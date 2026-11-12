@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	À espera das primeiras apresentações
 settings_stopped	f34e	interrompido
 settings_too_long	fed7	moonwater demorou demais e foi interrompido
 settings_too_many	db0e	são mais palavras do que um comando aceita
+settings_try_click	5177	Testar o clique duplo
+settings_try_click_about	52d8	Acende quando os dois cliques vêm dentro do tempo
+settings_try_click_value	28cd	Clique duas vezes aqui
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Pré-visualização
+settings_try_repeat	302d	Testar a repetição de teclas
+settings_try_repeat_about	70a4	Segure uma tecla no campo para sentir o atraso e a taxa
+settings_try_repeat_hint	1d74	Segure uma tecla
+settings_try_repeat_value	9b81	Digite aqui
 settings_turned_software	64d9	Girada pelo Moonwater (mais lento)
 settings_type_command	75f8	digite um comando: o verbo e o que vem depois
 settings_type_device	63e0	digite o nome de um dispositivo: Enter guarda, Escape deixa
@@ -225,6 +234,9 @@ ui_field_digits	f52b	um número é feito de dígitos
 ui_field_full	fe02	não cabe mais que isso
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Um círculo sob cada dedo numa tela sensível ao toque
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Um dedo ou caneta é seguido um quadro à frente, com menos atraso
+=A quick shake makes the pointer large for a moment	4d81	Uma sacudida rápida aumenta o ponteiro por um momento
 =Accent	ccd7	Destaque
 =Accent colour (rrggbb or reset)	53aa	Cor de destaque (rrggbb ou reset)
 =Airplane mode	3b8a	Modo avião
@@ -233,10 +245,12 @@ ui_field_full	fe02	não cabe mais que isso
 =Always off	48b1	Sempre desativado
 =Always on	fab5	Sempre ativado
 =Animation speed (percent, or default)	49c2	Velocidade das animações (porcentagem ou default)
+=Arrows, or a dot that turns into a bar over text	78cc	Setas, ou um ponto que vira uma barra sobre o texto
 =Audio	1439	Áudio
 =Audio modem	0ccb	Modem de áudio
 =Authenticated time (NTS)	e533	Hora autenticada (NTS)
 =Automatic	6784	Automático
+=Automatic shows it when no keyboard is plugged in	a05a	Automático mostra quando nenhum teclado está ligado
 =Background	0abd	Plano de fundo
 =Background colour (rrggbb or default)	e2b2	Cor do plano de fundo (rrggbb ou default)
 =Battery	e12e	Bateria
@@ -265,9 +279,17 @@ ui_field_full	fe02	não cabe mais que isso
 =Display	d9b5	Tela
 =Double-click time (ms, or default)	9af1	Tempo do clique duplo (ms ou default)
 =Drag lists with the mouse	4ee2	Arrastar listas com o mouse
+=Edge swipes	7aaf	Deslizar das bordas
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	Renderização por GPU (alfa)
 =Gallery	4cdd	Galeria
+=How fast the pointer follows the mouse	0a45	A rapidez com que o ponteiro segue o mouse
+=How long it stays large after a shake	82a0	Quanto tempo fica grande após uma sacudida
+=How long to hold a finger to right-click	b301	Quanto tempo segurar o dedo para um clique direito
+=How many times a second a held key repeats, or off	e430	Quantas vezes por segundo uma tecla segurada se repete, ou desligado
+=How much it shrinks while held	e457	Quanto ele encolhe enquanto pressionado
+=How much shaking makes the pointer grow	b625	Quanto sacudir faz o ponteiro crescer
+=How quickly the two clicks must come	24ce	A rapidez com que os dois cliques devem vir
 =Identify	033d	Identificar
 =In range and saved	7941	No alcance e salvas
 =Input	e11b	Entrada
@@ -292,6 +314,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Momentum	cfef	Inércia
 =Motion	7647	Movimento
 =Mount kept disks	f0c8	Montar os discos mantidos
+=Mouse	9b64	Mouse
 =Mouse acceleration	c400	Aceleração do mouse
 =Mouse sensitivity (percent, or default)	8a23	Sensibilidade do mouse (porcentagem ou default)
 =Mute	9f74	Silenciar
@@ -310,6 +333,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Output device (name, or default)	d73c	Dispositivo de saída (nome ou default)
 =Pair a machine	b39b	Parear uma máquina
 =Plain Text	2bbe	Texto simples
+=Pointer	4dca	Ponteiro
 =Pointer squeeze (percent, or default)	bbee	Compressão do ponteiro (percentagem, ou padrão)
 =Pointer squeezes on click	ad88	O ponteiro encolhe ao clicar
 =Power	a5e6	Energia
@@ -353,17 +377,25 @@ ui_field_full	fe02	não cabe mais que isso
 =Terminal lines per wheel notch	3800	Linhas do terminal por passo da roda
 =Text size (percent, or default)	51d7	Tamanho do texto (porcentagem ou default)
 =The internet prefers	3dbe	A internet prefere
+=The layout the keys type in	c104	O layout em que as teclas digitam
+=The page glides with each notch instead of jumping	0357	A página desliza a cada passo da roda em vez de pular
+=The pointer goes further when the mouse moves fast	d21b	O ponteiro vai mais longe quando o mouse se move rápido
+=The pointer shrinks while a button is held down	574c	O ponteiro encolhe enquanto um botão é mantido pressionado
+=The wait before a held key repeats	e3e9	A espera antes de uma tecla segurada se repetir
 =Theme	7c92	Tema
 =This machine	3790	Esta máquina
 =Time	e404	Hora
 =Time server (auto for the pool)	67e5	Servidor de hora (auto para o pool)
 =Time zone	741a	Fuso horário
+=Touch	fb78	Toque
 =Turned by the screen	ea45	Girado pela tela
 =Turned left	507c	Girada para a esquerda
 =Turned right	7a49	Girada para a direita
 =Upside down	9dc1	De cabeça para baixo
 =Volume (percent, or default)	f6e3	Volume (porcentagem ou default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	O que faz deslizar a partir desta borda
+=White edged in black, or the reverse	cd63	Branco com borda preta, ou o contrário
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Com fio
 =all	4bc4	todas

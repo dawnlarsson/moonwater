@@ -7771,6 +7771,15 @@ LANGUAGE_ID(settings_status_waiting, "Waiting for the first presents") \
 LANGUAGE_ID(settings_stopped, "stopped") \
 LANGUAGE_ID(settings_too_long, "moonwater took too long, and was stopped") \
 LANGUAGE_ID(settings_too_many, "that is more words than one command takes") \
+LANGUAGE_ID(settings_try_click, "Test double-click") \
+LANGUAGE_ID(settings_try_click_about, "It lights when the two clicks come within the time") \
+LANGUAGE_ID(settings_try_click_value, "Double-click here") \
+LANGUAGE_ID(settings_try_ms, "%d ms") \
+LANGUAGE_ID(settings_try_pointer, "Preview") \
+LANGUAGE_ID(settings_try_repeat, "Test key repeat") \
+LANGUAGE_ID(settings_try_repeat_about, "Hold a key in the field to feel the delay and rate") \
+LANGUAGE_ID(settings_try_repeat_hint, "Hold a key down") \
+LANGUAGE_ID(settings_try_repeat_value, "Type here") \
 LANGUAGE_ID(settings_turned_software, "Turned by Moonwater (slower)") \
 LANGUAGE_ID(settings_type_command, "type a command: its verb, then what follows it") \
 LANGUAGE_ID(settings_type_device, "type the name of a device: Enter keeps it, Escape leaves it") \
@@ -9451,6 +9460,58 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
         op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + from - top) * (unsigned long)pitch + (unsigned long)(1 + first));
         scene->used += (bytes + 15) & ~15ul;
         ui_scene_touch(scene, scene->ox + pen_x + first, scene->oy + from, scene->ox + pen_x + last, scene->oy + to);
+}
+
+/*
+        A picture of covers in one ink (the compositor's pointer is two, its fill's and its line's: compositor_pointer_row): w by h device
+        pixels at x, y, a byte of cover each and pitch bytes a row, the ink mixed over what is drawn by its cover, in the rows the ui may
+        write. A frame recorded for the GPU holds it as a text op whose bitmap is the covers.
+*/
+static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, const unsigned char address_to cover, int pitch, unsigned int ink)
+{
+        int top = y < ui->top ? ui->top : y, bottom = y + h > ui->bottom ? ui->bottom : y + h, left = x < 0 ? 0 : x, right = x + w > ui->width ? ui->width : x + w;
+
+        bottom = bottom > ui->height ? ui->height : bottom;
+        if (ui->band_bottom > ui->band_top)
+                top = top < ui->band_top ? ui->band_top : top, bottom = bottom > ui->band_bottom ? ui->band_bottom : bottom;
+        top = top < 0 ? 0 : top;
+        if (left >= right || top >= bottom)
+                return;
+        if (ui->scene)
+        {
+                struct ui_scene address_to scene = ui->scene;
+                int wide = right - left, rows = bottom - top, stride = wide + 2;
+                unsigned long bytes = (unsigned long)stride * (unsigned long)(rows + 2);
+                unsigned char address_to bitmap;
+                unsigned int address_to op;
+
+                if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+                {
+                        scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
+                        return;
+                }
+                bitmap = scene->cover + scene->used;
+                memory_zero(bitmap, bytes);
+                for (int row = 0; row < rows; row++)
+                        memory_copy(bitmap + (unsigned long)(row + 1) * (unsigned long)stride + 1, cover + (long)(top - y + row) * pitch + (left - x), (positive)wide);
+                op = scene->ops + 8 * scene->count++;
+                op[0] = 3u | (unsigned int)stride << 8, op[1] = (unsigned int)(scene->ox + left), op[2] = (unsigned int)(scene->oy + top);
+                op[3] = (unsigned int)(scene->ox + right), op[4] = (unsigned int)(scene->oy + bottom);
+                op[5] = ink & 0xffffffu, op[6] = 255;
+                op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)stride + 1);
+                scene->used += (bytes + 15) & ~15ul;
+                ui_scene_touch(scene, scene->ox + left, scene->oy + top, scene->ox + right, scene->oy + bottom);
+                return;
+        }
+        for (int row = top; row < bottom; row++)
+        {
+                unsigned int address_to pixels = ui->pixels + (unsigned long)row * ui->pitch;
+                const unsigned char address_to covers = cover + (long)(row - y) * pitch - x;
+
+                for (int column = left; column < right; column++)
+                        if (covers[column])
+                                pixels[column] = ui_over(ui_tone(ink, covers[column]), pixels[column]);
+        }
 }
 
 // The place of a key's copy in the pool, when the frame has one (the lookup ui_scene_copy makes first, without copying): false when it has none.
@@ -19293,6 +19354,7 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 struct ui_row
 {
         const char address_to label;       // at the left
+        const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
         const char address_to note;        // a quiet word before the value: what the row is, where it is from
         const char address_to words;       // a tabs row's choices, a swatches row's colours (rrggbb): words a blank apart; a slider row's unit, said after its number
@@ -19322,6 +19384,10 @@ struct ui_row
         int expander;                      // UI_ROW_EXPANDER_*: a chevron at the row's right (left of its badge), and whether the lines under it show
         b64 turn;                          // the expander's turn while it moves, Q30: 0 shut, UI_ONE open (the app's spring); -1 (the default): the flag decides
         b64 reveal;                        // the row's height as a share of a row, Q30 (UI_ONE is a whole row, 0 none): a folding line is shown by its share
+        // A picture the app draws (a preview of a setting): a part picture_w logical pixels wide at the row's end after its label, where a
+        // control would be, the row at least picture logical pixels tall (as tall as its words where they are taller). paint draws it.
+        int picture, picture_w;
+        fn (*paint)(struct ui address_to ui, int id, int x, int y, int w, int h);
 };
 
 struct ui_list
@@ -19777,7 +19843,9 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_ro
 
         In a list whose words wrap (ui_list.wrap), a label, a value and a note that do not fit the room their row gives them take as
         many lines as they need (the kit's wrapper), and the row is as tall as its lines: the root's height is what they come to (the
-        layout's height for width, ui_row_measure), a row's for one line and a line more for each more. The label keeps a few words'
+        layout's height for width, ui_row_measure), a row's for one line and a line more for each more. What the row does (about) is
+        lines of the label-medium role under its label, in the label's part, as wide as the wider of the two and wrapped in it, and
+        the row is as tall as both. The label keeps a few words'
         width at the least (ui_row_label_least, or its own where that is less) and a zone keeps its own least (a field's, or a value's
         marks and a little of the value); what gives way past that is what gave way before (a slider's number, then its control), at a
         width narrower than the rows need, which a page's window is not made (ui_row_least, ui_list_least, ui_page_least). A note
@@ -19798,6 +19866,10 @@ static struct ui_row_parts
         const char address_to note_shown;
         struct ui_node address_to zone;
         int label_one, zone_least;         // and the zone's own least (ui_row_least)
+        // What the row does, the lines under its label in its part (none: it has none, or its words are not written), and its width on one line.
+        const char address_to about_shown;
+        int about_one;
+        struct ui_node address_to picture; // the app's picture (ui_row.picture), the whole row or its end
 } ui_row_parts;
 
 #define UI_ROW_LABEL_LEAST 120 // a label's least width in a list whose words wrap, logical pixels (more with the text past 100 percent): a few words a line
@@ -19866,14 +19938,33 @@ static int ui_row_break(struct ui_row_parts address_to p, const struct ui_node a
         return ui_wrap_lines(p->ui, text, type, ui_types[type].size, width, at, bytes, UI_WRAP_MOST);
 }
 
-// A part of a row that wraps, as the layout asks it (ui_tree_run): the height of the row its lines make at a width, a row's for one line.
+// The lines of what a row does at a width (its label's part), and where each starts and its bytes when at is given: one where they fit.
+static int ui_row_about_lines(struct ui_row_parts address_to p, int width, positive address_to at, positive address_to bytes)
+{
+        if (!p->about_shown)
+                return 0;
+        if (p->about_one <= width)
+        {
+                if (at)
+                        at[0] = 0, bytes[0] = string_length((string_address)p->about_shown);
+                return 1;
+        }
+        return ui_wrap_lines(p->ui, p->about_shown, UI_LABEL_MEDIUM, ui_types[UI_LABEL_MEDIUM].size, width, at, bytes, UI_WRAP_MOST);
+}
+
+/*
+        A part of a row that wraps, as the layout asks it (ui_tree_run): the height of the row its lines make at a width, a row's for one
+        line. The label's part has the lines of what the row does under its own, each a line of their role more.
+*/
 static int ui_row_measure(address_any by, int node, int width)
 {
         struct ui_row_parts address_to p = by;
         const struct ui_node address_to n = &p->tree.node[node];
         int type = n == p->note ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, lines = ui_row_break(p, n, width, null, null);
+        int about = n == p->label ? ui_row_about_lines(p, width, null, null) : 0;
 
-        return ui_dev(p->ui, UI_ROW) + (lines > 1 ? (lines - 1) * ui_wrap_pitch(p->ui, type, ui_types[type].size) : 0);
+        return ui_dev(p->ui, UI_ROW) + (lines > 1 ? (lines - 1) * ui_wrap_pitch(p->ui, type, ui_types[type].size) : 0) +
+               about * ui_wrap_pitch(p->ui, UI_LABEL_MEDIUM, ui_types[UI_LABEL_MEDIUM].size);
 }
 
 // The widest of a text's lines at room (device pixels): what a label that wraps is wide.
@@ -19945,7 +20036,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         struct ui_node address_to n, address_to zone = null;
         struct ui_control address_to c = ui_list_trailing(ui, l, id, row);
         int gap = ui_dev(ui, UI_ROW_GAP), inset = ui_dev(ui, UI_INSET), lead = ui_dev(ui, 16) - gap, size = ui_dev(ui, 4), marks = 0, own = 0, least = 0;
-        b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER;
+        b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER || row->picture_w > 0;
         b32 wraps = l->wrap && !row->tall && ui->regular;
 
         memory_zero(&p->mark, sizeof(*p) - offset_of(struct ui_row_parts, mark));
@@ -19955,6 +20046,9 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 return;
         }
         p->wraps = wraps && words, p->ui = ui;
+        // What the row does is lines under its label where its words wrap and are written, and nowhere else.
+        if (p->wraps && row->label && row->about && row->about[0])
+                p->about_shown = row->about, p->about_one = ui_kit_measure(ui, (string_address)row->about, UI_LABEL_MEDIUM);
         ui_tree_begin(t);
         if (p->wraps && height <= 0)
                 t->measure = ui_row_measure, t->by = p;
@@ -19993,12 +20087,19 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                         n->wrap = (short)p->wraps;
                 if (c && held)
                         p->control = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, c->w)), n->size[0].shrink = 1;
+                // The app's picture at the row's end is where a control would be, and the row at least its height.
+                if (row->picture_w > 0)
+                        p->picture = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, row->picture_w)), n->size[0].shrink = 1,
+                        n->size[1] = (struct ui_size){UI_FIT, 0, row->picture > 0 ? ui_dev(ui, row->picture) : 0, UI_TREE_MOST, 0};
         }
         else
         {
                 p->label_one = row->label && (words || field) ? ui_kit_measure(ui, (string_address)row->label, UI_BODY_MEDIUM) : 0;
-                p->label = n = ui_row_leaf(t, UI_FIT, p->label_one);
-                n->size[0].shrink = 1, n->size[0].min = p->label_one < least ? p->label_one : least, n->wrap = (short)p->wraps;
+                // The label's part is as wide as the wider of the label and what the row does under it, each on one line.
+                int wide = p->label_one > p->about_one ? p->label_one : p->about_one;
+
+                p->label = n = ui_row_leaf(t, UI_FIT, wide);
+                n->size[0].shrink = 1, n->size[0].min = wide < least ? wide : least, n->wrap = (short)p->wraps;
                 p->zone = zone = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
                 n->size[0].min = (width - 2 * inset) * (field && row->head ? 2 : 1) / 3 - gap;
                 if (field && c)
@@ -20080,9 +20181,12 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 if (p->value_box)
                         p->value_shown = row->value;
                 ui_tree_run(t, width, height);
-                if (zone && p->label_shown && p->label_one > p->label->w)
+                if (zone && p->label_shown && (p->label_one > p->label->w || p->about_one > p->label->w))
                 {
-                        p->label->size[0] = (struct ui_size){UI_FIXED, ui_wrap_widest(ui, p->label_shown, UI_BODY_MEDIUM, p->label->w), 0, UI_TREE_MOST, 0};
+                        int wide = p->label_one > p->label->w ? ui_wrap_widest(ui, p->label_shown, UI_BODY_MEDIUM, p->label->w) : p->label_one;
+                        int about = p->about_one > p->label->w ? ui_wrap_widest(ui, p->about_shown, UI_LABEL_MEDIUM, p->label->w) : p->about_one;
+
+                        p->label->size[0] = (struct ui_size){UI_FIXED, wide > about ? wide : about, 0, UI_TREE_MOST, 0};
                         zone->size[0].min = own;
                         ui_tree_run(t, width, height);
                 }
@@ -20125,7 +20229,8 @@ static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, in
 
 /*
         The least width a row of a list whose words wrap is laid out at with no part over another and none past its end (device
-        pixels): its label a few words wide (ui_row_label_least, or its own width where that is less) and every other part at its
+        pixels): its label a few words wide (ui_row_label_least, or the wider of its own width and that of what the row does under it
+        where that is less) and every other part at its
         own width. It is read off the row laid out where all of it fits (UI_ROW_ROOM): a label that grows (beside a switch, tabs,
         swatches or a slider) is what the rest leaves it, so the least is the rest and the label's least. Any other label is beside
         the zone, which keeps a third of the row (two thirds after a verb, k) and its own least: the least is the wider of the
@@ -20149,7 +20254,8 @@ static int ui_row_least(struct ui address_to ui, struct ui_list address_to l, in
                 return pads + p->swatch->w + p->amount->w + p->share->w + 3 * ui_dev(ui, UI_GAP2) + (p->label->content[0] < least ? p->label->content[0] : least);
         if (!p->zone)
                 return UI_ROW_ROOM - p->label->w + least;
-        label = p->label_one < least ? p->label_one : least;
+        label = p->label_one > p->about_one ? p->label_one : p->about_one;
+        label = label < least ? label : least;
         rest = UI_ROW_ROOM - pads - p->label->w - p->zone->w;
         k = row->kind == UI_ROW_FIELD && row->head ? 2 : 1;
         need = label + (pads - 2 * inset) + rest - gap;
@@ -20347,6 +20453,39 @@ static fn ui_row_text(struct ui address_to ui, struct ui_row_parts address_to p,
 }
 
 /*
+        A label with what its row does under it: the label's lines and then those lines, in the quiet ink and the label's role a size
+        down, one block in the middle of the label's part, each line from the part's start. The row's controls and value stay in the
+        middle of the row, which is the block's middle too.
+*/
+static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts address_to p, unsigned int ink, unsigned int quiet)
+{
+        positive at[UI_WRAP_MOST], bytes[UI_WRAP_MOST], about_at[UI_WRAP_MOST], about_bytes[UI_WRAP_MOST];
+        const struct ui_node address_to n = p->label;
+        int count = ui_row_break(p, n, n->w, at, bytes), about = ui_row_about_lines(p, n->w, about_at, about_bytes);
+        int pitch = ui_wrap_pitch(ui, UI_BODY_MEDIUM, ui_types[UI_BODY_MEDIUM].size), about_pitch = ui_wrap_pitch(ui, UI_LABEL_MEDIUM, ui_types[UI_LABEL_MEDIUM].size);
+        int label_h = ui_dev(ui, ui_types[UI_BODY_MEDIUM].line) + (count - 1) * pitch, top = n->y + (n->h - label_h - about * about_pitch) / 2;
+        char line[UI_WRAP_PROBE];
+
+        for (int k = 0; k < count + about && k < 2 * UI_WRAP_MOST; k++)
+        {
+                b32 under = k >= count;
+                const char address_to text = under ? p->about_shown : p->label_shown;
+                positive from = under ? about_at[k - count] : at[k], keep = under ? about_bytes[k - count] : bytes[k];
+                int type = under ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, y = under ? top + label_h + (k - count) * about_pitch : top + k * pitch;
+
+                if (count == 1 && !under)
+                {
+                        ui_row_words(ui, n, 0, ui_kit_baseline(ui, y, type), text, type, ink);
+                        continue;
+                }
+                keep = keep < sizeof(line) ? keep : sizeof(line) - 1;
+                memory_copy(line, text + from, keep);
+                line[keep] = 0;
+                ui_row_words(ui, n, 0, ui_kit_baseline(ui, y, type), line, type, under ? quiet : ink);
+        }
+}
+
+/*
         A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
         the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
@@ -20405,12 +20544,18 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                 ui_control_draw(ui, own);
         }
+        // The app's picture, in its part at the row's end.
+        if ((n = p->picture) && row.paint && seen)
+                row.paint(ui, id, n->x, n->y, n->w, n->h);
         baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
         if ((n = p->mark))
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
                             ui_role(UI_PRIMARY), null);
-        // Where words wrap, the label, the note and the value are their lines (ui_row_text), one where they fit, drawn as below.
-        if (p->label_shown && p->wraps)
+        // Where words wrap, the label, the note and the value are their lines (ui_row_text), one where they fit, drawn as below; a label
+        // with what its row does under it is one block of both (ui_row_label_about).
+        if (p->label_shown && p->wraps && p->about_shown)
+                ui_row_label_about(ui, &ui_row_parts, ink, quiet);
+        else if (p->label_shown && p->wraps)
                 ui_row_text(ui, &ui_row_parts, p->label, baseline, ink, false);
         else if (p->label_shown)
                 ui_row_words(ui, p->label, 0, baseline, p->label_shown, UI_BODY_MEDIUM, ink);

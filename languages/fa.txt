@@ -190,6 +190,15 @@ settings_status_waiting	dfe6	منتظر اولین فریم‌ها
 settings_stopped	f34e	متوقف شد
 settings_too_long	fed7	moonwater زمان زیادی گرفت و متوقف شد
 settings_too_many	db0e	این بیش از تعداد واژه‌هایی است که یک فرمان می‌پذیرد
+settings_try_click	5177	آزمودن دوبار کلیک
+settings_try_click_about	52d8	وقتی دو کلیک در این زمان بیایند روشن می‌شود
+settings_try_click_value	28cd	اینجا دوبار کلیک کنید
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	پیش‌نمایش
+settings_try_repeat	302d	آزمودن تکرار کلید
+settings_try_repeat_about	70a4	کلیدی را در کادر نگه دارید تا تأخیر و سرعت را حس کنید
+settings_try_repeat_hint	1d74	یک کلید را نگه دارید
+settings_try_repeat_value	9b81	اینجا تایپ کنید
 settings_turned_software	64d9	چرخش توسط Moonwater (کندتر)
 settings_type_command	75f8	یک فرمان تایپ کنید: ابتدا فعل، سپس ادامه آن
 settings_type_device	63e0	نام دستگاه را تایپ کنید: Enter آن را نگه می‌دارد، Escape رها می‌کند
@@ -226,6 +235,9 @@ ui_field_digits	f52b	عدد از رقم‌ها تشکیل می‌شود
 ui_field_full	fe02	بیش از این جا ندارد
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	دایره‌ای زیر هر انگشت روی صفحه لمسی
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	انگشت یا قلم یک فریم جلوتر دنبال می‌شود تا کمتر عقب بماند
+=A quick shake makes the pointer large for a moment	4d81	یک تکان سریع نشانگر را لحظه‌ای بزرگ می‌کند
 =Accent	ccd7	رنگ تأکید
 =Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
 =Airplane mode	3b8a	حالت هواپیما
@@ -234,10 +246,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Always off	48b1	همیشه خاموش
 =Always on	fab5	همیشه روشن
 =Animation speed (percent, or default)	49c2	سرعت پویانمایی (درصد یا default)
+=Arrows, or a dot that turns into a bar over text	78cc	پیکان‌ها، یا نقطه‌ای که روی متن نوار می‌شود
 =Audio	1439	صدا
 =Audio modem	0ccb	مودم صوتی
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
 =Automatic	6784	خودکار
+=Automatic shows it when no keyboard is plugged in	a05a	خودکار آن را وقتی صفحه‌کلیدی وصل نیست نشان می‌دهد
 =Background	0abd	پس‌زمینه
 =Background colour (rrggbb or default)	e2b2	رنگ پس‌زمینه (rrggbb یا default)
 =Battery	e12e	باتری
@@ -266,9 +280,17 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Display	d9b5	نمایشگر
 =Double-click time (ms, or default)	9af1	زمان دوبار کلیک (ms یا default)
 =Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس
+=Edge swipes	7aaf	کشیدن از لبه‌ها
 =Editor	bf98	ویرایشگر
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =Gallery	4cdd	گالری
+=How fast the pointer follows the mouse	0a45	سرعت دنبال کردن ماوس توسط نشانگر
+=How long it stays large after a shake	82a0	پس از تکان چه مدت بزرگ بماند
+=How long to hold a finger to right-click	b301	انگشت را چه مدت نگه دارید تا کلیک راست شود
+=How many times a second a held key repeats, or off	e430	چند بار در ثانیه کلید نگه‌داشته تکرار شود، یا خاموش
+=How much it shrinks while held	e457	هنگام نگه داشتن چقدر کوچک شود
+=How much shaking makes the pointer grow	b625	چقدر تکان نشانگر را بزرگ می‌کند
+=How quickly the two clicks must come	24ce	دو کلیک باید چقدر سریع پشت هم بیایند
 =Identify	033d	شناسایی
 =In range and saved	7941	در برد و ذخیره‌شده
 =Input	e11b	ورودی
@@ -293,6 +315,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Momentum	cfef	تکانه
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
+=Mouse	9b64	ماوس
 =Mouse acceleration	c400	شتاب ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
 =Mute	9f74	بی‌صدا
@@ -311,6 +334,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Pair a machine	b39b	جفت کردن یک رایانه
 =Plain Text	2bbe	متن ساده
+=Pointer	4dca	نشانگر
 =Pointer squeeze (percent, or default)	bbee	فشرده‌سازی نشانگر (درصد، یا پیش‌فرض)
 =Pointer squeezes on click	ad88	نشانگر با کلیک کوچک می‌شود
 =Power	a5e6	انرژی
@@ -354,17 +378,25 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Terminal lines per wheel notch	3800	خطوط پایانه در هر گام چرخ
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
+=The layout the keys type in	c104	چیدمانی که کلیدها با آن تایپ می‌کنند
+=The page glides with each notch instead of jumping	0357	صفحه با هر ضامن چرخ نرم می‌لغزد نه پرشی
+=The pointer goes further when the mouse moves fast	d21b	وقتی ماوس تند حرکت کند نشانگر دورتر می‌رود
+=The pointer shrinks while a button is held down	574c	نشانگر تا وقتی دکمه‌ای نگه داشته شده کوچک می‌شود
+=The wait before a held key repeats	e3e9	مکث پیش از تکرار کلید نگه‌داشته
 =Theme	7c92	تم
 =This machine	3790	این رایانه
 =Time	e404	زمان
 =Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
 =Time zone	741a	منطقه زمانی
+=Touch	fb78	لمس
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست
 =Upside down	9dc1	وارونه
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	کشیدن از این لبه چه می‌کند
+=White edged in black, or the reverse	cd63	سفید با لبه سیاه، یا برعکس
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	شبکه سیمی
 =all	4bc4	همه

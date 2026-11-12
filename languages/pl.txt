@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	Czekam na pierwsze prezentacje
 settings_stopped	f34e	zatrzymano
 settings_too_long	fed7	moonwater trwał zbyt długo i został zatrzymany
 settings_too_many	db0e	to więcej słów, niż przyjmuje polecenie
+settings_try_click	5177	Wypróbuj dwuklik
+settings_try_click_about	52d8	Zaświeca się, gdy dwa kliknięcia zmieszczą się w czasie
+settings_try_click_value	28cd	Kliknij tu dwukrotnie
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Podgląd
+settings_try_repeat	302d	Wypróbuj powtarzanie klawiszy
+settings_try_repeat_about	70a4	Przytrzymaj klawisz w polu, by poczuć opóźnienie i tempo
+settings_try_repeat_hint	1d74	Przytrzymaj klawisz
+settings_try_repeat_value	9b81	Pisz tutaj
 settings_turned_software	64d9	Obraca Moonwater (wolniej)
 settings_type_command	75f8	wpisz polecenie: czasownik, potem to, co następuje
 settings_type_device	63e0	wpisz nazwę urządzenia: Enter zapamiętuje, Escape zostawia
@@ -225,6 +234,9 @@ ui_field_digits	f52b	liczba składa się z cyfr
 ui_field_full	fe02	więcej się nie zmieści
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Okrąg pod każdym palcem na ekranie dotykowym
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Palec lub rysik jest śledzony klatkę naprzód, więc mniej się opóźnia
+=A quick shake makes the pointer large for a moment	4d81	Szybkie potrząśnięcie na chwilę powiększa wskaźnik
 =Accent	ccd7	Akcent
 =Accent colour (rrggbb or reset)	53aa	Kolor akcentu (rrggbb lub reset)
 =Airplane mode	3b8a	Tryb samolotowy
@@ -233,10 +245,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Always off	48b1	Zawsze wyłączona
 =Always on	fab5	Zawsze włączona
 =Animation speed (percent, or default)	49c2	Szybkość animacji (procent lub default)
+=Arrows, or a dot that turns into a bar over text	78cc	Strzałki lub kropka, która nad tekstem staje się kreską
 =Audio	1439	Dźwięk
 =Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
 =Automatic	6784	Automatycznie
+=Automatic shows it when no keyboard is plugged in	a05a	Automatycznie pokazuje ją, gdy nie podłączono klawiatury
 =Background	0abd	Tło
 =Background colour (rrggbb or default)	e2b2	Kolor tła (rrggbb lub default)
 =Battery	e12e	Bateria
@@ -265,9 +279,17 @@ ui_field_full	fe02	więcej się nie zmieści
 =Display	d9b5	Ekran
 =Double-click time (ms, or default)	9af1	Czas dwukrotnego kliknięcia (ms lub default)
 =Drag lists with the mouse	4ee2	Przeciąganie list myszą
+=Edge swipes	7aaf	Przesunięcia od krawędzi
 =Editor	bf98	Edytor
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
 =Gallery	4cdd	Galeria
+=How fast the pointer follows the mouse	0a45	Jak szybko wskaźnik podąża za myszą
+=How long it stays large after a shake	82a0	Jak długo pozostaje duży po potrząśnięciu
+=How long to hold a finger to right-click	b301	Jak długo trzymać palec, by kliknąć prawym
+=How many times a second a held key repeats, or off	e430	Ile razy na sekundę powtarza się trzymany klawisz, lub wyłączone
+=How much it shrinks while held	e457	Jak bardzo kurczy się przy przytrzymaniu
+=How much shaking makes the pointer grow	b625	Ile potrząsania powiększa wskaźnik
+=How quickly the two clicks must come	24ce	Jak szybko muszą nastąpić dwa kliknięcia
 =Identify	033d	Identyfikuj
 =In range and saved	7941	W zasięgu i zapisane
 =Input	e11b	Wprowadzanie
@@ -292,6 +314,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Momentum	cfef	Pęd
 =Motion	7647	Ruch
 =Mount kept disks	f0c8	Montuj zachowane dyski
+=Mouse	9b64	Mysz
 =Mouse acceleration	c400	Przyspieszenie myszy
 =Mouse sensitivity (percent, or default)	8a23	Czułość myszy (procent lub default)
 =Mute	9f74	Wycisz
@@ -310,6 +333,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Pair a machine	b39b	Sparuj maszynę
 =Plain Text	2bbe	Zwykły tekst
+=Pointer	4dca	Wskaźnik
 =Pointer squeeze (percent, or default)	bbee	Ściśnięcie wskaźnika (procent lub domyślnie)
 =Pointer squeezes on click	ad88	Wskaźnik kurczy się przy kliknięciu
 =Power	a5e6	Zasilanie
@@ -353,17 +377,25 @@ ui_field_full	fe02	więcej się nie zmieści
 =Terminal lines per wheel notch	3800	Wiersze terminala na skok kółka
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
 =The internet prefers	3dbe	Internet preferuje
+=The layout the keys type in	c104	Układ, w którym piszą klawisze
+=The page glides with each notch instead of jumping	0357	Strona płynie z każdym ząbkiem kółka zamiast skakać
+=The pointer goes further when the mouse moves fast	d21b	Wskaźnik przesuwa się dalej, gdy mysz rusza się szybko
+=The pointer shrinks while a button is held down	574c	Wskaźnik kurczy się, gdy przycisk jest wciśnięty
+=The wait before a held key repeats	e3e9	Czas, po którym trzymany klawisz zaczyna się powtarzać
 =Theme	7c92	Motyw
 =This machine	3790	Ta maszyna
 =Time	e404	Czas
 =Time server (auto for the pool)	67e5	Serwer czasu (auto dla puli)
 =Time zone	741a	Strefa czasowa
+=Touch	fb78	Dotyk
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo
 =Upside down	9dc1	Do góry nogami
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Co robi przesunięcie od tej krawędzi
+=White edged in black, or the reverse	cd63	Biały z czarną krawędzią albo odwrotnie
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Przewodowa
 =all	4bc4	wszystkie

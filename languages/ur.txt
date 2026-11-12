@@ -190,6 +190,15 @@ settings_status_waiting	dfe6	پہلے فریم کا انتظار
 settings_stopped	f34e	رک گیا
 settings_too_long	fed7	moonwater نے بہت دیر لگائی اور اسے روک دیا گیا
 settings_too_many	db0e	یہ ایک کمانڈ کے قبول کردہ الفاظ سے زیادہ ہیں
+settings_try_click	5177	ڈبل کلک آزمائیں
+settings_try_click_about	52d8	جب دونوں کلک وقت کے اندر آئیں تو روشن ہوتا ہے
+settings_try_click_value	28cd	یہاں ڈبل کلک کریں
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	پیش منظر
+settings_try_repeat	302d	کلید دہرانا آزمائیں
+settings_try_repeat_about	70a4	تاخیر اور رفتار محسوس کرنے کے لیے خانے میں کلید دبائے رکھیں
+settings_try_repeat_hint	1d74	کوئی کلید دبائے رکھیں
+settings_try_repeat_value	9b81	یہاں ٹائپ کریں
 settings_turned_software	64d9	Moonwater کی طرف سے گھمایا گیا (سست)
 settings_type_command	75f8	کمانڈ لکھیں: پہلے اس کا فعل، پھر جو اس کے بعد آئے
 settings_type_device	63e0	ڈیوائس کا نام لکھیں: Enter اسے رکھتا ہے، Escape چھوڑ دیتا ہے
@@ -226,6 +235,9 @@ ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
 ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	ٹچ اسکرین پر ہر انگلی کے نیچے ایک دائرہ
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	انگلی یا قلم کو ایک فریم آگے رکھا جاتا ہے تاکہ تاخیر کم ہو
+=A quick shake makes the pointer large for a moment	4d81	تیز ہلانے سے پوائنٹر ایک لمحے کے لیے بڑا ہو جاتا ہے
 =Accent	ccd7	نمایاں رنگ
 =Accent colour (rrggbb or reset)	53aa	نمایاں رنگ (rrggbb یا reset)
 =Airplane mode	3b8a	ہوائی جہاز موڈ
@@ -234,10 +246,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
 =Animation speed (percent, or default)	49c2	اینیمیشن کی رفتار (فیصد یا default)
+=Arrows, or a dot that turns into a bar over text	78cc	تیر، یا ایک نقطہ جو متن پر پٹی بن جاتا ہے
 =Audio	1439	آڈیو
 =Audio modem	0ccb	آڈیو موڈیم
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
 =Automatic	6784	خودکار
+=Automatic shows it when no keyboard is plugged in	a05a	خودکار اسے تب دکھاتا ہے جب کوئی کی بورڈ نہ لگا ہو
 =Background	0abd	پس منظر
 =Background colour (rrggbb or default)	e2b2	پس منظر کا رنگ (rrggbb یا default)
 =Battery	e12e	بیٹری
@@ -266,9 +280,17 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Display	d9b5	اسکرین
 =Double-click time (ms, or default)	9af1	ڈبل کلک کا وقت (ms یا default)
 =Drag lists with the mouse	4ee2	ماؤس سے فہرستیں گھسیٹیں
+=Edge swipes	7aaf	کنارے سے سوائپ
 =Editor	bf98	ایڈیٹر
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
 =Gallery	4cdd	گیلری
+=How fast the pointer follows the mouse	0a45	پوائنٹر ماؤس کے ساتھ کتنا تیز چلے
+=How long it stays large after a shake	82a0	ہلانے کے بعد کتنی دیر بڑا رہے
+=How long to hold a finger to right-click	b301	دائیں کلک کے لیے انگلی کتنی دیر رکھیں
+=How many times a second a held key repeats, or off	e430	دبی ہوئی کلید ایک سیکنڈ میں کتنی بار دہرائے، یا بند
+=How much it shrinks while held	e457	دبانے کے دوران کتنا سکڑے
+=How much shaking makes the pointer grow	b625	کتنا ہلانے سے پوائنٹر بڑا ہو
+=How quickly the two clicks must come	24ce	دونوں کلک کتنی جلدی آنے چاہئیں
 =Identify	033d	شناخت
 =In range and saved	7941	رینج میں اور محفوظ
 =Input	e11b	ان پٹ
@@ -293,6 +315,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Momentum	cfef	مومینٹم
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	محفوظ ڈسکس ماؤنٹ کریں
+=Mouse	9b64	ماؤس
 =Mouse acceleration	c400	ماؤس ایکسیلریشن
 =Mouse sensitivity (percent, or default)	8a23	ماؤس کی حساسیت (فیصد یا default)
 =Mute	9f74	خاموش
@@ -311,6 +334,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Pair a machine	b39b	ایک کمپیوٹر جوڑیں
 =Plain Text	2bbe	سادہ متن
+=Pointer	4dca	پوائنٹر
 =Pointer squeeze (percent, or default)	bbee	پوائنٹر کا دباؤ (فیصد، یا ڈیفالٹ)
 =Pointer squeezes on click	ad88	کلک پر پوائنٹر سکڑ جاتا ہے
 =Power	a5e6	پاور
@@ -354,17 +378,25 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Terminal lines per wheel notch	3800	ہر وہیل نوچ پر ٹرمینل کی لائنیں
 =Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
+=The layout the keys type in	c104	وہ ترتیب جس میں کلیدیں ٹائپ کرتی ہیں
+=The page glides with each notch instead of jumping	0357	صفحہ ہر نوچ پر اچھلنے کے بجائے پھسلتا ہے
+=The pointer goes further when the mouse moves fast	d21b	ماؤس تیز چلے تو پوائنٹر زیادہ دور جاتا ہے
+=The pointer shrinks while a button is held down	574c	بٹن دبا رہے تو پوائنٹر سکڑ جاتا ہے
+=The wait before a held key repeats	e3e9	دبی کلید کے دہرانے سے پہلے کا وقفہ
 =Theme	7c92	تھیم
 =This machine	3790	یہ کمپیوٹر
 =Time	e404	وقت
 =Time server (auto for the pool)	67e5	ٹائم سرور (auto پول کے لیے)
 =Time zone	741a	ٹائم زون
+=Touch	fb78	ٹچ
 =Turned by the screen	ea45	اسکرین کی طرف سے گھمایا گیا
 =Turned left	507c	بائیں گھمایا گیا
 =Turned right	7a49	دائیں گھمایا گیا
 =Upside down	9dc1	الٹا
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	اس کنارے سے سوائپ کیا کرتا ہے
+=White edged in black, or the reverse	cd63	سفید سیاہ کنارے کے ساتھ، یا الٹ
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	وائرڈ نیٹ ورک
 =all	4bc4	سب

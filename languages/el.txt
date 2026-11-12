@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	Αναμονή για τα πρώτα καρέ
 settings_stopped	f34e	διακόπηκε
 settings_too_long	fed7	το moonwater άργησε πολύ και σταμάτησε
 settings_too_many	db0e	είναι περισσότερες λέξεις από όσες δέχεται μια εντολή
+settings_try_click	5177	Δοκιμή διπλού κλικ
+settings_try_click_about	52d8	Φωτίζεται όταν τα δύο κλικ έρθουν εντός του χρόνου
+settings_try_click_value	28cd	Κάντε διπλό κλικ εδώ
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Προεπισκόπηση
+settings_try_repeat	302d	Δοκιμή επανάληψης πλήκτρων
+settings_try_repeat_about	70a4	Κρατήστε ένα πλήκτρο στο πεδίο για να νιώσετε καθυστέρηση και ρυθμό
+settings_try_repeat_hint	1d74	Κρατήστε πατημένο ένα πλήκτρο
+settings_try_repeat_value	9b81	Πληκτρολογήστε εδώ
 settings_turned_software	64d9	Περιστρέφεται από το Moonwater (πιο αργά)
 settings_type_command	75f8	πληκτρολογήστε μια εντολή: το ρήμα και ό,τι ακολουθεί
 settings_type_device	63e0	πληκτρολογήστε το όνομα μιας συσκευής: το Enter το κρατά, το Escape το αφήνει
@@ -225,6 +234,9 @@ ui_field_digits	f52b	ένας αριθμός αποτελείται από ψη�
 ui_field_full	fe02	δεν χωράει περισσότερο
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Ένας κύκλος κάτω από κάθε δάχτυλο σε οθόνη αφής
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Δάχτυλο ή πένα ακολουθούνται ένα καρέ μπροστά, με λιγότερη καθυστέρηση
+=A quick shake makes the pointer large for a moment	4d81	Ένα γρήγορο κούνημα μεγαλώνει τον δείκτη για λίγο
 =Accent	ccd7	Έμφαση
 =Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
 =Airplane mode	3b8a	Λειτουργία πτήσης
@@ -233,10 +245,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Always off	48b1	Πάντα ανενεργό
 =Always on	fab5	Πάντα ενεργό
 =Animation speed (percent, or default)	49c2	Ταχύτητα κινούμενων εικόνων (ποσοστό ή default)
+=Arrows, or a dot that turns into a bar over text	78cc	Βέλη, ή μια κουκκίδα που πάνω σε κείμενο γίνεται μπάρα
 =Audio	1439	Ήχος
 =Audio modem	0ccb	Μόντεμ ήχου
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
 =Automatic	6784	Αυτόματο
+=Automatic shows it when no keyboard is plugged in	a05a	Το αυτόματο το δείχνει όταν δεν είναι συνδεδεμένο πληκτρολόγιο
 =Background	0abd	Φόντο
 =Background colour (rrggbb or default)	e2b2	Χρώμα φόντου (rrggbb ή default)
 =Battery	e12e	Μπαταρία
@@ -265,9 +279,17 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Display	d9b5	Οθόνη
 =Double-click time (ms, or default)	9af1	Χρόνος διπλού κλικ (ms ή default)
 =Drag lists with the mouse	4ee2	Σύρσιμο λιστών με το ποντίκι
+=Edge swipes	7aaf	Σαρώσεις από τις άκρες
 =Editor	bf98	Επεξεργαστής
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =Gallery	4cdd	Συλλογή
+=How fast the pointer follows the mouse	0a45	Πόσο γρήγορα ακολουθεί ο δείκτης το ποντίκι
+=How long it stays large after a shake	82a0	Πόση ώρα μένει μεγάλος μετά από κούνημα
+=How long to hold a finger to right-click	b301	Πόση ώρα κρατιέται ένα δάχτυλο για δεξί κλικ
+=How many times a second a held key repeats, or off	e430	Πόσες φορές το δευτερόλεπτο επαναλαμβάνεται ένα πλήκτρο, ή ανενεργό
+=How much it shrinks while held	e457	Πόσο μικραίνει όσο πατιέται
+=How much shaking makes the pointer grow	b625	Πόσο κούνημα κάνει τον δείκτη να μεγαλώσει
+=How quickly the two clicks must come	24ce	Πόσο γρήγορα πρέπει να έρθουν τα δύο κλικ
 =Identify	033d	Αναγνώριση
 =In range and saved	7941	Σε εμβέλεια και αποθηκευμένα
 =Input	e11b	Είσοδος
@@ -292,6 +314,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Momentum	cfef	Αδράνεια
 =Motion	7647	Κίνηση
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
+=Mouse	9b64	Ποντίκι
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
 =Mute	9f74	Σίγαση
@@ -310,6 +333,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
 =Plain Text	2bbe	Απλό κείμενο
+=Pointer	4dca	Δείκτης
 =Pointer squeeze (percent, or default)	bbee	Συμπίεση δείκτη (ποσοστό, ή προεπιλογή)
 =Pointer squeezes on click	ad88	Ο δείκτης συρρικνώνεται στο κλικ
 =Power	a5e6	Ενέργεια
@@ -353,17 +377,25 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Terminal lines per wheel notch	3800	Γραμμές τερματικού ανά βήμα τροχού
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
+=The layout the keys type in	c104	Η διάταξη με την οποία γράφουν τα πλήκτρα
+=The page glides with each notch instead of jumping	0357	Η σελίδα γλιστρά σε κάθε εγκοπή αντί να πηδά
+=The pointer goes further when the mouse moves fast	d21b	Ο δείκτης πηγαίνει πιο μακριά όταν το ποντίκι κινείται γρήγορα
+=The pointer shrinks while a button is held down	574c	Ο δείκτης μικραίνει όσο ένα κουμπί είναι πατημένο
+=The wait before a held key repeats	e3e9	Η αναμονή πριν επαναληφθεί ένα πατημένο πλήκτρο
 =Theme	7c92	Θέμα
 =This machine	3790	Αυτό το μηχάνημα
 =Time	e404	Ώρα
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
+=Touch	fb78	Αφή
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά
 =Upside down	9dc1	Ανάποδα
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Τι κάνει μια σάρωση από αυτό το άκρο
+=White edged in black, or the reverse	cd63	Λευκός με μαύρο περίγραμμα, ή το αντίστροφο
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Ενσύρματο
 =all	4bc4	όλα

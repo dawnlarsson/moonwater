@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	Wachten op de eerste presentaties
 settings_stopped	f34e	gestopt
 settings_too_long	fed7	moonwater deed er te lang over en werd gestopt
 settings_too_many	db0e	dat zijn meer woorden dan een opdracht aankan
+settings_try_click	5177	Dubbelklik testen
+settings_try_click_about	52d8	Het licht op als de twee klikken binnen de tijd komen
+settings_try_click_value	28cd	Dubbelklik hier
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Voorbeeld
+settings_try_repeat	302d	Toetsherhaling testen
+settings_try_repeat_about	70a4	Houd een toets vast in het veld om vertraging en snelheid te voelen
+settings_try_repeat_hint	1d74	Houd een toets ingedrukt
+settings_try_repeat_value	9b81	Typ hier
 settings_turned_software	64d9	Gedraaid door Moonwater (langzamer)
 settings_type_command	75f8	typ een opdracht: het werkwoord, dan wat volgt
 settings_type_device	63e0	typ de naam van een apparaat: Enter bewaart hem, Escape laat het
@@ -225,6 +234,9 @@ ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Een cirkel onder elke vinger op een aanraakscherm
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Een vinger of pen wordt een beeld vooruit gevolgd, met minder vertraging
+=A quick shake makes the pointer large for a moment	4d81	Even schudden maakt de aanwijzer kort groot
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
 =Airplane mode	3b8a	Vliegtuigmodus
@@ -233,10 +245,12 @@ ui_field_full	fe02	meer past er niet in
 =Always off	48b1	Altijd uit
 =Always on	fab5	Altijd aan
 =Animation speed (percent, or default)	49c2	Animatiesnelheid (procent of default)
+=Arrows, or a dot that turns into a bar over text	78cc	Pijlen, of een stip die boven tekst een balk wordt
 =Audio	1439	Audio
 =Audio modem	0ccb	Audiomodem
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
 =Automatic	6784	Automatisch
+=Automatic shows it when no keyboard is plugged in	a05a	Automatisch toont hem als er geen toetsenbord is aangesloten
 =Background	0abd	Achtergrond
 =Background colour (rrggbb or default)	e2b2	Achtergrondkleur (rrggbb of default)
 =Battery	e12e	Batterij
@@ -265,9 +279,17 @@ ui_field_full	fe02	meer past er niet in
 =Display	d9b5	Scherm
 =Double-click time (ms, or default)	9af1	Dubbelkliktijd (ms of default)
 =Drag lists with the mouse	4ee2	Lijsten met de muis slepen
+=Edge swipes	7aaf	Vegen vanaf de rand
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij
+=How fast the pointer follows the mouse	0a45	Hoe snel de aanwijzer de muis volgt
+=How long it stays large after a shake	82a0	Hoe lang hij groot blijft na het schudden
+=How long to hold a finger to right-click	b301	Hoe lang een vinger blijft voor een rechtsklik
+=How many times a second a held key repeats, or off	e430	Hoe vaak per seconde een vastgehouden toets herhaalt, of uit
+=How much it shrinks while held	e457	Hoeveel hij krimpt tijdens het vasthouden
+=How much shaking makes the pointer grow	b625	Hoeveel schudden de aanwijzer laat groeien
+=How quickly the two clicks must come	24ce	Hoe snel de twee klikken moeten komen
 =Identify	033d	Identificeren
 =In range and saved	7941	In bereik en opgeslagen
 =Input	e11b	Invoer
@@ -292,6 +314,7 @@ ui_field_full	fe02	meer past er niet in
 =Momentum	cfef	Momentum
 =Motion	7647	Beweging
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
+=Mouse	9b64	Muis
 =Mouse acceleration	c400	Muisversnelling
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
 =Mute	9f74	Dempen
@@ -310,6 +333,7 @@ ui_field_full	fe02	meer past er niet in
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Pair a machine	b39b	Een machine koppelen
 =Plain Text	2bbe	Platte tekst
+=Pointer	4dca	Aanwijzer
 =Pointer squeeze (percent, or default)	bbee	Indrukken van de aanwijzer (procent, of standaard)
 =Pointer squeezes on click	ad88	Aanwijzer krimpt bij klikken
 =Power	a5e6	Energie
@@ -353,17 +377,25 @@ ui_field_full	fe02	meer past er niet in
 =Terminal lines per wheel notch	3800	Terminalregels per wielstap
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
 =The internet prefers	3dbe	Internet verkiest
+=The layout the keys type in	c104	De indeling waarin de toetsen typen
+=The page glides with each notch instead of jumping	0357	De pagina glijdt bij elke klik van het wiel in plaats van te springen
+=The pointer goes further when the mouse moves fast	d21b	De aanwijzer gaat verder als de muis snel beweegt
+=The pointer shrinks while a button is held down	574c	De aanwijzer krimpt zolang een knop is ingedrukt
+=The wait before a held key repeats	e3e9	De wachttijd voordat een vastgehouden toets herhaalt
 =Theme	7c92	Thema
 =This machine	3790	Deze machine
 =Time	e404	Tijd
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
+=Touch	fb78	Aanraking
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid
 =Upside down	9dc1	Ondersteboven
 =Volume (percent, or default)	f6e3	Volume (procent of default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Wat vegen vanaf deze rand doet
+=White edged in black, or the reverse	cd63	Wit met een zwarte rand, of andersom
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Bekabeld
 =all	4bc4	alle

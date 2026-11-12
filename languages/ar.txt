@@ -190,6 +190,15 @@ settings_status_waiting	dfe6	في انتظار أول الإطارات
 settings_stopped	f34e	توقف
 settings_too_long	fed7	استغرق moonwater وقتا طويلا فتم إيقافه
 settings_too_many	db0e	هذه كلمات أكثر مما يقبله أمر واحد
+settings_try_click	5177	جرّب النقر المزدوج
+settings_try_click_about	52d8	يضيء عندما تأتي النقرتان ضمن الوقت
+settings_try_click_value	28cd	انقر هنا نقرًا مزدوجًا
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	معاينة
+settings_try_repeat	302d	جرّب تكرار المفاتيح
+settings_try_repeat_about	70a4	اضغط مفتاحًا مطولًا في الحقل لتشعر بالتأخير والمعدل
+settings_try_repeat_hint	1d74	اضغط مفتاحًا مطولًا
+settings_try_repeat_value	9b81	اكتب هنا
 settings_turned_software	64d9	التدوير بواسطة Moonwater (أبطأ)
 settings_type_command	75f8	اكتب أمرا: الفعل أولا ثم ما يليه
 settings_type_device	63e0	اكتب اسم الجهاز: Enter يحفظه، Escape يتركه
@@ -226,6 +235,9 @@ ui_field_digits	f52b	العدد يتكون من أرقام
 ui_field_full	fe02	هذا أقصى ما يتسع له
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	دائرة تحت كل إصبع على شاشة اللمس
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	يُتتبَّع الإصبع أو القلم قبل إطار واحد فيتأخر أقل
+=A quick shake makes the pointer large for a moment	4d81	هزة سريعة تكبّر المؤشر لحظة
 =Accent	ccd7	لون التمييز
 =Accent colour (rrggbb or reset)	53aa	لون التمييز (rrggbb أو reset)
 =Airplane mode	3b8a	وضع الطيران
@@ -234,10 +246,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Always off	48b1	دائماً إيقاف
 =Always on	fab5	دائماً تشغيل
 =Animation speed (percent, or default)	49c2	سرعة الرسوم المتحركة (نسبة مئوية أو default)
+=Arrows, or a dot that turns into a bar over text	78cc	أسهم، أو نقطة تصير شريطًا فوق النص
 =Audio	1439	الصوت
 =Audio modem	0ccb	مودم الصوت
 =Authenticated time (NTS)	e533	الوقت الموثق (NTS)
 =Automatic	6784	تلقائي
+=Automatic shows it when no keyboard is plugged in	a05a	التلقائي يظهرها عندما لا تكون لوحة مفاتيح موصولة
 =Background	0abd	الخلفية
 =Background colour (rrggbb or default)	e2b2	لون الخلفية (rrggbb أو default)
 =Battery	e12e	البطارية
@@ -266,9 +280,17 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Display	d9b5	الشاشة
 =Double-click time (ms, or default)	9af1	مدة النقر المزدوج (ms أو default)
 =Drag lists with the mouse	4ee2	سحب القوائم بالماوس
+=Edge swipes	7aaf	السحب من الحواف
 =Editor	bf98	المحرر
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض
+=How fast the pointer follows the mouse	0a45	سرعة تتبع المؤشر للماوس
+=How long it stays large after a shake	82a0	مدة بقائه كبيرًا بعد الهز
+=How long to hold a finger to right-click	b301	مدة إبقاء الإصبع لنقرة يمنى
+=How many times a second a held key repeats, or off	e430	عدد مرات تكرار المفتاح المضغوط في الثانية، أو إيقافه
+=How much it shrinks while held	e457	مقدار انكماشه أثناء الضغط
+=How much shaking makes the pointer grow	b625	مقدار الهز الذي يكبّر المؤشر
+=How quickly the two clicks must come	24ce	مدى سرعة توالي النقرتين
 =Identify	033d	تعريف
 =In range and saved	7941	ضمن النطاق والمحفوظة
 =Input	e11b	الإدخال
@@ -293,6 +315,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Momentum	cfef	الزخم
 =Motion	7647	الحركة
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
+=Mouse	9b64	الماوس
 =Mouse acceleration	c400	تسارع الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
 =Mute	9f74	كتم الصوت
@@ -311,6 +334,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Pair a machine	b39b	إقران حاسوب
 =Plain Text	2bbe	نص عادي
+=Pointer	4dca	المؤشر
 =Pointer squeeze (percent, or default)	bbee	ضغط المؤشر (بالمئة، أو الافتراضي)
 =Pointer squeezes on click	ad88	ينكمش المؤشر عند النقر
 =Power	a5e6	الطاقة
@@ -354,17 +378,25 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Terminal lines per wheel notch	3800	أسطر الطرفية لكل خطوة من العجلة
 =Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
 =The internet prefers	3dbe	يفضل الإنترنت
+=The layout the keys type in	c104	التخطيط الذي تكتب به المفاتيح
+=The page glides with each notch instead of jumping	0357	تنزلق الصفحة مع كل نقرة للعجلة بدلًا من القفز
+=The pointer goes further when the mouse moves fast	d21b	يذهب المؤشر أبعد عندما يتحرك الماوس بسرعة
+=The pointer shrinks while a button is held down	574c	ينكمش المؤشر ما دام زر مضغوطًا
+=The wait before a held key repeats	e3e9	مدة الانتظار قبل أن يتكرر المفتاح المضغوط
 =Theme	7c92	السمة
 =This machine	3790	هذا الحاسوب
 =Time	e404	الوقت
 =Time server (auto for the pool)	67e5	خادم الوقت (auto للمجموعة)
 =Time zone	741a	المنطقة الزمنية
+=Touch	fb78	اللمس
 =Turned by the screen	ea45	التدوير بواسطة الشاشة
 =Turned left	507c	مدار لليسار
 =Turned right	7a49	مدار لليمين
 =Upside down	9dc1	مقلوب
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	ما يفعله السحب من هذه الحافة
+=White edged in black, or the reverse	cd63	أبيض بحافة سوداء، أو العكس
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	الشبكة السلكية
 =all	4bc4	الكل

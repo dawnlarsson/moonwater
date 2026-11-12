@@ -161,6 +161,8 @@
 #define SETTINGS_CARD 12288   // the bytes of what a command said, shown as a card
 #define SETTINGS_CARD_LINES 256
 #define SETTINGS_PROBE 512    // one line, cut
+#define SETTINGS_LABEL_CUT 128 // a label up to its bracket, in bytes (settings_label_window)
+#define SETTINGS_TRY_SPAN 192  // the largest picture of a pointer its row draws, device pixels (settings_try_pointer_one)
 #define SETTINGS_NONE 0xffffu
 
 // The size the window opens at, logical pixels; every other size in it is the kit's (ui.c, the page).
@@ -800,6 +802,8 @@ static struct settings_large
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
         struct ui_view view;
+        char label_cut[SETTINGS_ROWS][SETTINGS_LABEL_CUT]; // each row's label as its line in the window says it (settings_label_window)
+        unsigned char try_cover[2][SETTINGS_TRY_SPAN * SETTINGS_TRY_SPAN];              // a pointer's covers as the pointer's row draws it, its fill's and its line's
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -833,6 +837,12 @@ static fn settings_say(string_address text);
         list row of its own, numbered after the rows, so the kit lays them out, scrolls them and moves the rows under them.
 */
 #define SETTINGS_SUBS 80           // the lines under the rows at most: an option's, and a drive's partitions (settings_drive_rows)
+// The rows that show a setting (settings_tries), numbered after the lines under the rows.
+#define SETTINGS_TRY_REPEAT 0
+#define SETTINGS_TRY_CLICK 1
+#define SETTINGS_TRY_POINTER 2
+#define SETTINGS_TRIES 3
+#define SETTINGS_TRY ((int)SETTINGS_ALL + SETTINGS_SUBS) // the list's row of the first
 #define SETTINGS_SUB_TEXT 240      // bytes of one line
 #define SETTINGS_BOARD_NS 1000000000ll
 #define SETTINGS_REAP_NS 10000000ll // how often a child that is ending is asked whether it has exited (settings_reap)
@@ -1259,6 +1269,36 @@ static const char address_to settings_label_shown(int row)
         return !settings_item(row) && !settings_generic_of(row) ? WORDS(settings_run_any) : settings_label(row);
 }
 
+/*
+        A row's label as its line in the window says it. The label of a number with a unit ends with what the command line is told
+        of it, in brackets ("Key repeat delay (ms, or default)"), and its control says that already (a slider's number has its
+        unit, a typed number is said with it): the window's line is the label up to the bracket, in the language taken, which
+        keeps the bracket at the end as English does (a check holds every file to it). A label whose bracket is not at its end
+        is shown whole.
+*/
+static const char address_to settings_label_window(int row)
+{
+        const char address_to shown = settings_label_shown(row);
+        positive length, open;
+
+        if (row < 0 || row >= SETTINGS_ANY || !settings_rows[row].unit || !settings_large)
+                return shown;
+        length = string_length((string_address)shown);
+        if (length < 2 || shown[length - 1] != ')')
+                return shown;
+        for (open = length - 1; open > 0 && shown[open] != '('; open--)
+                ;
+        if (!open || shown[open] != '(' || shown[open - 1] != ' ')
+                return shown;
+        while (open > 0 && shown[open - 1] == ' ')
+                open--;
+        if (!open || open >= sizeof(settings_large->label_cut[0]))
+                return shown;
+        memory_copy(settings_large->label_cut[row], shown, open);
+        settings_large->label_cut[row][open] = 0;
+        return settings_large->label_cut[row];
+}
+
 // What a row of a list does when it is pressed, said where the status is.
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
@@ -1301,7 +1341,8 @@ static int settings_device_section(const struct settings_item address_to item)
         return item->where == SETTINGS_WHERE_INTERNAL ? 0 : item->where == SETTINGS_WHERE_NONE ? 2 : 1;
 }
 
-// The first row of the section a row is in: a list is a section of its own, and the device list is one for each place a device is.
+// The first row of the section a row is listed in: the part of its group it is in (registry.c), or the group's own; a list is a section
+// of its own, and the device list is one for each place a device is.
 static int settings_section_start(int row)
 {
         if (row >= (int)SETTINGS_LIST && settings_list_of(row) == 2 && settings_item(row))
@@ -1316,18 +1357,31 @@ static int settings_section_start(int row)
                 return (int)SETTINGS_LIST + settings_list_of(row) * SETTINGS_LIST_ROWS;
         if (row >= SETTINGS_ANY)
                 return SETTINGS_ANY;
-        while (row > 0 && !settings_rows[row].section)
+        while (row > 0 && !settings_rows[row].section && !settings_rows[row].part)
                 row--;
         return row;
 }
 
+// The name of the group a row is in (a list's heading for a row of a list), which the filter finds it by.
 static const char address_to settings_section(int row)
 {
         if (row >= (int)SETTINGS_LIST && settings_list_of(row) == 2 && settings_item(row) && settings_device_section(settings_item(row)))
                 return settings_device_section(settings_item(row)) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
         if (row >= (int)SETTINGS_LIST)
                 return settings_feeds[settings_list_of(row)].heading;
-        return row >= SETTINGS_ANY ? SETTINGS_ALL_HEADER : settings_rows[settings_section_start(row)].section;
+        if (row >= SETTINGS_ANY)
+                return SETTINGS_ALL_HEADER;
+        while (row > 0 && !settings_rows[row].section)
+                row--;
+        return settings_rows[row].section;
+}
+
+// The header a row is listed under: the name of its part, or of its group for a row before the group's first part.
+static const char address_to settings_header(int row)
+{
+        int start = settings_section_start(row);
+
+        return start < SETTINGS_ANY && settings_rows[start].part ? settings_rows[start].part : settings_section(row);
 }
 
 /*
@@ -1418,8 +1472,10 @@ static b32 settings_matches_word(int row, const char address_to word, positive s
                 for (positive at = 0; at < SETTING_WORDS; at++)
                         if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
                                 return true;
-                // Its value is what the row holds: the filter finds a row by it too, as its comment says.
-                return settings_has(settings.value[row], word, size) || settings_matches_name(which->label, settings_section(row), word, size);
+                // Its value is what the row holds: the filter finds a row by it too, as its comment says; and by the name of its part
+                // and what it does, the words its line shows.
+                return settings_has(settings.value[row], word, size) || settings_matches_name(which->label, settings_section(row), word, size) ||
+                       settings_matches_name(which->about, settings_rows[settings_section_start(row)].part, word, size);
         }
         return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
                (row == SETTINGS_ANY && settings_has("anything", word, size));
@@ -1994,7 +2050,7 @@ static fn settings_layout(void)
         // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
         if (!settings.list.ids)
         {
-                settings.list.ids = (int)SETTINGS_ALL + SETTINGS_SUBS;
+                settings.list.ids = SETTINGS_TRY + SETTINGS_TRIES;
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
                 settings.list.hover = settings.list.down = -1;
@@ -2021,6 +2077,231 @@ static fn settings_layout(void)
 
 static fn settings_edit_end(void);
 static int settings_drive_rows(int row, int count);
+static fn settings_edit_begin(int row, const char address_to text, b32 masked);
+static b32 settings_row_is(int at, const char address_to path);
+
+/* ---- the rows that show a setting ---- */
+/*
+        Where seeing a setting beats reading it, a row of its own shows it beside the setting's row (found by its file), in that row's part,
+        listed with its group and never while the filter lists rows of every group, and drawn in the kit's own words and shapes, nothing
+        new: a field to hold a key in, where the key's repeat is felt (after the repeat rate); a row to double-click, which says how far
+        apart the two clicks came, in the selected tab's pill when that is within the double-click time (after the time); and the pointer
+        as the style, the size and the look draw it, at the head of the Pointer part: the arrow and the I-beam, or the dynamic shape at
+        rest and the bar it is over text, side by side at the row's end, made by the compositor's own code (compositor_pointer_row), and
+        smaller while a press holds the row, by the squeeze a held button gives the pointer.
+*/
+static const struct settings_try
+{
+        const char address_to path;     // the setting's row it is listed beside
+        b32 before;                     // before that row, else after it
+        const char address_to shows[6]; // the files of the rows it draws, which draw it again when they change
+} settings_tries[SETTINGS_TRIES] = {
+    [SETTINGS_TRY_REPEAT] = {SETTING_REPEAT_RATE_PATH, false, {null}},
+    [SETTINGS_TRY_CLICK] = {SETTING_DOUBLE_CLICK_PATH, false, {SETTING_DOUBLE_CLICK_PATH}},
+    [SETTINGS_TRY_POINTER] = {SETTING_CURSOR_STYLE_PATH, true, {SETTING_CURSOR_STYLE_PATH, SETTING_CURSOR_SIZE_PATH, SETTING_CURSOR_LOOK_PATH,
+                                                                SETTING_SQUEEZE_PATH, SETTING_CURSOR_CLICK_PATH}},
+};
+
+// The double-click row: when the last press on it that began a pair was, and where; and how far apart the last pair came, in ms (0 none).
+static struct
+{
+        positive at;
+        int x, y, apart;
+} settings_click_try;
+
+// The row whose file is path, or -1.
+static int settings_row_of(const char address_to path)
+{
+        const struct settings_row address_to row = setting_by_path((string_address)path);
+
+        return row ? (int)(row - settings_rows) : -1;
+}
+
+// A row's value as a number its verb says (100 percent, 450 ms), or fallback where it says none.
+static long settings_number_of(const char address_to path, long fallback)
+{
+        int row = settings_row_of(path);
+        long number = 0;
+
+        return row >= 0 && settings.state[row] == SETTINGS_READ && setting_typed_number(&settings_rows[row], (string_address)settings.value[row], &number)
+                       ? number
+                       : fallback;
+}
+
+// Whether a row's value is word.
+static b32 settings_value_is(const char address_to path, const char address_to word)
+{
+        int row = settings_row_of(path);
+
+        return row >= 0 && settings.state[row] == SETTINGS_READ && string_equals((string_address)settings.value[row], (string_address)word);
+}
+
+// A list row that shows a setting: its number among them, or -1.
+static int settings_try_of(int id)
+{
+        return id >= SETTINGS_TRY && id < SETTINGS_TRY + SETTINGS_TRIES ? id - SETTINGS_TRY : -1;
+}
+
+// The pointer as it is drawn at scale percent, in 256ths of a device pixel a cell (compositor_cursor_size's sum): the desktop's whole pixels
+// a logical pixel times the size's percent, less the squeeze while a press holds it; no larger than the largest picture its row draws.
+static int settings_try_cell(int scale, b32 pressed, b32 dynamic)
+{
+        long percent = settings_number_of(SETTING_CURSOR_SIZE_PATH, 100), squeeze = settings_number_of(SETTING_SQUEEZE_PATH, 25);
+        int cell = (int)((compositor_px1(scale) * 256 * percent + 50) / 100), most = (SETTINGS_TRY_SPAN << 8) / (dynamic ? CP_DYN_CELL : CP_CELL);
+
+        if (pressed && !settings_value_is(SETTING_CURSOR_CLICK_PATH, "off"))
+                cell = (int)(cell * (100 - (squeeze < 0 ? 0 : squeeze > 50 ? 50 : squeeze)) / 100);
+        return cell < 64 ? 64 : cell > most ? most : cell;
+}
+
+/*
+        What the two pointers cover, in cells: the arrow from its tip 12 across and 21 down, the I-beam 9 by 18 round its middle (columns 7
+        to 15 and rows 3 to 20 of its bitmap); the dynamic shape at rest a circle 16 across, and over text a bar 8 by 20. Side by side with
+        a gap between, at the row's end, the pair's part is as wide as the dynamic pair, the wider, so the row does not move as the style
+        changes; and the row is as tall as the taller of the two styles and a margin over and under, or as its words where they are taller.
+*/
+#define SETTINGS_TRY_ACROSS 24 // cells across both
+#define SETTINGS_TRY_DOWN 21   // and down
+
+// The pointers' part at the row's end and the row's least height, logical pixels.
+static fn settings_try_pointer_room(int scale, int address_to wide, int address_to tall)
+{
+        int cell = settings_try_cell(scale, false, true);
+
+        *wide = (SETTINGS_TRY_ACROSS * cell / 256 * 100 + scale - 1) / scale + UI_GAP4;
+        *tall = (SETTINGS_TRY_DOWN * cell / 256 * 100 + scale - 1) / scale + 2 * UI_GAP3;
+}
+
+/*
+        One pointer drawn with its hot pixel at x, y (device pixels): its covers made a row at a time by the compositor's code into the window's
+        mapping, then its fill ink and its line ink mixed over the picture by them (ui_kit_covers), as the compositor mixes them
+        (compositor_cursor_draw). The light look, which is the standard, is white with a black line, and the dark the other way
+        (compositor_cursor_ink).
+*/
+static fn settings_try_pointer_one(struct ui address_to ui, const struct compositor_pointer address_to p, int x, int y)
+{
+        int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y);
+        b32 dark = settings_value_is(SETTING_CURSOR_LOOK_PATH, "dark");
+
+        span = span < SETTINGS_TRY_SPAN ? span : SETTINGS_TRY_SPAN;
+        for (int row = 0; row < span; row++)
+                compositor_pointer_row(p, row, span, hot_x, hot_y, settings_large->try_cover[0] + row * span, settings_large->try_cover[1] + row * span);
+        ui_kit_covers(ui, x - hot_x, y - hot_y, span, span, settings_large->try_cover[0], span, dark ? 0x000000u : 0xffffffu);
+        ui_kit_covers(ui, x - hot_x, y - hot_y, span, span, settings_large->try_cover[1], span, dark ? 0xffffffu : 0x000000u);
+}
+
+// The two pointers at the row's end, in the middle of it down: the one at rest on the start side, the one over text after it.
+static fn settings_try_pointer_paint(struct ui address_to ui, int id, int x, int y, int w, int h)
+{
+        b32 dynamic = !settings_value_is(SETTING_CURSOR_STYLE_PATH, "classic");
+        int cell = settings_try_cell(ui->scale, settings.list.down == id, dynamic), gap = ui_px(ui, UI_GAP4), middle = y + h / 2;
+        int first = (dynamic ? 16 : 12) * cell / 256, second = (dynamic ? 8 : 9) * cell / 256, across = first + gap + second;
+        // The pair is at the part's end: its left edge reading from the left, its right edge reading from the right, where it starts.
+        int start = ui_rtl() ? x + across : x + w - across;
+        int rest_x = ui_rtl() ? start - first / 2 : start + first / 2, text_x = ui_rtl() ? start - first - gap - second / 2 : start + first + gap + second / 2;
+        struct compositor_pointer at_rest = {.dyn = dynamic, .scale = cell, .shape = CP_ARROW};
+        struct compositor_pointer on_text = {.dyn = dynamic, .scale = cell, .shape = CP_TEXT};
+
+        if (dynamic)
+        {
+                at_rest.hw = at_rest.hh = at_rest.c = 256 * CP_DYN_RADIUS;
+                on_text.hw = 256 * CP_DYN_TEXT_W, on_text.hh = 256 * CP_DYN_TEXT_H, on_text.c = 256 * CP_DYN_TEXT_R;
+                settings_try_pointer_one(ui, &at_rest, rest_x, middle);
+                settings_try_pointer_one(ui, &on_text, text_x, middle);
+                return;
+        }
+        // The arrow's hot pixel is its tip: half its covered box up and to the start side of its middle.
+        settings_try_pointer_one(ui, &at_rest, rest_x - first / 2, middle - 21 * cell / 512);
+        settings_try_pointer_one(ui, &on_text, text_x, middle);
+}
+
+// The double-click row's pair that came within the double-click time: its time apart, in the selected tab's pill at the row's end.
+static fn settings_try_click_paint(struct ui address_to ui, int id, int x, int y, int w, int h)
+{
+        int high = ui_px(ui, 32), top = y + (h - high) / 2, wide;
+        char said[32];
+        struct ui_box pill = {x * 256, top * 256, (x + w) * 256, (top + high) * 256, high * 128, high * 128};
+
+        (void)id;
+        language_format(said, sizeof(said), WORDS(settings_try_ms), settings_click_try.apart);
+        wide = ui_kit_measure(ui, (string_address)said, UI_LABEL_LARGE);
+        ui_kit_fill(ui, &pill, ui_role(UI_PRIMARY), null);
+        ui_kit_text(ui, x + (w - wide) / 2, ui_kit_baseline(ui, top + (high - ui_px(ui, ui_types[UI_LABEL_LARGE].line)) / 2, UI_LABEL_LARGE),
+                    (string_address)said, UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_PRIMARY), 0);
+}
+
+// Whether the double-click row's last pair came within the double-click time.
+static b32 settings_try_click_within(void)
+{
+        return settings_click_try.apart > 0 && settings_click_try.apart < settings_number_of(SETTING_DOUBLE_CLICK_PATH, 450);
+}
+
+// What a row that shows a setting shows, for the kit's list: in the part of the row it is beside, under its header.
+static fn settings_try_describe(int id, struct ui_row address_to row)
+{
+        static char apart[32];
+        int which = settings_try_of(id), beside = which >= 0 ? settings_row_of(settings_tries[which].path) : -1;
+        int scale = settings.ui.scale > 0 ? settings.ui.scale : 100;
+
+        row->section = beside >= 0 ? settings_section_start(beside) : 0;
+        row->header = beside >= 0 ? language_of(settings_header(beside)) : null;
+        if (which == SETTINGS_TRY_REPEAT)
+        {
+                row->label = WORDS(settings_try_repeat), row->about = WORDS(settings_try_repeat_about);
+                if (settings_editing() == id)
+                        row->kind = UI_ROW_FIELD, row->edit = &settings.edit, row->placeholder = WORDS(settings_try_repeat_hint);
+                else
+                        row->value = WORDS(settings_try_repeat_value);
+        }
+        else if (which == SETTINGS_TRY_CLICK)
+        {
+                // Before a pair, what to do; a pair too far apart says how far, as a value; one within the time says it in the pill.
+                row->label = WORDS(settings_try_click), row->about = WORDS(settings_try_click_about);
+                language_format(apart, sizeof(apart), WORDS(settings_try_ms), settings_click_try.apart);
+                if (settings_try_click_within() && settings.ui.regular)
+                        row->picture_w = (ui_kit_measure(&settings.ui, (string_address)apart, UI_LABEL_LARGE) * 100 + scale - 1) / scale + 2 * UI_GAP4,
+                        row->paint = settings_try_click_paint;
+                else
+                        row->value = settings_click_try.apart > 0 ? apart : WORDS(settings_try_click_value);
+        }
+        else if (which == SETTINGS_TRY_POINTER)
+        {
+                row->label = WORDS(settings_try_pointer), row->paint = settings_try_pointer_paint;
+                settings_try_pointer_room(scale, &row->picture_w, &row->picture);
+        }
+}
+
+// A press on a row that shows a setting: the key repeat's field opens; the double-click row takes it as a click (the press's place in
+// device pixels), the second of a pair when it comes within two seconds of the first and near it.
+static fn settings_try_press(int id, int x, int y)
+{
+        int which = settings_try_of(id);
+        positive now = ui_press_now();
+        long dx = (long)x - settings_click_try.x, dy = (long)y - settings_click_try.y, reach = UI_CLICK_PX * (long)settings.ui.scale / 100;
+
+        if (which == SETTINGS_TRY_REPEAT)
+                settings_edit_begin(id, "", false);
+        if (which != SETTINGS_TRY_CLICK)
+                return;
+        if (settings_click_try.at && now - settings_click_try.at < 2000000000ull && dx * dx + dy * dy <= reach * reach)
+        {
+                settings_click_try.apart = (int)((now - settings_click_try.at) / 1000000ull);
+                settings_click_try.apart += !settings_click_try.apart;
+                settings_click_try.at = 0;
+        }
+        else
+                settings_click_try.at = now, settings_click_try.x = x, settings_click_try.y = y;
+        ui_list_row_changed(&settings.ui, &settings.list, id);
+}
+
+// A row's reading changed: the rows that show it are drawn again, and laid out again where they are another height.
+static fn settings_try_changed(int row)
+{
+        for (int which = 0; which < SETTINGS_TRIES; which++)
+                for (int k = 0; k < 6 && settings_tries[which].shows[k]; k++)
+                        if (settings_row_is(row, settings_tries[which].shows[k]))
+                                ui_list_row_changed(&settings.ui, &settings.list, SETTINGS_TRY + which);
+}
 
 /*
         The rows that match the filter, laid out; the focus stays on its row
@@ -2038,8 +2319,15 @@ static fn settings_rebuild(void)
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
+                        // A row that shows a setting is listed beside its row with the group, and not while the filter lists rows.
+                        for (int which = 0; which < SETTINGS_TRIES && !settings_filter_length(); which++)
+                                if (settings_tries[which].before && settings_row_is((int)row, settings_tries[which].path) && count < UI_LIST_MOST)
+                                        settings.list.id[count++] = (unsigned short)(SETTINGS_TRY + which);
                         settings.list.id[count++] = (unsigned short)row;
                         count = settings_sub_rows((int)row, count);
+                        for (int which = 0; which < SETTINGS_TRIES && !settings_filter_length(); which++)
+                                if (!settings_tries[which].before && settings_row_is((int)row, settings_tries[which].path) && count < UI_LIST_MOST)
+                                        settings.list.id[count++] = (unsigned short)(SETTINGS_TRY + which);
                 }
         // The rows of a list come after, each in the group of its feed: the group is the list's, so it is found once for the list.
         for (int list = 0; list < SETTINGS_LISTS; list++)
@@ -3655,7 +3943,7 @@ static fn settings_reading_changed(int row)
         if (settings.page.menu_row == row)
                 ui_page_redraw(&settings.page);
         else if (!settings.page.card)
-                ui_list_row_changed(&settings.ui, &settings.list, row);
+                ui_list_row_changed(&settings.ui, &settings.list, row), settings_try_changed(row);
 }
 
 // Whether a row's verb waits for another machine (a pairing): its job has the pairing's time, and what it says while it waits is shown.
@@ -4650,6 +4938,9 @@ static fn settings_activate(int row, int way)
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         char next[SETTINGS_VALUE];
 
+        // The key repeat's field opens on Enter, as on a press; the other rows that show a setting take no key.
+        if (settings_try_of(row) == SETTINGS_TRY_REPEAT)
+                settings_edit_begin(row, "", false);
         // A line under a row (an issue, a status) is no row: Enter on it does nothing, but on a drive's disclosure it opens or shuts the
         // drive's partitions.
         if (row >= (int)SETTINGS_ALL)
@@ -4793,6 +5084,13 @@ static fn settings_edit_commit(void)
                 length--;
         typed[length] = 0;
         length -= start;
+        // What is typed to feel the key repeat is kept nowhere.
+        if (settings_try_of(settings_editing()) >= 0)
+        {
+                memory_zero(typed, sizeof(typed));
+                settings_edit_end();
+                return;
+        }
         if (settings_editing() >= (int)SETTINGS_LIST)
         {
                 const struct settings_item address_to item = settings_item(settings_editing());
@@ -5296,6 +5594,11 @@ static fn settings_describe(int id, struct ui_row address_to row)
         unsigned int state = which ? settings.state[id] : SETTINGS_READ;
         const char address_to shown = which ? settings.value[id] : "";
 
+        if (settings_try_of(id) >= 0)
+        {
+                settings_try_describe(id, row);
+                return;
+        }
         if (id >= (int)SETTINGS_ALL)
         {
                 if (id - (int)SETTINGS_ALL < settings_sub_count)
@@ -5303,11 +5606,17 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 return;
         }
         row->section = settings_section_start(id);
-        // A section whose header is empty (the note that no device was found) is under no header.
-        row->header = settings_section(id) && !settings_section(id)[0] ? null : language_of(settings_section(id));
-        row->label = settings_label_shown(id);
+        // A row's header is its part's or its group's; a section whose header is empty (the note that no device was found) is under none.
+        {
+                const char address_to header = settings_header(id);
+
+                row->header = header && !header[0] ? null : language_of(header);
+        }
+        row->label = settings_label_window(id);
         if (which)
         {
+                // What it does, in a line of the quiet ink under its label.
+                row->about = language_of(which->about);
                 settings_badge(id, row);
                 row->expander = settings_expander(id);
                 // The chevron turns with the fold: pointing right shut, down open, and between them while the spring moves it.
@@ -5663,6 +5972,13 @@ static fn settings_press_at(void)
                 settings_edit_end();
         if (row < 0)
                 return;
+        if (settings_try_of(row) >= 0)
+        {
+                settings.page.pane = 1;
+                settings_try_press(row, x, y);
+                ui_page_redraw(&settings.page);
+                return;
+        }
         if (row >= (int)SETTINGS_ALL)
         {
                 int at = row - (int)SETTINGS_ALL;

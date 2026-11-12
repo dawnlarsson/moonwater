@@ -190,6 +190,15 @@ settings_status_waiting	dfe6	ממתין לפריימים הראשונים
 settings_stopped	f34e	נעצר
 settings_too_long	fed7	moonwater לקח יותר מדי זמן ונעצר
 settings_too_many	db0e	אלו יותר מילים ממה שפקודה אחת מקבלת
+settings_try_click	5177	נסה לחיצה כפולה
+settings_try_click_about	52d8	נדלק כששתי הלחיצות מגיעות בתוך הזמן
+settings_try_click_value	28cd	לחצו כאן פעמיים
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	תצוגה מקדימה
+settings_try_repeat	302d	נסה חזרת מקשים
+settings_try_repeat_about	70a4	החזיקו מקש בשדה כדי לחוש את ההשהיה והקצב
+settings_try_repeat_hint	1d74	החזיקו מקש לחוץ
+settings_try_repeat_value	9b81	הקלידו כאן
 settings_turned_software	64d9	מסובב על ידי Moonwater (איטי יותר)
 settings_type_command	75f8	הקלד פקודה: קודם הפעולה ואז מה שאחריה
 settings_type_device	63e0	הקלד שם התקן: Enter שומר, Escape עוזב
@@ -226,6 +235,9 @@ ui_field_digits	f52b	מספר הוא ספרות
 ui_field_full	fe02	זה המקסימום שהוא מכיל
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	עיגול מתחת לכל אצבע במסך מגע
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	אצבע או עט נעקבים פריים אחד קדימה, כך שיש פחות השהיה
+=A quick shake makes the pointer large for a moment	4d81	ניעור מהיר מגדיל את המצביע לרגע
 =Accent	ccd7	צבע הדגשה
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
 =Airplane mode	3b8a	מצב טיסה
@@ -234,10 +246,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Always off	48b1	תמיד כבוי
 =Always on	fab5	תמיד מופעל
 =Animation speed (percent, or default)	49c2	מהירות האנימציה (אחוזים או default)
+=Arrows, or a dot that turns into a bar over text	78cc	חצים, או נקודה שהופכת לפס מעל טקסט
 =Audio	1439	שמע
 =Audio modem	0ccb	מודם שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
 =Automatic	6784	אוטומטי
+=Automatic shows it when no keyboard is plugged in	a05a	אוטומטי מציג אותה כשאין מקלדת מחוברת
 =Background	0abd	רקע
 =Background colour (rrggbb or default)	e2b2	צבע הרקע (rrggbb או default)
 =Battery	e12e	סוללה
@@ -266,9 +280,17 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Display	d9b5	מסך
 =Double-click time (ms, or default)	9af1	זמן לחיצה כפולה (ms או default)
 =Drag lists with the mouse	4ee2	גרירת רשימות בעכבר
+=Edge swipes	7aaf	החלקה מהקצוות
 =Editor	bf98	עורך
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה
+=How fast the pointer follows the mouse	0a45	כמה מהר המצביע עוקב אחרי העכבר
+=How long it stays large after a shake	82a0	כמה זמן הוא נשאר גדול אחרי ניעור
+=How long to hold a finger to right-click	b301	כמה זמן להחזיק אצבע ללחיצה ימנית
+=How many times a second a held key repeats, or off	e430	כמה פעמים בשנייה מקש מוחזק חוזר, או כבוי
+=How much it shrinks while held	e457	כמה הוא מתכווץ בזמן ההחזקה
+=How much shaking makes the pointer grow	b625	כמה ניעור מגדיל את המצביע
+=How quickly the two clicks must come	24ce	כמה מהר שתי הלחיצות צריכות לבוא
 =Identify	033d	זיהוי
 =In range and saved	7941	בטווח ושמורות
 =Input	e11b	קלט
@@ -293,6 +315,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Momentum	cfef	תנע
 =Motion	7647	תנועה
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
+=Mouse	9b64	עכבר
 =Mouse acceleration	c400	האצת העכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
 =Mute	9f74	השתקה
@@ -311,6 +334,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
 =Plain Text	2bbe	טקסט פשוט
+=Pointer	4dca	מצביע
 =Pointer squeeze (percent, or default)	bbee	לחיצת המצביע (אחוזים, או ברירת מחדל)
 =Pointer squeezes on click	ad88	המצביע מתכווץ בלחיצה
 =Power	a5e6	צריכת חשמל
@@ -354,17 +378,25 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Terminal lines per wheel notch	3800	שורות במסוף לכל צעד של הגלגלת
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
 =The internet prefers	3dbe	האינטרנט מעדיף
+=The layout the keys type in	c104	הפריסה שבה המקשים מקלידים
+=The page glides with each notch instead of jumping	0357	הדף גולש בכל שנת גלגלת במקום לקפוץ
+=The pointer goes further when the mouse moves fast	d21b	המצביע מגיע רחוק יותר כשהעכבר זז מהר
+=The pointer shrinks while a button is held down	574c	המצביע מתכווץ כל עוד לחצן מוחזק
+=The wait before a held key repeats	e3e9	ההמתנה עד שמקש מוחזק חוזר
 =Theme	7c92	ערכת נושא
 =This machine	3790	המחשב הזה
 =Time	e404	זמן
 =Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
 =Time zone	741a	אזור זמן
+=Touch	fb78	מגע
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה
 =Upside down	9dc1	הפוך
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	מה עושה החלקה פנימה מהקצה הזה
+=White edged in black, or the reverse	cd63	לבן עם שוליים שחורים, או להפך
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	רשת קווית
 =all	4bc4	הכול

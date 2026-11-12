@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	En attente des premières présentations
 settings_stopped	f34e	arrêté
 settings_too_long	fed7	moonwater a pris trop de temps et a été arrêté
 settings_too_many	db0e	c'est plus de mots que n'en prend une commande
+settings_try_click	5177	Tester le double-clic
+settings_try_click_about	52d8	Il s'allume si les deux clics arrivent dans le délai
+settings_try_click_value	28cd	Double-cliquez ici
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Aperçu
+settings_try_repeat	302d	Tester la répétition des touches
+settings_try_repeat_about	70a4	Maintenez une touche dans le champ pour sentir le délai et la vitesse
+settings_try_repeat_hint	1d74	Maintenez une touche enfoncée
+settings_try_repeat_value	9b81	Tapez ici
 settings_turned_software	64d9	Pivoté par Moonwater (plus lent)
 settings_type_command	75f8	saisissez une commande : son verbe, puis ce qui suit
 settings_type_device	63e0	saisissez le nom d'un appareil : Enter le garde, Escape laisse
@@ -225,6 +234,9 @@ ui_field_digits	f52b	un nombre s'écrit en chiffres
 ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Un cercle sous chaque doigt sur un écran tactile
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Le doigt ou le stylet est suivi une image d'avance, avec moins de retard
+=A quick shake makes the pointer large for a moment	4d81	Une petite secousse agrandit le pointeur un instant
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Couleur d'accent (rrggbb ou reset)
 =Airplane mode	3b8a	Mode avion
@@ -233,10 +245,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Always off	48b1	Toujours désactivé
 =Always on	fab5	Toujours activé
 =Animation speed (percent, or default)	49c2	Vitesse des animations (pourcentage ou default)
+=Arrows, or a dot that turns into a bar over text	78cc	Des flèches, ou un point qui devient une barre sur le texte
 =Audio	1439	Audio
 =Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)
 =Automatic	6784	Automatique
+=Automatic shows it when no keyboard is plugged in	a05a	Automatique l'affiche quand aucun clavier n'est branché
 =Background	0abd	Arrière-plan
 =Background colour (rrggbb or default)	e2b2	Couleur d'arrière-plan (rrggbb ou default)
 =Battery	e12e	Batterie
@@ -265,9 +279,17 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Display	d9b5	Écran
 =Double-click time (ms, or default)	9af1	Délai du double-clic (ms ou default)
 =Drag lists with the mouse	4ee2	Faire glisser les listes avec la souris
+=Edge swipes	7aaf	Balayages depuis les bords
 =Editor	bf98	Éditeur
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =Gallery	4cdd	Galerie
+=How fast the pointer follows the mouse	0a45	La vitesse à laquelle le pointeur suit la souris
+=How long it stays large after a shake	82a0	Combien de temps il reste grand après une secousse
+=How long to hold a finger to right-click	b301	Combien de temps garder le doigt pour un clic droit
+=How many times a second a held key repeats, or off	e430	Combien de fois par seconde une touche tenue se répète, ou désactivé
+=How much it shrinks while held	e457	De combien il rétrécit pendant l'appui
+=How much shaking makes the pointer grow	b625	Combien de secousses font grandir le pointeur
+=How quickly the two clicks must come	24ce	La rapidité requise entre les deux clics
 =Identify	033d	Identifier
 =In range and saved	7941	À portée et enregistrés
 =Input	e11b	Saisie
@@ -292,6 +314,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Momentum	cfef	Inertie
 =Motion	7647	Animation
 =Mount kept disks	f0c8	Monter les disques conservés
+=Mouse	9b64	Souris
 =Mouse acceleration	c400	Accélération de la souris
 =Mouse sensitivity (percent, or default)	8a23	Sensibilité de la souris (pourcentage ou default)
 =Mute	9f74	Couper le son
@@ -310,6 +333,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Pair a machine	b39b	Associer une machine
 =Plain Text	2bbe	Texte brut
+=Pointer	4dca	Pointeur
 =Pointer squeeze (percent, or default)	bbee	Écrasement du pointeur (pourcentage, ou défaut)
 =Pointer squeezes on click	ad88	Le pointeur se contracte au clic
 =Power	a5e6	Alimentation
@@ -353,17 +377,25 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Terminal lines per wheel notch	3800	Lignes du terminal par cran de molette
 =Text size (percent, or default)	51d7	Taille du texte (pourcentage ou default)
 =The internet prefers	3dbe	Internet préfère
+=The layout the keys type in	c104	La disposition dans laquelle les touches écrivent
+=The page glides with each notch instead of jumping	0357	La page glisse à chaque cran au lieu de sauter
+=The pointer goes further when the mouse moves fast	d21b	Le pointeur va plus loin quand la souris bouge vite
+=The pointer shrinks while a button is held down	574c	Le pointeur rétrécit tant qu'un bouton est enfoncé
+=The wait before a held key repeats	e3e9	L'attente avant qu'une touche tenue se répète
 =Theme	7c92	Thème
 =This machine	3790	Cette machine
 =Time	e404	Heure
 =Time server (auto for the pool)	67e5	Serveur de temps (auto pour le pool)
 =Time zone	741a	Fuseau horaire
+=Touch	fb78	Toucher
 =Turned by the screen	ea45	Pivoté par l'écran
 =Turned left	507c	Pivoté à gauche
 =Turned right	7a49	Pivoté à droite
 =Upside down	9dc1	À l'envers
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Ce que fait un balayage depuis ce bord
+=White edged in black, or the reverse	cd63	Blanc bordé de noir, ou l'inverse
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Filaire
 =all	4bc4	tous

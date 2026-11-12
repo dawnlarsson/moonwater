@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	Väntar på de första bildrutorna
 settings_stopped	f34e	stoppad
 settings_too_long	fed7	moonwater tog för lång tid och stoppades
 settings_too_many	db0e	det är fler ord än ett kommando tar
+settings_try_click	5177	Testa dubbelklick
+settings_try_click_about	52d8	Den lyser när de två klicken kommer inom tiden
+settings_try_click_value	28cd	Dubbelklicka här
+settings_try_ms	6be8	%d ms
+settings_try_pointer	4cf7	Förhandsvisning
+settings_try_repeat	302d	Testa tangentupprepning
+settings_try_repeat_about	70a4	Håll en tangent i fältet för att känna fördröjning och takt
+settings_try_repeat_hint	1d74	Håll ned en tangent
+settings_try_repeat_value	9b81	Skriv här
 settings_turned_software	64d9	Vänds av Moonwater (långsammare)
 settings_type_command	75f8	skriv ett kommando: verbet och det som följer
 settings_type_device	63e0	skriv namnet på en enhet: Enter sparar det, Escape lämnar
@@ -225,6 +234,9 @@ ui_field_digits	f52b	ett tal består av siffror
 ui_field_full	fe02	mer ryms inte
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	En cirkel under varje finger på en pekskärm
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Ett finger eller en penna följs en bildruta före, så den släpar mindre
+=A quick shake makes the pointer large for a moment	4d81	En snabb skakning gör pekaren stor en stund
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentfärg (rrggbb eller reset)
 =Airplane mode	3b8a	Flygplansläge
@@ -233,10 +245,12 @@ ui_field_full	fe02	mer ryms inte
 =Always off	48b1	Alltid av
 =Always on	fab5	Alltid på
 =Animation speed (percent, or default)	49c2	Animationshastighet (procent eller default)
+=Arrows, or a dot that turns into a bar over text	78cc	Pilar, eller en prick som blir en stapel över text
 =Audio	1439	Ljud
 =Audio modem	0ccb	Ljudmodem
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
 =Automatic	6784	Automatiskt
+=Automatic shows it when no keyboard is plugged in	a05a	Automatiskt visar det när inget tangentbord är anslutet
 =Background	0abd	Bakgrund
 =Background colour (rrggbb or default)	e2b2	Bakgrundsfärg (rrggbb eller default)
 =Battery	e12e	Batteri
@@ -265,9 +279,17 @@ ui_field_full	fe02	mer ryms inte
 =Display	d9b5	Skärm
 =Double-click time (ms, or default)	9af1	Tid för dubbelklick (ms eller default)
 =Drag lists with the mouse	4ee2	Dra listor med musen
+=Edge swipes	7aaf	Svep från kanten
 =Editor	bf98	Redigerare
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =Gallery	4cdd	Galleri
+=How fast the pointer follows the mouse	0a45	Hur snabbt pekaren följer musen
+=How long it stays large after a shake	82a0	Hur länge den förblir stor efter en skakning
+=How long to hold a finger to right-click	b301	Hur länge ett finger hålls för ett högerklick
+=How many times a second a held key repeats, or off	e430	Hur många gånger per sekund en nedhållen tangent upprepas, eller av
+=How much it shrinks while held	e457	Hur mycket den krymper medan knappen hålls
+=How much shaking makes the pointer grow	b625	Hur mycket skakning som får pekaren att växa
+=How quickly the two clicks must come	24ce	Hur snabbt de två klicken måste komma
 =Identify	033d	Identifiera
 =In range and saved	7941	I närheten och sparade
 =Input	e11b	Inmatning
@@ -292,6 +314,7 @@ ui_field_full	fe02	mer ryms inte
 =Momentum	cfef	Rörelsemängd
 =Motion	7647	Rörelse
 =Mount kept disks	f0c8	Montera sparade diskar
+=Mouse	9b64	Mus
 =Mouse acceleration	c400	Musacceleration
 =Mouse sensitivity (percent, or default)	8a23	Musens känslighet (procent eller default)
 =Mute	9f74	Ljud av
@@ -310,6 +333,7 @@ ui_field_full	fe02	mer ryms inte
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Pair a machine	b39b	Para ihop en maskin
 =Plain Text	2bbe	Oformaterad text
+=Pointer	4dca	Pekare
 =Pointer squeeze (percent, or default)	bbee	Pekarens hoptryckning (procent, eller standard)
 =Pointer squeezes on click	ad88	Pekaren krymper vid klick
 =Power	a5e6	Ström
@@ -353,17 +377,25 @@ ui_field_full	fe02	mer ryms inte
 =Terminal lines per wheel notch	3800	Terminalrader per hjulsteg
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
 =The internet prefers	3dbe	Internet föredrar
+=The layout the keys type in	c104	Layouten som tangenterna skriver i
+=The page glides with each notch instead of jumping	0357	Sidan glider vid varje hack i stället för att hoppa
+=The pointer goes further when the mouse moves fast	d21b	Pekaren går längre när musen rör sig snabbt
+=The pointer shrinks while a button is held down	574c	Pekaren krymper medan en knapp hålls nere
+=The wait before a held key repeats	e3e9	Väntan innan en nedhållen tangent upprepas
 =Theme	7c92	Tema
 =This machine	3790	Den här maskinen
 =Time	e404	Tid
 =Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
 =Time zone	741a	Tidszon
+=Touch	fb78	Touch
 =Turned by the screen	ea45	Vänds av skärmen
 =Turned left	507c	Vriden åt vänster
 =Turned right	7a49	Vriden åt höger
 =Upside down	9dc1	Upp och ned
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Vad ett svep in från den här kanten gör
+=White edged in black, or the reverse	cd63	Vit med svart kant, eller tvärtom
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Trådbundet
 =all	4bc4	alla

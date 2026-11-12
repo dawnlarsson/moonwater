@@ -189,6 +189,15 @@ settings_status_waiting	dfe6	Ожидание первых кадров
 settings_stopped	f34e	остановлено
 settings_too_long	fed7	moonwater работал слишком долго и был остановлен
 settings_too_many	db0e	это больше слов, чем принимает команда
+settings_try_click	5177	Проверить двойной щелчок
+settings_try_click_about	52d8	Загорается, если два щелчка уложились во время
+settings_try_click_value	28cd	Щёлкните здесь дважды
+settings_try_ms	6be8	%d мс
+settings_try_pointer	4cf7	Предпросмотр
+settings_try_repeat	302d	Проверить повтор клавиш
+settings_try_repeat_about	70a4	Удерживайте клавишу в поле, чтобы ощутить задержку и частоту
+settings_try_repeat_hint	1d74	Удерживайте клавишу
+settings_try_repeat_value	9b81	Введите здесь
 settings_turned_software	64d9	Поворачивает Moonwater (медленнее)
 settings_type_command	75f8	введите команду: её глагол и то, что за ним
 settings_type_device	63e0	введите имя устройства: Enter запомнит, Escape оставит
@@ -225,6 +234,9 @@ ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается
 =12h	da26	12h
 =24h	f841	24h
+=A circle under each finger on a touch screen	1bd7	Круг под каждым пальцем на сенсорном экране
+=A finger or pen is followed a frame ahead, so it lags less	c7a3	Палец или перо отслеживаются на кадр вперёд и меньше отстают
+=A quick shake makes the pointer large for a moment	4d81	Быстрое встряхивание ненадолго увеличивает указатель
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
 =Airplane mode	3b8a	Режим полёта
@@ -233,10 +245,12 @@ ui_field_full	fe02	больше не помещается
 =Always off	48b1	Всегда выключена
 =Always on	fab5	Всегда включена
 =Animation speed (percent, or default)	49c2	Скорость анимации (проценты или default)
+=Arrows, or a dot that turns into a bar over text	78cc	Стрелки или точка, которая над текстом становится полоской
 =Audio	1439	Звук
 =Audio modem	0ccb	Аудиомодем
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
 =Automatic	6784	Автоматически
+=Automatic shows it when no keyboard is plugged in	a05a	Автоматически показывается, когда клавиатура не подключена
 =Background	0abd	Фон
 =Background colour (rrggbb or default)	e2b2	Цвет фона (rrggbb или default)
 =Battery	e12e	Батарея
@@ -265,9 +279,17 @@ ui_field_full	fe02	больше не помещается
 =Display	d9b5	Экран
 =Double-click time (ms, or default)	9af1	Время двойного щелчка (мс или default)
 =Drag lists with the mouse	4ee2	Перетаскивать списки мышью
+=Edge swipes	7aaf	Жесты от края
 =Editor	bf98	Редактор
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =Gallery	4cdd	Галерея
+=How fast the pointer follows the mouse	0a45	Как быстро указатель следует за мышью
+=How long it stays large after a shake	82a0	Сколько он остаётся крупным после встряхивания
+=How long to hold a finger to right-click	b301	Сколько держать палец для правого щелчка
+=How many times a second a held key repeats, or off	e430	Сколько раз в секунду повторяется удерживаемая клавиша, или выкл.
+=How much it shrinks while held	e457	Насколько он сжимается при нажатии
+=How much shaking makes the pointer grow	b625	Сколько нужно трясти, чтобы указатель вырос
+=How quickly the two clicks must come	24ce	Как быстро должны следовать два щелчка
 =Identify	033d	Определить
 =In range and saved	7941	В зоне действия и сохранённые
 =Input	e11b	Ввод
@@ -292,6 +314,7 @@ ui_field_full	fe02	больше не помещается
 =Momentum	cfef	Инерция
 =Motion	7647	Движение
 =Mount kept disks	f0c8	Монтировать сохранённые диски
+=Mouse	9b64	Мышь
 =Mouse acceleration	c400	Ускорение мыши
 =Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
 =Mute	9f74	Без звука
@@ -310,6 +333,7 @@ ui_field_full	fe02	больше не помещается
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Pair a machine	b39b	Связать компьютер
 =Plain Text	2bbe	Простой текст
+=Pointer	4dca	Указатель
 =Pointer squeeze (percent, or default)	bbee	Сжатие указателя (процент или по умолчанию)
 =Pointer squeezes on click	ad88	Указатель сжимается при щелчке
 =Power	a5e6	Питание
@@ -353,17 +377,25 @@ ui_field_full	fe02	больше не помещается
 =Terminal lines per wheel notch	3800	Строк терминала на щелчок колеса
 =Text size (percent, or default)	51d7	Размер текста (проценты или default)
 =The internet prefers	3dbe	Интернет предпочитает
+=The layout the keys type in	c104	Раскладка, в которой печатают клавиши
+=The page glides with each notch instead of jumping	0357	Страница плавно скользит с каждым щелчком колеса, а не прыгает
+=The pointer goes further when the mouse moves fast	d21b	Указатель уходит дальше, когда мышь движется быстро
+=The pointer shrinks while a button is held down	574c	Указатель сжимается, пока кнопка нажата
+=The wait before a held key repeats	e3e9	Пауза перед повтором удерживаемой клавиши
 =Theme	7c92	Тема
 =This machine	3790	Этот компьютер
 =Time	e404	Время
 =Time server (auto for the pool)	67e5	Сервер времени (auto для пула)
 =Time zone	741a	Часовой пояс
+=Touch	fb78	Касание
 =Turned by the screen	ea45	Поворачивает экран
 =Turned left	507c	Повёрнут влево
 =Turned right	7a49	Повёрнут вправо
 =Upside down	9dc1	Перевёрнут
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Waterlink	6560	Waterlink
+=What a swipe in from this edge does	faab	Что делает жест от этого края
+=White edged in black, or the reverse	cd63	Белый с чёрной каймой или наоборот
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Проводная сеть
 =all	4bc4	все

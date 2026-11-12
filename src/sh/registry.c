@@ -207,6 +207,9 @@ struct settings_row
         const char address_to unit;     // a number's unit, said after it
         long low, high;                 // a number's least and greatest
         unsigned char output;           // SETTINGS_OUT_*: a row of the Display map's screen, which the table says, not a verb
+        // The window's again, last so that the places of the fields before stay.
+        const char address_to part;  // the header of the part of its group this row starts, or none: it is in the part before it
+        const char address_to about; // what it does, in plain words: the line under its label in the window
 };
 
 /*
@@ -222,6 +225,14 @@ struct settings_row
         Bluetooth, Devices, Power and Boot. A row is in the group a person looks
         for it in, by what it does and not by the program that applies it: the
         pointer's size is an Input row though the compositor draws it.
+
+        A group of more than a few rows is in parts: a row that names a part
+        (part) starts it, and it holds the rows after it up to the next part or
+        group; rows of a group before its first part are in the group's own,
+        under the group's name. The window heads each part with its name, and
+        the parts of a group are in the order a person reaches for them, the
+        most used first. Every row the window shows says what it does (about),
+        in a line of plain words under its label.
 */
 #define SETTING_UNWRAP(...) __VA_ARGS__
 // A plain row: group, label, window kind and flags, verb words in brackets, key, choices, then the rest by name.
@@ -359,44 +370,63 @@ static const struct settings_row settings_rows[] = {
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
     {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0,
-     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it ar il ir [us]"},
+     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it ar il ir [us]",
+     .part = "Keyboard",
+     .about = "The layout the keys type in"},
     //  The keyboard on the screen (src/canvas/compositor.c, the osk window): shown while a text field has the keys and there is no
     //  keyboard to type on (auto), never (off), or whenever a field has them (on).
     SETTING_PLAIN_ROW(null, "On-screen keyboard", SETTINGS_CHOICE, 0, ("keyboard", "onscreen"), "onscreen ", "auto off on",
                       .need = "", .path = SETTING_ONSCREEN_PATH, .standard = "auto", .reset = "auto",
                       .refusal = "the on-screen keyboard is auto, off or on, not %s\n",
                       .usage = "keyboard onscreen [auto|off|on]",
-                      .help = "a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]"),
+                      .help = "a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]",
+                      .about = "Automatic shows it when no keyboard is plugged in"),
     SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_SLIDER, 0, ("keyboard", "repeat", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .need = "", .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,
                       .usage = "keyboard repeat delay [MS|default]",
-                      .help = "how long a key is held before it repeats, 100 to 2000 ms [250]"),
+                      .help = "how long a key is held before it repeats, 100 to 2000 ms [250]",
+                      .about = "The wait before a held key repeats"),
     SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "rate"), "rate ", "off",
                       .type = SETTING_NUMBER, .need = "", .path = SETTING_REPEAT_RATE_PATH,
                       .standard = "30", .unit = "per second", .low = 1, .high = 100,
                       .usage = "keyboard repeat rate [PER-SECOND|off|default]",
-                      .help = "repeats a second of a held key, 1 to 100, or none [30]"),
+                      .help = "repeats a second of a held key, 1 to 100, or none [30]",
+                      .about = "How many times a second a held key repeats, or off"),
     SETTING_PLAIN_ROW(null, "Mouse sensitivity (percent, or default)", SETTINGS_SLIDER, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .need = "", .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,
-                      .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]"),
+                      .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]",
+                      .part = "Mouse",
+                      .about = "How fast the pointer follows the mouse"),
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .need = "", .path = SETTING_ACCELERATION_PATH, .standard = "on",
-                      .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
+                      .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]",
+                      .about = "The pointer goes further when the mouse moves fast"),
     //  The kit's one double press (ui.c's ui_click_again): a press this soon after the last, and near it, is the next click of its run, in
     //  every text, the terminal, the tray and the windows' tops.
     SETTING_PLAIN_ROW(null, "Double-click time (ms, or default)", SETTINGS_SLIDER, 0, ("mouse", "double", "click"), "click ", null,
                       .type = SETTING_NUMBER, .need = "", .path = SETTING_DOUBLE_CLICK_PATH,
                       .standard = "450", .unit = "ms", .low = 200, .high = 900,
                       .usage = "mouse double click [MS|default]",
-                      .help = "how soon a second press near the first is a double click, 200 to 900 ms; a third as soon is a triple [450]"),
+                      .help = "how soon a second press near the first is a double click, 200 to 900 ms; a third as soon is a triple [450]",
+                      .about = "How quickly the two clicks must come"),
     //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch runs to its step (two and a half rows) over a
     //  short time, starting at once and easing out; off, a notch moves a whole step at once.
     SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
                       .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on",
                       .usage = "canvas wheel smooth [on|off]",
-                      .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]"),
+                      .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]",
+                      .about = "The page glides with each notch instead of jumping"),
+    //  The pointer's shape: the classic bitmaps, or one filled shape with nothing in it, a circle that a fast hand stretches and
+    //  that is a rounded block over text (compositor.c's dynamic cursor). A touch always uses it, whatever this says.
+    SETTING_PLAIN_ROW(null, "Cursor style", SETTINGS_CHOICE, 0, ("canvas", "cursor", "style"), "style ", "classic dynamic",
+                      .path = SETTING_CURSOR_STYLE_PATH, .standard = "dynamic", .reset = "dynamic",
+                      .refusal = "cursor style is classic or dynamic, not %s\n",
+                      .usage = "canvas cursor style [classic|dynamic]",
+                      .help = "the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]",
+                      .part = "Pointer",
+                      .about = "Arrows, or a dot that turns into a bar over text"),
     //  The pointer's size (compositor.c's compositor_cursor_size): a percent of the size the desktop's scale gives it, which is 100;
     //  the standard, 80, is a little smaller. A file kept before it was a percent says auto, which is the standard, or 1 to 4, a size
     //  of its own (setting_cursor_size_was).
@@ -407,59 +437,62 @@ static const struct settings_row settings_rows[] = {
                       .help = "the pointer: its size, 50 to 300 percent of the size the desktop scale gives it, and its colours [80, auto]"),
     SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
                       .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto",
-                      .refusal = "cursor look is light, dark or auto, not %s\n"),
-    //  The pointer's shape: the classic bitmaps, or one filled shape with nothing in it, a circle that a fast hand stretches and
-    //  that is a rounded block over text (compositor.c's dynamic cursor). A touch always uses it, whatever this says.
-    SETTING_PLAIN_ROW(null, "Cursor style", SETTINGS_CHOICE, 0, ("canvas", "cursor", "style"), "style ", "classic dynamic",
-                      .path = SETTING_CURSOR_STYLE_PATH, .standard = "dynamic", .reset = "dynamic",
-                      .refusal = "cursor style is classic or dynamic, not %s\n",
-                      .usage = "canvas cursor style [classic|dynamic]",
-                      .help = "the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]"),
+                      .refusal = "cursor look is light, dark or auto, not %s\n",
+                      .about = "White edged in black, or the reverse"),
+    //  A held button changes the pointer's size for as long as it is down (compositor.c's compositor_pointer_press): on by default.
+    SETTING_PLAIN_ROW(null, "Pointer squeezes on click", SETTINGS_SWITCH, 0, ("canvas", "cursor", "click"), "click ", null,
+                      .path = SETTING_CURSOR_CLICK_PATH, .standard = "on",
+                      .usage = "canvas cursor click [on|off]",
+                      .help = "a held button changes how large the pointer is: the left shrinks it, the right grows it [on]",
+                      .about = "The pointer shrinks while a button is held down"),
     //  How far a pointer shrinks while a button is held (compositor.c's compositor_pointer_press, for either style): 0 is none.
     SETTING_PLAIN_ROW(null, "Pointer squeeze (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "squeeze"), "squeeze ", null,
                       .type = SETTING_NUMBER, .path = SETTING_SQUEEZE_PATH,
                       .standard = "25", .unit = "percent", .low = 0, .high = 50,
                       .usage = "canvas cursor squeeze [PERCENT|default]",
-                      .help = "how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]"),
+                      .help = "how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]",
+                      .about = "How much it shrinks while held"),
     SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
                       .path = SETTING_SHAKE_PATH, .standard = "on",
-                      .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
-    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_SHAKE_DELAY_PATH,
-                      .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
-                      .usage = "canvas cursor shake delay [MS|default]",
-                      .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+                      .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]",
+                      .about = "A quick shake makes the pointer large for a moment"),
     //  How much of a shake finds the pointer (compositor.c's compositor_shake): the step a reversal takes and how many come in its window.
     SETTING_PLAIN_ROW(null, "Shake sensitivity", SETTINGS_CHOICE, 0, ("canvas", "cursor", "shake", "sensitivity"), "sensitivity ", "low normal high",
                       .path = SETTING_SHAKE_FEEL_PATH, .standard = "normal", .reset = "normal",
                       .refusal = "shake sensitivity is low, normal or high, not %s\n",
                       .usage = "canvas cursor shake sensitivity [low|normal|high]",
-                      .help = "how much shaking makes the pointer large: low takes more and wider shakes, high fewer and smaller [normal]"),
-    //  A held button changes the pointer's size for as long as it is down (compositor.c's compositor_pointer_press): on by default.
-    SETTING_PLAIN_ROW(null, "Pointer squeezes on click", SETTINGS_SWITCH, 0, ("canvas", "cursor", "click"), "click ", null,
-                      .path = SETTING_CURSOR_CLICK_PATH, .standard = "on",
-                      .usage = "canvas cursor click [on|off]",
-                      .help = "a held button changes how large the pointer is: the left shrinks it, the right grows it [on]"),
+                      .help = "how much shaking makes the pointer large: low takes more and wider shakes, high fewer and smaller [normal]",
+                      .about = "How much shaking makes the pointer grow"),
+    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_SHAKE_DELAY_PATH,
+                      .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
+                      .usage = "canvas cursor shake delay [MS|default]",
+                      .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]",
+                      .about = "How long it stays large after a shake"),
     //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
     //  pointer is always predicted, so it has no row.
     SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
                       .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on",
                       .usage = "canvas predict touch [on|off]",
-                      .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]"),
+                      .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]",
+                      .part = "Touch",
+                      .about = "A finger or pen is followed a frame ahead, so it lags less"),
     //  On by default (the owner's call): a finger hides what it presses, and the mark says where the screen read it. It
     //  is drawn for a touch screen's fingers alone, never for a mouse, a pad or a pen, and costs nothing with no finger
     //  down or fading.
     SETTING_PLAIN_ROW(null, "Show touch area", SETTINGS_SWITCH, 0, ("canvas", "touch"), "touch ", null,
                       .path = SETTING_TOUCH_PATH, .standard = "on",
                       .usage = "canvas touch [on|off]",
-                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
+                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]",
+                      .about = "A circle under each finger on a touch screen"),
     //  The one hold of a finger (ui.c's ui_hold_ns): still this long it is a long press, the right button, as the touch recogniser has it;
     //  a key of the on-screen keyboard held this long shows its accents, and a swipe from an edge is decided within it.
     SETTING_PLAIN_ROW(null, "Long press time (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "touch", "hold"), "hold ", null,
                       .type = SETTING_NUMBER, .path = SETTING_TOUCH_HOLD_PATH,
                       .standard = "500", .unit = "ms", .low = 300, .high = 1500,
                       .usage = "canvas touch hold [MS|default]",
-                      .help = "how long a finger held still is a long press, the right button, and a key of the on-screen keyboard shows its accents, 300 to 1500 ms [500]"),
+                      .help = "how long a finger held still is a long press, the right button, and a key of the on-screen keyboard shows its accents, 300 to 1500 ms [500]",
+                      .about = "How long to hold a finger to right-click"),
     //  The screen's side edges (ui/ui.c, compositor.c): a swipe in from the left edge runs the window switcher or opens the
     //  launcher, one in from the right runs the switcher or opens the volume popup. Off by default: a swipe from a side is then
     //  the window's, as a touch.
@@ -467,12 +500,15 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TOUCH_LEFT_PATH, .standard = "off", .reset = "off",
                       .refusal = "the left edge is off, windows or launcher, not %s\n",
                       .usage = "canvas touch left [off|windows|launcher]",
-                      .help = "a swipe in from the left edge runs the window switcher, or opens the launcher [off]"),
+                      .help = "a swipe in from the left edge runs the window switcher, or opens the launcher [off]",
+                      .part = "Edge swipes",
+                      .about = "What a swipe in from this edge does"),
     SETTING_PLAIN_ROW(null, "Right edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "right"), "right ", "off windows volume",
                       .path = SETTING_TOUCH_RIGHT_PATH, .standard = "off", .reset = "off",
                       .refusal = "the right edge is off, windows or volume, not %s\n",
                       .usage = "canvas touch right [off|windows|volume]",
-                      .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]"),
+                      .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]",
+                      .about = "What a swipe in from this edge does"),
     //  The scrolling group: how a wheel, a trackpad and a drag move the content (ui.c's scroll body). Natural direction turns
     //  the way a wheel's notch and a pad's motion move it (a finger on the screen always takes the content with it); speed
     //  scales a trackpad's notches and streams (compositor_pad_pct, the speed row that was in Input); momentum is the coast a

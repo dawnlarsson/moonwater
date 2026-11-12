@@ -145769,6 +145769,271 @@ static fn settings_least_check(void)
         check("settings least: and its frame is whole: the title beside the search field, the column, its bar and the rows side by side, nothing past the window", frame);
 }
 
+/*
+        The rows that show a setting (settings.c's settings_tries), in the Input group of a window tall enough to show them whole. The
+        pointer's row draws, at its end, the pointer the style, size and look rows say, as the compositor does: classic, the arrow at the
+        start of the pair is 21 cells of the size tall and 12 across (the desktop's pixels a logical pixel times the size's percent), and
+        at 200 percent it is 200 over 80 times the arrow at 80; dynamic, the circle at rest is 16 cells across; and a press held on the row
+        draws it smaller by the squeeze (25 percent, the pointer squeezing on a click). The double-click row lights its time apart in the
+        selected tab's pill when two clicks on it come within the double-click row's time, and not when they come after it, which a
+        longer time makes a pair within; Enter on it is no click. Enter on the key repeat's row opens its field, and Enter in it closes it
+        and changes no setting.
+*/
+static int settings_tries_values(const char address_to path, const char address_to value)
+{
+        int row = settings_row_of(path);
+
+        if (row >= 0)
+                settings.state[row] = SETTINGS_READ, string_copy_bounded((string_address)settings.value[row], (string_address)value, SETTINGS_VALUE);
+        return row;
+}
+
+// The pointer's row drawn, and the box round what is not the row's ground in its part at the row's end (device pixels), from the part's
+// start side to the middle of the gap after the first pointer: that pointer's height, and its width.
+static int settings_tries_pointer(int address_to wide)
+{
+        struct ui address_to ui = &settings.ui;
+        int id = SETTINGS_TRY + SETTINGS_TRY_POINTER, at, y, top = 1 << 30, bottom = -1, left = 1 << 30, right = -1, cell, across;
+        const struct ui_node address_to n;
+        struct ui_row row;
+        unsigned int ground;
+        b32 dynamic = !settings_value_is(SETTING_CURSOR_STYLE_PATH, "classic");
+
+        settings_rebuild();
+        at = settings_pos(id);
+        if (at < 0)
+                return -1;
+        ui_scroll_set(&settings.list.scroll, settings.list.top[at]);
+        settings_layout();
+        settings.list.focus = -1, settings.list.hover = -1;
+        ui_kit.now += 2000000000ll, ui_kit.busy = 0;
+        settings_draw_rows(settings_frames_whole, 0, 0);
+        y = ui_list_row_y(&settings.list, at);
+        ui_list_describe(&settings.list, id, &row);
+        ui_row_tree(ui, &settings.list, id, &row, settings.list.tall[at], true);
+        ui_tree_origin(&ui_row_parts.tree, settings.list.x, y);
+        if (!(n = ui_row_parts.picture))
+                return -1;
+        cell = settings_try_cell(ui->scale, settings.list.down == id, dynamic);
+        across = (dynamic ? 16 : 12) * cell / 256 + (dynamic ? 8 : 9) * cell / 256 + ui_px(ui, UI_GAP4);
+        ground = settings_frames_whole[(positive)n->y * SETTINGS_FRAMES_W + (positive)n->x];
+        for (int py = n->y; py < n->y + n->h; py++)
+                for (int px = n->x + n->w - across; px < n->x + n->w - across + (dynamic ? 16 : 12) * cell / 256 + ui_px(ui, UI_GAP4) / 2; px++)
+                        if (settings_frames_whole[(positive)py * SETTINGS_FRAMES_W + (positive)px] != ground)
+                        {
+                                top = py < top ? py : top, bottom = py > bottom ? py : bottom;
+                                left = px < left ? px : left, right = px > right ? px : right;
+                        }
+        *wide = right >= left ? right - left + 1 : 0;
+        return bottom >= top ? bottom - top + 1 : 0;
+}
+
+static fn settings_tries_check(void)
+{
+        struct ui address_to ui = &settings.ui;
+        int input = settings_groups_named("Input"), cell, tall80, tall200, wide80, wide200, ring_h, ring_w, squeezed_h, squeezed_w, arrow_w;
+        int click_row = settings_row_of(SETTING_DOUBLE_CLICK_PATH), click = SETTINGS_TRY + SETTINGS_TRY_CLICK, repeat = SETTINGS_TRY + SETTINGS_TRY_REPEAT;
+        b32 lit_within = false, lit_after = true, lit_longer = false, keyed = false, field = false;
+        char kept[6][SETTINGS_VALUE];
+        static const char address_to const paths[6] = {SETTING_CURSOR_STYLE_PATH, SETTING_CURSOR_SIZE_PATH, SETTING_CURSOR_LOOK_PATH, SETTING_DOUBLE_CLICK_PATH,
+                                                       SETTING_SQUEEZE_PATH, SETTING_CURSOR_CLICK_PATH};
+
+        for (int k = 0; k < 6; k++)
+                string_copy_bounded((string_address)kept[k], (string_address)settings.value[settings_row_of(paths[k])], SETTINGS_VALUE);
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
+        settings.page.chosen = input;
+        settings_size(SETTINGS_WIDTH * ui->scale / 100, SETTINGS_FRAMES_H);
+        settings_tries_values(SETTING_CURSOR_LOOK_PATH, "auto");
+        settings_tries_values(SETTING_SQUEEZE_PATH, "25");
+        settings_tries_values(SETTING_CURSOR_CLICK_PATH, "on");
+        settings_tries_values(SETTING_CURSOR_STYLE_PATH, "classic");
+        settings_tries_values(SETTING_CURSOR_SIZE_PATH, "80");
+        tall80 = settings_tries_pointer(&wide80);
+        settings_tries_values(SETTING_CURSOR_SIZE_PATH, "200");
+        tall200 = settings_tries_pointer(&wide200);
+        settings.list.down = SETTINGS_TRY + SETTINGS_TRY_POINTER;
+        squeezed_h = settings_tries_pointer(&squeezed_w);
+        settings.list.down = -1;
+        settings_tries_values(SETTING_CURSOR_STYLE_PATH, "dynamic");
+        ring_h = settings_tries_pointer(&ring_w);
+        settings_tries_values(SETTING_CURSOR_SIZE_PATH, "80");
+        cell = (compositor_px1(ui->scale) * 256 * 80 + 50) / 100;
+        arrow_w = 12 * cell / 256;
+        string_format(log, "  settings tries: the arrow %b by %b at 80, %b by %b at 200, %b by %b pressed; the circle %b by %b at 200\n", (bipolar)wide80,
+                      (bipolar)tall80, (bipolar)wide200, (bipolar)tall200, (bipolar)squeezed_w, (bipolar)squeezed_h, (bipolar)ring_w, (bipolar)ring_h);
+        check("settings tries: the pointer's row draws the classic arrow 21 cells of the size tall, two and a half times that at 200 percent, and the dynamic circle 16 across",
+              tall80 >= 21 * cell / 256 - 1 && tall80 <= 21 * cell / 256 + 2 && wide80 >= arrow_w - 1 && wide80 <= arrow_w + 2 &&
+                  tall200 * 80 >= tall80 * 200 - 3 * 80 && tall200 * 80 <= tall80 * 200 + 3 * 80 && ring_h != tall200 && ring_w >= ring_h - 1 &&
+                  ring_w <= ring_h + 1 && ring_h * 256 >= 16 * cell * 200 / 80 - 2 * 256 && ring_h * 256 <= 16 * cell * 200 / 80 + 3 * 256);
+        check("settings tries: and a press held on the row draws the pointer smaller, by the squeeze", squeezed_h > 0 && squeezed_h < tall200 && squeezed_w < wide200);
+
+        // The double-click row: two presses on it 300 ms apart with 450 ms to come in light it; 620 ms apart do not, until the time is 700.
+        settings_tries_values(SETTING_DOUBLE_CLICK_PATH, "450");
+        settings_rebuild();
+        if (click_row >= 0 && settings_pos(click) >= 0)
+        {
+                int at = settings_pos(click), x = settings.list.x + settings.list.w / 2, y;
+
+                ui_scroll_set(&settings.list.scroll, settings.list.top[at]);
+                settings_layout();
+                y = ui_list_row_y(&settings.list, at) + settings.list.tall[at] / 2;
+                for (int pair = 0; pair < 3; pair++)
+                {
+                        static const unsigned int apart[3] = {300, 620, 620};
+                        unsigned int primary = ui_role(UI_PRIMARY) | 0xff000000u;
+                        b32 pill = false;
+                        struct ui_row row;
+
+                        if (pair == 2)
+                                settings_tries_values(SETTING_DOUBLE_CLICK_PATH, "700");
+                        settings_click_try.at = 0, settings_click_try.apart = 0;
+                        ui_kit.stamp = 0;
+                        ui_kit.now += 5000000000ll;
+                        settings_try_press(click, x, y);
+                        ui_kit.now += (b64)apart[pair] * 1000000ll;
+                        settings_try_press(click, x, y);
+                        ui_kit.busy = 0;
+                        settings.list.focus = -1, settings.list.hover = -1;
+                        settings_draw_rows(settings_frames_whole, 0, 0);
+                        // The pill is the part at the row's end: a pixel inside its round end, on its middle line, is the accent.
+                        ui_list_describe(&settings.list, click, &row);
+                        ui_row_tree(ui, &settings.list, click, &row, settings.list.tall[at], true);
+                        ui_tree_origin(&ui_row_parts.tree, settings.list.x, ui_list_row_y(&settings.list, at));
+                        if (ui_row_parts.picture)
+                                pill = settings_frames_whole[(positive)(ui_row_parts.picture->y + ui_row_parts.picture->h / 2) * SETTINGS_FRAMES_W +
+                                                             (positive)(ui_row_parts.picture->x + ui_px(ui, 10))] == primary;
+                        if (pair == 0)
+                                lit_within = settings_click_try.apart == 300 && pill;
+                        else if (pair == 1)
+                                lit_after = settings_click_try.apart == 620 && (pill || !row.value);
+                        else
+                                lit_longer = settings_click_try.apart == 620 && pill;
+                }
+        }
+        settings_click_try.at = 0, settings_click_try.apart = 0;
+        settings.child = 1;
+        settings_activate(click, 1), settings_activate(click, 1);
+        keyed = !settings_click_try.apart && !settings_click_try.at;
+        check("settings tries: the double-click row lights its time apart when two clicks on it come within the double-click time, and not after it",
+              lit_within && !lit_after && lit_longer);
+        check("settings tries: and Enter on it is no click", keyed);
+
+        // The key repeat's field: Enter opens it, typed in and Enter closes it, and nothing is changed.
+        {
+                positive queued = settings.queued;
+
+                settings.child = 1;
+                settings_activate(repeat, 1);
+                field = settings_editing() == repeat;
+                ui_text_set(&settings.edit, (const p8 address_to) "kkkk", 4);
+                settings_edit_commit();
+                field &= settings_editing() < 0 && settings.queued == queued;
+        }
+        check("settings tries: Enter on the key repeat's row opens its field, and Enter in it closes it and changes no setting", field);
+        for (int k = 0; k < 6; k++)
+                settings_tries_values(paths[k], kept[k]);
+        settings_size(SETTINGS_WIDTH * ui->scale / 100, SETTINGS_HEIGHT * ui->scale / 100);
+}
+
+/*
+        The groups in parts (registry.c's part): a group's rows are listed in the parts it names, in the table's order, every row in the
+        part of the last row at or before it that starts one (or the group's own, under its name), and the list heads each part with its
+        name over its first row and nowhere else: Input is Keyboard, Mouse, Pointer, Touch and Edge swipes. What is typed in the filter
+        lists a part's header only over a row it lists, so a part none of whose rows is listed has no header. A row that says what it
+        does has it under its label: the row is a row and a line of the quiet role taller, and its switch is in the middle of it.
+*/
+static fn check_settings_parts(void)
+{
+        struct ui address_to ui = &settings.ui;
+        static const char address_to const input_parts[] = {"Keyboard", "Mouse", "Pointer", "Touch", "Edge swipes"};
+        b32 ordered = true, headed = true, input = true, filtered = true, tall = false, centred = false;
+        int parts = 0;
+
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_size(SETTINGS_WIDTH * ui->scale / 100, SETTINGS_HEIGHT * ui->scale / 100);
+        for (int group = 0; group < settings_groups() - 1; group++)
+        {
+                int last = -1;
+
+                settings.page.chosen = group;
+                settings_rebuild();
+                for (int at = 0; at < settings.list.count; at++)
+                {
+                        int id = settings.list.id[at], start;
+                        struct ui_row row;
+
+                        // A row that shows a setting is in the part of the row it is beside, and may be the part's first.
+                        if (id >= SETTINGS_ANY && settings_try_of(id) < 0)
+                                continue;
+                        ui_list_describe(&settings.list, id, &row);
+                        start = id < SETTINGS_ANY ? settings_section_start(id) : row.section;
+                        ordered &= start >= last && settings_group_of(start) == group && (id >= SETTINGS_ANY || start <= id);
+                        for (int between = start + 1; between <= id && id < SETTINGS_ANY; between++)
+                                ordered &= !settings_rows[between].part && !settings_rows[between].section;
+                        headed &= ((settings.list.starts[at] & UI_LIST_HEADED) != 0) == (start != last) &&
+                                  string_equals((string_address)row.header, (string_address)language_of(settings_rows[start].part ? settings_rows[start].part
+                                                                                                                                  : settings_section(id)));
+                        if (start != last && string_equals((string_address)settings_group_name(group), (string_address) "Input"))
+                                input &= parts < (int)(sizeof(input_parts) / sizeof(input_parts[0])) && settings_rows[start].part &&
+                                         string_equals((string_address)settings_rows[start].part, (string_address)input_parts[parts++]);
+                        last = start;
+                }
+        }
+        check("settings parts: each group's rows are listed in the parts it names, in order, each part headed by its name over its first row alone",
+              ordered && headed);
+        check("settings parts: Input is in five parts, Keyboard, Mouse, Pointer, Touch and Edge swipes", input && parts == 5);
+        // A filter that lists the key repeat rows from Keyboard alone heads them Keyboard, and no part over nothing.
+        settings.page.chosen = 0;
+        settings_groups_filter("repeat", 6);
+        {
+                int heads = 0;
+
+                // No row that shows a setting is listed while the filter lists rows: it would head a part with no row of the part.
+                for (int at = 0; at < settings.list.count; at++)
+                        filtered &= settings_try_of(settings.list.id[at]) < 0;
+                for (int at = 0; at < settings.list.count; at++)
+                        if (settings.list.starts[at] & UI_LIST_HEADED)
+                        {
+                                struct ui_row row;
+
+                                ui_list_describe(&settings.list, settings.list.id[at], &row);
+                                heads++;
+                                filtered &= settings.list.id[at] < (int)SETTINGS_ALL && settings_matches(settings.list.id[at]);
+                                filtered &= heads > 1 || string_equals((string_address)row.header, (string_address) "Keyboard");
+                        }
+                filtered &= heads >= 1 && settings.list.count >= 2;
+        }
+        settings_filter_clear(), (void)0;
+        check("settings parts: the filter heads only the parts of the rows it lists: \"repeat\" lists Keyboard's two, under Keyboard", filtered);
+        // Mouse acceleration says what it does under its label: a row and a line taller, its switch in the middle of it.
+        {
+                int row_id = -1, at;
+
+                for (positive each = 0; each < SETTINGS_ROWS; each++)
+                        if (settings_row_is((int)each, SETTING_ACCELERATION_PATH))
+                                row_id = (int)each;
+                settings.page.chosen = settings_group_of(row_id);
+                settings_rebuild();
+                at = settings_pos(row_id);
+                if (at >= 0)
+                {
+                        struct ui_row row;
+                        const struct ui_row_parts address_to p = &ui_row_parts;
+
+                        ui_list_describe(&settings.list, row_id, &row);
+                        tall = row.about && settings.list.whole[at] == ui_dev(ui, UI_ROW) + ui_wrap_pitch(ui, UI_LABEL_MEDIUM, ui_types[UI_LABEL_MEDIUM].size);
+                        ui_row_tree(ui, &settings.list, row_id, &row, settings.list.tall[at], true);
+                        centred = p->toggle && p->about_shown && p->label && 2 * p->toggle->y + p->toggle->h == 2 * p->tree.node[0].y + p->tree.node[0].h &&
+                                  p->label->h == p->tree.node[0].h;
+                }
+        }
+        check("settings parts: a row that says what it does is a row and a line of the quiet role tall, the line under its label, its switch in the middle",
+              tall && centred);
+        settings_tries_check();
+        settings.page.chosen = 0;
+        settings_refilter();
+}
+
 #ifdef PAGE_DUMP
 #include PAGE_DUMP_FILE
 #endif
@@ -145975,6 +146240,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_least_check();
+        check_settings_parts();
         settings_frames_gallery();
 #ifdef PAGE_DUMP
         page_dump();
@@ -164880,6 +165146,8 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 
                 missing_keys += lcheck_keyed_missing(row->section, row->section ? string_length((string_address)row->section) : 0);
                 missing_keys += lcheck_keyed_missing(row->label, row->label ? string_length((string_address)row->label) : 0);
+                missing_keys += lcheck_keyed_missing(row->part, row->part ? string_length((string_address)row->part) : 0);
+                missing_keys += lcheck_keyed_missing(row->about, row->about ? string_length((string_address)row->about) : 0);
                 while (words && *words)
                 {
                         positive length = (positive)(string_first_of_or_end((string_address)words, ' ') - (string_address)words);
@@ -165024,7 +165292,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
         if (missing_keys + order + absent + bad_header + bad_text + bad_stamp + bad_ids + bad_keys + bad_specs + bad_menus + bad_glyphs)
                 string_format(log, "  languages: keys %p, order %p, absent %p, header %p, text %p, stamp %p, ids %p, lines %p, placeholders %p, mnemonics %p, glyphs %p\n",
                               missing_keys, order, absent, bad_header, bad_text, bad_stamp, bad_ids, bad_keys, bad_specs, bad_menus, bad_glyphs);
-        check("languages: every group, label and choice word of the registry has its keyed line in English", !missing_keys);
+        check("languages: every group, part, label, description and choice word of the registry has its keyed line in English", !missing_keys);
         check("languages: the words the tabs of the theme and the motion show are single words in every language", !tab_words);
         check("languages: no text of English or of a translation has two blanks in a row", !doubled);
         check("languages: the Language row offers the table of names' codes in its order, and each is a file", !order && !absent);
@@ -165796,6 +166064,48 @@ static fn settings_words_check(void)
         }
         check("settings words: in every language a label is never empty, and each word a choice's menu shows comes back as the word the verb takes",
               !blank && !round && checked > 500);
+        /*
+                A row's line in the window (settings_label_window): a number with a unit shows its label up to the bracket the command line
+                is told its unit in, in English and in every language, which keeps the bracket at the end; every other label is whole. And
+                every row of the Input group but the pointer's size (its label says it) says what it does, a text of its own in every language.
+        */
+        {
+                positive bracketed = 0, cut = 0, whole = 0, said = 0, unsaid = 0, untranslated = 0;
+                int input = settings_groups_named("Input");
+
+                for (int l = -1; l < (int)(sizeof(lcheck_codes) / sizeof(lcheck_codes[0])); l++)
+                {
+                        language_take(l < 0 ? 0 : (unsigned int)lcheck_codes[l].code[0] | (unsigned int)lcheck_codes[l].code[1] << 8);
+                        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        {
+                                const char address_to label = settings_label_shown((int)at), address_to line = settings_label_window((int)at);
+                                positive length = string_length((string_address)line);
+
+                                const char address_to english = settings_rows[at].label;
+
+                                if (settings_rows[at].unit && english[string_length((string_address)english) - 1] == ')')
+                                {
+                                        bracketed++;
+                                        cut += length && length < string_length((string_address)label) && !string_compare_max((string_address)line, (string_address)label, length) &&
+                                               !string_first_of((string_address)line, '(') && label[length] == ' ' && label[length + 1] == '(';
+                                }
+                                else
+                                        whole += line == label;
+                                if (settings_group_of((int)at) != input)
+                                        continue;
+                                said += settings_rows[at].about && settings_rows[at].about[0];
+                                unsaid += !settings_rows[at].about || !settings_rows[at].about[0];
+                                untranslated += l >= 0 && settings_rows[at].about && language_of(settings_rows[at].about) == settings_rows[at].about;
+                        }
+                }
+                language_take(0);
+                string_format(log, "  settings words: %p lines with a unit, %p of them cut at the bracket; %p rows say what they do, %p do not, %p untranslated\n",
+                              bracketed, cut, said, unsaid, untranslated);
+                check("settings words: a number with a unit is listed as its label up to the bracket its unit is in, in English and in every language, and every other label whole",
+                      bracketed >= 17 * 17 && cut == bracketed && whole == 17 * (SETTINGS_ROWS - bracketed / 17));
+                check("settings words: every row of the Input group but its pointer's size, which its label says, says what it does, in a text of its own in every language",
+                      said > 0 && unsaid == 17 && !untranslated);
+        }
         check("settings words: the tabs of the theme and of the motion are three and two words, one each", !tabs);
         language_take('d' | 'e' << 8);
         settings_word_of(theme, settings_label_of(theme, "dark"), back, sizeof(back));
