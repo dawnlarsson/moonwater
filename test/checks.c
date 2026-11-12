@@ -155379,12 +155379,39 @@ static b32 strips_is(int x, int y, unsigned int role)
         return strips_pixel(x, y) == (ui_role(role) & 0xffffffu);
 }
 
-// How far the strips are scrolled after a second: the first look starts a move that was asked for, the second is where it ends.
-static b64 strips_shift_after(struct ui_strips address_to s)
+// How far the strips are scrolled now: their region's body stepped to the kit's time, and the place it rests at, which they are laid out at.
+static b64 strips_shift_now(const struct ui address_to ui, struct ui_strips address_to s)
 {
-        (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+        ui_scroll_frame(ui, &s->scroll);
+        return ui_scroll_rest(&s->scroll, s->scroll.scroll, s->scroll.view);
+}
+
+// And after a second: a move that was asked for is over by then.
+static b64 strips_shift_after(const struct ui address_to ui, struct ui_strips address_to s)
+{
+        strips_shift_now(ui, s);
         ui_kit.now += 1000000000ll;
-        return (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+        return strips_shift_now(ui, s);
+}
+
+// The left edge of strip k in the window: its column's, in the strips' tree as ui_strips_place laid it out.
+static int strips_left(const struct ui_strips address_to s, int k)
+{
+        return ui_strip_part(s, k, UI_STRIP_NODE_COLUMN).x;
+}
+
+// The same with the strips scrolled by shift: in a row 300 wide, which the strips there are do not fit, and put back where they were.
+static int strips_left_scrolled(struct ui address_to ui, struct ui_strips address_to s, int k, int shift)
+{
+        int left, w = s->w;
+
+        ui_strips_place(ui, s, s->x, s->y, 300, s->h);
+        ui_scroll_set(&s->scroll, shift);
+        ui_strips_place(ui, s, s->x, s->y, 300, s->h);
+        left = strips_left(s, k);
+        ui_scroll_set(&s->scroll, 0);
+        ui_strips_place(ui, s, s->x, s->y, w, s->h);
+        return left;
 }
 
 // n strips: the device first, the rest "P1", "P2", ... at the percents given, the first of them listed at now.
@@ -155738,7 +155765,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 struct window_event move, press, lift;
 
                 mixer.quick = true;
-                mixer.width = ui_px(&mixer.ui, MIXER_QUICK_W), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
+                mixer.width = ui_strips_tree(&mixer.ui, s, 1, 0), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
                 mixer.shown = -1;
                 mixer.font = (string_address) "/fonts/ui.ttf";
                 mixer_fixture_streams();
@@ -156063,7 +156090,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.listed = false;
                 check_mixer_poll_at(mixer_t0 + 1300000000ll);
                 mixer.quick = true;
-                mixer.width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(3)), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
+                mixer.width = ui_strips_tree(&mixer.ui, s, 3, 0), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
                 mixer.big->view.group.keys = 1;
                 system_remove_at(AT_FDCWD, started_path, 0);
                 e = strips_key(UI_KEY_ENTER, 0);
@@ -156297,20 +156324,20 @@ static fn check_kit_strips(void)
                 strips_list(s, 4, steady, ui_kit.now);
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
                 check("kit strips: the strips lie from the start edge, the gap after the first",
-                      ui_strip_at(&ui, s, 0, 0) == UI_STRIP_PAD && ui_strip_at(&ui, s, 1, 0) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP &&
-                          ui_strip_at(&ui, s, 3, 0) == UI_STRIP_PAD + 3 * UI_STRIP_W + UI_STRIP_GAP && ui_strip_at(&ui, s, 1, 50) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP - 50);
+                      strips_left(s, 0) == UI_STRIP_PAD && strips_left(s, 1) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP &&
+                          strips_left(s, 3) == UI_STRIP_PAD + 3 * UI_STRIP_W + UI_STRIP_GAP && strips_left_scrolled(&ui, s, 1, 50) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP - 50);
                 ui_kit.rtl = 1;
-                check("kit strips: reading from the right the first strip is at the right edge and the rest follow toward the left",
-                      ui_strip_at(&ui, s, 0, 0) == 640 - UI_STRIP_PAD - UI_STRIP_W && ui_strip_at(&ui, s, 1, 0) == 640 - UI_STRIP_PAD - 2 * UI_STRIP_W - UI_STRIP_GAP &&
-                          ui_strip_part(&ui, 100, 10, 20) == 100 + UI_STRIP_W - 10 - 20);
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
+                check("kit strips: reading from the right the first strip is at the right edge and the rest follow toward the left",
+                      strips_left(s, 0) == 640 - UI_STRIP_PAD - UI_STRIP_W && strips_left(s, 1) == 640 - UI_STRIP_PAD - 2 * UI_STRIP_W - UI_STRIP_GAP &&
+                          ui_strip_part(s, 1, UI_STRIP_NODE_METER).x == strips_left(s, 1) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH);
                 check("kit strips: and the slider's box is mirrored in its strip, so the meter is on the other side of the slider",
-                      s->control[2].x == ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH - 6 - UI_STRIP_SLIDER_W);
+                      s->control[2].x == strips_left(s, 1) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH - 6 - UI_STRIP_SLIDER_W);
                 ui_kit.rtl = 0;
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
                 check("kit strips: reading from the left the slider is right of the meter, and the mute button is under the strip's middle",
-                      s->control[2].x == ui_strip_at(&ui, s, 1, 0) + (UI_STRIP_W - UI_STRIP_GROUP) / 2 + UI_METER_WIDTH + 6 &&
-                          s->control[3].x == ui_strip_at(&ui, s, 1, 0) + (UI_STRIP_W - UI_STRIP_MUTE_W) / 2 && s->control[3].y + s->control[3].h <= 400 - 16 &&
+                      s->control[2].x == strips_left(s, 1) + (UI_STRIP_W - UI_STRIP_GROUP) / 2 + UI_METER_WIDTH + 6 &&
+                          s->control[3].x == strips_left(s, 1) + (UI_STRIP_W - UI_STRIP_MUTE_W) / 2 && s->control[3].y + s->control[3].h <= 400 - 16 &&
                           s->control[2].y + s->control[2].h < s->control[3].y);
         }
 
@@ -156401,7 +156428,7 @@ static fn check_kit_strips(void)
                 ui_kit.now += 5000000000ll;
                 strips_list(s, 4, steady, ui_kit.now);
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
-                move.a = ui_strip_at(&ui, s, 1, 0) + 40;
+                move.a = strips_left(s, 1) + 40;
                 ui_strips_event(&ui, s, &move);
                 bits = ui_strips_event(&ui, s, &notch);
                 check("kit strips: a notch up over a strip is two percent more, and it has the keys", s->item[1].percent == 52 && s->changed == 1 && s->focus == 1 &&
@@ -156512,54 +156539,54 @@ static fn check_kit_strips(void)
                 ui_kit.now += 5000000000ll;
                 strips_list(s, 9, steady, ui_kit.now);
                 ui_strips_place(&ui, s, 0, 0, 400, 400);
-                most = ui_strips_most(&ui, s);
-                check("kit strips: nine strips do not fit 400 pixels, and the scroll is the rest of them", ui_strips_total(&ui, s) == 2 * UI_STRIP_PAD + 9 * UI_STRIP_W + UI_STRIP_GAP &&
-                                                                                                           most == ui_strips_total(&ui, s) - 400 && most > 0);
+                most = ui_scroll_most(&s->scroll);
+                check("kit strips: nine strips do not fit 400 pixels, and the scroll is the rest of them", s->scroll.content == 2 * UI_STRIP_PAD + 9 * UI_STRIP_W + UI_STRIP_GAP &&
+                                                                                                           most == s->scroll.content - 400 && most > 0);
                 move.a = 200, move.b = 390;
                 ui_strips_event(&ui, s, &move);
                 bits = ui_strips_event(&ui, s, &side);
-                at = strips_shift_after(s);
+                at = strips_shift_after(&ui, s);
                 check("kit strips: the wheel turned sideways scrolls them, a strip a notch", (bits & UI_STRIPS_DRAW) && at == UI_STRIP_W);
                 bits = ui_strips_event(&ui, s, &shift);
-                at = strips_shift_after(s);
+                at = strips_shift_after(&ui, s);
                 check("kit strips: and Shift with the wheel up the other way, held to the start", (bits & UI_STRIPS_DRAW) && at == 0);
                 for (int k = 0; k < 12; k++)
                 {
                         ui_strips_event(&ui, s, &side);
-                        at = strips_shift_after(s);
+                        at = strips_shift_after(&ui, s);
                 }
                 check("kit strips: and held to the end", at == most);
                 // Two notches in quick succession: the second comes 50 ms into the first one's move (220 ms), and is a strip on from where
                 // that move was going, so the two are two strips; a notch the other way while they still move takes one of them back.
-                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                ui_scroll_set(&s->scroll, 0);
                 ui_strips_event(&ui, s, &side);
-                (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                strips_shift_now(&ui, s);
                 ui_kit.now += 50000000ll;
                 ui_strips_event(&ui, s, &side);
-                at = strips_shift_after(s);
+                at = strips_shift_after(&ui, s);
                 check("kit strips: two notches in quick succession are two strips, the second a strip on from where the first was going", at == 2 * UI_STRIP_W && 2 * UI_STRIP_W < most);
                 ui_strips_event(&ui, s, &side);
-                (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                strips_shift_now(&ui, s);
                 ui_kit.now += 50000000ll;
                 ui_strips_event(&ui, s, &side_back);
-                at = strips_shift_after(s);
+                at = strips_shift_after(&ui, s);
                 check("kit strips: and a sideways notch the other way while they move takes a strip back from where they were going", at == 2 * UI_STRIP_W);
                 // A drag of the ground.
-                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                ui_scroll_set(&s->scroll, 0);
                 move.a = 300, move.b = 395;
                 ui_strips_event(&ui, s, &move);
                 bits = ui_strips_event(&ui, s, &press);
                 move.a = 220;
                 ui_strips_event(&ui, s, &move);
-                at = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                at = strips_shift_now(&ui, s);
                 check("kit strips: a drag of the ground moves them with the hand", (bits & UI_STRIPS_TAKEN) && s->dragging && at == 80);
                 move.a = 900;
                 ui_strips_event(&ui, s, &move);
-                at = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                at = strips_shift_now(&ui, s);
                 ui_strips_event(&ui, s, &release);
                 check("kit strips: held at the start, and the release lets go", at == 0 && !s->dragging);
                 // The keys scroll to the strip they go to.
-                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                ui_scroll_set(&s->scroll, 0);
                 s->focus = 0;
                 for (int k = 0; k < 8; k++)
                 {
@@ -156567,7 +156594,7 @@ static fn check_kit_strips(void)
 
                         ui_strips_event(&ui, s, &e);
                 }
-                at = strips_shift_after(s);
+                at = strips_shift_after(&ui, s);
                 check("kit strips: the keys go to the last strip and scroll it whole into view", s->focus == 8 && at == most);
         }
 
@@ -156590,34 +156617,34 @@ static fn check_kit_strips(void)
                 ui_strips_draw(&ui, s, true);
                 slider = &s->control[0];
                 // The device's meter, at -6 dB: nine tenths of its track, green; the program's, at full scale, runs to the top, through amber and red.
-                mx = ui_strip_part(&ui, ui_strip_at(&ui, s, 0, 0), (UI_STRIP_W - UI_STRIP_GROUP) / 2, UI_METER_WIDTH) + 1;
+                mx = ui_strip_part(s, 0, UI_STRIP_NODE_METER).x + 1;
                 meter_bottom = strips_is(mx, slider->y + slider->h - 4, UI_SUCCESS);
                 meter_empty = strips_pixel(mx, slider->y + 4) != (ui_role(UI_SUCCESS) & 0xffffffu) && strips_pixel(mx, slider->y + 4) != (ui_role(UI_ERROR) & 0xffffffu);
-                mx = ui_strip_part(&ui, ui_strip_at(&ui, s, 1, 0), (UI_STRIP_W - UI_STRIP_GROUP) / 2, UI_METER_WIDTH) + 1;
+                mx = ui_strip_part(s, 1, UI_STRIP_NODE_METER).x + 1;
                 amber = strips_is(mx, slider->y + slider->h - slider->h * 85 / 100, UI_WARNING);
                 red = strips_is(mx, slider->y + slider->h - slider->h * 97 / 100, UI_ERROR);
                 line = strips_is(mx, slider->y + slider->h - slider->h * 70 / 100, UI_SUCCESS) && strips_is(mx, slider->y + slider->h - slider->h * 40 / 100, UI_SUCCESS);
-                disc = strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2) == (ui_role(UI_SURFACE_HIGHEST) & 0xffffffu);
-                speaker = strips_is(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE) ||
-                          strips_is(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE);
+                disc = strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2) == (ui_role(UI_SURFACE_HIGHEST) & 0xffffffu);
+                speaker = strips_is(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE) ||
+                          strips_is(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE);
                 text = false;
                 for (int y = 60; y < 80; y++)
-                        for (int x = ui_strip_at(&ui, s, 1, 0); x < ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W; x++)
+                        for (int x = strips_left(s, 1); x < strips_left(s, 1) + UI_STRIP_W; x++)
                                 text |= strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu);
                 if (!(meter_bottom && meter_empty && amber && red))
                         string_format(log, "  dump: meter %p %p %p %p, slider y %p h %p, mx %p roles %p %p %p; device bar %p %p %p; program bar %p %p %p; disc %p, 1: %p %p\n", (positive)meter_bottom,
                                       (positive)meter_empty, (positive)amber, (positive)red, (positive)slider->y, (positive)slider->h, (positive)mx, (positive)(ui_role(UI_SUCCESS) & 0xffffffu),
                                       (positive)(ui_role(UI_WARNING) & 0xffffffu), (positive)(ui_role(UI_ERROR) & 0xffffffu), (positive)strips_pixel(33, 336), (positive)strips_pixel(33, 200),
                                       (positive)strips_pixel(33, 104), (positive)strips_pixel(mx, 336), (positive)strips_pixel(mx, 136), (positive)strips_pixel(mx, 107),
-                                      (positive)strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2), (positive)ui_strip_at(&ui, s, 1, 0),
+                                      (positive)strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2), (positive)strips_left(s, 1),
                                       (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu));
                 check("kit strips: the device's meter at -6 dB is green from its foot and empty at its head; a program's at full scale goes through amber to red",
                       meter_bottom && meter_empty && amber && red && line);
                 if (!(disc && speaker && text))
                         string_format(log, "  dump: disc %p speaker %p text %p; pixels disc %p speaker %p %p roles %p %p\n", (positive)disc, (positive)speaker, (positive)text,
-                                      (positive)strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2),
-                                      (positive)strips_pixel(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2),
-                                      (positive)strips_pixel(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2),
+                                      (positive)strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2),
+                                      (positive)strips_pixel(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2),
+                                      (positive)strips_pixel(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2),
                                       (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu), (positive)(ui_role(UI_ON_SURFACE) & 0xffffffu));
                 check("kit strips: the speaker is drawn in the device's disc, a program has its disc, and the name is written under it", disc && speaker && text);
         }
@@ -156670,7 +156697,7 @@ static fn check_kit_strips(void)
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
                         for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
-                                for (int x = ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 + 2; x < ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 + UI_STRIP_FACE / 2; x++)
+                                for (int x = strips_left(s, 0) + UI_STRIP_W / 2 + 2; x < strips_left(s, 0) + UI_STRIP_W / 2 + UI_STRIP_FACE / 2; x++)
                                         count += strips_pixel(x, y) == (ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu);
                         counts[muted] = count;
                 }
@@ -156694,7 +156721,7 @@ static fn check_kit_strips(void)
                         ui_strips_end(s);
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
-                        centre = ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2;
+                        centre = strips_left(s, 0) + UI_STRIP_W / 2;
                         for (int y = 27; y <= 33; y++)
                                 for (int x = centre - 2; x <= centre + 2; x++)
                                         inside += strips_pixel(x, y) == ink;
@@ -156773,7 +156800,7 @@ static fn check_kit_strips(void)
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
                         for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
-                                for (int x = ui_strip_at(&ui, s, 0, 0); x < ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W; x++)
+                                for (int x = strips_left(s, 0); x < strips_left(s, 0) + UI_STRIP_W; x++)
                                         count += strips_pixel(x, y) == ink;
                         if (dimmed)
                                 dim = count;
@@ -226654,6 +226681,12 @@ static void app_gallery_paint(unsigned int address_to pixels)
         gallery_draw(&settings.ui);
 }
 
+// The mixer's tray popup in logical pixels: as wide as one strip comes to in the kit's row, at 100 percent.
+static int app_quick_w(void)
+{
+        return ui_strips_tree(&(struct ui){.scale = 100}, &app_mixer.strips, 1, 0);
+}
+
 // which: 0 the launcher; 1 the mixer's window; 2 the mixer's tray popup; 3 the mixer's window with the recording page and no microphone.
 // fixed_pitch: 0 for the picture's own width as its pitch, else that pitch.
 static void app_rows(int which, positive pic_at, positive ops_at, positive bins_at, positive cover_at, positive cover_size, const int *scales, int count,
@@ -226673,7 +226706,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
         positive need = 0;
         for (int k = 0; k < count; k++)
         {
-                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
+                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? app_quick_w() : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
                 int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : which == 7 ? 60 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
 
                 if ((positive)pitch * H > need)
@@ -226685,7 +226718,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
                 for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
+                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? app_quick_w() : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
                         int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : which == 7 ? 60 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
                         void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : which == 7 ? app_find_paint : which == 8 ? editor_draw : mixer_draw;

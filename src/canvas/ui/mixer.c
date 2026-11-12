@@ -52,9 +52,7 @@
 #define MIXER_MEMBERS 16               // the streams of one program that are one strip
 #define MIXER_VOLUME 65536u
 #define MIXER_NONE 0xffffffffu
-#define MIXER_QUICK_WIDTH(n) (2 * UI_STRIP_PAD + (n) * UI_STRIP_W + ((n) > 1 ? UI_STRIP_GAP : 0)) // the popup: n strips wide,
-#define MIXER_QUICK_W MIXER_QUICK_WIDTH(1)                                                      // one for the output,
-#define MIXER_QUICK_H 380                                                                       // this tall, the last of it the Mixer row
+#define MIXER_QUICK_H 380              // the popup: as wide as its strips (mixer_open) and this tall, the last of it the Mixer row
 
 struct mixer_group
 {
@@ -72,7 +70,7 @@ struct mixer_big
         unsigned char send[UI_STRIPS_MOST]; // what is to be sent for a strip: 1 its volume, 2 its mute
         char sink[64];                      // the output device as programs name it, for its volume
         char source[64];                    // and the microphone
-        char device_name[96];               // the output's name, drawn beside its slider (mixer_device_name): its strip is listed with none
+        char device_name[96];               // the output's name, the note beside its strip's slider (UI_STRIP_BESIDE): its strip is listed with none
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
         struct ui_view view;                // the window as a tree: the tabs, Allow on the Recording page with recording turned off, and the popup's Mixer row
 };
@@ -194,10 +192,12 @@ static fn mixer_list(b64 now)
         mixer.capture_off = off;
         if (mixer.have && !mixer.recording)
         {
-                // The output's name is not the strip's: mixer_device_name draws it beside the slider, so the strip's own line is left empty.
+                // The output's name is not the strip's own line, which is left empty: a name laid across takes the strip's width, so it is the
+                // strip's note beside its slider, set down the strip's margin a letter a line (ui_strip_stood).
                 ui_strips_add(&big->strips, 0xfffffffffffffffeul, "", mixer_percent(page->volume), page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
                 string_copy_bounded((string_address)big->device_name, (string_address)(page->device[0] ? page->device : page->name[0] ? page->name : "?"),
                                     sizeof(big->device_name));
+                ui_strips_note(&big->strips, UI_STRIP_BESIDE, big->device_name);
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
                 mixer_device_notes(page);
         }
@@ -418,60 +418,6 @@ static fn mixer_dirty(void)
         mixer.dirty = true;
 }
 
-// The unit of text at at: one character, or a whole UTF-8 sequence, and the byte after it.
-static int mixer_unit_next(const char address_to text, int at)
-{
-        int next = at + 1;
-
-        if ((p8)text[at] >= 0xc0)
-                for (; next < at + 4 && ((p8)text[next] & 0xc0) == 0x80; next++)
-                        ;
-        return next;
-}
-
-/*
-        The playback output's name, beside its slider rather than in the strip's header: the kit sets text in rows that run across,
-        and a name laid across takes the strip's width, so it is set down the strip's margin to the slider's side (the side the
-        meter is not on), a letter a line, from the slider's foot upward. The kit has no turned text, so the letters are upright.
-        What does not fit the slider's height is cut, with three dots after the last letter that does.
-*/
-static fn mixer_device_name(struct ui address_to ui, struct ui_strips address_to s)
-{
-        struct ui_control address_to slider = &s->control[0];
-        struct ui_strip address_to strip = &s->item[0];
-        const char address_to name = mixer.big->device_name;
-        int left = ui_strip_at(ui, s, 0, ui_strips_shift(ui, s));
-        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), bottom = ui_dev(ui, slider->y + slider->h);
-        int fits = line > 0 ? ui_dev(ui, slider->h) / line : 0, units = 0, shown = 0, at = 0, centre;
-        unsigned int ink = ui_text_colour(ui, strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
-        b32 dots;
-
-        if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
-                return;
-        centre = ui_strip_part(ui, left, ui_dev(ui, 68), ui_dev(ui, 24)) + ui_dev(ui, 12);
-        for (int next = 0; name[next]; next = mixer_unit_next(name, next))
-                units++;
-        if (units == 0 || fits <= 0)
-                return;
-        dots = units > fits;
-        shown = dots ? fits - 1 : units;
-        for (int k = 0; k <= shown && (k < shown || dots); k++)
-        {
-                char glyph[8] = "...";
-                int next = at, width;
-
-                if (k < shown)
-                {
-                        next = mixer_unit_next(name, at);
-                        memory_copy(glyph, name + at, (positive)(next - at));
-                        glyph[next - at] = 0;
-                }
-                width = ui_kit_measure(ui, (string_address)glyph, UI_LABEL_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, bottom - (k + 1) * line, UI_LABEL_MEDIUM), (string_address)glyph, UI_LABEL_MEDIUM, ink, 0);
-                at = next;
-        }
-}
-
 static fn mixer_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &mixer.ui;
@@ -486,8 +432,6 @@ static fn mixer_draw(unsigned int address_to pixels)
                 return;
         }
         ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys);
-        if (!mixer.recording && strips->count && strips->item[0].master == 1)
-                mixer_device_name(ui, strips);
         ui_view_draw(ui, &mixer.big->view, mixer.focused);
         // What there is to say instead of strips or beside them.
         if (mixer.capture_off)
@@ -587,7 +531,7 @@ static int mixer_open(void)
 {
         struct windows address_to table = mixer.own.table;
         unsigned int row = mixer.own.row;
-        int width = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_W : MIXER_WIDTH), height = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_H : MIXER_HEIGHT);
+        int width = ui_px(&mixer.ui, MIXER_WIDTH), height = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_H : MIXER_HEIGHT);
         int room = (int)table->output_height - ui_px(&mixer.ui, 2 * (24 + 24));
         long mapped;
 
@@ -602,10 +546,11 @@ static int mixer_open(void)
                 return 1;
         }
         mixer.big = (struct mixer_big address_to)mapped;
-        // The page is read first: the recording popup is as wide as the strips it shows (the microphone and up to three programs; room for a line beside one at least).
+        // The page is read first: the popup is as wide as the strips it shows come to in the kit's row (ui_strips_tree), the output's one, or on the
+        // Recording page the microphone and up to three programs (room for a line beside one at least).
         mixer_poll((b64)ui_kit.now);
-        if (mixer.quick && mixer.recording)
-                width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(mixer_quick_shown(mixer.big->strips.count)));
+        if (mixer.quick)
+                width = ui_strips_tree(&mixer.ui, &mixer.big->strips, mixer.recording ? mixer_quick_shown(mixer.big->strips.count) : 1, 0);
         mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
                    (unsigned int)(height < room ? height : room > 0 ? room : height));
         ui_anchor_take(&mixer.anchor, table, mixer.beside);

@@ -14644,13 +14644,10 @@ static long ui_body_given(struct ui_body address_to b, b64 at)
         A scroll region: a track down its x and a thumb in it, and a position that is the body's (ui_body, s->body) drawn in whole
         device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
         of (ui_scroll_release), a wheel's notch is a target the body follows (ui_wheel_turn), a jump is a body set, a reveal is a notch,
-        and the bar's thumb is the body's place, drawn where the body is, past an end too.
-
-        A region that runs across (s->across: a row that scrolls sideways, the mixer's strips) is the same region turned over: its
-        position is how far it is from its start edge, its track lies along its foot for what it shows (s->view), a thumb at the start
-        edge is at the right in a window that reads from the right, and the wheel turns it along the screen (ui_wheel_turn). Its bar
-        is drawn (ui_scroll_draw) and takes no pointer: ui_scroll_pointer and ui_scroll_reach are a bar's that runs down, and the
-        stretch of a pull (ui_scroll_pull) is a picture's that is pulled down or up.
+        and the bar's thumb is the body's place, drawn where the body is, past an end too. A region that runs across (s->across: the
+        mixer's strips) is the same turned over: its position is from its start edge, its track lies along its foot for what it shows,
+        and the wheel turns it along the screen. Its bar is drawn and takes no pointer, and a pull of it stretches nothing: ui_scroll_pointer,
+        ui_scroll_reach and ui_scroll_pull are a region's that runs down.
 */
 struct ui_scroll
 {
@@ -14677,7 +14674,7 @@ struct ui_scroll
 /*
         The track's top and height (device pixels): the region's, from its top to its end, except that it starts below its
         inset: a window's close button is there, so a window's bar reaches the window's bottom and no higher than that. Across,
-        they are where the track starts along the region's foot and how long it is: the region's left, and what it shows.
+        they are the region's left and what it shows.
 */
 #define UI_SCROLL_INSET 1
 static void ui_scroll_track(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to height)
@@ -14721,7 +14718,7 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 }
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth. A track
-// that lies along a region's foot has the same box turned over, from the start edge (the right one, reading from the right).
+// along a region's foot has the same box turned over, from the start edge (the right one, reading from the right).
 static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
 {
         int border = UI_SCROLL_BORDER * ui->scale / 100, width = UI_SCROLL_WIDTH * ui->scale / 100;
@@ -15102,9 +15099,8 @@ static void ui_wheel_stream(struct ui_scroll address_to s, b64 q, b64 stamp, b64
 /*
         The one conversion of a window's wheel event into a body's motion, for every region the wheel turns (lists, pages, the gallery,
         the terminal's bar): the compositor, the touch recogniser and a Wayland client send the event and nothing converts it again.
-        A horizontal notch (event->b) turns nothing but a region that runs across, which every turn handed to it turns along the
-        screen: a sideways turn's amount is positive to the right, an upright one's positive up goes to the left, and the far end is
-        at the left in a window that reads from the right. A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
+        A horizontal notch (event->b) turns nothing but a region that runs across, which every turn turns along the screen (a sideways
+        one's amount is positive to the right, an upright one's up goes to the left). A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
         the notch's turn is its 120ths of a notch: a stepped notch is ui_wheel_notch at the scale, a precise turn (WINDOW_WHEEL_PRECISE, a
         trackpad's or a stream's) is its share of UI_NOTCH, and a notch moves the body's target, which the position follows
         (ui_body_notch), while a precise turn is the hand, one for one (ui_body_track). The sign: a notch down moves the position toward
@@ -17527,7 +17523,7 @@ static fn ui_chevron_turn(struct ui address_to ui, int cx, int cy, int size, uns
 /*
         A speaker, a level meter and the strips of both (the mixer's composite): ui_speaker, ui_level_* (the meter's feed and
         motion), ui_strips_begin, ui_strips_add and ui_strips_end (a strip is data: a name and a level), ui_strips_event and
-        ui_strips_draw. The strips own their scroll and their pointer; the app adds strips.
+        ui_strips_draw. Their places are the layout's, their scroll is a region of the kit's and their pointer is their own; the app adds strips.
 */
 
 /*
@@ -17742,21 +17738,32 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
         }
 }
 
+// The child of element at of a tree that a point is in, where the element shows it (the point is in the element too), or -1: what
+// a pointer is over, one level down. The layout has no such question yet and the strips ask it, so it is here above them.
+static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y)
+{
+        const struct ui_node address_to n = &t->node[at];
+
+        for (int ch = at < t->count && x >= n->x && x < n->x + n->w && y >= n->y && y < n->y + n->h ? n->first : -1; ch >= 0; ch = t->node[ch].next)
+                if (x >= t->node[ch].x && x < t->node[ch].x + t->node[ch].w && y >= t->node[ch].y && y < t->node[ch].y + t->node[ch].h)
+                        return ch;
+        return -1;
+}
+
 /*
         Strips: the columns of a mixer, one for each thing that plays and the device first. A strip is a disc (a speaker for the
         device, the first letter of a program for a program, a dot on it while it plays), its name, its volume as a number, a
         level meter and a vertical slider side by side, and a mute button under them. Where each of these is comes from the
-        kit's layout and nowhere else (ui_strips_place: a tree, its root a row that scrolls and a column a strip, UI_STRIP_W each,
-        the device's set off from the rest by UI_STRIP_GAP), and what the pointer is over is the element it is in. They scroll
-        along when they do not fit, as every region of the kit's scrolls (struct ui_scroll, running across): the wheel over the
-        empty ground, the wheel turned sideways, a drag of the ground, and the keys, which move the focus and scroll to it. An
-        app says only what each strip is and acts on what the kit reports:
+        kit's layout and nowhere else (ui_strips_tree: its root a row that scrolls and a column a strip, UI_STRIP_W each, the
+        device's set off from the rest by UI_STRIP_GAP), and the strip the pointer is over is the column it is in. They scroll
+        along when they do not fit, as every region of the kit's does (struct ui_scroll, across): the wheel over the empty
+        ground, the wheel turned sideways, a drag of the ground, and the keys, which move the focus and scroll to it. An app
+        says only what each strip is and acts on what the kit reports:
 
             ui_strips_begin   a new listing is coming; ui_strips_add, one call for each strip in order; ui_strips_end
             ui_strips_event   a key or a pointer event: the UI_STRIPS_ bits of what the strips made of it; the strip that
                               changed is s->changed, with its new percent and mute in s->item[]
             ui_strips_draw    the strips, in the rectangle given to ui_strips_place
-            ui_strips_wide    how wide a number of strips come to: a window as wide as its strips asks
 
         The keys, with the window's: Left and Right (the way the window reads) and Tab pick a strip, Up and Down change its
         volume by one, Page Up and Page Down by ten, Home sets 100 and End sets 0, M and Space and Enter mute and unmute it.
@@ -17777,6 +17784,7 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
 #define UI_STRIP_LEAST 60     // the shortest a slider is, before the strips are too short to be used
 #define UI_STRIP_NOTES 2      // the notes a strip may have under its volume (ui_strips_note), each broken to the strip's width,
 #define UI_STRIP_NOTE_ROWS 4  // in this many lines in all, which every slider gives room for when any strip has a note
+#define UI_STRIP_BESIDE UI_STRIP_NOTES // and one note more, set down beside its slider (ui_strip_stood)
 #define UI_STRIPS_HOLD_NS 600000000ll
 #define UI_STRIPS_WHEEL 2     // percent a notch
 #define UI_STRIPS_DRAW 1u     // the strips' picture is due again
@@ -17793,10 +17801,17 @@ struct ui_strip
         int percent;          // 0 to 100
         b32 muted, master, playing;
         b32 dim;              // drawn in the quiet ink: a device that is there and cannot be heard (ui_strips_note)
-        char note[UI_STRIP_NOTES][96]; // what is said of it under its volume, in the quiet ink
+        char note[UI_STRIP_NOTES + 1][96]; // what is said of it under its volume, in the quiet ink, and (UI_STRIP_BESIDE) beside its slider
         struct ui_level level[2];
         b64 changed_at;       // ns: when the person last changed it
 };
+
+// The strips' tree (ui_strips_tree): element 0 is the row, element 1 + k strip k's column, and the last strip's column has its parts in
+// it, in this order (the track is the row the meter and the slider stand in, with a lead before them and the room for a note beside the
+// slider after). Every strip is laid out as the last is, so a part of another strip is the last's moved to that strip's column
+// (ui_strip_part), and 34 strips are 45 of the tree's 128 elements.
+enum { UI_STRIP_NODE_COLUMN, UI_STRIP_NODE_DISC, UI_STRIP_NODE_NAME, UI_STRIP_NODE_PERCENT, UI_STRIP_NODE_NOTES, UI_STRIP_NODE_TRACK, UI_STRIP_NODE_LEAD,
+       UI_STRIP_NODE_METER, UI_STRIP_NODE_SLIDER, UI_STRIP_NODE_BESIDE, UI_STRIP_NODE_MUTE, UI_STRIP_NODES };
 
 struct ui_strips
 {
@@ -17807,11 +17822,11 @@ struct ui_strips
         unsigned long focus_id;
         struct ui_control control[2 * UI_STRIPS_MOST]; // strip k's slider is 2k and its mute button 2k + 1
         struct ui_control face;                        // the disc of a program
-        struct ui_tween shift;                         // how far they are scrolled, device pixels
+        struct ui_tree tree;                           // where everything is, device pixels of the window (ui_strips_tree)
+        struct ui_scroll scroll;                       // how far they are scrolled: the kit's region, across
         int x, y, w, h;                                // where they are, device pixels
         int pointer_x, pointer_y, wheel, grab_x;
         b32 listing, ready, dragging;
-        b64 grab_shift;
         char mute_label[UI_STRIPS_MOST][2][24];
 };
 
@@ -17819,7 +17834,7 @@ static fn ui_strips_begin(struct ui_strips address_to s)
 {
         if (!s->ready)
         {
-                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                memory_zero(&s->scroll, sizeof(s->scroll));
                 s->changed = -1;
                 s->focus = 0;
                 s->ready = 1;
@@ -17830,17 +17845,25 @@ static fn ui_strips_begin(struct ui_strips address_to s)
         s->listing = 1;
 }
 
+// The bytes of the letter a text begins with: one, or a whole UTF-8 sequence.
+static positive ui_strip_unit(const char address_to text)
+{
+        positive size = 1;
+
+        if ((p8)text[0] >= 0xc0)
+                for (; size < 4 && ((p8)text[size] & 0xc0) == 0x80; size++)
+                        ;
+        return size;
+}
+
 // The first letter of a name, capital, whole (UTF-8): the disc's letter.
 static fn ui_strip_initial(char address_to into, positive room, const char address_to name)
 {
-        positive size = 1;
+        positive size = ui_strip_unit(name);
 
         into[0] = 0;
         if (!name[0] || room < 4)
                 return;
-        if ((p8)name[0] >= 0xc0)
-                for (; size < 4 && ((p8)name[size] & 0xc0) == 0x80; size++)
-                        ;
         memory_copy(into, name, size);
         into[size] = 0;
         if (size == 1 && into[0] >= 'a' && into[0] <= 'z')
@@ -17864,7 +17887,7 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         else
                 memory_zero(strip, sizeof(*strip));
         strip->id = id;
-        strip->dim = 0, strip->note[0][0] = strip->note[1][0] = 0;
+        strip->dim = 0, strip->note[0][0] = strip->note[1][0] = strip->note[UI_STRIP_BESIDE][0] = 0;
         string_copy_bounded((string_address)strip->name, (string_address)name, sizeof(strip->name));
         ui_strip_initial(strip->initial, sizeof(strip->initial), name);
         strip->master = master, strip->playing = playing;
@@ -17877,10 +17900,11 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         ui_level_feed(&strip->level[1], right);
 }
 
-// Of the strip added last: a note under its volume (which of the UI_STRIP_NOTES, its words) and whether it is dim. Both are said again at each listing.
+// Of the strip added last: a note under its volume (which of the UI_STRIP_NOTES, its words) or beside its slider (UI_STRIP_BESIDE), and
+// whether it is dim. Both are said again at each listing.
 static fn ui_strips_note(struct ui_strips address_to s, int which, const char address_to text)
 {
-        if (s->listing && s->count > 0 && which >= 0 && which < UI_STRIP_NOTES)
+        if (s->listing && s->count > 0 && which >= 0 && which <= UI_STRIP_BESIDE)
                 string_copy_bounded((string_address)s->item[s->count - 1].note[which], (string_address)text, sizeof(s->item[0].note[0]));
 }
 
@@ -17908,207 +17932,223 @@ static fn ui_strips_end(struct ui_strips address_to s)
         s->focus_id = s->count ? s->item[s->focus].id : 0;
 }
 
-// The device pixels the strips take from the start edge to the end of the last, and how far they can be scrolled.
-static int ui_strips_total(const struct ui address_to ui, const struct ui_strips address_to s)
+// An element of the strips' tree opened, w by h device pixels (0: what its content or its parent gives it).
+static struct ui_node address_to ui_strip_open(struct ui_tree address_to t, int w, int h)
 {
-        return s->count ? ui_dev(ui, 2 * UI_STRIP_PAD + s->count * UI_STRIP_W + UI_STRIP_GAP * (s->count > 1)) : 0;
+        struct ui_node address_to n = ui_tree_open(t);
+
+        n->size[0] = (struct ui_size){w ? UI_FIXED : UI_FIT, w, 0, UI_TREE_MOST, 0}, n->size[1] = (struct ui_size){h ? UI_FIXED : UI_FIT, h, 0, UI_TREE_MOST, 0};
+        return n;
 }
-
-static int ui_strips_most(const struct ui address_to ui, const struct ui_strips address_to s)
-{
-        int most = ui_strips_total(ui, s) - s->w;
-
-        return most > 0 ? most : 0;
-}
-
-// The left of strip k as it is laid out from the left, before the scroll, and then where it is (scrolled, and turned for a window that reads from the right).
-static int ui_strip_left(const struct ui address_to ui, int k)
-{
-        return ui_dev(ui, UI_STRIP_PAD + k * UI_STRIP_W + (k > 0 ? UI_STRIP_GAP : 0));
-}
-
-static int ui_strip_at(const struct ui address_to ui, const struct ui_strips address_to s, int k, b64 shift)
-{
-        return ui_mirror(s->x + ui_strip_left(ui, k) - (int)shift, ui_dev(ui, UI_STRIP_W), s->x, s->w);
-}
-
-// One element of a strip, offset from the strip's start edge and w wide, as it lies in the window.
-static int ui_strip_part(const struct ui address_to ui, int strip_left, int offset, int w)
-{
-        return ui_rtl() ? strip_left + ui_dev(ui, UI_STRIP_W) - offset - w : strip_left + offset;
-}
-
-// How far the strips are scrolled now, held to what there is to scroll (the window may have grown, or a strip gone, since it was asked).
-static b64 ui_strips_shift(const struct ui address_to ui, struct ui_strips address_to s)
-{
-        b64 shift = s->ready ? ui_tween_at(&s->shift, &(b32){0}) : 0;
-        int most = ui_strips_most(ui, s);
-
-        return shift < 0 ? 0 : shift > most ? most : shift;
-}
-
-static fn ui_strips_reveal(struct ui address_to ui, struct ui_strips address_to s, int k);
 
 /*
-        Where the strips are, and every control of them laid out: the slider's box and the mute button, in logical pixels, at the
-        scroll the strips are at now; and what the controls show of what the strips are (a value, a muted track, the button's
-        words). Said again at every frame and before every event, so the controls and the picture agree.
+        The strips' tree laid out for count strips in the rectangle they were placed in, scrolled by offset; the answer is what the row
+        comes to, its strips and the pad at each end (what a window as wide as its strips asks). The root is the row, which scrolls, and a
+        strip is a column, the second with the gap before it that sets the device off. Down a strip: 16, the disc, 8, a line for the name
+        and one for the volume, the room for the notes when any strip has one, 4, the track (what is left, UI_STRIP_LEAST at least), 12, the
+        mute button, 16. Every element is then moved to where the row is, and turned over the row's width when the window reads from the
+        right: the device is at the right and a slider on the other side of its meter, each drawn as it is from the left.
+*/
+static int ui_strips_tree(const struct ui address_to ui, struct ui_strips address_to s, int count, int offset)
+{
+        struct ui_tree address_to t = &s->tree;
+        struct ui_node address_to n;
+        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), room = ui_px(ui, UI_STRIP_W - 8);
+
+        ui_tree_begin(t);
+        n = ui_tree_open(t);
+        n->scroll = 1, n->offset = offset, n->pad[0] = n->pad[1] = ui_px(ui, UI_STRIP_PAD), n->size[0].kind = n->size[1].kind = UI_GROW;
+        for (int k = 0; k < count; k++)
+        {
+                n = ui_strip_open(t, ui_px(ui, UI_STRIP_W), 0);
+                n->dir = 1, n->align = UI_CENTER, n->pad[2] = n->pad[3] = ui_px(ui, 16), n->margin[0] = k == 1 ? ui_px(ui, UI_STRIP_GAP) : 0;
+                if (k == count - 1)
+                {
+                        ui_strip_open(t, ui_px(ui, UI_STRIP_FACE), ui_px(ui, UI_STRIP_FACE))->margin[3] = ui_px(ui, 8), ui_tree_close(t);
+                        ui_strip_open(t, room, line), ui_tree_close(t);
+                        ui_strip_open(t, 0, ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)), ui_tree_close(t);
+                        ui_strip_open(t, room, s->noted ? UI_STRIP_NOTE_ROWS * line : 0)->margin[3] = ui_px(ui, 4), ui_tree_close(t);
+                        n = ui_strip_open(t, ui_px(ui, UI_STRIP_W), 0);
+                        n->size[1] = (struct ui_size){UI_GROW, 1, ui_px(ui, UI_STRIP_LEAST), UI_TREE_MOST, 0}, n->margin[3] = ui_px(ui, 12);
+                        ui_tree_open(t)->size[0] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, ui_tree_close(t);
+                        ui_strip_open(t, ui_dev(ui, UI_METER_WIDTH), 0)->margin[1] = ui_px(ui, UI_STRIP_GROUP - UI_METER_WIDTH - UI_STRIP_SLIDER_W), ui_tree_close(t);
+                        ui_strip_open(t, ui_px(ui, UI_STRIP_SLIDER_W), 0), ui_tree_close(t);
+                        ui_tree_open(t)->size[0] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, ui_tree_close(t);
+                        ui_tree_close(t);
+                        ui_strip_open(t, ui_px(ui, UI_STRIP_MUTE_W), ui_px(ui, UI_STRIP_MUTE_H)), ui_tree_close(t);
+                }
+                ui_tree_close(t);
+        }
+        ui_tree_close(t);
+        ui_tree_run(t, s->w, s->h);
+        for (int at = 0; at < t->count; at++)
+                t->node[at].x = ui_mirror(t->node[at].x, t->node[at].w, 0, s->w) + s->x, t->node[at].y += s->y;
+        return t->node[0].extent + t->node[0].pad[0] + t->node[0].pad[1];
+}
+
+// An element of strip k (UI_STRIP_NODE_) where it is in the window: the last strip's, moved to strip k's column.
+static struct ui_node ui_strip_part(const struct ui_strips address_to s, int k, int part)
+{
+        const struct ui_node address_to last = &s->tree.node[s->tree.count - UI_STRIP_NODES];
+        struct ui_node n = last[part];
+
+        n.x += s->tree.node[1 + k].x - last->x;
+        return n;
+}
+
+/*
+        Where the strips are, and every control of them placed: the tree laid out where the kit's region rests (its body stepped to now, its
+        extent the row's, a notch of its wheel a strip), the slider's box and the mute button's written from their elements (ui_view_box), and
+        what the controls show of what the strips are (a value, a muted track, the button's words). Said again at every frame and before every
+        event, so the controls and the picture agree.
 */
 static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s, int x, int y, int w, int h)
 {
-        b64 shift;
-        int track_top, track_bottom, group = (UI_STRIP_W - UI_STRIP_GROUP) / 2;
+        struct ui_scroll address_to scroll = &s->scroll;
 
         s->x = x, s->y = y, s->w = w, s->h = h;
-        shift = ui_strips_shift(ui, s);
-        track_top = 16 + UI_STRIP_FACE + 8 + 16 + 24 + (s->noted ? UI_STRIP_NOTE_ROWS * 16 : 0);
-        track_bottom = h * 100 / ui->scale - 16 - UI_STRIP_MUTE_H - 12;
-        if (track_bottom - track_top < UI_STRIP_LEAST)
-                track_bottom = track_top + UI_STRIP_LEAST;
+        ui_scroll_frame(ui, scroll);
+        scroll->content = ui_strips_tree(ui, s, s->count, ui_scroll_rest(scroll, scroll->scroll, scroll->view));
+        scroll->across = 1, scroll->x = x, scroll->y = y, scroll->height = h, scroll->view = w, scroll->scale = ui->scale, scroll->wheel = ui_px(ui, UI_STRIP_W);
+        ui_scroll_clamp(scroll);
         for (int k = 0; k < s->count; k++)
         {
                 struct ui_control address_to slider = &s->control[2 * k], address_to mute = &s->control[2 * k + 1];
                 struct ui_strip address_to strip = &s->item[k];
-                int left = ui_strip_at(ui, s, k, shift), box = ui_strip_part(ui, left, ui_dev(ui, group + UI_METER_WIDTH + 6), ui_dev(ui, UI_STRIP_SLIDER_W));
-                int button = ui_strip_part(ui, left, ui_dev(ui, (UI_STRIP_W - UI_STRIP_MUTE_W) / 2), ui_dev(ui, UI_STRIP_MUTE_W));
+                struct ui_node box = ui_strip_part(s, k, UI_STRIP_NODE_SLIDER), button = ui_strip_part(s, k, UI_STRIP_NODE_MUTE);
 
                 slider->kind = UI_SLIDER, slider->variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE;
-                slider->low = 0, slider->high = ui_q(100), slider->step = ui_q(1);
-                slider->x = box * 100 / ui->scale, slider->y = (y * 100 / ui->scale) + track_top;
-                slider->w = UI_STRIP_SLIDER_W, slider->h = track_bottom - track_top;
-                slider->on = strip->muted;
+                slider->low = 0, slider->high = ui_q(100), slider->step = ui_q(1), slider->on = strip->muted;
+                ui_view_box(ui, &box, slider);
                 if (!slider->down && !slider->sliding)
                         slider->value = ui_q(strip->percent);
                 mute->kind = UI_BUTTON, mute->variant = strip->muted ? UI_BUTTON_PRIMARY : UI_BUTTON_OUTLINED;
-                mute->x = button * 100 / ui->scale, mute->y = (y * 100 / ui->scale) + h * 100 / ui->scale - 16 - UI_STRIP_MUTE_H;
-                mute->w = UI_STRIP_MUTE_W, mute->h = UI_STRIP_MUTE_H;
+                ui_view_box(ui, &button, mute);
                 string_copy_bounded((string_address)s->mute_label[k][strip->muted], (string_address)(strip->muted ? WORDS(mixer_unmute) : WORDS(mixer_mute)),
                                     sizeof(s->mute_label[k][0]));
                 mute->label = s->mute_label[k][strip->muted];
         }
 }
 
-// The strips scrolled so that strip k is whole in view: the nearest scroll that shows it, over 220 ms.
-static fn ui_strips_reveal(struct ui address_to ui, struct ui_strips address_to s, int k)
+// The strips scrolled so that strip k is whole in view with the pad either side of it (the kit's reveal): its place along the row is its
+// column's, turned back when the window reads from the right, and the scroll.
+static fn ui_strips_reveal(struct ui_strips address_to s, int k)
 {
-        int near = ui_strip_left(ui, k) - ui_dev(ui, UI_STRIP_PAD), far = ui_strip_left(ui, k) + ui_dev(ui, UI_STRIP_W) + ui_dev(ui, UI_STRIP_PAD);
-        b64 now = ui_tween_at(&s->shift, &(b32){0}), want = now;
-        int most = ui_strips_most(ui, s);
+        const struct ui_node address_to row = &s->tree.node[0];
+        struct ui_node column = ui_strip_part(s, k, UI_STRIP_NODE_COLUMN);
 
-        if (k == 0)
-                near = 0;
-        if (now > near)
-                want = near;
-        else if (now < far - s->w)
-                want = far - s->w;
-        want = want < 0 ? 0 : want > most ? most : want;
-        ui_kit_number_to(&s->shift, want, 220, &ui_ease);
+        ui_scroll_extent(&s->scroll);
+        if (ui_body_reveal(&s->scroll.body, ui_mirror(column.x, column.w, row->x, row->w) - row->x + row->offset - row->pad[0],
+                           column.w + row->pad[0] + row->pad[1], ui_kit_time()))
+                s->scroll.precise = 0;
 }
 
-// The strip a device x is over, or -1.
-static int ui_strips_over(const struct ui address_to ui, struct ui_strips address_to s, int x)
+// A strip's note set down beside its slider (UI_STRIP_BESIDE: the name of the mixer's output): the kit sets text in rows that run across
+// and has no turned text, so it is a letter a line, upright, each centred on centre, from bottom (the slider's foot) upward for the lines
+// height has. What does not fit is cut, with three dots after the last letter that does.
+static fn ui_strip_stood(struct ui address_to ui, const char address_to name, int centre, int bottom, int height, unsigned int ink)
 {
-        b64 shift = ui_strips_shift(ui, s);
+        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), fits = line > 0 ? height / line : 0, units = 0, shown, at = 0;
+        b32 dots;
 
-        for (int k = 0; k < s->count; k++)
+        for (int next = 0; name[next]; next += (int)ui_strip_unit(name + next))
+                units++;
+        if (units == 0 || fits <= 0)
+                return;
+        dots = units > fits;
+        shown = dots ? fits - 1 : units;
+        for (int k = 0; k < shown + dots; k++)
         {
-                int left = ui_strip_at(ui, s, k, shift);
+                char glyph[8] = "...";
+                int size = k < shown ? (int)ui_strip_unit(name + at) : 0, width;
 
-                if (x >= left && x < left + ui_dev(ui, UI_STRIP_W))
-                        return k;
+                if (size)
+                        memory_copy(glyph, name + at, (positive)size), glyph[size] = 0;
+                width = ui_kit_measure(ui, (string_address)glyph, UI_LABEL_MEDIUM);
+                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, bottom - (k + 1) * line, UI_LABEL_MEDIUM), (string_address)glyph, UI_LABEL_MEDIUM, ink, 0);
+                at += size;
         }
-        return -1;
 }
 
 static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s, b32 keys)
 {
         UI_CALL();
-        b64 shift;
         char text[96], fitted[96];
 
-        ui_kit_tween(&s->shift);
         ui_strips_place(ui, s, s->x, s->y, s->w, s->h);
-        shift = ui_strips_shift(ui, s);
         for (int k = 0; k < s->count; k++)
         {
                 struct ui_strip address_to strip = &s->item[k];
                 struct ui_control address_to slider = &s->control[2 * k];
-                int left = ui_strip_at(ui, s, k, shift), face = ui_dev(ui, UI_STRIP_FACE), centre = left + ui_dev(ui, UI_STRIP_W) / 2;
-                int room = ui_dev(ui, UI_STRIP_W - 8), width, group = (UI_STRIP_W - UI_STRIP_GROUP) / 2;
+                struct ui_node column = ui_strip_part(s, k, UI_STRIP_NODE_COLUMN), disc = ui_strip_part(s, k, UI_STRIP_NODE_DISC), at;
+                int centre = column.x + column.w / 2, face = disc.w, width, lines = UI_STRIP_NOTE_ROWS;
                 string_address name;
                 b64 shown[2], hold[2];
                 unsigned int ink = ui_text_colour(ui, strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
-                int lines = UI_STRIP_NOTE_ROWS, note_top = s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8 + 16 + 20);
 
-                if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
+                if (column.x + column.w <= s->x || column.x >= s->x + s->w)
                         continue;
                 // The disc: the output device's has a speaker in it, the microphone's (master 2) a microphone, a program's its letter and a dot while it plays.
                 if (strip->master)
                 {
                         int waves = strip->muted || !strip->percent ? 0 : strip->percent < 50 ? 1 : 2, size = ui_dev(ui, 22);
 
-                        ui_kit_fill(ui, &(struct ui_box){(centre - face / 2) * 256, (s->y + ui_dev(ui, 16)) * 256, (centre + face / 2) * 256,
-                                                         (s->y + ui_dev(ui, 16) + face) * 256, face * 128, face * 128},
+                        ui_kit_fill(ui, &(struct ui_box){(centre - face / 2) * 256, disc.y * 256, (centre + face / 2) * 256, (disc.y + face) * 256, face * 128, face * 128},
                                     ui_well(ui, UI_SURFACE_HIGHEST, 16), null);
                         if (strip->master == 2)
-                                ui_microphone(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, strip->muted, ink);
+                                ui_microphone(ui, centre - size / 2, disc.y + (face - size) / 2, size, strip->muted, ink);
                         else
-                                ui_speaker(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, waves, strip->muted, ink);
+                                ui_speaker(ui, centre - size / 2, disc.y + (face - size) / 2, size, waves, strip->muted, ink);
                 }
                 else
                 {
-                        s->face.kind = UI_AVATAR, s->face.variant = 0, s->face.w = UI_STRIP_FACE, s->face.on = strip->playing;
-                        s->face.label = strip->initial;
-                        s->face.x = (centre - face / 2) * 100 / ui->scale, s->face.y = s->y * 100 / ui->scale + 16;
+                        s->face.kind = UI_AVATAR, s->face.variant = 0, s->face.on = strip->playing, s->face.label = strip->initial;
+                        ui_view_box(ui, &disc, &s->face);
                         ui_avatar_draw(ui, &s->face);
                 }
                 // Its name, cut to the strip, and its volume.
-                name = ui_fit(ui, (string_address)strip->name, UI_LABEL_MEDIUM, room, fitted, sizeof(fitted));
+                at = ui_strip_part(s, k, UI_STRIP_NODE_NAME);
+                name = ui_fit(ui, (string_address)strip->name, UI_LABEL_MEDIUM, at.w, fitted, sizeof(fitted));
                 width = ui_kit_measure(ui, name, UI_LABEL_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8), UI_LABEL_MEDIUM), name, UI_LABEL_MEDIUM, ink, 0);
+                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, at.y, UI_LABEL_MEDIUM), name, UI_LABEL_MEDIUM, ink, 0);
                 language_format(text, sizeof(text), WORDS(settings_percent), (long)strip->percent);
                 width = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8 + 16), UI_BODY_MEDIUM), (string_address)text,
+                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, ui_strip_part(s, k, UI_STRIP_NODE_PERCENT).y, UI_BODY_MEDIUM), (string_address)text,
                             UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 // What is said of it, in the quiet ink, broken to the strip.
+                at = ui_strip_part(s, k, UI_STRIP_NODE_NOTES);
                 for (int note = 0; note < UI_STRIP_NOTES && lines > 0; note++)
                 {
-                        int drawn = strip->note[note][0] ? ui_kit_text_block(ui, centre, note_top, room, strip->note[note], UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), lines) : 0;
+                        int drawn = strip->note[note][0] ? ui_kit_text_block(ui, centre, at.y, at.w, strip->note[note], UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), lines) : 0;
 
-                        note_top += drawn * ui_dev(ui, 16), lines -= drawn;
+                        at.y += drawn * ui_dev(ui, 16), lines -= drawn;
                 }
-                // The meter beside the slider, the length of its track.
+                // The meter beside the slider, the length of its track as the slider is drawn, and the note on its other side.
                 for (int channel = 0; channel < 2; channel++)
                         ui_level_now(&strip->level[channel], &shown[channel], &hold[channel]);
-                ui_meter_draw(ui, ui_strip_part(ui, left, ui_dev(ui, group), ui_dev(ui, UI_METER_WIDTH)), ui_dev(ui, slider->y), ui_dev(ui, slider->y + slider->h),
-                              shown, hold);
+                ui_meter_draw(ui, ui_strip_part(s, k, UI_STRIP_NODE_METER).x, ui_dev(ui, slider->y), ui_dev(ui, slider->y + slider->h), shown, hold);
                 if (shown[0] > 0 || shown[1] > 0 || hold[0] > shown[0] || hold[1] > shown[1])
                         ui_kit.busy = 1;
                 slider->focused = keys && s->focus == k && s->keyed;
                 ui_control_draw(ui, slider);
                 ui_control_draw(ui, &s->control[2 * k + 1]);
+                at = ui_strip_part(s, k, UI_STRIP_NODE_BESIDE);
+                ui_strip_stood(ui, strip->note[UI_STRIP_BESIDE], at.x + at.w / 2, ui_dev(ui, slider->y + slider->h), ui_dev(ui, slider->h), ink);
         }
-        // Where the strips are scrolled to, when they are: a thin bar along the foot.
-        if (ui_strips_most(ui, s) > 0)
-        {
-                int total = ui_strips_total(ui, s), bar = (int)((b64)s->w * s->w / total), at = (int)((b64)(s->w - bar) * shift / ui_strips_most(ui, s));
-                int y = s->y + s->h - ui_dev(ui, 6), thick = ui_dev(ui, 3);
-
-                at = ui_rtl() ? s->w - bar - at : at;
-                ui_kit_fill(ui, &(struct ui_box){(s->x + at) * 256, y * 256, (s->x + at + bar) * 256, (y + thick) * 256, thick * 128, thick * 128},
-                            ui_mix(ui_text_colour(ui, UI_ON_SURFACE), 24, 0), null);
-        }
+        ui_scroll_draw(ui, &s->scroll);
 }
 
-// A line of words in the middle of the area to the right of the first strip, or of all of it with none: what there is to say instead of strips.
+// A line of words in the middle of the room the first strip and its gap leave of the row, or of all of it: what there is to say instead of strips.
 static fn ui_strips_message(struct ui address_to ui, struct ui_strips address_to s, const char address_to text, b32 beside)
 {
         UI_CALL();
-        int taken = beside ? ui_dev(ui, UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP) : 0, left = s->x + (ui_rtl() ? 0 : taken), width = s->w - taken;
-        int measured = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM), at = measured < width ? (width - measured) / 2 : 0;
+        const struct ui_node address_to first = &s->tree.node[1];
+        int gap = ui_px(ui, UI_STRIP_GAP), left = s->x, right = s->x + s->w, measured = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
 
-        ui_kit_text_in(ui, left + at, ui_kit_baseline(ui, s->y + s->h / 2 - ui_dev(ui, 10), UI_BODY_MEDIUM), (string_address)text, UI_BODY_MEDIUM,
-                       ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, left, left + width);
+        if (beside && s->count)
+                left = ui_rtl() ? left : first->x + first->w + gap, right = ui_rtl() ? first->x - gap : right;
+        ui_kit_text_in(ui, left + (measured < right - left ? (right - left - measured) / 2 : 0), ui_kit_baseline(ui, s->y + s->h / 2 - ui_dev(ui, 10), UI_BODY_MEDIUM),
+                       (string_address)text, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, left, right);
 }
 
 // A value set for strip k by the person: it is theirs for a moment, whatever the app lists meanwhile, and the slider shows it.
@@ -18124,7 +18164,7 @@ static fn ui_strips_set(struct ui_strips address_to s, int k, int percent)
         s->changed = k;
 }
 
-static p32 ui_strips_key(struct ui address_to ui, struct ui_strips address_to s, const struct window_event address_to event)
+static p32 ui_strips_key(struct ui_strips address_to s, const struct window_event address_to event)
 {
         int key = event->a, k = s->focus, percent;
 
@@ -18171,35 +18211,24 @@ static p32 ui_strips_key(struct ui address_to ui, struct ui_strips address_to s,
         k = k < 0 ? 0 : k >= s->count ? s->count - 1 : k;
         s->focus = k;
         s->focus_id = s->item[k].id;
-        ui_strips_reveal(ui, s, k);
+        ui_strips_reveal(s, k);
         return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
 }
 
-// The wheel: over a strip it changes the volume, two a notch, up raising it; elsewhere, or sideways, or with Shift, it scrolls the strips.
-// A turn's amount is event->a, in 120ths of a notch, whichever way the wheel lies: event->b says only that it is a sideways one, whose
-// amount is positive to the right (the strips then go toward their end, where a vertical turn up goes toward their start).
+// The wheel: over a strip (the column of the row the pointer is in) it changes the volume, two a notch, up raising it; elsewhere, or
+// sideways, or with Shift, it turns the strips' region (ui_wheel_turn): a notch is a strip from where the strips are going, so two quick
+// notches are two strips.
 static p32 ui_strips_wheel(struct ui address_to ui, struct ui_strips address_to s, const struct window_event address_to event)
 {
-        int over = ui_strips_over(ui, s, s->pointer_x), steps;
-        b32 sideways = event->b != 0 || (event->flags & WINDOW_KEY_SHIFT) != 0 || over < 0 || s->pointer_y < s->y || s->pointer_y >= s->y + s->h;
+        int over = ui_tree_under(&s->tree, 0, s->pointer_x, s->pointer_y) - 1, steps;
         long total = (long)s->wheel + (long)event->a;
 
+        if (event->b != 0 || (event->flags & WINDOW_KEY_SHIFT) != 0 || over < 0)
+                return UI_STRIPS_TAKEN | (ui_wheel_turn(ui, &s->scroll, event) ? UI_STRIPS_DRAW : 0);
         steps = (int)(total / 120);
         s->wheel = (int)(total - (long)steps * 120);
         if (!steps)
                 return UI_STRIPS_TAKEN;
-        if (sideways)
-        {
-                // A notch is a strip from where the strips are going, not from where they have got to: a notch that comes while the last
-                // one's move still runs adds its strip to that move's end, so two quick notches are two strips.
-                int most = ui_strips_most(ui, s);
-                b64 going = s->shift.pending ? s->shift.want : s->shift.to, want;
-
-                going = going < 0 ? 0 : going > most ? most : going;
-                want = going - (b64)(event->b ? -steps : steps) * ui_dev(ui, UI_STRIP_W) * ui_dir();
-                ui_kit_number_to(&s->shift, want < 0 ? 0 : want > most ? most : want, 220, &ui_ease);
-                return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
-        }
         s->focus = over, s->focus_id = s->item[over].id, s->keyed = 0;
         if ((steps > 0 && s->item[over].percent >= 100) || (steps < 0 && s->item[over].percent <= 0))
                 return UI_STRIPS_TAKEN;
@@ -18219,19 +18248,18 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
                 x = s->pointer_x = event->a, y = s->pointer_y = event->b;
                 if (s->dragging)
                 {
-                        int most = ui_strips_most(ui, s);
-                        b64 want = s->grab_shift - (b64)(x - s->grab_x) * ui_dir();
-
-                        ui_tween_put(&s->shift, want < 0 ? 0 : want > most ? most : want, UI_TWEEN_NUMBER);
+                        // The ground goes with the hand, so the strips' place along the row goes the other way.
+                        ui_scroll_drag(&s->scroll, (s->grab_x - x) * ui_dir());
+                        s->grab_x = x;
                         return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
                 }
         }
         if (type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                 return 0;
-        ui_strips_place(ui, s, s->x, s->y, s->w, s->h);
         if (type == WINDOW_EVENT_BUTTON && !down && s->dragging)
         {
                 s->dragging = 0;
+                ui_scroll_let_go(&s->scroll, 0);
                 return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
         }
         changed = ui_kit_pointer(ui, s->control, 2 * s->count, type, x, y, down, event->flags);
@@ -18245,9 +18273,10 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
                         s->keyed = 0; // a press takes the focus, and the stood slider shows no ring for it
                         bits |= UI_STRIPS_TAKEN;
                 }
-                else if (ui_strips_most(ui, s) > 0 && x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h)
+                else if (ui_scroll_most(&s->scroll) > 0 && x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h)
                 {
-                        s->dragging = 1, s->grab_x = x, s->grab_shift = ui_tween_at(&s->shift, &(b32){0});
+                        s->dragging = 1, s->grab_x = x;
+                        ui_scroll_hold(&s->scroll);
                         bits |= UI_STRIPS_TAKEN;
                 }
         }
@@ -18277,9 +18306,10 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
 
 static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to s, const struct window_event address_to event)
 {
+        ui_strips_place(ui, s, s->x, s->y, s->w, s->h);
         if (event->type == WINDOW_EVENT_KEY)
         {
-                p32 bits = ui_strips_key(ui, s, event);
+                p32 bits = ui_strips_key(s, event);
 
                 if (bits & UI_STRIPS_TAKEN)
                         s->keyed = 1;
