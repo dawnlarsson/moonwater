@@ -142982,7 +142982,7 @@ static fn check_settings_device_strip(void)
                 //      port before it keeps none. The row after the last is a note: one more is not shown. A drive with thirteen
                 //      segments keeps all of them (the host sends up to 33).
                 static char rows[2048];
-                static const char part[] = "    part 2048 1048576 free -\n";
+                static const char part[] = "    part 2048 2097152 free -\n";
                 positive length = 0;
 
                 for (positive each = 0; each < 23; each++)
@@ -143009,7 +143009,20 @@ static fn check_settings_device_strip(void)
                 settings_feed_hardware();
                 check("settings: a drive with thirteen segments keeps every one of them",
                       settings.item_count[2] == 1 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 13 &&
-                          items[0].segment_bytes[12] == 1048576ull);
+                          items[0].segment_bytes[12] == 2097152ull);
+                // Free room no bigger than the partitions' alignment (the MiB before a GPT disk's first partition) has no segment.
+                length = 0;
+                for (const char address_to line = "  vdf drive 1024 MB view only\n    part 0 1048576 free -\n    part 1048576 536870912 efi -\n"
+                                                  "    part 537919488 1048575 free -\n    part 538968064 2097152 free -\n";
+                     *line; line++)
+                        rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                check("settings: free room no bigger than a MiB, the alignment a partition table keeps, is no segment, and free room larger than that is one",
+                      settings.item_count[2] == 1 && items[0].segment_count == 2 && items[0].segment_role[0] == 0 && items[0].segment_role[1] == 4 &&
+                          items[0].segment_bytes[1] == 2097152ull);
                 length = 0;
                 for (const char address_to line = "  1-2 usb 0627:0001 "; *line; line++)
                         rows[length++] = *line;
@@ -143035,6 +143048,259 @@ static fn check_settings_device_strip(void)
                                   string_equals((string_address)described.note, (string_address) "blocked"));
                 }
         }
+}
+
+/*
+        A drive's row as the kit lays it out and draws it, in the window with the shipped faces. Every segment of a disk of sixteen
+        partitions and the free room round them has a leaf at least UI_SEGMENT_LEAST wide where the strip has the room for that, and
+        each is the strip over the count where it has not; a partition of 512 MB on a disk of 1 TB is drawn in its colour; free room
+        is in no partition's colour, a ring round the ground; and reading from the right the strip is where it is reading from the
+        left, turned over.
+*/
+static struct
+{
+        struct ui_node segment[UI_STRIP_MOST];
+        b32 has_segment[UI_STRIP_MOST];
+        struct ui_row row;
+        int at, id, top, height, strip_x, strip_w;
+} drive;
+static p8 drive_settings_kept[sizeof(settings)], drive_kit_kept[sizeof(ui_kit)], drive_items_kept[sizeof(settings_large->item[2])];
+
+// The device list as the host says it, fed to the Devices list.
+static fn drive_feed(const char address_to text)
+{
+        positive length = string_length((string_address)text);
+
+        for (positive at = 0; at < length; at++)
+                settings_large->said[at] = text[at];
+        settings.said_length = length;
+        settings_feed_hardware();
+}
+
+// The Devices group in the window, width logical pixels by 760 at a scale, read from the right or not, drawn whole.
+static fn drive_show(int width, int scale, b32 rtl)
+{
+        ui_kit.rtl = rtl ? 1 : 0;
+        ui_kit_settle();
+        settings.ui.scale = scale * 100;
+        settings_size((unsigned int)(width * scale), (unsigned int)(760 * scale));
+        settings.page.chosen = settings_groups_named("Devices");
+        settings_filter_clear();
+        settings.page.card = 0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1;
+        settings.focused = 0, settings.list.hover = -1;
+        settings_refilter();
+        settings.list.scroll.scroll = 0;
+        ui_kit.now = 5000000000ull;
+        ui_kit.busy = 0;
+        settings_draw_rows(settings_frames_whole, 0, 0);
+}
+
+// The first drive's row laid out where the list has it: its line's and its strip's parts kept in drive. False: no drive.
+static b32 drive_lay(void)
+{
+        memory_zero(&drive, sizeof(drive));
+        for (int at = 0; at < settings.list.count; at++)
+        {
+                ui_list_describe(&settings.list, settings.list.id[at], &drive.row);
+                if (!drive.row.tall)
+                        continue;
+                drive.at = at, drive.id = settings.list.id[at];
+                drive.top = ui_list_row_y(&settings.list, at), drive.height = settings.list.tall[at];
+                ui_row_tree(&settings.ui, &settings.list, drive.id, &drive.row, drive.height, true);
+                ui_tree_origin(&ui_row_parts.tree, settings.list.x, drive.top);
+                for (int k = 0; k < UI_STRIP_MOST; k++)
+                        if (ui_row_parts.segment[k])
+                                drive.segment[k] = *ui_row_parts.segment[k], drive.has_segment[k] = true;
+                drive.strip_x = settings.list.x + ui_dev(&settings.ui, UI_INSET), drive.strip_w = settings.list.w - 2 * ui_dev(&settings.ui, UI_INSET);
+                return true;
+        }
+        return false;
+}
+
+static unsigned int drive_pixel(int x, int y)
+{
+        return settings_frames_whole[(positive)y * SETTINGS_FRAMES_W + (positive)x] & 0xffffffu;
+}
+
+static fn check_settings_drive_rows(string_address regular, string_address bold)
+{
+        static font_face faces[2];
+        static p8 atlas[1024 * 1024];
+        static char sixteen[4096], nvme[1024];
+        positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0, bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        struct windows address_to window = (struct windows address_to)table;
+        b32 least = true, fills = true, equal = true, drawn = false, free_ring = false, mirrored = true;
+        int widths[] = {SETTINGS_WIDTH, 420, 300};
+
+        if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
+            font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("settings drive rows: the face, the engine and the window load", false);
+                return;
+        }
+        memory_copy(drive_settings_kept, &settings, sizeof(settings));
+        memory_copy(drive_kit_kept, &ui_kit, sizeof(ui_kit));
+        memory_copy(drive_items_kept, settings_large->item[2], sizeof(drive_items_kept));
+        window->stride = SETTINGS_FRAMES_W, window->buffer = buffer, window->output_width = 4096, window->output_height = 4096;
+        settings.own = (struct window_row){window, 0, -1, -1, WINDOWS_HEADER + 2 * buffer, buffer, SETTINGS_FRAMES_W, 4096, 4096};
+        memory_zero(&settings.ui, sizeof(settings.ui));
+        settings.ui.engine = (font_engine address_to)engine;
+        font_start(settings.ui.engine, atlas, 1024, 1024);
+        settings.ui.regular = &faces[0];
+        settings.ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
+        settings.ui.scale = 100, settings.ui.opaque = 1;
+        settings.list.controls = null, settings.page.buffers.shown = -1, settings.page.pane = 0;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        ui_inks(&settings.ui, 0x101012u);
+        ui_kit_inks(&settings.ui);
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+
+        // A disk of 2 TB: sixteen partitions, the free room before each and after the last (33 segments), one of 1 TB and some of 1 MiB.
+        {
+                unsigned long long at = 0, sizes[16] = {1048576ull, 536870912ull, 1000000000000ull, 1048576ull, 8000000000ull, 200000000000ull,
+                                                        4000000000ull, 60000000000ull, 33554432ull, 300000000000ull, 2000000000ull, 120000000000ull,
+                                                        16000000000ull, 100000000000ull, 50000000000ull, 10000000000ull};
+                static const char address_to const roles[16] = {"other", "efi", "linux", "other", "swap", "linux", "linux", "linux",
+                                                                 "other", "other", "other", "linux", "swap", "other", "linux", "other"};
+                char number[24];
+
+                string_copy_bounded((string_address)sixteen, (string_address) "  sdb drive 2000398 MB view only\n", sizeof(sixteen));
+                for (int k = 0; k <= 16; k++)
+                {
+                        unsigned long long free = 2097152ull * (unsigned long long)(k + 1);
+
+                        string_append_bounded((string_address)sixteen, (string_address) "    part ", sizeof(sixteen));
+                        number[positive_into_string((p8 address_to)number, (positive)at)] = 0;
+                        string_append_bounded((string_address)sixteen, (string_address)number, sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address) " ", sizeof(sixteen));
+                        number[positive_into_string((p8 address_to)number, (positive)free)] = 0;
+                        string_append_bounded((string_address)sixteen, (string_address)number, sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address) " free -\n", sizeof(sixteen));
+                        at += free;
+                        if (k == 16)
+                                break;
+                        string_append_bounded((string_address)sixteen, (string_address) "    part ", sizeof(sixteen));
+                        number[positive_into_string((p8 address_to)number, (positive)at)] = 0;
+                        string_append_bounded((string_address)sixteen, (string_address)number, sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address) " ", sizeof(sixteen));
+                        number[positive_into_string((p8 address_to)number, (positive)sizes[k])] = 0;
+                        string_append_bounded((string_address)sixteen, (string_address)number, sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address) " ", sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address)roles[k], sizeof(sixteen));
+                        string_append_bounded((string_address)sixteen, (string_address)(k == 1 ? " EFI_system_partition\n" : " -\n"), sizeof(sixteen));
+                        at += sizes[k];
+                }
+        }
+        // A disk of 1 TB with an EFI partition of 512 MB, its data, and the free room after them.
+        string_copy_bounded((string_address)nvme,
+                            (string_address) "  nvme0n1 drive 1000204 MB view only\n"
+                                             "    part 1048576 536870912 efi EFI_system_partition\n"
+                                             "    part 537919488 16777216 other Microsoft_reserved_partition\n"
+                                             "    part 554696704 900000000000 other Basic_data_partition\n"
+                                             "    part 900554696704 69000000000 linux Linux_filesystem\n"
+                                             "    part 969554696704 30650189312 free -\n",
+                            sizeof(nvme));
+
+        // Every segment has a leaf: at least the least wide where 33 of them fit (the window's width, at scales 1 and 2), the strip over the
+        // count each where they do not (420 and 300 wide); and the segments with their gaps are the strip, whole.
+        drive_feed(sixteen);
+        for (int w = 0; w < 3; w++)
+                for (int scale = 1; scale <= 2; scale++)
+                {
+                        int sum = 0, smallest = 1 << 30, largest = 0, gap;
+
+                        drive_show(widths[w], scale, false);
+                        gap = ui_dev(&settings.ui, UI_SEGMENT_GAP);
+                        if (!drive_lay() || drive.row.strip_count != 33)
+                        {
+                                least = fills = equal = false;
+                                continue;
+                        }
+                        for (int k = 0; k < 33; k++)
+                        {
+                                int width = drive.has_segment[k] ? drive.segment[k].w : 0;
+
+                                sum += width;
+                                smallest = width < smallest ? width : smallest;
+                                largest = width > largest ? width : largest;
+                                least &= drive.has_segment[k] && width > 0;
+                        }
+                        fills &= sum + 32 * gap == drive.strip_w;
+                        if (33 * ui_dev(&settings.ui, UI_SEGMENT_LEAST) + 32 * gap <= drive.strip_w)
+                                least &= smallest >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && largest > 10 * smallest;
+                        else
+                                equal &= largest - smallest <= 1;
+                }
+        check("settings drive rows: every segment of a drive of 16 partitions and the free room round them has a leaf, at least the least wide where the strip has room for that",
+              least);
+        check("settings drive rows: where 33 segments at the least do not fit, each is the strip over the count, and the segments and their gaps are the strip whole",
+              equal && fills);
+
+        // Reading from the right, the strip is where it is reading from the left, turned over the window.
+        for (int w = 0; w < 2; w++)
+        {
+                struct ui_node ltr[UI_STRIP_MOST];
+                int count = 0;
+
+                drive_show(widths[w], 1, false);
+                if (!drive_lay())
+                {
+                        mirrored = false;
+                        continue;
+                }
+                for (int k = 0; k < UI_STRIP_MOST; k++)
+                        ltr[k] = drive.segment[k];
+                drive_show(widths[w], 1, true);
+                mirrored &= drive_lay();
+                for (int k = 0; k < UI_STRIP_MOST && mirrored; k++)
+                {
+                        const struct ui_node address_to was = &ltr[k], address_to now = &drive.segment[k];
+
+                        count += was->w > 0;
+                        mirrored &= now->x == settings.width - was->x - was->w && now->y == was->y && now->w == was->w && now->h == was->h;
+                }
+                mirrored &= count == 33;
+        }
+        check("settings drive rows: reading from the right a drive's strip is its strip from the left, turned over", mirrored);
+
+        // A partition of 512 MB on a disk of 1 TB is drawn: its pill is in the accent at its middle.
+        drive_feed(nvme);
+        drive_show(SETTINGS_WIDTH, 1, false);
+        if (drive_lay() && drive.row.strip_count == 5 && drive.has_segment[0])
+        {
+                const struct ui_node address_to efi = &drive.segment[0];
+
+                drawn = efi->w >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && drive_pixel(efi->x + efi->w / 2, efi->y + efi->h / 2) == (ui_role(UI_PRIMARY) & 0xffffffu);
+        }
+        check("settings drive rows: a partition of 512 MB on a disk of 1 TB is drawn, at least the least wide, in its role's colour", drawn);
+
+        // Free room is no partition's colour: a free segment of the least width is the ground at its middle, as the gap beside it is, and its
+        // ring is drawn at its top.
+        drive_feed(sixteen);
+        drive_show(SETTINGS_WIDTH, 1, false);
+        if (drive_lay() && drive.has_segment[0] && drive.has_segment[1] && drive.row.strip_roles[0] == 4)
+        {
+                const struct ui_node address_to room = &drive.segment[0], address_to next = &drive.segment[1];
+                unsigned int ground = drive_pixel(room->x + room->w + (next->x - room->x - room->w) / 2, room->y + room->h / 2);
+                unsigned int middle = drive_pixel(room->x + room->w / 2, room->y + room->h / 2);
+
+                free_ring = room->w == ui_dev(&settings.ui, UI_SEGMENT_LEAST) && middle == ground && drive_pixel(room->x + room->w / 2, room->y) != ground;
+                for (int role = 0; role < 6; role++)
+                        free_ring &= role == 4 || middle != (ui_role(ui_strip_colour((unsigned int)role, ui_strip_role_colours)) & 0xffffffu);
+        }
+        check("settings drive rows: free room is drawn in no partition's colour: the ground in a ring", free_ring);
+
+        ui_kit.rtl = 0;
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        memory_copy(settings_large->item[2], drive_items_kept, sizeof(drive_items_kept));
+        memory_copy(&settings, drive_settings_kept, sizeof(settings));
+        memory_copy(&ui_kit, drive_kit_kept, sizeof(ui_kit));
 }
 
 static fn check_settings_groups(void)
@@ -144548,6 +144814,26 @@ static fn check_rtl_mirror(void)
         check("rtl mirror: every group of the Settings window, its card, a menu and the launcher, right to left is its picture left to right flipped", groups);
         check("rtl mirror: a press at a place of the Settings window right to left is on what a press at the mirrored place left to right is on, every group at scales 1 and 2",
               !rtl_pressed_wrong);
+        // The Devices group with drives in it: a disk of Windows and Linux, and one with more partitions than its strip shows.
+        {
+                static p8 kept[sizeof(settings_large->item[2])];
+                unsigned short count = settings.item_count[2];
+                int devices = settings_groups_named("Devices");
+                b32 drives;
+
+                memory_copy(kept, settings_large->item[2], sizeof(kept));
+                drive_feed("  1-1 usb 0781:5581 SanDisk Ultra allowed\n"
+                           "  nvme0n1 drive 1000204 MB view only\n    part 1048576 536870912 efi EFI_system_partition\n"
+                           "    part 537919488 16777216 other Microsoft_reserved_partition\n    part 554696704 900000000000 other Basic_data_partition\n"
+                           "    part 900554696704 69000000000 linux Linux_filesystem\n    part 969554696704 30650189312 free -\n"
+                           "  sdb drive 64000 MB view only\n    part 0 2097152 free -\n    part 2097152 1048576 other BIOS_boot_partition\n"
+                           "    part 3145728 536870912 efi -\n    part 540016640 8000000000 swap Linux_swap\n    part 8540016640 4000000 free -\n"
+                           "    part 8544016640 40000000000 linux Linux_root\n    part 48544016640 15000000000 other Media\n    more 2\n");
+                drives = rtl_view("a drive's strip", devices, 1) && rtl_view("a drive's strip", devices, 2);
+                memory_copy(settings_large->item[2], kept, sizeof(kept));
+                settings.item_count[2] = count;
+                check("rtl mirror: a drive's strip, right to left, is its picture left to right flipped, at scales 1 and 2", drives);
+        }
         check_text_scale();
         // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.
         {
@@ -167073,6 +167359,8 @@ b32 main()
                        program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_groups();
         check_settings_device_strip();
+        check_settings_drive_rows(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                                  program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_keys();
         check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                               program_argument_count() > 4 ? program_argument(4) : null);

@@ -249,6 +249,7 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_STATE 24        // a port's state word (allowed, blocked, waiting), or a drive's kind and state (drive, view only)
 #define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
 #define SETTINGS_SEGMENT_TEXT 16 // a segment's size, drawn in the segment where it has room (ui.c's UI_STRIP_TEXT is this)
+#define SETTINGS_ALIGNMENT 1048576ull // free room this small is the room a partition table and the partitions' alignment keep, and is not shown
 
 struct settings_item
 {
@@ -2950,7 +2951,9 @@ static fn settings_feed_hardware(void)
                                 word++;
                         role_length = word - role_at;
                         code = settings_role_code(text + role_at, role_length);
-                        if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS)
+                        // Free room no bigger than the alignment the partitions keep is no room a person can use: it has no segment.
+                        if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
+                            (code != 4 || bytes > SETTINGS_ALIGNMENT))
                         {
                                 drive->segment_bytes[drive->segment_count] = bytes;
                                 drive->segment_role[drive->segment_count++] = (unsigned char)code;

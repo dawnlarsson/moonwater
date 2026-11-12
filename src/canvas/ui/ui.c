@@ -18655,22 +18655,98 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 }
 
 /*
-        A drive's strip, and the roles' colours. Each role is a container of the theme and its on-colour for the size written in it,
-        so the six are told apart in both themes: EFI system is the accent, Linux data the success container, swap the secondary
-        container, other the warning container, free room the outline (a track of nothing), and a disk with no table the info container.
+        A drive's strip, and the roles' colours. Each role is a container of the theme and its on-colour for the size written in
+        it, so they are told apart in both themes: EFI system is the accent, Linux data the success container, swap the info
+        container, other the warning container, and a disk with no table the secondary container. Free room is no role's colour:
+        it is a ring in the outline round nothing, the room a partition could be put in, and its size is in the quiet ink.
+
+        The strip is the line's width less the gaps between its segments. Every segment is at least UI_SEGMENT_LEAST wide: at the
+        strip's 16 that is a pill whose two round ends meet, four times the gap that parts it from the next one, so it reads as a
+        segment and not as a seam; a pointer can be put on it; and 33 of them with their gaps are 328, which is less than the 456
+        the window gives the strip at its default width. What the segments at their least leave is shared by bytes among those
+        whose share is more than the least, so the large ones are as large as they are on the disk; where the segments at their
+        least do not fit (a narrow window), each is the strip over the count.
 */
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
 #define UI_STRIP_MOST 33 // the most segments a strip takes: the host's partitions and the free room round them (settings' SETTINGS_SEGMENTS)
 #define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
+#define UI_SEGMENT_LEAST 8 // the narrowest a segment is, logical pixels
+#define UI_STRIP_HIGH 16   // the strip's height, logical pixels
 
-// A strip role's colour in a table of them by role: a role past the free room takes the last entry, the info container's.
+// A strip role's colour in a table of them by role: a role past the free room takes the last entry, the secondary container's.
 static int ui_strip_colour(unsigned int role, const int address_to table)
 {
         return table[role <= UI_STRIP_FREE ? role : UI_STRIP_FREE + 1];
 }
 
-static const int ui_strip_role_colours[] = {[UI_STRIP_EFI] = UI_PRIMARY, [UI_STRIP_LINUX] = UI_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_SECONDARY_CONTAINER, [UI_STRIP_OTHER] = UI_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_OUTLINE_VARIANT, [UI_STRIP_FREE + 1] = UI_INFO_CONTAINER};
-static const int ui_strip_ink_colours[] = {[UI_STRIP_EFI] = UI_ON_PRIMARY, [UI_STRIP_LINUX] = UI_ON_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_ON_SECONDARY_CONTAINER, [UI_STRIP_OTHER] = UI_ON_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_ON_SURFACE, [UI_STRIP_FREE + 1] = UI_ON_INFO_CONTAINER};
+static const int ui_strip_role_colours[] = {[UI_STRIP_EFI] = UI_PRIMARY, [UI_STRIP_LINUX] = UI_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_INFO_CONTAINER, [UI_STRIP_OTHER] = UI_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_OUTLINE, [UI_STRIP_FREE + 1] = UI_SECONDARY_CONTAINER};
+static const int ui_strip_ink_colours[] = {[UI_STRIP_EFI] = UI_ON_PRIMARY, [UI_STRIP_LINUX] = UI_ON_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_ON_INFO_CONTAINER, [UI_STRIP_OTHER] = UI_ON_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_ON_SURFACE_VARIANT, [UI_STRIP_FREE + 1] = UI_ON_SECONDARY_CONTAINER};
+
+/*
+        The widths of a strip's count segments, room device pixels in all once the gaps are taken out: each at least least wide, and
+        what those at their least leave shared by bytes among the others, a segment whose share is under the least being one of
+        those in its turn; a floor's pixels go one each to the first that share. Where count at the least do not fit, each is room
+        over the count, the first ones a pixel wider by what does not divide.
+*/
+static fn ui_strip_widths(const unsigned long long address_to bytes, int count, int room, int least, int address_to widths)
+{
+        unsigned long long scaled[UI_STRIP_MOST], most = 0, total;
+        b32 small[UI_STRIP_MOST];
+        int shift = 0, sharing;
+        b64 left, given = 0;
+
+        count = count < 0 ? 0 : count > UI_STRIP_MOST ? UI_STRIP_MOST : count;
+        room = room < 0 ? 0 : room;
+        if (!count)
+                return;
+        if ((b64)count * least >= room)
+        {
+                for (int at = 0; at < count; at++)
+                        widths[at] = room / count + (at < room % count);
+                return;
+        }
+        // The bytes in a scale whose largest is under 2^40: a share is the room times them, in 64 bits.
+        for (int at = 0; at < count; at++)
+                most = bytes[at] > most ? bytes[at] : most;
+        while (most >> shift >= 1ull << 40)
+                shift++;
+        for (int at = 0; at < count; at++)
+                scaled[at] = bytes[at] >> shift, small[at] = false;
+        for (;;)
+        {
+                b32 more = false;
+
+                left = room, total = 0;
+                for (int at = 0; at < count; at++)
+                        if (small[at])
+                                left -= least;
+                        else
+                                total += scaled[at];
+                for (int at = 0; at < count; at++)
+                        if (!small[at] && (!total || left * (b64)scaled[at] / (b64)total < least))
+                                small[at] = true, more = true;
+                if (!more)
+                        break;
+        }
+        // None shares only when none has a byte: then they are the room over the count.
+        sharing = 0;
+        for (int at = 0; at < count; at++)
+                sharing += !small[at];
+        if (!sharing)
+        {
+                for (int at = 0; at < count; at++)
+                        widths[at] = room / count + (at < room % count);
+                return;
+        }
+        for (int at = 0; at < count; at++)
+        {
+                widths[at] = small[at] ? least : (int)(left * (b64)scaled[at] / (b64)total);
+                given += small[at] ? 0 : widths[at];
+        }
+        for (int at = 0; at < count && given < left; at++)
+                if (!small[at])
+                        widths[at]++, given++;
+}
 
 /*
         A row's parts. A row is a tree of the kit's layout (ui_tree), declared again for each row that is drawn or pressed, and the
@@ -18679,7 +18755,7 @@ static const int ui_strip_ink_colours[] = {[UI_STRIP_EFI] = UI_ON_PRIMARY, [UI_S
         Before a switch, tabs, swatches or a slider the label grows into the room they leave. In any other row the label is as wide
         as its words and gives way to a zone that grows and keeps a third of the row from it (two thirds: a field after a verb): in
         it, at its end, a field, or the note in the room the value leaves and the value with its step marks or its chevron. A tall
-        row (a drive) is a column: that line, its strip, each segment grown by its share of the bytes, its legend and a hairline.
+        row (a drive) is a column: that line, its strip (each segment as wide as ui_strip_widths has it), its legend and a hairline.
 */
 static struct ui_row_parts
 {
@@ -18788,18 +18864,17 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
                 p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
         if (row->tall)
         {
-                unsigned long long most = 0;
-                int count = row->strip_count < 0 ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+                int count = row->strip_count < 0 || !row->strip_bytes ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+                int widths[UI_STRIP_MOST], segment_gap = ui_dev(ui, UI_SEGMENT_GAP);
 
-                // Under the line the strip: a segment's weight is its bytes in 1024ths of the largest one's, and one too small for a weight has no leaf.
+                // Under the line the strip, every segment a leaf as wide as its share (ui_strip_widths), the line's width less the gaps shared.
                 ui_tree_close(t);
-                n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, 16), n->margin[2] = ui_dev(ui, 6);
-                n->gap = ui_dev(ui, UI_SEGMENT_GAP);
+                ui_strip_widths(row->strip_bytes, count, l->w - 2 * inset - (row->sub ? ui_dev(ui, 20) : 0) - (count - 1) * segment_gap,
+                                ui_dev(ui, UI_SEGMENT_LEAST), widths);
+                n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_STRIP_HIGH), n->margin[2] = ui_dev(ui, 6);
+                n->gap = segment_gap;
                 for (int at = 0; at < count; at++)
-                        most = row->strip_bytes[at] > most ? row->strip_bytes[at] : most;
-                for (int at = 0; at < count; at++)
-                        if (row->strip_bytes[at] / (most / UI_TREE_WEIGHT + 1))
-                                p->segment[at] = ui_row_leaf(t, UI_GROW, (int)(row->strip_bytes[at] / (most / UI_TREE_WEIGHT + 1)));
+                        p->segment[at] = ui_row_leaf(t, UI_FIXED, widths[at]);
                 ui_tree_close(t);
                 p->legend = n = ui_row_leaf(t, UI_FIT, 0), n->size[1].kind = UI_GROW, n->size[1].value = 1, n->margin[2] = ui_dev(ui, 2);
                 p->rule = n = ui_row_leaf(t, UI_FIT, 0), n->size[1].kind = UI_FIXED, n->size[1].value = 1;
@@ -18864,6 +18939,15 @@ static int ui_row_baseline(struct ui address_to ui, const struct ui_node address
 static fn ui_row_words(struct ui address_to ui, const struct ui_node address_to n, int in, int baseline, const char address_to text, int type, unsigned int ink)
 {
         ui_kit_text_flipped(ui, n->x + in, baseline, (string_address)text, type, ink, 0, n->x, n->w);
+}
+
+// A segment's pill: its role's colour, or for free room a ring in the outline round nothing.
+static fn ui_strip_pill(struct ui address_to ui, const struct ui_box address_to box, unsigned int role)
+{
+        if (role == UI_STRIP_FREE)
+                ui_kit_ring(ui, box, ui_stroke(ui), ui_role(UI_OUTLINE));
+        else
+                ui_kit_fill(ui, box, ui_role(ui_strip_colour(role, ui_strip_role_colours)), null);
 }
 
 /*
@@ -18952,8 +19036,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
         if ((n = p->bars))
                 ui_signal(ui, n->x + n->w, n->y + n->h / 2, row.bars);
-        // A drive's strip: each segment a pill of its role's colour, with its size in its middle where it has room (whichever way the window
-        // reads, so the size goes at device x as it is); then the legend, and the hairline that ends the row.
+        // A drive's strip: each segment a pill of its role's colour (a ring for free room), with its size in its middle where it has room
+        // (laid out from the left and turned over in the pill reading from the right, so it is the mirror to the pixel); then the legend,
+        // and the hairline that ends the row.
         for (int at = 0; at < UI_STRIP_MOST; at++)
                 if ((n = p->segment[at]) && n->w > 0)
                 {
@@ -18961,11 +19046,11 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         const char address_to text = row.strip_text ? row.strip_text + at * UI_STRIP_TEXT : null;
                         int size_w = seen && text && text[0] ? ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM) : 0;
 
-                        ui_kit_fill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, radius * 256, radius * 256},
-                                    ui_role(ui_strip_colour(row.strip_roles[at], ui_strip_role_colours)), null);
+                        ui_strip_pill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, radius * 256, radius * 256},
+                                      row.strip_roles[at]);
                         if (size_w && size_w + ui_dev(ui, 8) <= n->w)
-                                ui_kit_text(ui, n->x + (n->w - size_w) / 2, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), (string_address)text, UI_LABEL_MEDIUM,
-                                            ui_text_colour(ui, ui_strip_colour(row.strip_roles[at], ui_strip_ink_colours)), 0);
+                                ui_row_words(ui, n, (n->w - size_w) / 2, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM,
+                                             ui_text_colour(ui, ui_strip_colour(row.strip_roles[at], ui_strip_ink_colours)));
                 }
         if ((n = p->legend) && row.legend && row.legend[0] && seen)
                 ui_row_words(ui, n, 0, ui_kit_baseline(ui, n->y, UI_LABEL_MEDIUM),
