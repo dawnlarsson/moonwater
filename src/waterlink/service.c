@@ -4293,6 +4293,10 @@ static p8 link_client_initiate(struct link_session address_to s, p64 now)
            an earlier MAC, and do not read the still-uninitialized datagram in
            the failure path. */
         memory_zero(link_client.mac1, sizeof link_client.mac1);
+        //      An initiation out is this session's, said where it is made: an
+        //      answer or a cookie finds the session by it, and no caller can
+        //      leave one out with no session behind it.
+        link_client.session = s;
         link_client.ours = link_index_new();
         link_client.initiated = now;
         memory_zero(hello, sizeof hello);
@@ -4382,7 +4386,10 @@ static p8 link_client_answer(struct link_session address_to s,
 
 static fn link_client_answered(p8 address_to datagram, positive length)
 {
-        if (link_client.ours &&
+        //      Only for a session still open: one closed since its initiation
+        //      left (a close from the far side, then its answer) has no keys
+        //      to take, and its record is wiped.
+        if (link_client.ours && link_client.session->used &&
             link_client_answer(link_client.session, address_of link_client.noise,
                                link_client.ours, datagram, length))
                 link_client.ours = 0;
@@ -4394,7 +4401,7 @@ static fn link_client_answered(p8 address_to datagram, positive length)
         carries it. Either way it is an attempt. */
 static fn link_client_cookie(p8 address_to datagram, positive length, p64 now)
 {
-        if (!link_client.ours ||
+        if (!link_client.ours || !link_client.session->used ||
             !waterlink_cookie_take(link_client.session->peer, link_client.mac1,
                                    datagram, length, link_client.cookie))
                 return;
@@ -4551,7 +4558,6 @@ static p8 link_keep_begin(struct link_session address_to s, p64 now, p8 rekey)
 {
         link_keep_dial = s;
         link_keep_rekey = rekey;
-        link_client.session = s;
         link_client.attempts = 1;
         link_client.ours = 0;
         if (!rekey)
@@ -4698,7 +4704,6 @@ static b32 link_client_run(string_address name, p8 kind,
         link_client.sent = 0;
         link_client.send_error = 0;
         link_client.unverified = false;
-        link_client.session = link_self.session;
 
         //      Every send reads the transport once, here. The audio modem takes a push, a file over the sound card to the
         //      receiver, which writes it where it chooses, so the machine and the path are not used; it sends nothing back, so
