@@ -15397,15 +15397,15 @@ struct ui_menu_item
 struct ui_popmenu
 {
         struct ui_menu_item items[UI_MENU_ITEMS];
-        int count, hot, top, rows_shown;
+        int count, hot, rows_shown;
         b32 touch;
         struct ui_press press;       // a press on an item: its target is the item it went down on, -1 none
         struct ui_ripple ripple;     // the press's ripple, drawn in the item's own rect (ripple_at), and whether it is moving
         int ripple_at;
         b32 moving;
         int width, height;
-        struct ui_tree tree;         // the layout (ui_popmenu_size): the root is the menu and what scrolls, its children the items in their order
-        struct ui_scroll scroll;     // the kit's bar: its track down the right, its scroll the top item's start (in pixels)
+        struct ui_tree tree;         // the layout (ui_popmenu_size): the root is the menu and what scrolls, its offset the menu's one scroll, its children the items in their order
+        struct ui_scroll scroll;     // the kit's bar, bound to the root: its content and view are the root's, and it rests where the root's offset is (ui_popmenu_to)
         char typed[16];
         int typed_length;
         positive typed_at;
@@ -15433,16 +15433,23 @@ static int ui_popmenu_start(const struct ui_popmenu address_to m, int at)
         return n > first ? n->y - n->margin[2] - first->y + first->margin[2] : 0;
 }
 
-// The menu scrolled to an item: the item's start goes in as the root's offset, the tree places the items by it and keeps it inside its
-// ends (the last page's top), and the kit's region rests where the tree put it, its bar drawn there. top is the item the tree left at
-// the menu's top: the last that starts at or before the offset.
+// The item at the menu's top, read from the tree: the last that starts at or before the root's offset. A menu rests on an item's top.
+static int ui_popmenu_top(const struct ui_popmenu address_to m)
+{
+        int at = 0;
+
+        while (at + 1 < m->count && ui_popmenu_start(m, at + 1) <= m->tree.node[0].offset)
+                at++;
+        return at;
+}
+
+// The menu scrolled to an item, its one scroll: the item's start goes in as the root's offset, the tree places the items by it and keeps
+// it inside its ends (the last page's top), and the kit's region rests where the tree put it, its bar drawn there.
 static fn ui_popmenu_to(struct ui_popmenu address_to m, int at)
 {
         m->tree.node[0].offset = ui_popmenu_start(m, at < m->count ? at : m->count - 1);
         ui_tree_run(&m->tree, 0, 0);
         ui_scroll_set(&m->scroll, m->tree.node[0].offset);
-        for (m->top = 0; m->top + 1 < m->count && ui_popmenu_start(m, m->top + 1) <= m->tree.node[0].offset;)
-                m->top++;
 }
 
 // A label as drawn: its & left out (and && one &).
@@ -15481,7 +15488,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         struct ui_tree address_to t = &m->tree;
         struct ui_node address_to root, address_to n;
         int pad = ui_dev(ui, UI_MENU_PAD), inset = pad + ui_dev(ui, UI_MENU_INSET), far = ui_dev(ui, UI_MENU_PAD + 14), rule = ui_px(ui, 1);
-        int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), cap = ui_capital(ui, 14), bar = ui_dev(ui, UI_SCROLL_WIDTH);
+        int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), cap = ui_capital(ui, 14), bar = ui_dev(ui, UI_SCROLL_WIDTH), place = t->node[0].offset;
 
         ui_tree_begin(t);
         root = ui_tree_open(t);
@@ -15520,7 +15527,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         m->scroll.content = root->extent, m->scroll.view = root->h;
         m->scroll.x = ui_mirror(root->w - bar, bar, 0, root->w), m->scroll.y = root->y, m->scroll.height = root->h;
         m->scroll.held = m->scroll.hover = 0;
-        ui_popmenu_to(m, m->top);
+        root->offset = place, ui_popmenu_to(m, ui_popmenu_top(m)); // the menu rests where it was: on the item its place before is in
 }
 
 // The item a point is in (the menu's own device pixels), or -1: the point is in the menu and in the item's element. A separator is no
@@ -15618,8 +15625,10 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
 // The view follows the hot item as far as it must: up to it, or down until it is the last row that shows; with none hot, to the top.
 static fn ui_popmenu_reveal(struct ui_popmenu address_to m)
 {
-        if (m->hot < m->top || (m->rows_shown > 0 && m->hot >= m->top + m->rows_shown))
-                ui_popmenu_to(m, m->hot < m->top ? m->hot : m->hot - m->rows_shown + 1);
+        int top = ui_popmenu_top(m);
+
+        if (m->hot < top || (m->rows_shown > 0 && m->hot >= top + m->rows_shown))
+                ui_popmenu_to(m, m->hot < top ? m->hot : m->hot - m->rows_shown + 1);
 }
 
 // The hot item moved by step over what can be chosen (wrapping), the view following it. With none hot (-1) Down takes the
@@ -15662,17 +15671,17 @@ static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 
 /*
         The menu's bar, when it has one: a motion, a press or a release on it is its (a held thumb follows the hand, a press on
-        the track pages it). True when it took the event, and the menu is scrolled to the item the scroll it asks for is in.
+        the track pages it). True when it took the event: the scroll it asks for goes in as the root's offset, its end as the
+        tree's own, and the menu rests on the item that is in.
 */
 static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu address_to m, int type, int x, int y, b32 down)
 {
-        int scroll = m->scroll.content > m->scroll.view || m->scroll.held ? ui_scroll_pointer(ui, &m->scroll, type, x, y, down) : -1, at = 0;
+        int scroll = m->scroll.content > m->scroll.view || m->scroll.held ? ui_scroll_pointer(ui, &m->scroll, type, x, y, down) : -1;
 
         if (scroll < 0)
                 return false;
-        while (at + 1 < m->count && ui_popmenu_start(m, at + 1) <= scroll)
-                at++;
-        ui_popmenu_to(m, at);
+        m->tree.node[0].offset = scroll < ui_scroll_most(&m->scroll) ? scroll : UI_TREE_MOST;
+        ui_popmenu_to(m, ui_popmenu_top(m));
         return true;
 }
 
@@ -15771,7 +15780,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 pixels = ui_wheel_pixels(ui, event, 3L * row, &m->wheel_rest) + m->wheel_left;
                 items = row > 0 ? (int)(pixels / row) : 0;
                 m->wheel_left = (int)(pixels - (long)items * row);
-                ui_popmenu_to(m, m->top + items);
+                ui_popmenu_to(m, ui_popmenu_top(m) + items);
                 return UI_MENU_NOTHING;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
@@ -15909,7 +15918,7 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         p->menu.hot = -1;
         memory_zero(&p->menu.press, sizeof(p->menu.press));
         p->menu.ripple.live = 0, p->menu.ripple_at = -1, p->menu.moving = 0;
-        p->menu.top = 0;
+        ui_popmenu_to(&p->menu, 0);
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
         ui_popmenu_size(&p->ui, &p->menu, screen_h);
         table->popup_parent[p->own.row] = parent->row + 1;
@@ -15977,8 +15986,8 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
                 ui_event_context(&event);
-                // What the picture shows: the hot item, the top one (a wheel or the bar moves it) and the bar's own lit state.
-                int hot = p->menu.hot, top = p->menu.top, scroll = p->menu.scroll.scroll;
+                // What the picture shows: the hot item, the menu's scroll (a wheel, the keys or the bar moves it) and the bar's own lit state.
+                int hot = p->menu.hot, scroll = p->menu.tree.node[0].offset;
                 b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held;
 
                 if (event.type == WINDOW_EVENT_MOTION)
@@ -15986,8 +15995,7 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
                 answer = ui_popmenu_event(&p->ui, &p->menu, &event, p->x, p->y);
                 if (answer == UI_MENU_OPEN)
                         answer = UI_MENU_NOTHING;
-                if (p->menu.hot != hot || p->menu.top != top || p->menu.scroll.scroll != scroll || p->menu.scroll.hover != lit ||
-                    p->menu.scroll.held != held)
+                if (p->menu.hot != hot || p->menu.tree.node[0].offset != scroll || p->menu.scroll.hover != lit || p->menu.scroll.held != held)
                         ui_popmenu_present(p);
         }
         if (p->menu.moving && answer == UI_MENU_NOTHING)
@@ -19545,7 +19553,7 @@ static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page addre
         if (at < 0 || ui->scale <= 0)
                 return false;
         l->focus = row;
-        m->count = 0, m->top = 0, m->typed_length = 0;
+        m->count = 0, m->typed_length = 0;
         memory_zero(&m->press, sizeof(m->press));
         m->touch = ui_kit_touch;
         for (int k = 0; k < UI_MENU_ITEMS; k++)

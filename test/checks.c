@@ -128656,7 +128656,8 @@ static void check_dropdown_selected(void)
         ui_popmenu_add(&m, "Copy", null, 0, 1);
         ui_popmenu_add(&m, "Paste", null, 0, 2);
         ui_popmenu_add(&m, "Select all", null, 0, 3);
-        m.hot = 1, m.touch = 0, m.top = 0, m.typed_length = 0;
+        m.hot = 1, m.touch = 0, m.typed_length = 0;
+        ui_popmenu_to(&m, 0);
         m.ripple.live = 0, m.ripple_at = -1, m.moving = 0;
         memory_zero(&m.press, sizeof(m.press));
         ui_popmenu_size(&g, &m, 300);
@@ -140642,7 +140643,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter on a choice opens a list of every choice, the one it has now the one the keys are on",
-                              settings.page.menu_row == kb && settings.popup.menu.count == 13 && settings.popup.menu.hot == 1 && settings.popup.menu.top == 0 &&
+                              settings.page.menu_row == kb && settings.popup.menu.count == 13 && settings.popup.menu.hot == 1 && ui_popmenu_top(&settings.popup.menu) == 0 &&
                                   settings.popup.menu.width >= ui_px(&settings.ui, UI_MENU_LEAST) && settings.popup.menu.height > 0);
                         settings_menu_press(UI_KEY_DOWN);
                         check("settings: Down in the list goes to the next choice", settings.popup.menu.hot == 2);
@@ -140847,9 +140848,9 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 13 && settings.popup.menu.height <= (int)popup_fake.screen);
                         settings_menu_press(UI_KEY_END);
                         check("settings: End on it scrolls to the last, which then shows",
-                              settings.popup.menu.hot == 12 && settings.popup.menu.top == 13 - settings.popup.menu.rows_shown);
+                              settings.popup.menu.hot == 12 && ui_popmenu_top(&settings.popup.menu) == 13 - settings.popup.menu.rows_shown);
                         settings_menu_press(UI_KEY_HOME);
-                        check("settings: Home scrolls back to the first", settings.popup.menu.hot == 0 && settings.popup.menu.top == 0);
+                        check("settings: Home scrolls back to the first", settings.popup.menu.hot == 0 && ui_popmenu_top(&settings.popup.menu) == 0);
                         settings_menu_gone();
 
                         // Only a choice with a state to read opens, and a value that is none of its words starts the keys on the first.
@@ -158354,7 +158355,7 @@ static fn popmenu_bar_check(struct ui address_to wui)
         ui_popmenu_event(wui, &m, &press, x, y);
         ui_popmenu_event(wui, &m, &motion, x, y + 100);
         ui_popmenu_event(wui, &m, &release, x, y + 100);
-        check("popup menu: a thumb dragged 100 pixels down moves the menu's top with it", m.top > 0 && m.scroll.scroll > 0);
+        check("popup menu: a thumb dragged 100 pixels down moves the menu's top with it", ui_popmenu_top(&m) > 0 && m.scroll.scroll > 0);
         {
                 // The wheel over a long menu scrolls it, three items a notch, and does not close it; a trackpad's small turns add up to items; the
                 // ends hold it; a menu that fits is still closed by it.
@@ -158364,19 +158365,19 @@ static fn popmenu_bar_check(struct ui address_to wui)
                 int one, two, up, closed_fits;
 
                 ui_popmenu_size(wui, &m, 300);
-                m.top = 0, m.wheel_rest = m.wheel_left = 0;
-                one = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && m.top == 3;
-                two = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && m.top == 6;
-                up = ui_popmenu_event(wui, &m, &back, 5, 5) == UI_MENU_NOTHING && m.top == 3;
+                ui_popmenu_to(&m, 0), m.wheel_rest = m.wheel_left = 0;
+                one = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 3;
+                two = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 6;
+                up = ui_popmenu_event(wui, &m, &back, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 3;
                 for (int k = 0; k < 40; k++)
                         ui_popmenu_event(wui, &m, &notch, 5, 5);
-                one = one && m.top == m.count - m.rows_shown;
+                one = one && ui_popmenu_top(&m) == m.count - m.rows_shown;
                 for (int k = 0; k < 40; k++)
                         ui_popmenu_event(wui, &m, &back, 5, 5);
-                one = one && m.top == 0;
+                one = one && ui_popmenu_top(&m) == 0;
                 for (int k = 0; k < 20; k++)
                         ui_popmenu_event(wui, &m, &small, 5, 5);
-                two = two && m.top >= 1 && m.top <= 3;
+                two = two && ui_popmenu_top(&m) >= 1 && ui_popmenu_top(&m) <= 3;
                 memory_zero(&fits, sizeof(fits));
                 for (int at = 0; at < 3; at++)
                         ui_popmenu_add(&fits, "Item", null, 0, at + 1);
@@ -164418,7 +164419,7 @@ static fn kit_composites_check(struct ui address_to wui)
         ui_popmenu_add(&up_m, "Beta", null, 0, 2);
         ui_popmenu_add(&up_m, "Gamma", null, 0, 3);
         ui_popmenu_size(wui, &up_m, 900 * s);
-        up_m.hot = -1, up_m.top = 0;
+        up_m.hot = -1, ui_popmenu_to(&up_m, 0);
         ui_popmenu_event(wui, &up_m, &up, 0, 0);
         check("menu: Up with nothing chosen takes the last item", up_m.hot == 2);
 
@@ -164432,9 +164433,9 @@ static fn kit_composites_check(struct ui address_to wui)
         {
                 struct ui_popmenu address_to m = round ? &none_m : &empty_m;
 
-                m->hot = -1, m->top = 0;
+                m->hot = -1, ui_popmenu_to(m, 0);
                 ui_popmenu_event(wui, m, &down, 0, 0);
-                tops_ok &= m->top >= 0 && m->hot == -1;
+                tops_ok &= ui_popmenu_top(m) >= 0 && m->hot == -1;
         }
         check("menu: keys in a menu with nothing to choose keep its view at the top", tops_ok);
 
