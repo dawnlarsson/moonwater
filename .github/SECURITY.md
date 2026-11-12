@@ -666,7 +666,12 @@ attacker gets its invariants here once there is a lane that proves them.
   reading (`waterlink_mdns_read`) is done by a child that is nobody, not
   dumpable, dies with the listener, holds only its end of a socket of whole
   messages and stdio, and is killed at any call but reading a packet from
-  that socket and sending the reading back. The listener believes the
+  that socket and sending the reading back. It is a fork of the listener, so
+  before it confines itself or reads it forgets the link
+  (`link_secrets_forget`, MW-2026-188): the key, the cookies' secret, every
+  session's keys and frames, the groups' keys and the datagrams last opened;
+  `security_hygiene` holds it to that order. A packet shorter than a DNS
+  header is not sent to it. The listener believes the
   fixed-size reading only with every count and length inside its array; a
   reader that dies or answers what cannot be believed is ended and started
   again. **It fails closed:** a reader that cannot be confined reads nothing,
@@ -1252,6 +1257,60 @@ architecture gate above.
   design (`waterlink_pre_fuzz`, `waterlink_fuzz`, `waterlink_noise`);
   netlink comes from the kernel (`netlink_fuzz`). Neither is a confined
   parser.
+- **Found by the audit of 2026-11-12 and left as they are** (each is a
+  decision, not an oversight; the fixes of that day are MW-2026-185 to 193):
+  - *A greeting is bound to no destination.* A group's first message names
+    nobody it is for (the header is not in the transcript), so any host on the
+    link can make a member greet it (an announcement does) and send that
+    greeting on to another member, which then records the first member at the
+    sender's address and dials it there; four such evict the member's real
+    places. Binding the destination's address into the psk transcript is a
+    change of the wire, and old and new builds would not open each other's
+    greetings.
+  - *An announcement's source is not held to the receiving interface's
+    subnet,* so a spoofed source draws a 1,200-byte greeting a group to an
+    off-link address (the ring bounds it at 16 in 10 seconds).
+  - *One group can fill all 64 places of the machines file* with invented
+    keys; a ceiling per group is a limit on how large a group may be.
+  - *The mDNS pointer budget is overstated.* A PTR or SRV whose data is a
+    malformed name is passed over without its jumps being charged: a
+    1,490-byte packet followed 10,964 where the ceiling says its byte length.
+    Refusing the packet changes what the two models of the reader accept.
+  - *A pairing code is thirty bits with the waiting machine's name as its only
+    salt,* so one recorded greeting is an offline verifier for it, and the
+    work can be done ahead for a known name. What it buys ends when the code
+    is used or runs out.
+  - *`net_apart` waits on its child with no deadline.* An honest child is
+    bound by its own; one taken over holds its caller (the NTP child and its
+    lock, `host`, a synchronous wget) until it is killed. A ceiling per caller
+    is the fix.
+  - *The first NTS key establishment of a boot at the tight tier* judges a
+    staple's or CRL's `thisUpdate` against the clock's floor and asks three
+    SCTs of a 90-day leaf (its zeroed notBefore reads as a long life), so a
+    machine that was off longer than the answer is old refuses it and stays
+    unsynchronised.
+  - *A fetched CRL that never verifies is held for the life of the process*
+    and never fetched again, where one that failed to fetch is retried after
+    `TLS_CRL_RETRY`.
+  - *A DHCP watcher is served only by a poll that times out,* so link news
+    more often than once a second from another interface starves renewal and
+    expiry; and 1,300 junk datagrams to port 68 end an acquisition's schedule
+    with "nobody offered", which the watcher takes as final for the pass.
+  - *The tight tier takes a URL with no scheme as `http://`,* where this
+    document says it asks for an explicit scheme; and its whole-fetch budget
+    does not cover a hop's lookup, connect or TLS handshake.
+  - *`fetch` writes its failure text to standard output,* where the body goes.
+- **Lanes that had stopped running, found the same day:** `waterlink_sanitized`
+  and `wire_constants` (lift markers and the Mac's socket numbers), the link
+  lane (it asked for netem before anything), CHECK_waterlink_service and the
+  utilities program (the kit's switches inside the tool table; the modem's
+  half of the link), CHECK_net (`AUDIO_EAGAIN`). All run again. Still red:
+  `waterlink_pre_fuzz` and `waterlink_fuzz`, whose lifts of the listener have
+  drifted past a marker fix (they need the modem's and the keeper's functions
+  stubbed and their sections re-cut); one row of CHECK_net, "fragmented HTTP
+  header search work stays linear", whose byte counter reads zero since
+  `memory_search` became a macro in lib.util.c; and the hosted fuzz lifts
+  that need a clang newer than 18 (`offset_of`, `__builtin_cpu_supports`).
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.
