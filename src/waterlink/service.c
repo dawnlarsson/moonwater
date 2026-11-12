@@ -4481,6 +4481,11 @@ static fn link_peer_moved(p8 address_to key, p8 address_to address, p16 port)
         struct waterlink_peer address_to peer;
         bipolar lock = link_peers_lock();
 
+        //      Only under the lock every writer of the file takes: read and
+        //      written without it, this put back a grant a link deny took
+        //      away between the two.
+        if (lock < 0)
+                return;
         link_peers_load(address_of peers);
         peer = link_peer_keyed(address_of peers, key);
         if (peer && (peer->port != port ||

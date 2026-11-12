@@ -1182,11 +1182,15 @@ static b32 link_group_leave(string_address namespace, p8 forget)
                                                  "%p machines it linked\n",
                                  namespace, dropped);
                 else
-                        host_say(log, host_label "left group %s; %s could not "
-                                                 "be locked or read, so the "
-                                                 "machines it linked are "
-                                                 "kept\n",
-                                 namespace, LINK_PEERS_PATH);
+                {
+                        //      Asked to forget them and did not: a refusal,
+                        //      with its status, where this said so and left 0.
+                        crypto_forget(address_of keys, sizeof keys);
+                        return host_refuse("left group %s; %s could not be "
+                                           "locked or read, so the machines "
+                                           "it linked are kept\n",
+                                           namespace, LINK_PEERS_PATH);
+                }
         }
         else
                 host_say(log, host_label "left group %s; the machines it "
@@ -1832,6 +1836,10 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
                                    "no u. Copy it again from moonwater link pair; "
                                    LINK_UNSENT "\n",
                                    typed);
+        //      The code is in /proc/PID/cmdline for the five minutes this
+        //      waits, which every user reads below the locked tier, and it
+        //      opens every grant a code gives: wiped, as a group's secret is.
+        crypto_forget(typed, string_length(typed));
         host_read_word(LINK_TRANSPORT_PATH, transport, sizeof transport);
         if (!string_equals((string_address)transport, "modem") && !link_has_route())
                 return host_refuse("peer not reachable: this machine has no route to "
