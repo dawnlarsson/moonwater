@@ -74263,7 +74263,7 @@ int main(void)
         reset(); lease = held; complete_result = DHCP_OK;
         check(dhcp_reacquire("x", hardware, &lease, rebinding, 7) == DHCP_OK, "the answer is returned");
         check(opens == 1 && closes == 1 && sends == 1 && completes == 1, "one REQUEST, one completion");
-        check(open_host == held.address && open_broadcast == (bool)rebinding, "bound to the held address");
+        check(open_host == HOST_ANY && open_broadcast == (bool)rebinding, "bound to the device at any address, where a broadcast NAK is heard");
         check(packet_kind(0) == DHCP_REQUEST, "a REQUEST");
         check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the held address");
         check(!has_option(0, DHCP_OPTION_REQUESTED) && !has_option(0, DHCP_OPTION_SERVER), "no requested address or server id");

@@ -68058,7 +68058,7 @@ static p8 dhcp_mid_path_send_body(void)
         p8 answer;
 
         //      The lease's address is on lo, as it is on the interface a client
-        //      renews on: the socket is bound to it.
+        //      renews on: the REQUEST leaves from it, by the device's route.
         if (route >= 0)
         {
                 (void)netlink_link_up((b32)route, 1);

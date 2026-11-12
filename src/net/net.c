@@ -18278,7 +18278,13 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
-        handle = dhcp_open(device, lease->address, rebinding);
+        //      At any address of the device, as an acquisition's socket is:
+        //      a server broadcasts every DHCPNAK (RFC 2131 4.1) and, to a
+        //      rebinding REQUEST that asks for it, its ACK, and a socket
+        //      bound to the held address is handed nothing sent to
+        //      255.255.255.255. Bound there, a renewal never heard that its
+        //      lease was refused and kept the address to the end of it.
+        handle = dhcp_open(device, HOST_ANY, rebinding);
 
         if (handle < 0)
                 return DHCP_NO_SOCKET;
