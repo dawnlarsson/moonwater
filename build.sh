@@ -9,6 +9,8 @@
 #           sh build.sh --run --shell         boot with the console on this terminal
 #           sh build.sh --boot                boot the last image, do not rebuild
 #           sh build.sh --usb                 build, then write a USB stick
+#           sh build.sh --usb-update DIR      build, then copy it onto the FAT stick
+#                                             mounted at DIR, erasing nothing
 #           sh build.sh --clean               remove what a build produced
 #           sh build.sh --host box            build on another machine over ssh
 #           sh build.sh --arch arm64 --run    build and boot another architecture
@@ -250,6 +252,8 @@ do_run=0
 do_build=1
 do_clean=0
 do_usb=0
+do_usb_update=0
+usb_dir=""
 console=0
 image=""
 ram=4
@@ -370,6 +374,14 @@ while [ "$remaining" -gt 0 ]; do
         --boot) do_run=1; do_build=0 ;;
         --shell) console=1 ;;
         --usb) do_usb=1 ;;
+        --usb-update)
+                [ "$remaining" -gt 0 ] || die "--usb-update wants the directory a FAT stick is mounted at"
+                usb_dir=$1
+                shift
+                remaining=$((remaining - 1))
+                do_usb_update=1
+                ;;
+        --usb-update=*) usb_dir=${argument#--usb-update=}; do_usb_update=1 ;;
         --host)
                 [ "$remaining" -gt 0 ] || die "--host wants a machine to build on"
                 host=$1
@@ -408,6 +420,12 @@ if [ -n "${env_cmd:-}" ]; then
         env_command "$env_cmd"
         exit $?
 fi
+
+#       An option after --usb-update is a word forgotten, not a directory,
+#       and is refused before anything is built.
+case $do_usb_update:$usb_dir in
+1: | 1:-*) die "--usb-update wants the directory a FAT stick is mounted at" ;;
+esac
 
 #       The machine to build on is a word of ssh's and rsync's command lines,
 #       where one that begins with a dash is an option: -oProxyCommand=CMD
@@ -820,7 +838,7 @@ if [ "$do_build" -eq 1 ]; then
         fi
 fi
 
-[ "$do_usb" -eq 1 ] || [ "$do_run" -eq 1 ] || exit 0
+[ "$do_usb" -eq 1 ] || [ "$do_usb_update" -eq 1 ] || [ "$do_run" -eq 1 ] || exit 0
 
 #
 #       Where the image ended up. A remote build sets this from its own
@@ -838,6 +856,77 @@ fi
 
 [ -f "$image" ] ||
         die "no image at $image -- build one first, or drop --boot${target:+ (this is the $target image; --arch picks another)}"
+
+#
+#       An update onto a FAT stick already mounted, erasing nothing.
+#
+#       An installed machine takes a build from any FAT stick that carries the
+#       image at its root as moonwater/bootx64.efi (bootaa64.efi,
+#       bootriscv64.efi), without starting it: moonwater setup update usb. So
+#       the image goes there beside whatever the stick holds, under a name of
+#       its own until it is whole, with its SHA-256 beside it as shasum writes
+#       one, and the build it says is said: x86's from its setup header, the
+#       others' from the kernel's banner, as the machine reads them. On Linux
+#       build_usb_update in src/build/build.c does the same.
+#
+image_build() {
+        case "$1" in
+        *bootx64.efi)
+                at=$(od -An -tu2 -j526 -N2 "$1" | tr -d ' ')
+                [ -n "$at" ] && [ "$at" -gt 0 ] || return 1
+                dd if="$1" bs=1 skip=$((512 + at)) count=255 2>/dev/null | tr '\000' '\n' | head -1
+                ;;
+        *)
+                LC_ALL=C tr -c '[:print:]' '\n' < "$1" | grep -m1 '^Linux version .*) #[0-9]' |
+                        sed -E 's/^Linux version ([^ ]+) \(([^)]*)\) \(.*\) (#[0-9].*)$/\1 (\2) \3/'
+                ;;
+        esac
+}
+
+if [ "$do_usb_update" -eq 1 ]; then
+        name=$(basename "$image")
+        case "$name" in
+        bootx64.efi | bootaa64.efi | bootriscv64.efi) ;;
+        *) die "$image is not an image a machine takes from a stick: bootx64.efi, bootaa64.efi or bootriscv64.efi" ;;
+        esac
+        [ -d "$usb_dir" ] || die "$usb_dir is not a directory: mount the stick and name its mount point"
+        info=$(diskutil info "$usb_dir" 2>/dev/null) ||
+                die "$usb_dir is not where a disk is mounted: name the stick's mount point"
+        mounted=$(echo "$info" | awk -F': *' '/Mount Point:/ { print $2; exit }')
+        kind=$(echo "$info" | awk -F': *' '/File System Personality:/ { print $2; exit }')
+        [ "$mounted" = "$(cd "$usb_dir" && pwd -P)" ] ||
+                die "$usb_dir is not where a FAT stick is mounted: name its mount point"
+        case "$kind" in
+        *FAT*) ;;
+        *) die "$usb_dir is ${kind:-an unknown filesystem}, not FAT: format the stick FAT32 first" ;;
+        esac
+        build_id=$(image_build "$image")
+        [ -n "$build_id" ] || die "$image names no build, so no machine would take it"
+
+        target=$usb_dir/moonwater/$name
+        say "Writing $target"
+        mkdir -p "$usb_dir/moonwater" || die "could not make $usb_dir/moonwater"
+        rm -f "$target.new" "$target.sha256.new"
+        if ! cp "$image" "$target.new" || ! cmp -s "$image" "$target.new"; then
+                rm -f "$target.new"
+                die "could not copy $image whole to the stick"
+        fi
+        mv -f "$target.new" "$target" &&
+                (cd "$usb_dir/moonwater" && shasum -a 256 "$name" > "$name.sha256.new" &&
+                        mv -f "$name.sha256.new" "$name.sha256") ||
+                die "could not write $target.sha256"
+        sync
+
+        printf '\n  %s\n\n' "$build_id"
+        echo "is on the stick at $target, its SHA-256 beside it; nothing else on the"
+        echo "stick was changed. On the installed machine, with the stick in:"
+        echo
+        echo "  moonwater setup              names the build it carries beside the one running"
+        echo "  moonwater setup update usb   writes it over the install, keeping its data"
+        echo
+        echo "then reboot. moonwater setup rollback starts the build before it again."
+        exit 0
+fi
 
 #
 #       Writing to a USB stick.

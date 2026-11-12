@@ -6874,8 +6874,158 @@ static b32 build_usb(string_address image)
         string_format(log, "\n");
         string_format(log,
                       "Check the device name twice. This erases whatever it names.\n");
+        string_format(log, "\n");
+        string_format(log, "An installed machine takes the build from any FAT stick instead,\n"
+                           "without starting it: build --usb-update DIR copies it onto the\n"
+                           "stick mounted at DIR and erases nothing.\n");
         log_flush();
 
+        return 0;
+}
+
+/* Whether directory is where a FAT filesystem is mounted, its root and not a
+   directory inside one: what the machine looks at is the stick's root. */
+static bool build_fat_root(string_address directory)
+{
+        storage_mount_table table;
+        error_stat at;
+        error_stat mounted;
+        bool fat = false;
+
+        if (stat(directory, address_of at) < 0 || !storage_mount_table_load(address_of table, null))
+                return false;
+
+        for (positive one = 0; one < table.count; one++)
+                if ((string_equals(table.entry[one].type, "vfat") ||
+                     string_equals(table.entry[one].type, "msdos")) &&
+                    stat(table.entry[one].target, address_of mounted) >= 0 &&
+                    mounted.st_dev == at.st_dev && mounted.st_ino == at.st_ino)
+                        fat = true;
+
+        storage_mount_table_release(address_of table);
+        return fat;
+}
+
+/*
+        An update onto a stick that is a FAT stick already, erasing nothing.
+
+        An installed machine takes a build from a stick without starting it
+        (moonwater setup update usb), from any FAT stick that carries the
+        image at its root as moonwater/bootx64.efi (bootaa64.efi,
+        bootriscv64.efi: the name the build gives it). So the image is judged
+        the way the machine will judge it -- an EFI application for the
+        machine its name says, whole, naming its build -- and copied there,
+        beside whatever else the stick holds, under a name of its own first
+        and renamed once it is whole and synced, so a stick pulled part way
+        has the update it had or this one. Its SHA-256 goes beside it as
+        sha256sum writes one, which the machine holds the copy to, and the
+        build it is is said, read from the copy as the machine reads it.
+*/
+static b32 build_usb_update(string_address image, string_address directory)
+{
+        string_address name = build_name_of(image);
+        p16 machine = word_is(name, "bootx64.efi")       ? 0x8664
+                      : word_is(name, "bootaa64.efi")    ? 0xaa64
+                      : word_is(name, "bootriscv64.efi") ? 0x5064
+                                                         : 0;
+        p8 build[HOST_BUILD_ROOM];
+        p8 sum[32];
+        p8 line[160];
+        string_address folder;
+        string_address target;
+        string_address stage;
+        string_address summed;
+        string_address summed_stage;
+        p16 named;
+        positive length;
+        bipolar handle;
+        bipolar failed;
+        bool read;
+
+        if (!machine)
+                return build_die(build_join(image, " is not an image a machine takes from a stick: "
+                                                   "bootx64.efi, bootaa64.efi or bootriscv64.efi",
+                                            null));
+        if (host_image_shape(image, machine, address_of named))
+                return build_die(build_join(image, " is not an EFI application for the machine its "
+                                                   "name says",
+                                            null));
+        if (!host_image_whole(image))
+                return build_die(build_join(image, " ends before its own sections do", null));
+
+        if (!build_is_type(directory, S_IFDIR) || !build_fat_root(directory))
+                return build_die(build_join(directory, " is not where a FAT stick is mounted: mount "
+                                                       "the stick and name its mount point, or "
+                                                       "format it FAT32 first",
+                                            null));
+
+        folder = build_join(directory, "/moonwater", null);
+        target = build_join(folder, "/", name, null);
+        stage = build_join(target, ".new", null);
+        summed = build_join(target, HOST_DIGEST_SUFFIX, null);
+        summed_stage = build_join(summed, ".new", null);
+
+        build_say(build_join("Writing ", target, null));
+        system_make_directory_at(AT_FDCWD, folder, 0755);
+        unlink(stage);
+        unlink(summed_stage);
+        if (host_copy_file(image, stage) || !host_files_alike(image, stage, 0, 0))
+        {
+                unlink(stage);
+                return build_die(build_join("could not copy ", image, " whole to ", stage, null));
+        }
+
+        handle = system_open_at(AT_FDCWD, stage, FILE_READ | O_CLOEXEC);
+        read = handle >= 0 && (machine == 0x8664 ? host_setup_version(handle, build, sizeof(build))
+                                                 : host_banner_version(handle, build, sizeof(build)));
+        if (handle >= 0)
+                system_close(handle);
+        if (!read || !host_image_sum(stage, false, sum))
+        {
+                unlink(stage);
+                return build_die(build_join(image, " names no build, so no machine would take it",
+                                            null));
+        }
+        host_plain_line(build);
+
+        length = memory_into_hex(line, sum, sizeof(sum));
+        memory_copy(line + length, "  ", 2);
+        length += 2;
+        memory_copy(line + length, name, string_length(name));
+        length += string_length(name);
+        line[length++] = '\n';
+
+        failed = rename(stage, target);
+        if (!failed)
+        {
+                handle = system_open_at_mode(AT_FDCWD, summed_stage,
+                                             FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
+                failed = handle < 0 ? handle : storage_format_write(handle, line, length, 0);
+                if (handle >= 0)
+                {
+                        if (!failed)
+                                failed = system_call_1(syscall(fsync), (positive)handle);
+                        system_close(handle);
+                }
+        }
+        if (!failed)
+                failed = rename(summed_stage, summed);
+        if (failed)
+        {
+                unlink(stage);
+                unlink(summed_stage);
+                return build_die(build_join("could not write ", summed, null));
+        }
+        host_place_sync(directory);
+
+        string_format(log, "\n  %s\n\n", build);
+        string_format(log, "is on the stick at %s, its SHA-256 beside it; nothing else on the\n"
+                           "stick was changed. On the installed machine, with the stick in:\n\n",
+                      target);
+        string_format(log, "  moonwater setup              names the build it carries beside the one running\n");
+        string_format(log, "  moonwater setup update usb   writes it over the install, keeping its data\n\n");
+        string_format(log, "then reboot. moonwater setup rollback starts the build before it again.\n");
+        log_flush();
         return 0;
 }
 
@@ -7124,6 +7274,8 @@ static fn build_usage()
                       "    build --run --shell         boot with the console on this terminal\n"
                       "    build --boot                boot the last image, do not rebuild\n"
                       "    build --usb                 build, then write a USB stick\n"
+                      "    build --usb-update DIR      build, then copy the image onto the FAT\n"
+                      "                                stick mounted at DIR, erasing nothing\n"
                       "    build --clean               remove what a build produced\n"
                       "    build --host box            build on another machine over ssh\n"
                       "    build --arch arm64 --run    build and boot another architecture\n"
@@ -7343,6 +7495,7 @@ b32 main()
                 bool make = true;
                 bool clean = false;
                 bool usb = false;
+                string_address usb_update = null;
                 bool console = false;
                 string_address arch_asked = null;
                 string_address profile_arch = null;
@@ -7381,6 +7534,17 @@ b32 main()
                         }
                         else if (word_is(word, "--usb"))
                                 usb = true;
+                        else if (word_is(word, "--usb-update") ||
+                                 string_has_prefix(word, "--usb-update="))
+                        {
+                                usb_update = word[12] ? word + 13
+                                                      : (at + 1 < count ? arguments[++at]
+                                                                        : (string_address) "");
+                                //      An option after it is a word forgotten, not a directory.
+                                if (!*usb_update || *usb_update == '-')
+                                        return build_die("--usb-update wants the directory a "
+                                                         "FAT stick is mounted at");
+                        }
                         else if (word_is(word, "--host"))
                         {
                                 if (at + 1 >= count)
@@ -7468,7 +7632,7 @@ b32 main()
                                 return 1;
                 }
 
-                if (!usb && !run)
+                if (!usb && !usb_update && !run)
                         return 0;
 
                 /*
@@ -7513,6 +7677,8 @@ b32 main()
 
                 if (usb)
                         return build_usb(image);
+                if (usb_update)
+                        return build_usb_update(image, usb_update);
 
                 return build_boot(image, console, target ? target : (string_address)"x64", ram);
         }

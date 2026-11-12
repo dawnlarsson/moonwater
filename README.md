@@ -13,6 +13,7 @@ the whole system is meant to stay under 15 MB.
 ```sh
 sh build.sh --run                       default profiles, booted in a window
 sh build.sh arch/x64 debug_none serial  the profiles named
+sh build.sh --usb-update DIR            and copied onto the FAT stick mounted at DIR, for an update
 sh build.sh --help                      every option
 ```
 
