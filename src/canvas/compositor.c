@@ -4294,7 +4294,7 @@ struct compositor_poll
 #define COMPOSITOR_WAKE_FIRST_NS 500000000ull
 #define COMPOSITOR_WAKE_SECOND_NS 2000000000ull
 // A drag that ends this near the edge of the output fills it or half of it. (Double presses are the kit's click count, ui_click_again.)
-#define COMPOSITOR_TRAY TASKBAR_TRAY // taskbar_hit's answer for the tray
+#define COMPOSITOR_TRAY TASKBAR_TRAY // taskbar_hit_reach's answer for the tray
 
 // The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
 // a pixel short of a line one pixel wide still has it -- and the step a new window is put down and across
@@ -13207,7 +13207,7 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
         return edges;
 }
 
-// What of the bands is at a point (taskbar_hit's answer), with the listing of the band it is on in compositor.listed,
+// What of the bands is at a point (taskbar_hit_reach's answer), with the listing of the band it is on in compositor.listed,
 // which is what a tab's number names.
 static int compositor_band_hit(int x, int y)
 {
@@ -16585,9 +16585,9 @@ static int compositor_quick_row(void)
         return compositor_row_named("mixer-quick");
 }
 
-// The table holds the rectangle of the band's cell at a point (which is the hit taskbar_hit_reach names, anchored by anchor),
+// The table holds the rectangle of the band's cell at a point (which is the hit taskbar_hit_reach names, and taskbar_anchor anchors),
 // its edge and its screen, for the script to start the popup beside it. Nothing when no cell of that kind is there.
-static void compositor_button_rect(int x, int y, int which, int (*anchor)(const struct taskbar_view *, int *, int *, int *, int *))
+static void compositor_button_rect(int x, int y, int which)
 {
         struct windows *table = compositor.table;
         int reach = compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
@@ -16597,7 +16597,7 @@ static void compositor_button_rect(int x, int y, int which, int (*anchor)(const 
                 struct taskbar_view view = compositor_band_view();
                 int rect[4];
 
-                if (taskbar_hit_reach(&view, x, y, reach) != which || !anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+                if (taskbar_hit_reach(&view, x, y, reach) != which || !taskbar_anchor(&view, which, &rect[0], &rect[1], &rect[2], &rect[3]))
                         continue;
                 table->button_x = rect[0], table->button_y = rect[1];
                 table->button_w = (unsigned int)rect[2], table->button_h = (unsigned int)rect[3];
@@ -16611,7 +16611,7 @@ static void compositor_volume_open(int x, int y)
 {
         if (compositor_quick_row() >= 0)
                 return;
-        compositor_button_rect(x, y, TASKBAR_VOLUME, taskbar_volume_anchor);
+        compositor_button_rect(x, y, TASKBAR_VOLUME);
         compositor_script_say("volume_button");
 }
 
@@ -16620,7 +16620,7 @@ static void compositor_mic_open(int x, int y)
 {
         if (compositor_quick_row() >= 0)
                 return;
-        compositor_button_rect(x, y, TASKBAR_MIC, taskbar_mic_anchor);
+        compositor_button_rect(x, y, TASKBAR_MIC);
         compositor_script_say("mic_button");
 }
 
@@ -16664,7 +16664,7 @@ static void compositor_notices_open(int x, int y)
 {
         if (compositor_row_named("notices") >= 0)
                 return;
-        compositor_button_rect(x, y, TASKBAR_NOTICES, taskbar_notices_anchor);
+        compositor_button_rect(x, y, TASKBAR_NOTICES);
         compositor_script_say("notices_button");
 }
 
@@ -16896,7 +16896,7 @@ static void compositor_settings_open(void)
 */
 static void compositor_launcher_open(int x, int y)
 {
-        compositor_button_rect(x, y, TASKBAR_LAUNCHER, taskbar_anchor);
+        compositor_button_rect(x, y, TASKBAR_LAUNCHER);
         compositor.launcher_asked++;
         compositor_script_say("launcher_button");
 }

@@ -458,11 +458,6 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
         return which == -4 || which == -3 ? TASKBAR_TRAY : which;
 }
 
-static int taskbar_hit(const struct taskbar_view *view, int px, int py)
-{
-        return taskbar_hit_reach(view, px, py, 0);
-}
-
 /*
         A slot's stripe of the band: the slot's length along the edge and the band's whole thickness across it, on the output. It is
         what a change under the band reaches and what the glass is made over, and the rectangle a popup from the slot opens beside
@@ -470,7 +465,7 @@ static int taskbar_hit(const struct taskbar_view *view, int px, int py)
         top band's starts where it ends, and a side band's is beside it, its top at this top. Answers 0 when the band has no such
         slot now.
 */
-static int taskbar_cell_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
+static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
 {
         const struct ui_node address_to n = taskbar_node(view, which), address_to band = &taskbar_tree(view)->node[1];
 
@@ -503,7 +498,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
         {
                 int reach[4];
 
-                if (which == -4 || which == -3 || !taskbar_cell_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
+                if (which == -4 || which == -3 || !taskbar_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
                         continue;
                 reach[2] += reach[0] + COMPOSITOR_GLASS_REACH, reach[3] += reach[1] + COMPOSITOR_GLASS_REACH;
                 reach[0] -= COMPOSITOR_GLASS_REACH, reach[1] -= COMPOSITOR_GLASS_REACH;
@@ -977,20 +972,10 @@ static void taskbar_volume_cell(const struct taskbar_view *view, const struct ui
 
         if (taskbar.volume_flash)
         {
-                char text[8];
-                int at = 0;
+                char text[8] = "--";
 
-                if (taskbar.volume_percent >= 100)
-                        text[at++] = '1', text[at++] = '0', text[at++] = '0';
-                else
-                {
-                        if (taskbar.volume_percent >= 10)
-                                text[at++] = (char)('0' + taskbar.volume_percent / 10);
-                        text[at++] = (char)('0' + taskbar.volume_percent % 10);
-                }
-                text[at++] = '%', text[at] = 0;
-                if (taskbar.volume_muted)
-                        text[0] = '-', text[1] = '-', text[2] = 0;
+                if (!taskbar.volume_muted)
+                        taskbar_battery_text(text, 0, taskbar.volume_percent);
                 taskbar_say(view, t, n, text, ink, ground);
                 return;
         }
@@ -1049,7 +1034,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
         for (int which = TASKBAR_LAUNCHER; which < (int)view->count; which++)
-                if (which != -4 && which != -3 && (redo & taskbar_bit(which)) && taskbar_cell_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
+                if (which != -4 && which != -3 && (redo & taskbar_bit(which)) && taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
                 {
                         stripe[2] += stripe[0], stripe[3] += stripe[1];
                         compositor_union(span, stripe);
@@ -1309,29 +1294,4 @@ static void taskbar_padding_set(int pixels)
 static void taskbar_hide_set(int on)
 {
         taskbar.hide_fullscreen = on != 0;
-}
-
-static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{
-        return taskbar_cell_anchor(view, TASKBAR_VOLUME, x, y, width, height);
-}
-
-static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{
-        return taskbar_cell_anchor(view, TASKBAR_MIC, x, y, width, height);
-}
-
-static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{
-        return taskbar_cell_anchor(view, TASKBAR_NOTICES, x, y, width, height);
-}
-
-/*
-        Where a menu from the launcher button opens, as the rectangle it opens beside: the button's length along the edge
-        and the band's whole thickness across it, on the output. A bottom band's menu ends where this starts, a top band's
-        starts where it ends, and a side band's is beside it, its top at this top. Answers 0 when the band has no button.
-*/
-static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{
-        return taskbar_cell_anchor(view, TASKBAR_LAUNCHER, x, y, width, height);
 }

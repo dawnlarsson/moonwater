@@ -1250,7 +1250,6 @@ typedef int (*taskbar_glass_fn)(void *context, int x, int y, int width, int heig
 
 static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
-static int taskbar_hit(const struct taskbar_view *view, int px, int py);
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach);
 static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages);
 static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
@@ -1276,13 +1275,10 @@ static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *bef
 static int taskbar_sliding(positive now);
 static b64 taskbar_shift(void);
 static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
-static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
-static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_mic_set(int present, int muted);
-static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_notices_set(int present, unsigned int severity);
-static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 
 #else
 
@@ -1290,8 +1286,6 @@ static inline void taskbar_band(const struct taskbar_view *view, int *x, int *y,
 { (void)view; *x = *y = *width = *height = 0; }
 static inline int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
 { (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
-static inline int taskbar_hit(const struct taskbar_view *view, int px, int py)
-{ (void)view, (void)px, (void)py; return TASKBAR_HIT_NONE; }
 static inline int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 { (void)view, (void)px, (void)py, (void)reach; return TASKBAR_HIT_NONE; }
 static inline unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages)
@@ -1326,20 +1320,14 @@ static inline int taskbar_sliding(positive now) { (void)now; return 0; }
 static inline b64 taskbar_shift(void) { return 0; }
 static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
 { (void)view, (void)before, *x = *y = *width = *height = 0; }
-static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
+{ (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_volume_set(int present, int percent, int muted, int flash)
 { (void)present, (void)percent, (void)muted, (void)flash; return 0; }
-static inline int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_mic_set(int present, int muted)
 { (void)present, (void)muted; return 0; }
-static inline int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_notices_set(int present, unsigned int severity)
 { (void)present, (void)severity; return 0; }
-static inline int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif
 

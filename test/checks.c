@@ -126653,8 +126653,8 @@ static void check_taskbar_geometry(void)
         check("taskbar: the tray is inside the band; a row's tray is at its right end, a side band's sits 4 pixels above its bottom", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) &&
               tx >= x && ty >= y && tx + tw <= x + w && ty + th <= y + h &&
               (at < 2 ? x + w - (tx + tw) <= 8 : ty + th == y + h - 4));
-        check("taskbar: a point in the tray is the tray, a point off the band is none", taskbar_hit(&view, tx + tw / 2, ty + th / 2) == -2 &&
-              taskbar_hit(&view, 1280, 700) == TASKBAR_HIT_NONE);
+        check("taskbar: a point in the tray is the tray, a point off the band is none", taskbar_hit_reach(&view, tx + tw / 2, ty + th / 2, 0) == -2 &&
+              taskbar_hit_reach(&view, 1280, 700, 0) == TASKBAR_HIT_NONE);
         check("taskbar: with the battery none, no battery cell is drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
     }
 
@@ -126751,7 +126751,7 @@ static void check_rtl_chrome(void)
                 x = y = w = h = -1;
             (mode ? mirrored : left)[at][0] = x, (mode ? mirrored : left)[at][1] = y, (mode ? mirrored : left)[at][2] = w, (mode ? mirrored : left)[at][3] = h;
             if (mode && w > 0)
-                hit &= taskbar_hit(&view, x + w / 2, y + h / 2) == slots[at];
+                hit &= taskbar_hit_reach(&view, x + w / 2, y + h / 2, 0) == slots[at];
             taken += mode && w > 0;
         }
     }
@@ -126941,7 +126941,7 @@ static void check_taskbar_fullscreen(void)
         view = compositor_taskbar_view();
         fullscreen_band(rect);
         at_end &= taskbar_shift() == UI_ONE && fullscreen_off(rect);
-        takes_no_press &= taskbar_hit(&view, base[0] + base[2] / 2, base[1] + base[3] / 2) == TASKBAR_HIT_NONE;
+        takes_no_press &= taskbar_hit_reach(&view, base[0] + base[2] / 2, base[1] + base[3] / 2, 0) == TASKBAR_HIT_NONE;
 
         // Back: fullscreen is over, and the band slides to its place and is there.
         t2 = t1 + 2 * whole;
@@ -127077,8 +127077,8 @@ static void check_taskbar_launcher(void)
             length = vertical ? bh : bw;
             origin = vertical ? by : bx;
             launcher_oracle(position, scale, 3, lengths, length, origin, 0, &start, wide, &tray_at, &tray_length);
-            off_same &= !taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) && taskbar_hit(&view, bx + gap + 1, by + 1) != TASKBAR_LAUNCHER &&
-                        !taskbar_anchor(&view, &x, &y, &w, &h);
+            off_same &= !taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) && taskbar_hit_reach(&view, bx + gap + 1, by + 1, 0) != TASKBAR_LAUNCHER &&
+                        !taskbar_anchor(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h);
             for (int tab = 0, place = start; tab < 3; place += wide[tab] + gap, tab++)
             {
                 int got = taskbar_slot(&view, tab, &x, &y, &w, &h);
@@ -127113,14 +127113,14 @@ static void check_taskbar_launcher(void)
                           taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (vertical ? ty : tx) == tray_at;
 
             // Hit: the button, a tab, the tray, and the gap between the button and the first tab is none.
-            hits &= taskbar_hit(&view, x + w / 2, y + h / 2) == TASKBAR_LAUNCHER &&
-                    taskbar_hit(&view, vertical ? x + w / 2 : along[0] + span[0] / 2, vertical ? along[0] + span[0] / 2 : y + h / 2) == 0 &&
-                    taskbar_hit(&view, tx + tw / 2, ty + th / 2) == -2 &&
-                    taskbar_hit(&view, vertical ? x + w / 2 : x + w + gap / 2, vertical ? y + h + gap / 2 : y + h / 2) == TASKBAR_HIT_NONE &&
+            hits &= taskbar_hit_reach(&view, x + w / 2, y + h / 2, 0) == TASKBAR_LAUNCHER &&
+                    taskbar_hit_reach(&view, vertical ? x + w / 2 : along[0] + span[0] / 2, vertical ? along[0] + span[0] / 2 : y + h / 2, 0) == 0 &&
+                    taskbar_hit_reach(&view, tx + tw / 2, ty + th / 2, 0) == -2 &&
+                    taskbar_hit_reach(&view, vertical ? x + w / 2 : x + w + gap / 2, vertical ? y + h + gap / 2 : y + h / 2, 0) == TASKBAR_HIT_NONE &&
                     taskbar_hit_reach(&view, x + w / 2, y + h / 2, 4) == TASKBAR_LAUNCHER;
 
             // The anchor: the button along the edge, the band's whole thickness across it.
-            anchored &= taskbar_anchor(&view, &tx, &ty, &tw, &th) &&
+            anchored &= taskbar_anchor(&view, TASKBAR_LAUNCHER, &tx, &ty, &tw, &th) &&
                         (vertical ? tx == bx && tw == bw && ty == y && th == h : tx == x && tw == w && ty == by && th == bh);
 
             // Damage over the button redoes the button's slot and not the tray's, which is the other end of the band.
@@ -129410,7 +129410,7 @@ static void check_compositor_launcher(void)
         compositor_focus(1);
 
         view = compositor_band_view();
-        if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || !taskbar_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+        if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || !taskbar_anchor(&view, TASKBAR_LAUNCHER, &rect[0], &rect[1], &rect[2], &rect[3]))
         {
             check("launcher button press: the band has a button", false);
             return;
@@ -130246,7 +130246,7 @@ static void check_notices_dot(void)
         taskbar_mic_set(0, 0);
         view = compositor_taskbar_view();
         taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h);
-        check("notices: a press on the dot's centre is the dot", taskbar_hit(&view, x + w / 2, y + h / 2) == TASKBAR_NOTICES);
+        check("notices: a press on the dot's centre is the dot", taskbar_hit_reach(&view, x + w / 2, y + h / 2, 0) == TASKBAR_NOTICES);
         compositor_notices_open(x + w / 2, y + h / 2);
         check("notices: a press on the dot leaves its rectangle for the popup", table->button_x == x && (int)table->button_w == w && table->button_edge == TASKBAR_BOTTOM);
         table->button_w = 0;
@@ -130416,7 +130416,7 @@ static void check_compositor_volume(void)
         taskbar_slot(&view, -3, &bx, &by, &bw, &bh);
         check("volume: the tray is a cell longer, the cell at its start and the clock's after it", w == before + cw && cx == x && bx == cx + cw && cx + cw <= x + w);
         check("volume: a point in the cell is the volume, a point in the clock's is the tray",
-              taskbar_hit(&view, cx + cw / 2, cy + ch / 2) == TASKBAR_VOLUME && taskbar_hit(&view, bx + bw / 2, by + bh / 2) == -2);
+              taskbar_hit_reach(&view, cx + cw / 2, cy + ch / 2, 0) == TASKBAR_VOLUME && taskbar_hit_reach(&view, bx + bw / 2, by + bh / 2, 0) == -2);
         taskbar_settings_set("bottom", "primary", "battery BAT0\n");
         taskbar.battery_item = 1;
         view = compositor_taskbar_view();
@@ -130479,7 +130479,7 @@ static void check_compositor_volume(void)
 
                 view = compositor_taskbar_view();
                 taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
-                taskbar_volume_anchor(&view, &ax, &ay, &aw, &ah);
+                taskbar_anchor(&view, TASKBAR_VOLUME, &ax, &ay, &aw, &ah);
                 table->button_w = 0, table->button_h = 0;
                 compositor_volume_open(cx + cw / 2, cy + ch / 2);
                 check("volume: a press on the cell leaves its rectangle (along the cell, across the band), the edge and the screen for the popup",
@@ -130638,8 +130638,8 @@ static void check_compositor_volume(void)
                 taskbar_slot(&view, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
                 taskbar_slot(&view, -3, &bx, &by, &bw, &bh);
                 check("mic: the cell is at the start of the tray, the volume's after it and the clock's after that, the tray two cells longer than without them",
-                      mx == x && vx == mx + mw && bx == vx + vw && w == before + mw + vw && taskbar_hit(&view, mx + mw / 2, my + mh / 2) == TASKBAR_MIC &&
-                          taskbar_hit(&view, vx + vw / 2, vy + vh / 2) == TASKBAR_VOLUME);
+                      mx == x && vx == mx + mw && bx == vx + vw && w == before + mw + vw && taskbar_hit_reach(&view, mx + mw / 2, my + mh / 2, 0) == TASKBAR_MIC &&
+                          taskbar_hit_reach(&view, vx + vw / 2, vy + vh / 2, 0) == TASKBAR_VOLUME);
                 taskbar_settings_set("left", "primary", "battery none\n");
                 view = compositor_taskbar_view();
                 taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh);
@@ -130681,7 +130681,7 @@ static void check_compositor_volume(void)
                 mic_cell(1, 0, AUDIO_STATE_PLAYING);
                 view = compositor_taskbar_view();
                 taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh);
-                taskbar_mic_anchor(&view, &ax, &ay, &aw, &ah);
+                taskbar_anchor(&view, TASKBAR_MIC, &ax, &ay, &aw, &ah);
                 table->button_w = 0, table->button_h = 0;
                 compositor_mic_open(mx + mw / 2, my + mh / 2);
                 check("mic: a press on the cell leaves its rectangle, the edge and the screen for the popup",
