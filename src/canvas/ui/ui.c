@@ -14002,35 +14002,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 }
 
 /*
-        Tabs handed a pointer event: a press on a tab and its release are the tabs' (taken), a motion moves their hover, and what another
-        control holds the pointer for is left to it. The bits say what to do with it: the picture is due again, the event was the tabs',
-        a tab was chosen (c->at is it). x, y: where the pointer is, for a press, which carries no place of its own.
-*/
-#define UI_TABS_DRAW 1u
-#define UI_TABS_TAKEN 2u
-#define UI_TABS_CHOSEN 4u
-
-static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to c, const struct window_event address_to event, int x, int y)
-{
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, had = c->down;
-        int was = c->hover | c->down << 1;
-        p32 bits;
-
-        // Another control's hold takes the motions and the release (capture); a press is never held back by it, since the press
-        // lets a hold that lost its release go (ui_kit_pointer), so a stale hold does not stop the tabs answering.
-        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) ||
-            (ui_kit_held && ui_kit_held != c && !(event->type == WINDOW_EVENT_BUTTON && down)) ||
-            (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT))
-                return 0;
-        if (event->type == WINDOW_EVENT_MOTION)
-                x = event->a, y = event->b;
-        bits = ui_kit_pointer(ui, c, 1, (int)event->type, x, y, down, event->flags) ? UI_TABS_DRAW | UI_TABS_CHOSEN : 0;
-        bits |= was != (c->hover | c->down << 1) ? UI_TABS_DRAW : 0;
-        bits |= event->type == WINDOW_EVENT_BUTTON && (c->down || had) ? UI_TABS_TAKEN : 0;
-        return bits;
-}
-
-/*
         The scroll body: the one place a position moves under a finger, under a trackpad's momentum or under a wheel, and
         springs home past an end. The units are the caller's (device pixels, with the view and the content in the same
         ones), the positions are Q30. Every constant is fitted to a Mac's trackpad scroll, recorded as the scroll view's

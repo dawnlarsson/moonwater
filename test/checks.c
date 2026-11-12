@@ -162903,7 +162903,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 editor.ui = ui;
                 editor.width = 600, editor.height = 300, editor.own.stride = 600;
                 editor.count = 0;
-                // A control the kit holds from an earlier press takes the strip's events (ui_tabs_pointer): the tabs start with none held.
+                // A control the kit holds from an earlier press takes the strip's events (the view hands a held control's to it): the tabs start with none held.
                 ui_kit_held = null;
                 editor_open(null), editor_open(null), editor_open(null);
                 editor.tab = 0;
