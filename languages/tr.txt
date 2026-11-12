@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Kapat
 launcher_power_off_armed	a48f	kapat
 launcher_restart	ed8c	Yeniden başlat
 launcher_restart_armed	11ec	yeniden başlat
-launcher_run	e05a	Çalıştır  %s
+launcher_run	61b6	Çalıştır %s
 launcher_search_hint	334b	Program ara veya bir komut yaz
 menu_copy	43e0	&Kopyala
 menu_cut	5c17	K&es

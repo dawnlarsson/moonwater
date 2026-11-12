@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Stäng av
 launcher_power_off_armed	a48f	stäng av
 launcher_restart	ed8c	Starta om
 launcher_restart_armed	11ec	starta om
-launcher_run	e05a	Kör  %s
+launcher_run	61b6	Kör %s
 launcher_search_hint	334b	Sök program, eller skriv ett kommando
 menu_copy	43e0	Ko&piera
 menu_cut	5c17	&Klipp ut

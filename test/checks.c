@@ -164501,7 +164501,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 {
         const char address_to wanted = SETTINGS_LANGUAGE_CODES;
         positive missing_keys = 0, order = 0, absent = 0, bad_header = 0, bad_text = 0, bad_stamp = 0, bad_ids = 0, bad_keys = 0;
-        positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0, tab_words = 0;
+        positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0, tab_words = 0, doubled = 0;
         positive english_total, language_total, longest;
 
         // The registry's own texts are the keyed lines of English.
@@ -164603,6 +164603,9 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         bad_text += (said->text_length && said->text[said->text_length - 1] == ' ') !=
                                     (mine->text_length && mine->text[mine->text_length - 1] == ' ');
                         bad_text += (said->text_length && said->text[0] == ' ') != (mine->text_length && mine->text[0] == ' ');
+                        // Words are a blank apart: no text has two in a row, the English (looked at with the first file) or a translation.
+                        doubled += memory_search((address_any)mine->text, mine->text_length, (address_any) "  ", 2) != null;
+                        doubled += !l && memory_search((address_any)said->text, said->text_length, (address_any) "  ", 2) != null;
                         {
                                 b32 undrawn = !lcheck_drawn(face_regular, behind_regular, mine->text, mine->text_length) ||
                                               !lcheck_drawn(face_bold, behind_bold, mine->text, mine->text_length);
@@ -164655,6 +164658,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                               missing_keys, order, absent, bad_header, bad_text, bad_stamp, bad_ids, bad_keys, bad_specs, bad_menus, bad_glyphs);
         check("languages: every group, label and choice word of the registry has its keyed line in English", !missing_keys);
         check("languages: the words the tabs of the theme and the motion show are single words in every language", !tab_words);
+        check("languages: no text of English or of a translation has two blanks in a row", !doubled);
         check("languages: the Language row offers the table of names' codes in its order, and each is a file", !order && !absent);
         check("languages: each file's header says its code, its own name, what made it, machine or reviewed, and @direction rtl if it reads from the right",
               !bad_header);
@@ -165202,8 +165206,8 @@ static fn launcher_words_check(void)
               !string_compare_max((string_address)label, (string_address) "Settings", 9) && !string_compare_max((string_address)note, (string_address) "desktop", 8));
         string_copy_bounded((string_address)launcher.text, (string_address) "ls -l", sizeof(launcher.text));
         launcher_label(&command, label, sizeof(label), &note);
-        check("launcher words: the command row is Run, two blanks and the text, from the shell",
-              !string_compare_max((string_address)label, (string_address) "Run  ls -l", 11) && !string_compare_max((string_address)note, (string_address) "shell", 6));
+        check("launcher words: the command row is Run, one blank and the text, from the shell",
+              !string_compare_max((string_address)label, (string_address) "Run ls -l", 10) && !string_compare_max((string_address)note, (string_address) "shell", 6));
         check("launcher words: sett names Settings and zzz names nothing",
               launcher_program_rank("sett", 4, &launcher_programs[0]) == 2 && !launcher_program_rank("zzz", 3, &launcher_programs[0]));
         language_take('d' | 'e' << 8);
@@ -165211,7 +165215,7 @@ static fn launcher_words_check(void)
         check("launcher words: in German the program and where it is from say so",
               !string_compare_max((string_address)label, (string_address) "Einstellungen", 14) && !string_compare_max((string_address)note, (string_address) "Desktop", 8));
         launcher_label(&command, label, sizeof(label), &note);
-        check("launcher words: and the command row says Ausf\xc3\xbchren", !string_compare_max((string_address)label, (string_address) "Ausf\xc3\xbchren  ls -l", 20));
+        check("launcher words: and the command row says Ausf\xc3\xbchren, one blank and the text", !string_compare_max((string_address)label, (string_address) "Ausf\xc3\xbchren ls -l", 19));
         check("launcher words: einst names Settings in German, and the English settings still does",
               launcher_program_rank("einst", 5, &launcher_programs[0]) == 2 && launcher_program_rank("settings", 8, &launcher_programs[0]) == 3 &&
                   launcher_program_rank("ajustes", 7, &launcher_programs[0]) == 0);

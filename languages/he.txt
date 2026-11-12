@@ -40,7 +40,7 @@ launcher_power_off	ae2f	כיבוי
 launcher_power_off_armed	a48f	כיבוי
 launcher_restart	ed8c	הפעלה מחדש
 launcher_restart_armed	11ec	הפעלה מחדש
-launcher_run	e05a	הרץ  %s
+launcher_run	61b6	הרץ %s
 launcher_search_hint	334b	חפש תוכנית או הקלד פקודה
 menu_copy	43e0	העתק
 menu_cut	5c17	גזור

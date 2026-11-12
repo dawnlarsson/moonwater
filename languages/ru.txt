@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Выключить
 launcher_power_off_armed	a48f	выключить
 launcher_restart	ed8c	Перезагрузить
 launcher_restart_armed	11ec	перезагрузить
-launcher_run	e05a	Выполнить  %s
+launcher_run	61b6	Выполнить %s
 launcher_search_hint	334b	Поиск программ или ввод команды
 menu_copy	43e0	Копировать
 menu_cut	5c17	Вырезать

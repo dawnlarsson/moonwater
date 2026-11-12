@@ -40,7 +40,7 @@ launcher_power_off	ae2f	خاموش کردن
 launcher_power_off_armed	a48f	خاموش کردن
 launcher_restart	ed8c	راه‌اندازی مجدد
 launcher_restart_armed	11ec	راه‌اندازی مجدد
-launcher_run	e05a	اجرا  %s
+launcher_run	61b6	اجرا %s
 launcher_search_hint	334b	جستجوی برنامه یا تایپ یک فرمان
 menu_copy	43e0	کپی
 menu_cut	5c17	برش

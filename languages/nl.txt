@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Uitschakelen
 launcher_power_off_armed	a48f	uitschakelen
 launcher_restart	ed8c	Opnieuw opstarten
 launcher_restart_armed	11ec	opnieuw opstarten
-launcher_run	e05a	Uitvoeren  %s
+launcher_run	61b6	Uitvoeren %s
 launcher_search_hint	334b	Zoek programma's, of typ een opdracht
 menu_copy	43e0	Ko&piëren
 menu_cut	5c17	&Knippen

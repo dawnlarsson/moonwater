@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Power off
 launcher_power_off_armed	a48f	power off
 launcher_restart	ed8c	Restart
 launcher_restart_armed	11ec	restart
-launcher_run	e05a	Run  %s
+launcher_run	61b6	Run %s
 launcher_search_hint	334b	Search programs, or type a command
 menu_copy	43e0	&Copy
 menu_cut	5c17	Cu&t

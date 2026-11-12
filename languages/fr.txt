@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Éteindre
 launcher_power_off_armed	a48f	éteindre
 launcher_restart	ed8c	Redémarrer
 launcher_restart_armed	11ec	redémarrer
-launcher_run	e05a	Exécuter  %s
+launcher_run	61b6	Exécuter %s
 launcher_search_hint	334b	Chercher un programme, ou saisir une commande
 menu_copy	43e0	&Copier
 menu_cut	5c17	Co&uper

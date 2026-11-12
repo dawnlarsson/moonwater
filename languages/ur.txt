@@ -40,7 +40,7 @@ launcher_power_off	ae2f	بند کریں
 launcher_power_off_armed	a48f	بند کریں
 launcher_restart	ed8c	دوبارہ شروع کریں
 launcher_restart_armed	11ec	دوبارہ شروع کریں
-launcher_run	e05a	چلائیں  %s
+launcher_run	61b6	چلائیں %s
 launcher_search_hint	334b	پروگرام تلاش کریں یا کمانڈ لکھیں
 menu_copy	43e0	کاپی
 menu_cut	5c17	کٹ

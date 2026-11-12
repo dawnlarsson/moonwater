@@ -39,7 +39,7 @@ launcher_power_off	ae2f	Wyłącz
 launcher_power_off_armed	a48f	wyłącz
 launcher_restart	ed8c	Uruchom ponownie
 launcher_restart_armed	11ec	uruchom ponownie
-launcher_run	e05a	Uruchom  %s
+launcher_run	61b6	Uruchom %s
 launcher_search_hint	334b	Szukaj programów lub wpisz polecenie
 menu_copy	43e0	&Kopiuj
 menu_cut	5c17	&Wytnij
