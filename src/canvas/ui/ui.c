@@ -14645,10 +14645,16 @@ static long ui_body_given(struct ui_body address_to b, b64 at)
         device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
         of (ui_scroll_release), a wheel's notch is a target the body follows (ui_wheel_turn), a jump is a body set, a reveal is a notch,
         and the bar's thumb is the body's place, drawn where the body is, past an end too.
+
+        A region that runs across (s->across: a row that scrolls sideways, the mixer's strips) is the same region turned over: its
+        position is how far it is from its start edge, its track lies along its foot for what it shows (s->view), a thumb at the start
+        edge is at the right in a window that reads from the right, and the wheel turns it along the screen (ui_wheel_turn). Its bar
+        is drawn (ui_scroll_draw) and takes no pointer: ui_scroll_pointer and ui_scroll_reach are a bar's that runs down, and the
+        stretch of a pull (ui_scroll_pull) is a picture's that is pulled down or up.
 */
 struct ui_scroll
 {
-        int x, y, height;            // the track: its left, its top and its height
+        int x, y, height;            // the track: its left, its top and its height (across: the region's own left, top and height)
         int content, view, scroll;   // what scrolls, what shows of it, and where the body is drawn (whole device pixels)
         b32 hover, held;
         int grab;                    // where in the thumb the hand took it
@@ -14665,19 +14671,21 @@ struct ui_scroll
         int stream_count;            // the notches of this stream's gesture (a longer gap than UI_STREAM_GESTURE_NS begins another)
         b64 stream_skew;             // the least the kit's time has been after a notch's stamp in this gesture: the stamp's own clock, in the kit's
         b64 lone_at, lone_stamp, lone_q; // the last stepped notch: when it was read (the kit's clock), its device's stamp, and what it moved (units, Q30); lone_at 0 for none
+        b32 across;                  // the region runs across, not down
 };
 
 /*
         The track's top and height (device pixels): the region's, from its top to its end, except that it starts below its
-        inset: a window's close button is there, so a window's bar reaches the window's bottom and no higher than that.
+        inset: a window's close button is there, so a window's bar reaches the window's bottom and no higher than that. Across,
+        they are where the track starts along the region's foot and how long it is: the region's left, and what it shows.
 */
 #define UI_SCROLL_INSET 1
 static void ui_scroll_track(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to height)
 {
         int inset = s->inset * ui->scale / 100, bottom = s->y + s->height;
 
-        *top = s->y > inset ? s->y : inset;
-        *height = bottom > *top ? bottom - *top : 0;
+        *top = s->across ? s->x : s->y > inset ? s->y : inset;
+        *height = s->across ? (s->view > 0 ? s->view : 0) : bottom > *top ? bottom - *top : 0;
 }
 
 // The thumb's top and length (device pixels); false when everything shows and there is no bar. The thumb is where the body is drawn,
@@ -14712,16 +14720,21 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
         return !ui_tween_still(&s->ink) || !ui_tween_still(&s->grow);
 }
 
-// The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
+// The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth. A track
+// that lies along a region's foot has the same box turned over, from the start edge (the right one, reading from the right).
 static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
 {
         int border = UI_SCROLL_BORDER * ui->scale / 100, width = UI_SCROLL_WIDTH * ui->scale / 100;
-        b64 centre = (b64)(s->x + width / 2) * 256, half = (b64)(width / 2 - border) * 256;
+        b64 centre = (b64)((s->across ? s->y + s->height - width : s->x) + width / 2) * 256, half = (b64)(width / 2 - border) * 256;
         b64 r = ui_qmul(half, ui_kit_tween(&s->grow));
 
+        if (s->across)
+                top = ui_mirror(top, length, s->x, s->view);
         thumb->x0 = (b32)(centre - r), thumb->x1 = (b32)(centre + r);
         thumb->y0 = (b32)((top + border) * 256), thumb->y1 = (b32)((top + length - border) * 256);
         thumb->rx = thumb->ry = (b32)r;
+        if (s->across)
+                *thumb = (struct ui_box){thumb->y0, thumb->x0, thumb->y1, thumb->x1, (b32)r, (b32)r};
 }
 
 // The track's rows are drawn again next frame, as a moving control's are.
@@ -14731,6 +14744,8 @@ static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll a
 
         ui_scroll_track(ui, s, &top, &height);
         bottom = top + height;
+        if (s->across)
+                bottom = s->y + s->height, top = bottom - UI_SCROLL_WIDTH * ui->scale / 100;
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
                 ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
         else
@@ -15087,7 +15102,9 @@ static void ui_wheel_stream(struct ui_scroll address_to s, b64 q, b64 stamp, b64
 /*
         The one conversion of a window's wheel event into a body's motion, for every region the wheel turns (lists, pages, the gallery,
         the terminal's bar): the compositor, the touch recogniser and a Wayland client send the event and nothing converts it again.
-        A horizontal notch (event->b) turns nothing. A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
+        A horizontal notch (event->b) turns nothing but a region that runs across, which every turn handed to it turns along the
+        screen: a sideways turn's amount is positive to the right, an upright one's positive up goes to the left, and the far end is
+        at the left in a window that reads from the right. A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
         the notch's turn is its 120ths of a notch: a stepped notch is ui_wheel_notch at the scale, a precise turn (WINDOW_WHEEL_PRECISE, a
         trackpad's or a stream's) is its share of UI_NOTCH, and a notch moves the body's target, which the position follows
         (ui_body_notch), while a precise turn is the hand, one for one (ui_body_track). The sign: a notch down moves the position toward
@@ -15096,9 +15113,9 @@ static void ui_wheel_stream(struct ui_scroll address_to s, b64 q, b64 stamp, b64
 */
 static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
 {
-        b64 now = ui_kit_time(), per = ui_wheel_notch(ui, s, event->flags), q;
+        b64 now = ui_kit_time(), per = ui_wheel_notch(ui, s, event->flags), turn = s->across ? (event->b ? -event->a : event->a) * ui_dir() : event->a, q;
 
-        if (event->b)
+        if (event->b && !s->across)
                 return false;
         if (event->flags & WINDOW_WHEEL_STOP)
         {
@@ -15109,7 +15126,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         }
         if (!event->a)
                 return false;
-        q = ui_body_sign(-(b64)event->a * per * UI_ONE / 120);
+        q = ui_body_sign(-turn * per * UI_ONE / 120);
         ui_scroll_extent(s);
         // A notch (a mouse's detent, a stream's) moves a region that scrolls: one whose content fits has nowhere to go, in either direction.
         if ((!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM)) && !ui_body_far(&s->body))
@@ -17728,15 +17745,18 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
 /*
         Strips: the columns of a mixer, one for each thing that plays and the device first. A strip is a disc (a speaker for the
         device, the first letter of a program for a program, a dot on it while it plays), its name, its volume as a number, a
-        level meter and a vertical slider side by side, and a mute button under them. They are laid out from the start edge,
-        UI_STRIP_W each (the device's set off from the rest by UI_STRIP_GAP), and scroll along when they do not fit: the wheel
-        over the empty ground, the wheel turned sideways, a drag of the ground, and the keys, which move the focus and scroll to
-        it. An app says only what each strip is and acts on what the kit reports:
+        level meter and a vertical slider side by side, and a mute button under them. Where each of these is comes from the
+        kit's layout and nowhere else (ui_strips_place: a tree, its root a row that scrolls and a column a strip, UI_STRIP_W each,
+        the device's set off from the rest by UI_STRIP_GAP), and what the pointer is over is the element it is in. They scroll
+        along when they do not fit, as every region of the kit's scrolls (struct ui_scroll, running across): the wheel over the
+        empty ground, the wheel turned sideways, a drag of the ground, and the keys, which move the focus and scroll to it. An
+        app says only what each strip is and acts on what the kit reports:
 
             ui_strips_begin   a new listing is coming; ui_strips_add, one call for each strip in order; ui_strips_end
             ui_strips_event   a key or a pointer event: the UI_STRIPS_ bits of what the strips made of it; the strip that
                               changed is s->changed, with its new percent and mute in s->item[]
             ui_strips_draw    the strips, in the rectangle given to ui_strips_place
+            ui_strips_wide    how wide a number of strips come to: a window as wide as its strips asks
 
         The keys, with the window's: Left and Right (the way the window reads) and Tab pick a strip, Up and Down change its
         volume by one, Page Up and Page Down by ten, Home sets 100 and End sets 0, M and Space and Enter mute and unmute it.
