@@ -338,7 +338,7 @@ static p8 link_key_parse(string_address text, p8 address_to key)
 static const string_address link_words[] = {
     "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
     "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
-    "run",  "help",  "transport", "modem",
+    "run",  "help",  "transport", "modem", "cancel", "doctor",
 };
 
 #define LINK_NAME_CHARACTERS                                                  \
