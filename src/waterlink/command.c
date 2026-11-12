@@ -2218,6 +2218,7 @@ static p8 link_code_shaped(string_address word)
 static b32 link_dispatch(string_address address_to arguments, positive count)
 {
         string_address verb = count > 2 ? arguments[2] : null;
+        p8 folded[WATERLINK_NAME_MAX];
         positive kind;
         positive shape = verb ? string_table_find(verb, link_shapes,
                                                   sizeof link_shapes[0],
@@ -2347,13 +2348,12 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         //      command on it, or, if it is not known and the word after it
         //      is a code, the pairing that makes it known. A name that is
         //      neither is told how to become one.
-        {
-                p8 folded[WATERLINK_NAME_MAX];
-
-                link_fold_name(verb, folded);
-                if (!link_known(verb) && link_known((string_address)folded))
-                        verb = (string_address)folded;
-        }
+        //      (folded is the function's, not a block's: verb may be left
+        //      pointing at it, and a block's array is gone at its brace,
+        //      where link BOX-A CODE read whatever took its place.)
+        link_fold_name(verb, folded);
+        if (!link_known(verb) && link_known((string_address)folded))
+                verb = (string_address)folded;
         //      A code after a name pairs, linked or not: a code is never a
         //      command, and the Settings pairing field sends NAME CODE for any
         //      name, so a linked name would otherwise run the code as a command.
