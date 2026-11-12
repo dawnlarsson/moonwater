@@ -4167,7 +4167,7 @@ struct compositor_touch
 {
         struct ui_touch gesture; // what the fingers mean (ui/ui.c)
         int device;              // the touch screen the gesture is on
-        int hidden;              // a finger was the last thing used, so the pointer is not shown under it
+        int hidden;              // a finger was the last thing used: the pointer under it is the dynamic one, whatever the style says
         int closing;             // the window whose close button the finger went down on, which a tap closes
         int resumed;             // the press is being made again without the close button (compositor_touch_resume)
         int hold_row;            // the window a long press landed on, which its lift is told, or COMPOSITOR_NONE
@@ -18376,7 +18376,7 @@ static int compositor_report(positive now, positive stamp)
                 moved = 1;
         }
 
-        // A mouse, a pad or a tablet moved: the pointer a finger hid is shown again where it is (compositor_motion).
+        // A mouse, a pad or a tablet moved: the pointer is the style's own again where it is (compositor_motion).
         if (moved)
                 compositor.touch.hidden = 0;
         return moved;
