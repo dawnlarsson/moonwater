@@ -736,6 +736,8 @@ static struct
         struct ui_popup popup;
         char status[SETTINGS_STATUS];
         int width, height;
+        int least_w, least_h;      // the window's least size, device pixels (settings_least), and what it was worked out for
+        unsigned int least_key;
         unsigned int ground;
         b32 focused;
 
@@ -1865,6 +1867,46 @@ static void settings_map_draw(struct ui address_to ui)
 }
 
 static fn settings_describe(int id, struct ui_row address_to row);
+static fn settings_size(unsigned int width, unsigned int height);
+
+/*
+        The window's least size (device pixels), and the table told it in logical pixels, which the compositor holds a resize to. Its
+        width is the page's least (ui_page_least): the title's band whole, the column of groups at its least, and the list as wide as
+        the widest of every row of every group needs, as the machine has said them (a switch, tabs, a slider beside a label of a few
+        words), whether the window shows the rows or a card. Its height is what the Display group needs to show a row: the title's band, the map of the screens with its caption
+        on two lines, and a row. Worked out again only when what it depends on changed: the scale, the text's size, the way the
+        window reads, the language and the rows' readings (the list's revision). Answers 2 when it was worked out again, 1 when the
+        one kept holds, and 0 when there is none: the gallery has none of its own, and there is none before the page's frame is or
+        with no face to measure the rows in.
+*/
+static int settings_least(void)
+{
+        struct ui address_to ui = &settings.ui;
+        unsigned int key = 2166136261u;
+        const char address_to shown;
+        b32 column;
+
+        if (gallery.on || !ui->regular || !settings.list.ids || !settings.page.view || ui->scale <= 0)
+                return 0;
+        key = (key ^ (unsigned int)ui->scale) * 16777619u, key = (key ^ ui_text_percent) * 16777619u, key = (key ^ (unsigned int)ui_rtl()) * 16777619u;
+        key = (key ^ language.code) * 16777619u, key = (key ^ settings.list.revision) * 16777619u;
+        if (key == settings.least_key && settings.least_w > 0)
+                return 1;
+        settings.least_key = key;
+        // The rows with the column beside them and the title they have, whichever the window shows now: a card, which has no column, needs
+        // less, and its title is cut to its band.
+        column = settings.page.column_on, shown = settings.page.title;
+        settings.page.column_on = true, settings.page.title = language_of("Settings");
+        settings.least_w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
+        settings.page.column_on = column, settings.page.title = shown;
+        settings.least_h = ui_px(ui, UI_PAGE_TOP + SETTINGS_MAP_PANEL + 2 * UI_GAP2 + 2 * ui_types[UI_LABEL_MEDIUM].line) + ui_dev(ui, UI_ROW);
+        if (settings.own.table && settings.own.row < WINDOWS)
+        {
+                settings.own.table->least_width[settings.own.row] = (unsigned int)((settings.least_w * 100 + ui->scale - 1) / ui->scale);
+                settings.own.table->least_height[settings.own.row] = (unsigned int)((settings.least_h * 100 + ui->scale - 1) / ui->scale);
+        }
+        return 2;
+}
 
 // The page laid out for the window's size: the kit's frame, its column and the list in the body, the map above the list while it is shown.
 static fn settings_layout(void)
@@ -1895,6 +1937,9 @@ static fn settings_layout(void)
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         settings.page.view = &settings_large->view;
         settings.page.above = settings_map_above;
+        // The least as it is now: the frame gives the rows what they need before the column has its share (a window narrower than the least
+        // is drawn at it by the next picture, settings_frame).
+        settings_least();
         ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, &settings.card, ui_lines_height(ui, settings.card_text.count));
 }
 
@@ -5440,6 +5485,13 @@ static fn settings_fold_step(void)
 static b32 settings_frame(void)
 {
         settings_fold_step();
+        // A reading since the last picture may have made a row want more room (a switch, tabs, a slider read), and the text may be larger:
+        // the least is worked out again where it is due, and a window narrower or shorter than it is drawn at it.
+        if (settings.own.table && settings.width > 0 && settings_least() &&
+            ((settings.width < settings.least_w && settings.width < (int)settings.own.table->output_width &&
+              (!settings.own.table->stride || settings.width < (int)settings.own.table->stride)) ||
+             (settings.height < settings.least_h && settings.height < (int)settings.own.table->output_height)))
+                settings_size((unsigned int)settings.width, (unsigned int)settings.height);
         if (!ui_buffers_present(&settings.page.buffers, &settings.own, settings.width, settings.height, settings_draw_rows, null))
                 return false;
         settings.page.dirty = false;
@@ -5448,12 +5500,19 @@ static b32 settings_frame(void)
 
 /* ---- the program ---- */
 
-// The size the window is drawn at: its own, or what the compositor asked, never past the output.
+// The size the window is drawn at: its own, or what the compositor asked, never under its least (settings_least) and never past the output
+// or its buffer's rows, which win where the two meet.
 static fn settings_size(unsigned int width, unsigned int height)
 {
         struct windows address_to table = settings.own.table;
+        unsigned int most = table->stride && table->stride < table->output_width ? table->stride : table->output_width;
 
-        settings.width = (int)(width > table->output_width ? table->output_width : width);
+        if (settings_least())
+        {
+                width = width < (unsigned int)settings.least_w ? (unsigned int)settings.least_w : width;
+                height = height < (unsigned int)settings.least_h ? (unsigned int)settings.least_h : height;
+        }
+        settings.width = (int)(width > most ? most : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
         ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
         if (settings.page.card)

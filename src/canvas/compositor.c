@@ -13357,20 +13357,41 @@ static void compositor_place(int row, int x, int y)
 }
 
 /*
+        The least a window is made, device pixels, across (down 0) or down (down 1): the desktop's least for any window, or the
+        window's own where its program says one in the table (least_width, least_height: logical pixels at the scale the window
+        is drawn at, read as at most WINDOW_LEAST_MOST so what a program writes there multiplies safely), whichever is more. The
+        hand's edge, a divider, a tile and a snap all ask for a size through compositor_want, which holds it to this: a tile
+        narrower than a window's least is the window at its least, held by the tile's edges that are its screen's.
+*/
+static int compositor_least(int row, int down)
+{
+        b32 named = row >= 0 && row < WINDOWS;
+        unsigned int own = named ? (down ? compositor.table->least_height[row] : compositor.table->least_width[row]) : 0;
+        unsigned int scale = named ? compositor.table->window_scale[row] : 0;
+        int least = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100, asked;
+
+        scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
+        own = own > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own;
+        asked = (int)(own * scale / 100);
+        return asked > least ? asked : least;
+}
+
+/*
         The size a window is asked to be, in the table, and a knock. It draws
         whatever size it will and says so with its next picture; the edges the
         hand does not hold stay where they were, whatever comes back.
 */
 static void compositor_want(int row, int width, int height)
 {
-        int x = compositor.x[row], y = compositor.y[row];
+        int x = compositor.x[row], y = compositor.y[row], least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
 
         // The least first and the most last: at a scale whose least window is past the largest screen (96 pixels at 800
         // percent is 768), the least won and a window was made wider than its buffer's rows, which compositor_stretch
-        // then filled into the rows after them -- the next window's pixels, and for the last row past the table.
-        width = width < WINDOW_MIN_WIDTH * compositor.scale / 100 ? WINDOW_MIN_WIDTH * compositor.scale / 100 : width;
+        // then filled into the rows after them -- the next window's pixels, and for the last row past the table. The least is
+        // the window's own where it says one (compositor_least).
+        width = width < least_w ? least_w : width;
         width = width > compositor_most_width() ? compositor_most_width() : width;
-        height = height < WINDOW_MIN_HEIGHT * compositor.scale / 100 ? WINDOW_MIN_HEIGHT * compositor.scale / 100 : height;
+        height = height < least_h ? least_h : height;
         height = height > compositor_most_height() ? compositor_most_height() : height;
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
@@ -13693,14 +13714,13 @@ static void compositor_shared_move(void)
 {
         int vertical = compositor.shared_vertical, travel = vertical ? compositor.pointer_x - compositor.press_x
                                                                          : compositor.pointer_y - compositor.press_y;
-        int least = (vertical ? WINDOW_MIN_WIDTH : WINDOW_MIN_HEIGHT) * compositor.scale / 100;
         int low = -2147483647, high = 2147483647;
         unsigned int all = compositor.shared_lo_set | compositor.shared_hi_set;
         struct compositor_divider d;
 
         for (int each = 0; each < WINDOWS; each++)
         {
-                int size = compositor.shared_sizes[each];
+                int size = compositor.shared_sizes[each], least = compositor_least(each, !vertical);
                 int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
 
                 if (!(all >> each & 1))
@@ -14482,7 +14502,7 @@ static void compositor_float_for_drag(int row)
         int least_w, least_h;
 
         compositor_osk_unpan(row);
-        least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+        least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
         int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
         int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
         int in_x = compositor.press_x - compositor.x[row], in_y = compositor.press_y - compositor.y[row];
@@ -14895,7 +14915,7 @@ static void compositor_remember(int row)
 static int compositor_recall(int row, const int (*screens)[4], unsigned int count)
 {
         char names[WINDOW_PLACE_SCREENS][WINDOWS_NAME];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100, found, x, y;
+        int least_w = compositor_least(row, 0), least_h = compositor_least(row, 1), found, x, y;
         unsigned int on, width, height;
         struct places places;
 
@@ -14932,7 +14952,7 @@ static int compositor_recall(int row, const int (*screens)[4], unsigned int coun
 static void compositor_first_put(int row, int x, int y)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+        int least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
         unsigned int count = place_screens(screens), on, how, fills;
         struct window_place place;
 
@@ -14984,7 +15004,7 @@ static void compositor_first_put(int row, int x, int y)
 static void compositor_move(int row)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+        int least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
         unsigned int count = place_screens(screens), from, on, fills;
         char name[WINDOWS_NAME];
         struct window_place place;
@@ -15656,7 +15676,7 @@ static void compositor_osk_pan(int row, int keyboard)
                 return;
         if (compositor.arranged[row] != COMPOSITOR_FLOATING)
         {
-                int above = compositor.y[keyboard] - compositor.y[row], least = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+                int above = compositor.y[keyboard] - compositor.y[row], least = compositor_least(row, 1);
 
                 if (above < least || above >= (int)compositor.h[row])
                         return;

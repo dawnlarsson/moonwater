@@ -18654,6 +18654,7 @@ struct ui_list
         b32 keys;                          // and ringed: the keys are in it and the window has them
         int focus;                         // the row the keys are on, -1 none
         b32 wrap;                          // a row's words that do not fit the room it gives them wrap, and the row is as tall as they are (else they are cut with dots)
+        unsigned int revision;             // counted up when a row's words changed (ui_list_row_changed): what a least worked out of them is kept against
         // The kit's.
         int top[UI_LIST_MOST];             // each place's top, from the list's
         int tall[UI_LIST_MOST];            // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
@@ -18806,6 +18807,7 @@ static fn ui_list_row_changed(struct ui address_to ui, struct ui_list address_to
         int at = ui_list_at(l, id);
         struct ui_row row;
 
+        l->revision++;
         if (at >= 0 && l->wrap && ui->regular)
         {
                 ui_list_describe(l, id, &row);
@@ -19100,7 +19102,8 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_li
         layout's height for width, ui_row_measure), a row's for one line and a line more for each more. The label keeps a few words'
         width at the least (ui_row_label_least, or its own where that is less) and a zone keeps its own least (a field's, or a value's
         marks and a little of the value); what gives way past that is what gave way before (a slider's number, then its control), at a
-        width narrower than the rows need. A note whose longest word does not fit its room is dropped
+        width narrower than the rows need, which a page's window is not made (ui_row_least, ui_list_least, ui_page_least). A note
+        whose longest word does not fit its room is dropped
         whole, as it was. A tall row's line is a row and is cut, as every row of a list whose words do not wrap is.
 */
 static struct ui_row_parts
@@ -19116,7 +19119,7 @@ static struct ui_row_parts
         struct ui address_to ui;
         const char address_to note_shown;
         struct ui_node address_to zone;
-        int label_one;
+        int label_one, zone_least;         // and the zone's own least (ui_row_least)
 } ui_row_parts;
 
 #define UI_ROW_LABEL_LEAST 120 // a label's least width in a list whose words wrap, logical pixels (more with the text past 100 percent): a few words a line
@@ -19312,6 +19315,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 // Where words wrap, the zone keeps its own least too: the label gives way first, down to a few words.
                 if (wraps && own > zone->size[0].min)
                         zone->size[0].min = own;
+                p->zone_least = own;
                 ui_tree_close(t);
         }
         if (row->expander)
@@ -19400,6 +19404,63 @@ static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, in
 {
         ui_row_tree_at(ui, l, id, row, l->w, 0, true);
         return ui_row_parts.tree.node[0].h;
+}
+
+/*
+        The least width a row of a list whose words wrap is laid out at with no part over another and none past its end (device
+        pixels): its label a few words wide (ui_row_label_least, or its own width where that is less) and every other part at its
+        own width. It is read off the row laid out where all of it fits (UI_ROW_ROOM): a label that grows (beside a switch, tabs,
+        swatches or a slider) is what the rest leaves it, so the least is the rest and the label's least. Any other label is beside
+        the zone, which keeps a third of the row (two thirds after a verb, k) and its own least: the least is the wider of the
+        width at which the third leaves the label its least, 2 * inset + 3 * (label + indent + rest - gap) / (3 - k), and the
+        width at which the zone's own least does, the pads, the rest, the zone's least and the label's.
+*/
+#define UI_ROW_ROOM (1 << 20) // a row's width where all of it fits (device pixels), to read its parts' own widths off
+
+static int ui_row_least(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row)
+{
+        const struct ui_row_parts address_to p = &ui_row_parts;
+        const struct ui_node address_to root = &p->tree.node[0];
+        int inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, UI_ROW_GAP), least = ui_row_label_least(ui), pads, rest, label, third, k, need;
+
+        ui_row_tree_at(ui, l, id, row, UI_ROW_ROOM, ui_dev(ui, UI_ROW), true);
+        pads = root->pad[0] + root->pad[1];
+        if (!p->label)
+                return pads;
+        if (!p->zone)
+                return UI_ROW_ROOM - p->label->w + least;
+        label = p->label_one < least ? p->label_one : least;
+        rest = UI_ROW_ROOM - pads - p->label->w - p->zone->w;
+        k = row->kind == UI_ROW_FIELD && row->head ? 2 : 1;
+        need = label + (pads - 2 * inset) + rest - gap;
+        third = 2 * inset + (need > 0 ? (3 * need + (3 - k) - 1) / (3 - k) : 0);
+        need = pads + rest + p->zone_least + label;
+        return third > need ? third : need;
+}
+
+/*
+        The least width of a list whose words wrap (device pixels): the widest of its rows' leasts, of every row the app numbers,
+        listed or not, so that it is the same whichever of them are listed (another group chosen does not make it another). A
+        list whose words do not wrap, or with no face to measure them in, says none.
+*/
+static int ui_list_least(struct ui address_to ui, struct ui_list address_to l)
+{
+        int most = 0;
+
+        if (!l->wrap || !ui->regular || !l->describe)
+                return 0;
+        for (int id = 0; id < l->ids; id++)
+        {
+                struct ui_row row;
+                int least;
+
+                ui_list_describe(l, id, &row);
+                if (!row.label && !row.value && !row.kind)
+                        continue;
+                least = ui_row_least(ui, l, id, &row);
+                most = least > most ? least : most;
+        }
+        return most;
 }
 
 // A row's control put in its part, in logical pixels (ui_logical). Across, it ends where its part ends, at the row's end side, and is its
@@ -20034,7 +20095,8 @@ struct ui_page
         // The frame: a view (ui_page_view) the app keeps the room for, and where it put the column's groups and bar, the rows and the body's
         // bar, device pixels.
         struct ui_view address_to view;
-        struct ui_rect column_box, column_bar, list_box, body_bar;
+        struct ui_rect column_box, column_bar, list_box, body_bar, title_box;
+        int list_least;                    // the width the list's rows need (ui_list_least, device pixels; 0 none): the column gives way before it
         // Read off those by ui_page_fit, device pixels.
         int top, bottom;                   // the body's band
         int left, right;                   // and its sides
@@ -20068,19 +20130,27 @@ static fn ui_page_changed(struct ui_page address_to p);
         The page's frame, a view: the title's band (the title, and the search field at its end, clear of the window's buttons, when the
         app gave it a placeholder), and under it a row the window's height: the margin, the column of groups (this share of the window,
         between its least and its most, in a box never more than half of the window), the gutter with the column's bar in its middle,
-        the body (what the app declares above its rows, then the rows) and the margin with the body's bar in its middle. The column, the
-        bars and the rows are hosts: the view says where they are (ui_page_fit reads it), and the page draws them. Reading from the right
-        the view turns it over the window's middle: the column at the right edge, the body to its left. It is declared when the page is
-        laid out and again for each picture, so the words in it are what they are then.
+        the body (what the app declares above its rows, then the rows) and the margin with the body's bar in its middle. Where the window
+        is too narrow for the column's share beside what its list's rows need (list_least), the column gives way to them, down to its
+        least. The column, the bars and the rows are hosts: the view says where they are (ui_page_fit reads it), and the page draws them.
+        Reading from the right the view turns it over the window's middle: the column at the right edge, the body to its left. It is
+        declared when the page is laid out and again for each picture, so the words in it are what they are then.
 */
 static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
 {
+        int half = p->width / 2, least = ui_px(ui, UI_COLUMN_LEAST), room = p->width - 2 * ui_px(ui, UI_PAD) - ui_px(ui, UI_COLUMN_GUTTER) - p->list_least;
+        int most = ui_share(50);
+
+        // The column's most: half the window, or what the rows' least leaves it where that is less (and no less than its least).
+        room = room < least ? least : room;
+        if (p->list_least > 0 && room < half && ui->scale > 0)
+                most = room * 100 / ui->scale;
         if (p->search.kind != UI_INPUT)
                 p->search.kind = UI_INPUT, p->search.variant = UI_FIELD_BARE, ui_control_start(&p->search);
         ui_view_begin(p->view, ui, p->width, -p->height);
         ui_row(.h = UI_PAGE_TOP)
         {
-                ui_text(p->title, .class = "pagetitle");
+                ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
                 ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
         }
         ui_row(.grow = 1)
@@ -20088,8 +20158,8 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
                 ui_host(null, .w = UI_PAD);
                 if (p->column_on)
                 {
-                        ui_row(.host = &p->column_box, .max_w = ui_share(50))
-                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST);
+                        ui_row(.host = &p->column_box, .max_w = most)
+                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST, .shrink = 1);
                         ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
                                 ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
                 }
@@ -20103,6 +20173,50 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
                         ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
         }
         ui_view_end(p->view);
+}
+
+// Whether the page's frame laid out width wide is inside the window, gives its list need and its title room for title wide (device pixels).
+static b32 ui_page_holds(struct ui address_to ui, struct ui_page address_to p, int width, int need, int title)
+{
+        const struct ui_tree address_to t = &p->view->tree;
+        b32 inside = true;
+
+        p->width = width;
+        ui_page_view(ui, p);
+        for (int at = 0; at < t->count; at++)
+                inside &= t->node[at].x >= 0 && t->node[at].x + t->node[at].w <= width;
+        return inside && p->list_box.w >= need && p->title_box.w >= title;
+}
+
+/*
+        The least width of a page's window (device pixels): the least at which its frame gives its list the width its rows need
+        (ui_list_least, which the frame then keeps for the body: list_least) and the title's band the title whole beside the search
+        field, the column of groups having given way to its least. What the frame gives the list and the title only grows with the window, so the
+        least is found by laying the frame out (a view, which is cheap) at widths, halving between one that holds them and one that
+        does not. The frame is left laid out at the page's width as it was. Its least height is the app's to say: what it shows
+        above its rows is its own.
+*/
+static int ui_page_least(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, const char address_to title)
+{
+        int need = ui_list_least(ui, l), wide = title && ui->regular ? ui_kit_measure(ui, (string_address)title, UI_TITLE_LARGE) : 0;
+        int kept = p->width, low = 0, high = kept > 0 ? kept : ui_dev(ui, 700);
+        const char address_to shown = p->title;
+
+        p->title = title, p->list_least = need;
+        for (int k = 0; k < 8 && !ui_page_holds(ui, p, high, need, wide); k++)
+                high *= 2;
+        while (low + 1 < high)
+        {
+                int middle = low + (high - low) / 2;
+
+                if (ui_page_holds(ui, p, middle, need, wide))
+                        high = middle;
+                else
+                        low = middle;
+        }
+        p->title = shown, p->width = kept;
+        ui_page_view(ui, p);
+        return high;
 }
 
 // The group under a point of the window, or -1.

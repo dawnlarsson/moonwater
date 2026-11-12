@@ -134182,6 +134182,55 @@ static void check_compositor_tile_resize(void)
 }
 
 /*
+        A window's own least: a program that says one in the table (least_width and least_height, logical pixels) is not made smaller
+        than it by an edge dragged past it, nor by a tile narrower than it. A window 200 by 150 at 20, 20 on a screen of 256 that says
+        150 by 120: its right edge dragged 120 to the left leaves it 150 wide, its foot dragged 110 up leaves it 120 tall, the edges the
+        hand does not hold where they were; saying none, the same drag leaves it the desktop's least, 96. Put in the left half (128 wide)
+        it is 150 wide from the screen's left edge, and in the right half 150 wide to the screen's right edge.
+*/
+static void check_compositor_least(void)
+{
+    b32 wide, tall, none, left, right;
+
+    if (!layout_table_map(256))
+    {
+        check("least: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.table->motion = 1;
+    layout_show(1, 20, 20, 200, 150);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+    compositor.table->least_width[1] = 150, compositor.table->least_height[1] = 120;
+    screens_hand(222, 95, 1);
+    screens_hand(102, 95, 0);
+    wide = compositor.resize == 1 && compositor.w[1] == 150 && compositor.table->want_width[1] == 150 && compositor.x[1] == 20 && compositor.h[1] == 150;
+    screens_hand(102, 95, -1);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(95, 172, 1);
+    screens_hand(95, 62, 0);
+    tall = compositor.resize == 1 && compositor.h[1] == 120 && compositor.table->want_height[1] == 120 && compositor.y[1] == 20 && compositor.w[1] == 150;
+    screens_hand(95, 62, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("least: a window that says its least is not made narrower or shorter than it by an edge dragged past it, the edges not held where they were",
+          wide && tall);
+    compositor.table->least_width[1] = compositor.table->least_height[1] = 0;
+    screens_hand(172, 95, 1);
+    screens_hand(52, 95, 0);
+    none = compositor.w[1] == WINDOW_MIN_WIDTH && compositor.x[1] == 20;
+    screens_hand(52, 95, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("least: one that says none is made as narrow as the desktop's least", none);
+    compositor.table->least_width[1] = 150, compositor.table->least_height[1] = 120;
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    left = layout_is(1, COMPOSITOR_LEFT, 0, 0, 150, 256) && compositor.w[1] == 150;
+    compositor_arrange(1, COMPOSITOR_RIGHT);
+    right = layout_is(1, COMPOSITOR_RIGHT, 106, 0, 150, 256) && compositor.x[1] + (int)compositor.w[1] == 256;
+    check("least: a tile narrower than a window's least is the window at its least, from the tile's edge that is its screen's", left && right);
+    compositor.table->least_width[1] = compositor.table->least_height[1] = 0;
+}
+
+/*
         A divider of more than two tiles moves as one: the left half beside the two right quarters share one line, and the
         right quarters' left edge taken and moved widens the left half and narrows both quarters, so no gap or overlap opens
         and what a click finds follows them; its indicator spans the whole line, and a press anywhere along it takes all
@@ -143886,6 +143935,109 @@ static fn check_settings_search(void)
               width - (c->x + c->w) >= 2 * (UI_CLOSE + UI_CLOSE_IN));
 }
 
+/*
+        The Settings window's least size. It asks for it (the table's least_width and least_height are its least, logical pixels at its
+        scale), and it is drawn no smaller whatever it is asked. At its least width, at 100 and 200 percent and both ways it reads, every
+        group lays out with nothing over anything else and nothing past the window: in each row its parts side by side inside it, each
+        control as wide as it is drawn; the title whole beside the search field; the column of groups, its bar and the rows side by side;
+        and every element of the frame inside the window.
+*/
+static b32 settings_least_row(int id)
+{
+        struct ui address_to ui = &settings.ui;
+        struct ui_list address_to l = &settings.list;
+        const struct ui_tree address_to t = &ui_row_parts.tree;
+        const struct ui_node address_to root = &t->node[0];
+        struct ui_control address_to c = ui_list_control(l, id, 1);
+        struct ui_row row;
+        b32 good = true;
+
+        ui_list_describe(l, id, &row);
+        if (row.tall)
+                return true;
+        ui_row_tree(ui, l, id, &row, ui_dev(ui, UI_ROW), true);
+        for (int a = 1; a < t->count; a++)
+        {
+                const struct ui_node address_to n = &t->node[a];
+
+                if (n->children || n->w <= 0)
+                        continue;
+                good &= n->x >= root->x && n->x + n->w <= root->x + root->w;
+                for (int b = a + 1; b < t->count; b++)
+                {
+                        const struct ui_node address_to m = &t->node[b];
+
+                        if (!m->children && m->w > 0 && n->x < m->x + m->w && m->x < n->x + n->w)
+                                good = false;
+                }
+        }
+        if (ui_row_parts.control && c && c->kind != UI_INPUT)
+                good &= ui_row_parts.control->w >= ui_dev(ui, c->w);
+        if (ui_row_parts.label && ui_row_parts.label_one)
+                good &= ui_row_parts.label->w >= (ui_row_parts.label_one < ui_row_label_least(ui) ? ui_row_parts.label_one : ui_row_label_least(ui));
+        return good;
+}
+
+static fn settings_least_check(void)
+{
+        struct ui address_to ui = &settings.ui;
+        struct windows address_to table = settings.own.table;
+        b32 asked = true, rows = true, frame = true;
+        int kept_scale = ui->scale;
+
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
+        for (int scale = 1; scale <= 2; scale++)
+                for (int rtl = 0; rtl < 2; rtl++)
+                {
+                        const struct ui_tree address_to frame_tree = &settings_large->view.tree;
+                        int title = 0;
+
+                        ui->scale = scale * 100, ui_kit.rtl = rtl;
+                        ui_kit_settle();
+                        settings_size(SETTINGS_WIDTH * scale, SETTINGS_HEIGHT * scale);
+                        settings_size(100, 100);
+                        asked &= settings.least_w > 0 && settings.width == settings.least_w && settings.height == settings.least_h &&
+                                 table->least_width[settings.own.row] == (unsigned int)((settings.least_w * 100 + ui->scale - 1) / ui->scale) &&
+                                 table->least_height[settings.own.row] == (unsigned int)((settings.least_h * 100 + ui->scale - 1) / ui->scale);
+                        string_format(log, "  settings least: %b by %b at scale %b%s (%b by %b logical)\n", (bipolar)settings.least_w, (bipolar)settings.least_h,
+                                      (bipolar)scale, (string_address)(rtl ? ", reading from the right" : ""), (bipolar)table->least_width[settings.own.row],
+                                      (bipolar)table->least_height[settings.own.row]);
+                        for (int group = 0; group < settings_groups(); group++)
+                        {
+                                const struct ui_page address_to p = &settings.page;
+                                b32 apart;
+
+                                settings.page.chosen = group;
+                                settings_refilter();
+                                settings.page.title = language_of("Settings");
+                                ui_page_view(ui, &settings.page);
+                                for (int at = 0; at < settings.list.count; at++)
+                                        if (!settings_least_row(settings.list.id[at]))
+                                        {
+                                                if (rows)
+                                                        string_format(log, "  settings least: at scale %b, group %b, row %b overlaps or runs past its end\n", (bipolar)scale,
+                                                                      (bipolar)group, (bipolar)settings.list.id[at]);
+                                                rows = false;
+                                        }
+                                title = ui_kit_measure(ui, (string_address)language_of("Settings"), UI_TITLE_LARGE);
+                                apart = rtl ? p->list_box.x + p->list_box.w <= p->column_bar.x && p->column_bar.x + p->column_bar.w <= p->column_box.x
+                                            : p->column_box.x + p->column_box.w <= p->column_bar.x && p->column_bar.x + p->column_bar.w <= p->list_box.x;
+                                frame &= apart && p->title_box.w >= title && p->list_box.w >= ui_list_least(ui, &settings.list);
+                                frame &= rtl ? ui_dev(ui, p->search.x + p->search.w) <= p->title_box.x : p->title_box.x + p->title_box.w <= ui_dev(ui, p->search.x);
+                                for (int at = 0; at < frame_tree->count; at++)
+                                        frame &= frame_tree->node[at].x >= 0 && frame_tree->node[at].x + frame_tree->node[at].w <= settings.width;
+                        }
+                }
+        ui_kit.rtl = 0, ui->scale = kept_scale;
+        ui_kit_settle();
+        settings.page.chosen = 0;
+        settings_size(SETTINGS_WIDTH * ui->scale / 100, SETTINGS_HEIGHT * ui->scale / 100);
+        settings_refilter();
+        check("settings least: the window asks for its least size (the table's least_width and least_height) and is drawn no smaller, asked smaller", asked);
+        check("settings least: at its least width every row of every group has its parts side by side inside it, at 100 and 200 percent, either way it reads", rows);
+        check("settings least: and its frame is whole: the title beside the search field, the column, its bar and the rows side by side, nothing past the window", frame);
+}
+
 #ifdef PAGE_DUMP
 #include PAGE_DUMP_FILE
 #endif
@@ -144091,6 +144243,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_group_glide_check();
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
+        settings_least_check();
         settings_frames_gallery();
 #ifdef PAGE_DUMP
         page_dump();
@@ -167690,6 +167843,7 @@ b32 main()
         check_compositor_preview_over();
         check_compositor_restore_glide();
         check_compositor_tile_resize();
+        check_compositor_least();
         check_compositor_divider();
         check_compositor_divider_scales();
         check_compositor_touch_hold();

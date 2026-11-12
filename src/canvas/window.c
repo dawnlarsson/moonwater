@@ -136,6 +136,8 @@ struct window_key
 // A window is never resized below this, whatever is dragged.
 #define WINDOW_MIN_WIDTH 96
 #define WINDOW_MIN_HEIGHT 48
+// A window's own least (struct windows' least_width and least_height) is read as at most this, logical pixels.
+#define WINDOW_LEAST_MOST 16384
 
 // How long a title can be, which is the one string that lives in this page
 // rather than in a window's own content.
@@ -1134,6 +1136,10 @@ struct windows
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
         unsigned int client_rects_card, client_rects_cpu; // the damage rectangles copied by the card, and by the processor
+        // The program's: the least size its window can be laid out at, logical pixels at the scale it is drawn at (0: none). The compositor
+        // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
+        // WINDOW_MIN_HEIGHT holds for every window whatever it says.
+        unsigned int least_width[WINDOWS], least_height[WINDOWS];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -3267,6 +3273,8 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->place[row] = table->place_screen[row] = 0;
         table->place_x[row] = table->place_y[row] = 0;
         table->place_width[row] = table->place_height[row] = 0;
+        // So is the least size it said: the next window in the row says its own, or has none.
+        table->least_width[row] = table->least_height[row] = 0;
         for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                 table->name[row][at] = 0;
         __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
