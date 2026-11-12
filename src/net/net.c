@@ -87,6 +87,7 @@
 #define IFLA_ADDRESS 1
 #define IFLA_IFNAME 3
 #define IFLA_MTU 4
+#define IFLA_MASTER 10
 #define IFLA_WIRELESS 11
 #define IFLA_LINKINFO 18
 #define IFLA_INFO_KIND 1
@@ -934,6 +935,9 @@ typedef struct
         bool wireless;
         //      Wired links are not candidates: `moonwater wired off`.
         bool skip_wired;
+        //      A link never asked for a lease, by its name: one this machine
+        //      serves addresses on (the Bluetooth share's bridge).
+        string_address shunned;
         p8 skip_count;
         p32 skip[8];
         //      The kernel's count of carrier losses, where it says one.
@@ -1021,6 +1025,20 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                 for (positive at = 0; at < search->skip_count && at < 8; at++)
                         if (search->skip[at] == link->index)
                                 return true;
+
+                /*
+                        Nor a port of a bridge or a bond, which is its
+                        master's: the lease is the master's to have, and an
+                        offer taken on the port put an address and the
+                        default route on a link that carries no traffic of
+                        its own. Nor the link the caller serves addresses on
+                        itself. Both ranked as wired, ahead of a wifi that
+                        had joined, and each was waited out before it.
+                */
+                if (netlink_find(header, sizeof(netlink_link), IFLA_MASTER, null))
+                        return true;
+                if (search->shunned && string_equals(name, search->shunned))
+                        return true;
 
                 /*
                         Not the first one found -- the best one.

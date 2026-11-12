@@ -2430,6 +2430,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         search.skip_loopback = true;
         search.prefer = net_internet_prefer();
         search.skip_wired = net_wired_off();
+        search.shunned = NET_BLUETOOTH_SHARE_BRIDGE;
         radio_links_unleased(address_of search);
 
         /*

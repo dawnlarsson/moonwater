@@ -62117,6 +62117,8 @@ typedef struct
         p8 wireless;
         positive hardware_width;
         positive downs_width;
+        //      The index of the bridge or bond the link is a port of, or 0.
+        p32 master;
 } link_spec;
 
 static p8 link_feed(netlink_visitor visit, address_any context,
@@ -62150,6 +62152,8 @@ static p8 link_feed(netlink_visitor visit, address_any context,
         }
         if (spec->wireless == 3)
                 built &= netlink_attribute_add(&message, IFLA_WIRELESS, hardware, 4);
+        if (spec->master)
+                built &= netlink_attribute_add(&message, IFLA_MASTER, &spec->master, 4);
         check("a synthetic link builds", built && !message.failed);
         if (!built)
         {
@@ -62170,6 +62174,34 @@ static p8 link_see(netlink_search address_to search,
                      const link_spec address_to spec)
 {
         return link_feed(netlink_link_seen, search, spec);
+}
+
+/* A port of a bridge and the link the caller serves on are never the link a
+   lease is asked on, whatever their carrier and whatever came first. */
+static fn link_ports(void)
+{
+        static const link_spec port_up = {"bnep0", 7, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4, 9};
+        static const link_spec share_up = {"pan0", 9, IFF_RUNNING, NETLINK_LINK_ETHER, 2, 6, 4};
+        static const link_spec bridge_up = {"br0", 10, IFF_RUNNING, NETLINK_LINK_ETHER, 2, 6, 4};
+        static const link_spec wifi_idle = {"wlan0", 3, 0, NETLINK_LINK_ETHER, 1, 6, 4};
+        netlink_search search = {.skip_loopback = true, .shunned = "pan0"};
+
+        link_see(&search, &port_up);
+        link_see(&search, &share_up);
+        check("sec: a bridge's port and the link the machine serves on are not asked for a lease",
+              !search.found);
+        link_see(&search, &wifi_idle);
+        link_see(&search, &port_up);
+        link_see(&search, &share_up);
+        check("and neither takes the place of a wifi link with no carrier", search.found && search.index == 3);
+        link_see(&search, &bridge_up);
+        check("where a bridge of the person's own, with carrier, is asked like any wired link",
+              search.found && search.index == 10);
+
+        netlink_search unnamed = {.skip_loopback = true};
+
+        link_see(&unnamed, &share_up);
+        check("and a caller that serves on no link takes a bridge of that name", unnamed.found && unnamed.index == 9);
 }
 
 static fn link_choice(void)
@@ -83581,6 +83613,7 @@ b32 main(void)
         net_group(network_wait_edges);
         net_group(link_candidates);
         net_group(link_choice);
+        net_group(link_ports);
         net_group(wired_listing);
         net_group(lease_stamps);
         net_group(talking);
