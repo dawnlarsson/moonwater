@@ -1301,6 +1301,7 @@ typedef struct
 {
         p32 mark;
         p64 expires; // seconds since boot
+        link_peers had; // the machines linked before the code was made
 } link_pair_made;
 
 static p8 link_pair_waiting(struct link_group_record address_to record,
@@ -1542,8 +1543,16 @@ static b32 link_pair_wait(link_pair_made address_to made, string_address namespa
 
                 link_pair_look(namespace, address_of closed, address_of live);
                 link_peers_load(address_of peers);
+                //      A machine this code linked: one with the mark that was
+                //      not here before. The mark is the name's alone, the same
+                //      for every code this machine makes, so a machine an
+                //      earlier code linked carries it too, and the wait said
+                //      "linked with" that one at once and left the new code
+                //      open its five minutes with nobody watching.
                 for (positive at = 0; at < peers.count; at++)
-                        if (peers.peer[at].group == made->mark)
+                        if (peers.peer[at].group == made->mark &&
+                            !link_peer_keyed(address_of made->had,
+                                             peers.peer[at].key))
                         {
                                 if (tty && shown)
                                         host_say(log, "\n");
@@ -1608,7 +1617,11 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
                            string_address expect, link_pair_made address_to made,
                            link_before address_to before)
 {
-        bipolar opened = link_pair_open(namespace, code, expect, made);
+        bipolar opened;
+
+        //      Before the code exists, so nothing it links is among them.
+        link_peers_load(address_of made->had);
+        opened = link_pair_open(namespace, code, expect, made);
 
         if (opened == LINK_PAIR_WAITING)
         {
