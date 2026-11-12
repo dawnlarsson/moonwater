@@ -45,7 +45,7 @@
         which the keys and the wheel scroll and Escape or a press closes. A command runs until it ends or Escape
         stops it. A command that ends the desktop, the session or the
         machine, or throws away what a person keeps (wipe, setup install,
-        update and use, sleep, hibernate, bios reboot, desktop start and stop,
+        update, use and rollback, sleep, hibernate, bios reboot, desktop start and stop,
         desktop off, link remove and group leave, wifi and bluetooth remove,
         cpu offline, bind init and exit remove), whichever row it is typed
         in, is not run by the first Enter: the window says so and runs it
@@ -318,6 +318,7 @@ static const char address_to const settings_asks[][3] = {
     {"setup", "install"},
     {"setup", "update"},
     {"setup", "use"},
+    {"setup", "rollback"},
     {"sleep"},
     {"hibernate"},
     {"bios", "reboot"},

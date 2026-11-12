@@ -141150,6 +141150,11 @@ static fn check_settings(string_address regular, string_address bold)
                           (settings_generic_words(desktop, "on", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 2)));
                 settings_generic_words(any, "setup install /dev/sda yes", more, SETTINGS_WORDS);
                 check("settings: setup install asks twice, typed in any row", settings_asks_for(more + 1, 4));
+                settings_generic_words(any, "setup update usb yes", more, SETTINGS_WORDS);
+                check("settings: and an update from a stick, which writes the build the machine starts",
+                      settings_asks_for(more + 1, 4));
+                settings_generic_words(any, "setup rollback yes", more, SETTINGS_WORDS);
+                check("settings: and a rollback, which starts the build it had again", settings_asks_for(more + 1, 3));
                 settings_generic_words(any, "wipe", more, SETTINGS_WORDS);
                 check("settings: and wipe, bare", settings_asks_for(more + 1, 1));
                 settings_generic_words(any, "link group leave home", more, SETTINGS_WORDS);
