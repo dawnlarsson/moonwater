@@ -142405,6 +142405,16 @@ static b32 check_display_section_words(int row, const char address_to want0, con
                settings_choice(&settings_rows[row], 1, word, sizeof(word)) && string_equals((string_address)word, (string_address)want1);
 }
 
+// The map placed as the page's frame places it (settings_map_above), in a window 700 wide under a band 100 device pixels high: where
+// the rows of the display section have its panel.
+static fn display_map_place(void)
+{
+        ui_view_begin(settings.page.view, &settings.ui, 700, 0);
+        ui_host(null, .h = 100 * 100 / settings.ui.scale);
+        settings_map_above();
+        ui_view_end(settings.page.view);
+}
+
 static fn check_display_section(void)
 {
         struct settings_screen screens[3];
@@ -142586,8 +142596,8 @@ static fn check_display_section(void)
         settings.page.top = 100, settings.page.left = 0, settings.page.right = 700;
         settings.ui.scale = 100;
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.page.chosen == settings_group_of(screen_row));
-        settings_map_place();
-        check("display section: the map's panel is placed at the top of the page", settings.map.y == 100 && settings.map.h > 0 && settings.map.field_h > 0);
+        display_map_place();
+        check("display section: the map's panel is placed at the top of the page", settings.map.panel.y == 100 && settings.map.panel.h > 0 && settings.map.field.h > 0);
         // The Screen dropdown counts the screens in the same reading order as identify does: a 2 by 2 arrangement, listed bottom
         // right first, is Screen 1 top left, Screen 2 top right, Screen 3 bottom left and Screen 4 bottom right.
         memory_zero(&table, sizeof(table));
@@ -142620,7 +142630,7 @@ static fn check_display_section(void)
                 b32 taken;
                 bipolar child_before;
 
-                settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
+                settings_map_view_of(grid, grid_count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
                 gallery.on = 0, settings.page.menu_row = -1, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear();
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1;
@@ -142695,9 +142705,9 @@ static fn check_display_section(void)
                 memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
                 memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
                 settings.ui.scale = 200;
-                settings_map_place();
+                display_map_place();
                 grid_count = settings_map_load(grid, grid_number);
-                settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
+                settings_map_view_of(grid, grid_count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &grid_view);
                 settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
                 settings.popup.open = 0, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
                 settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
@@ -142714,7 +142724,7 @@ static fn check_display_section(void)
                       settings.map.drag == 2 && (settings.map.target_x != before_x || settings.map.target_y != before_y));
                 settings.map.display = settings.map.drag = -1;
                 settings.ui.scale = 100, table.scale = 100;
-                settings_map_place();
+                display_map_place();
         }
 
         // The keyboard on the map. The four screens of the 2 by 2 (index 0 bottom right, number 4; index 3 top left, number 1): Up
@@ -143483,7 +143493,7 @@ static fn check_settings_seam(void)
         The page's search field, as the settings frames just drew it: the kit's field, the title band's whole height (UI_PAGE_TOP
         from the window's top: it melts into the band, with no gap above or below), and clear of the close button
         and the minimise button beside it at the top right (their width and their inset from the edge). The band is the
-        field's own clip: a field that crossed its bottom edge was cut where the list below repaints.
+        field's box, where the page's frame has it: what it draws is in the band, above the rows the list repaints.
 */
 static fn check_settings_search(void)
 {
@@ -143497,6 +143507,9 @@ static fn check_settings_search(void)
               width - (c->x + c->w) >= 2 * (UI_CLOSE + UI_CLOSE_IN));
 }
 
+#ifdef PAGE_DUMP
+#include PAGE_DUMP_FILE
+#endif
 static fn check_settings_frames(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -143700,6 +143713,9 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
+#ifdef PAGE_DUMP
+        page_dump();
+#endif
         string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);
 
         settings.ui = saved.ui;
@@ -152297,6 +152313,23 @@ static int view_check_build(int width, int limit)
         return ui_view_end(&view_check);
 }
 
+// A box 30 percent of the window's width, between 88 and 170 logical pixels, in a box never more than half of the window: the outer
+// box's rectangle is written to view_check_head (a container's host), the inner's to view_check_list. Answers the outer's width.
+static int view_check_share(int width, int scale)
+{
+        view_check_ui.scale = scale;
+        ui_view_begin(&view_check, &view_check_ui, width, 0);
+        ui_row(.h = 10)
+        {
+                ui_row(.host = &view_check_head, .max_w = ui_share(50))
+                        ui_host(&view_check_list, .w = ui_share(30), .min_w = 88, .max_w = 170);
+                ui_host(null, .grow = 1);
+        }
+        ui_view_end(&view_check);
+        view_check_ui.scale = 100;
+        return view_check_head.w;
+}
+
 // The loop's way to an event of the view: the kit's event context, the screen declared again, then the view's.
 static p32 view_check_send(const struct window_event address_to event)
 {
@@ -152366,6 +152399,14 @@ static fn check_kit_view(void)
         check("kit view: a negative limit is the window's height exactly, shared by the rows and in a row by the weights, no pixel left over",
               height == 113 && view_check.unknown == 0 && view_check_head.x == 16 && view_check_head.y == 60 && view_check_head.w == 65 &&
                   view_check_head.h == 37 && view_check_list.x == 87 && view_check_list.y == 60 && view_check_list.w == 97 && view_check_list.h == 37);
+
+        // A share of the window's width is whole device pixels of it, whatever the scale, and its limits are logical pixels: 30 percent of
+        // 701 is 210 and held to 170, of 401 it is 120, of 805 at 200 percent 241 (an odd pixel no logical size makes), of 1403 there 420 and
+        // held to 340; of 150 it is 45, made 88, and its box is half of the window, 75. A container's rectangle is written to its host.
+        check("kit view: a share of the window's width is whole device pixels of it at any scale, within limits in logical pixels, and a container's rectangle is written to its host",
+              view_check_share(701, 100) == 170 && view_check_list.w == 170 && view_check_head.x == 0 && view_check_head.y == 0 && view_check_head.h == 10 &&
+                  view_check_share(401, 100) == 120 && view_check_share(805, 200) == 241 && view_check_head.h == 20 && view_check_share(1403, 200) == 340 &&
+                  view_check_share(150, 100) == 75 && view_check_list.w == 88 && view_check.unknown == 0);
 
         // A variable the build read: its readers' rows are due again when it changes, by the app or by ui_set, and once.
         view_check_rows = 3;

@@ -40,9 +40,9 @@
         that follow its verb, and Enter in it runs the command as words, with
         the command's own words first: blanks part them and a pair of double
         or single quotes holds blanks in one, and nothing else is read, never
-        a shell. What it said is the status line when it is a line, and else
-        a card with the lines, which the keys and the wheel scroll and
-        Escape or a press closes. A command runs until it ends or Escape
+        a shell. What it said is the window's status when it is a line (kept,
+        and drawn nowhere: settings_say), and else a card with the lines,
+        which the keys and the wheel scroll and Escape or a press closes. A command runs until it ends or Escape
         stops it. A command that ends the desktop, the session or the
         machine, or throws away what a person keeps (wipe, setup install,
         update and use, sleep, hibernate, bios reboot, desktop start and stop,
@@ -672,7 +672,7 @@ struct settings_generic
 };
 
 // The map of the screens above the Display rows (settings_map_*): the screen the rows are for, a drag of one screen (applied
-// on release), and the identify button. The positions are the window's device pixels, set by settings_map_place.
+// on release), and the identify button. The positions are the window's device pixels, where the page's frame has them (settings_map_above).
 struct settings_map
 {
         int display;                            // the table's index of the screen the rows are for, -1 none chosen
@@ -682,8 +682,8 @@ struct settings_map
         b32 keys;                               // the keyboard is on the map (Up from the first Display row): its arrows choose and move a screen
         b32 nudged;                             // a screen was last sent by a key to nudge_x, nudge_y, the table not caught up with it yet
         int nudge_at, nudge_x, nudge_y;         // the screen that was sent, and where it was sent to
-        int x, y, w, h;                         // the panel: its top left and size
-        int field_x, field_y, field_w, field_h; // the screens' area, under the panel's top strip
+        struct ui_rect panel;                   // the panel
+        struct ui_rect field;                   // the screens' area, under the panel's top strip
         struct ui_control identify;             // the button on the strip
 };
 
@@ -773,8 +773,8 @@ _Static_assert(SETTINGS_ALL <= UI_LIST_MOST, "every row the window shows is a pl
         What is kept in a mapping made when the window opens and not in the
         image (the shell image links this file, and a tool under a 12 MiB
         address cap has no room for forty kilobytes it never uses): what a
-        verb said, the words of help, the card, and the words of a command
-        being made.
+        verb said, the words of help, the card, the words of a command
+        being made, and the page's frame (the kit's view of it).
 */
 static struct settings_large
 {
@@ -784,6 +784,7 @@ static struct settings_large
         unsigned short card_at[SETTINGS_CARD_LINES], card_size[SETTINGS_CARD_LINES];
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
+        struct ui_view view;
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -1401,10 +1402,8 @@ struct settings_map_view
         long bx, by, f, ox, oy;
 };
 
-#define SETTINGS_MAP_PAD 8        // logical pixels: the panel's inset, and the screens' area from its edges
 #define SETTINGS_MAP_STRIP 36     // logical pixels: the top strip of the panel, where the identify button sits
 #define SETTINGS_MAP_PANEL 150    // logical pixels: the panel the screens are drawn in
-#define SETTINGS_MAP_CAPTION 24   // logical pixels: the caption's line under the panel
 #define SETTINGS_MAP_BUTTON_W 168 // logical pixels: the identify button
 #define SETTINGS_MAP_BUTTON_H 28
 #define SETTINGS_SHOWN 64 // bytes of a screen's label or a rate's, shown in a row
@@ -1644,29 +1643,6 @@ static b32 settings_map_on(void)
         return row >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(row) == settings.page.chosen;
 }
 
-static int settings_map_height(void)
-{
-        return ui_px(&settings.ui, SETTINGS_MAP_PANEL) + ui_px(&settings.ui, UI_GAP2) + ui_px(&settings.ui, SETTINGS_MAP_CAPTION);
-}
-
-// The panel, its screens' area and the button, from the page's place: where the map is drawn and hit.
-static void settings_map_place(void)
-{
-        struct ui address_to ui = &settings.ui;
-        int pad = ui_px(ui, SETTINGS_MAP_PAD), strip = ui_px(ui, SETTINGS_MAP_STRIP);
-        int button_w = ui_px(ui, SETTINGS_MAP_BUTTON_W), button_h = ui_px(ui, SETTINGS_MAP_BUTTON_H);
-        struct ui_control address_to c = &settings.map.identify;
-
-        settings.map.x = settings.page.left, settings.map.y = settings.page.top;
-        settings.map.w = settings.page.right - settings.page.left, settings.map.h = ui_px(ui, SETTINGS_MAP_PANEL);
-        settings.map.field_x = settings.map.x + pad, settings.map.field_y = settings.map.y + strip;
-        settings.map.field_w = settings.map.w - 2 * pad, settings.map.field_h = settings.map.h - strip - pad;
-        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address)WORDS(settings_identify_screens);
-        c->w = button_w * 100 / ui->scale, c->h = button_h * 100 / ui->scale;
-        c->x = ui_mirror(settings.map.x + settings.map.w - pad - button_w, button_w, settings.map.x, settings.map.w) * 100 / ui->scale;
-        c->y = (settings.map.y + (strip - button_h) / 2) * 100 / ui->scale;
-}
-
 // The Rotation dropdown's words, in the order it lists them, and the degrees each one is.
 static const struct settings_turn
 {
@@ -1795,7 +1771,7 @@ static int settings_map_at(int px, int py, const struct settings_screen address_
 {
         struct settings_map_view view;
 
-        settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+        settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
         for (int at = (int)count - 1; at >= 0; at--)
         {
                 int x, y, width, height;
@@ -1818,20 +1794,42 @@ static const char address_to settings_map_hint(unsigned int count)
                : count == 1           ? WORDS(settings_map_one) : WORDS(settings_map_hint);
 }
 
-// The panel, its screens drawn to fit it (a drag shows the screen where it would be let go), each one's number, and the
-// caption under the panel (settings_map_hint). With no screen the panel is empty and the caption says why.
+/*
+        The map above the rows, declared in the page's frame while it is shown: the panel (its rectangle is the map's, which paints
+        it and takes a press in it), across its top the strip with the identify button at its end, under the strip the screens' area,
+        and under the panel the caption (settings_map_hint), which with no screen says why the panel is empty.
+*/
+static fn settings_map_above(void)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0};
+        struct ui_control address_to c = &settings.map.identify;
+
+        if (!settings_map_on())
+                return;
+        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address)WORDS(settings_identify_screens);
+        ui_col(.host = &settings.map.panel, .class = "map", .h = SETTINGS_MAP_PANEL)
+        {
+                ui_row(.class = "foot", .h = SETTINGS_MAP_STRIP)
+                        ui_control(c, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                ui_host(&settings.map.field, .grow = 1);
+        }
+        ui_text(settings_map_hint(settings_map_load(screens, number)), .class = "caption");
+}
+
+// The panel, its screens drawn to fit it (a drag shows the screen where it would be let go) and each one's number. The button and the
+// caption are the frame's, drawn over these.
 static void settings_map_draw(struct ui address_to ui)
 {
         struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0};
         unsigned int count = settings_map_load(screens, number);
         int radius = ui_px(ui, UI_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
-        int caption = settings.map.y + settings.map.h + ui_px(ui, UI_GAP2);
-        const char address_to hint = settings_map_hint(count);
+        const struct ui_rect address_to panel = &settings.map.panel, address_to field = &settings.map.field;
 
-        ui_round(ui, settings.map.x, settings.map.y, settings.map.w, settings.map.h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
+        ui_round(ui, panel->x, panel->y, panel->w, panel->h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
         // The screens are where they are on the desk, left is left whichever way the window reads: the field is not turned over.
-        UI_KEEP(settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h);
+        UI_KEEP(field->x, field->y, field->w, field->h);
         for (unsigned int at = 0; count && at < count; at++)
         {
                 struct settings_map_view view;
@@ -1839,7 +1837,7 @@ static void settings_map_draw(struct ui address_to ui)
                 int x, y, width, height;
                 char text[SETTINGS_SHOWN];
 
-                settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+                settings_map_view_of(screens, count, field->x, field->y, field->w, field->h, &view);
                 moved = screens[at];
                 if (settings.map.drag == (int)at)
                         moved.x = settings.map.target_x, moved.y = settings.map.target_y;
@@ -1860,20 +1858,17 @@ static void settings_map_draw(struct ui address_to ui)
                         ui_kit_text_flipped(ui, x + pad, ui_kit_baseline(ui, y + height - pad - line, UI_LABEL_MEDIUM),
                                             (string_address)settings.own.table->output_name[at], UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, x, width);
         }
-        ui_kit_text_flipped(ui, settings.map.x, ui_kit_baseline(ui, caption, UI_LABEL_MEDIUM), (string_address)hint, UI_LABEL_MEDIUM,
-                            ui_role(UI_ON_SURFACE_VARIANT), 0, settings.map.x, settings.map.w);
-        ui_control_draw(ui, &settings.map.identify);
 }
 
 static fn settings_describe(int id, struct ui_row address_to row);
 
-// The page laid out for the window's size: the kit's bands, its column and the list in the body.
-static int settings_map_inset(void);
-
+// The page laid out for the window's size: the kit's frame, its column and the list in the body, the map above the list while it is shown.
 static fn settings_layout(void)
 {
         struct ui address_to ui = &settings.ui;
 
+        if (!settings_map())
+                return;
         // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
         if (!settings.list.ids)
         {
@@ -1893,16 +1888,9 @@ static fn settings_layout(void)
         settings.page.column_on = !settings.page.card;
         settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
-        ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, settings_map_inset, &settings.card, ui_lines_height(ui, settings.card_text.count));
-}
-
-// The map's panel above the rows, placed in the page (its height is the rows' inset), or none when the map is not shown.
-static int settings_map_inset(void)
-{
-        if (!settings_map_on())
-                return 0;
-        settings_map_place();
-        return settings_map_height();
+        settings.page.view = &settings_large->view;
+        settings.page.above = settings_map_above;
+        ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, &settings.card, ui_lines_height(ui, settings.card_text.count));
 }
 
 static fn settings_edit_end(void);
@@ -2255,10 +2243,10 @@ static fn settings_card_leave(void)
 
 /* ---- the verbs ---- */
 
+// What the window says of what was just done or refused. The words are kept; the page has no status line, so they are drawn nowhere.
 static fn settings_say(string_address text)
 {
         string_copy_bounded((string_address)settings.status, text, sizeof(settings.status));
-        settings_changed(settings.page.bottom, settings.height);
 }
 
 /*
@@ -4994,7 +4982,7 @@ static void settings_map_drag_to(int x, int y)
 
         if (!count || settings.map.drag < 0 || settings.map.drag >= (int)count)
                 return;
-        settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+        settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
         tx = (int)(settings_map_table_x(&view, x) - settings.map.grab_x);
         ty = (int)(settings_map_table_y(&view, y) - settings.map.grab_y);
         settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
@@ -5008,10 +4996,11 @@ static b32 settings_map_press(int x, int y)
 {
         struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0}, count;
+        const struct ui_rect address_to panel = &settings.map.panel;
         struct settings_map_view view;
         int at;
 
-        if (x < settings.map.x || x >= settings.map.x + settings.map.w || y < settings.map.y || y >= settings.map.y + settings.map.h)
+        if (x < panel->x || x >= panel->x + panel->w || y < panel->y || y >= panel->y + panel->h)
                 return false;
         settings.map.keys = false; // a pointer has the map now, and its focus with it
         // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
@@ -5023,7 +5012,7 @@ static b32 settings_map_press(int x, int y)
         count = settings_map_load(screens, number);
         if ((at = count ? settings_map_at(x, y, screens, count) : -1) >= 0)
         {
-                settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+                settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
                 settings.map.display = settings.map.drag = at, settings.map.nudged = false;
                 settings.map.grab_x = (int)(settings_map_table_x(&view, x) - screens[at].x);
                 settings.map.grab_y = (int)(settings_map_table_y(&view, y) - screens[at].y);
@@ -5253,11 +5242,11 @@ static fn settings_press_at(void)
 
 /*
         The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): the kit's page
-        (its title, the search field that shows the filter, the status line), then the column of groups and the rows of
-        the group chosen, or the card, and over them the menu a choice opened. settings_paint calls it only for a band
-        with rows in it (ui_buffers_present calls it).
+        (its title, the search field that shows the filter), the column of groups and the rows of the group chosen, or
+        the card, and over them the menu a choice opened. settings_paint calls it only for a band with rows in it
+        (ui_buffers_present calls it).
 */
-// The map above the rows, drawn between the column and the rows: a panel the page's inset holds, when the map is shown.
+// The map above the rows, drawn between the column and the rows: the panel the page's frame has there, when the map is shown.
 static void settings_map_paint(struct ui address_to ui)
 {
         if (settings_map_on())
@@ -5285,7 +5274,6 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 return;
         }
         settings.page.title = settings.page.card ? settings.card_title : language_of("Settings");
-        settings.page.status = settings.status;
         settings.list.empty = WORDS(settings_nothing_matches);
         // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
         // clipboard, its caret), with the keys while the window has them and no row is typed in.

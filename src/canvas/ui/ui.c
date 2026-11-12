@@ -5,7 +5,7 @@
         theme's roles, its type roles, its shapes drawn with their edges
         where they fall, its controls with their motion, and the composites
         a window is made of -- a page (a title, a search field, a column of
-        groups, a body and a status line), a list of rows in sections, the
+        groups and a body), a list of rows in sections, the
         menu a choice opens, a page of text, a scrollbar on whatever scrolls
         and a finger's press, drag and throw. An app declares what it shows;
         every size, colour, state and motion is the kit's, with nothing to
@@ -16041,13 +16041,13 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
 /*
         A window of the kit is a page: its title at the top left, a search
         field at the title's right when it has one, a column of groups at
-        the left when it has one (the kit's tabs stood on end), the body (a
-        list of rows in sections, or a page of text), and the status line at
-        its foot; and over all of it, when a row opened one, a menu of a
-        choice's words. An app says what it shows -- the rows, each one's
-        label and value and what kind of value it is, the groups, the words
-        of a choice, the status -- and the kit does the rest: every size, the
-        type, the theme's colours, the hover and the press and its ripple
+        the left when it has one (the kit's tabs stood on end), and the body
+        (a list of rows in sections, or a page of text); and over all of it,
+        when a row opened one, a menu of a choice's words. An app says what
+        it shows -- the rows, each one's label and value and what kind of
+        value it is, the groups, the words of a choice -- and the kit does
+        the rest: every size, the type, the theme's colours, the hover and
+        the press and its ripple
         edge to edge, the row the keys are on and their ring, a finger's
         reach, a scrollbar on whatever scrolls, the wheel, a finger's drag
         and throw, the keys that move in a list, a column or a menu, and a
@@ -16072,8 +16072,8 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
 #define UI_GAP3 12
 #define UI_GAP4 16           // and between groups
 #define UI_PAGE_TOP 60       // a page's title band
-#define UI_PAGE_FOOT 40      // its status line's band
-#define UI_PAGE_INSET 6      // the title and the status line in from the margin
+#define UI_PAGE_FOOT 40      // a status bar's band at a window's foot
+#define UI_PAGE_INSET 6      // a page's title in from the margin
 #define UI_SEARCH_W 190      // a page's search field, at the title's right
 #define UI_SEARCH_RIGHT 46   // and ends this far from the window's right edge: clear of the close button (14 px, 5 in) and the minimise button beside it, with a gap of 8
 #define UI_COLUMN_SHARE 30   // a page's column: this share of the window,
@@ -16403,7 +16403,9 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         Style is the class and nothing else: .class names the classes of ui_classes, a blank or a dot apart ("card.title": the language
         check reads a literal with a blank as English, and a class is no English), and a later name wins over an earlier; a class says a gap, a pad, a margin, a size, a justify, an align, a shrink, a type and an ink by theme role, a fill by
         role and a corner, and a button's variant. An app writes no colour, size or pad of its own; .w, .h, .grow, .shrink and the
-        limits are for the few sizes a class cannot say (a list as tall as its rows). A name the table lacks is counted in
+        limits are for the few sizes a class cannot say (a list as tall as its rows), in logical pixels, or as ui_share(n), n percent
+        of the window's width in whole device pixels (a column a third of its window and never more than half of it). Any element
+        says .host to have its rectangle written, a container too (a panel the app paints under its children). A name the table lacks is counted in
         ui_view.unknown, which a check reads, and is no style. Layout is flexbox: row or column, gap, justify, align, padding, margin,
         grow, shrink, the sizes and their limits, and scroll (overflow: auto) as a class. Logical pixels, times the window's scale.
 
@@ -16434,7 +16436,7 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key). The buttons are
         the kit's one row, drawn over the picture and pressed wherever they are: a button is not cut to a scroll container.
 
-        What is still a host: the list, the page, the lines and the strips, the old composites with a scroller of their own, and the
+        What is still a host: the list, a page's column of groups, the lines and the strips, the old composites with a scroller of their own, and the
         text of a field (a field's control is an element, placed and drawn by the view; what is typed in it and the pointer on it
         are still handed to its engine by its app, ui_field_event, and the view gives such a field no pointer). What removing the
         old way needs: those given elements, the checks that read the old structs' fields (settings.page, mixer.row) read the
@@ -16448,6 +16450,8 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
 #define UI_ITEM_BUTTON 2
 #define UI_ITEM_HOST 3
 #define UI_H_ROW (-1)             // a class's height: one row of a list (UI_ROW grows with the text scale)
+#define UI_SHARE (1 << 20)        // a size or a limit from here up is a share of the window's width, not logical pixels
+#define ui_share(percent) (UI_SHARE + (percent)) // this many percent of the window's width, in whole device pixels
 #define UI_ROLE(role) ((role) + 1) // a class's role or type is its number plus one: 0 is not said
 #define UI_VIEW_DRAW UI_BUTTONS_DRAW
 #define UI_VIEW_TAKEN UI_BUTTONS_TAKEN
@@ -16475,7 +16479,7 @@ struct ui_props
         const char address_to says;       // a button that is not undone: what its next press does, said while it is armed
         b32 (*on)(int value);             // a button's act, a control's change: false ends the window
         int arg;                          // what the handler is given
-        struct ui_rect address_to host;   // a host's rectangle, device pixels, written by ui_view_end
+        struct ui_rect address_to host;   // where the element's rectangle is written by ui_view_end, device pixels: a host's, or any element's the app asks for
         struct ui_control address_to control; // the app's control the element is (ui_control), or the surface of a container
 };
 
@@ -16514,7 +16518,11 @@ static const struct ui_class ui_classes[] = {
         {"gap3", .gap = UI_GAP3},                                                        // actions side by side
         {"level", .align = UI_CENTER},                                                   // a row's children on its middle line
         {"spread", .justify = UI_BETWEEN, .align = UI_CENTER},                           // a row's children at its two ends, on its middle line
+        {"map", .pad = {UI_GAP2, UI_GAP2, 0, UI_GAP2}},                                  // a panel with a strip of actions across its top: what is in it is in from its sides and its foot
+        {"search", .w = UI_SEARCH_W, .margin = {0, UI_SEARCH_RIGHT + UI_PAD, 0, 0}},     // a page's search field at the end of its title's band: clear of the window's buttons
         // Text.
+        {"pagetitle", .type = UI_ROLE(UI_TITLE_LARGE), .ink = UI_ROLE(UI_ON_SURFACE), .margin = {UI_PAD + UI_PAGE_INSET, 0, 8, 0}, .grow = 1}, // a page's title: in from the margin, in the middle of its band under the window's edge, as wide as what follows leaves it
+        {"caption", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .margin = {0, 0, UI_GAP2, UI_GAP2}}, // a quiet line under what it is about, a gap from it and from what follows
         {"badge", .align = UI_CENTER},                                                   // a column's children in the middle of its width
         {"figure", .type = UI_ROLE(UI_LABEL_LARGE)},                                     // a bold text, sized by the element
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
@@ -16714,6 +16722,13 @@ static int ui_width(void)
         return ui_view_now && ui_view_now->ui->scale > 0 ? ui_view_now->width * 100 / ui_view_now->ui->scale : 0;
 }
 
+// A size or a limit of a class or a prop in device pixels: its logical pixels at the window's scale, a row of a list (UI_H_ROW), or a
+// share of the window's width (ui_share), which is that many hundredths of the width the view was begun with, rounded down.
+static int ui_view_px(const struct ui_view address_to v, int size)
+{
+        return size >= UI_SHARE ? (int)((b64)v->width * (size - UI_SHARE) / 100) : ui_px(v->ui, size == UI_H_ROW ? UI_ROW : size);
+}
+
 // An element opened inside the one open: its node written from its classes and the props over them, in device pixels.
 static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui_props address_to p)
 {
@@ -16738,19 +16753,24 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         {
                 struct ui_size address_to s = &n->size[a];
 
-                s->min = ui_px(ui, low[a]);
-                s->max = high[a] ? ui_px(ui, high[a]) : UI_TREE_MOST;
+                s->min = ui_view_px(v, low[a]);
+                s->max = high[a] ? ui_view_px(v, high[a]) : UI_TREE_MOST;
                 s->shrink = p->shrink ? p->shrink : look.shrink;
                 if (grow && a == along)
-                        // A size of a class in device pixels: its logical pixels at the window's scale, or a row.
-                        s->kind = UI_GROW, s->value = grow, s->min = fixed[a] ? ui_px(ui, ((int)(fixed[a])) == UI_H_ROW ? UI_ROW : ((int)(fixed[a]))) : s->min; // its size is its basis, the least it has
+                        s->kind = UI_GROW, s->value = grow, s->min = fixed[a] ? ui_view_px(v, fixed[a]) : s->min; // its size is its basis, the least it has
                 else if (fixed[a])
-                        s->kind = UI_FIXED, s->value = ui_px(ui, ((int)(fixed[a])) == UI_H_ROW ? UI_ROW : ((int)(fixed[a])));
+                        s->kind = UI_FIXED, s->value = ui_view_px(v, fixed[a]);
         }
         type = look.type ? look.type - 1 : kind == UI_ITEM_BUTTON ? UI_LABEL_LARGE : UI_BODY_MEDIUM;
         if (kind == UI_ITEM_TEXT && p->text)
         {
-                n->content[0] = fixed[0] ? 0 : ui_kit_measure_at(ui, (string_address)p->text, type, p->size ? p->size : ui_types[type].size);
+                // A text is measured where its width is its words'. It is not where the layout reads no width of it: one given a size, one that
+                // grows along its row, and one a column stretches that has a width of its own are as wide as their room. A screen of such texts
+                // alone is laid out with no face.
+                const struct ui_node address_to up = parent >= 0 ? &v->tree.node[parent] : null;
+                b32 given = fixed[0] || (grow && !along) || (up && along && up->size[0].kind != UI_FIT && (up->align < UI_START || up->align > UI_END));
+
+                n->content[0] = given ? 0 : ui_kit_measure_at(ui, (string_address)p->text, type, p->size ? p->size : ui_types[type].size);
                 n->content[1] = ui_dev(ui, ui_types[type].line);
         }
         else if (kind == UI_ITEM_BUTTON && p->text)
@@ -16892,9 +16912,9 @@ static int ui_view_end(struct ui_view address_to v)
                 }
                 if (item->control)
                         ui_view_box(ui, n, item->control);
-                if (item->kind == UI_ITEM_HOST && item->host)
+                if (item->host)
                         *item->host = (struct ui_rect){n->x, n->y, n->w, n->h};
-                else if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
+                if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
                 {
                         struct ui_control address_to c = &v->group.button[item->button];
 
@@ -17008,8 +17028,9 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                                                   : ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type);
                         unsigned int argb = item->ink ? item->ink : ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE);
 
-                        ui_kit_start_at(ui, ui_rtl() ? n->x + n->w : n->x, baseline, (string_address)item->text, type, size, argb, 0, n->x,
-                                        n->x + n->w);
+                        // Cut where it runs out of its box, at the end away from the edge it starts at: what its letters' edges take past that edge is theirs.
+                        ui_kit_start_at(ui, ui_rtl() ? n->x + n->w : n->x, baseline, (string_address)item->text, type, size, argb, 0, ui_rtl() ? n->x : 0,
+                                        ui_rtl() ? ui->width : n->x + n->w);
                 }
                 if (item->scroll >= 0)
                         open[depth] = at, after[depth++] = ui_view_after(v, at);
@@ -19205,10 +19226,11 @@ static int ui_press_lift(struct ui_press address_to press, b32 cancelled)
 
 /* ---- a page ---- */
 /*
-        A page: ui_page_layout and ui_page_draw (a title, a search field, a column of groups, a body and a status line), the
-        column's ui_page_column_* (hit, reveal, key, press, bar) and ui_page_wheel. ui_app_run is the main loop: it calls
-        ui_event_context once for each event and forwards it. ui_argument reads a program's argument. An app declares its
-        groups and rows; the page lays out, scrolls and draws them.
+        A page: ui_page_view declares its frame as a view (a title, a search field, a column of groups, a body), ui_page_fit puts
+        its parts where the view says and ui_page_paint draws them; the column's ui_page_column_* (hit, reveal, key, press, bar)
+        and ui_page_wheel. ui_app_run is the main loop: it calls ui_event_context once for each event and forwards it. ui_argument
+        reads a program's argument. An app declares its groups and rows, and what it shows above the rows; the page lays out,
+        scrolls and draws them.
 */
 
 // The two buffers of an app's window (ui_buffers_present, below): what each lacks, and whether the picture is due. A page embeds one.
@@ -19226,10 +19248,14 @@ struct ui_buffers
 struct ui_page
 {
         const char address_to title;       // at the top left
-        const char address_to status;      // at the foot: a line, or two where it does not fit one
         b32 column_on;                     // it has a column of groups at the left
+        fn (*above)(void);                 // what the app shows above its rows, declared as elements of the frame (or none)
         int width, height;                 // the window, device pixels
-        // Laid out by the kit, device pixels.
+        // The frame: a view (ui_page_view) the app keeps the room for, and where it put the column's groups and bar, the rows and the body's
+        // bar, device pixels.
+        struct ui_view address_to view;
+        struct ui_rect column_box, column_bar, list_box, body_bar;
+        // Read off those by ui_page_fit, device pixels.
         int top, bottom;                   // the body's band
         int left, right;                   // and its sides
         int column_w;
@@ -19248,7 +19274,7 @@ struct ui_page
         // The app's: what scrolls in the body (its list's region, or a page of text's).
         struct ui_scroll address_to body;
         // The picture: the page's buffers and the flag that it is due. The kit marks what changes in it (a press, a finger, a key,
-        // a menu); the app marks what its own data changed (ui_page_redraw, ui_page_rows).
+        // a menu); the app marks what its own data changed (ui_page_redraw, ui_page_damage).
         struct ui_buffers buffers;
         b32 dirty;
 };
@@ -19258,55 +19284,45 @@ static fn ui_buffers_rows(struct ui_buffers address_to b, int top, int bottom);
 static fn ui_page_damage(struct ui_page address_to p, int top, int bottom);
 static fn ui_page_changed(struct ui_page address_to p);
 
-static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_to p, int width, int height)
-{
-        int pad = ui_dev(ui, UI_PAD), side = width * UI_COLUMN_SHARE / 100;
-
-        p->width = width, p->height = height;
-        p->top = ui_dev(ui, UI_PAGE_TOP);
-        p->bottom = height - ui_dev(ui, UI_PAGE_FOOT);
-        side = side < ui_dev(ui, UI_COLUMN_LEAST) ? ui_dev(ui, UI_COLUMN_LEAST) : side;
-        side = side > ui_dev(ui, UI_COLUMN_MOST) ? ui_dev(ui, UI_COLUMN_MOST) : side;
-        p->column_w = p->column_on ? (side > width / 2 ? width / 2 : side) : 0;
-        p->left = pad + (p->column_on ? p->column_w + ui_dev(ui, UI_COLUMN_GUTTER) : 0);
-        p->right = width - pad;
-        p->column_scroll.x = pad + p->column_w + (ui_dev(ui, UI_COLUMN_GUTTER) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
-        p->seam = p->column_on ? p->column_scroll.x + ui_dev(ui, UI_SCROLL_WIDTH) / 2 : 0;
-        // Reading from the right it is the same page turned over the window's middle: the column at the right edge, the body to its left.
-        if (ui_rtl())
-        {
-                int left = p->left;
-
-                p->left = width - p->right, p->right = width - left;
-                p->column_scroll.x = width - p->column_scroll.x - ui_dev(ui, UI_SCROLL_WIDTH);
-                p->seam = p->column_on ? width - p->seam : 0;
-        }
-        // The column scrolls as a list does: its ends take a pull as the rubber band, and a wheel turn at an end (the body's band).
-        p->column_scroll.scale = ui->scale;
-        p->column_scroll.y = p->top, p->column_scroll.height = p->bottom - p->top, p->column_scroll.view = p->bottom - p->top;
-        p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
-        ui_scroll_clamp(&p->column_scroll);
-}
-
 /*
-        The body's rows run from the seam to the window's own edge, flush: the column's rows end at the middle of the column's scroll
-        track and these begin there, so the track lies across the join of two surfaces and not in a margin of either, and the list's
-        own track is drawn over its rows' last stretch, which is blank. The list's box (ui_list_place's) is unchanged: its words and
-        controls keep the page's margins at both ends, and nothing sits under a track. A page with no column starts at the window's edge.
+        The page's frame, a view: the title's band (the title, and the search field at its end, clear of the window's buttons, when the
+        app gave it a placeholder), and under it a row the window's height: the margin, the column of groups (this share of the window,
+        between its least and its most, in a box never more than half of the window), the gutter with the column's bar in its middle,
+        the body (what the app declares above its rows, then the rows) and the margin with the body's bar in its middle. The column, the
+        bars and the rows are hosts: the view says where they are (ui_page_fit reads it), and the page draws them. Reading from the right
+        the view turns it over the window's middle: the column at the right edge, the body to its left. It is declared when the page is
+        laid out and again for each picture, so the words in it are what they are then.
 */
-static fn ui_page_rows(const struct ui_page address_to p, struct ui_list address_to l)
+static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
 {
-        l->row_x = p->column_on && !ui_rtl() ? p->seam : 0;
-        l->row_w = p->column_on && ui_rtl() ? p->seam : p->width - l->row_x;
-}
-
-// A page's bottom edge moved from the layout's (an app's body runs to the window's edge): the column's view follows it, so its
-// scroll range ends where its drawing does.
-static fn ui_page_set_bottom(struct ui_page address_to p, int bottom)
-{
-        p->bottom = bottom;
-        p->column_scroll.height = p->column_scroll.view = p->bottom - p->top;
-        ui_scroll_clamp(&p->column_scroll);
+        if (p->search.kind != UI_INPUT)
+                p->search.kind = UI_INPUT, p->search.variant = UI_FIELD_BARE, ui_control_start(&p->search);
+        ui_view_begin(p->view, ui, p->width, -p->height);
+        ui_row(.h = UI_PAGE_TOP)
+        {
+                ui_text(p->title, .class = "pagetitle");
+                ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
+        }
+        ui_row(.grow = 1)
+        {
+                ui_host(null, .w = UI_PAD);
+                if (p->column_on)
+                {
+                        ui_row(.host = &p->column_box, .max_w = ui_share(50))
+                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST);
+                        ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
+                                ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
+                }
+                ui_col(.grow = 1)
+                {
+                        if (p->above)
+                                p->above();
+                        ui_host(&p->list_box, .grow = 1);
+                }
+                ui_row(.w = UI_PAD, .class = "middle")
+                        ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
+        }
+        ui_view_end(p->view);
 }
 
 // The group under a point of the window, or -1.
@@ -19354,30 +19370,42 @@ static b32 ui_page_column_reveal(const struct ui address_to ui, struct ui_page a
 }
 
 /*
-        A page laid out in its window: the page's geometry (ui_page_layout), its band down to the window's bottom edge, the list's
-        place at the body's top plus the inset (asked after the page is laid out: a panel above the rows), the list's rows and its
-        layout, the body's scroll kept in its range, and the card's place (the body's whole band, at the side of the column) with
-        its content height. The app sets the column and the body first.
-*/
-static fn ui_page_fit(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int width, int height,
-                      int (*inset)(void), struct ui_scroll address_to card, int card_content)
-{
-        int top;
+        A page laid out in its window: its frame declared (ui_page_view), and its parts put where the frame has them. The body's band
+        is the height of its bar's track, down to the window's bottom edge, and its sides are the rows' box's; the column is as wide as
+        its box, and its rows end at the seam, the middle of its bar's track. Each bar is in its track: the column's, which scrolls as
+        a list does (its ends take a pull as the rubber band, and a wheel turn at an end), and the card's, which is the body's (a card
+        that scrolls takes a pull at its ends like a list, and at its top when it fits). The list is put in its box and laid out, and its
+        scroll kept in its range. The app sets the column, the body, the frame's view and what it shows above the rows first.
 
-        ui_page_layout(ui, p, width, height);
-        ui_page_set_bottom(p, height);
-        top = p->top + inset();
-        ui_list_place(ui, l, p->left, top, p->right - p->left, p->bottom - top);
-        ui_page_rows(p, l);
+        The body's rows run from the seam to the window's own edge, flush: the column's rows end at the middle of the column's scroll
+        track and these begin there, so the track lies across the join of two surfaces and not in a margin of either, and the list's
+        own track is drawn over its rows' last stretch, which is blank. The list's box (ui_list_place's) is unchanged: its words and
+        controls keep the page's margins at both ends, and nothing sits under a track. A page with no column starts at the window's edge.
+*/
+static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int width, int height,
+                      struct ui_scroll address_to card, int card_content)
+{
+        const struct ui_rect address_to bar = &p->column_bar, address_to box = &p->list_box;
+        struct ui_scroll address_to bars[2] = {&p->column_scroll, card};
+
+        p->width = width, p->height = height;
+        ui_page_view(ui, p);
+        p->top = p->body_bar.y, p->bottom = p->top + p->body_bar.h;
+        p->left = box->x, p->right = box->x + box->w;
+        p->column_w = p->column_on ? p->column_box.w : 0;
+        p->seam = p->column_on ? ui_mirror(bar->x + bar->w / 2, 0, bar->x, bar->w) : 0;
+        p->column_scroll.x = bar->x, p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
+        card->x = p->body_bar.x, card->content = card_content;
+        for (int k = 0; k < 2; k++)
+        {
+                bars[k]->y = p->top, bars[k]->height = bars[k]->view = p->bottom - p->top, bars[k]->scale = ui->scale;
+                ui_scroll_clamp(bars[k]);
+        }
+        ui_list_place(ui, l, box->x, box->y, box->w, box->h);
+        l->row_x = p->column_on && !ui_rtl() ? p->seam : 0;
+        l->row_w = p->column_on && ui_rtl() ? p->seam : p->width - l->row_x;
         ui_list_layout(ui, l);
         ui_scroll_clamp(&l->scroll);
-        card->x = ui_rtl() ? p->left - ui_px(ui, UI_SCROLL_WIDTH) - (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2
-                           : p->right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
-        card->y = p->top, card->height = card->view = p->bottom - p->top;
-        card->content = card_content;
-        // A card that scrolls takes a pull at its ends like a list (the body's band), and at its top when it fits.
-        card->scale = ui->scale;
-        ui_scroll_clamp(card);
 }
 
 // The body scrolled to scroll: drawn again when it moved.
@@ -19426,6 +19454,7 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
+        const struct ui_rect address_to box = &p->column_box;
         int chosen = p->chosen, rest;
 
         if (!p->column_on)
@@ -19438,11 +19467,12 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
                 c->at = chosen;
         }
-        c->x = ui_rtl() ? p->width * 100 / ui->scale - UI_PAD - p->column_w * 100 / ui->scale : UI_PAD;
+        // The groups are in the column's box, in logical pixels from the edge they start at (the box's right, reading from the right).
+        c->w = box->w * 100 / ui->scale;
+        c->x = ui_rtl() ? (box->x + box->w) * 100 / ui->scale - c->w : box->x * 100 / ui->scale;
         // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_scroll_pull)
         rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top);
         c->y = (p->top - rest) * 100 / ui->scale;
-        c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
         // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
         // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
@@ -19996,80 +20026,15 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
         }
 }
 
-/*
-        The page's own parts: cleared to the surface, the title in the title role, the search field (the engine's field
-        the app gave it, search.edit, lit while it has the keys), and the status line at the foot, quiet, broken at a
-        blank where it does not fit one line.
-*/
-static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32 keys)
-{
-        UI_CALL();
-        int pad = ui_dev(ui, UI_PAD), left = pad + ui_dev(ui, UI_PAGE_INSET), room = p->width - left - pad, foot = ui_dev(ui, UI_PAGE_FOOT);
-
-        ui->top = 0;
-        ui->bottom = p->height;
-        ui_clear(ui);
-        if (p->title)
-                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, ui_dev(ui, 8) + (p->top - ui_dev(ui, 8) - ui_dev(ui, 28)) / 2, UI_TITLE_LARGE),
-                                    (string_address)p->title, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0, 0, p->width);
-        if (p->search.items[0])
-        {
-                struct ui_control address_to c = &p->search;
-
-                if (c->kind != UI_INPUT)
-                {
-                        c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                        ui_control_start(c);
-                }
-                // The field is the title band's whole height (it melts into the band: no gap above or below it).
-                c->w = UI_SEARCH_W, c->h = UI_PAGE_TOP;
-                c->x = ui_mirror((p->width - pad) * 100 / ui->scale - c->w - UI_SEARCH_RIGHT, c->w, 0, p->width * 100 / ui->scale), c->y = 0;
-                c->focused = keys;
-                // Its own clip: the title band. A field drawn past the band's edge was cut where the list below repaints.
-                ui->bottom = p->top;
-                ui_control_draw(ui, c);
-                ui->bottom = p->height;
-        }
-        ui->top = p->bottom;
-        if (p->status && p->status[0])
-        {
-                unsigned int quiet = ui_role(UI_ON_SURFACE_VARIANT);
-                positive length = string_length((string_address)p->status), cut = 0;
-                char first[256];
-
-                if (ui_kit_measure(ui, (string_address)p->status, UI_LABEL_MEDIUM) <= room || length >= sizeof(first))
-                {
-                        ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + (foot - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)p->status,
-                                            UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
-                        return;
-                }
-                for (positive at = 1; at < length; at++)
-                {
-                        if (p->status[at] != ' ')
-                                continue;
-                        memory_copy(first, p->status, at);
-                        first[at] = 0;
-                        if (ui_kit_measure(ui, (string_address)first, UI_LABEL_MEDIUM) > room)
-                                break;
-                        cut = at;
-                }
-                cut = cut ? cut : length;
-                memory_copy(first, p->status, cut);
-                first[cut] = 0;
-                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2 - ui_dev(ui, 16), UI_LABEL_MEDIUM), (string_address)first,
-                                    UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
-                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2, UI_LABEL_MEDIUM), (string_address)p->status + cut + (cut < length),
-                                    UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
-        }
-}
-
 static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t);
 
 /*
-        A page's picture, with its parts: the page's own (ui_page_draw, the search field lit while keys), then the card in place of the
-        body (parts->card, drawn by the app), or the column of groups, the between (the app's: a panel above the rows), the rows lit
-        and keyed as the parts say, and the column's bar, drawn last; then the overlays the app lists (each over the rows, when not
-        null). The app says what each part shows; the kit draws them in this order.
+        A page's picture, with its parts: the frame declared again (ui_page_view: its words are what they are now) and the window
+        cleared to the surface; then the card in place of the body (parts->card, drawn by the app), or the column of groups, the
+        between (the app's: what is under and in what it declared above the rows), the rows lit and keyed as the parts say, and the
+        column's bar, drawn last of them; then the frame over them (ui_view_draw: the title, the search field lit while keys, the
+        app's own elements above the rows), and the overlays the app lists (each over the rows, when not null). The app says what
+        each part shows; the kit draws them in this order.
 */
 struct ui_page_parts
 {
@@ -20102,9 +20067,13 @@ static fn ui_page_paint(struct ui address_to ui, struct ui_page address_to p, co
 {
         int k;
 
-        ui_page_draw(ui, p, parts->keys);
+        ui_page_view(ui, p);
+        ui->top = 0, ui->bottom = p->height;
+        ui_clear(ui);
         if (p->card)
         {
+                // The card is in place of the body: what the app draws of it is in the body's band.
+                ui->top = p->top, ui->bottom = p->bottom;
                 if (parts->card)
                         parts->card(ui);
         }
@@ -20119,6 +20088,8 @@ static fn ui_page_paint(struct ui address_to ui, struct ui_page address_to p, co
                 ui_list_draw(ui, parts->list);
                 ui_page_column_bar(ui, p);
         }
+        p->search.focused = parts->keys;
+        ui_view_draw(ui, p->view, false);
         for (k = 0; k < 2; k++)
                 if (parts->overlays[k])
                         ui_text_overlay(ui, parts->overlays[k]);
