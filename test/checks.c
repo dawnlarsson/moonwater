@@ -151951,7 +151951,8 @@ static fn check_kit_confirm_repeat(void)
         The kit's layout (ui/ui.c) on trees whose rectangles are worked by hand from the rules in its head comment: the grow
         shares in whole pixels with the pixel the floors leave to the first, a grow child frozen at its max, the justifies, the
         aligns, a shrink that stops at a min, margins and pads in a fit size, a percent with a max, a scroll element's offset
-        clamped, and the limits.
+        clamped, two ends that give way alike with a child in the middle between them, a root put somewhere, an element found
+        by its name and at a point (with a finger's reach), the mirror, and the limits.
 */
 static struct ui_tree layout_tree;
 
@@ -152096,6 +152097,58 @@ static fn check_kit_layout(void)
         root->offset = 500;
         ui_tree_run(&layout_tree, 100, 100);
         check("kit layout: a scroll offset past the end is held to the end", root->offset == 80 && a->y == -80 && c->y == 40);
+
+        // A size that gives way: two ends that each ask for all of a row of 101, with the same shrink weight, and a child of 30 between them.
+        // They give up 131 alike, the pixel left over from the first: 35 and 36, so the child is in the middle of the row, the odd pixel after it.
+        root = layout_root(0);
+        a = layout_child(0, 0), a->size[0] = (struct ui_size){UI_PERCENT, 100, 0, UI_TREE_MOST, 1};
+        b = layout_child(30, 0);
+        c = layout_child(0, 0), c->size[0] = (struct ui_size){UI_PERCENT, 100, 0, UI_TREE_MOST, 1};
+        ui_tree_close(&layout_tree);
+        ui_tree_run(&layout_tree, 101, 20);
+        check("kit layout: two ends that each ask for all of the row and give way alike are the same size, so the child between them is in the middle of the row (at 35 of 101, the odd pixel after it)",
+              a->w == 35 && b->x == 35 && b->w == 30 && c->x == 65 && c->w == 36);
+        a->size[0].min = 50;
+        ui_tree_run(&layout_tree, 101, 20);
+        check("kit layout: an end that has come down to its min gives no more, the other gives up the rest, and the child between them is off the middle by that much (at 50)",
+              a->w == 50 && b->x == 50 && c->x == 80 && c->w == 21);
+        a->size[0].min = 0, c->size[0].min = 40;
+        ui_tree_run(&layout_tree, 101, 20);
+        check("kit layout: and the same from the other end (at 31, the last end 40)", a->w == 31 && b->x == 31 && c->x == 61 && c->w == 40);
+
+        // Names, points and the mirror: a row at 30, -20 of a box 40 by 20 named 7 with a box of 10 with no name in its middle, a gap of 10,
+        // a box 40 by 20 named 8, and a box of no width named 9.
+        {
+                struct ui_node address_to inner, address_to none;
+                static const int along[2] = {6, 0}, down[2] = {0, 5};
+                b32 points, fingers;
+
+                root = layout_root(0);
+                root->gap = 10, root->align = UI_START, root->x = 30, root->y = -20;
+                a = ui_tree_open(&layout_tree);
+                a->size[0] = (struct ui_size){UI_FIXED, 40, 0, UI_TREE_MOST, 0}, a->size[1] = (struct ui_size){UI_FIXED, 20, 0, UI_TREE_MOST, 0};
+                a->id = 7, a->justify = a->align = UI_CENTER;
+                inner = layout_child(10, 10);
+                ui_tree_close(&layout_tree);
+                c = layout_child(40, 20), c->id = 8;
+                none = layout_child(0, 20), none->id = 9;
+                ui_tree_close(&layout_tree);
+                ui_tree_run(&layout_tree, 200, 100);
+                check("kit layout: a root the caller put somewhere stays there, and every element is placed from it",
+                      root->x == 30 && root->y == -20 && root->w == 200 && a->x == 30 && a->y == -20 && inner->x == 45 && inner->y == -15 && c->x == 80 && none->x == 130 && none->w == 0);
+                check("kit layout: an element is found by its name, and 0 and a name no element has find none",
+                      ui_tree_find(&layout_tree, 7) == a && ui_tree_find(&layout_tree, 8) == c && !ui_tree_find(&layout_tree, 0) && !ui_tree_find(&layout_tree, 5));
+                points = ui_tree_hit(&layout_tree, 31, -19, null) == 1 && ui_tree_hit(&layout_tree, 50, -10, null) == 1 && ui_tree_hit(&layout_tree, 119, -1, null) == 3 &&
+                         ui_tree_hit(&layout_tree, 75, -10, null) == -1 && ui_tree_hit(&layout_tree, 50, 0, null) == -1 && ui_tree_hit(&layout_tree, 29, -10, null) == -1;
+                check("kit layout: the element at a point is the deepest one with a name that holds it (a box with none inside it is the box it is in), and a gap, the root and a point off the root are none", points);
+                fingers = ui_tree_hit(&layout_tree, 75, -10, along) == 1 && ui_tree_hit(&layout_tree, 77, -10, along) == 3 && ui_tree_hit(&layout_tree, 50, 4, down) == 1 &&
+                          ui_tree_hit(&layout_tree, 50, 5, down) == -1 && ui_tree_hit(&layout_tree, 28, -10, along) == -1 && ui_tree_hit(&layout_tree, 132, -10, along) == -1;
+                check("kit layout: with a finger's reach each element is that much larger on either side, of two that hold the point the first opened is it, the root is no larger, and an element of no size holds no point",
+                      fingers);
+                ui_tree_mirror(&layout_tree);
+                check("kit layout: the mirror turns the tree over the root's width: each element as far from its right edge as it was from its left, the root where it was",
+                      root->x == 30 && a->x == 190 && inner->x == 205 && c->x == 140 && a->y == -20 && a->w == 40);
+        }
 
         // The limits: elements past the tree's room and a second root are refused and counted, and nothing is written outside the arrays.
         root = layout_root(0);

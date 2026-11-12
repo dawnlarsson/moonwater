@@ -1461,6 +1461,8 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
             align        the children across it: UI_START, UI_CENTER, UI_END, or UI_STRETCH (0 too): a child of fit size fills
             scroll       1: the children are not shrunk, run past the end, and are moved back by offset (clamped, answered in
                          offset), with the length of what they take in extent: overflow: auto along the main axis
+            id           the caller's name for the element, which the layout does not read: what ui_tree_find and ui_tree_hit
+                         answer by (0, which an open gives it, is no name)
             size[0..1]   the width and the height, below
 
         Sizing, per axis (size[0] is the width, size[1] the height):
@@ -1476,13 +1478,22 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
                          share of the excess in proportion to the weight and its size, down to its min. A GROW child never.
 
         Pass 1 (bottom-up, the reverse of open order) gives every element its preferred size. Pass 2 (top-down, in open order)
-        gives the root its size from the viewport (GROW: all of it, PERCENT: that share of it) and then, each parent in turn, its
-        children their main sizes (FIXED and FIT as pass 1 has them, PERCENT of the inner size, the GROW shares of what is left
-        after the sizes, margins and gaps) and their places. A share is in whole pixels, floor(room * weight / total weight), and the
-        pixels the floors leave go one each to the first children with a weight, in open order. A GROW child that would pass its max
-        is frozen at the max and the room shared again among the rest; a shrinking child that would pass its min is frozen at the min
-        and the excess shared again; each repeats till none passes. Children are never clipped: one larger than its parent runs
-        past it.
+        gives the root its size from the viewport (GROW: all of it, PERCENT: that share of it), where the caller put it (its x and
+        y, which an open leaves at the origin), and then, each parent in turn, its children their main sizes (FIXED and FIT as
+        pass 1 has them, PERCENT of the inner size, the GROW shares of what is left after the sizes, margins and gaps) and their
+        places. A share is in whole pixels, floor(room * weight / total weight), and the pixels the floors leave go one each to
+        the first children with a weight, in open order. A GROW child that would pass its max is frozen at the max and the room
+        shared again among the rest; a shrinking child that would pass its min is frozen at the min and the excess shared again;
+        each repeats till none passes. Children are never clipped: one larger than its parent runs past it.
+
+        A child's size apart from its least is a size that gives way: two children that each ask for all of their parent
+        (PERCENT 100) with the same shrink weight come to the same size, so what is between them is in the middle of the parent,
+        the odd pixel after it, and when one of the two has come down to its min the other gives up the rest and the middle
+        moves off it (the taskbar's tabs, between its launcher button and its tray).
+
+        After the run, what a caller asks of the rectangles: ui_tree_find is the element of a name, ui_tree_hit the named element
+        at a point (the deepest one, and with a finger's reach each one a little larger), and ui_tree_mirror turns the whole
+        tree over the root's width, which is what a window or a band read from the right is.
 
         Every value is read within its range: sizes, gaps, pads, margins and the viewport lie in [0, UI_TREE_MOST], weights in
         [0, UI_TREE_WEIGHT], a direction other than 1 is 0, a kind outside 0 to 3 is UI_FIT, a justify or an align the table does
@@ -1538,8 +1549,8 @@ struct ui_node
         int pref[2], base, frozen;         // the scratch of the passes
         b64 sum[2];
         int widest[2];
-        int x, y, w, h;                    // the answer: the rectangle, from the root's top left
-        int spare[2];
+        int x, y, w, h;                    // the answer: the rectangle, from where the root is put (its x and y, read by the run)
+        int id, spare;                     // the caller's name for the element (0: none)
 };
 
 struct ui_tree
@@ -1805,13 +1816,13 @@ static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
                         }
                 }
         }
-        // The root: from the viewport, at the origin.
+        // The root: from the viewport, where the caller put it.
         for (int a = 0; a < 2; a++)
         {
                 const struct ui_size address_to s = &t->node[0].size[a];
                 b64 v = s->kind == UI_GROW ? view[a] : s->kind == UI_PERCENT ? view[a] * s->value / 100 : t->node[0].pref[a];
 
-                *ui_tree_at(&t->node[0], a) = 0;
+                *ui_tree_at(&t->node[0], a) = ui_tree_place(*ui_tree_at(&t->node[0], a));
                 *ui_tree_len(&t->node[0], a) = (int)ui_tree_clamp(v, s->min, s->max);
         }
         // Pass 2, top-down: each parent places its children, in open order.
@@ -1890,6 +1901,45 @@ static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
                         *ui_tree_at(k, c) = ui_tree_place(origin[c] + k->margin[2 * c] + (e->align == UI_CENTER ? left / 2 : e->align == UI_END ? left : 0));
                 }
         }
+}
+
+// The first element named id, or null: 0 names none.
+static struct ui_node address_to ui_tree_find(struct ui_tree address_to t, int id)
+{
+        for (int i = 0; id && i < t->count; i++)
+                if (t->node[i].id == id)
+                        return &t->node[i];
+        return null;
+}
+
+/*
+        The element at a point: the deepest one with a name whose rectangle holds it, as the rectangles of all it is inside do,
+        and of two as deep the first opened; -1 when none does. An element with no name is never the answer (it is structure, or
+        a part of the one it is in), and an element of no size holds no point. With reach, a finger's: every element but the
+        root is read reach[0] pixels larger to its left and its right and reach[1] above and below, so an element a finger lands
+        beside is still that element, and nothing is laid out any larger.
+*/
+static int ui_tree_hit(const struct ui_tree address_to t, int x, int y, const int address_to reach)
+{
+        int depth[UI_TREE_NODES], best = -1;
+
+        for (int i = 0; i < t->count; i++)
+        {
+                const struct ui_node address_to n = &t->node[i];
+                int rx = i && reach ? reach[0] : 0, ry = i && reach ? reach[1] : 0, above = i ? depth[n->parent] : 0;
+
+                depth[i] = above >= 0 && n->w > 0 && n->h > 0 && x >= n->x - rx && x < n->x + n->w + rx && y >= n->y - ry && y < n->y + n->h + ry ? above + 1 : -1;
+                if (n->id && depth[i] > (best < 0 ? 0 : depth[best]))
+                        best = i;
+        }
+        return best;
+}
+
+// The whole tree turned over the root's width: every element as far from the root's right edge as it was from its left.
+static fn ui_tree_mirror(struct ui_tree address_to t)
+{
+        for (int i = 1; i < t->count; i++)
+                t->node[i].x = 2 * t->node[0].x + t->node[0].w - t->node[i].x - t->node[i].w;
 }
 
 /*
@@ -16848,8 +16898,8 @@ static int ui_view_end(struct ui_view address_to v)
         ui_tree_close(&v->tree);
         ui_tree_run(&v->tree, v->width, v->limit);
         v->dropped = v->tree.dropped;
-        for (int at = 0; at < v->tree.count && ui_rtl(); at++)
-                v->tree.node[at].x = v->tree.node[0].w - v->tree.node[at].x - v->tree.node[at].w;
+        if (ui_rtl())
+                ui_tree_mirror(&v->tree);
         for (int at = 0; at < v->tree.count; at++)
         {
                 const struct ui_node address_to n = &v->tree.node[at];

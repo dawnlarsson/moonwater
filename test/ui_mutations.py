@@ -129,6 +129,10 @@ M = [
     (T, "the microphone not struck when muted", "size, taskbar.mic_muted, compositor_ink_role(UI_ERROR)", "size, 0, compositor_ink_role(UI_ERROR)"),
     (T, "the notices dot in the kit's roles, which the compositor never makes", "unsigned int colour = compositor_ink_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);", "unsigned int colour = ui_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);"),
     (T, "the tabs centred in what the tray leaves of the band", "lay->start = lay->origin + (lay->length - group) / 2;", "lay->start = lay->origin + lay->lead + (lay->length - lay->lead - lay->tray - windows) / 2;"),
+    (U, "the layout's hit answers an element with no name", "if (n->id && depth[i] > (best < 0 ? 0 : depth[best]))", "if (depth[i] > (best < 0 ? 0 : depth[best]))"),
+    (U, "the layout's hit grows the root by the reach", "int rx = i && reach ? reach[0] : 0, ry = i && reach ? reach[1] : 0, above = i ? depth[n->parent] : 0;", "int rx = reach ? reach[0] : 0, ry = reach ? reach[1] : 0, above = i ? depth[n->parent] : 0;"),
+    (U, "the layout's root put back at the origin", "*ui_tree_at(&t->node[0], a) = ui_tree_place(*ui_tree_at(&t->node[0], a));", "*ui_tree_at(&t->node[0], a) = 0;"),
+    (U, "the layout's mirror about the origin, not the root", "t->node[i].x = 2 * t->node[0].x + t->node[0].w - t->node[i].x - t->node[i].w;", "t->node[i].x = t->node[0].w - t->node[i].x - t->node[i].w;"),
     # ---- the fullscreen slide (`taskbar fullscreen on`) ----
     (T, "fullscreen on, no slide: the band jumps off at once", "taskbar.slide_at = animate ? now : 0;", "taskbar.slide_at = 0;"),
     (T, "fullscreen on, the band never leaves its edge", "int off = (int)(((long long)thick * (long long)shift) / (long long)UI_ONE);", "int off = 0;"),
