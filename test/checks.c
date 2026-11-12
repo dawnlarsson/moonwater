@@ -138304,6 +138304,24 @@ static b32 settings_chord(int key, unsigned int code, unsigned int flags)
 
         return settings_key(&event);
 }
+
+/*
+        A row put where a person who types in it has it: the rows of its group listed in a window of the size Settings opens
+        at, the keys on the row, and the row in view. A key that comes while the row typed in is out of view ends the typing
+        (settings_key), as a press outside its field does, so a check that types in a row shows the row first. The reveal is
+        a glide, and the list is put where the glide ends.
+*/
+static fn settings_show(int row)
+{
+        settings.ui.scale = 100;
+        settings.width = SETTINGS_WIDTH;
+        settings.height = SETTINGS_HEIGHT;
+        settings_filter_clear();
+        settings.page.chosen = settings_group_of(row);
+        settings.list.focus = row;
+        settings_refilter();
+        ui_scroll_set(&settings.list.scroll, (int)(scroll_aim(&settings.list.scroll) >> 8));
+}
 #endif
 
 /*
@@ -140057,12 +140075,14 @@ static fn check_settings(string_address regular, string_address bold)
                       settings_row_asks(wipe) && settings_row_asks(sleep) && !settings_row_asks(status) && !settings_row_asks(desktop));
 
                 // The second Enter: the first says so and runs nothing, a key between asks again, the same Enter after it runs.
+                // The command's row is in view, as it is for whoever types in it (settings_show).
                 settings.child = 1;
                 settings.queued = 0;
                 settings.job = clock;
                 settings.job_sets = false;
                 ui_field_close(&settings.edit);
                 ui_confirm_drop(&settings.confirm);
+                settings_show(wipe);
                 settings_activate(wipe, 1);
                 check("settings: Enter on a command with words to type opens its field", settings_editing() == wipe && settings_holds(""));
                 settings_type_code('y');
@@ -140093,6 +140113,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.queued = 0;
 
                 // The any row: the verb is in what is typed, and nothing typed is no command.
+                settings_show(any);
                 settings_activate(any, 1);
                 check("settings: the any row opens a field", settings_editing() == any);
                 settings_press(UI_KEY_ENTER);
@@ -140103,6 +140124,22 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_press(UI_KEY_ENTER);
                 check("settings: a command typed in it runs", settings.queued == 1 && settings.queue[0].row == any &&
                           string_equals((string_address)settings.queue[0].value, (string_address) "name lane-any") && settings_editing() < 0);
+                settings.queued = 0;
+                // A command is run by Enter alone: a key that comes once its row has scrolled out of view ends the typing as a press
+                // outside its field does, and what was typed is not run by it (a plain value's field is set by either).
+                {
+                        b32 hidden;
+
+                        settings_show(any);
+                        settings_activate(any, 1);
+                        for (const char address_to letter = "name lane-out"; *letter; letter++)
+                                settings_type_code((unsigned int)*letter);
+                        ui_scroll_set(&settings.list.scroll, ui_scroll_most(&settings.list.scroll));
+                        hidden = settings_editing() == any && settings_holds("name lane-out") && !settings_edit_shown();
+                        settings_press(UI_KEY_DOWN);
+                        check("settings: a command typed in a row that scrolled out of view is not run by the next key, which ends its typing",
+                              hidden && settings.queued == 0 && settings_editing() < 0);
+                }
                 settings.queued = 0;
                 settings.child = 0;
 
@@ -140324,6 +140361,8 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: Control-Z gives it back", settings_holds("patient-moh"));
                 settings_press(FIELD_KEY_ESCAPE);
                 check("settings: Escape leaves the field as it was", settings_editing() < 0);
+                // The time zone's row is in view from here on, as it is for whoever types in it (settings_show).
+                settings_show(zone);
                 settings_hold(zone, "");
                 settings_type_code(0xe9);
                 settings_type_code(0xfc);
@@ -162768,6 +162807,29 @@ static fn check_field_hands(string_address regular)
                         check("settings: a click outside a value sets what its field holds",
                               settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-crickety"));
+                        // A command is run by Enter alone: the same click outside its field leaves it as Escape does. The filter lists
+                        // the row that runs any command with no row under the pointer, so the click is outside every row.
+                        {
+                                b32 typed;
+
+                                settings.queued = 0;
+                                for (const char address_to letter = "anything"; *letter; letter++)
+                                        settings_type_code((unsigned int)*letter);
+                                settings.list.focus = SETTINGS_ANY;
+                                settings_press(UI_KEY_ENTER);
+                                settings_draw_rows((unsigned int address_to)pixels, 0, 0);
+                                for (const char address_to letter = "name lane-out"; *letter; letter++)
+                                        settings_type_code((unsigned int)*letter);
+                                typed = settings_editing() == SETTINGS_ANY && settings_holds("name lane-out") &&
+                                        ui_list_hit(&settings.ui, &settings.list, 400, settings.height - 6) < 0;
+                                settings_event_at(&move);
+                                settings_event_at(&press);
+                                settings_event_at(&release);
+                                check("settings: a click outside a command being typed runs nothing, and leaves its field as Escape does",
+                                      typed && settings_editing() < 0 && settings.queued == 0);
+                                settings.queued = 0;
+                                settings_press(FIELD_KEY_ESCAPE);
+                        }
                 }
                 // A row is done on its mouse's release, where the press went down: the press alone opens nothing, the release on
                 // the row opens it, and a press let go off its row opens nothing.

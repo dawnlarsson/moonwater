@@ -4112,9 +4112,10 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         ui_field_begin(t, &settings.own, settings.edit_from, row);
         t->masked = masked;
         // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
-        // a press outside it cancels (the kit's rule), where a plain value is kept.
+        // a press outside it cancels (the kit's rule), where a plain value is kept. A command's row is one of All commands, which
+        // is no item of a list: every row from the any row on is a command's or a list's, so a click never runs what was typed.
         ui_field_focus(t, true);
-        t->cancels = settings_item(row) != null;
+        t->cancels = row >= SETTINGS_ANY;
         t->most =row >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL - 1
                   : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
                                                                                         : SETTINGS_VALUE - 1;
