@@ -81453,13 +81453,24 @@ def harness_waterlink_link(argv):
         print("waterlink link: NOT RUN -- Linux namespaces")
         return 2
     probe = subprocess.run(["unshare", "-Urmn", "--fork", "sh", "-c",
-                            "ip link add name wa type veth peer name wb && "
-                            "tc qdisc add dev wa root netem delay 1ms"],
+                            "ip link add name wa type veth peer name wb"],
                            capture_output=True)
     if probe.returncode:
-        print("waterlink link: NOT RUN -- no unprivileged namespaces, veth or netem here: " +
+        print("waterlink link: NOT RUN -- no unprivileged namespaces or veth here: " +
               probe.stderr.decode(errors="replace")[:200])
         return 2
+    #   netem shapes three scenes: everything again over a lossy path, a
+    #   megabyte over a slow one, and the flood's path. A kernel without the
+    #   qdisc runs every other scene and says which three it did not: they are
+    #   NOT RUN there, not passes over a clean path.
+    shaped = subprocess.run(["unshare", "-Urmn", "--fork", "sh", "-c",
+                             "ip link add name wa type veth peer name wb && "
+                             "tc qdisc add dev wa root netem delay 1ms"],
+                            capture_output=True)
+    if shaped.returncode:
+        print("waterlink link: netem NOT RUN -- the lossy scenes, the slow path and the "
+              "flood's loss did not run, the rest did: " +
+              shaped.stderr.decode(errors="replace").strip()[:120])
 
     with tempfile.TemporaryDirectory(prefix="waterlink-link-") as temporary:
         top = Path(temporary)
@@ -81476,7 +81487,8 @@ def harness_waterlink_link(argv):
                                       str(top / "inner.py"), str(top)],
                                      stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
                                      env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                                          "LC_ALL": "C", "TERM": "xterm"})
+                                          "LC_ALL": "C", "TERM": "xterm",
+                                          "WATERLINK_LINK_NETEM": "" if shaped.returncode else "1"})
             try:
                 scene.wait(timeout=900)
             except subprocess.TimeoutExpired:
@@ -81511,6 +81523,20 @@ env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "TERM": "xterm", 
 def say(ok, what):
     print(("ok " if ok else "FAIL ") + what, flush=True)
     return ok
+
+#       Whether this kernel has netem (the harness asked): a scene that is
+#       only its shaped path is skipped without it, and says so.
+netem_here = bool(os.environ.get("WATERLINK_LINK_NETEM"))
+
+def shape(*spec):
+    for dev, where in (("wb0", None), ("wb", netns)):
+        subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                       ["tc", "qdisc", "add", "dev", dev, "root", "netem"] + list(spec), check=True)
+
+def unshape():
+    for dev, where in (("wb0", None), ("wb", netns)):
+        subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                       ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
 
 for side in "abc":
     for d in ("root", "run"):
@@ -82080,15 +82106,13 @@ text = out.decode(errors="replace")
 say("a  " in text and "may shell run" in text and "heard" in text,
     "status names the peer, its grants, and where it was heard")
 
-for dev, where in (("wb0", None), ("wb", netns)):
-    command = ["tc", "qdisc", "add", "dev", dev, "root", "netem", "delay", "4ms", "2ms",
-               "loss", "3%", "duplicate", "2%", "reorder", "20%", "50%"]
-    subprocess.run((["nsenter", "--net=" + where] if where else []) + command, check=True)
-runs("lossy: ")
-shell("lossy: ")
-for dev, where in (("wb0", None), ("wb", netns)):
-    subprocess.run((["nsenter", "--net=" + where] if where else []) +
-                   ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+if netem_here:
+    shape("delay", "4ms", "2ms", "loss", "3%", "duplicate", "2%", "reorder", "20%", "50%")
+    runs("lossy: ")
+    shell("lossy: ")
+    unshape()
+else:
+    print("  netem NOT RUN: run and shell again over loss, duplication and reordering", flush=True)
 
 #       A path that is slow and loses nothing: a megabyte at four megabits is
 #       two seconds, and the command that sends it is done in a tenth of one.
@@ -82096,17 +82120,16 @@ for dev, where in (("wb0", None), ("wb", netns)):
 big = os.urandom(1000000)
 with open(top + "/b/root/big", "wb") as f:
     f.write(big)
-for dev, where in (("wb0", None), ("wb", netns)):
-    subprocess.run((["nsenter", "--net=" + where] if where else []) +
-                   ["tc", "qdisc", "add", "dev", dev, "root", "netem", "rate", "4mbit"], check=True)
-status, out, err = on("a", moon + " link pull b /root/big /root/bigslow", timeout=120)
-back = open(top + "/a/root/bigslow", "rb").read() if os.path.exists(top + "/a/root/bigslow") else b""
-say(status == 0 and back == big, "a pull over a slow path is whole (%r, %d of %d bytes)" % (status, len(back), len(big)))
-status, out, err = on("a", moon + " link run b 'cat /root/big'", timeout=120)
-say(status == 0 and out == big, "and so is a command's output (%r, %d of %d bytes)" % (status, len(out), len(big)))
-for dev, where in (("wb0", None), ("wb", netns)):
-    subprocess.run((["nsenter", "--net=" + where] if where else []) +
-                   ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+if netem_here:
+    shape("rate", "4mbit")
+    status, out, err = on("a", moon + " link pull b /root/big /root/bigslow", timeout=120)
+    back = open(top + "/a/root/bigslow", "rb").read() if os.path.exists(top + "/a/root/bigslow") else b""
+    say(status == 0 and back == big, "a pull over a slow path is whole (%r, %d of %d bytes)" % (status, len(back), len(big)))
+    status, out, err = on("a", moon + " link run b 'cat /root/big'", timeout=120)
+    say(status == 0 and out == big, "and so is a command's output (%r, %d of %d bytes)" % (status, len(out), len(big)))
+    unshape()
+else:
+    print("  netem NOT RUN: a megabyte pulled and a command's megabyte over a 4 Mbit path", flush=True)
 
 server.send_signal(signal.SIGTERM)
 try:
@@ -82672,8 +82695,10 @@ if match is not None and listener is not None and len(names) == 2:
         for one in sockets:
             one.close()
 
-    subprocess.run(["tc", "qdisc", "add", "dev", "wb0", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
-    subprocess.run(["nsenter", "--net=" + netns, "tc", "qdisc", "add", "dev", "wb", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
+    if netem_here:
+        shape("delay", "4ms", "2ms", "loss", "3%")
+    else:
+        print("  netem NOT RUN: the flood's path loses nothing here", flush=True)
     on("a", moon + " link run %s true" % far_name, timeout=60)
     cpu0, rss0, began = cpu_seconds(listener), rss_kb(listener), time.time()
     flooder = threading.Thread(target=flood, args=(4.0,))
@@ -82684,9 +82709,8 @@ if match is not None and listener is not None and len(names) == 2:
     during = time.time() - began_run
     flooder.join()
     cpu1, rss1 = cpu_seconds(listener), rss_kb(listener)
-    for dev, where in (("wb0", None), ("wb", netns)):
-        subprocess.run((["nsenter", "--net=" + where] if where else []) +
-                       ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+    if netem_here:
+        unshape()
     print("  flood: %d initiations sent, %d cookie replies, listener CPU %.2f s, resident +%d kB, "
           "a paired run took %.1f s during it" % (outcome["sent"], outcome["cookies"], cpu1 - cpu0,
                                                    rss1 - rss0, during), flush=True)

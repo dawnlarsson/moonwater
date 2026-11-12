@@ -209972,8 +209972,43 @@ __attribute__((noipa)) static positive net_hot_padding(void)
                           address_of overload) == 0;
 }
 
+/*      A TLS record's body under its traffic key: sealed where it lies, and a
+        sealed copy opened where it lies, which is every byte of an HTTPS
+        transfer once each way. */
+static crypto_aesgcm_key net_hot_gcm;
+static p8 net_hot_record[TLS_PLAINTEXT_MAX + 16];
+static p8 net_hot_sealed[TLS_PLAINTEXT_MAX + 16];
+static positive net_hot_body;
+
 static fn net_hot_work(void)
 {
+        if (net_hot_kind == 8 || net_hot_kind == 9)
+        {
+                p8 nonce[12];
+                p8 head[5];
+
+                tls_record_header(head, TLS_CT_APP, net_hot_body + 16);
+                for (positive round = 0; round < net_hot_rounds; round++)
+                {
+                        tls_nonce(net_hot_iv, round, nonce);
+                        if (net_hot_kind == 8)
+                                crypto_aesgcm_seal(address_of net_hot_gcm, nonce, head, 5,
+                                                   net_hot_record, net_hot_body,
+                                                   net_hot_record + net_hot_body);
+                        else
+                        {
+                                tls_nonce(net_hot_iv, 0, nonce);
+                                memory_copy(net_hot_record, net_hot_sealed,
+                                            net_hot_body + 16);
+                                if (!crypto_aesgcm_open(address_of net_hot_gcm, nonce, head, 5,
+                                                        net_hot_record, net_hot_body,
+                                                        net_hot_record + net_hot_body))
+                                        system_call_1(syscall(exit_group), 2);
+                        }
+                        net_hot_sink += net_hot_record[round % (net_hot_body + 16)];
+                }
+                return;
+        }
         if (net_hot_kind == 7)
         {
                 for (positive round = 0; round < net_hot_rounds; round++)
@@ -210171,6 +210206,37 @@ b32 main(void)
         net_hot_kind = 7;
         net_hot_rounds = 1000000;
         net_hot_row("TLS record header");
+        {
+                static const positive bodies[] = {64, 1400, TLS_PLAINTEXT_MAX};
+                static const string_address sealing[] = {
+                    "TLS record of 64 bytes sealed",
+                    "TLS record of 1400 bytes sealed",
+                    "TLS record of 16384 bytes sealed"};
+                static const string_address opening[] = {
+                    "TLS record of 64 bytes copied and opened",
+                    "TLS record of 1400 bytes copied and opened",
+                    "TLS record of 16384 bytes copied and opened"};
+                p8 nonce[12];
+                p8 head[5];
+
+                crypto_aesgcm_prepare(address_of net_hot_gcm, net_hot_iv);
+                for (positive at = 0; at < array_count(bodies); at++)
+                {
+                        net_hot_body = bodies[at];
+                        net_hot_rounds = max((positive)64, (positive)(1 << 22) / net_hot_body);
+                        for (positive byte = 0; byte < net_hot_body; byte++)
+                                net_hot_sealed[byte] = (p8)(byte * 131 + 7);
+                        tls_nonce(net_hot_iv, 0, nonce);
+                        tls_record_header(head, TLS_CT_APP, net_hot_body + 16);
+                        crypto_aesgcm_seal(address_of net_hot_gcm, nonce, head, 5,
+                                           net_hot_sealed, net_hot_body,
+                                           net_hot_sealed + net_hot_body);
+                        net_hot_kind = 8;
+                        net_hot_row(sealing[at]);
+                        net_hot_kind = 9;
+                        net_hot_row(opening[at]);
+                }
+        }
         log_flush();
 
         if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK,
