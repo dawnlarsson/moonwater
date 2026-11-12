@@ -1,7 +1,8 @@
 # English literals of a converted source file that stay, because they are text no person reads in a window (pieces of a line for
-# the machine's log, the table's own English that a lookup shows) and the check cannot tell
-# from text by what stands round them. One a line: the file, a tab, the literal as it is written between its quotes. Keys,
-# verbs, options, paths, log lines, assembly and static asserts need no line here: the check knows them by their place and shape.
+# the machine's log, the table's own English that a lookup shows) or a name no language translates (a unit, a key, a syntax),
+# and the check cannot tell from text by what stands round them. One a line: the file, a tab, the literal as it is written
+# between its quotes. Keys, verbs, options, paths, log lines, assembly and static asserts need no line here: the check knows
+# them by their place and shape.
 src/canvas/ui/launcher.c	Settings
 src/canvas/ui/launcher.c	settings preferences options
 src/canvas/ui/launcher.c	Terminal
@@ -40,6 +41,7 @@ src/canvas/ui/settings.c	All commands
 src/canvas/ui/settings.c	this machine has no
 src/canvas/ui/settings.c	this battery has no
 src/canvas/ui/settings.c	no wireless hardware
+src/canvas/ui/settings.c	on the other machine
 src/canvas/ui/settings.c	dBm
 src/canvas/ui/settings.c	and
 src/canvas/ui/settings.c	wifi
@@ -50,3 +52,9 @@ src/canvas/ui/settings.c	Waterlink
 src/canvas/ui/settings.c	Linked machines
 src/canvas/ui/settings.c	GB
 src/canvas/ui/settings.c	MB
+src/canvas/ui/ui.c	Ctrl
+src/canvas/ui/ui.c	Shift
+src/canvas/ui/ui.c	Alt
+src/canvas/ui/ui.c	Super
+src/canvas/ui/ui.c	Plain Text
+src/canvas/ui/ui.c	Shell

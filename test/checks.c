@@ -160328,7 +160328,10 @@ static positive check_hits(const char address_to text, positive size, const char
         texts are the Settings window's: every group, label and choice word of registry.c, which stay English as the keys
         code compares and are shown through language_of. Code is held to the table too: every id is used, no lookup is
         compared as a key, and in a file that is converted no English literal is left that is not a key, a path, a log line
-        or assembly (languages/keep lists the few that are none of those, one `file TAB literal` a line).
+        or assembly (languages/keep lists the few that are none of those, one `file TAB literal` a line). The kit is one file
+        with the table in it, so the scan reads the table too: a line of the table is where the English is kept and is no
+        literal left, and neither is a word of the kit's tables of keys or of the languages' own names, which lcheck_tables
+        names one by one.
 */
 #define LCHECK_ENTRIES 1024
 struct lcheck_entry
@@ -160908,13 +160911,70 @@ static b32 lcheck_kept(const char address_to keep, positive keep_size, const cha
         return false;
 }
 
+/*
+        The tables of a converted file whose words are no English a person reads, each named by the file it is in and the words
+        its declaration ends with. A table is left out from those words to the ; that ends it, and a literal anywhere else in
+        the file is held as before, one of another table among them.
+*/
+static const struct
+{
+        const char address_to file;
+        const char address_to head;
+} lcheck_tables[] = {
+    // The keymap's own keys: each line is KEYS COMMAND as the keymap file holds it, read by the keymap's parser and shown by no window.
+    {"src/canvas/ui/ui.c", "doc_default_keys[] = {"},
+    // The keywords and the types of the languages a code view colours, which a tokenizer compares with the bytes of the file.
+    {"src/canvas/ui/ui.c", "const keywords[] = {"},
+    {"src/canvas/ui/ui.c", "const types[] = {"},
+    // The kernel's words for what a power supply is and what a battery does, which the reader compares with what its files say.
+    {"src/canvas/ui/ui.c", "battery_kind_words[] = {"},
+    {"src/canvas/ui/ui.c", "battery_status_words[] = {"},
+    // Each language's own name for itself, which the Language row shows as it is whichever language is taken, and which the
+    // languages rows hold to the @name of its file.
+    {"src/canvas/ui/ui.c", "language_names[] = {"},
+};
+
+// Whether one of the file's tables that are left out is declared at a place of its text: its head stands there, whole.
+static b32 lcheck_table(const char address_to file, const char address_to text, positive at, positive size)
+{
+        for (positive t = 0; t < sizeof(lcheck_tables) / sizeof(lcheck_tables[0]); t++)
+        {
+                positive length;
+
+                if (text[at] != lcheck_tables[t].head[0] || (at && lcheck_word_byte(text[at - 1])))
+                        continue;
+                length = string_length((string_address)lcheck_tables[t].head);
+                if (at + length <= size && !memory_compare(text + at, lcheck_tables[t].head, length) &&
+                    string_equals((string_address)file, (string_address)lcheck_tables[t].file))
+                        return true;
+        }
+        return false;
+}
+
+/*
+        Whether a literal is the English of a line of the language table: LANGUAGE_ID(, the id, a comma and a blank are all that
+        stands before it on its line. The table is where the English is kept and every language file is made from, so its own
+        lines are no literal left; a literal anywhere else on such a line, or on the line after the table, is held as any other.
+*/
+static b32 lcheck_language_line(const char address_to text, positive line_start, positive from)
+{
+        positive at = line_start + 12;
+
+        if (from < at + 3 || memory_compare(text + line_start, "LANGUAGE_ID(", 12))
+                return false;
+        while (at < from && lcheck_word_byte(text[at]))
+                at++;
+        return at + 3 == from && text[at] == ',' && text[at + 1] == ' ';
+}
+
 // The literals of a file that are English text and are not kept, counted, and reported by line when it is converted (report). A
 // section the file says is not translated (the settings window's gallery, which is the kit's demo page) is left out, from its
-// header comment to the next one.
+// header comment to the next one, and so is each table lcheck_tables names, from its name to the ; that ends it.
 static positive lcheck_left(const char address_to file, const char address_to text, positive size, const char address_to keep, positive keep_size,
                             b32 report)
 {
         positive left = 0, line = 1, at = 0, line_start = 0;
+        b32 table = false;
 
         while (at < size)
         {
@@ -160960,6 +161020,8 @@ static positive lcheck_left(const char address_to file, const char address_to te
                 }
                 if (text[at] != '"')
                 {
+                        // A table that is left out begins at its name and ends at the ; of its declaration.
+                        table = text[at] != ';' && (table || lcheck_table(file, text, at, size));
                         at++;
                         continue;
                 }
@@ -160986,8 +161048,8 @@ static positive lcheck_left(const char address_to file, const char address_to te
                                         stmt--;
                         }
                 }
-                if (lcheck_context(text + stmt, from - 1 - stmt) || lcheck_not_text(text + from, to - from) ||
-                    (keep && lcheck_kept(keep, keep_size, file, text + from, to - from)))
+                if (table || lcheck_language_line(text, line_start, from) || lcheck_context(text + stmt, from - 1 - stmt) ||
+                    lcheck_not_text(text + from, to - from) || (keep && lcheck_kept(keep, keep_size, file, text + from, to - from)))
                         continue;
                 left++;
                 if (report)
