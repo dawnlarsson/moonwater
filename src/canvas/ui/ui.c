@@ -15798,15 +15798,16 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         }
         // A scroll (the wheel's or a touchpad's) over a menu that fits closes it, as a scroll anywhere does (ui_popmenu_scroll). A menu taller
         // than its window scrolls under a vertical turn, three items a notch (a trackpad's turns add up to the items they make), and stays open.
+        // A stop (WINDOW_WHEEL_STOP) is a touchpad's fingers lifting and turns nothing: it is no scroll, and closes no menu.
         if (event->type == WINDOW_EVENT_WHEEL)
         {
                 int row = ui_popmenu_row(ui, m), most = m->count > m->rows_shown ? m->count - m->rows_shown : 0, items, to;
                 long pixels;
 
-                if (m->scroll.content <= m->scroll.view || event->b)
-                        return UI_MENU_GONE;
                 if (event->flags & WINDOW_WHEEL_STOP)
                         return UI_MENU_NOTHING;
+                if (m->scroll.content <= m->scroll.view || event->b)
+                        return UI_MENU_GONE;
                 pixels = ui_wheel_pixels(ui, event, 3L * row, &m->wheel_rest) + m->wheel_left;
                 items = row > 0 ? (int)(pixels / row) : 0;
                 m->wheel_left = (int)(pixels - (long)items * row);
@@ -15984,11 +15985,12 @@ static fn ui_popmenu_close(struct ui_popup address_to p)
 /*
         The kit's default for a scroll: a wheel or a touchpad's scroll that the app's window receives closes its open popup, as
         Escape does, and the answer is UI_MENU_GONE for the app (the app's loop calls this on each event it reads, once). A menu
-        that stayed open would float over content the scroll has moved away from.
+        that stayed open would float over content the scroll has moved away from. A stop (WINDOW_WHEEL_STOP, a touchpad's fingers
+        lifting) moves nothing and is no scroll: the menu stays open over it.
 */
 static int ui_popmenu_scroll(struct ui_popup address_to p, const struct window_event address_to event)
 {
-        if (!p->open || event->type != WINDOW_EVENT_WHEEL)
+        if (!p->open || event->type != WINDOW_EVENT_WHEEL || (event->flags & WINDOW_WHEEL_STOP))
                 return UI_MENU_NOTHING;
         ui_popmenu_close(p);
         return UI_MENU_GONE;

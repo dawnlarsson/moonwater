@@ -4114,6 +4114,7 @@ struct compositor_pad
         int at_x, at_y;         // and where it was at the last report
         int moving;             // at_x and at_y are a place this touch moves from: not at its first report
         int fingers, touching;  // on the pad, as its tool keys say, and whether one touches it
+        int turned;             // two fingers have turned the wheel since the fingers landed: their lift is that turn's stop (WINDOW_WHEEL_STOP)
         int per_mm_x, per_mm_y; // its units to a millimetre
         int left_x, left_y;     // what a move or a turn left under a whole count or 120th, times the units to a millimetre
         unsigned int clicked;   // the button the pad's press went down as
@@ -18685,6 +18686,9 @@ static void compositor_pad_apply(unsigned int at, positive now)
                         compositor_wheel(y, 0, WINDOW_WHEEL_PRECISE);
                 if (x)
                         compositor_wheel(x, 1, WINDOW_WHEEL_PRECISE);
+                // A precise turn went out: the fingers' lift ends it (the stop is sent then, and only then).
+                if (x || y)
+                        compositor.pad[at].turned = 1;
         }
 }
 
@@ -20037,11 +20041,17 @@ static void compositor_input_read(unsigned int at)
                                  compositor_pad_finger_key(event->code))
                         {
                                 // The last finger lifting ends the precise gesture: the region in hand lets go at its lift (WINDOW_WHEEL_STOP).
+                                // Fingers that turned no wheel (a move of the pointer, a tap, a click) end none, and their lift sends nothing:
+                                // a stop is a wheel event to the window under the pointer, which an open menu there is not to be closed by.
                                 b32 down = compositor.pad[at].touching || compositor.pad[at].fingers;
 
                                 compositor_pad_key(&compositor.pad[at], event->code, event->value);
                                 if (down && !compositor.pad[at].touching && !compositor.pad[at].fingers)
-                                        compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                                {
+                                        if (compositor.pad[at].turned)
+                                                compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                                        compositor.pad[at].turned = 0;
+                                }
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
                                  !compositor.touchpad[at] && !compositor.touchscreen[at])

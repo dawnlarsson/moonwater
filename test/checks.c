@@ -128659,7 +128659,8 @@ static void check_dropdown_selected(void)
 /*
         A dropdown closes when it is scrolled. A wheel or a touchpad's scroll over the menu's own window closes it (the menu's row
         answers UI_MENU_GONE, as Escape does), and a scroll the app's window receives closes it too (ui_popmenu_scroll), once: a
-        second one finds it closed. A motion that is not a scroll leaves it open.
+        second one finds it closed. A motion that is not a scroll leaves it open, and so does a stop (WINDOW_WHEEL_STOP, a touchpad's
+        fingers lifting), which is a wheel event that turns nothing.
 */
 static void check_dropdown_scroll(void)
 {
@@ -128669,9 +128670,12 @@ static void check_dropdown_scroll(void)
     struct windows address_to table;
     struct ui parent_ui = terminal.ui;
     struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0}, sideways = {WINDOW_EVENT_WHEEL, 0, 120, 1};
+    struct window_event stop = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
     struct window_event motion = {WINDOW_EVENT_MOTION, 0, 5, 5};
-    int answer[3] = {UI_MENU_NOTHING, UI_MENU_NOTHING, UI_MENU_NOTHING}, again = UI_MENU_NOTHING, kept = UI_MENU_NOTHING;
-    b32 shown[3] = {false, false, false}, closed[3] = {false, false, false}, kept_open = false;
+    int answer[4] = {UI_MENU_NOTHING, UI_MENU_NOTHING, UI_MENU_NOTHING, UI_MENU_GONE}, again = UI_MENU_NOTHING, kept = UI_MENU_NOTHING;
+    int stop_app = UI_MENU_GONE, stop_then = UI_MENU_NOTHING;
+    b32 shown[4] = {false, false, false, false}, closed[4] = {false, false, false, false}, kept_open = false;
+    b32 stop_own_open = false, stop_app_open = false;
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
@@ -128703,7 +128707,7 @@ static void check_dropdown_scroll(void)
     memory_zero(&parent_row, sizeof(parent_row));
     parent_row.table = table;
     parent_row.row = 1;
-    for (int round = 0; round < 3; round++)
+    for (int round = 0; round < 4; round++)
     {
         windows_reset_row(table, 3);
         __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
@@ -128734,11 +128738,22 @@ static void check_dropdown_scroll(void)
             compositor_post(3, WINDOW_EVENT_WHEEL, 0, 120, 1);
             answer[1] = ui_popmenu_pump(&popup);
         }
-        else
+        else if (round == 2)
         {
             // A scroll the app's window receives (the app's loop asks ui_popmenu_scroll), then one more: the menu is closed by the first.
             answer[2] = ui_popmenu_scroll(&popup, &wheel);
             again = ui_popmenu_scroll(&popup, &sideways);
+        }
+        else
+        {
+            // A touchpad's fingers lifting, as the compositor says it: a stop to the menu's own row, and one the app's window receives.
+            // Neither turns anything, and the menu is open after both; the scroll that comes after them closes it.
+            compositor_post(3, WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0);
+            answer[3] = ui_popmenu_pump(&popup);
+            stop_own_open = popup.open;
+            stop_app = ui_popmenu_scroll(&popup, &stop);
+            stop_app_open = popup.open;
+            stop_then = ui_popmenu_scroll(&popup, &wheel);
         }
         closed[round] = !popup.open;
         popup.open = false;
@@ -128771,6 +128786,10 @@ static void check_dropdown_scroll(void)
     check("dropdown scroll: a scroll the app's window receives closes its open menu, and a second scroll finds it closed",
           closed[2] && answer[2] == UI_MENU_GONE && again == UI_MENU_NOTHING);
     check("dropdown scroll: a motion that is not a scroll leaves the menu open", kept == UI_MENU_NOTHING && kept_open);
+    check("dropdown scroll: a touchpad's lift over the menu's own window (a stop, which turns nothing) leaves the menu open",
+          shown[3] && answer[3] == UI_MENU_NOTHING && stop_own_open);
+    check("dropdown scroll: a touchpad's lift the app's window receives leaves the menu open too, and the scroll after it closes it",
+          stop_app == UI_MENU_NOTHING && stop_app_open && stop_then == UI_MENU_GONE && closed[3]);
 }
 
 static void check_popup_reopen(void)
@@ -134598,6 +134617,32 @@ static void check_compositor_wheel(void)
         // The lift is one stop (WINDOW_WHEEL_STOP, no turn) at most: nothing moves, and no notch turns.
         check("pad: lifted, the last place it says moves and turns nothing (a stop at most, which turns nothing)", events <= 1 && sum == 0 && compositor.pointer_x == 100 &&
                                                                              compositor.pointer_y == 40);
+        // The stop is the turn's: fingers that turned the wheel end it with one, and a finger that only moved the pointer ends
+        // nothing, so its lift is no wheel event at all (a stop goes to the window under the pointer, an open menu among them).
+        {
+            unsigned int stops = 0;
+
+            for (unsigned int at = table->event_tail[1]; at != table->event_head[1]; at++)
+                stops += table->event_type[1][at % WINDOWS_EVENTS] == WINDOW_EVENT_WHEEL && (table->event_flags[1][at % WINDOWS_EVENTS] & WINDOW_WHEEL_STOP);
+            check("pad: the lift of two fingers that turned the wheel is one stop", events == 1 && stops == 1);
+        }
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_ABS, 0, 4000);
+        wheel_feed(COMPOSITOR_EV_ABS, 1, 2000);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, 1);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        wheel_feed(COMPOSITOR_EV_ABS, 0, 4040);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, 0);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 0);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("pad: a finger that moved the pointer and turned no wheel lifts with no wheel event, not a stop",
+              events == 0 && sum == 0 && compositor.pointer_x > 100 && compositor.pointer_y == 40);
+        compositor.pointer_x = compositor.kept_x = 100;
+        table->event_tail[1] = table->event_head[1];
     }
     compositor.touchpad[0] = 0;
 
