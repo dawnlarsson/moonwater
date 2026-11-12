@@ -12111,6 +12111,33 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
                 ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
 }
 
+// Whether the theme is a light one: its surface is the lighter half of the range. A lit row there is lighter than its ground, as it is
+// in a dark theme, and not the ink laid over it, which in a light theme is a darker grey.
+static inline b32 ui_kit_light(const struct ui address_to ui)
+{
+        return !ui->glass && ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768;
+}
+
+/*
+        A row lit by the pointer (hovered or pressed, layer the state layer's percent): in a light theme a step up from the grey ground to
+        the white of a raised surface, the whole step at a hover's 6 percent, as a chosen group of a column is; in a dark one and on glass
+        the ink at layer percent, which is lighter than its ground there. Never a darker grey than the row's ground.
+*/
+static inline fn ui_kit_lift_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int ink, unsigned int layer)
+{
+        if (layer && ui_kit_light(ui))
+                ui_kit_fill(ui, box, ui_mix(ui_role(UI_SURFACE_LOWEST), layer >= 6 ? 100 : layer * 100 / 6, 0), null);
+        else
+                ui_kit_layer_fill(ui, box, ink, layer);
+}
+
+// The row the keys are on: the white of a raised surface in a light theme, the secondary container (lighter than its ground) in a dark
+// one, and on glass a well of the ink (ui_glass_well).
+static inline unsigned int ui_kit_lit(const struct ui address_to ui)
+{
+        return ui_kit_light(ui) ? ui_role(UI_SURFACE_LOWEST) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
+}
+
 // A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink,
 // cut at the control's right edge (its width, when it has one; a control whose width is not yet set is cut at the window).
 static inline fn ui_control_label(struct ui address_to ui, const struct ui_control address_to c, int dx, int dy, int type, unsigned int ink)
@@ -12356,7 +12383,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         }
         if (c->kind == UI_SWITCH)
         {
-                ui_kit_layer_fill(ui, &clip, ui_role(UI_ON_SURFACE), ui_kit_layer(c));
+                ui_kit_lift_fill(ui, &clip, ui_role(UI_ON_SURFACE), ui_kit_layer(c));
         }
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
@@ -12993,7 +13020,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 
                         ui_kit_layer_to(c, 0);
                         layer = ui_kit_layer(c);
-                        ui_kit_layer_fill(ui, &face, ink, layer);
+                        ui_kit_lift_fill(ui, &face, ink, layer);
                         {
                                 struct ui_box pill = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
 
@@ -13519,8 +13546,8 @@ static fn ui_control_place(struct ui_control address_to c)
 }
 
 /*
-        A list's row with no control of the kit's in it (a choice, a field's row, a command): the kit's hover state layer
-        (the ink at .06, .2s) and its press ripple in the accent, across the whole row, edge to edge.
+        A list's row with no control of the kit's in it (a choice, a field's row, a command): the kit's hover state layer, lit as a
+        row is (ui_kit_lift_fill, .2s), and its press ripple in the accent, across the whole row, edge to edge.
 */
 static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to c)
 {
@@ -13534,7 +13561,7 @@ static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to
         row = (struct ui_box){ui_q8(ui, x), ui_q8(ui, y), ui_q8(ui, x + w), ui_q8(ui, y + h), 0, 0};
         ui_kit_layer_to(c, c->disabled);
         layer = ui_kit_layer(c);
-        ui_kit_layer_fill(ui, &row, ui_text_colour(ui, UI_ON_SURFACE), layer);
+        ui_kit_lift_fill(ui, &row, ui_text_colour(ui, UI_ON_SURFACE), layer);
         ui_kit_ripples(ui, c, row.x0, row.y0, &place, &row, ui_role(UI_PRIMARY));
 }
 
@@ -19711,7 +19738,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
                 struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
-                ui_kit_fill(ui, &box, ui_well(ui, UI_SECONDARY_CONTAINER, 36), null);
+                ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
                 if (l->keys && !ui->glass)
                         ui_kit_outline(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:

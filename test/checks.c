@@ -150311,6 +150311,47 @@ static int pointer_as(struct ui address_to ui, struct ui_scroll address_to s, in
         return answer;
 }
 
+/*
+        A lit row (the one the keys are on, a hovered or pressed one, a hovered group of a column) is lighter than the ground it lies on in
+        either theme: in a light one the white of a raised surface over the grey ground, as a chosen group is, and in a dark one the
+        secondary container and the ink's layer, which are lighter there. It is never a darker grey. Glass keeps its wells.
+*/
+static fn check_kit_lit(void)
+{
+        static unsigned int pixels[64 * 8];
+        struct ui ui = {0};
+        b32 light_keys, light_hover, light_press, dark_keys, dark_hover, glass_same;
+        unsigned int ground;
+        struct ui_box box = {0, 0, 64 * 256, 8 * 256, 0, 0};
+
+        ui.pixels = pixels, ui.pitch = 64, ui.width = 64, ui.height = 8, ui.top = 0, ui.bottom = 8, ui.scale = 100;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        ground = ui_role(UI_SURFACE) | 0xff000000u;
+        light_keys = ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        for (int at = 0; at < 64 * 8; at++)
+                pixels[at] = ground;
+        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 6);
+        light_hover = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        for (int at = 0; at < 64 * 8; at++)
+                pixels[at] = ground;
+        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 10);
+        light_press = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        ui.glass = 1;
+        glass_same = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36);
+        ui.glass = 0;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ground = ui_role(UI_SURFACE) | 0xff000000u;
+        dark_keys = !ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        for (int at = 0; at < 64 * 8; at++)
+                pixels[at] = ground;
+        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 6);
+        dark_hover = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        check("kit lit: in the light theme the row the keys are on, a hovered row and a pressed one are lighter than their ground, never a darker grey",
+              light_keys && light_hover && light_press);
+        check("kit lit: in the dark theme they are lighter than their ground too, and on glass the row the keys are on keeps its well", dark_keys && dark_hover && glass_same);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -167978,6 +168019,7 @@ b32 main()
         check_kit_fills();
         check_kit_corners();
         check_kit_slider_below();
+        check_kit_lit();
         check_kit_place();
         check_kit_controls();
         check_kit_states();
