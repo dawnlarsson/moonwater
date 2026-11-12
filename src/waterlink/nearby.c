@@ -341,7 +341,11 @@ fn link_machine_name(p8 address_to name)
         time it pairs, is added when it would, and then the name is cut to
         leave room for it.
 */
-static fn link_name_for(link_peers address_to peers, p8 address_to offered,
+//      False when the name with its longest suffix is taken as well: the
+//      loop looked up every name but the last it made, and a member that had
+//      taken that one too was kept under a name another machine has, where
+//      link allow NAME and link remove NAME act on whichever is first.
+static p8 link_name_for(link_peers address_to peers, p8 address_to offered,
                         p8 address_to key, p8 address_to name)
 {
         p8 base[WATERLINK_NAME_MAX];
@@ -372,6 +376,7 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
                 memory_copy(name + used, hex, width);
                 name[used + width] = 0;
         }
+        return !link_peer_named(peers, (string_address)name);
 }
 
 // The listener's side of it ------------------------------------------------
@@ -574,6 +579,7 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         bipolar lock = link_peers_lock();
         p8 changed = false;
         p8 new = false;
+        p8 name[WATERLINK_NAME_MAX];
 
         struct link_group_record address_to record =
                 link_nearby.groups.record + group;
@@ -603,13 +609,12 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         if (!open)
                 link_nearby.refused_code = true;
         peer = link_peer_keyed(address_of peers, key);
+        //      Named before it is in the list, or it meets itself; with no
+        //      name left that nobody has, it is not kept.
         if (!peer && open && peers.count < LINK_PEERS_MAX &&
-            !crypto_same(key, link_self.me.public, 32))
+            !crypto_same(key, link_self.me.public, 32) &&
+            link_name_for(address_of peers, offered, key, name))
         {
-                p8 name[WATERLINK_NAME_MAX];
-
-                //      Named before it is in the list, or it meets itself.
-                link_name_for(address_of peers, offered, key, name);
                 peer = peers.peer + peers.count++;
                 memory_zero(peer, sizeof(address_to peer));
                 memory_copy(peer->key, key, 32);

@@ -96287,6 +96287,30 @@ static fn indexes_and_commands(void)
                               string_length((string_address)again) ==
                                       string_length((string_address)name) + 1 &&
                                       link_name_good((string_address)again));
+                        {
+                                p8 named = true;
+
+                                //      The names with four, five and six
+                                //      digits taken as well: the last name
+                                //      the walk makes is one a machine has.
+                                for (positive taken = 2; taken < 5; taken++)
+                                {
+                                        string_copy(peers.peer[taken].name,
+                                                    (string_address)again);
+                                        peers.count = taken + 1;
+                                        named = link_name_for(address_of peers,
+                                                              offered, key,
+                                                              again);
+                                }
+                                check("sec: with every suffix taken there is no "
+                                      "name, where the last one made was given "
+                                      "to a second machine",
+                                      !named &&
+                                              link_peer_named(
+                                                  address_of peers,
+                                                  (string_address)again));
+                                peers.count = 2;
+                        }
                 }
 
                 //      A name that is not one, or is a word link uses, is
