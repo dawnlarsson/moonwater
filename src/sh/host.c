@@ -4441,8 +4441,15 @@ static string_address host_fit_said(b32 fit, p16 machine)
 
 /*
         Where an image keeps its settings: the file offset of its first slot,
-        or 0 for an image without them. The section table says where, and both
-        slots must carry the magic there before anything believes it.
+        or 0 for an image without them. The section table says where, by the
+        section's name, a place on a page and room for two slots, and one slot
+        must carry the magic there before anything believes it. One and not
+        both: a slot whose first sector is lost is what a cut write leaves,
+        the kernel starts on the other (spark_settings_newest), and the slot
+        that does not check is the one the next write takes
+        (host_settings_older). Asked of both, such an image read as one built
+        without settings, so an update stamped the defaults over what was
+        kept and a save was refused instead of writing the lost slot again.
 */
 static p64 host_settings_section(bipolar handle)
 {
@@ -4469,7 +4476,7 @@ static p64 host_settings_section(bipolar handle)
                     file_transfer_exact(syscall(pread64), handle,
                                         (p8 address_to)(magic + 1), 8,
                                         raw + SPARK_SETTINGS_SLOT) != 8 ||
-                    magic[0] != SPARK_SETTINGS_MAGIC || magic[1] != SPARK_SETTINGS_MAGIC)
+                    (magic[0] != SPARK_SETTINGS_MAGIC && magic[1] != SPARK_SETTINGS_MAGIC))
                         return 0;
 
                 return raw;

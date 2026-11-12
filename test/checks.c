@@ -110858,14 +110858,19 @@ static fn settings_sections(void)
                 string_address name;
                 p32 raw;
                 p32 size;
+                p8 first;
                 p8 second;
                 p64 found;
         } cases[] = {
-            {".mwset\0\0", 0x2000, 0x8000, true, 0x2000},
-            {".mwsex\0\0", 0x2000, 0x8000, true, 0},
-            {".mwset\0\0", 0x2001, 0x8000, true, 0},
-            {".mwset\0\0", 0x2000, 0x4000, true, 0},
-            {".mwset\0\0", 0x2000, 0x8000, false, 0},
+            {".mwset\0\0", 0x2000, 0x8000, true, true, 0x2000},
+            {".mwsex\0\0", 0x2000, 0x8000, true, true, 0},
+            {".mwset\0\0", 0x2001, 0x8000, true, true, 0},
+            {".mwset\0\0", 0x2000, 0x4000, true, true, 0},
+            //      One slot's magic is enough, whichever it is (a cut write
+            //      leaves the other without); neither is no settings block.
+            {".mwset\0\0", 0x2000, 0x8000, true, false, 0x2000},
+            {".mwset\0\0", 0x2000, 0x8000, false, true, 0x2000},
+            {".mwset\0\0", 0x2000, 0x8000, false, false, 0},
         };
         p8 held = true;
 
@@ -110882,6 +110887,8 @@ static fn settings_sections(void)
                 }
 
                 settings_build(cases[at].name, cases[at].raw, cases[at].size, cases[at].second);
+                if (!cases[at].first)
+                        memory_fill(settings_image + 0x2000, 0, 64);
 
                 held &= storage_write(handle, settings_image, sizeof(settings_image), 0) ==
                             (bipolar)sizeof(settings_image) &&
@@ -110889,12 +110896,13 @@ static fn settings_sections(void)
                         host_settings_slots(handle, settings_pair, address_of offset) ==
                             (cases[at].found != 0) &&
                         (!cases[at].found ||
-                         (offset == 0x2000 && spark_settings_newest(settings_pair) == 0));
+                         (offset == 0x2000 &&
+                          spark_settings_newest(settings_pair) == (cases[at].first ? 0 : 1)));
                 system_close(handle);
         }
 
         check("an image's settings are believed only where its section table and "
-              "both magics agree",
+              "one slot's magic agree",
               held);
 }
 
@@ -111145,6 +111153,8 @@ static fn settings_codes(void)
         b32 kinds[4] = {0, 0, 0, 0};
         bipolar stamps[4] = {0, 0, 0, 0};
         p8 whole = true;
+        p8 one = true;
+        p8 junk[512];
 
         if (handle < 0)
                 return;
@@ -111163,6 +111173,25 @@ static fn settings_codes(void)
         stamps[0] = host_settings_stamp(path, slot);
         held &= host_settings_image(path, into) == 1 && into->generation == 4 &&
                 settings_same(into, slot);
+
+        //      One slot's first sector lost, each in turn: the kernel starts on the
+        //      other (spark_settings_newest), and so the image still has its settings
+        //      here, where it read as an image built without any, an update stamped
+        //      the defaults over what the person had kept, and the next stamp, which
+        //      is what writes the lost slot again, was refused.
+        for (positive lost = 0; lost < 2; lost++)
+        {
+                slot->generation = 7 + lost;
+                one &= host_settings_stamp(path, slot) == 0;
+                memory_fill(junk, 0xff, sizeof(junk));
+                one &= storage_write(handle, junk, sizeof(junk),
+                                     0x2000 + lost * SPARK_SETTINGS_SLOT) == (bipolar)sizeof(junk);
+                one &= host_settings_image(path, into) == 1 &&
+                       into->generation == 7 + lost && settings_same(into, slot);
+        }
+        slot->generation = 9;
+        one &= host_settings_stamp(path, slot) == 0 && host_settings_image(path, into) == 1 &&
+               into->generation == 9 && settings_same(into, slot);
 
         //      Both slots torn: a block is there and cannot be read.
         settings_build(".mwset\0\0", 0x2000, 0x8000, true);
@@ -111193,6 +111222,8 @@ static fn settings_codes(void)
 
         check("an image with a block gives its settings, and stamping puts new ones in both slots",
               held && kinds[0] == 1 && stamps[0] == 0);
+        check("an image with one slot's first sector lost gives the other slot's settings, and the next stamp writes both again",
+              one);
         check("an image whose slots are both torn is the defaults, and is said to be",
               kinds[1] == 0);
         //      Main answers -1 for both: an image with no usable block, and a file
