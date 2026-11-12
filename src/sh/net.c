@@ -2295,8 +2295,12 @@ static COLD bipolar net_packet_open(p32 index, p16 protocol)
             .family = AF_PACKET,
             .protocol = network_order_16(protocol),
             .index = index};
-        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
-                                    (b32)network_order_16(protocol));
+        //      Made with no protocol, so it hears nothing until the bind
+        //      names the protocol and the interface together: made with the
+        //      protocol, it queued that protocol's frames from every
+        //      interface until it was bound, and an ARP from another link
+        //      for the offered address read as a conflict on this one.
+        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 
         if (handle >= 0 &&
             socket_bind((b32)handle, address_of self, sizeof self) < 0)
