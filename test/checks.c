@@ -137340,16 +137340,18 @@ static void check_compositor_touch(void)
           unchanged && compositor.pointer_x == 1016 * 127 / 1020 && compositor.pointer_y == 200);
     compositor.outputs = 0;
 
-    /* A mouse moved after a finger shows the pointer again. */
+    /* The pointer under a finger is the dynamic one, whatever the style says (here classic), and a mouse moved after it draws the style's again. */
     compositor.cursor.soft = 1;
+    compositor.cursor.style = 0;
     touch_one(100, 80, false);
     touch_one(100, 80, true);
-    unchanged = !compositor.cursor.drawn;
+    unchanged = compositor.cursor.drawn && compositor.cursor.drawn_as.dyn;
     wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 3);
     wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
     compositor.touchscreen[0] = 0;
     compositor_input_read(0);
-    check("touch: no pointer is drawn under a finger, and a mouse moved shows it again", unchanged && compositor.cursor.drawn);
+    check("touch: the pointer drawn under a finger is the dynamic one whatever the style says, and a mouse moved draws the style's again",
+          unchanged && compositor.cursor.drawn && !compositor.cursor.drawn_as.dyn);
     compositor.cursor.soft = 0;
 
     system_close(wheel_pipe[0]);
