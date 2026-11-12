@@ -4244,6 +4244,7 @@ struct compositor_chip
         int row;                   // CONTROLS: the window it is of (the box follows it)
         int rel_x, rel_y;          // CONTROLS: the top left in the window's pixels; HINT: its place in the desktop
         int w, h;                  // the size in device pixels
+        int cells;                 // CONTROLS: its cells, 3 (close, minimise, maximise), or 2 for a window with no tab, which has no minimise
         int slide;                 // CONTROLS: how far above its place it is still, in device pixels
         int drawn[5];              // the box and alpha last drawn: x, y, w, h, alpha (what damage is taken for)
         unsigned int alpha;        // 0..255 now
@@ -18804,15 +18805,22 @@ static void compositor_chip_stroke_into(unsigned char *layer, int w, int h, long
                 }
 }
 
-// The glyphs of the three cells: close (an X), minimise (a bar), maximise (a square), each a G-pixel half size about its cell's middle.
-static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale)
+// The control cell i of a chip of cells is: 0 close, 1 minimise, 2 maximise. A chip of two has no minimise.
+static int compositor_chip_kind(int cells, int i)
 {
-        int cell = w / 3;
+        return cells == 2 && i > 0 ? i + 1 : i;
+}
+
+// The glyphs of the cells: close (an X), minimise (a bar), maximise (a square), each a G-pixel half size about its cell's middle.
+static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale, int cells)
+{
+        int cell = w / cells;
         long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
 
-        for (int i = 0; i < 3; i++)
+        for (int at = 0; at < cells; at++)
         {
-                long cx = (long)i * cell + cell / 2;
+                long cx = (long)at * cell + cell / 2;
+                int i = compositor_chip_kind(cells, at);
 
                 if (i == 0)
                         compositor_chip_stroke_into(layer, w, h, cx - g, cy - g, cx + g, cy + g, radius),
@@ -18827,7 +18835,7 @@ static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale
         }
 }
 
-// The coverage of a chip of w x h: the body, and the glyphs after it when glyphs is set.
+// The coverage of a chip of w x h: the body, and the glyphs of its cells after it when there are any (glyphs: how many).
 static void compositor_chip_paint(int w, int h, int scale, int glyphs)
 {
         unsigned char *cover = compositor.chip.cover;
@@ -18836,7 +18844,7 @@ static void compositor_chip_paint(int w, int h, int scale, int glyphs)
         if (glyphs)
         {
                 memory_zero(cover + (unsigned long)w * h, (positive)w * h);
-                compositor_chip_glyphs(cover + (unsigned long)w * h, w, h, scale);
+                compositor_chip_glyphs(cover + (unsigned long)w * h, w, h, scale, glyphs);
         }
 }
 
@@ -18908,19 +18916,21 @@ static void compositor_chip_hide(void)
         c->alpha = 0;
 }
 
-// The window's controls over its top band, when they fit it (three cells, and a cell's margin either side); false when they do not.
+// The window's controls over its top band, when they fit it (a cell each, and a cell's margin either side); false when they do not. A window
+// that asked for no tab has no minimise: nothing would bring it back (compositor_frame's minimise button is left out for it the same way).
 static int compositor_chip_controls(int row, positive now)
 {
         struct compositor_chip *c = &compositor.chip;
-        int scale = compositor.scale, cell = UI_EDGE_CONTROL_CELL * scale / 100, w = 3 * cell, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100;
+        int cells = row >= 0 && row < WINDOWS && (compositor.asks[row] & WINDOW_NO_TAB) ? 2 : 3;
+        int scale = compositor.scale, cell = UI_EDGE_CONTROL_CELL * scale / 100, w = cells * cell, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100;
 
         if (row < 0 || row >= WINDOWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST)
                 return 0;
         if ((int)compositor.w[row] < w + 2 * cell || !compositor_chip_map())
                 return 0;
         compositor_chip_hide();
-        compositor_chip_paint(w, h, scale, 1);
-        c->kind = COMPOSITOR_CHIP_CONTROLS, c->row = row;
+        compositor_chip_paint(w, h, scale, cells);
+        c->kind = COMPOSITOR_CHIP_CONTROLS, c->row = row, c->cells = cells;
         c->rel_x = ((int)compositor.w[row] - w) / 2, c->rel_y = COMPOSITOR_CHIP_TOP_DP * scale / 100;
         c->w = w, c->h = h, c->alpha = 255;
         c->slide = compositor_chip_reduced() ? 0 : h;
@@ -18962,7 +18972,7 @@ static void compositor_chip_hint(const int *rect, int x, int y, int side, positi
         compositor_chip_redraw();
 }
 
-// The cell of a controls chip a point is over (0 close, 1 minimise, 2 maximise), with the finger's slop above and below; -1 for none.
+// The control of a controls chip a point is over (0 close, 1 minimise, 2 maximise), with the finger's slop above and below; -1 for none.
 static int compositor_chip_cell(int x, int y)
 {
         const struct compositor_chip *c = &compositor.chip;
@@ -18973,8 +18983,8 @@ static int compositor_chip_cell(int x, int y)
         x0 = compositor.x[c->row] + c->rel_x, y0 = compositor.y[c->row] + c->rel_y;
         if (x < x0 || x >= x0 + c->w || y < y0 - slop || y >= y0 + c->h + slop)
                 return -1;
-        cell = (x - x0) / (c->w / 3);
-        return cell > 2 ? 2 : cell;
+        cell = (x - x0) / (c->w / c->cells);
+        return compositor_chip_kind(c->cells, cell >= c->cells ? c->cells - 1 : cell);
 }
 
 // Whether a point is on the chip's box (not its slop), which a press there leaves the chip up for.

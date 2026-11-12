@@ -136932,10 +136932,11 @@ static void check_compositor_edges(void)
               touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0);
     edge_at(100, 116, 1, 10000);
 
-    /* A swipe down from a window's top band shows its controls over the band, and the window gets no touch. */
+    /* A swipe down from a window's top band shows its controls over the band, and the window gets no touch. The window has a tab. */
     edge_setup(0);
     table = compositor.table;
     layout_show(1, 0, 0, 240, 100);
+    compositor.asks[1] &= ~WINDOW_NO_TAB;
     head = table->event_head[1];
     edge_at(100, 4, 0, 10000);
     edge_drag(100, 4, 100, 56, 6, 10000);
@@ -136956,8 +136957,7 @@ static void check_compositor_edges(void)
             edge_setup(0);
             table = compositor.table;
             layout_show(1, 0, 0, 240, 100);
-            if (cell == 1)
-                compositor.asks[1] &= ~WINDOW_NO_TAB;
+            compositor.asks[1] &= ~WINDOW_NO_TAB;
             edge_show_controls();
             edge_at(cells[cell], 20, 0, 10000);
             edge_at(cells[cell], 20, 1, 10000);
@@ -136973,15 +136973,20 @@ static void check_compositor_edges(void)
         }
     }
 
-    /* A window that asked for no tab is not put away, since nothing would bring it back: the tap takes the controls and leaves the window. */
+    /* A window that asked for no tab has no minimise control, since nothing would bring it back: its controls are close and maximise,
+       two cells centred over its top band (80 to 160), and a tap on the second maximises it. */
     edge_setup(0);
     table = compositor.table;
     layout_show(1, 0, 0, 240, 100);
     edge_show_controls();
-    edge_at(120, 20, 0, 10000);
-    edge_at(120, 20, 1, 10000);
-    check("edge: a tap on the minimise control of a window with no tab leaves the window shown, and the controls go",
-          compositor_visible(1) && !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+    check("edge: a window with no tab has two controls, close and maximise, 80 px wide and centred over its top band",
+          compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.cells == 2 && compositor.chip.w == 80 && compositor.chip.rel_x == 80 &&
+              compositor_chip_cell(130, 20) == 2 && compositor_chip_cell(100, 20) == 0);
+    edge_at(140, 20, 0, 10000);
+    edge_at(140, 20, 1, 10000);
+    check("edge: a tap on its second control maximises it and puts nothing away, and the controls go",
+          compositor_visible(1) && !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.arranged[1] == COMPOSITOR_MAXIMIZED &&
+              compositor.chip.kind == COMPOSITOR_CHIP_NONE);
 
     /* A drag that starts on a control is the window's, from its top band: the window moves with the finger. */
     edge_setup(0);
