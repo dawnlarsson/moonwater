@@ -141870,7 +141870,6 @@ static fn settings_frames_gallery(void)
         settings_frames.wrong = false;
         gallery.on = 1;
         gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
-        gallery.scroll.scroll = 0;
         settings_size(GALLERY_W, GALLERY_H);
         settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
         start = settings_frames.now;
@@ -141881,7 +141880,6 @@ static fn settings_frames_gallery(void)
 
                 if (kind != UI_BUTTON && kind != UI_SWITCH && kind != UI_CHECKBOX && kind != UI_RADIOS && kind != UI_SLIDER && kind != UI_TABS)
                         continue;
-                y -= gallery.scroll.scroll;
                 settings_frames_until(start + (positive)pressed * 300 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
                 settings_frames_pass();
@@ -144108,7 +144106,6 @@ static fn rtl_draw(int group, int scale, b32 rtl)
                 gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
                 settings.width = ui_px(&settings.ui, GALLERY_W);
                 settings.height = ui_px(&settings.ui, GALLERY_H);
-                gallery.scroll.scroll = 0;
         }
         else if (group >= 0)
         {
@@ -157552,6 +157549,7 @@ static fn frames_run(string_address name, const struct frames_step address_to st
         b64 next = (b64)steps[0].ms_x100 * 10000;
 
         gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+        gallery_layout(&settings.ui, settings.width, settings.height);
         ui_kit.busy = 0;
         // An event at its own time; a frame every 1/60 s from the last event (a shot is the frame at its time).
         while (at < count)
@@ -157968,6 +157966,7 @@ b32 main()
                 }
 
                 gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                gallery_layout(&settings.ui, settings.width, settings.height);
                 for (int k = 0; k < gallery.count; k++)
                 {
                         struct ui_control address_to each = &gallery.control[k];
@@ -158035,6 +158034,7 @@ b32 main()
                 int x, y;
 
                 gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                gallery_layout(&settings.ui, settings.width, settings.height);
                 for (int k = 0; k < gallery.count; k++)
                         if (gallery.control[k].kind == UI_TABS)
                                 tabs = &gallery.control[k];

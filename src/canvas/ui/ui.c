@@ -16514,6 +16514,16 @@ static const struct ui_class ui_classes[] = {
         {"middle", .justify = UI_CENTER},                                                // the children in the middle of the room along the main axis
         {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
+        {"page", .pad = {24, 24, 24, 24}, .gap = 24, .fill = UI_ROLE(UI_SURFACE)},        // a page of the kit's surfaces on the theme's paper: its margin, and the room between its rows
+        {"cards", .gap = 24},                                                            // a row of them
+        {"window", .pad = {24, 24, 93, 24}, .gap = UI_GAP4},                             // what is on the kit's window (UI_WINDOW): in from its edge, under its title's band
+        {"panel", .pad = {25, 25, 25, 25}, .gap = UI_GAP4},                              // what is on the kit's card (UI_CARD): in from its hairline
+        {"rule", .h = 1, .margin = {0, 0, UI_GAP4, UI_GAP4}},                            // a hairline between two groups (UI_RULE): a group's gap more on each side of it
+        {"meter", .h = 6, .margin = {0, 0, UI_GAP2, 0}},                                 // a progress bar (UI_PROGRESS) under the line that says what it measures
+        {"gap2", .gap = UI_GAP2},                                                        // pieces that go together
+        {"gap3", .gap = UI_GAP3},                                                        // actions side by side
+        {"level", .align = UI_CENTER},                                                   // a row's children on its middle line
+        {"spread", .justify = UI_BETWEEN, .align = UI_CENTER},                           // a row's children at its two ends, on its middle line
         // Text.
         {"badge", .align = UI_CENTER},                                                   // a column's children in the middle of its width
         {"figure", .type = UI_ROLE(UI_LABEL_LARGE)},                                     // a bold text, sized by the element
