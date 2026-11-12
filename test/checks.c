@@ -161616,26 +161616,36 @@ static fn check_one_cut(void)
 /*
         One decimal reader for every window's number: the library's string_digits_max reads a number's digits, and no window
         of Canvas folds the digits into a number by hand (the value * 10 + digit loop, or the digit's byte less '0'). The four
-        windows that read a number say so, and the scan reads their sources from the repository's root (the editor's line number is
-        the kit's find bar's, read in ui.c).
+        numbers that are read say so: the screen identify is asked for, the terminal's kept text size, and in ui.c, which is the
+        whole kit, the find bar's line (the editor's line number is its) and a battery's reading. One digit that names a thing
+        is no number folded, and is its byte less '0': ui.c has three, the group a replacement names ($1) and the argument a
+        language's format names (%1$s, where the arguments are counted and where they are written), and the scan takes those
+        three by their own words and every other as a fold. It reads the sources from the repository's root.
 */
 static fn check_one_digits(void)
 {
-        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/ui.c",
-                                                      "src/canvas/ui/terminal.c"};
-        static const char address_to const hand[] = {"* 10 + (", "- '0')"};
-        positive read = 0, hand_found = 0, reads = 0;
+        static const struct
+        {
+                const char address_to file;
+                positive reads, ones; // the calls of string_digits_max, and the single digits named below
+        } files[] = {{"src/canvas/ui/identify.c", 1, 0}, {"src/canvas/ui/ui.c", 2, 3}, {"src/canvas/ui/terminal.c", 1, 0}};
+        static const char address_to const one[] = {"(positive)(next - '0')", "index = (unsigned int)(*f - '0'), f += 2;"};
+        positive read = 0, folds = 0;
+        b32 as_said = true;
 
         for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
         {
-                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+                positive size = 0, bytes = compositor_map_file((string_address)files[f].file, &size), ones = 0;
+                const char address_to text = (const char address_to)bytes;
 
                 if (!bytes)
                         continue;
                 read++;
-                for (positive i = 0; i < sizeof(hand) / sizeof(hand[0]); i++)
-                        hand_found += check_hits((const char address_to)bytes, size, hand[i]);
-                reads += check_hits((const char address_to)bytes, size, "string_digits_max(");
+                for (positive i = 0; i < sizeof(one) / sizeof(one[0]); i++)
+                        ones += check_hits(text, size, one[i]);
+                // Each named digit holds the byte less '0' once: what is left of those hits, and every loop, is a fold by hand.
+                folds += check_hits(text, size, "* 10 + (") + check_hits(text, size, "- '0')") - ones;
+                as_said = as_said && ones == files[f].ones && check_hits(text, size, "string_digits_max(") == files[f].reads;
                 compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
         }
         if (!read)
@@ -161643,7 +161653,7 @@ static fn check_one_digits(void)
                 string_format(log, "  NOT RUN: one decimal reader, the sources are not here\n");
                 return;
         }
-        check("digits: every window's number is read by string_digits_max, none folds its digits by hand", read == sizeof(files) / sizeof(files[0]) && !hand_found && reads == read);
+        check("digits: every window's number is read by string_digits_max, none folds its digits by hand", read == sizeof(files) / sizeof(files[0]) && !folds && as_said);
 }
 
 /*
