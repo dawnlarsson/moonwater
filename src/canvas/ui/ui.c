@@ -1495,6 +1495,7 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
                          offset), with the length of what they take in extent: overflow: auto along the main axis
             id           the caller's name for the element, which the layout does not read: what ui_tree_find and ui_tree_hit
                          answer by (0, which an open gives it, is no name)
+            wrap         1: a leaf whose height is the tree's measure of it at the width it is given (a text that wraps), below
             size[0..1]   the width and the height, below
 
         Sizing, per axis (size[0] is the width, size[1] the height):
@@ -1517,6 +1518,15 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
         the first children with a weight, in open order. A GROW child that would pass its max is frozen at the max and the room
         shared again among the rest; a shrinking child that would pass its min is frozen at the min and the excess shared again;
         each repeats till none passes. Children are never clipped: one larger than its parent runs past it.
+
+        Height for width: a leaf that wraps (wrap 1) is as tall as its words come to at its width, which the run asks the tree's
+        measure (t->measure, given t->by and the element) once every width is known: its content[0] is its words on one line, what a
+        fit size takes, and its content[1] is set to the measure's answer, and when any leaf's is not what it was the tree is run
+        again. A width never depends on a height, so the second run gives every element the width of the first and the heights its
+        lines take: a wrapped text in a column takes as many lines as it needs and what follows it moves down, and in a row it is
+        the width the row gives it and the row is as tall as it is. Across a column that does not stretch it, such a leaf of fit
+        width is no wider than the room (CSS's fit-content), so it wraps there rather than running past the column. With no
+        measure, or no leaf that wraps, a run is one run.
 
         A child's size apart from its least is a size that gives way: two children that each ask for all of their parent
         (PERCENT 100) with the same shrink weight come to the same size, so what is between them is in the middle of the parent,
@@ -1582,7 +1592,8 @@ struct ui_node
         b64 sum[2];
         int widest[2];
         int x, y, w, h;                    // the answer: the rectangle, from where the root is put (its x and y, read by the run)
-        int id, spare;                     // the caller's name for the element (0: none)
+        int id;                            // the caller's name for the element (0: none)
+        short wrap, spare;                 // a leaf whose height is the tree's measure of it at its width; and a spare the layout never reads
 };
 
 struct ui_tree
@@ -1591,6 +1602,8 @@ struct ui_tree
         struct ui_node discard;            // what a refused open answers, to be written and not read
         int count, depth, over, dropped;
         int open[UI_TREE_DEPTH];           // the open stack: each open's element, or -1 for a refused one
+        int (*measure)(address_any by, int node, int width); // a leaf that wraps: its height at a width (null: none; ui_tree_begin clears it)
+        address_any by;                    // what the measure is given
 };
 
 _Static_assert(sizeof(struct ui_size) == 20, "ui_size: five ints");
@@ -1635,10 +1648,11 @@ static inline b64 ui_tree_gaps(const struct ui_node address_to n)
         return n->children > 1 ? (b64)(n->children - 1) * n->gap : 0;
 }
 
-// An empty tree; the array is left as it is.
+// An empty tree with no measure; the array is left as it is.
 static fn ui_tree_begin(struct ui_tree address_to t)
 {
         t->count = t->depth = t->over = t->dropped = 0;
+        t->measure = null, t->by = null;
 }
 
 // An element opened as the last child of the innermost open one (or as the root), zeroed but for the limits: fit sizes, no max.
@@ -1783,8 +1797,8 @@ static fn ui_tree_shrink(struct ui_tree address_to t, const struct ui_node addre
         }
 }
 
-// The rectangles of the tree for a viewport of width by height: every element's x, y, w and h.
-static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
+// One run of the two passes for a viewport of width by height, every leaf at the content it has.
+static fn ui_tree_lay(struct ui_tree address_to t, int width, int height)
 {
         b64 view[2] = {ui_tree_pixels(width), ui_tree_pixels(height)};
         int count = t->count;
@@ -1927,12 +1941,40 @@ static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
 
                         room = room < 0 ? 0 : room;
                         v = s->kind == UI_GROW || (s->kind == UI_FIT && stretch) ? room : s->kind == UI_PERCENT ? room * s->value / 100 : k->pref[c];
+                        // A leaf that wraps, of fit width across a column, is no wider than the room: its words go onto more lines.
+                        if (k->wrap && !k->children && !c && s->kind == UI_FIT && v > room)
+                                v = room;
                         v = ui_tree_clamp(v, s->min, s->max);
                         *ui_tree_len(k, c) = (int)v;
                         left = room - v < 0 ? 0 : room - v;
                         *ui_tree_at(k, c) = ui_tree_place(origin[c] + k->margin[2 * c] + (e->align == UI_CENTER ? left / 2 : e->align == UI_END ? left : 0));
                 }
         }
+}
+
+/*
+        The rectangles of the tree for a viewport of width by height: every element's x, y, w and h. Each leaf that wraps is then
+        asked its height at the width it was given, and when any is not the height it was laid out at the tree is run again with
+        theirs: its widths are those of the first run (no width depends on a height), and its heights are the lines'.
+*/
+static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
+{
+        b32 again = false;
+
+        ui_tree_lay(t, width, height);
+        for (int at = 0; t->measure && at < t->count; at++)
+        {
+                struct ui_node address_to n = &t->node[at];
+                int tall;
+
+                if (!n->wrap || n->children)
+                        continue;
+                tall = ui_tree_pixels(t->measure(t->by, at, n->w));
+                again |= tall != n->content[1];
+                n->content[1] = tall;
+        }
+        if (again)
+                ui_tree_lay(t, width, height);
 }
 
 // The first element named id, or null: 0 names none.

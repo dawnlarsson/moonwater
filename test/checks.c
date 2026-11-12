@@ -152789,6 +152789,31 @@ static struct ui_node address_to layout_child(int w, int h)
         return n;
 }
 
+/*
+        A text that wraps, as the layout sees it: words of 20 pixels, as many as its one line's width holds (content[0]), a line 10 tall.
+        Its height at a width is its lines' (as many words a line as the width holds, one at least); the measure counts its calls.
+*/
+static int layout_measured;
+
+static int layout_lines(address_any by, int node, int width)
+{
+        int words = layout_tree.node[node].content[0] / 20, per = width / 20 < 1 ? 1 : width / 20;
+
+        (void)by;
+        layout_measured++;
+        return 10 * (words <= per ? 1 : (words + per - 1) / per);
+}
+
+// A leaf that wraps: five words of 20 on one line, 100 by 10.
+static struct ui_node address_to layout_words(void)
+{
+        struct ui_node address_to n = ui_tree_open(&layout_tree);
+
+        n->wrap = 1, n->content[0] = 100, n->content[1] = 10;
+        ui_tree_close(&layout_tree);
+        return n;
+}
+
 static fn check_kit_layout(void)
 {
         struct ui_node address_to root, address_to a, address_to b, address_to c;
@@ -152955,6 +152980,61 @@ static fn check_kit_layout(void)
                 ui_tree_mirror(&layout_tree);
                 check("kit layout: the mirror turns the tree over the root's width: each element as far from its right edge as it was from its left, the root where it was",
                       root->x == 30 && a->x == 190 && inner->x == 205 && c->x == 140 && a->y == -20 && a->w == 40);
+        }
+
+        // Height for width: five words of 20 that wrap (100 on one line, 10 a line), in a column 50 wide with a gap of 4 and a box 50 by 20
+        // after them: two words a line is three lines, 30 tall, and the box is under them; the column is as tall as both.
+        {
+                struct ui_node address_to column, address_to text, address_to after, address_to row;
+                b32 fits, alone;
+
+                root = layout_root(1);
+                layout_tree.measure = layout_lines;
+                column = ui_tree_open(&layout_tree);
+                column->dir = 1, column->gap = 4, column->size[0] = (struct ui_size){UI_FIXED, 50, 0, UI_TREE_MOST, 0};
+                text = layout_words();
+                after = layout_child(50, 20);
+                ui_tree_close(&layout_tree);
+                ui_tree_close(&layout_tree);
+                layout_measured = 0;
+                ui_tree_run(&layout_tree, 300, 200);
+                check("kit layout: a text that wraps, in a column of fixed width, takes as many lines as it needs (three of two words, 30 tall) and what follows it moves down under them",
+                      text->w == 50 && text->h == 30 && text->y == 0 && after->y == 34 && column->h == 54 && layout_measured == 1);
+                // Across a column that does not stretch it, it is no wider than the column (fit-content) and wraps there; where it fits it is
+                // its one line.
+                column->align = UI_CENTER;
+                ui_tree_run(&layout_tree, 300, 200);
+                fits = text->w == 50 && text->x == 0 && text->h == 30 && after->y == 34;
+                column->size[0].value = 120, after->size[0].value = 120;
+                layout_measured = 0;
+                ui_tree_run(&layout_tree, 300, 200);
+                check("kit layout: across a column that centres it a text that wraps is no wider than the column and wraps in it, and where it fits it is one line in the middle of the column, its measure asked once",
+                      fits && text->w == 100 && text->x == 10 && text->h == 10 && after->y == 14 && column->h == 34 && layout_measured == 1);
+
+                // In a row: a box 40 wide beside it, the text giving way (shrink 1) in a row as tall as what is in it, and a box 15 tall
+                // under the row. In 100 it is the 60 the row gives it, three words a line, two lines: the row is 20 tall, the box beside it
+                // stretched to it and the box under it at 20. In 200 it fits: one line, the row 10 tall.
+                root = layout_root(1);
+                layout_tree.measure = layout_lines;
+                row = ui_tree_open(&layout_tree);
+                a = layout_child(40, 0);
+                text = layout_words();
+                text->size[0].shrink = 1;
+                ui_tree_close(&layout_tree);
+                after = layout_child(0, 15);
+                ui_tree_close(&layout_tree);
+                ui_tree_run(&layout_tree, 100, 200);
+                check("kit layout: a text that wraps in a row is the width the row gives it, and the row grows to its height: what is beside it stretches to it and what is under the row moves down",
+                      text->x == 40 && text->w == 60 && text->h == 20 && row->h == 20 && a->h == 20 && after->y == 20);
+                layout_measured = 0;
+                ui_tree_run(&layout_tree, 200, 200);
+                check("kit layout: and where it fits nothing wraps: its one line, the row a line tall, its measure asked once",
+                      text->w == 100 && text->h == 10 && row->h == 10 && a->h == 10 && after->y == 10 && layout_measured == 1);
+                layout_tree.measure = null;
+                text->content[1] = 10;
+                ui_tree_run(&layout_tree, 100, 200);
+                alone = text->w == 60 && text->h == 10 && row->h == 10;
+                check("kit layout: with no measure a leaf that says it wraps is the line it has", alone);
         }
 
         // The limits: elements past the tree's room and a second root are refused and counted, and nothing is written outside the arrays.
