@@ -60149,7 +60149,7 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
         if (net_recv_eagain_count)
         {
                 net_recv_eagain_count--;
-                return AUDIO_EAGAIN;
+                return -EAGAIN;
         }
         if (net_recv_interruptions)
         {
@@ -60334,7 +60334,7 @@ static bipolar net_test_random_fill(address_any into, positive length, positive 
         if (net_random_refuse)
         {
                 net_random_refuse--;
-                return AUDIO_EAGAIN;
+                return -EAGAIN;
         }
         return system_random_fill(into, length, flags);
 }
