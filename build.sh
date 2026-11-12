@@ -97,7 +97,13 @@ if [ "$(uname)" = "Linux" ]; then
         # needing another compiler can build ./build explicitly before elevating.
         if [ "$bootstrap_uid" = 0 ]; then
                 compiler=cc
-                command -v clang >/dev/null 2>&1 && compiler=clang
+                #       Only a clang that takes the defer statement: the tool has
+                #       scope_exit in it (src/lib.util.c), and a clang that does not
+                #       take -fdefer-ts (Ubuntu's 18 and 19) failed every build root
+                #       started, on a machine whose cc would have built it.
+                command -v clang >/dev/null 2>&1 &&
+                        printf 'int x;\n' | clang -fdefer-ts -x c -c -o /dev/null - 2> /dev/null &&
+                        compiler=clang
         fi
 
         # The tool is built again when it is missing, when the compiler's own
