@@ -16508,6 +16508,153 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         return 0;
 }
 
+/* ---- lines of text ---- */
+/*
+        Where a text breaks to fit a width: the one wrapper of the kit's, for a page of lines (ui_lines_wrap), a view's text and a list's
+        row. A newline ends a line. A line is as many whole words as fit, broken at the blank before the next, and a word wider than the
+        width on its own is cut where it stops fitting, between two characters, one character at the least; the blanks a line breaks at
+        are no line's. What a run measures is the caller's (ui_wrap_width: the run from one byte of the text to another, as it is drawn).
+        The lines are in the order the bytes are; each is laid out and drawn whole, so a line reads from the edge it starts at either way.
+*/
+#define UI_WRAP_PROBE 512 // a run is measured in pieces of at most this many bytes
+#define UI_WRAP_MOST 32   // the lines of a text a view or a row draws
+
+typedef int (*ui_wrap_width)(address_any by, positive from, positive to);
+
+// The end of the line that starts at start in text, whose own line ends at over (its newline, or its end), in room device pixels.
+static positive ui_wrap_fit(ui_wrap_width width, address_any by, const char address_to text, positive start, positive over, int room)
+{
+        positive fit = start, next = start;
+
+        // As many whole words as fit.
+        while (next < over)
+        {
+                positive word = next;
+
+                while (word < over && text[word] == ' ')
+                        word++;
+                while (word < over && text[word] != ' ')
+                        word++;
+                if (width(by, start, word) > room)
+                        break;
+                fit = next = word;
+        }
+        // One word wider than the room: the longest run from start that fits (a width grows with its bytes: a search, not a count of them),
+        // ending before a character that did not fit, and one character at the least.
+        if (fit == start && start < over)
+        {
+                positive low = start + 1, high = over;
+
+                while (low < high)
+                {
+                        positive mid = low + (high - low + 1) / 2;
+
+                        if (width(by, start, mid) <= room)
+                                low = mid;
+                        else
+                                high = mid - 1;
+                }
+                fit = low;
+                while (fit > start + 1 && fit < over && ((unsigned char)text[fit] & 0xc0) == 0x80)
+                        fit--;
+                while (fit < over && ((unsigned char)text[fit] & 0xc0) == 0x80)
+                        fit++;
+        }
+        return fit;
+}
+
+// A run of a text of a role at a size, as it is drawn: measured in pieces, each cut between characters, so a run longer than a probe is
+// its whole width.
+static int ui_wrap_span(struct ui address_to ui, const char address_to text, positive from, positive to, int type, int size)
+{
+        char probe[UI_WRAP_PROBE];
+        int width = 0;
+
+        while (to - from >= UI_WRAP_PROBE)
+        {
+                positive cut = from + UI_WRAP_PROBE - 1;
+
+                while (cut > from + 1 && ((unsigned char)text[cut] & 0xc0) == 0x80)
+                        cut--;
+                memory_copy(probe, text + from, cut - from);
+                probe[cut - from] = 0;
+                width += ui_kit_measure_at(ui, (string_address)probe, type, size);
+                from = cut;
+        }
+        memory_copy(probe, text + from, to - from);
+        probe[to - from] = 0;
+        return width + ui_kit_measure_at(ui, (string_address)probe, type, size);
+}
+
+struct ui_wrap_role
+{
+        struct ui address_to ui;
+        const char address_to text;
+        int type, size;
+};
+
+static int ui_wrap_role_width(address_any by, positive from, positive to)
+{
+        const struct ui_wrap_role address_to role = by;
+
+        return ui_wrap_span(role->ui, role->text, from, to, role->type, role->size);
+}
+
+// The lines of a text of a role at a size in room (device pixels): how many, and with at given, where each of the first most starts in
+// the text and its bytes.
+static int ui_wrap_lines(struct ui address_to ui, const char address_to text, int type, int size, int room, positive address_to at, positive address_to bytes,
+                         int most)
+{
+        struct ui_wrap_role role = {ui, text, type, size};
+        positive length = string_length((string_address)text), from = 0;
+        int count = 0;
+
+        while (from <= length)
+        {
+                positive over = from, start = from;
+
+                while (over < length && text[over] != '\n')
+                        over++;
+                do
+                {
+                        positive fit = ui_wrap_fit(ui_wrap_role_width, &role, text, start, over, room);
+
+                        if (at && count < most)
+                                at[count] = start, bytes[count] = fit - start;
+                        count++;
+                        start = fit;
+                        while (start < over && text[start] == ' ')
+                                start++;
+                } while (start < over);
+                from = over + 1;
+        }
+        return count;
+}
+
+// Whether a text has more than one line wherever it is: a newline in it.
+static b32 ui_wrap_broken(const char address_to text)
+{
+        while (*text && *text != '\n')
+                text++;
+        return *text == '\n';
+}
+
+// How far apart two lines of a role's text at a size are (device pixels): the role's line, in proportion to a size of its own, and grown
+// with the text's size past 100 percent as a list's row is (ui_row_height).
+static int ui_wrap_pitch(const struct ui address_to ui, int type, int size)
+{
+        int line = ui_types[type].line * (size > 0 ? size : ui_types[type].size) / ui_types[type].size;
+
+        return ui_dev(ui, ui_text_percent > 100 ? line * (int)ui_text_percent / 100 : line);
+}
+
+// The height of a role's text of lines lines at a size: the first is the line box of one line (the role's line, as a text of one line has
+// had), and each after it a pitch further on.
+static int ui_wrap_tall(const struct ui address_to ui, int type, int size, int lines)
+{
+        return ui_dev(ui, ui_types[type].line) + (lines > 1 ? (lines - 1) * ui_wrap_pitch(ui, type, size) : 0);
+}
+
 /* ---- the view ---- */
 /*
         The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the
@@ -16538,6 +16685,14 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         says .host to have its rectangle written, a container too (a panel the app paints under its children). A name the table lacks is counted in
         ui_view.unknown, which a check reads, and is no style. Layout is flexbox: row or column, gap, justify, align, padding, margin,
         grow, shrink, the sizes and their limits, and scroll (overflow: auto) as a class. Logical pixels, times the window's scale.
+
+        A text wraps, as one in a page of HTML does: where its words do not fit the width it is given it takes as many lines as they
+        need (the kit's wrapper, ui_wrap_lines: at a blank, and a word longer than the line within it), and its box is as tall as they
+        are (the layout's height for width), drawn line by line from the edge the window reads from. In a row, a text of its own width
+        gives way to what is beside it (a shrink of 1) unless it is said not to. A class or a prop says .cut for one line cut with three
+        dots where it does not fit (white-space: nowrap and text-overflow: ellipsis): a band's words, whose height is the band's and not
+        theirs, are cut -- a page's title, a card's title, a status bar's words and warning, a figure -- and what is free to grow down a
+        column wraps, as a caption or a quiet line does, since what such a line is for is lost where it is cut.
 
         Events are an element's own: .on is called with .arg when the button acts, answers false to end the window as an app's event
         does, and the view owns focus, hover, press, the ripple and the press-again confirm (.says: what the next press does). A
@@ -16605,6 +16760,7 @@ struct ui_props
         unsigned int ink;                 // a text's colour (ARGB, fixed; 0: the class's role)
         int size;                         // a text's size in points (0: its type's)
         int drop;                         // a text's baseline: the middle of its box plus this many hundredths of its size (0: centred)
+        b32 cut;                          // a text on one line, cut with three dots where it does not fit its box (0: the class's; else it wraps)
         const char address_to text;       // a text's words, a button's label
         const char address_to says;       // a button that is not undone: what its next press does, said while it is armed
         b32 (*on)(int value);             // a button's act, a control's change: false ends the window
@@ -16623,6 +16779,7 @@ struct ui_class
         short justify, align, scroll;     // UI_START... of the layout; scroll 1
         short type, ink, fill, radius;    // the type of a text, its ink and a box's fill by role, a box's corner
         short variant;                    // a button's, UI_BUTTON_*
+        short cut;                        // 1: a text on one line, cut with three dots where it does not fit (else it wraps)
 };
 
 static const struct ui_class ui_classes[] = {
@@ -16651,14 +16808,14 @@ static const struct ui_class ui_classes[] = {
         {"map", .pad = {UI_GAP2, UI_GAP2, 0, UI_GAP2}},                                  // a panel with a strip of actions across its top: what is in it is in from its sides and its foot
         {"search", .w = UI_SEARCH_W, .margin = {0, UI_SEARCH_RIGHT + UI_PAD, 0, 0}},     // a page's search field at the end of its title's band: clear of the window's buttons
         // Text.
-        {"pagetitle", .type = UI_ROLE(UI_TITLE_LARGE), .ink = UI_ROLE(UI_ON_SURFACE), .margin = {UI_PAD + UI_PAGE_INSET, 0, 8, 0}, .grow = 1}, // a page's title: in from the margin, in the middle of its band under the window's edge, as wide as what follows leaves it
+        {"pagetitle", .type = UI_ROLE(UI_TITLE_LARGE), .ink = UI_ROLE(UI_ON_SURFACE), .margin = {UI_PAD + UI_PAGE_INSET, 0, 8, 0}, .grow = 1, .cut = 1}, // a page's title: in from the margin, in the middle of its band under the window's edge, as wide as what follows leaves it, one line
         {"caption", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .margin = {0, 0, UI_GAP2, UI_GAP2}}, // a quiet line under what it is about, a gap from it and from what follows
         {"badge", .align = UI_CENTER},                                                   // a column's children in the middle of its width
-        {"figure", .type = UI_ROLE(UI_LABEL_LARGE)},                                     // a bold text, sized by the element
-        {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
+        {"figure", .type = UI_ROLE(UI_LABEL_LARGE), .cut = 1},                           // a bold text, sized by the element, one line
+        {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE), .cut = 1}, // a card's title, one line
         {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
-        {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)}, // a status bar's words
-        {"warning", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_WARNING)},           // a status bar's warning
+        {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .cut = 1}, // a status bar's words, one line in its band
+        {"warning", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_WARNING), .cut = 1},           // a status bar's warning, one line in its band
         // Buttons: the size of an action, and the variants.
         {"action", .w = UI_BUTTONS_W, .h = UI_BUTTONS_H},
         {"plain", .variant = UI_ROLE(UI_BUTTON_DEFAULT)},
@@ -16677,6 +16834,7 @@ struct ui_item
         struct ui_class look;             // the classes of the element, merged
         unsigned int paint, ink;          // the fixed colours (ui_props): a box's fill, a text's ink; 0 for the class's roles
         int size, drop;                   // a text's size in points and its baseline (ui_props)
+        b32 cut;                          // a text on one line, cut to its box (its props' or its class's); else it wraps
         const char address_to text;
         struct ui_rect address_to host;
         struct ui_control address_to control;
@@ -16759,7 +16917,7 @@ static fn ui_class_resolve(struct ui_view address_to v, const char address_to na
                         into->align = ui_pick(into->align, from->align), into->scroll = ui_pick(into->scroll, from->scroll);
                         into->type = ui_pick(into->type, from->type), into->ink = ui_pick(into->ink, from->ink);
                         into->fill = ui_pick(into->fill, from->fill), into->radius = ui_pick(into->radius, from->radius);
-                        into->variant = ui_pick(into->variant, from->variant);
+                        into->variant = ui_pick(into->variant, from->variant), into->cut = ui_pick(into->cut, from->cut);
                         for (int k = 0; k < 4; k++)
                                 into->pad[k] = ui_pick(into->pad[k], from->pad[k]), into->margin[k] = ui_pick(into->margin[k], from->margin[k]);
                 }
@@ -16902,6 +17060,11 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
 
                 n->content[0] = given ? 0 : ui_kit_measure_at(ui, (string_address)p->text, type, p->size ? p->size : ui_types[type].size);
                 n->content[1] = ui_dev(ui, ui_types[type].line);
+                // A text that is not cut to one line wraps: its height is its lines' at the width it is given (ui_view_measure). In a row a
+                // text of its own width gives way to what is beside it unless it is said not to (a cut one is cut, one that wraps wraps).
+                n->wrap = !(p->cut || look.cut);
+                if (!along && !grow && !fixed[0] && !p->shrink && !look.shrink)
+                        n->size[0].shrink = 1;
         }
         else if (kind == UI_ITEM_BUTTON && p->text)
         {
@@ -16916,7 +17079,7 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
                 n->content[0] = fixed[0] ? 0 : ui_px(ui, p->control->w), n->content[1] = ui_px(ui, p->control->h);
         }
         item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = item->scroll = -1;
-        item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop;
+        item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop, item->cut = p->cut || look.cut;
         item->control = p->control, item->on = p->on, item->arg = p->arg;
         // A column that scrolls: its scroller is the view's, by its order among the build's. Its body is stepped to the kit's time, and
         // its children are laid out at the place it rests at (a pull past an end is drawn by ui_view_draw, on the picture).
@@ -16977,6 +17140,22 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 #define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
 #define ui_control(c, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .control = (c), __VA_ARGS__})
 
+// A text of the view that wraps, as the layout asks it (ui_tree_run): the height its lines come to at a width, one line where its words fit
+// it. With no face it is the one line it was declared with.
+static int ui_view_measure(address_any by, int node, int width)
+{
+        struct ui_view address_to v = by;
+        const struct ui_item address_to item = &v->item[node];
+        int type = item->look.type ? item->look.type - 1 : UI_BODY_MEDIUM, size = item->size ? item->size : ui_types[type].size, lines = 1;
+        int one = v->tree.node[node].content[0];
+
+        if (!v->ui->regular || !item->text)
+                return v->tree.node[node].content[1];
+        if (ui_wrap_broken(item->text) || (one ? one : ui_kit_measure_at(v->ui, (string_address)item->text, type, size)) > width)
+                lines = ui_wrap_lines(v->ui, item->text, type, size, width, null, null, 0);
+        return ui_wrap_tall(v->ui, type, size, lines);
+}
+
 // A screen begun: a window width wide (device pixels) and at most limit tall (0: as tall as it comes to; below 0: exactly -limit tall, a
 // height the window was given). The root is a column the width of the window; what is declared after this is its children, until ui_view_end.
 static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, int width, int limit)
@@ -16989,6 +17168,7 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
         v->group.count = v->scrolls = 0;
         ui_view_now = v;
         ui_tree_begin(&v->tree);
+        v->tree.measure = ui_view_measure, v->tree.by = v;
         root = ui_tree_open(&v->tree);
         root->dir = 1;
         root->size[0].kind = UI_GROW, root->size[0].value = 1;
@@ -17112,6 +17292,8 @@ static struct ui_scroll address_to ui_view_scroll_at(struct ui_view address_to v
         return found;
 }
 
+static fn ui_view_words(struct ui address_to ui, const struct ui_node address_to n, const struct ui_item address_to item, int type);
+
 // The screen painted: the boxes, the text and the controls in the order they were declared, each in the rows its scroll containers show and
 // not at all when it is wholly outside them (a control, when all it paints is: UI_VIEW_REACH); after the last of what is in a scroll
 // container, its pull past an end and its bar; then the buttons over them (keys: the window has the keys).
@@ -17152,16 +17334,7 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                 else if (item->kind == UI_ITEM_BOX && item->look.fill)
                         ui_fill(ui, n->x, n->y, n->w, n->h, ui_role(item->look.fill - 1) | 0xff000000u);
                 else if (item->kind == UI_ITEM_TEXT && item->text)
-                {
-                        int size = item->size ? item->size : ui_types[type].size;
-                        int baseline = item->drop ? n->y + n->h / 2 + size * ui->scale / 100 * item->drop / 100
-                                                  : ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type);
-                        unsigned int argb = item->ink ? item->ink : ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE);
-
-                        // Cut where it runs out of its box, at the end away from the edge it starts at: what its letters' edges take past that edge is theirs.
-                        ui_kit_start_at(ui, ui_rtl() ? n->x + n->w : n->x, baseline, (string_address)item->text, type, size, argb, 0, ui_rtl() ? n->x : 0,
-                                        ui_rtl() ? ui->width : n->x + n->w);
-                }
+                        ui_view_words(ui, n, item, type);
                 if (item->scroll >= 0)
                         open[depth] = at, after[depth++] = ui_view_after(v, at);
         }
@@ -17303,7 +17476,7 @@ struct ui_cut
 {
         char text[UI_CUT_TEXT];
         positive length, cut, capacity;
-        int type, room, scale;
+        int type, size, room, scale;
         unsigned int percent; // the text's percent when it was cut: the same words are another width at another size
         unsigned char kind; // 1 whole, 2 the first cut bytes and the dots, 3 the first cut bytes alone
         unsigned char rtl;  // the window read from the right when it was cut: the same words are another width there
@@ -17362,21 +17535,22 @@ static positive ui_cut_write(char address_to fitted, string_address text, positi
         return string_length((string_address)fitted);
 }
 
-// The kit's width of a role's text, for a cut of it.
+// The kit's width of a role's text at a size, for a cut of it.
 struct ui_cut_role
 {
         struct ui address_to ui;
-        int type;
+        int type, size;
 };
 
 static int ui_cut_kit(address_any by, string_address text)
 {
         const struct ui_cut_role address_to role = by;
 
-        return ui_kit_measure(role->ui, text, role->type);
+        return ui_kit_measure_at(role->ui, text, role->type, role->size);
 }
 
-static string_address ui_fit(struct ui address_to ui, string_address text, int type, int room, char address_to fitted, positive capacity)
+// A text cut to room at a role and a size of its own (a view's text may say one): the cut, kept as ui_fit's are.
+static string_address ui_fit_at(struct ui address_to ui, string_address text, int type, int size, int room, char address_to fitted, positive capacity)
 {
         positive length = string_length(text), cut = 0;
         unsigned char kind = 0;
@@ -17397,21 +17571,22 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 hash = (((hash ^ (unsigned int)type) * 16777619u ^ (unsigned int)room) * 16777619u ^ (unsigned int)ui->scale) * 16777619u;
                 hash = (hash ^ (unsigned int)ui_rtl()) * 16777619u;
                 hash = (hash ^ ui_text_percent) * 16777619u;
+                hash = size == ui_types[type].size ? hash : (hash ^ (unsigned int)size) * 16777619u;
                 memo = &ui_cuts[(hash ^ hash >> 15) & (UI_CUTS - 1)];
-                if (memo->kind && memo->length == length && memo->type == type && memo->room == room && memo->scale == ui->scale &&
+                if (memo->kind && memo->length == length && memo->type == type && memo->size == size && memo->room == room && memo->scale == ui->scale &&
                     memo->percent == ui_text_percent && memo->rtl == (unsigned char)ui_rtl() && memo->capacity == capacity &&
                     !memory_compare(memo->text, text, length))
                         kind = memo->kind, cut = memo->cut;
         }
         if (!kind)
         {
-                struct ui_cut_role role = {ui, type};
+                struct ui_cut_role role = {ui, type, size};
 
                 kind = ui_cut_by(ui_cut_kit, &role, text, length, room, fitted, capacity, &cut);
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
-                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->percent = ui_text_percent, memo->rtl = (unsigned char)ui_rtl();
+                        memo->length = length, memo->type = type, memo->size = size, memo->room = room, memo->scale = ui->scale, memo->percent = ui_text_percent, memo->rtl = (unsigned char)ui_rtl();
                         memo->capacity = capacity, memo->cut = cut, memo->kind = kind;
                 }
         }
@@ -17419,6 +17594,51 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 return text;
         ui_cut_write(fitted, text, length, cut, kind, capacity);
         return (string_address)fitted;
+}
+
+// A text cut to room at a role's own size.
+static string_address ui_fit(struct ui address_to ui, string_address text, int type, int room, char address_to fitted, positive capacity)
+{
+        return ui_fit_at(ui, text, type, ui_types[type].size, room, fitted, capacity);
+}
+
+/*
+        A text of the view drawn in its box. A cut one is one line: its words where they fit the box, else the longest start of them that
+        fits with three dots after it (ui_fit). One that wraps is its lines where the layout found its words do not fit the box, in a block
+        in the middle of the box, and its one line where they do, as a text was drawn before it could wrap. Each line is a run of its own,
+        laid out and drawn whole by the font engine, from the edge the window reads from, and cut at the box's far end: what its letters'
+        edges take past that end is theirs.
+*/
+static fn ui_view_words(struct ui address_to ui, const struct ui_node address_to n, const struct ui_item address_to item, int type)
+{
+        int size = item->size ? item->size : ui_types[type].size, line = ui_dev(ui, ui_types[type].line), count = 1, pitch, top;
+        int edge = ui_rtl() ? n->x + n->w : n->x, low = ui_rtl() ? n->x : 0, high = ui_rtl() ? ui->width : n->x + n->w;
+        unsigned int argb = item->ink ? item->ink : ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE);
+        positive at[UI_WRAP_MOST], bytes[UI_WRAP_MOST];
+        char shown[UI_WRAP_PROBE];
+        string_address text = (string_address)item->text;
+
+        if (item->cut)
+                text = ui_fit_at(ui, text, type, size, n->w, shown, sizeof(shown));
+        else if (n->content[1] > line)
+                count = ui_wrap_lines(ui, item->text, type, size, n->w, at, bytes, UI_WRAP_MOST);
+        if (count <= 1)
+        {
+                int baseline = item->drop ? n->y + n->h / 2 + size * ui->scale / 100 * item->drop / 100 : ui_kit_baseline(ui, n->y + (n->h - line) / 2, type);
+
+                ui_kit_start_at(ui, edge, baseline, text, type, size, argb, 0, low, high);
+                return;
+        }
+        pitch = ui_wrap_pitch(ui, type, size);
+        top = n->y + (n->h - (line + (count - 1) * pitch)) / 2;
+        for (int k = 0; k < count && k < UI_WRAP_MOST; k++)
+        {
+                positive keep = bytes[k] < sizeof(shown) ? bytes[k] : sizeof(shown) - 1;
+
+                memory_copy(shown, item->text + at[k], keep);
+                shown[keep] = 0;
+                ui_kit_start_at(ui, edge, ui_kit_baseline(ui, top + k * pitch, type), (string_address)shown, type, size, argb, 0, low, high);
+        }
 }
 
 /*
@@ -20488,28 +20708,10 @@ static fn ui_lines_set(struct ui_lines address_to l, const char address_to text,
         l->text = text, l->length = length, l->at = at, l->size = size, l->max = max, l->made = false;
 }
 
-// A run of the text, measured as it is drawn.
+// A run of the text, measured as it is drawn: in pieces, so a line of more than a probe's bytes does not run past the window.
 static int ui_lines_width(struct ui address_to ui, const struct ui_lines address_to l, positive from, positive to)
 {
-        char probe[UI_LINES_PROBE] = {0};
-        int width = 0;
-
-        // A run longer than the probe is measured in pieces, each cut between characters, so the width is the whole run's
-        // (a probe of only its first bytes let a line of more than 511 bytes run past the window).
-        while (to - from >= UI_LINES_PROBE)
-        {
-                positive cut = from + UI_LINES_PROBE - 1;
-
-                while (cut > from + 1 && ((unsigned char)l->text[cut] & 0xc0) == 0x80)
-                        cut--;
-                memory_copy(probe, l->text + from, cut - from);
-                probe[cut - from] = 0;
-                width += ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
-                from = cut;
-        }
-        memory_copy(probe, l->text + from, to - from);
-        probe[to - from] = 0;
-        return width + ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
+        return ui_wrap_span(ui, l->text, from, to, UI_BODY_MEDIUM, ui_types[UI_BODY_MEDIUM].size);
 }
 
 // A run of the text laid on as it is measured: the pen after the bytes from its start to at, so a wider prefix costs its new
@@ -20534,9 +20736,25 @@ static int ui_lines_run_width(struct ui address_to ui, const struct ui_lines add
         return ui_pen_width(&run->pen);
 }
 
+// A run of a page's line as the wrapper asks it (ui_wrap_fit): laid on with the pen when the line is plain, measured whole when it is not.
+struct ui_lines_by
+{
+        struct ui address_to ui;
+        const struct ui_lines address_to l;
+        struct ui_lines_run address_to run;
+        b32 plain;
+};
+
+static int ui_lines_by_width(address_any by, positive from, positive to)
+{
+        const struct ui_lines_by address_to b = by;
+
+        return b->plain ? ui_lines_run_width(b->ui, b->l, b->run, from, to) : ui_lines_width(b->ui, b->l, from, to);
+}
+
 /*
-        The lines cut to the width: each of the text's lines is as many as it takes, a break at a blank where it can be and else
-        where the line has gone as far as it fits. Kept until the width, the scale, the percent or the text changes.
+        The lines cut to the width: each of the text's lines is as many as it takes, where the kit's wrapper breaks them (ui_wrap_fit).
+        Kept until the width, the scale, the percent or the text changes.
 */
 static fn ui_lines_wrap(struct ui address_to ui, struct ui_lines address_to l, int width)
 {
@@ -20551,50 +20769,17 @@ static fn ui_lines_wrap(struct ui address_to ui, struct ui_lines address_to l, i
                 positive over = at, start = at;
                 // No run is started yet: the first width laid out starts the pen, even for a line that begins at byte 0.
                 struct ui_lines_run run = {~(positive)0, 0, {0, 0, 0, 0}};
-                b32 plain;
+                struct ui_lines_by by = {ui, l, &run, false};
 
                 while (over < l->length && l->text[over] != '\n')
                         over++;
-                plain = over - at < UI_LINES_PROBE;
-                for (positive byte = at; plain && byte < over; byte++)
-                        plain = (unsigned char)l->text[byte] < 0x80;
+                by.plain = over - at < UI_LINES_PROBE;
+                for (positive byte = at; by.plain && byte < over; byte++)
+                        by.plain = (unsigned char)l->text[byte] < 0x80;
                 do
                 {
-                        positive fit = start, next = start;
+                        positive fit = ui_wrap_fit(ui_lines_by_width, &by, l->text, start, over, room);
 
-                        // As many whole words as fit.
-                        while (next < over)
-                        {
-                                positive word = next;
-
-                                while (word < over && l->text[word] == ' ')
-                                        word++;
-                                while (word < over && l->text[word] != ' ')
-                                        word++;
-                                if ((plain ? ui_lines_run_width(ui, l, &run, start, word) : ui_lines_width(ui, l, start, word)) > room)
-                                        break;
-                                fit = next = word;
-                        }
-                        // One word wider than the window: as many of its bytes as fit.
-                        if (fit == start && start < over)
-                        {
-                                // The longest run from start that fits (a width grows with its bytes: a search, not a count of them).
-                                positive low = start + 1, high = over;
-
-                                while (low < high)
-                                {
-                                        positive mid = low + (high - low + 1) / 2;
-
-                                        if ((plain ? ui_lines_run_width(ui, l, &run, start, mid) : ui_lines_width(ui, l, start, mid)) <= room)
-                                                low = mid;
-                                        else
-                                                high = mid - 1;
-                                }
-                                fit = low;
-                                // Not inside a character: a line ends before the continuation bytes of one that did not fit.
-                                while (fit > start + 1 && fit < over && ((unsigned char)l->text[fit] & 0xc0) == 0x80)
-                                        fit--;
-                        }
                         if (l->count < l->max)
                         {
                                 l->at[l->count] = (unsigned short)start;

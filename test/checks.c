@@ -141403,6 +141403,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_refilter();
                 }
                 compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
+                // The window's faces go with the engine they were drawn with: what is laid out after this is laid out with no face, as a
+                // screen of words alone is, and measures nothing (a wrapped text measures its words when it is laid out).
+                settings.ui.engine = null, settings.ui.regular = settings.ui.bold = settings.ui.mono = null;
         }
 }
 #endif
@@ -153623,6 +153626,124 @@ static p32 view_control_send(unsigned int type, unsigned int flags, int a, int b
 static unsigned int view_control_pixel(const unsigned int address_to pixels, int x, int y)
 {
         return pixels[y * 300 + x] & 0xffffffu;
+}
+
+/*
+        A text of the view that wraps, in the block face (rtl_font_make: every character a block an em wide, so a run of n characters is n
+        ems, 14 pixels a character at 100 percent). "aaaa bbbb cccc dddd" is 19 of them, 266 wide. In a column 130 wide it is two lines of
+        two words (126 each), 40 tall, and what follows is under them; a word of 20 is three lines, of 9, 9 and 2; in a row 200 wide beside a
+        box of 60 it is the 140 the row leaves, two lines, and the row is as tall; where it fits it is its one line; cut, it is one line,
+        "aaaa b..." (9, 126). Drawn, each line is a bar from the edge the window reads from, and reading from the right it is the mirror.
+*/
+static unsigned int view_wrap_pixels[300 * 120], view_wrap_turned[300 * 120];
+static struct ui view_wrap_ui;
+static struct ui_rect view_wrap_text, view_wrap_after;
+
+static int view_wrap_build(const char address_to words, int width, b32 cut, b32 row)
+{
+        ui_view_begin(&view_check, &view_wrap_ui, 300, 0);
+        if (row)
+                ui_row(.w = width)
+                {
+                        ui_host(null, .w = 60);
+                        ui_text(words, .class = "quiet", .host = &view_wrap_text, .cut = cut);
+                }
+        else
+                ui_col(.w = width)
+                        ui_text(words, .class = "quiet", .host = &view_wrap_text, .cut = cut);
+        ui_host(&view_wrap_after, .h = 10);
+        return ui_view_end(&view_check);
+}
+
+// The view drawn into pixels (300 by 120, cleared), and the first and last columns inked in rows top to bottom (-1 for none).
+static fn view_wrap_draw(unsigned int address_to pixels)
+{
+        memory_zero(pixels, sizeof(view_wrap_pixels));
+        ui_begin(&view_wrap_ui, pixels, 300, 300, 120);
+        ui_view_draw(&view_wrap_ui, &view_check, false);
+}
+
+static int view_wrap_ink(const unsigned int address_to pixels, int top, int bottom, int address_to last)
+{
+        int first = -1;
+
+        *last = -1;
+        for (int y = top; y < bottom; y++)
+                for (int x = 0; x < 300; x++)
+                        if (pixels[y * 300 + x])
+                                first = first < 0 || x < first ? x : first, *last = x > *last ? x : *last;
+        return first;
+}
+
+static fn check_kit_view_wrap(void)
+{
+        static unsigned int scratch[300 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui address_to ui = &view_wrap_ui;
+        int height, last[3], first[3];
+        b32 column, word, row, fits, mirror = true;
+
+        rtl_font_make();
+        if (font_load(&face, rtl_font_bytes, rtl_font_size, 0) != 0)
+        {
+                check("kit view wrap: the block face loads", false);
+                return;
+        }
+        *ui = terminal.ui;
+        ui->scale = 100, ui->scratch = scratch, ui->scratch_width = 300, ui->band_top = ui->band_bottom = 0, ui->mono = null, ui->scene = null;
+        ui->regular = ui->bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.rtl = 0;
+        ui_kit_settle();
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        memory_zero(&view_check, sizeof(view_check));
+
+        height = view_wrap_build("aaaa bbbb cccc dddd", 130, false, false);
+        column = view_wrap_text.w == 130 && view_wrap_text.h == 40 && view_wrap_after.y == 40 && height == 50;
+        view_wrap_draw(view_wrap_pixels);
+        first[0] = view_wrap_ink(view_wrap_pixels, 0, 20, &last[0]), first[1] = view_wrap_ink(view_wrap_pixels, 20, 40, &last[1]);
+        first[2] = view_wrap_ink(view_wrap_pixels, 40, 120, &last[2]);
+        check("kit view wrap: a text whose words do not fit its column wraps at a blank onto the lines it needs (two of two words), its box as tall as they are and what follows it under them",
+              column && view_check.unknown == 0);
+        check("kit view wrap: drawn line by line, each line its words from the column's left edge (126 wide, two lines and nothing under them)",
+              first[0] == 0 && last[0] == 125 && first[1] == 0 && last[1] == 125 && first[2] < 0);
+        // Reading from the right: the column at the window's right edge, each line from its right edge, the picture the mirror of the one before.
+        ui_kit.rtl = 1;
+        view_wrap_build("aaaa bbbb cccc dddd", 130, false, false);
+        view_wrap_draw(view_wrap_turned);
+        ui_kit.rtl = 0;
+        for (int y = 0; y < 120; y++)
+                for (int x = 0; x < 300; x++)
+                        mirror &= view_wrap_turned[y * 300 + 299 - x] == view_wrap_pixels[y * 300 + x];
+        check("kit view wrap: reading from the right the same lines are drawn from the column's right edge, the picture the mirror of the one from the left",
+              mirror && view_wrap_ink(view_wrap_turned, 0, 20, &last[0]) == 174 && last[0] == 299);
+
+        height = view_wrap_build("aaaaaaaaaaaaaaaaaaaa", 130, false, false);
+        word = view_wrap_text.h == 60 && view_wrap_after.y == 60;
+        view_wrap_draw(view_wrap_pixels);
+        first[0] = view_wrap_ink(view_wrap_pixels, 0, 20, &last[0]), first[2] = view_wrap_ink(view_wrap_pixels, 40, 60, &last[2]);
+        check("kit view wrap: a word longer than the line breaks within it, where it stops fitting: 20 characters in 130 are lines of 9, 9 and 2",
+              word && first[0] == 0 && last[0] == 125 && first[2] == 0 && last[2] == 27);
+
+        height = view_wrap_build("aaaa bbbb cccc dddd", 200, false, true);
+        row = view_wrap_text.x == 60 && view_wrap_text.w == 140 && view_wrap_text.h == 40 && view_wrap_after.y == 40;
+        check("kit view wrap: in a row a text gives way to what is beside it, takes the width it is given (140) and wraps in it, and the row is as tall as its lines", row);
+
+        height = view_wrap_build("aaaa bbbb cccc dddd", 280, false, false);
+        fits = view_wrap_text.h == 20 && view_wrap_after.y == 20 && height == 30;
+        view_wrap_draw(view_wrap_pixels);
+        first[0] = view_wrap_ink(view_wrap_pixels, 0, 20, &last[0]);
+        check("kit view wrap: where its words fit, a text is its one line, laid out and drawn as one (266 wide)", fits && first[0] == 0 && last[0] == 265);
+
+        height = view_wrap_build("aaaa bbbb cccc dddd", 130, true, false);
+        view_wrap_draw(view_wrap_pixels);
+        first[0] = view_wrap_ink(view_wrap_pixels, 0, 20, &last[0]);
+        check("kit view wrap: a text said to be cut is one line, the longest start of it that fits with three dots after it (aaaa b..., 126)",
+              view_wrap_text.h == 20 && view_wrap_after.y == 20 && first[0] == 0 && last[0] == 125 && view_wrap_ink(view_wrap_pixels, 20, 120, &last[1]) < 0);
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        memory_zero(&view_check, sizeof(view_check));
 }
 
 static fn check_kit_view_controls(void)
@@ -167496,6 +167617,7 @@ b32 main()
         check_kit_view_scroll();
         check_kit_mouse_drag();
         check_kit_view_controls();
+        check_kit_view_wrap();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
