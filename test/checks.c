@@ -150474,43 +150474,56 @@ static int pointer_as(struct ui address_to ui, struct ui_scroll address_to s, in
 
 /*
         A lit row (the one the keys are on, a hovered or pressed one, a hovered group of a column) is lighter than the ground it lies on in
-        either theme: in a light one the white of a raised surface over the grey ground, as a chosen group is, and in a dark one the
-        secondary container and the ink's layer, which are lighter there. It is never a darker grey. Glass keeps its wells.
+        either theme: on a light ground a step toward white, six tenths of it hovered and all of it pressed, so hover and press read apart,
+        and in a dark one the secondary container and the ink's layer, which are lighter there. A light glass (the launcher's, a menu's)
+        lifts toward white too; a dark glass keeps its wells. It is never a darker grey.
 */
+static unsigned int lit_lay(struct ui address_to ui, unsigned int address_to pixels, unsigned int ground, unsigned int layer)
+{
+        struct ui_box box = {0, 0, 64 * 256, 8 * 256, 0, 0};
+
+        for (int at = 0; at < 64 * 8; at++)
+                pixels[at] = ground;
+        ui_kit_lift_fill(ui, &box, ui_text_colour(ui, UI_ON_SURFACE), layer);
+        return ui_luminance(pixels[4 * 64 + 32] & 0xffffffu);
+}
+
 static fn check_kit_lit(void)
 {
         static unsigned int pixels[64 * 8];
         struct ui ui = {0};
-        b32 light_keys, light_hover, light_press, dark_keys, dark_hover, glass_same;
-        unsigned int ground;
-        struct ui_box box = {0, 0, 64 * 256, 8 * 256, 0, 0};
+        b32 light_keys, light_hover, light_apart, dark_keys, dark_hover, glass_light, glass_dark, menu_light;
+        unsigned int ground, hover, press;
 
         ui.pixels = pixels, ui.pitch = 64, ui.width = 64, ui.height = 8, ui.top = 0, ui.bottom = 8, ui.scale = 100;
         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
         ground = ui_role(UI_SURFACE) | 0xff000000u;
         light_keys = ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
-        for (int at = 0; at < 64 * 8; at++)
-                pixels[at] = ground;
-        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 6);
-        light_hover = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
-        for (int at = 0; at < 64 * 8; at++)
-                pixels[at] = ground;
-        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 10);
-        light_press = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        hover = lit_lay(&ui, pixels, ground, 6), press = lit_lay(&ui, pixels, ground, 10);
+        light_hover = hover > ui_luminance(ground & 0xffffffu);
+        light_apart = press > hover;
+        // A light glass, the launcher's grey: its lit row and its hovered one are lighter than the tint, and a menu's hot item is the lit row's.
         ui.glass = 1;
-        glass_same = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36);
+        ui_inks(&ui, 0xe0e0e2u);
+        ground = 0xffe0e0e2u;
+        glass_light = ui_kit_light(&ui) && ui_luminance(window_mix(ground, ui_kit_lit(&ui) & 0xffffffu, ui_kit_lit(&ui) >> 24)) > ui_luminance(ground & 0xffffffu) &&
+                      lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu) && lit_lay(&ui, pixels, ground, 10) > lit_lay(&ui, pixels, ground, 6);
+        menu_light = ui_kit_lift(&ui, 100) == ui_kit_lit(&ui);
+        // A dark glass keeps the well of its ink, which is lighter than its tint there.
+        ui_inks(&ui, 0x2b2b2eu);
+        glass_dark = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36);
         ui.glass = 0;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ground = ui_role(UI_SURFACE) | 0xff000000u;
         dark_keys = !ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
-        for (int at = 0; at < 64 * 8; at++)
-                pixels[at] = ground;
-        ui_kit_lift_fill(&ui, &box, ui_role(UI_ON_SURFACE), 6);
-        dark_hover = ui_luminance(pixels[4 * 64 + 32] & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        dark_hover = lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu);
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
         check("kit lit: in the light theme the row the keys are on, a hovered row and a pressed one are lighter than their ground, never a darker grey",
-              light_keys && light_hover && light_press);
-        check("kit lit: in the dark theme they are lighter than their ground too, and on glass the row the keys are on keeps its well", dark_keys && dark_hover && glass_same);
+              light_keys && light_hover);
+        check("kit lit: in the light theme a pressed row is lighter than a hovered one, so the two states read apart", light_apart);
+        check("kit lit: on a light glass (the launcher's, a menu's) the row the keys are on, a hovered row and a pressed one are lighter than the tint, and a menu's hot item is the lit row's fill",
+              glass_light && menu_light);
+        check("kit lit: in the dark theme they are lighter than their ground too, and on a dark glass the row the keys are on keeps its well", dark_keys && dark_hover && glass_dark);
 }
 
 static fn check_kit_place(void)

@@ -12112,31 +12112,46 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
                 ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
 }
 
-// Whether the theme is a light one: its surface is the lighter half of the range. A lit row there is lighter than its ground, as it is
-// in a dark theme, and not the ink laid over it, which in a light theme is a darker grey.
+// Whether what the rows lie on is light: an opaque window's surface, or what a glass's tint came to, in the lighter half of the range.
+// A lit row there is lighter than its ground, as it is on a dark one, and not the ink laid over it, which on a light ground is a darker grey.
 static inline b32 ui_kit_light(const struct ui address_to ui)
 {
-        return !ui->glass && ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768;
+        return ui_luminance(ui->glass ? ui->ground & 0xffffffu : ui_role(UI_SURFACE) & 0xffffffu) > 32768;
 }
 
 /*
-        A row lit by the pointer (hovered or pressed, layer the state layer's percent): in a light theme a step up from the grey ground to
-        the white of a raised surface, the whole step at a hover's 6 percent, as a chosen group of a column is; in a dark one and on glass
-        the ink at layer percent, which is lighter than its ground there. Never a darker grey than the row's ground.
+        White laid over a light ground at percent of its whole step (opaque: to the white of a raised surface; glass: to
+        UI_GLASS_LIFT percent of white over the tint, so the glass still shows), straight, as ui_kit_fill takes it.
+*/
+#define UI_GLASS_LIFT 70
+static inline unsigned int ui_kit_lift(const struct ui address_to ui, unsigned int percent)
+{
+        percent = percent > 100 ? 100 : percent;
+        if (ui->glass)
+                return ui_mix(0xffffffffu, percent * UI_GLASS_LIFT / 100, 0);
+        return ui_mix(ui_role(UI_SURFACE_LOWEST), percent, 0);
+}
+
+/*
+        A row lit by the pointer (hovered or pressed, layer the state layer's percent: 6 hovered, 10 pressed): on a light ground
+        a step toward white, six tenths of it hovered and the whole of it pressed, so the two read apart and both are lighter
+        than the row's ground; on a dark one the ink at layer percent, which is lighter than its ground there. Never a darker
+        grey than the row's ground.
 */
 static inline fn ui_kit_lift_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int ink, unsigned int layer)
 {
         if (layer && ui_kit_light(ui))
-                ui_kit_fill(ui, box, ui_mix(ui_role(UI_SURFACE_LOWEST), layer >= 6 ? 100 : layer * 100 / 6, 0), null);
+                ui_kit_fill(ui, box, ui_kit_lift(ui, layer * 10), null);
         else
                 ui_kit_layer_fill(ui, box, ink, layer);
 }
 
-// The row the keys are on: the white of a raised surface in a light theme, the secondary container (lighter than its ground) in a dark
-// one, and on glass a well of the ink (ui_glass_well).
+// The row the keys are on: the whole step toward white on a light ground (opaque or glass), the secondary container (lighter than
+// its ground) on a dark opaque one, and on dark glass a well of the ink (ui_glass_well). The focus ring over it is what says the keys
+// are there; the fill only says which row.
 static inline unsigned int ui_kit_lit(const struct ui address_to ui)
 {
-        return ui_kit_light(ui) ? ui_role(UI_SURFACE_LOWEST) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
+        return ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
 }
 
 // A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink,
@@ -15770,9 +15785,11 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         continue;
                 }
                 // The hot item's rect: ui_fill lays a premultiplied tone, and the well is straight (its alpha is its cover), so it is
-                // premultiplied first. The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
+                // premultiplied first. On a light glass it is the step toward white a lit row is (ui_kit_lit), never a darker grey; on
+                // a dark one the well. The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
                 if (ui_popmenu_choosable(m, at) && at == m->hot)
-                        ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_well(ui, UI_SELECTION, 28), UI_FULL));
+                        ui_fill(ui, n->x, n->y, n->w, n->h,
+                                ui_premultiplied(ui->glass && ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SELECTION, 28), UI_FULL));
                 if (at == m->ripple_at)
                         ui_popmenu_ripple(ui, m, n);
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
