@@ -143347,8 +143347,11 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                                 least &= drive.has_segment[k] && width > 0;
                         }
                         fills &= sum + 32 * gap == drive.strip_w;
+                        // At the least the segments are shared by bytes: the largest is the widest, and ten times the least where the strip has
+                        // twice the room the least widths take (the window's least width leaves a 16 partition strip only a little more than that).
                         if (33 * ui_dev(&settings.ui, UI_SEGMENT_LEAST) + 32 * gap <= drive.strip_w)
-                                least &= smallest >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && largest > 10 * smallest;
+                                least &= smallest >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && largest > smallest &&
+                                         (drive.strip_w < 2 * (33 * ui_dev(&settings.ui, UI_SEGMENT_LEAST) + 32 * gap) || largest > 10 * smallest);
                         else
                                 equal &= largest - smallest <= 1;
                         // The legend is as tall as its lines: the row ends a gap and the hairline under its lowest entry.
@@ -143374,8 +143377,22 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 }
         check("settings drive rows: every segment of a drive of 16 partitions and the free room round them has a leaf, at least the least wide where the strip has room for that",
               least);
-        check("settings drive rows: where 33 segments at the least do not fit, each is the strip over the count, and the segments and their gaps are the strip whole",
+        check("settings drive rows: the segments and their gaps are the strip whole, and where 33 at the least do not fit each is the strip over the count",
               equal && fills);
+        // The window's least width keeps a 16 partition strip wide enough for its least widths, so the rule for one too narrow is held here
+        // to the widths alone: 33 segments in 200 pixels at a least of 8 are each 200 over 33, the first ones a pixel wider.
+        {
+                unsigned long long bytes[33];
+                int widths[33], sum = 0, low = 1 << 30, high = 0;
+
+                for (int k = 0; k < 33; k++)
+                        bytes[k] = k % 3 ? 1ull << 20 : 1ull << 40;
+                ui_strip_widths(bytes, 33, 200, 8, widths);
+                for (int k = 0; k < 33; k++)
+                        sum += widths[k], low = widths[k] < low ? widths[k] : low, high = widths[k] > high ? widths[k] : high;
+                check("settings drive rows: a strip too narrow for its segments at the least gives each the strip over the count, whatever their bytes",
+                      sum == 200 && low == 200 / 33 && high - low <= 1 && widths[0] >= widths[32]);
+        }
         check("settings drive rows: the partitions the host did not show are the legend's last entry, after every segment's", last);
         check("settings drive rows: a drive's row is as tall as its legend, and taller where the window is narrow and the legend has one column",
               tall && heights[1] > heights[0] && heights[0] > 0);

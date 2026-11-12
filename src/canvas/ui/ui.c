@@ -17187,13 +17187,20 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
 }
 
 // A control's box from its element's rectangle: the one conversion of the view's device pixels to a control's logical ones, in 64 bits
-// (a node may sit up to 2^30 device pixels out, a long scroll, and times 100 that is past an int). A group of radios is its rows
-// UI_RADIO_PITCH apart, and its control's height is one row's.
+// (a node may sit up to 2^30 device pixels out, a long scroll, and times 100 that is past an int). The box is the largest of whole logical
+// pixels inside the rectangle (its near edges rounded up, its far ones down), so a control drawn from it never reaches past its element
+// into the one beside it, where a logical pixel is more than one device pixel. A group of radios is its rows UI_RADIO_PITCH apart, and its
+// control's height is one row's.
 static fn ui_view_box(const struct ui address_to ui, const struct ui_node address_to n, struct ui_control address_to c)
 {
-        int scale = ui->scale > 0 ? ui->scale : 100;
+        b64 scale = ui->scale > 0 ? ui->scale : 100, x0 = ((b64)n->x * 100 + scale - 1) / scale, y0 = ((b64)n->y * 100 + scale - 1) / scale;
+        b64 x1 = ((b64)n->x + n->w) * 100 / scale, y1 = ((b64)n->y + n->h) * 100 / scale;
 
-        c->x = (int)((b64)n->x * 100 / scale), c->y = (int)((b64)n->y * 100 / scale), c->w = (int)((b64)n->w * 100 / scale), c->h = (int)((b64)n->h * 100 / scale);
+        if (n->x < 0)
+                x0 = -((-(b64)n->x * 100) / scale);
+        if (n->y < 0)
+                y0 = -((-(b64)n->y * 100) / scale);
+        c->x = (int)x0, c->y = (int)y0, c->w = (int)(x1 > x0 ? x1 - x0 : 0), c->h = (int)(y1 > y0 ? y1 - y0 : 0);
         if (c->kind == UI_RADIOS && c->count > 1)
                 c->h -= (c->count - 1) * UI_RADIO_PITCH;
 }
