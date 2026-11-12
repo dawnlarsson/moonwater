@@ -131742,7 +131742,7 @@ static void check_compositor_volume(void)
         window's close and minimise buttons, all in one scene, which is pinned by a hash of the whole output so that a
         changed default pixel is seen. The tabs' inks the band takes for a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x2b67bbadu
+#define CHROME_SCENE_HASH 0x5719b41du
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -131910,6 +131910,122 @@ static void check_compositor_minimise(void)
     compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
     check("minimise: a window with no close button has no minimise button", !(compositor.state[3] & WINDOW_MINIMIZED));
+}
+
+/*
+        The close and minimise buttons are one look. Over a plain window of the kit, its dark paper 111113 and its light f7f7f8,
+        at 100 and 200 percent, every pixel of both buttons is the paper, the theme's text ink (ededef on the dark paper, 18181b
+        on the light), or a mix of the two at a stroke's edge: the strokes are the ink and no halo's box is seen round either.
+        Over a busy picture (stripes of black, white and blue) neither draws anything off its strokes: every pixel of both
+        buttons that the X's strokes or the dash do not cover is the picture's own.
+*/
+static unsigned int glyph_stripe(int x, int y)
+{
+    return (x / 3 + y / 5) % 3 == 0 ? 0x000000u : (x / 3) % 3 == 1 ? 0xffffffu : 0x2a7fd4u;
+}
+
+static void check_compositor_glyphs(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct compositor_frame frame;
+    int plain = 1, inked = 1, scenes = 0, x, y, side;
+    unsigned int stroked = 0, changed = 0;
+
+    for (int scale = 100; scale <= 200; scale += 100)
+        for (int dark = 0; dark < 2; dark++)
+        {
+            unsigned int paper = dark ? 0x111113u : 0xf7f7f8u, ink = dark ? 0xededefu : 0x18181bu;
+
+            memory_zero(&compositor, sizeof(compositor));
+            compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+            compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+            compositor.width = compositor.height = GLASS_SIDE;
+            compositor.scale = scale;
+            compositor.card = -1;
+            compositor.scanout = screen;
+            compositor.scanout_pitch = GLASS_SIDE * 4;
+            if (!glass_table_map())
+            {
+                check("glyphs: the table is mapped", false);
+                return;
+            }
+            compositor.table->x[1] = 30, compositor.table->y[1] = 30, compositor.table->width[1] = 200, compositor.table->height[1] = 120;
+            glass_paint(1, 0, 0, 200, 120, paper, true);
+            compositor.focus = 1;
+            compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+            compositor_present();
+            compositor_frame_of(1, &frame);
+            for (int which = 0; which < 2; which++)
+            {
+                int bx, by, half = compositor_px1(scale), in = COMPOSITOR_MINIMIZE_IN * scale / 100;
+
+                if (!(which ? compositor_minimize_box(&frame, &bx, &by, &side) : compositor_close_box(&frame, &bx, &by, &side)))
+                {
+                    plain = 0;
+                    continue;
+                }
+                scenes++;
+                for (y = by; y < by + side; y++)
+                    for (x = bx; x < bx + side; x++)
+                    {
+                        unsigned int shown = glass_at(x, y), edge = 0;
+
+                        for (unsigned int k = 0; k <= 16; k++)
+                            edge |= shown == compositor_mix(paper, ink, k * 255 / 16);
+                        plain &= edge;
+                    }
+                // The X's middle is wholly stroke, and so are the dash's top row at its middle and its bottom row at its start.
+                inked &= glass_at(bx + side / 2, which ? by + side / 2 - half : by + side / 2) == ink;
+                inked &= !which || glass_at(bx + in, by + side / 2 + half - 1) == ink;
+            }
+        }
+    string_format(log, "  glyphs: %p buttons over the kit's plain papers\n", (positive)scenes);
+    check("glyphs: over a plain window of the kit, dark and light, at 100 and 200 percent, the close and minimise buttons are the paper and the "
+          "theme's text ink alone, with no halo's box round either",
+          scenes == 8 && plain);
+    check("glyphs: the X's strokes and the dash are the theme's text ink, ededef on the dark paper and 18181b on the light", scenes == 8 && inked);
+
+    // A busy picture under both buttons, at 100 percent: off its strokes neither draws anything.
+    {
+        unsigned int address_to pixels = windows_buffer(compositor.table, 1, 0);
+        int bx, by, mx, my, half, in;
+
+        compositor.scale = 100;
+        for (y = 0; y < 120; y++)
+            for (x = 0; x < 200; x++)
+                pixels[y * GLASS_SIDE + x] = glyph_stripe(x, y);
+        compositor.table->buffer_index[1] = 0, compositor.table->damage_width[1] = 0, compositor.table->damage_height[1] = 120;
+        compositor.table->frame[1]++;
+        compositor_take(1);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        compositor_frame_of(1, &frame);
+        if (!compositor_close_box(&frame, &bx, &by, &side) || !compositor_minimize_box(&frame, &mx, &my, &side))
+        {
+            check("glyphs: the busy window has both buttons", false);
+            return;
+        }
+        half = compositor_px1(100), in = COMPOSITOR_MINIMIZE_IN;
+        for (int which = 0; which < 2; which++)
+        {
+            int ox = which ? mx : bx, oy = which ? my : by;
+
+            for (y = oy; y < oy + side; y++)
+                for (x = ox; x < ox + side; x++)
+                {
+                    unsigned int under = glyph_stripe(x - frame.x, y - frame.y), shown = glass_at(x, y);
+                    // The strokes: the dash's bar, and every pixel the X's strokes cover any of (sixteen samples a pixel, as it is drawn).
+                    int stroke = which ? x >= ox + in && x < ox + side - in && y >= oy + side / 2 - half && y < oy + side / 2 + half
+                                       : compositor_close_sample(side, half, x - ox, y - oy) > 0;
+
+                    stroked += stroke && shown != under;
+                    changed += !stroke && shown != under;
+                }
+        }
+        string_format(log, "  glyphs: over the stripes %p pixels of the strokes are drawn and %p round them\n", (positive)stroked, (positive)changed);
+        check("glyphs: over a busy picture neither button draws anything off its strokes, the X no more than the dash",
+              stroked > 20 && changed == 0);
+    }
 }
 
 /*
@@ -169556,6 +169672,7 @@ b32 main()
         check_compositor_chrome();
         check_compositor_focus_line();
         check_compositor_minimise();
+        check_compositor_glyphs();
         check_compositor_predict();
         check_compositor_predict_drag();
         check_compositor_predict_model();

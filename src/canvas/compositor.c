@@ -184,7 +184,7 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
 static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the line of the window with the keys, the theme's (compositor_chrome_now)
 static unsigned int compositor_line_unlit(void); // the line of a window without the keys: the theme's outline
-static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: the close button's halo, the tray and a tab unlit
+static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: the tray's and a tab's drawn without a font
 static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
 static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at its percent, read on the wallpaper
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
@@ -493,10 +493,20 @@ static int compositor_minimize_box(const struct compositor_frame *frame, int *x,
 }
 
 /*
-        The minimise button over a window's pixels: a dash across its disc, COMPOSITOR_MINIMIZE_IN in from each side and
-        two device pixels thick, in the ink the close button's X takes for the same window (window_contrast of the mean
-        under it), so the two stand out alike. Flat: no halo and no cover. Drawn after the window's pixels, through the
-        target's clip, as the close button is.
+        The ink of the close and minimise glyphs over the mean of a window's pixels under its close button
+        (compositor_close_mean): the text ink of the theme whose paper is on the mean's side of lightness, the light theme's
+        18181b on a light mean and the dark theme's ededef on a dark one, so over a window of the kit the glyphs are its own
+        text's ink in either theme, and over any other picture they stand out 3.3 to 1 or more from the mean.
+*/
+static unsigned int compositor_glyph_ink(unsigned int mean)
+{
+        return (window_light(mean) ? ui_theme_dawning.role[UI_ON_SURFACE] : ui_theme_night.role[UI_ON_SURFACE]) & 0xffffffu;
+}
+
+/*
+        The minimise button over a window's pixels: a dash across its disc, COMPOSITOR_MINIMIZE_IN in from each side and two
+        logical pixels thick, in the close button's ink (compositor_glyph_ink), and, as the X, with nothing round it, so the
+        two are one look. Drawn after the window's pixels, through the target's clip, as the close button is.
 */
 static void compositor_minimize_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
@@ -505,7 +515,7 @@ static void compositor_minimize_draw(const struct compositor_target *t, const st
         if (!compositor_minimize_box(frame, &mx, &my, &side))
                 return;
         compositor_fill(t, mx + in, my + side / 2 - compositor_px1(frame->scale), side - 2 * in, 2 * compositor_px1(frame->scale),
-                        window_contrast(frame->close_mean));
+                        compositor_glyph_ink(frame->close_mean));
 }
 
 // A title's length in characters, the bytes that begin one, to its end or the listing's.
@@ -669,27 +679,27 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
 }
 
 /*
-        How much of each pixel of a close button the X's halo and its stroke
-        cover, in sixteenths (four by four samples): the geometry of the
-        button alone, its side and its scale, so made once for them
-        (compositor_close_ready, before the scene's bands) and read for every
-        window's button at every present, where the sixteen samples a pixel
-        were most of a present's cost after the copy.
+        How much of each pixel of a close button the X's strokes cover, in
+        sixteenths (four by four samples): the geometry of the button alone,
+        its side and its scale, so made once for them (compositor_close_ready,
+        before the scene's bands) and read for every window's button at every
+        present, where the sixteen samples a pixel were most of a present's
+        cost after the copy.
 */
 #define COMPOSITOR_CLOSE_MOST (UI_CLOSE * 8)
 
 static struct
 {
         int side, half;
-        unsigned char halo[COMPOSITOR_CLOSE_MOST * COMPOSITOR_CLOSE_MOST];
         unsigned char cross[COMPOSITOR_CLOSE_MOST * COMPOSITOR_CLOSE_MOST];
 } compositor_close_cover;
 
-static void compositor_close_sample(int side, int half, int x, int y, unsigned int *halo, unsigned int *cross)
+// The share of the sixteen sample points of pixel x, y of a close button side wide that are inside the X's strokes, half each stroke's half width.
+static unsigned int compositor_close_sample(int side, int half, int x, int y)
 {
         int arm = side * 2 / 7;
+        unsigned int cross = 0;
 
-        *halo = *cross = 0;
         // In eighths of a pixel from the button's middle, sample centres odd.
         for (int sy = 0; sy < 4; sy++)
                 for (int sx = 0; sx < 4; sx++)
@@ -700,45 +710,32 @@ static void compositor_close_sample(int side, int half, int x, int y, unsigned i
 
                         d1 = d1 < 0 ? -d1 : d1;
                         d2 = d2 < 0 ? -d2 : d2;
-                        *cross += ax <= 8 * arm && ay <= 8 * arm && (d1 <= 11 * half || d2 <= 11 * half);
-                        *halo += ax <= 8 * arm + 12 * half && ay <= 8 * arm + 12 * half && (d1 <= 28 * half || d2 <= 28 * half);
+                        cross += ax <= 8 * arm && ay <= 8 * arm && (d1 <= 11 * half || d2 <= 11 * half);
                 }
+        return cross;
 }
 
 // The cover of a frame's button, made where it is not already for its side and scale.
 static void compositor_close_ready(const struct compositor_frame *frame)
 {
-        int bx, by, side;
+        int bx, by, side, half = compositor_px1(frame->scale);
 
         if (!compositor_close_box(frame, &bx, &by, &side) || side > COMPOSITOR_CLOSE_MOST ||
-            (compositor_close_cover.side == side && compositor_close_cover.half == compositor_px1(frame->scale)))
+            (compositor_close_cover.side == side && compositor_close_cover.half == half))
                 return;
         for (int y = 0; y < side; y++)
                 for (int x = 0; x < side; x++)
-                {
-                        unsigned int halo, cross;
-
-                        compositor_close_sample(side, compositor_px1(frame->scale), x, y, &halo, &cross);
-                        compositor_close_cover.halo[y * side + x] = (unsigned char)halo;
-                        compositor_close_cover.cross[y * side + x] = (unsigned char)cross;
-                }
+                        compositor_close_cover.cross[y * side + x] = (unsigned char)compositor_close_sample(side, half, x, y);
         compositor_close_cover.side = side;
-        compositor_close_cover.half = compositor_px1(frame->scale);
+        compositor_close_cover.half = half;
 }
 
 /*
-        The close button over a window's pixels: an X and nothing round it.
-        Its strokes are the ink that stands out on what is under the button
-        (window_contrast of the mean of the window's pixels there, which
-        compositor_close_mean made once for the present), and a halo a pixel
-        and a half wider round them takes the window's own pixels further to
-        the side of lightness they are on, as the tabs' glass does, so the X
-        reads on a busy picture as on a plain ground; each pixel is the share
-        of its sixteen sample points inside the strokes and inside the halo.
-        What is under it is read from the window's pixels, which are known,
-        and not from the target. Drawn last, after the round corners, through
-        the target's clip, so the scene's pieces and its corners' scratch both
-        have it.
+        The close button over a window's pixels: an X in the glyph ink (compositor_glyph_ink) and nothing round it, as the
+        minimise button's dash has nothing round it, so the two are one look. Each pixel is the window's own mixed with the
+        ink by the share of its sixteen sample points inside the strokes. What is under it is read from the window's pixels,
+        which are known, and not from the target. Drawn last, after the round corners, through the target's clip, so the
+        scene's pieces and its corners' scratch both have it.
 */
 static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
@@ -753,7 +750,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         if (x2 <= x1 || y2 <= y1)
                 return;
 
-        unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
+        unsigned int ink = compositor_glyph_ink(frame->close_mean);
         int half = compositor_px1(frame->scale); // half the X's stroke
         int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
         const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
@@ -761,23 +758,16 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         for (int py = y1; py < y2; py++)
                 for (int px = x1; px < x2; px++)
                 {
-                        unsigned int halo, cross;
+                        unsigned int cross = made ? compositor_close_cover.cross[(py - by) * side + (px - bx)]
+                                                  : compositor_close_sample(side, half, px - bx, py - by);
 
-                        if (made)
-                                halo = compositor_close_cover.halo[(py - by) * side + (px - bx)],
-                                cross = compositor_close_cover.cross[(py - by) * side + (px - bx)];
-                        else
-                                compositor_close_sample(side, half, px - bx, py - by, &halo, &cross);
-                        if (!halo)
+                        if (!cross)
                                 continue;
 
                         unsigned int under = picture ? picture[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)]
                                                      : compositor_picture_at(frame, px - frame->x, py - frame->y);
-                        unsigned int pixel = compositor_mix(under, window_mix(under, tone, 140), halo * 255 / 16);
 
-                        if (cross)
-                                pixel = compositor_mix(pixel, ink, cross * 255 / 16);
-                        t->pixels[(unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox)] = pixel;
+                        t->pixels[(unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox)] = compositor_mix(under, ink, cross * 255 / 16);
                 }
 }
 
@@ -1234,20 +1224,15 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
         return at;
 }
 
-// A close button's table (side by side bytes): the halo's covers (which 0) or the strokes' (which 1), in 255ths as the processor mixes them (the samples of sixteen).
-static unsigned int compositor_gpu_close_table(int side, int half, int which)
+// A close button's table (side by side bytes): the X's strokes' covers, in 255ths as the processor mixes them (the samples of sixteen).
+static unsigned int compositor_gpu_close_table(int side, int half)
 {
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(side, half, 4, 2 + which, (unsigned int)(side * side), &table);
+        unsigned int at = compositor_gpu_slot(side, half, 4, 3, (unsigned int)(side * side), &table);
 
         for (int y = 0; table && y < side; y++)
                 for (int x = 0; x < side; x++)
-                {
-                        unsigned int halo, cross;
-
-                        compositor_close_sample(side, half, x, y, &halo, &cross);
-                        table[y * side + x] = (unsigned char)((which ? cross : halo) * 255 / 16);
-                }
+                        table[y * side + x] = (unsigned char)(compositor_close_sample(side, half, x, y) * 255 / 16);
         return at;
 }
 
@@ -1277,15 +1262,12 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         g->count++;
 }
 
-// The close button and the minimise button over a window's pixels (compositor_close_draw, compositor_minimize_draw): the halo mixes the window's own pixels towards
-// their mix with a tone and the strokes mix the ink over that; the dash is a fill. False when the button is not wholly in the picture (the processor draws it cut).
+// The close button and the minimise button over a window's pixels (compositor_close_draw, compositor_minimize_draw): the X's strokes mix the glyph ink over
+// the window's pixels and the dash is a fill of it, nothing round either. False when the button is not wholly in the picture (the processor draws it cut).
 static b32 compositor_gpu_buttons(const struct compositor_frame *f)
 {
         int bx, by, side, mx, my, in = COMPOSITOR_MINIMIZE_IN * f->scale / 100, half = compositor_px1(f->scale);
-        unsigned int mean = f->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
-        unsigned int halo, cross;
-        positive at;
-        unsigned int *op = compositor_gscene.ops + 8 * compositor_gscene.count;
+        unsigned int ink = compositor_glyph_ink(f->close_mean), cross;
 
         if (!compositor_close_box(f, &bx, &by, &side))
                 return true;
@@ -1299,29 +1281,13 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
                 return false;
         }
-        halo = compositor_gpu_close_table(side, half, 0), cross = compositor_gpu_close_table(side, half, 1);
-        if (!halo || !cross)
+        cross = compositor_gpu_close_table(side, half);
+        if (!cross)
         {
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
                 return false;
         }
-        // The halo is cut to the clip the records are (a tint's redraw): its record starts at the clipped corner, and its cover and picture are read from
-        // there (the kernel reads both from the record's own origin, a row of the covers side bytes and of the picture its pitch). Nothing of it is in
-        // the clip when the rectangle is empty.
-        {
-                const int *c = compositor_gscene.clip;
-                int x0 = bx > c[0] ? bx : c[0], y0 = by > c[1] ? by : c[1], x1 = bx + side < c[2] ? bx + side : c[2], y1 = by + side < c[3] ? by + side : c[3];
-
-                if (x1 > x0 && y1 > y0)
-                {
-                        at = compositor_gpu_va(f) + 4ull * ((positive)(y0 - f->y) * f->pitch + (positive)(x0 - f->x));
-                        op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0;
-                        op[3] = (unsigned int)x1, op[4] = (unsigned int)y1, op[5] = halo + (unsigned int)((y0 - by) * side + (x0 - bx)), op[6] = (unsigned int)at;
-                        op[7] = (unsigned int)(at >> 32) | tone << 8;
-                        compositor_gscene.count++;
-                }
-                compositor_gpu_rect(5, bx, by, bx + side, by + side, ink, 0, cross, side);
-        }
+        compositor_gpu_rect(5, bx, by, bx + side, by + side, ink, 0, cross, side);
         if (compositor_minimize_box(f, &mx, &my, &side))
                 compositor_gpu_rect(0, mx + in, my + side / 2 - half, mx + in + side - 2 * in, my + side / 2 + half, ink, 0, 0, 0);
         return true;
