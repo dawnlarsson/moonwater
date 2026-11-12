@@ -153894,6 +153894,25 @@ static fn check_kit_view_wrap(void)
         first[0] = view_wrap_ink(view_wrap_pixels, 0, 20, &last[0]);
         check("kit view wrap: a text said to be cut is one line, the longest start of it that fits with three dots after it (aaaa b..., 126)",
               view_wrap_text.h == 20 && view_wrap_after.y == 20 && first[0] == 0 && last[0] == 125 && view_wrap_ink(view_wrap_pixels, 20, 120, &last[1]) < 0);
+
+        // A status bar's two words in a row 300 wide with insets of 16, 14 characters each at 12 pixels (168 each, 344 with the gap of 8
+        // between them, in the 268 between the insets): each gives way by its share (to 130) and is cut with dots in it ("aaaa bb...",
+        // 120), and nothing runs past the row.
+        {
+                struct ui_rect one, two;
+
+                ui_view_begin(&view_check, &view_wrap_ui, 300, 0);
+                ui_row(.class = "inset")
+                {
+                        ui_text("aaaa bbbb cccc", .class = "status", .host = &one);
+                        ui_text("dddd eeee ffff", .class = "status", .host = &two);
+                }
+                ui_view_end(&view_check);
+                view_wrap_draw(view_wrap_pixels);
+                first[0] = view_wrap_ink(view_wrap_pixels, 0, 60, &last[0]);
+                check("kit view wrap: the words of a status bar too narrow for them give way alike and are each cut with dots in their room, none past the row",
+                      one.x == 16 && one.w == 130 && two.x == 154 && two.w == 130 && first[0] == 16 && last[0] == 273);
+        }
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         memory_zero(&view_check, sizeof(view_check));
@@ -153924,6 +153943,13 @@ static void list_wrap_row(int id, struct ui_row address_to row)
 {
         row->label = list_wrap_rows[id].label, row->value = list_wrap_rows[id].value, row->kind = list_wrap_rows[id].kind;
         row->reveal = list_wrap_rows[id].reveal, row->on = id == 0;
+}
+
+// A row in a section whose header is wider than the list.
+static void list_wrap_headed(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "aaaa", row->header = "hhhh hhhh hhhh hhhh hhhh hhhh", row->section = 1;
 }
 
 // The list drawn whole into pixels (300 by 400, cleared).
@@ -154044,6 +154070,21 @@ static fn check_kit_list_wrap(void)
         aim = (int)((l.scroll.body.target + UI_ONE / 2) >> UI_Q);
         check("kit list wrap: the keys moving to a row bring all of its lines into view", aim == 80);
         l.focus = -1;
+
+        // A section's header wider than the list is one line cut with dots inside the list's sides: 29 characters (406) in the 272 between
+        // its insets are "hhhh hhhh hhhh hhhh h..." (19, 266), drawn from 14 to 279.
+        {
+                static struct ui_list headed;
+
+                memory_zero(&headed, sizeof(headed));
+                headed.count = headed.ids = 1, headed.describe = list_wrap_headed, headed.empty = "", headed.focus = headed.hover = headed.down = -1;
+                headed.wrap = 1;
+                ui_list_place(&ui, &headed, 0, 0, 300, 400);
+                ui_list_layout(&ui, &headed);
+                list_wrap_draw(&ui, &headed, list_wrap_pixels);
+                first[0] = list_wrap_ink(list_wrap_pixels, 0, ui_dev(&ui, UI_SECTION), 0, 300, &last[0]);
+                check("kit list wrap: a section's header wider than the list is cut with dots inside the list's sides", first[0] == 14 && last[0] == 279);
+        }
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         ui_kit.test_clock = 0;

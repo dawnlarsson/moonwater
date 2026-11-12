@@ -19786,7 +19786,8 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
         UI_CALL();
-        int row_height = ui_dev(ui, UI_ROW);
+        int row_height = ui_dev(ui, UI_ROW), room = l->w - 2 * ui_dev(ui, UI_INSET);
+        char cut[UI_CUT_TEXT];
 
         int drawn, rest;
 
@@ -19804,9 +19805,12 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         l->scroll.scroll = rest;
         ui->top = l->y;
         ui->bottom = l->y + l->h;
+        // What it says with no rows and a section's header are one line each, in from the list's sides and cut with dots where they would
+        // run past them.
         if (!l->count && l->empty)
                 ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, l->y + (row_height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM),
-                                    (string_address)l->empty, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
+                                    ui_fit(ui, (string_address)l->empty, UI_BODY_MEDIUM, room, cut, sizeof(cut)), UI_BODY_MEDIUM,
+                                    ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
         for (int at = 0; at < l->count; at++)
         {
                 int y = ui_list_row_y(l, at), height = l->tall[at];
@@ -19817,7 +19821,8 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 
                         ui_list_describe(l, l->id[at], &row);
                         ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
-                                            (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
+                                            ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
+                                            ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
                 }
                 // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
                 if (height > 0 && y + height > l->y && y < l->y + l->h)
