@@ -28891,7 +28891,7 @@ def canvas_assembly(library, arch):
 
     lib.c assembles them only into a kernel build with Canvas, so no
     user-space build of it carries them. A body is the lines between ASM_FUNC(name) and
-    ASM_END(name) in the machine's block: C string literals, ASM_RET and
+    ASM_END(name) in the machine's block: C string literals, ASM_RET, ASM_LABEL and
     comments. The strings are decoded rather than transcribed, so what the
     check runs is the text lib.c holds, and anything else in a body stops
     the lift instead of being guessed at.
@@ -28910,7 +28910,7 @@ def canvas_assembly(library, arch):
         if selected:
             current = selected.group(2)
         owner.append(current)
-    piece = re.compile(r'\s*("(?:\\.|[^"\\])*"|ASM_RET\b|//.*$)')
+    piece = re.compile(r'\s*("(?:\\.|[^"\\])*"|ASM_RET\b|ASM_LABEL\(\w+\)|//.*$)')
     out = [".text"]
     for name in CANVAS_ROUTINES:
         begins = [i for i, line in enumerate(lines)
@@ -28933,6 +28933,8 @@ def canvas_assembly(library, arch):
                 token = found.group(1)
                 if token == "ASM_RET":
                     body.append("ret\n")
+                elif token.startswith("ASM_LABEL("):
+                    body.append(".L" + token[len("ASM_LABEL("):-1])  # a local label, as lib.c's ASM_LABEL spells it for ELF
                 elif token.startswith('"'):
                     body.append(ast.literal_eval(token))
                 at = found.end()

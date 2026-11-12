@@ -127891,6 +127891,8 @@ static void check_compositor_click(void)
         cells about the hot cell with the state's mark inside it, the text's rounded rectangle instead; a stretch and a press's squeeze
         stay on the plane; a touch is always dynamic; and the setting rows say dynamic and 25 when nothing is kept.
 */
+static int settings_row_named(const char address_to label);
+
 static void check_compositor_cursor_style(void)
 {
     static unsigned int plane[CP_PLANE * CP_PLANE];
@@ -135545,7 +135547,7 @@ static void caret_field_check(struct ui address_to wui)
     int kept_pitch = wui->pitch, kept_width = wui->width, kept_height = wui->height, toggles = 0, waits = 0, seen_solid = 0, seen_gone = 0, differ_off = 0, differ_on = 0;
     positive since = 1000000000ull, now = since, due = 0, off_due = 0, period_end = since + 1060000000ull, idle = since + 30000000000ull;
     b64 kept_clock = ui_kit.test_clock, kept_now = ui_kit.now;
-    unsigned int saved = ui_kit.caret_speed, start, end, cover, i;
+    unsigned int saved = ui_kit.caret_speed, start, last, cover, i;
     b32 redraw = false;
 
     ui_kit.caret_speed = UI_CARET_NORMAL;
@@ -135562,9 +135564,9 @@ static void caret_field_check(struct ui address_to wui)
         toggles += redraw;
         waits += due != 0;
     }
-    end = caret_field_tick(&t, period_end, &due, &redraw);
+    last = caret_field_tick(&t, period_end, &due, &redraw);
     check("caret field: a focused field's caret goes solid, then gone, then solid where the period began, over one period",
-          start == UI_CARET_FULL && seen_solid && seen_gone && end == start);
+          start == UI_CARET_FULL && seen_solid && seen_gone && last == start);
     check("caret field: each toggle of a focused field asks for a redraw, and it keeps asking for the next", toggles >= 2 && waits >= 4);
 
     caret_field_tick(&t, idle, &due, &redraw);
@@ -137971,6 +137973,17 @@ static fn check_glass(void)
 static unsigned int settings_parsed(unsigned int row, const char address_to said, char address_to value)
 {
         return settings_parse(&settings_rows[row], said, string_length((string_address)said), value, SETTINGS_VALUE);
+}
+
+// How many choices a row offers: settings_choice answers each in turn until there are no more.
+static positive settings_options(const struct settings_row address_to row)
+{
+        char word[SETTINGS_VALUE];
+        positive count = 0;
+
+        while (settings_choice(row, count, word, sizeof(word)))
+                count++;
+        return count;
 }
 
 static int settings_row_named(const char address_to label)
@@ -149059,26 +149072,6 @@ static fn check_kit_place(void)
         check("kit place: a control shown again after a change it did not see is placed, not moved", forgot_still);
         check("kit place: a change after the first frame moves, and the kit settled (a resize) puts it at its end at once", change_moves && settled);
 
-        // A slider's thumb halo (its shadow and its radius) is placed with the control: settled while the thumb was not
-        // hovered, and hovered before the next frame, the halo is at the thumb on that frame, with nothing moving to it.
-        {
-                struct ui_control slider;
-                b32 halo_placed;
-
-                memory_zero(&slider, sizeof(slider));
-                slider.kind = UI_SLIDER, slider.x = 20, slider.y = 190, slider.w = 300, slider.h = 48, slider.label = "Volume";
-                slider.low = 0, slider.high = UI_ONE, slider.value = 0;
-                ui_control_start(&slider);
-                ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                ui_kit_settle();
-                slider.hover = 1, slider.pointer_x = slider.x + 10, slider.pointer_y = slider.y + 24;
-                ui_kit.now += 16666667, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                halo_placed = !ui_kit.busy && ui_kit_tween(&slider.shadow) == UI_Q2(8) && ui_kit_tween(&slider.extent) == ui_q(10);
-                check("kit place: a slider's thumb halo hovered once the kit settled is drawn at the thumb, nothing moving", halo_placed);
-        }
-
         // A resize moves the controls (the layout is laid again): the pips go with their strip and group, nothing lerps.
         {
                 b32 moved_still;
@@ -151401,7 +151394,7 @@ static struct ui_node address_to layout_child(int w, int h)
 
 static fn check_kit_layout(void)
 {
-        struct ui_node address_to root, a, b, c;
+        struct ui_node address_to root, address_to a, address_to b, address_to c;
 
         // Grow shares: 300 across, a fixed 50, two gaps of 10, so 230 left for weights 1 and 2: 76 and 153, the pixel left over to the first.
         root = layout_root(0);
@@ -151450,14 +151443,14 @@ static fn check_kit_layout(void)
                 b32 centre = a->y == 40;
                 root->align = UI_END;
                 ui_tree_run(&layout_tree, 100, 100);
-                b32 end = a->y == 80;
+                b32 low = a->y == 80;
                 root->align = UI_START;
                 ui_tree_run(&layout_tree, 100, 100);
                 b32 start = a->y == 0 && a->h == 20;
                 a->size[1].kind = UI_FIT;
                 root->align = UI_STRETCH;
                 ui_tree_run(&layout_tree, 100, 100);
-                check("kit layout: align places a child across the row, and stretch makes a fit one fill it", centre && end && start && a->y == 0 && a->h == 100);
+                check("kit layout: align places a child across the row, and stretch makes a fit one fill it", centre && low && start && a->y == 0 && a->h == 100);
         }
 
         // Shrink: 80 and 60 in 100 give up 40 by weight and size (23 and 17), and stop at a min; a child with no weight does not give.
@@ -151573,7 +151566,7 @@ static p32 view_check_send(const struct window_event address_to event)
 
 static fn check_kit_view(void)
 {
-        struct ui_control address_to one, two;
+        struct ui_control address_to one, address_to two;
         struct window_event motion = {WINDOW_EVENT_MOTION, 0, 340, 210}, land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
                             lift = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
         int height, top, bottom, band = UI_PAD + UI_TARGET, foot;
@@ -154580,6 +154573,8 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         }
         // The playback device at the default size, with a long name and the reason it plays in the page: no note takes rows from the sliders, so the slider
         // keeps its width and its full height, and the name is drawn beside it (on the side the meter is not), in both ways the window reads.
+        b32 beside_kept[2] = {false, false};
+
         for (int rtl = 0; rtl < 2; rtl++)
         {
                 struct ui_control address_to slider = &s->control[0];
@@ -154597,11 +154592,11 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 for (int y = ui_dev(&mixer.ui, slider->y); y < ui_dev(&mixer.ui, slider->y + slider->h); y++)
                         for (int x = ui_dev(&mixer.ui, rtl ? slider->x - 20 : slider->x + slider->w + 4); x < ui_dev(&mixer.ui, rtl ? slider->x - 4 : slider->x + slider->w + 20); x++)
                                 beside += (pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
-                check(rtl ? "mixer: right to left, the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it"
-                          : "mixer: the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it",
-                      slider->w == UI_STRIP_SLIDER_W && slider->h == full && full >= UI_STRIP_LEAST && !s->noted && beside > 0);
+                beside_kept[rtl] = slider->w == UI_STRIP_SLIDER_W && slider->h == full && full >= UI_STRIP_LEAST && !s->noted && beside > 0;
         }
         ui_kit.rtl = 0;
+        check("mixer: the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it", beside_kept[0]);
+        check("mixer: right to left, the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it", beside_kept[1]);
         // The popup (-q): the device's strip alone, the Mixer row under it, the keys and the pointer, the mixer started by the row, the place
         // beside the cell, and the keys going elsewhere.
         {
@@ -155095,12 +155090,12 @@ static fn check_kit_strips(void)
                 memory_zero(&c, sizeof(c));
                 c.kind = UI_SLIDER, c.variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE, c.x = 0, c.y = 100, c.w = 28, c.h = 200;
                 c.low = 0, c.high = ui_q(100), c.step = ui_q(1);
-                ends = ui_slider_at(&ui, &c, 292) == 0 && ui_slider_at(&ui, &c, 108) == ui_q(100) && ui_slider_at(&ui, &c, 1000) == 0 &&
-                       ui_slider_at(&ui, &c, -20) == ui_q(100);
-                middle = ui_slider_at(&ui, &c, 200) == ui_q(50);
-                step = ui_slider_at(&ui, &c, 150) == ui_q(78) && ui_slider_at(&ui, &c, 151) == ui_q(77);
+                ends = ui_slider_at(&ui, &c, c.x, 292) == 0 && ui_slider_at(&ui, &c, c.x, 108) == ui_q(100) && ui_slider_at(&ui, &c, c.x, 1000) == 0 &&
+                       ui_slider_at(&ui, &c, c.x, -20) == ui_q(100);
+                middle = ui_slider_at(&ui, &c, c.x, 200) == ui_q(50);
+                step = ui_slider_at(&ui, &c, c.x, 150) == ui_q(78) && ui_slider_at(&ui, &c, c.x, 151) == ui_q(77);
                 ui.scale = 200;
-                scaled = ui_slider_at(&ui, &c, 400) == ui_q(50) && ui_slider_at(&ui, &c, 584) == 0 && ui_slider_at(&ui, &c, 216) == ui_q(100);
+                scaled = ui_slider_at(&ui, &c, c.x, 400) == ui_q(50) && ui_slider_at(&ui, &c, c.x, 584) == 0 && ui_slider_at(&ui, &c, c.x, 216) == ui_q(100);
                 ui.scale = 100;
                 check("kit strips: a point on the vertical slider is a value: the thumb's centre, 0 at the bottom of its travel and 100 at the top, held past them",
                       ends && middle && scaled);
@@ -156336,35 +156331,6 @@ static fn check_kit_controls(void)
 
                 check("kit tabs: a finger presses a tab UI_TARGET each way (4 above or below its 32 strip), a mouse only what it is on",
                       finger_top && finger_bottom && mouse_off && column_finger && !column_mouse);
-        }
-
-        // A slider's thumb rings where the hand hovers it (the halo, 8%), and the ring goes when the hand leaves.
-        {
-                struct ui_control slider;
-                b32 ringed, let_go, live = 0;
-
-                memory_zero(&slider, sizeof(slider));
-                slider.kind = UI_SLIDER, slider.x = 20, slider.y = 100, slider.w = 300, slider.h = 88, slider.label = "Level";
-                slider.low = ui_q(0), slider.high = ui_q(100), slider.step = 0, slider.value = ui_q(50);
-                ui_control_start(&slider);
-                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                // The thumb's middle at the half: 20 + (300 - 20) / 2 + 10 = 170, on the track's middle row, 156.
-                ui_kit_pointer(&ui, &slider, 1, WINDOW_EVENT_MOTION, 170, 156, false, 0);
-                ui_kit.now += 400000000ll, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                ui_kit.now += 400000000ll, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                ringed = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&slider.shadow, &live)) == UI_Q2(8) && !live;
-                ui_kit_pointer(&ui, &slider, 1, WINDOW_EVENT_MOTION, 400, 20, false, 0);
-                ui_kit.now += 400000000ll, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                ui_kit.now += 400000000ll, ui_kit.busy = 0;
-                ui_control_draw(&ui, &slider);
-                let_go = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&slider.shadow, &live)) == 0 && !live;
-
-                check("kit slider: hovering the thumb rings it where the hand is, a faint ring", ringed);
-                check("kit slider: leaving the thumb lets the ring go, nothing animating once it has", let_go);
         }
 
         // A stepped slider from 0 to 110 in steps of 40 has its steps at 0, 40 and 80: a press at its far end lands on 80,
@@ -159280,8 +159246,8 @@ static fn field_check(struct ui address_to wui)
                 check("field: the caret blinks after a key", (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_tick(&t, &redraw)) != 0);
                 t.caret_fade = UI_CARET_FULL;
                 redraw = false;
-                check("field: and a while after the last it stays drawn, and no frame is due",
-                      !(ui_kit.now = ui_kit.test_clock = (b64)(now + UI_TEXT_BLINK_FOR_NS + 1), ui_text_tick(&t, &redraw)) && redraw && !t.caret_fade);
+                check("field: and half a minute after the last it blinks still: a frame is due",
+                      (ui_kit.now = ui_kit.test_clock = (b64)(now + 30000000000ull), ui_text_tick(&t, &redraw)) != 0);
         }
         // The caret's width: 1, 2 and 3 pixels at 100 percent (thin, normal, thick), and each scales with the screen, never to nothing:
         // a thin caret at 75 percent is one pixel, not the 0 that 0.75 rounds to. An empty field holds nothing but the caret, so the
@@ -161273,10 +161239,10 @@ static fn check_caret_blink(void)
         // A key restarts the phase: solid at once, gone in the middle of the cycle of its own, solid again at the next key.
         ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
         t.focused = true;
-        t.caret.since = t.caret.awake = now;
+        t.caret.since = now;
         check("caret: solid at the key", check_text_tick_at(&t, now, &redraw) != 0 && t.caret_fade == 0);
         check("caret: gone three quarters round its own cycle", check_text_tick_at(&t, now + cycle / 2, &redraw) != 0 && t.caret_fade == UI_CARET_FULL);
-        t.caret.since = t.caret.awake = now + cycle / 2 + 1000000;
+        t.caret.since = now + cycle / 2 + 1000000;
         check("caret: a key restarts it solid", check_text_tick_at(&t, now + cycle / 2 + 1000000, &redraw) != 0 && t.caret_fade == 0);
 
         // Off is solid, and asks for no frame, whatever the time.
@@ -161285,18 +161251,10 @@ static fn check_caret_blink(void)
                 solid = solid && check_text_tick_at(&t, now + k * 77000000ull, &redraw) == 0 && t.caret_fade == 0;
         check("caret: off is solid, and no frame is due", solid);
 
-        // Left alone past the ten seconds, it stays drawn with no frame due.
+        // Left alone it blinks for as long as it has the keys: a minute on, a frame is still due.
         ui_kit.caret_speed = UI_CARET_NORMAL;
         redraw = false;
-        check("caret: left alone it stays drawn and asks for no frame",
-              check_text_tick_at(&t, t.caret.awake + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
-        // The wait ends at the ten seconds, whatever phase the caret is in, so a caret that is gone then is drawn then.
-        {
-                positive due = 0;
-
-                (void)(ui_kit.now = ui_kit.test_clock = (b64)(now + UI_TEXT_BLINK_FOR_NS - 50000000ull), ui_caret_at(now, now, &due));
-                check("caret: the wait ends at ten seconds, not at the next change of the wave", due == now + UI_TEXT_BLINK_FOR_NS);
-        }
+        check("caret: left alone a minute it blinks still, a frame due at its next change", check_text_tick_at(&t, t.caret.since + 60000000000ull, &redraw) != 0);
         ui_text_close(&t);
         ui_kit.caret_speed = saved;
         ui_kit.test_clock = 0;
@@ -161320,7 +161278,7 @@ static fn check_caret_terminal(void)
         static const unsigned int widths[3] = {1, 2, 3};
         unsigned int saved_speed = ui_kit.caret_speed, pixels[60 * 20];
         b32 was_shown = shown, was_focused = terminal.focused;
-        positive since = terminal.caret.since, awake = terminal.caret.awake, now = 3000000000000ull, width_was = terminal.width;
+        positive since = terminal.caret.since, now = 3000000000000ull, width_was = terminal.width;
         positive height_was = terminal.height, pitch_was = terminal.pitch, cell_h_was = terminal.cell_h;
         long cycle;
 
@@ -161383,7 +161341,6 @@ static fn check_caret_terminal(void)
                 // The phase is set for each frame: solid at its start, gone at three quarters of a cycle, and between at the
                 // middle of the falling fade (a quarter cycle in). Each frame is taken before the next, as the compositor does, and
                 // its caret's pixel is read at once, since the buffer is drawn into again by the frame after.
-                terminal.caret.awake = mid;
                 terminal.caret.since = mid;
                 framed = terminal_frame();
                 table->shown[own] = table->frame[own];
@@ -161413,12 +161370,12 @@ static fn check_caret_terminal(void)
                 long timeout = -1;
 
                 check_caret_step_at(when, &timeout);
-                terminal.caret.since = when, terminal.caret.awake = when;
+                terminal.caret.since = when;
                 terminal.dirty = false;
                 check_caret_step_at(later, &timeout);
                 check("terminal caret: the wait that ends where the cover changes repaints it, with nothing else to draw", terminal.dirty);
         }
-        terminal.caret.since = since, terminal.caret.awake = awake;
+        terminal.caret.since = since;
 
         // The settings come from the kit alone: terminal.c asks ui_caret_at and ui_caret_thick, and reads no setting of its own.
         {
@@ -161441,7 +161398,7 @@ static fn check_caret_terminal(void)
 
         shown = was_shown;
         terminal.focused = was_focused;
-        terminal.caret.since = since, terminal.caret.awake = awake;
+        terminal.caret.since = since;
         ui_kit.caret_speed = saved_speed;
         ui_kit.test_clock = 0;
         ui_kit.test_clock = 0;
@@ -227902,8 +227859,12 @@ b32 main(void)
                                 int px = (int)(gpu_random() % (696 + 40)) - 20, py = (int)(gpu_random() % (PH + 40)) - 20, shape = (int)(gpu_random() % (CP_SHAPES + 1)), size = 1 + (int)(gpu_random() % 3);
                                 unsigned int fill = gpu_random(), edge = gpu_random();
 
-                                compositor_cursor_draw(&reference, px, py, (unsigned int)shape, size, fill, edge);
-                                compositor_gpu_cursor(px, py, (unsigned int)shape, size, fill, edge);
+                                // a bitmap or the dynamic shape, at a whole size or one between
+                                struct compositor_pointer pointer = {.dyn = shape == CP_SHAPES, .shape = shape < CP_SHAPES ? (unsigned int)shape : 0, .scale = size * 256 - (int)(gpu_random() % 3) * 40,
+                                                                     .hw = 8 * 256, .hh = 8 * 256, .c = 8 * 256};
+
+                                compositor_cursor_draw(&reference, px, py, &pointer, fill & 0xffffffu, edge & 0xffffffu);
+                                check("gpu frames: the pointer is drawn by the GPU, over everything", compositor_gpu_cursor(px, py, &pointer, fill & 0xffffffu, edge & 0xffffffu));
                                 cursor_note[0] = px, cursor_note[1] = py, cursor_note[2] = shape, cursor_note[3] = size, cursor_note[4] = 1;
                         }
                         if (!gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH))
