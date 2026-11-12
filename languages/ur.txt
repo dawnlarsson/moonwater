@@ -249,6 +249,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Devices	f320	ڈیوائسز
 =Devices in this machine	d7b8	اس مشین کے ڈیوائسز
 =Display	d9b5	اسکرین
+=Double-click time (ms, or default)	9af1	ڈبل کلک کا وقت (ms یا default)
 =Drag lists with the mouse	4ee2	ماؤس سے فہرستیں گھسیٹیں
 =Editor	bf98	ایڈیٹر
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
@@ -271,6 +272,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Launcher	44b1	لانچر
 =Left edge	9ce5	بائیں کنارہ
 =Linked machines	0cc2	منسلک کمپیوٹر
+=Long press time (ms, or default)	aff4	لمبے دباؤ کا وقت (ms یا default)
 =Machine	be0e	کمپیوٹر
 =Mixer	123a	مکسر
 =Momentum	cfef	مومینٹم
@@ -302,6 +304,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
 =Resize border width (pixels, or default)	7fdf	سائز بدلنے کے کنارے کی چوڑائی (پکسل یا default)
+=Resize grip (pixels, or default)	dddd	سائز بدلنے کی گرفت (پکسل یا default)
 =Right edge	279a	دائیں کنارہ
 =Rotation	777f	گردش
 =Rubber band	9c42	ربڑ بینڈ اثر
@@ -312,6 +315,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Scrolling	74ec	اسکرول
 =Set the clock from the network	b2a3	گھڑی نیٹ ورک سے سیٹ کریں
 =Settings	8728	ترتیبات
+=Shake sensitivity	8d3a	ہلانے کی حساسیت
 =Shake the pointer to find it	f508	پوائنٹر ہلا کر اسے تلاش کریں
 =Show touch area	9ca8	ٹچ کا علاقہ دکھائیں
 =Side taskbar text faces	d115	سائیڈ ٹاسک بار کے متن کا رخ
@@ -332,6 +336,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Taskbar scale (percent)	810b	ٹاسک بار کا اسکیل (فیصد)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ٹاسک بار کی ٹرے ({names} والا متن: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	ٹرمینل
+=Terminal lines per wheel notch	3800	ہر وہیل نوچ پر ٹرمینل کی لائنیں
 =Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
 =Theme	7c92	تھیم
@@ -371,6 +376,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =full	b33c	مکمل
 =graphite	dc8d	گریفائٹ
 =green	ecbc	سبز
+=high	b9fd	زیادہ
 =kernel log	415a	کرنل لاگ
 =kernel log klog dmesg messages	1a8d	کرنل لاگ klog dmesg پیغامات
 =launcher	8391	لانچر
@@ -378,6 +384,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =light	1e2f	روشن
 =light-grey	ed41	ہلکا خاکستری
 =lock	7842	لاک
+=low	6a81	کم
 =mdy	3697	mdy
 =midnight-blue	4008	رات کا نیلا
 =modem	67ed	موڈیم

@@ -249,6 +249,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Devices	f320	התקנים
 =Devices in this machine	d7b8	התקנים במכונה זו
 =Display	d9b5	מסך
+=Double-click time (ms, or default)	9af1	זמן לחיצה כפולה (ms או default)
 =Drag lists with the mouse	4ee2	גרירת רשימות בעכבר
 =Editor	bf98	עורך
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
@@ -271,6 +272,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Launcher	44b1	משגר
 =Left edge	9ce5	קצה שמאלי
 =Linked machines	0cc2	מחשבים מקושרים
+=Long press time (ms, or default)	aff4	זמן לחיצה ארוכה (ms או default)
 =Machine	be0e	מחשב
 =Mixer	123a	מערבל
 =Momentum	cfef	תנע
@@ -302,6 +304,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
 =Resize border width (pixels, or default)	7fdf	רוחב מסגרת שינוי הגודל (פיקסלים או default)
+=Resize grip (pixels, or default)	dddd	אחיזת שינוי הגודל (פיקסלים או default)
 =Right edge	279a	קצה ימני
 =Rotation	777f	סיבוב
 =Rubber band	9c42	אפקט גומייה
@@ -312,6 +315,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Scrolling	74ec	גלילה
 =Set the clock from the network	b2a3	קבע את השעון מהרשת
 =Settings	8728	הגדרות
+=Shake sensitivity	8d3a	רגישות לניעור
 =Shake the pointer to find it	f508	נער את המצביע כדי למצוא אותו
 =Show touch area	9ca8	הצג אזור מגע
 =Side taskbar text faces	d115	כיוון הטקסט בשורת המשימות הצדדית
@@ -332,6 +336,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Taskbar scale (percent)	810b	קנה המידה של שורת המשימות (אחוזים)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	מסוף
+=Terminal lines per wheel notch	3800	שורות במסוף לכל צעד של הגלגלת
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
 =The internet prefers	3dbe	האינטרנט מעדיף
 =Theme	7c92	ערכת נושא
@@ -371,6 +376,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =full	b33c	מלא
 =graphite	dc8d	גרפיט
 =green	ecbc	ירוק
+=high	b9fd	גבוה
 =kernel log	415a	יומן הליבה
 =kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
 =launcher	8391	מפעיל
@@ -378,6 +384,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =light	1e2f	בהיר
 =light-grey	ed41	אפור בהיר
 =lock	7842	נעל
+=low	6a81	נמוך
 =mdy	3697	mdy
 =midnight-blue	4008	כחול חצות
 =modem	67ed	מודם

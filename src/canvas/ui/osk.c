@@ -400,7 +400,7 @@ static void osk_press(int index)
                 if (osk_accents_of(key->ch))
                 {
                         osk.long_key = index;
-                        osk.long_at = ui_kit.now + UI_HOLD_NS;
+                        osk.long_at = ui_kit.now + ui_hold_ns;
                         osk.long_capital = osk_character(key) != key->ch;
                 }
                 if (osk.shift == 1)

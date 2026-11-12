@@ -249,6 +249,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Devices	f320	دستگاه‌ها
 =Devices in this machine	d7b8	دستگاه‌های این دستگاه
 =Display	d9b5	نمایشگر
+=Double-click time (ms, or default)	9af1	زمان دوبار کلیک (ms یا default)
 =Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس
 =Editor	bf98	ویرایشگر
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
@@ -271,6 +272,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Launcher	44b1	راه‌انداز
 =Left edge	9ce5	لبه چپ
 =Linked machines	0cc2	رایانه‌های متصل
+=Long press time (ms, or default)	aff4	زمان فشار طولانی (ms یا default)
 =Machine	be0e	رایانه
 =Mixer	123a	میکسر
 =Momentum	cfef	تکانه
@@ -302,6 +304,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
 =Resize border width (pixels, or default)	7fdf	پهنای لبهٔ تغییر اندازه (پیکسل یا default)
+=Resize grip (pixels, or default)	dddd	دستگیرهٔ تغییر اندازه (پیکسل یا default)
 =Right edge	279a	لبه راست
 =Rotation	777f	چرخش
 =Rubber band	9c42	اثر کشسانی
@@ -312,6 +315,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Scrolling	74ec	پیمایش
 =Set the clock from the network	b2a3	تنظیم ساعت از روی شبکه
 =Settings	8728	تنظیمات
+=Shake sensitivity	8d3a	حساسیت تکان دادن
 =Shake the pointer to find it	f508	تکان دادن نشانگر برای پیدا کردن آن
 =Show touch area	9ca8	نمایش ناحیه لمس
 =Side taskbar text faces	d115	جهت متن نوار وظیفه کناری
@@ -332,6 +336,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Taskbar scale (percent)	810b	مقیاس نوار وظیفه (درصد)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	پایانه
+=Terminal lines per wheel notch	3800	خطوط پایانه در هر گام چرخ
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
 =Theme	7c92	تم
@@ -371,6 +376,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =full	b33c	کامل
 =graphite	dc8d	گرافیتی
 =green	ecbc	سبز
+=high	b9fd	زیاد
 =kernel log	415a	گزارش هسته
 =kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
 =launcher	8391	راه‌انداز
@@ -378,6 +384,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =light	1e2f	روشن
 =light-grey	ed41	خاکستری روشن
 =lock	7842	قفل
+=low	6a81	کم
 =mdy	3697	mdy
 =midnight-blue	4008	آبی نیمه‌شب
 =modem	67ed	مودم

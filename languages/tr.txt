@@ -248,6 +248,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Devices	f320	Aygıtlar
 =Devices in this machine	d7b8	Bu makinedeki aygıtlar
 =Display	d9b5	Ekran
+=Double-click time (ms, or default)	9af1	Çift tıklama süresi (ms veya default)
 =Drag lists with the mouse	4ee2	Listeleri fareyle sürükle
 =Editor	bf98	Düzenleyici
 =GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
@@ -270,6 +271,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Launcher	44b1	Başlatıcı
 =Left edge	9ce5	Sol kenar
 =Linked machines	0cc2	Bağlı makineler
+=Long press time (ms, or default)	aff4	Uzun basma süresi (ms veya default)
 =Machine	be0e	Makine
 =Mixer	123a	Karıştırıcı
 =Momentum	cfef	Atalet
@@ -301,6 +303,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Refresh rate	bf6e	Yenileme hızı
 =Remembered devices	abbc	Hatırlanan aygıtlar
 =Resize border width (pixels, or default)	7fdf	Boyutlandırma kenarlığı genişliği (piksel veya default)
+=Resize grip (pixels, or default)	dddd	Boyutlandırma tutamacı (piksel veya default)
 =Right edge	279a	Sağ kenar
 =Rotation	777f	Döndürme
 =Rubber band	9c42	Lastik bant efekti
@@ -311,6 +314,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Scrolling	74ec	Kaydırma
 =Set the clock from the network	b2a3	Saati ağdan ayarla
 =Settings	8728	Ayarlar
+=Shake sensitivity	8d3a	Sallama duyarlılığı
 =Shake the pointer to find it	f508	İşaretçiyi bulmak için salla
 =Show touch area	9ca8	Dokunma alanını göster
 =Side taskbar text faces	d115	Yan çubuğun metin yönü
@@ -331,6 +335,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Taskbar scale (percent)	810b	Görev çubuğu ölçeği (yüzde)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Tekerlek adımı başına terminal satırı
 =Text size (percent, or default)	51d7	Metin boyutu (yüzde veya default)
 =The internet prefers	3dbe	İnternet şunu tercih eder
 =Theme	7c92	Tema
@@ -370,6 +375,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =full	b33c	tam
 =graphite	dc8d	grafit
 =green	ecbc	yeşil
+=high	b9fd	yüksek
 =kernel log	415a	çekirdek günlüğü
 =kernel log klog dmesg messages	1a8d	çekirdek günlüğü klog dmesg iletiler
 =launcher	8391	başlatıcı
@@ -377,6 +383,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =light	1e2f	açık
 =light-grey	ed41	açık gri
 =lock	7842	kilitle
+=low	6a81	düşük
 =mdy	3697	mdy
 =midnight-blue	4008	gece mavisi
 =modem	67ed	modem

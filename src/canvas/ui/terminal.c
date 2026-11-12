@@ -95,7 +95,7 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_CEILING 3840
 // Bytes taken from the pty in one go before a frame is looked at.
 #define TERMINAL_BUDGET (256 * 1024)
-// Three lines a wheel step, as the kernel's window scrolled.
+// Three lines a wheel step, as the kernel's window scrolled, unless `moonwater canvas terminal wheel` says another (ui_kit.wheel_lines).
 #define TERMINAL_WHEEL_LINES 3
 #define TERMINAL_LIVE ((unsigned int)-1)
 // A held synchronized frame is let go of after this long.
@@ -563,6 +563,12 @@ static struct ui terminal_kit(unsigned int address_to whole)
         return kit;
 }
 
+// The lines a stepped notch of the wheel moves: the kit's, as `moonwater canvas terminal wheel` keeps it, or TERMINAL_WHEEL_LINES.
+static unsigned int terminal_wheel_lines(void)
+{
+        return ui_kit.wheel_lines ? ui_kit.wheel_lines : TERMINAL_WHEEL_LINES;
+}
+
 // The kit's scroll bar where the view is: its track down the window's right edge, flush with it, from below the close
 // button to the window's bottom; the view's rows over the scrollback's, and first, the rows above the view. Its hover
 // and grab stay as the kit keeps them, from one frame to the next.
@@ -573,7 +579,7 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
         terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100, terminal.bar.y = 0;
         terminal.bar.height = (int)terminal.height, terminal.bar.inset = UI_CLOSE_BOTTOM;
         terminal.bar.content = (int)total * cell, terminal.bar.view = (int)shown * cell, terminal.bar.scale = terminal_scale();
-        terminal.bar.wheel = 3 * cell; // a notch of a wheel is three lines, as every terminal's is
+        terminal.bar.wheel = (int)terminal_wheel_lines() * cell; // a notch of a wheel is three lines, as every terminal's is, or the lines set
         // A body moving at the live end goes with it as lines are printed (ui_body_fit_end): a notch's glide or bounce there would
         // otherwise rest a line short of the new end, and the view, which is the body's place, would stop following the output.
         ui_body_fit_end(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE, terminal.view == TERMINAL_LIVE);
@@ -3334,7 +3340,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         return true;
                 }
 
-                long scaled = (long)steps * TERMINAL_WHEEL_LINES + terminal.wheel_remainder;
+                long scaled = (long)steps * (long)terminal_wheel_lines() + terminal.wheel_remainder;
                 int lines = (int)(scaled / 120);
 
                 lines = lines > (int)ROWS ? (int)ROWS : lines < -(int)ROWS ? -(int)ROWS : lines;

@@ -93,11 +93,13 @@
 #define SETTING_SQUEEZE_PATH "/root/canvas.cursor.squeeze"
 #define SETTING_SHAKE_PATH "/root/canvas.cursor.shake"
 #define SETTING_SHAKE_DELAY_PATH "/root/canvas.cursor.shake.delay"
+#define SETTING_SHAKE_FEEL_PATH "/root/canvas.cursor.shake.sensitivity"
 #define SETTING_CURSOR_CLICK_PATH "/root/canvas.cursor.click"
 #define SETTING_REPEAT_DELAY_PATH "/root/keyboard.repeat.delay"
 #define SETTING_ONSCREEN_PATH "/root/keyboard.onscreen"
 #define SETTING_REPEAT_RATE_PATH "/root/keyboard.repeat.rate"
 #define SETTING_SENSITIVITY_PATH "/root/mouse.sensitivity"
+#define SETTING_DOUBLE_CLICK_PATH "/root/mouse.double.click"
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
@@ -110,6 +112,7 @@
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_TOUCH_LEFT_PATH "/root/canvas.touch.left"
 #define SETTING_TOUCH_RIGHT_PATH "/root/canvas.touch.right"
+#define SETTING_TOUCH_HOLD_PATH "/root/canvas.touch.hold"
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
@@ -161,11 +164,13 @@
 #define SETTING_SCROLL_MOMENTUM_PATH "/root/canvas.scroll.momentum"
 #define SETTING_SCROLL_RUBBER_PATH "/root/canvas.scroll.rubber"
 #define SETTING_SCROLL_DRAG_PATH "/root/canvas.scroll.drag"
+#define SETTING_TERMINAL_WHEEL_PATH "/root/canvas.terminal.wheel"
 #define SETTING_CARET_BLINK_PATH "/root/canvas.caret.blink"
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
 // The text's size, in percent of what every role's size says: ui.c's ui_em multiplies it in, and the portal says it as text-scaling-factor.
 #define SETTING_TEXT_SCALE_PATH "/root/canvas.text.scale"
 #define SETTING_BORDER_WIDTH_PATH "/root/canvas.border.width"
+#define SETTING_BORDER_GRIP_PATH "/root/canvas.border.grip"
 // The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/ui.c reads it).
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
 #define SETTING_LANGUAGE_PATH "/root/language"
@@ -293,6 +298,13 @@ static const struct settings_row settings_rows[] = {
                       .unit = "pixels", .low = 1, .high = 4,
                       .usage = "canvas border width [PIXELS|default]",
                       .help = "how wide the highlight on the edge or corner of a window is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]"),
+    //  How far outside a window's edge a pointer's press resizes it (compositor.c's compositor_grip); two pixels inside are always the grip,
+    //  and a finger's is wider whatever this says.
+    SETTING_PLAIN_ROW(null, "Resize grip (pixels, or default)", SETTINGS_SLIDER, 0, ("canvas", "border", "grip"), "grip ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_BORDER_GRIP_PATH, .standard = "6",
+                      .unit = "pixels", .low = 2, .high = 16,
+                      .usage = "canvas border grip [PIXELS|default]",
+                      .help = "how far outside the edge of a window a press of the pointer takes it to resize, 2 to 16 pixels; a finger takes 16 [6]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .live = SETTING_LIVE_NONE, .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on",
@@ -372,6 +384,13 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .need = "", .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
+    //  The kit's one double press (ui.c's ui_click_again): a press this soon after the last, and near it, is the next click of its run, in
+    //  every text, the terminal, the tray and the windows' tops.
+    SETTING_PLAIN_ROW(null, "Double-click time (ms, or default)", SETTINGS_SLIDER, 0, ("mouse", "double", "click"), "click ", null,
+                      .type = SETTING_NUMBER, .need = "", .path = SETTING_DOUBLE_CLICK_PATH,
+                      .standard = "450", .unit = "ms", .low = 200, .high = 900,
+                      .usage = "mouse double click [MS|default]",
+                      .help = "how soon a second press near the first is a double click, 200 to 900 ms; a third as soon is a triple [450]"),
     //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch runs to its step (two and a half rows) over a
     //  short time, starting at once and easing out; off, a notch moves a whole step at once.
     SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
@@ -406,6 +425,12 @@ static const struct settings_row settings_rows[] = {
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+    //  How much of a shake finds the pointer (compositor.c's compositor_shake): the step a reversal takes and how many come in its window.
+    SETTING_PLAIN_ROW(null, "Shake sensitivity", SETTINGS_CHOICE, 0, ("canvas", "cursor", "shake", "sensitivity"), "sensitivity ", "low normal high",
+                      .path = SETTING_SHAKE_FEEL_PATH, .standard = "normal", .reset = "normal",
+                      .refusal = "shake sensitivity is low, normal or high, not %s\n",
+                      .usage = "canvas cursor shake sensitivity [low|normal|high]",
+                      .help = "how much shaking makes the pointer large: low takes more and wider shakes, high fewer and smaller [normal]"),
     //  A held button changes the pointer's size for as long as it is down (compositor.c's compositor_pointer_press): on by default.
     SETTING_PLAIN_ROW(null, "Pointer squeezes on click", SETTINGS_SWITCH, 0, ("canvas", "cursor", "click"), "click ", null,
                       .path = SETTING_CURSOR_CLICK_PATH, .standard = "on",
@@ -424,6 +449,13 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TOUCH_PATH, .standard = "on",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
+    //  The one hold of a finger (ui.c's ui_hold_ns): still this long it is a long press, the right button, as the touch recogniser has it;
+    //  a key of the on-screen keyboard held this long shows its accents, and a swipe from an edge is decided within it.
+    SETTING_PLAIN_ROW(null, "Long press time (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "touch", "hold"), "hold ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_TOUCH_HOLD_PATH,
+                      .standard = "500", .unit = "ms", .low = 300, .high = 1500,
+                      .usage = "canvas touch hold [MS|default]",
+                      .help = "how long a finger held still is a long press, the right button, and a key of the on-screen keyboard shows its accents, 300 to 1500 ms [500]"),
     //  The screen's side edges (ui/ui.c, compositor.c): a swipe in from the left edge runs the window switcher or opens the
     //  launcher, one in from the right runs the switcher or opens the volume popup. Off by default: a swipe from a side is then
     //  the window's, as a touch.
@@ -453,6 +485,13 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "trackpad speed is a number from 25 to 400 percent, slow, normal, fast or default, not %s\n",
                       .usage = "canvas trackpad speed [PERCENT|slow|normal|fast|default]",
                       .help = "how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]"),
+    //  The terminal's notch (terminal.c's terminal_wheel_lines): the lines it moves the scrollback, and on the alternate screen the arrows
+    //  it sends a full-screen program. The scroll speed above scales the scrollback's as it does every notch.
+    SETTING_PLAIN_ROW(null, "Terminal lines per wheel notch", SETTINGS_SLIDER, 0, ("canvas", "terminal", "wheel"), "wheel ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_TERMINAL_WHEEL_PATH,
+                      .standard = "3", .unit = "lines", .low = 1, .high = 10,
+                      .usage = "canvas terminal wheel [LINES|default]",
+                      .help = "how many lines a notch of the mouse wheel moves the terminal, 1 to 10; a full-screen program is sent as many arrows [3]"),
     SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
                       .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on",
                       .usage = "canvas scroll momentum [on|off]",

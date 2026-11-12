@@ -39,6 +39,7 @@ moonwater canvas                       whether Canvas is on, and the screens it 
 moonwater canvas arrange [NAME[@X,Y|@off]...|default]  where each screen is: names left to right, the first the primary [default]
 moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
 moonwater canvas border width [PIXELS|default]  how wide the highlight on the edge or corner of a window is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]
+moonwater canvas border grip [PIXELS|default]  how far outside the edge of a window a press of the pointer takes it to resize, 2 to 16 pixels; a finger takes 16 [6]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
@@ -68,9 +69,11 @@ moonwater canvas cursor style [classic|dynamic]  the classic pointers, or one fi
 moonwater canvas cursor squeeze [PERCENT|default]  how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
+moonwater canvas cursor shake sensitivity [low|normal|high]  how much shaking makes the pointer large: low takes more and wider shakes, high fewer and smaller [normal]
 moonwater canvas cursor click [on|off]  a held button changes how large the pointer is: the left shrinks it, the right grows it [on]
 moonwater canvas predict touch [on|off]  a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
+moonwater canvas touch hold [MS|default]  how long a finger held still is a long press, the right button, and a key of the on-screen keyboard shows its accents, 300 to 1500 ms [500]
 moonwater canvas touch left [off|windows|launcher]  a swipe in from the left edge runs the window switcher, or opens the launcher [off]
 moonwater canvas touch right [off|windows|volume]  a swipe in from the right edge runs the window switcher, or opens the volume popup [off]
 moonwater canvas wheel smooth [on|off]  a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]
@@ -80,6 +83,7 @@ moonwater keyboard repeat delay [MS|default]  how long a key is held before it r
 moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
 moonwater keyboard start               exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
+moonwater mouse double click [MS|default]  how soon a second press near the first is a double click, 200 to 900 ms; a third as soon is a triple [450]
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 
 
@@ -88,6 +92,7 @@ moonwater canvas scroll drag [on|off]  a mouse press on a list that moves drags 
 moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]
 moonwater canvas scroll natural [on|off]  a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]
 moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
+moonwater canvas terminal wheel [LINES|default]  how many lines a notch of the mouse wheel moves the terminal, 1 to 10; a full-screen program is sent as many arrows [3]
 moonwater canvas trackpad speed [PERCENT|slow|normal|fast|default]  how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]
 
 

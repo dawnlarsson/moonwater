@@ -248,6 +248,7 @@ ui_field_full	fe02	that is as much as it holds
 =Devices	f320	Devices
 =Devices in this machine	d7b8	Devices in this machine
 =Display	d9b5	Display
+=Double-click time (ms, or default)	9af1	Double-click time (ms, or default)
 =Drag lists with the mouse	4ee2	Drag lists with the mouse
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
@@ -270,6 +271,7 @@ ui_field_full	fe02	that is as much as it holds
 =Launcher	44b1	Launcher
 =Left edge	9ce5	Left edge
 =Linked machines	0cc2	Linked machines
+=Long press time (ms, or default)	aff4	Long press time (ms, or default)
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Momentum	cfef	Momentum
@@ -301,6 +303,7 @@ ui_field_full	fe02	that is as much as it holds
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
 =Resize border width (pixels, or default)	7fdf	Resize border width (pixels, or default)
+=Resize grip (pixels, or default)	dddd	Resize grip (pixels, or default)
 =Right edge	279a	Right edge
 =Rotation	777f	Rotation
 =Rubber band	9c42	Rubber band
@@ -311,6 +314,7 @@ ui_field_full	fe02	that is as much as it holds
 =Scrolling	74ec	Scrolling
 =Set the clock from the network	b2a3	Set the clock from the network
 =Settings	8728	Settings
+=Shake sensitivity	8d3a	Shake sensitivity
 =Shake the pointer to find it	f508	Shake the pointer to find it
 =Show touch area	9ca8	Show touch area
 =Side taskbar text faces	d115	Side taskbar text faces
@@ -331,6 +335,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar scale (percent)	810b	Taskbar scale (percent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Terminal lines per wheel notch
 =Text size (percent, or default)	51d7	Text size (percent, or default)
 =The internet prefers	3dbe	The internet prefers
 =Theme	7c92	Theme
@@ -370,6 +375,7 @@ ui_field_full	fe02	that is as much as it holds
 =full	b33c	full
 =graphite	dc8d	graphite
 =green	ecbc	green
+=high	b9fd	high
 =kernel log	415a	kernel log
 =kernel log klog dmesg messages	1a8d	kernel log klog dmesg messages
 =launcher	8391	launcher
@@ -377,6 +383,7 @@ ui_field_full	fe02	that is as much as it holds
 =light	1e2f	light
 =light-grey	ed41	light-grey
 =lock	7842	lock
+=low	6a81	low
 =mdy	3697	mdy
 =midnight-blue	4008	midnight-blue
 =modem	67ed	modem

@@ -248,6 +248,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Devices	f320	Urządzenia
 =Devices in this machine	d7b8	Urządzenia w tej maszynie
 =Display	d9b5	Ekran
+=Double-click time (ms, or default)	9af1	Czas dwukrotnego kliknięcia (ms lub default)
 =Drag lists with the mouse	4ee2	Przeciąganie list myszą
 =Editor	bf98	Edytor
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
@@ -270,6 +271,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Launcher	44b1	Uruchamianie
 =Left edge	9ce5	Lewa krawędź
 =Linked machines	0cc2	Połączone maszyny
+=Long press time (ms, or default)	aff4	Czas długiego naciśnięcia (ms lub default)
 =Machine	be0e	Maszyna
 =Mixer	123a	Mikser
 =Momentum	cfef	Pęd
@@ -301,6 +303,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Refresh rate	bf6e	Częstotliwość odświeżania
 =Remembered devices	abbc	Zapamiętane urządzenia
 =Resize border width (pixels, or default)	7fdf	Szerokość ramki zmiany rozmiaru (piksele lub default)
+=Resize grip (pixels, or default)	dddd	Uchwyt zmiany rozmiaru (piksele lub default)
 =Right edge	279a	Prawa krawędź
 =Rotation	777f	Obrót
 =Rubber band	9c42	Efekt gumki
@@ -311,6 +314,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Scrolling	74ec	Przewijanie
 =Set the clock from the network	b2a3	Ustawiaj zegar z sieci
 =Settings	8728	Ustawienia
+=Shake sensitivity	8d3a	Czułość potrząsania
 =Shake the pointer to find it	f508	Potrząśnij wskaźnikiem, aby go znaleźć
 =Show touch area	9ca8	Pokaż obszar dotyku
 =Side taskbar text faces	d115	Kierunek tekstu paska bocznego
@@ -331,6 +335,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar scale (percent)	810b	Skala paska zadań (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Wiersze terminala na skok kółka
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
 =The internet prefers	3dbe	Internet preferuje
 =Theme	7c92	Motyw
@@ -370,6 +375,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =full	b33c	pełny
 =graphite	dc8d	grafitowy
 =green	ecbc	zielony
+=high	b9fd	wysoko
 =kernel log	415a	dziennik jądra
 =kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
 =launcher	8391	uruchamiacz
@@ -377,6 +383,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =light	1e2f	jasny
 =light-grey	ed41	jasnoszary
 =lock	7842	zablokuj
+=low	6a81	nisko
 =mdy	3697	mdy
 =midnight-blue	4008	granatowy
 =modem	67ed	modem

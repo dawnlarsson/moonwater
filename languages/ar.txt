@@ -249,6 +249,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Devices	f320	الأجهزة
 =Devices in this machine	d7b8	الأجهزة في هذا الجهاز
 =Display	d9b5	الشاشة
+=Double-click time (ms, or default)	9af1	مدة النقر المزدوج (ms أو default)
 =Drag lists with the mouse	4ee2	سحب القوائم بالماوس
 =Editor	bf98	المحرر
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
@@ -271,6 +272,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Launcher	44b1	المشغل
 =Left edge	9ce5	الحافة اليسرى
 =Linked machines	0cc2	الحواسيب المرتبطة
+=Long press time (ms, or default)	aff4	مدة الضغط المطول (ms أو default)
 =Machine	be0e	الحاسوب
 =Mixer	123a	خلاط الصوت
 =Momentum	cfef	الزخم
@@ -302,6 +304,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Refresh rate	bf6e	معدل التحديث
 =Remembered devices	abbc	الأجهزة المحفوظة
 =Resize border width (pixels, or default)	7fdf	عرض حد تغيير الحجم (بكسل أو default)
+=Resize grip (pixels, or default)	dddd	مقبض تغيير الحجم (بكسل أو default)
 =Right edge	279a	الحافة اليمنى
 =Rotation	777f	الدوران
 =Rubber band	9c42	تأثير المطاط
@@ -312,6 +315,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Scrolling	74ec	التمرير
 =Set the clock from the network	b2a3	ضبط الساعة من الشبكة
 =Settings	8728	الإعدادات
+=Shake sensitivity	8d3a	حساسية الهز
 =Shake the pointer to find it	f508	هز المؤشر للعثور عليه
 =Show touch area	9ca8	إظهار منطقة اللمس
 =Side taskbar text faces	d115	اتجاه نص شريط المهام الجانبي
@@ -332,6 +336,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Taskbar scale (percent)	810b	مقياس شريط المهام (نسبة مئوية)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	الطرفية
+=Terminal lines per wheel notch	3800	أسطر الطرفية لكل خطوة من العجلة
 =Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
 =The internet prefers	3dbe	يفضل الإنترنت
 =Theme	7c92	السمة
@@ -371,6 +376,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =full	b33c	كامل
 =graphite	dc8d	جرافيت
 =green	ecbc	أخضر
+=high	b9fd	مرتفع
 =kernel log	415a	سجل النواة
 =kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
 =launcher	8391	المُشغِّل
@@ -378,6 +384,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =light	1e2f	فاتح
 =light-grey	ed41	رمادي فاتح
 =lock	7842	قفل
+=low	6a81	منخفض
 =mdy	3697	mdy
 =midnight-blue	4008	أزرق منتصف الليل
 =modem	67ed	مودم

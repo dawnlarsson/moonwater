@@ -2908,7 +2908,10 @@ static int compositor_tablet(int value, int minimum, int maximum, int size)
         Shake to find it: reversing direction takes a real movement each
         time, so a slow wobble or a hand resting on the mouse is not a shake,
         and the reversals have to come inside one window or the count starts
-        again.
+        again. How much it takes is `moonwater canvas cursor shake
+        sensitivity`: normal (the standard) is CP_SHAKE_STEP pixels a
+        reversal and CP_SHAKE_REVERSALS of them, low asks more of the hand
+        (a step of 9 and 7 reversals) and high less (4 and 4).
 */
 #define CP_SHAKE_WINDOW 700000000ull
 #define CP_SHAKE_STEP 6
@@ -2918,13 +2921,15 @@ struct compositor_shake
 {
         unsigned long long window;
         int direction, count;
+        int feel; // `moonwater canvas cursor shake sensitivity`: 0 normal (the standard), 1 low, 2 high, its word's place among its words
 };
 
 static int compositor_shake(struct compositor_shake *shake, int delta, unsigned long long now)
 {
-        int direction;
+        static const int steps[3] = {CP_SHAKE_STEP, 9, 4}, reversals[3] = {CP_SHAKE_REVERSALS, 7, 4};
+        int direction, feel = shake->feel >= 0 && shake->feel < 3 ? shake->feel : 0;
 
-        if (delta > -CP_SHAKE_STEP && delta < CP_SHAKE_STEP)
+        if (delta > -steps[feel] && delta < steps[feel])
                 return 0;
 
         direction = delta > 0 ? 1 : -1;
@@ -2938,7 +2943,7 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
                 return 0;
 
         shake->direction = direction;
-        if (++shake->count >= CP_SHAKE_REVERSALS)
+        if (++shake->count >= reversals[feel])
         {
                 shake->count = 0;
                 return 1;
@@ -4183,7 +4188,7 @@ struct compositor_touch
         is decided: the kit is not told of it (COMPOSITOR_SWIPE_UNDECIDED), and the window under it gets nothing. A decided swipe is
         the system's (COMPOSITOR_SWIPE_SWIPED) until every finger is up. A finger that is not a swipe after all is handed to the
         kit as it would have been without the band: its landing, then the report as it is (compositor_swipe_hand). The landing
-        frame is kept for that, and the deadline (UI_HOLD_NS) is the time a finger in the band may take to be decided.
+        frame is kept for that, and the deadline (ui_hold_ns) is the time a finger in the band may take to be decided.
         A window that covers its screen (COMPOSITOR_MAXIMIZED) takes a first swipe as its own, with an indicator at the edge;
         a second within COMPOSITOR_SWIPE_ARM_NS is the system's.
 */
@@ -4299,8 +4304,9 @@ struct compositor_poll
 #define COMPOSITOR_TRAY TASKBAR_TRAY // taskbar_hit_reach's answer for the tray
 
 // The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
-// a pixel short of a line one pixel wide still has it -- and the step a new window is put down and across
-// from one in its place, in logical pixels.
+// a pixel short of a line one pixel wide still has it; `moonwater canvas border grip` sets the six for a
+// pointer, 2 to 16 (compositor_grip) -- and the step a new window is put down and across from one in its
+// place, in logical pixels.
 #define COMPOSITOR_GRIP 6
 #define COMPOSITOR_GRIP_IN 2
 /*
@@ -4312,7 +4318,7 @@ struct compositor_poll
         either side, and the close and the minimise button are the finger's within COMPOSITOR_TOUCH_BUTTON_SLOP of their disc
         (the window goes when the finger lifts from the X: one that moves past the slop was making the press the corner or the
         titlebar gives, and makes it). It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
-        where it landed and not a drag. Held UI_HOLD_NS without moving it is a long press: the right button,
+        where it landed and not a drag. Held ui_hold_ns without moving it is a long press: the right button,
         flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
         press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within UI_TOUCH_TAP_NS
         of the second landing, neither moved, are the right button too; two that move are a precise turn of the wheel in
@@ -4812,6 +4818,7 @@ static struct
         int repeat_own[COMPOSITOR_INPUTS][2], repeat_now[COMPOSITOR_INPUTS][2]; // delay, period: as it was, as it is
         int repeat_kept, repeat_delay, repeat_rate; // bit 1 delay, bit 2 rate kept; the delay in ms, the rate a second (0 off)
         int sensitivity, flat; // percent of the gain (0 is 100); one to one, with no curve
+        int grip;              // `moonwater canvas border grip`: logical pixels outside a window's edge a pointer's press resizes it by (0 is COMPOSITOR_GRIP)
         int layout_given; // -l named one, and the settings are not looked at
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
@@ -12497,6 +12504,48 @@ static void compositor_click_read(void)
         compositor.cursor.click_off = compositor_setting_kept(SETTING_CURSOR_CLICK_PATH, word, &value) && value == 1;
 }
 
+/*
+        What a hand takes, as the files of their rows keep them (none, default or a word that is none of a row's is its standard):
+        `moonwater mouse double click` and `canvas touch hold` (ui.c's ui_click_ns and ui_hold_ns, which the windows' tops, the tray and
+        the touch recogniser take at once), `canvas terminal wheel` (the terminal's), `canvas cursor shake sensitivity` (compositor_shake)
+        and `canvas border grip` (compositor_grip). The double click, the long press and the terminal's lines are the table's too, for
+        every window, which a change of them knocks, as a theme change does.
+*/
+static void compositor_hand_set(const char *click, const char *hold, const char *wheel, const char *feel, const char *grip)
+{
+        struct windows *table = compositor.table;
+        long value;
+        unsigned int click_ms, hold_ms, lines;
+
+        compositor_setting_kept(SETTING_DOUBLE_CLICK_PATH, click, &value);
+        click_ms = value >= UI_CLICK_LEAST && value <= UI_CLICK_MOST ? (unsigned int)value : (unsigned int)(UI_CLICK_NS / UI_MS);
+        compositor_setting_kept(SETTING_TOUCH_HOLD_PATH, hold, &value);
+        hold_ms = value >= UI_HOLD_LEAST && value <= UI_HOLD_MOST ? (unsigned int)value : (unsigned int)(UI_HOLD_NS / UI_MS);
+        compositor_setting_kept(SETTING_TERMINAL_WHEEL_PATH, wheel, &value);
+        lines = value >= 1 && value <= 10 ? (unsigned int)value : 3;
+        // The words are low, normal and high; the shake's feel is 0 for normal (what a zeroed compositor is), 1 low and 2 high.
+        compositor_setting_kept(SETTING_SHAKE_FEEL_PATH, feel, &value);
+        compositor.shake.feel = value == 0 ? 1 : value == 2 ? 2 : 0;
+        compositor_setting_kept(SETTING_BORDER_GRIP_PATH, grip, &value);
+        compositor.grip = value >= 2 && value <= 16 ? (int)value : COMPOSITOR_GRIP;
+        ui_click_ns = (b64)click_ms * UI_MS, ui_hold_ns = (b64)hold_ms * UI_MS;
+        if (!table || (table->click_ms == click_ms && table->hold_ms == hold_ms && table->wheel_lines == lines))
+                return;
+        table->click_ms = click_ms, table->hold_ms = hold_ms, table->wheel_lines = lines;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
+static void compositor_hand_read(void)
+{
+        char words[5][16];
+        static const char *const paths[5] = {SETTING_DOUBLE_CLICK_PATH, SETTING_TOUCH_HOLD_PATH, SETTING_TERMINAL_WHEEL_PATH,
+                                             SETTING_SHAKE_FEEL_PATH, SETTING_BORDER_GRIP_PATH};
+
+        for (unsigned int at = 0; at < 5; at++)
+                compositor_word(paths[at], words[at], sizeof(words[at]));
+        compositor_hand_set(words[0], words[1], words[2], words[3], words[4]);
+}
+
 // Read when the compositor starts and again when a file of them is written.
 static void compositor_input_settings_read(void)
 {
@@ -12511,6 +12560,7 @@ static void compositor_input_settings_read(void)
         compositor_touch_settings_read();
         compositor_predict_read();
         compositor_click_read();
+        compositor_hand_read();
 }
 
 _Static_assert(COMPOSITOR_INPUTS == WINDOWS_INPUTS, "an input slot is a row of the table's");
@@ -13186,6 +13236,12 @@ static unsigned int compositor_corner_reach(int px, int py, int x1, int y1, int 
         return found;
 }
 
+// How far outside a window's edge a pointer's press resizes it, in logical pixels: `moonwater canvas border grip`, or COMPOSITOR_GRIP.
+static int compositor_grip(void)
+{
+        return compositor.grip ? compositor.grip : COMPOSITOR_GRIP;
+}
+
 // Whether a point is in the band at a window's edges that resizes it -- just inside its contents, its line,
 // and past it -- and which edges.
 static unsigned int compositor_edge_zone(int row, int x, int y)
@@ -13196,7 +13252,7 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
                 return 0;
         // A finger's are wider (COMPOSITOR_TOUCH_GRIP), its corners further along each edge, and its top a pointer's.
         int touch = compositor.touching;
-        int grip = (touch ? COMPOSITOR_TOUCH_GRIP : COMPOSITOR_GRIP) * compositor.scale / 100 + compositor_line(row);
+        int grip = (touch ? COMPOSITOR_TOUCH_GRIP : compositor_grip()) * compositor.scale / 100 + compositor_line(row);
         int in = (touch ? COMPOSITOR_TOUCH_GRIP_IN : COMPOSITOR_GRIP_IN) * compositor.scale / 100;
         int x2 = compositor.x[row] + (int)compositor.w[row], y2 = compositor.y[row] + (int)compositor.h[row];
         unsigned int edges = compositor_edges_at(x, y, compositor.x[row], compositor.y[row], x2, y2, grip, in,
@@ -19601,7 +19657,7 @@ static int compositor_swipe_landing(unsigned int at, positive now, const struct 
         swipe->side = side, swipe->cell = cell, swipe->row = row, swipe->screen = number;
         memory_copy(swipe->rect, rect, sizeof(rect));
         swipe->x0 = x, swipe->y0 = y;
-        swipe->deadline = now + UI_HOLD_NS;
+        swipe->deadline = now + (positive)ui_hold_ns;
         memory_copy(&swipe->landing, frame, sizeof(*frame));
         return 1;
 }
@@ -19870,7 +19926,7 @@ static void compositor_touch_report(unsigned int at, positive now)
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }
 
-// When the first finger is a long press, or 0: the kit's time for it (a press still for UI_HOLD_NS, the left button down there).
+// When the first finger is a long press, or 0: the kit's time for it (a press still for ui_hold_ns, the left button down there).
 static positive compositor_touch_due(void)
 {
         positive due = ui_touch_due(&compositor.touch.gesture, compositor.button_down & 1);
@@ -20969,8 +21025,9 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_start();
 #endif
-        // The theme goes in the table it now has.
+        // The theme goes in the table it now has, and what a hand takes (read before there was a table) with it.
         compositor_theme_read();
+        compositor_hand_read();
         // The keyboard's setting too (compositor_osk_sync writes the table).
         compositor_osk_setting_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)

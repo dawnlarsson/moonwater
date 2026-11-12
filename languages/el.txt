@@ -248,6 +248,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Devices	f320	Συσκευές
 =Devices in this machine	d7b8	Συσκευές σε αυτό το μηχάνημα
 =Display	d9b5	Οθόνη
+=Double-click time (ms, or default)	9af1	Χρόνος διπλού κλικ (ms ή default)
 =Drag lists with the mouse	4ee2	Σύρσιμο λιστών με το ποντίκι
 =Editor	bf98	Επεξεργαστής
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
@@ -270,6 +271,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Launcher	44b1	Εκκινητής
 =Left edge	9ce5	Αριστερό άκρο
 =Linked machines	0cc2	Συνδεδεμένα μηχανήματα
+=Long press time (ms, or default)	aff4	Χρόνος παρατεταμένου πατήματος (ms ή default)
 =Machine	be0e	Μηχάνημα
 =Mixer	123a	Μίκτης
 =Momentum	cfef	Αδράνεια
@@ -301,6 +303,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
 =Resize border width (pixels, or default)	7fdf	Πλάτος περιγράμματος αλλαγής μεγέθους (pixel ή default)
+=Resize grip (pixels, or default)	dddd	Λαβή αλλαγής μεγέθους (pixel ή default)
 =Right edge	279a	Δεξιό άκρο
 =Rotation	777f	Περιστροφή
 =Rubber band	9c42	Ελαστικό εφέ
@@ -311,6 +314,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Scrolling	74ec	Κύλιση
 =Set the clock from the network	b2a3	Ρύθμιση ρολογιού από το δίκτυο
 =Settings	8728	Ρυθμίσεις
+=Shake sensitivity	8d3a	Ευαισθησία κουνήματος
 =Shake the pointer to find it	f508	Κούνημα του δείκτη για να βρεθεί
 =Show touch area	9ca8	Εμφάνιση περιοχής αφής
 =Side taskbar text faces	d115	Προσανατολισμός κειμένου πλευρικής γραμμής
@@ -331,6 +335,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar scale (percent)	810b	Κλίμακα της γραμμής εργασιών (ποσοστό)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Τερματικό
+=Terminal lines per wheel notch	3800	Γραμμές τερματικού ανά βήμα τροχού
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =Theme	7c92	Θέμα
@@ -370,6 +375,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =full	b33c	πλήρες
 =graphite	dc8d	γραφίτης
 =green	ecbc	πράσινο
+=high	b9fd	υψηλά
 =kernel log	415a	αρχείο καταγραφής πυρήνα
 =kernel log klog dmesg messages	1a8d	πυρήνας καταγραφή klog dmesg μηνύματα
 =launcher	8391	εκκινητής
@@ -377,6 +383,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =light	1e2f	φωτεινό
 =light-grey	ed41	ανοιχτό γκρι
 =lock	7842	κλείδωμα
+=low	6a81	χαμηλά
 =mdy	3697	mdy
 =midnight-blue	4008	μεσονύχτιο μπλε
 =modem	67ed	μόντεμ

@@ -297,6 +297,12 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define UI_NOTCH 40 // a wheel's notch in device pixels at 100 percent: the one notch a precise turn's 120ths are read in (the body, the stream and its gain)
 #define UI_HAND_GAP_NS 60000000ull // the one gate of a device's gesture: no report for this long ends it (a stream's notches, a trackpad's hand, and its still before its lift throws nothing; Android's 40 ms, widened so 50 ms notches stay one stream)
 #define UI_HOLD_NS 500000000ull // the one hold of a finger: still this long it is a long press (the touch recogniser), its edge's swipe is decided or failed (UI_EDGE_NS), and the processor stays out of its deep idle (compositor_hold_touch); Android's and iOS's 500 ms
+// The long press as a person has set it (`moonwater canvas touch hold`, 300 to 1500 ms; UI_HOLD_NS unless set): the touch recogniser's long
+// press, the edge's swipe decided or failed, and a key of the on-screen keyboard held for its accents. The compositor takes it from its
+// file and the window table carries it to every window (hold_ms, ui_kit_input_take); the processor's deep idle keeps UI_HOLD_NS.
+#define UI_HOLD_LEAST 300
+#define UI_HOLD_MOST 1500
+static b64 ui_hold_ns = (b64)UI_HOLD_NS;
 
 /*
         A finger's target, the one rule: a finger on a touch screen is wider than a pointer and shakes as it lands, so what it
@@ -652,12 +658,17 @@ static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
 
 /*
         A click's count, the kit's one double-press rule for every text, the terminal, the panel's tray and the windows' tops: a
-        press within UI_CLICK_NS (450 ms) of the last one, and within UI_CLICK_PX (4 logical px) of where it was, is the next
-        click of its run (a double click, then a triple, then the first again); any other press is the first of a run. The
-        place is the pointer's, in the desktop's pixels, and scale is the kit's percent (the px are scaled by it).
+        press within ui_click_ns (UI_CLICK_NS, 450 ms, unless `moonwater mouse double click` sets it from 200 to 900 ms) of the last
+        one, and within UI_CLICK_PX (4 logical px) of where it was, is the next click of its run (a double click, then a triple, then
+        the first again); any other press is the first of a run. The place is the pointer's, in the desktop's pixels, and scale is
+        the kit's percent (the px are scaled by it). The compositor takes the time from its file and the window table carries it to
+        every window (click_ms, ui_kit_input_take).
 */
 #define UI_CLICK_NS 450000000ull
 #define UI_CLICK_PX 4
+#define UI_CLICK_LEAST 200
+#define UI_CLICK_MOST 900
+static b64 ui_click_ns = (b64)UI_CLICK_NS;
 
 struct ui_click
 {
@@ -668,7 +679,7 @@ struct ui_click
 static inline int ui_click_again(struct ui_click *k, b64 now, int x, int y, int scale)
 {
         long dx = (long)x - k->x, dy = (long)y - k->y, reach = UI_CLICK_PX * (long)scale / 100;
-        b32 again = k->count && now - k->at < UI_CLICK_NS && dx * dx + dy * dy <= reach * reach;
+        b32 again = k->count && now - k->at < ui_click_ns && dx * dx + dy * dy <= reach * reach;
 
         k->count = again ? k->count % 3 + 1 : 1;
         k->at = now, k->x = x, k->y = y;
@@ -695,7 +706,7 @@ static inline int ui_notch_take(int *rest, int v120)
         left button where it went down, and it moves nothing until it is UI_SLOP past where it went down (a tap is a click where it
         landed); a second finger before the first has moved makes the two a wheel from their middle (the left press is taken back
         with a release that says it was no click), and the two lifted soon, neither moved, are a click of the right button; a long
-        press (UI_HOLD_NS, still, with the left button taken) is the right button, held, and the finger may move on until it
+        press (ui_hold_ns, still, with the left button taken) is the right button, held, and the finger may move on until it
         lifts, which ends the press. A window's close button under the finger is the caller's: it marks the press pending
         (ui_touch_pend), and a lift unmoved then is UI_TOUCH_CLOSE, a move past the slop UI_TOUCH_RESUME.
 
@@ -1043,7 +1054,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
 // When the first finger is a long press: its time when it is one (still, the left button pressed and not a close), or 0.
 static inline b64 ui_touch_due(const struct ui_touch *t, int pressed)
 {
-        return t->mode == UI_TOUCH_ONE && !t->moved && !t->pending && pressed ? t->start + (b64)UI_HOLD_NS : 0;
+        return t->mode == UI_TOUCH_ONE && !t->moved && !t->pending && pressed ? t->start + ui_hold_ns : 0;
 }
 
 // The tick: at or after the long press's time, the first finger is a hold (UI_TOUCH_HOLD) and the press is HELD.
@@ -1094,7 +1105,7 @@ static inline void ui_touch_reset(struct ui_touch *t)
         travelled UI_EDGE_SWIPE inward within a cone of about 30 degrees (SWIPED: the system's gesture, and the window under it
         gets nothing); whether it has gone back past the slop, or strayed sideways past the slop out of the cone (FAILED: the
         press is the window's, as if no band were there); or neither yet (UNDECIDED). The caller fails a finger still
-        UI_HOLD_NS after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
+        ui_hold_ns after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
         when it lifts. A finger on a control of the window's controls (UI_EDGE_CONTROL) is judged by travel alone: any travel
         past the slop fails it, a lift without travel is the control's. Sides are the screen's own, from its rectangle in the
         desktop's pixels, so a screen turned is judged in its own orientation.
@@ -10354,6 +10365,7 @@ static struct ui_kit
         unsigned int scroll_speed;         // the Scroll speed row, as the table keeps it: a percent from 25 to 400, 0 for 100 (ui_wheel_percent)
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
+        unsigned int wheel_lines;          // the terminal's lines a stepped notch of the wheel moves (canvas terminal wheel), 1 to 10; 0 for 3
         unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
         unsigned int read_rtl;             // the way the language read when the controls were last placed
         unsigned int themed;               // the table's theme count as last taken
@@ -10402,6 +10414,17 @@ static fn ui_kit_scroll_take(const struct windows address_to table)
 {
         ui_kit.scroll_off = table->scroll_off;
         ui_kit.scroll_speed = table->scroll_speed;
+}
+
+// The times that decide what a hand did (ui_click_ns, ui_hold_ns) and the terminal's lines a notch, taken with the pace: a time the table
+// says none in range for leaves the one this process has, and lines none in range for are the standard, 3.
+static fn ui_kit_input_take(const struct windows address_to table)
+{
+        if (table->click_ms >= UI_CLICK_LEAST && table->click_ms <= UI_CLICK_MOST)
+                ui_click_ns = (b64)table->click_ms * UI_MS;
+        if (table->hold_ms >= UI_HOLD_LEAST && table->hold_ms <= UI_HOLD_MOST)
+                ui_hold_ns = (b64)table->hold_ms * UI_MS;
+        ui_kit.wheel_lines = table->wheel_lines >= 1 && table->wheel_lines <= 10 ? table->wheel_lines : 0;
 }
 
 // Whether a press of an event drags what it is on as a finger's does (ui_press_down): a finger's always, and a mouse's while `canvas scroll
@@ -15986,7 +16009,7 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -20761,7 +20784,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -20855,7 +20878,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                         // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
                         // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)

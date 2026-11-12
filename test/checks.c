@@ -149071,6 +149071,139 @@ static fn check_motion_pace(void)
 }
 
 /*
+        What a hand takes, as a person sets it: `moonwater mouse double click` (ui_click_ns), `canvas touch hold` (ui_hold_ns),
+        `canvas terminal wheel` (the terminal's lines a notch), `canvas cursor shake sensitivity` (compositor_shake) and `canvas
+        border grip` (compositor_grip). Each row's standard is what the desktop did before there was a row; a kept word changes
+        what a press, a finger, a notch, a shake and a press by a window's edge are, in the compositor at once and, through the
+        window table, in every window; and a word that is none of a row's is its standard.
+*/
+static positive hand_row_standard(const char address_to path)
+{
+        const struct settings_row address_to row = setting_by_path((string_address)path);
+
+        return row ? (positive)setting_standard(row) : ~(positive)0;
+}
+
+// How many of twelve moves of `step` pixels back and forth, 50 ms apart, are a shake at a sensitivity (0 normal, 1 low, 2 high).
+static int hand_shakes(int feel, int step)
+{
+        struct compositor_shake shake;
+        unsigned long long now = 1000000000ull;
+        int first = 0;
+
+        memory_zero(&shake, sizeof(shake));
+        shake.feel = feel;
+        for (int at = 0; at < 12; at++)
+        {
+                if (compositor_shake(&shake, at & 1 ? -step : step, now) && !first)
+                        first = at + 1;
+                now += 50000000ull;
+        }
+        return first;
+}
+
+static fn check_hand_settings(void)
+{
+        static struct windows table;
+        static __typeof__(compositor) compositor_was;
+        struct ui_kit kit_was = ui_kit;
+        b64 click_was = ui_click_ns, hold_was = ui_hold_ns;
+        int parent_was = compositor_popup_parent[2];
+        struct ui_click k;
+        struct ui_touch touch;
+        b32 standards, clicks, holds, wheels, shakes, grips, junk;
+
+        compositor_was = compositor;
+        standards = hand_row_standard(SETTING_DOUBLE_CLICK_PATH) == UI_CLICK_NS / UI_MS && hand_row_standard(SETTING_TOUCH_HOLD_PATH) == UI_HOLD_NS / UI_MS &&
+                    hand_row_standard(SETTING_TERMINAL_WHEEL_PATH) == TERMINAL_WHEEL_LINES && hand_row_standard(SETTING_BORDER_GRIP_PATH) == COMPOSITOR_GRIP &&
+                    hand_row_standard(SETTING_SHAKE_FEEL_PATH) == 1 && ui_click_ns == (b64)UI_CLICK_NS && ui_hold_ns == (b64)UI_HOLD_NS;
+        check("hand settings: each row's standard is what the desktop did: a double click in 450 ms, a long press of 500 ms, three lines a notch, a normal shake, a grip of 6 pixels",
+              standards);
+
+        // The double click: a second press 600 ms after the first is the first of a run at the standard, and the second of it at 700.
+        memory_zero(&k, sizeof(k));
+        ui_click_again(&k, 1000000000ll, 10, 10, 100);
+        clicks = ui_click_again(&k, 1000000000ll + 600 * UI_MS, 10, 10, 100) == 1;
+        check_land_setup(&table, 0);
+        compositor_hand_set("700", "", "", "", "");
+        memory_zero(&k, sizeof(k));
+        ui_click_again(&k, 1000000000ll, 10, 10, 100);
+        clicks = clicks && ui_click_again(&k, 1000000000ll + 600 * UI_MS, 10, 10, 100) == 2 && table.click_ms == 700 && table.themed == 1;
+        ui_click_ns = (b64)UI_CLICK_NS;
+        ui_kit_input_take(&table);
+        clicks = clicks && ui_click_ns == 700 * UI_MS;
+        check("hand settings: a double click kept at 700 ms makes two presses 600 ms apart a double click in the compositor and, through the table, in a window",
+              clicks);
+
+        // The long press: due at the hold after the finger lands, 500 ms as standard and 800 when kept so.
+        memory_zero(&touch, sizeof(touch));
+        ui_hold_ns = (b64)UI_HOLD_NS;
+        touch.mode = UI_TOUCH_ONE, touch.start = 2000000000ll;
+        holds = ui_touch_due(&touch, 1) == 2000000000ll + (b64)UI_HOLD_NS;
+        compositor_hand_set("", "800", "", "", "");
+        holds = holds && ui_touch_due(&touch, 1) == 2000000000ll + 800 * UI_MS && table.hold_ms == 800 && ui_click_ns == (b64)UI_CLICK_NS;
+        {
+                struct ui_touch_out out;
+
+                ui_touch_tick(&touch, 2000000000ll + 600 * UI_MS, 1, &out);
+                holds = holds && out.count == 0 && touch.mode == UI_TOUCH_ONE;
+                ui_touch_tick(&touch, 2000000000ll + 800 * UI_MS, 1, &out);
+                holds = holds && out.count == 1 && out.event[0].kind == UI_TOUCH_HOLD;
+        }
+        ui_hold_ns = (b64)UI_HOLD_NS;
+        ui_kit_input_take(&table);
+        holds = holds && ui_hold_ns == 800 * UI_MS;
+        check("hand settings: a long press kept at 800 ms is no hold at 600 ms and a hold at 800, in the touch recogniser and, through the table, in a window",
+              holds);
+
+        // The terminal's lines a notch: three as standard, and five when kept so, carried by the table.
+        ui_kit.wheel_lines = 0;
+        wheels = terminal_wheel_lines() == 3;
+        compositor_hand_set("", "", "5", "", "");
+        ui_kit_input_take(&table);
+        wheels = wheels && table.wheel_lines == 5 && terminal_wheel_lines() == 5;
+        compositor_hand_set("", "", "", "", "");
+        ui_kit_input_take(&table);
+        wheels = wheels && table.wheel_lines == 3 && terminal_wheel_lines() == 3;
+        check("hand settings: the terminal's notch is three lines as standard, and five when kept so, carried by the table", wheels);
+
+        // The shake: eight pixels back and forth is found at the fifth reversal as standard, at none when low (a step of nine), and five
+        // pixels at the fourth when high.
+        compositor_hand_set("", "", "", "low", "");
+        shakes = compositor.shake.feel == 1;
+        compositor_hand_set("", "", "", "high", "");
+        shakes = shakes && compositor.shake.feel == 2;
+        compositor_hand_set("", "", "", "normal", "");
+        shakes = shakes && compositor.shake.feel == 0 && hand_shakes(0, 8) == 5 && hand_shakes(1, 8) == 0 && hand_shakes(1, 10) == 7 &&
+                 hand_shakes(0, 5) == 0 && hand_shakes(2, 5) == 4;
+        check("hand settings: a shake is found at the fifth reversal of 6 pixels or more as standard, at the seventh of 9 when low, at the fourth of 4 when high",
+              shakes);
+
+        // The grip: a press 10 pixels left of a window's left edge is no grip at 6 pixels and the left edge's at 12.
+        check_land_setup(&table, 0);
+        compositor_take(2);
+        compositor_popup_parent[2] = -1;
+        compositor_hand_set("", "", "", "", "");
+        grips = compositor_grip() == COMPOSITOR_GRIP && compositor_edge_zone(2, compositor.x[2] - 10, compositor.y[2] + 50) == 0 &&
+                compositor_edge_zone(2, compositor.x[2] - 4, compositor.y[2] + 50) == CP_EDGE_LEFT;
+        compositor_hand_set("", "", "", "", "12");
+        grips = grips && compositor_grip() == 12 && compositor_edge_zone(2, compositor.x[2] - 10, compositor.y[2] + 50) == CP_EDGE_LEFT &&
+                compositor_edge_zone(2, compositor.x[2] - 20, compositor.y[2] + 50) == 0;
+        check("hand settings: a press 10 pixels outside a window's edge is no grip at the standard 6 pixels, and resizes it at 12", grips);
+
+        // Words that are none of a row's are its standard.
+        compositor_hand_set("950", "100", "11", "wild", "1");
+        junk = ui_click_ns == (b64)UI_CLICK_NS && ui_hold_ns == (b64)UI_HOLD_NS && table.wheel_lines == 3 && compositor.shake.feel == 0 &&
+               compositor_grip() == COMPOSITOR_GRIP;
+        check("hand settings: a time, a count or a word that is none of its row's is the row's standard", junk);
+
+        compositor_popup_parent[2] = parent_was;
+        compositor = compositor_was;
+        ui_kit = kit_was;
+        ui_click_ns = click_was, ui_hold_ns = hold_was;
+}
+
+/*
         A corner's root (ui_arc) is the bit loop's for every place in a corner: 65536 places, each the hardware's root
         against the bit loop's. A corner's lines are places too (u = dy over ry, 16.16), so every one is asked.
 */
@@ -166866,6 +166999,7 @@ b32 main()
         check_kit_motion();
         check_kit_theme();
         check_motion_pace();
+        check_hand_settings();
         check_kit_arc();
         check_kit_ramps();
 #if X64

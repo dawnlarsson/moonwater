@@ -248,6 +248,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Devices	f320	Dispositivi
 =Devices in this machine	d7b8	Dispositivi di questa macchina
 =Display	d9b5	Schermo
+=Double-click time (ms, or default)	9af1	Tempo del doppio clic (ms o default)
 =Drag lists with the mouse	4ee2	Trascina gli elenchi con il mouse
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	Rendering con GPU (alpha)
@@ -270,6 +271,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Launcher	44b1	Avviatore
 =Left edge	9ce5	Bordo sinistro
 =Linked machines	0cc2	Macchine collegate
+=Long press time (ms, or default)	aff4	Durata della pressione prolungata (ms o default)
 =Machine	be0e	Macchina
 =Mixer	123a	Mixer
 =Momentum	cfef	Inerzia
@@ -301,6 +303,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Refresh rate	bf6e	Frequenza di aggiornamento
 =Remembered devices	abbc	Dispositivi ricordati
 =Resize border width (pixels, or default)	7fdf	Larghezza del bordo di ridimensionamento (pixel o default)
+=Resize grip (pixels, or default)	dddd	Presa di ridimensionamento (pixel o default)
 =Right edge	279a	Bordo destro
 =Rotation	777f	Rotazione
 =Rubber band	9c42	Effetto elastico
@@ -311,6 +314,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Scrolling	74ec	Scorrimento
 =Set the clock from the network	b2a3	Imposta l'orologio dalla rete
 =Settings	8728	Impostazioni
+=Shake sensitivity	8d3a	Sensibilità allo scuotimento
 =Shake the pointer to find it	f508	Agita il puntatore per trovarlo
 =Show touch area	9ca8	Mostra l'area di tocco
 =Side taskbar text faces	d115	Orientamento del testo della barra laterale
@@ -331,6 +335,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Taskbar scale (percent)	810b	Scala della barra delle applicazioni (percentuale)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Area di notifica della barra (testo con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminale
+=Terminal lines per wheel notch	3800	Righe del terminale per scatto della rotellina
 =Text size (percent, or default)	51d7	Dimensione del testo (percentuale o default)
 =The internet prefers	3dbe	Internet preferisce
 =Theme	7c92	Tema
@@ -370,6 +375,7 @@ ui_field_full	fe02	non ce ne sta di più
 =full	b33c	completo
 =graphite	dc8d	grafite
 =green	ecbc	verde
+=high	b9fd	alto
 =kernel log	415a	registro del kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg messaggi
 =launcher	8391	avvio
@@ -377,6 +383,7 @@ ui_field_full	fe02	non ce ne sta di più
 =light	1e2f	chiaro
 =light-grey	ed41	grigio chiaro
 =lock	7842	blocca
+=low	6a81	basso
 =mdy	3697	mdy
 =midnight-blue	4008	blu notte
 =modem	67ed	modem

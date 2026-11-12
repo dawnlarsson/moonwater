@@ -248,6 +248,7 @@ ui_field_full	fe02	mer ryms inte
 =Devices	f320	Enheter
 =Devices in this machine	d7b8	Enheter i den här datorn
 =Display	d9b5	Skärm
+=Double-click time (ms, or default)	9af1	Tid för dubbelklick (ms eller default)
 =Drag lists with the mouse	4ee2	Dra listor med musen
 =Editor	bf98	Redigerare
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
@@ -270,6 +271,7 @@ ui_field_full	fe02	mer ryms inte
 =Launcher	44b1	Startare
 =Left edge	9ce5	Vänster kant
 =Linked machines	0cc2	Länkade maskiner
+=Long press time (ms, or default)	aff4	Tid för långt tryck (ms eller default)
 =Machine	be0e	Maskin
 =Mixer	123a	Mixer
 =Momentum	cfef	Rörelsemängd
@@ -301,6 +303,7 @@ ui_field_full	fe02	mer ryms inte
 =Refresh rate	bf6e	Uppdateringsfrekvens
 =Remembered devices	abbc	Ihågkomna enheter
 =Resize border width (pixels, or default)	7fdf	Bredd på kanten för storleksändring (pixlar eller default)
+=Resize grip (pixels, or default)	dddd	Grepp för storleksändring (pixlar eller default)
 =Right edge	279a	Höger kant
 =Rotation	777f	Rotation
 =Rubber band	9c42	Gummibandseffekt
@@ -311,6 +314,7 @@ ui_field_full	fe02	mer ryms inte
 =Scrolling	74ec	Rullning
 =Set the clock from the network	b2a3	Ställ klockan från nätverket
 =Settings	8728	Inställningar
+=Shake sensitivity	8d3a	Känslighet för skakning
 =Shake the pointer to find it	f508	Skaka pekaren för att hitta den
 =Show touch area	9ca8	Visa tryckytan
 =Side taskbar text faces	d115	Sidofältets textriktning
@@ -331,6 +335,7 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar scale (percent)	810b	Aktivitetsfältets skala (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Terminalrader per hjulsteg
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
 =The internet prefers	3dbe	Internet föredrar
 =Theme	7c92	Tema
@@ -370,6 +375,7 @@ ui_field_full	fe02	mer ryms inte
 =full	b33c	full
 =graphite	dc8d	grafit
 =green	ecbc	grön
+=high	b9fd	hög
 =kernel log	415a	kärnlogg
 =kernel log klog dmesg messages	1a8d	kärnlogg klog dmesg meddelanden
 =launcher	8391	startprogram
@@ -377,6 +383,7 @@ ui_field_full	fe02	mer ryms inte
 =light	1e2f	ljust
 =light-grey	ed41	ljusgrå
 =lock	7842	lås
+=low	6a81	låg
 =mdy	3697	mdy
 =midnight-blue	4008	midnattsblå
 =modem	67ed	modem

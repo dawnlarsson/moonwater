@@ -248,6 +248,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Devices	f320	Geräte
 =Devices in this machine	d7b8	Geräte in diesem Rechner
 =Display	d9b5	Anzeige
+=Double-click time (ms, or default)	9af1	Doppelklickzeit (ms oder default)
 =Drag lists with the mouse	4ee2	Listen mit der Maus ziehen
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-Rendering (alpha)
@@ -270,6 +271,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Launcher	44b1	Starter
 =Left edge	9ce5	Linker Rand
 =Linked machines	0cc2	Verbundene Maschinen
+=Long press time (ms, or default)	aff4	Dauer für langes Drücken (ms oder default)
 =Machine	be0e	Gerät
 =Mixer	123a	Mixer
 =Momentum	cfef	Schwung
@@ -301,6 +303,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Refresh rate	bf6e	Bildwiederholrate
 =Remembered devices	abbc	Gemerkte Geräte
 =Resize border width (pixels, or default)	7fdf	Breite des Größenänderungsrahmens (Pixel oder default)
+=Resize grip (pixels, or default)	dddd	Griff zur Größenänderung (Pixel oder default)
 =Right edge	279a	Rechter Rand
 =Rotation	777f	Drehung
 =Rubber band	9c42	Gummiband-Effekt
@@ -311,6 +314,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Scrolling	74ec	Scrollen
 =Set the clock from the network	b2a3	Uhr über das Netzwerk stellen
 =Settings	8728	Einstellungen
+=Shake sensitivity	8d3a	Schüttelempfindlichkeit
 =Shake the pointer to find it	f508	Mauszeiger schütteln, um ihn zu finden
 =Show touch area	9ca8	Berührungsbereich anzeigen
 =Side taskbar text faces	d115	Textausrichtung der seitlichen Taskleiste
@@ -331,6 +335,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Taskbar scale (percent)	810b	Skalierung der Taskleiste (Prozent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskleisten-Infobereich (Text mit {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Terminalzeilen pro Mausradraste
 =Text size (percent, or default)	51d7	Textgröße (Prozent oder default)
 =The internet prefers	3dbe	Internet bevorzugt
 =Theme	7c92	Design
@@ -370,6 +375,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =full	b33c	Voll
 =graphite	dc8d	Graphit
 =green	ecbc	Grün
+=high	b9fd	Hoch
 =kernel log	415a	Kernel-Protokoll
 =kernel log klog dmesg messages	1a8d	kernel protokoll klog dmesg meldungen
 =launcher	8391	Starter
@@ -377,6 +383,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =light	1e2f	Hell
 =light-grey	ed41	Hellgrau
 =lock	7842	Sperren
+=low	6a81	Niedrig
 =mdy	3697	mdy
 =midnight-blue	4008	Mitternachtsblau
 =modem	67ed	Modem

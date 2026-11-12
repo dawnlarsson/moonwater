@@ -248,6 +248,7 @@ ui_field_full	fe02	meer past er niet in
 =Devices	f320	Apparaten
 =Devices in this machine	d7b8	Apparaten in deze machine
 =Display	d9b5	Scherm
+=Double-click time (ms, or default)	9af1	Dubbelkliktijd (ms of default)
 =Drag lists with the mouse	4ee2	Lijsten met de muis slepen
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
@@ -270,6 +271,7 @@ ui_field_full	fe02	meer past er niet in
 =Launcher	44b1	Starter
 =Left edge	9ce5	Linkerrand
 =Linked machines	0cc2	Gekoppelde machines
+=Long press time (ms, or default)	aff4	Duur van lang indrukken (ms of default)
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Momentum	cfef	Momentum
@@ -301,6 +303,7 @@ ui_field_full	fe02	meer past er niet in
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
 =Resize border width (pixels, or default)	7fdf	Breedte van de rand voor formaatwijziging (pixels of default)
+=Resize grip (pixels, or default)	dddd	Greep voor formaatwijziging (pixels of default)
 =Right edge	279a	Rechterrand
 =Rotation	777f	Rotatie
 =Rubber band	9c42	Rubberbandeffect
@@ -311,6 +314,7 @@ ui_field_full	fe02	meer past er niet in
 =Scrolling	74ec	Scrollen
 =Set the clock from the network	b2a3	Klok instellen via het netwerk
 =Settings	8728	Instellingen
+=Shake sensitivity	8d3a	Gevoeligheid voor schudden
 =Shake the pointer to find it	f508	Schud de aanwijzer om hem te vinden
 =Show touch area	9ca8	Aanraakgebied tonen
 =Side taskbar text faces	d115	Tekstrichting van de zijtaakbalk
@@ -331,6 +335,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar scale (percent)	810b	Schaal van de taakbalk (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Terminalregels per wielstap
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
 =The internet prefers	3dbe	Internet verkiest
 =Theme	7c92	Thema
@@ -370,6 +375,7 @@ ui_field_full	fe02	meer past er niet in
 =full	b33c	volledig
 =graphite	dc8d	grafiet
 =green	ecbc	groen
+=high	b9fd	hoog
 =kernel log	415a	kernellogboek
 =kernel log klog dmesg messages	1a8d	kernel logboek klog dmesg berichten
 =launcher	8391	starter
@@ -377,6 +383,7 @@ ui_field_full	fe02	meer past er niet in
 =light	1e2f	licht
 =light-grey	ed41	lichtgrijs
 =lock	7842	vergrendelen
+=low	6a81	laag
 =mdy	3697	mdy
 =midnight-blue	4008	middernachtblauw
 =modem	67ed	modem

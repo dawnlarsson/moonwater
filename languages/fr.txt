@@ -248,6 +248,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Devices	f320	Périphériques
 =Devices in this machine	d7b8	Périphériques de cette machine
 =Display	d9b5	Écran
+=Double-click time (ms, or default)	9af1	Délai du double-clic (ms ou default)
 =Drag lists with the mouse	4ee2	Faire glisser les listes avec la souris
 =Editor	bf98	Éditeur
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
@@ -270,6 +271,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Launcher	44b1	Lanceur
 =Left edge	9ce5	Bord gauche
 =Linked machines	0cc2	Machines liées
+=Long press time (ms, or default)	aff4	Durée de l'appui long (ms ou default)
 =Machine	be0e	Machine
 =Mixer	123a	Mélangeur
 =Momentum	cfef	Inertie
@@ -301,6 +303,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
 =Resize border width (pixels, or default)	7fdf	Épaisseur de la bordure de redimensionnement (pixels ou default)
+=Resize grip (pixels, or default)	dddd	Prise de redimensionnement (pixels ou default)
 =Right edge	279a	Bord droit
 =Rotation	777f	Rotation
 =Rubber band	9c42	Effet élastique
@@ -311,6 +314,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Scrolling	74ec	Défilement
 =Set the clock from the network	b2a3	Régler l'horloge depuis le réseau
 =Settings	8728	Paramètres
+=Shake sensitivity	8d3a	Sensibilité à la secousse
 =Shake the pointer to find it	f508	Secouer le pointeur pour le retrouver
 =Show touch area	9ca8	Afficher la zone de toucher
 =Side taskbar text faces	d115	Orientation du texte de la barre latérale
@@ -331,6 +335,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar scale (percent)	810b	Échelle de la barre des tâches (pourcentage)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Zone d'état de la barre des tâches (texte avec {names} : {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Terminal lines per wheel notch	3800	Lignes du terminal par cran de molette
 =Text size (percent, or default)	51d7	Taille du texte (pourcentage ou default)
 =The internet prefers	3dbe	Internet préfère
 =Theme	7c92	Thème
@@ -370,6 +375,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =full	b33c	complète
 =graphite	dc8d	graphite
 =green	ecbc	vert
+=high	b9fd	élevé
 =kernel log	415a	journal du noyau
 =kernel log klog dmesg messages	1a8d	journal noyau klog dmesg messages
 =launcher	8391	lanceur
@@ -377,6 +383,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =light	1e2f	clair
 =light-grey	ed41	gris clair
 =lock	7842	verrouiller
+=low	6a81	faible
 =mdy	3697	mdy
 =midnight-blue	4008	bleu nuit
 =modem	67ed	modem

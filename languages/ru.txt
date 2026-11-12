@@ -248,6 +248,7 @@ ui_field_full	fe02	больше не помещается
 =Devices	f320	Устройства
 =Devices in this machine	d7b8	Устройства этой машины
 =Display	d9b5	Экран
+=Double-click time (ms, or default)	9af1	Время двойного щелчка (мс или default)
 =Drag lists with the mouse	4ee2	Перетаскивать списки мышью
 =Editor	bf98	Редактор
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
@@ -270,6 +271,7 @@ ui_field_full	fe02	больше не помещается
 =Launcher	44b1	Запуск
 =Left edge	9ce5	Левый край
 =Linked machines	0cc2	Связанные компьютеры
+=Long press time (ms, or default)	aff4	Время долгого нажатия (мс или default)
 =Machine	be0e	Компьютер
 =Mixer	123a	Микшер
 =Momentum	cfef	Инерция
@@ -301,6 +303,7 @@ ui_field_full	fe02	больше не помещается
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
 =Resize border width (pixels, or default)	7fdf	Ширина рамки изменения размера (пикселей или default)
+=Resize grip (pixels, or default)	dddd	Захват для изменения размера (пикселей или default)
 =Right edge	279a	Правый край
 =Rotation	777f	Поворот
 =Rubber band	9c42	Эффект резинки
@@ -311,6 +314,7 @@ ui_field_full	fe02	больше не помещается
 =Scrolling	74ec	Прокрутка
 =Set the clock from the network	b2a3	Устанавливать часы по сети
 =Settings	8728	Настройки
+=Shake sensitivity	8d3a	Чувствительность встряхивания
 =Shake the pointer to find it	f508	Потрясти указатель, чтобы найти его
 =Show touch area	9ca8	Показывать область касания
 =Side taskbar text faces	d115	Направление текста боковой панели
@@ -331,6 +335,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar scale (percent)	810b	Масштаб панели задач (проценты)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Терминал
+=Terminal lines per wheel notch	3800	Строк терминала на щелчок колеса
 =Text size (percent, or default)	51d7	Размер текста (проценты или default)
 =The internet prefers	3dbe	Интернет предпочитает
 =Theme	7c92	Тема
@@ -370,6 +375,7 @@ ui_field_full	fe02	больше не помещается
 =full	b33c	полное
 =graphite	dc8d	графитовый
 =green	ecbc	зелёный
+=high	b9fd	высоко
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
 =launcher	8391	запуск
@@ -377,6 +383,7 @@ ui_field_full	fe02	больше не помещается
 =light	1e2f	светлая
 =light-grey	ed41	светло-серый
 =lock	7842	заблокировать
+=low	6a81	низко
 =mdy	3697	mdy
 =midnight-blue	4008	полуночно-синий
 =modem	67ed	модем

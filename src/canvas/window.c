@@ -936,6 +936,11 @@ struct windows
         // (50 to 200, the standard 115; ui.c's ui_paced). 0 before the compositor has said one, which leaves a window the pace it has. A
         // change counts themed up, as a theme's does.
         unsigned int motion_pace;
+        // The compositor's: the times that decide what a hand did, in ms, and the terminal's lines a wheel's notch: `moonwater mouse double
+        // click` (click_ms, 200 to 900, ui.c's ui_click_ns), `canvas touch hold` (hold_ms, 300 to 1500, ui_hold_ns) and `canvas terminal
+        // wheel` (wheel_lines, 1 to 10), as their files keep them. 0 before the compositor has said one, which leaves a window the one it
+        // has (the standard). A change counts themed up, as a theme's does.
+        unsigned int click_ms, hold_ms, wheel_lines;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
