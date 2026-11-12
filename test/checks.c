@@ -123408,6 +123408,11 @@ static long popup_fake_take(struct window_row address_to own)
 #define windows_take(own) popup_fake_take(own)
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
+// A menu's row as its tree laid it out: the height of its first item's element, which is a row in every menu a check makes.
+static int popmenu_row(const struct ui_popmenu address_to m)
+{
+        return m->tree.node[m->items[0].node].h;
+}
 #endif
 #undef windows_take
 #include "../src/canvas/ui/terminal.c"
@@ -128574,14 +128579,14 @@ static void check_dropdown_labels(void)
             const unsigned int address_to front = windows_pixels(&popup.own, (unsigned int)popup.shown);
             int y = pad;
 
-            row_h = ui_popmenu_row(&popup.ui, &popup.menu);
+            row_h = popmenu_row(&popup.menu);
             for (int at = 0; at < popup.menu.count; at++)
             {
                 int ink = 0;
 
                 if (popup.menu.items[at].flags & UI_MENU_SEPARATOR)
                 {
-                    y += ui_popmenu_tall(&popup.ui, &popup.menu, at);
+                    y += ui_popmenu_start(&popup.menu, at + 1) - ui_popmenu_start(&popup.menu, at);
                     continue;
                 }
                 for (int yy = y + row_h / 4; yy < y + 3 * row_h / 4; yy++)
@@ -128655,7 +128660,7 @@ static void check_dropdown_selected(void)
         m.ripple.live = 0, m.ripple_at = -1, m.moving = 0;
         memory_zero(&m.press, sizeof(m.press));
         ui_popmenu_size(&g, &m, 300);
-        row = ui_popmenu_row(&g, &m), y = UI_MENU_PAD * g.scale / 100 + row;
+        row = popmenu_row(&m), y = UI_MENU_PAD * g.scale / 100 + row;
         memory_zero(picture, sizeof(picture));
         ui_begin(&g, picture, 600, m.width, m.height);
         ui_popmenu_draw(&g, &m);
@@ -140686,7 +140691,7 @@ static fn check_settings(string_address regular, string_address bold)
                         {
                                 struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0}, lift = {WINDOW_EVENT_BUTTON, 0, 0x110, 0},
                                       move = {WINDOW_EVENT_MOTION, 0, 0, 0};
-                                int row = ui_popmenu_row(&settings.ui, &settings.popup.menu), pad = ui_px(&settings.ui, UI_MENU_PAD);
+                                int row = popmenu_row(&settings.popup.menu), pad = ui_px(&settings.ui, UI_MENU_PAD);
 
                                 settings_menu_point(&move, settings.popup.menu.width / 2, pad + 3 * row + row / 2 + 4);
                                 check("settings: the pointer over a choice puts the keys on it", settings.popup.menu.hot == 3);
@@ -140750,7 +140755,7 @@ static fn check_settings(string_address regular, string_address bold)
                                           settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > (int)popup_fake.screen
                                                                          ? (int)popup_fake.screen
                                                                          : 13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD)));
-                                row = ui_popmenu_row(&settings.ui, &settings.popup.menu);
+                                row = popmenu_row(&settings.popup.menu);
                                 settings_menu_point(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0},
                                                     settings.popup.menu.width / 2, ui_px(&settings.ui, UI_MENU_PAD) + 3 * row + row / 2);
                                 settings_menu_point(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0},
@@ -160384,7 +160389,7 @@ static fn check_glass_pieces(string_address regular)
         ui_popmenu_size(&menu_ui, &menu, 0);
         ui_begin(&menu_ui, (unsigned int address_to)menu_picture, 800, menu.width, menu.height);
         ui_popmenu_draw(&menu_ui, &menu);
-        row = ui_popmenu_row(&menu_ui, &menu);
+        row = popmenu_row(&menu);
 #define MENU_AT(x, y) (menu_picture[(y) * 800 + (x)] >> 24)
         check("glass: a menu has no face and no outline: its top, left, right and bottom edges are clear",
               MENU_AT(menu.width / 2, 0) == 0 && MENU_AT(0, UI_MENU_PAD + row / 2) == 0 && MENU_AT(menu.width - 1, UI_MENU_PAD + row / 2) == 0 &&
@@ -164152,8 +164157,8 @@ static p32 menu_next(p32 below)
 /*
         The kit's menus, held to one set of defaults (ui.c's menu section): a menu chooses on a release over the item its press
         went down on and on no other; drawn opaque it still has no face (a menu is glass, a temporary overlay); its size comes
-        from ui_menu_sizes, the one place its numbers are; and a menu whose items do not all show has the kit's bar. The kit
-        that has these defines UI_MENU_DEFAULTS; before it, the checks that need its names are red.
+        from the UI_MENU_ numbers, the one place they are, as its tree lays them out; and a menu whose items do not all show has
+        the kit's bar. The kit that has these defines UI_MENU_DEFAULTS; before it, the checks that need its names are red.
 */
 static fn menu_defaults_items(struct ui address_to wui, struct ui_popmenu address_to m)
 {
@@ -164174,7 +164179,7 @@ static fn menu_defaults_check(struct ui address_to wui)
         int row, pad, x, y1, y2, chosen_same, chosen_other, chosen_away;
 
         menu_defaults_items(wui, &m);
-        row = ui_popmenu_row(wui, &m), pad = UI_MENU_PAD * wui->scale / 100, x = m.width / 2;
+        row = popmenu_row(&m), pad = UI_MENU_PAD * wui->scale / 100, x = m.width / 2;
         y1 = pad + row + row / 2, y2 = pad + 2 * row + row / 2;
         menu_defaults_items(wui, &m);
         ui_popmenu_event(wui, &m, &press, x, y1);
@@ -164195,7 +164200,7 @@ static fn menu_defaults_check(struct ui address_to wui)
 
                 menu_defaults_items(wui, &m);
                 ui_popmenu_event(wui, &m, &press, x, y1);
-                check("menu: a press on an item shows it pressed at once", ui_pressed(&m.press, ui_popmenu_at(wui, &m, y1)));
+                check("menu: a press on an item shows it pressed at once", ui_pressed(&m.press, ui_popmenu_at(&m, x, y1)));
                 chosen_taken = ui_popmenu_event(wui, &m, &taken, x, y1);
                 check("menu: a press taken back chooses nothing, and shows nothing pressed", chosen_taken == UI_MENU_NOTHING && !m.press.down);
         }
@@ -164213,7 +164218,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 ui_popmenu_add(&t, "Paste", null, 0, 2);
                 ui_popmenu_add(&t, "Select all", null, 0, 3);
                 ui_popmenu_size(wui, &t, 0);
-                trow = ui_popmenu_row(wui, &t), tpad = 0, tx = t.width / 2;
+                trow = popmenu_row(&t), tpad = 0, tx = t.width / 2;
                 ty1 = tpad + trow + trow / 2, ty2 = tpad + 2 * trow + trow / 2;
                 ui_popmenu_event(wui, &t, &touch_press, tx, ty1);
                 ui_popmenu_event(wui, &t, &touch_move, tx, ty2);
@@ -164260,7 +164265,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 glass.glass = 1, glass.opaque = false;
                 ui_inks(&glass, UI_GLASS_GROUND);
                 menu_defaults_items(wui, &m);
-                row = ui_popmenu_row(wui, &m);
+                row = popmenu_row(&m);
                 top = pad + row, mid = top + row / 2;
                 ui_popmenu_event(wui, &m, &press, m.width / 2, mid);
                 ui_kit.now = 1000000000ll;
@@ -164288,11 +164293,17 @@ static fn menu_defaults_check(struct ui address_to wui)
 
 #ifdef UI_MENU_DEFAULTS
         {
-                struct ui_menu_sizes sizes = ui_menu_sizes(wui, false), finger = ui_menu_sizes(wui, true);
+                // The rows as the menu's tree laid them out: the mouse's, and the same menu sized for a finger.
+                int mouse = popmenu_row(&m), finger;
 
+                m.touch = true;
+                ui_popmenu_size(wui, &m, 0);
+                finger = popmenu_row(&m);
+                m.touch = false;
+                ui_popmenu_size(wui, &m, 0);
                 check("menu: a finger's row is the kit's touch row, and the mouse's the kit's row",
-                      sizes.row == UI_MENU_ROW * wui->scale / 100 && finger.row == UI_MENU_TOUCH_ROW * wui->scale / 100);
-                check("menu: a menu is no narrower than the kit's least width", m.width >= sizes.least && row == sizes.row);
+                      mouse == UI_MENU_ROW * wui->scale / 100 && finger == UI_MENU_TOUCH_ROW * wui->scale / 100);
+                check("menu: a menu is no narrower than the kit's least width", m.width >= UI_MENU_LEAST * wui->scale / 100 && row == mouse);
         }
         // A menu of twenty items shown five high has the kit's bar down its right, and nothing else there.
         memory_zero(&m, sizeof(m));
@@ -164433,15 +164444,15 @@ static fn kit_composites_check(struct ui address_to wui)
         ui_popmenu_size(wui, &pad_m, 96 * s);
         bottom = pad_m.height + 2 * s;
         {
-                int row = ui_popmenu_row(wui, &pad_m), middle = 2 * row + row / 2;
+                int row = popmenu_row(&pad_m), middle = 2 * row + row / 2;
                 struct window_event motion = {WINDOW_EVENT_MOTION, 0, 10 * s, middle};
 
                 pad_m.hot = -1;
                 ui_popmenu_event(wui, &pad_m, &motion, 10 * s, middle);
-                check("menu: the row drawn under the pointer is its item", pad_m.hot == 2 && ui_popmenu_at(wui, &pad_m, middle) == 2);
+                check("menu: the row drawn under the pointer is its item", pad_m.hot == 2 && ui_popmenu_at(&pad_m, 10 * s, middle) == 2);
                 motion.b = bottom;
                 ui_popmenu_event(wui, &pad_m, &motion, 10 * s, bottom);
-                check("menu: below the menu's last row is no item (it has no padding to be one)", pad_m.hot == -1 && ui_popmenu_at(wui, &pad_m, bottom) == -1);
+                check("menu: below the menu's last row is no item (it has no padding to be one)", pad_m.hot == -1 && ui_popmenu_at(&pad_m, 10 * s, bottom) == -1);
         }
 
         keyed.count = 3;
@@ -226563,12 +226574,12 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 if (app_group == 3)
                                 {
                                         // A press on the first item, as the menu's press records it: the press, the hot item and the ripple from the press.
-                                        int top = ui_menu_sizes(&settings.ui, app_menu.touch).pad + ui_popmenu_offset(&settings.ui, &app_menu, 0);
+                                        int top = ui_dev(&settings.ui, UI_MENU_PAD) + ui_popmenu_start(&app_menu, 0);
 
                                         ui_press_begin(&app_menu.press, 12, top + 4, 0, app_menu.touch);
                                         app_menu.hot = 0;
                                         ui_ripple_go(&app_menu.ripple, ui_qdiv(ui_q(12), ui_q(s) / 100), ui_qdiv(ui_q(4), ui_q(s) / 100),
-                                                     ui_qdiv(ui_q(app_menu.width), ui_q(s) / 100), ui_qdiv(ui_q(ui_popmenu_row(&settings.ui, &app_menu)), ui_q(s) / 100), 0);
+                                                     ui_qdiv(ui_q(app_menu.width), ui_q(s) / 100), ui_qdiv(ui_q(popmenu_row(&app_menu)), ui_q(s) / 100), 0);
                                         app_menu.ripple_at = 0;
                                 }
                         }
