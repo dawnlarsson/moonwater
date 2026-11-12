@@ -16414,7 +16414,8 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         the container, and its bar is at the container's trailing edge. What is in the container is drawn in its rows and nowhere else,
         and an element wholly outside them is not drawn at all; a pull past an end stretches the picture (ui_scroll_pull), and the bar
         is over it. The wheel turns the container under the pointer, the deepest of them; the bar takes the pointer on it; a finger's
-        drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key).
+        drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key). The buttons are
+        the kit's one row, drawn over the picture and pressed wherever they are: a button is not cut to a scroll container.
 
         What is still a host: the list, the page, the lines and the strips, the old composites with a scroller of their own, and the
         text of a field (a field's control is an element, placed and drawn by the view; what is typed in it and the pointer on it
@@ -16548,7 +16549,7 @@ struct ui_view
         unsigned int generation;          // counted up by each build
         int watches;
         struct ui_watch watch[UI_VIEW_WATCHES];
-        int moved_top, moved_bottom;      // the rows (device pixels) the changed variables' readers are in, empty when bottom <= top
+        int moved_top, moved_bottom;      // the rows (device pixels) due again: the changed variables' readers', a slider's whose ghost moved; empty when bottom <= top
         struct ui_scroll scroll[UI_VIEW_SCROLLS]; // the scroll containers of the build, in order: the body, the bar and the region of each
         int scrolls;
         struct ui_press finger;           // a finger's press in a scroll container: the drag that moves it, and the lift that throws it
@@ -16650,9 +16651,7 @@ static b32 ui_view_poll(struct ui_view address_to v)
                         continue;
                 any = true;
                 if (w->node >= 0 && w->node < v->tree.count)
-                {
                         ui_view_due(v, v->tree.node[w->node].y, v->tree.node[w->node].y + v->tree.node[w->node].h);
-                }
                 else
                         v->moved_top = 0, v->moved_bottom = UI_TREE_MOST;
         }
