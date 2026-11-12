@@ -795,7 +795,7 @@ static b32 editor_event(const struct window_event address_to event)
         p32 asks;
 
         // A key or a press other than the one that asked is a change of mind: the next such key asks again. A modifier alone is
-        // no key of its own (Ctrl+W, let go, Ctrl+W again is the second press), so its press leaves the confirm armed.
+        // no key of its own (Ctrl+W, let go, and Ctrl+W a second time is the second press), so its press leaves the confirm armed.
         if ((event->flags & WINDOW_KEY_DOWN) &&
             (event->type == WINDOW_EVENT_BUTTON ||
              (event->type == WINDOW_EVENT_KEY && !ui_key_modifier(event->a) &&
