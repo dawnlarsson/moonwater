@@ -151274,6 +151274,102 @@ static fn check_kit_lit(void)
         check("kit lit: in the dark theme they are lighter than their ground too, and on a dark glass the row the keys are on keeps its well", dark_keys && dark_hover && glass_dark);
 }
 
+/*
+        The keys' focus, a field's placeholder and a disabled control, kept to the design (flat, no outline of its own): a button the
+        keys are on has the focus ring, a gap out from its pill, 3:1 or more from its ground, and one the keys are not on has nothing
+        round it; a click does not focus a button (the ring is the keys', as :focus-visible is); the ring's ink stands out 3:1 from the
+        surface and from a lit row's white with Dawn's orange too (2.4:1 on white as it is); a field's placeholder is the quiet ink at
+        full strength, 4.5:1 or more on the light surface where the ink at 36% was 2.2:1; and a disabled switch that is on is the ink's
+        grey, not the accent.
+*/
+static unsigned int focus_at(const unsigned int address_to pixels, int x, int y)
+{
+        return pixels[y * 400 + x] & 0xffffffu;
+}
+
+static fn check_kit_focus(void)
+{
+        static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        struct ui_control button, field, toggle;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        unsigned int ground, ring_ink, darkest = 0xffffffu, pill;
+        b32 ringed, bare, clicked, dawn_ink, placeholder, disabled;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit focus: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 200, ui.top = 0, ui.bottom = 200, ui.scale = 100;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0, ui.mono = null, ui.glass = 0;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        ui_kit.now = 5000000000ll;
+        ground = ui_role(UI_SURFACE) & 0xffffffu;
+
+        // A button the keys are on, and the same not: the ring is 2 to 4 pixels out from the pill's side.
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        memory_zero(&button, sizeof(button));
+        button.kind = UI_BUTTON, button.variant = UI_BUTTON_PRIMARY, button.x = 40, button.y = 40, button.w = 120, button.h = 36, button.label = "Save";
+        ui_control_start(&button);
+        button.focused = 1;
+        ui_control_draw(&ui, &button);
+        ring_ink = focus_at(pixels, 37, 58);
+        ringed = ring_ink != ground && ui_contrast(ring_ink, ground) >= 300;
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        button.focused = 0;
+        ui_control_draw(&ui, &button);
+        bare = focus_at(pixels, 37, 58) == ground && focus_at(pixels, 38, 58) == ground;
+        // A click on it is a pointer's, and does not give it the ring.
+        ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 100, 58, true, 0);
+        ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 100, 58, false, 0);
+        clicked = !button.focused;
+
+        // Dawn's ring: the orange deepened till it is 3:1 from the light surface and from white.
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+        dawn_ink = ui_contrast(ui_kit_focus_ink(&ui) & 0xffffffu, 0xf7f7f8u) >= 300 && ui_contrast(ui_kit_focus_ink(&ui) & 0xffffffu, 0xffffffu) >= 300 &&
+                   ui_contrast(0xff8800u, 0xffffffu) < 300;
+
+        // A field with nothing typed: its placeholder's darkest pixel is 4.5:1 or more from the light surface.
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        memory_zero(&field, sizeof(field));
+        field.kind = UI_INPUT, field.variant = UI_FIELD_BARE, field.x = 40, field.y = 100, field.w = 300, field.h = 40, field.items[0] = "Type to filter";
+        ui_control_start(&field);
+        ui_control_draw(&ui, &field);
+        for (int y = 100; y < 140; y++)
+                for (int x = 40; x < 340; x++)
+                        if (ui_luminance(focus_at(pixels, x, y)) < ui_luminance(darkest))
+                                darkest = focus_at(pixels, x, y);
+        placeholder = darkest != 0xffffffu && ui_contrast(darkest, ground) >= 450;
+
+        // A switch that is on and disabled: its pill is the ink's grey at 38 percent, not Dawn's orange.
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+        ground = ui_role(UI_SURFACE) & 0xffffffu;
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        memory_zero(&toggle, sizeof(toggle));
+        toggle.kind = UI_SWITCH, toggle.x = 20, toggle.y = 140, toggle.w = 300, toggle.h = 48, toggle.label = "Telemetry", toggle.on = 1, toggle.disabled = 1;
+        ui_control_start(&toggle);
+        ui_control_draw(&ui, &toggle);
+        pill = focus_at(pixels, 20 + 300 - 26, 164);
+        disabled = pill != (ui_role(UI_PRIMARY) & 0xffffffu) && (pill >> 16 & 255) - (pill & 255) + 8 < 17;
+
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        check("kit focus: a button the keys are on has the focus ring a gap out from its pill, 3:1 from the ground, and one they are not on has nothing round it",
+              ringed && bare);
+        check("kit focus: a click on a button does not focus it: the ring is the keys'", clicked);
+        check("kit focus: the ring's ink stands out 3:1 from the light surface and from a lit row's white with Dawn's orange too, which is 2.4:1 on white as it is",
+              dawn_ink);
+        check("kit focus: a field's placeholder is the quiet ink at full strength, 4.5:1 or more from the light surface (the ink at 36 percent was 2.2:1)", placeholder);
+        check("kit focus: a disabled switch that is on is the ink's grey, not the accent", disabled);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -168942,6 +169038,7 @@ b32 main()
         check_kit_corners();
         check_kit_slider_below();
         check_kit_lit();
+        check_kit_focus();
         check_kit_place();
         check_kit_controls();
         check_kit_states();

@@ -12022,6 +12022,55 @@ static inline b32 ui_q8(const struct ui address_to ui, int logical) { return log
 // A stroke of one logical pixel in Q8, never less than a device pixel: at 75 percent it is 0.75 of one, which the whole-pixel rule takes to 0.
 static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1) > 256 ? ui_q8(ui, 1) : 256; }
 
+/*
+        The focus ring: the one outline the kit draws whatever UI_KIT_OUTLINES says, because it is how a person on the keys
+        sees where they are (WCAG 2.4.7), and a fill alone (a lit row is a step toward white on a light ground) is too faint
+        to be that. Two logical pixels, on the box it is given (a row set in by UI_FOCUS_GAP, or a control's face grown by it).
+        Its ink is the accent, deepened (toward black on a light surface, white on a dark one) until it stands out 3:1 from the
+        surface and from the white a lit row comes to, so Dawn's orange, 2.4:1 on white, is drawn a deeper orange; on glass
+        it is the window's ink, which stands out from the tint.
+*/
+#define UI_FOCUS_WIDTH 2
+#define UI_FOCUS_GAP 2
+static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
+{
+        unsigned int ink = ui_role(UI_PRIMARY) | 0xff000000u, ground = ui_role(UI_SURFACE) | 0xff000000u;
+        b32 light = ui_luminance(ground & 0xffffffu) > 32768;
+        unsigned int lit = light ? ui_role(UI_SURFACE_LOWEST) | 0xff000000u : ground, toward = light ? 0xff000000u : 0xffffffffu;
+
+        if (ui->glass)
+                return 0xff000000u | (ui->ink & 0xffffffu);
+        for (int step = 0; step < 24 && (ui_contrast(ink & 0xffffffu, ground & 0xffffffu) < 300 || ui_contrast(ink & 0xffffffu, lit & 0xffffffu) < 300); step++)
+                ink = ui_mix(ink, 85, toward);
+        return ink;
+}
+
+static fn ui_kit_focus_ring(struct ui address_to ui, const struct ui_box address_to box)
+{
+        ui_kit_ring(ui, box, ui_q8(ui, UI_FOCUS_WIDTH), ui_kit_focus_ink(ui));
+}
+
+// A row's box set in by the ring's gap on every side, its corners UI_RADIUS: the box a row's ring is drawn on, inside the row, so a row
+// that runs to the window's or a column's edge keeps its whole ring and the ring is the kit's rounded shape, not the row's square edge.
+static struct ui_box ui_kit_focus_inset(const struct ui address_to ui, struct ui_box row)
+{
+        b32 in = ui_q8(ui, UI_FOCUS_GAP);
+
+        row.x0 += in, row.y0 += in, row.x1 -= in, row.y1 -= in;
+        row.rx = row.ry = ui_q8(ui, 8);
+        return row;
+}
+
+// A face grown by the focus ring's gap and width on every side, its corners with it: the box an outset ring is drawn on.
+static struct ui_box ui_kit_focus_outset(const struct ui address_to ui, struct ui_box face)
+{
+        b32 grow = ui_q8(ui, UI_FOCUS_GAP + UI_FOCUS_WIDTH);
+
+        face.x0 -= grow, face.y0 -= grow, face.x1 += grow, face.y1 += grow;
+        face.rx = face.rx ? face.rx + grow : 0, face.ry = face.ry ? face.ry + grow : 0;
+        return face;
+}
+
 // A determinate progress's fill as a whole: at most the track's end, UI_ONE (a value past its whole fills the track, no more).
 static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE : value; }
 
@@ -12313,8 +12362,15 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         face = ui_box_transform(face, sx, sy, ox, oy, tx, ty);
         ui_kit_fill(ui, &face, fill, null);
         if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
-                ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->focused ? UI_PRIMARY : c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
+                ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
         ui_kit_layer_fill(ui, &face, ink, layer);
+        // The keys on it: the focus ring, a gap out from the pill, whatever its variant.
+        if (c->focused && !c->disabled)
+        {
+                struct ui_box ring = ui_kit_focus_outset(ui, face);
+
+                ui_kit_focus_ring(ui, &ring);
+        }
         {
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
 
@@ -12401,10 +12457,11 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         {
                 ui_kit_lift_fill(ui, &clip, ui_role(UI_ON_SURFACE), ui_kit_layer(c));
         }
+        // Disabled, the bars are the ink at 12% (the rest) and 38% (the fill), as a disabled button's are: the same pill, and not the accent.
         if (rest_w > 0)
-                ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
+                ui_kit_fill(ui, &rest, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 12, 0) : ui_role(UI_CONTROL_OFF), null);
         if (fill_w > 0)
-                ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY), null);
+                ui_kit_fill(ui, &fill, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : ui_role(UI_PRIMARY), null);
 
         // The label: its box shrink-wraps the text, stretched 0.6 of the domino about its trailing edge, and the text
         // laid at whole pixels where the stretch takes the box's middle.
@@ -12546,7 +12603,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                 struct ui_box pip = {cx - ui_q8(ui, 14), py - ui_q8(ui, 14), cx + ui_q8(ui, 14), py + ui_q8(ui, 14), ui_q8(ui, 14), ui_q8(ui, 14)};
 
                 pip = ui_box_transform(pip, psx, psy, cx, py, 0, 0);
-                ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
+                ui_kit_fill(ui, &pip, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : ui_role(UI_PRIMARY), null);
         }
 }
 
@@ -12712,7 +12769,9 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         struct ui_box fill, rest;
         // The rest of the track is a well: its role in a window of the kit's surface, and over glass (the tray's mixer) the ground's ink at
         // a well's percent, where the role's opaque colour would stand as a block on what is under the window.
-        unsigned int accent = ui_role(UI_PRIMARY), off = ui_well(ui, UI_CONTROL_OFF, 30), ink, fill_ink = c->on ? ui_role(UI_OUTLINE) : accent;
+        // Disabled, the fill is the ink at 38% and the rest at 12%, as a disabled switch's bars are.
+        unsigned int accent = c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : ui_role(UI_PRIMARY);
+        unsigned int off = c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 12, 0) : ui_well(ui, UI_CONTROL_OFF, 30), ink, fill_ink = c->on ? ui_role(UI_OUTLINE) : accent;
         char shown[24];
         int baseline;
 
@@ -13008,7 +13067,11 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                         ui_kit_fill(ui, &pip, ui_role(UI_SURFACE_HIGH), null);
                 // The keys in the column: the kit's focus ring, on the row's own edge (it runs to the window's).
                 if (c->focused && !c->disabled)
-                        ui_kit_outline(ui, &pip, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                {
+                        struct ui_box ring = ui_kit_focus_inset(ui, pip);
+
+                        ui_kit_focus_ring(ui, &ring);
+                }
         }
         for (int item = 0; item < c->count; item++)
         {
@@ -13130,8 +13193,8 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         // The label above (a bare field has none).
         if (!bare && c->label)
                 ui_control_label(ui, c, 0, 0, UI_BODY_LARGE, ui_role(UI_ON_SURFACE));
-        // No background of its own, for now: the field is the text, its selection and its caret over what is under it (the row's ground, a glass
-        // window's glass). Nothing is drawn for its face, its hover, its press or its focus.
+        // No background of its own: the field is the text, its selection and its caret over what is under it (the row's ground, a glass
+        // window's glass). Nothing is drawn for its face, its hover, its press or its focus: its placeholder, in the quiet ink, says what it is for.
         baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
         // What is in the well is the engine's: the text (dots when masked), its selection, its caret and its placeholder.
         // A field with no engine is one nothing can be typed in, and shows its placeholder and no caret.
@@ -13143,7 +13206,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 int start = ui_rtl() ? ui_dev(ui, c->x + c->w - 14) - ui_run_in(ui, faces, 0, 0, (string_address)c->items[0], 15, 0, 0, 0, ui->width, 0)
                                      : ui_dev(ui, c->x + 14);
 
-                ui_run_in(ui, faces, start, baseline, (string_address)c->items[0], 15, ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu, 92,
+                ui_run_in(ui, faces, start, baseline, (string_address)c->items[0], 15, ui_text_colour(ui, UI_ON_SURFACE_VARIANT) & 0xffffffu, 255,
                           ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), 0);
         }
 }
@@ -13986,8 +14049,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 
                         if (hit < 0)
                                 continue;
-                        if (c->kind == UI_BUTTON)
-                                c->focused = 1; // button[outlined]:focus: its border is the accent
+                        // A click does not focus a button: the focus ring is the keys' (:focus-visible), and a pointer sees where it pressed.
                         ui_kit_held = c;
                         c->down = 1;
                         c->moved = 0;
@@ -19743,7 +19805,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
         int across, across_w, baseline, size = ui_dev(ui, 4);
         // Whether any of its rows may be written, with room for a run's rows round its line.
-        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
+        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4)), ringed = 0;
+        struct ui_box ring = {0};
 
         ui_list_describe(l, id, &row);
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
@@ -19757,8 +19820,11 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
+                // The keys on the list: the focus ring on the row's own edge, drawn last, over the row's own control's hover and
+                // press. A glass list (the launcher's) keeps the keys in its search, and its lit row is the one Enter takes, not a
+                // focus of its own: it has no ring.
                 if (l->keys && !ui->glass)
-                        ui_kit_outline(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                        ring = ui_kit_focus_inset(ui, box), ringed = 1;
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
                 // its quiet words are the ink too, which stands out from the well (ui_glass_well).
                 if (ui->glass && !row.tall)
@@ -19823,6 +19889,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_signal(ui, n->x + n->w, n->y + n->h / 2, row.bars);
         if (row.tall)
                 ui_list_drive(ui, l, id, &row, seen, strong, quiet);
+        if (ringed)
+                ui_kit_focus_ring(ui, &ring);
 }
 
 // Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which
@@ -25402,12 +25470,10 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
-                unsigned int text = ui_text_colour(ui, UI_ON_SURFACE), alpha = 92;
-
-                // On glass the placeholder is the quiet ink at full strength: the ink at 36% is 2.0 to 2.7:1 from the glass,
-                // and the quiet ink is held at the readable threshold (ui_glass_quiet). The kit's surfaces keep the 36%.
-                if (ui->glass)
-                        text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
+                // The placeholder is the quiet ink at full strength, on glass and on the kit's surfaces alike: the ink at 36% was 2.2:1
+                // on a light surface and 2.0 to 2.7:1 from the glass, and it is often the one thing that says what a field is for. The
+                // quiet ink is 7:1 on a surface and held at the readable threshold on glass (ui_glass_quiet), and still reads apart from the ink.
+                unsigned int text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
                 int start = ui_rtl() ? t->right - ui_run_in(ui, faces, 0, 0, (string_address)t->placeholder, t->size + t->zoom, 0, 0, 0, ui->width, 0) : t->left;
 
