@@ -126359,7 +126359,7 @@ static unsigned int corner_probe(int row, int scale, unsigned int *geometry)
     struct compositor_frame frame;
     const unsigned int *screen = compositor.scanout;
     unsigned int pitch = compositor.scanout_pitch / 4, ground = compositor_ground & 0xffffffu;
-    unsigned int edge = compositor_ink_shadow() & 0xffffffu, bits = 0;
+    unsigned int edge = compositor_line_unlit() & 0xffffffu, bits = 0; // the probed windows have not the keys
     int line = scale / 100 > 1 ? scale / 100 : 1, radius = UI_RADIUS * scale / 100, x, y, w, h;
 
     compositor_frame_of(row, &frame);
@@ -130186,7 +130186,7 @@ static void check_compositor_glass_popup(void)
               clear != 0x2060c0u && clear != 0);
         check("glass menu: where it is drawn it is its own colour", drawn == 0x00ff00u);
         check("glass menu: it has its line at its edge, as a window does, and the window beneath is what is outside that",
-              outside == compositor_ink_shadow() && glass_at(58, 60) == 0x2060c0u);
+              outside == compositor_line_unlit() && glass_at(58, 60) == 0x2060c0u);
     }
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
@@ -131738,12 +131738,11 @@ static void check_compositor_volume(void)
 }
 
 /*
-        The chrome at the default theme, drawn the way it was before the kit's roles drew it: the line of the window
-        with the keys and of one without, the desktop and each window's close and minimise buttons, all in one scene, which is
-        pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
-        a tab drawn without a font are pinned too.
+        The chrome at the default theme: the line of the window with the keys and of one without, the desktop and each
+        window's close and minimise buttons, all in one scene, which is pinned by a hash of the whole output so that a
+        changed default pixel is seen. The tabs' inks the band takes for a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x85706e59u
+#define CHROME_SCENE_HASH 0x2b67bbadu
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -131771,17 +131770,76 @@ static void check_compositor_chrome(void)
     compositor.focus = 1;
     compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
     compositor_present();
-    check("chrome: the window with the keys has its line at 4d4d4d, and the one without a black line",
-          glass_at(49, 70) == 0x4d4d4du && glass_at(179, 140) == 0u && glass_at(100, 29) == 0x4d4d4du);
+    check("chrome: on the dark standard the window with the keys has its line at a7a7a7, and the one without the outline's 52525b",
+          glass_at(49, 70) == 0xa7a7a7u && glass_at(179, 140) == 0x52525bu && glass_at(100, 29) == 0xa7a7a7u);
     for (unsigned int at = 0; at < GLASS_SIDE * GLASS_SIDE; at++)
         hash = (hash ^ (screen[at] & 0xffffffu)) * 16777619u;
     string_format(log, "  chrome: the default scene hashes to %p\n", (positive)hash);
-    check("chrome: the default scene, desktop, lines, close and minimise buttons, is drawn as it was", hash == CHROME_SCENE_HASH);
+    check("chrome: the default scene, desktop, lines, close and minimise buttons, is the picture pinned by its hash", hash == CHROME_SCENE_HASH);
 #if MOONWATER_UI_TASKBAR
     check("chrome: a tab drawn without a font is black, the panel's ink when away and 38383c when lit",
           taskbar_tab_ink(-1, 0) == 0u && taskbar_tab_ink(0, 0) == 0u && taskbar_tab_ink(0, COMPOSITOR_TAB_AWAY) == 0x141416u &&
               taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) == 0x38383cu);
 #endif
+}
+
+/*
+        A frameless window with no shadow is told from the rest by its line alone. Two windows over the default wallpaper on the
+        light theme and on the dark, the one at 50, 30 with the keys: its line stands out 3 to 1 or more from the line of the one
+        without them, and that line stands out 2 to 1 or more from the wallpaper, so a dark window without the keys does not
+        vanish into it (its paper, 111113, is 1.13 to 1 on the wallpaper). Every accent of 4096 keeps the 3 to 1, light and dark.
+*/
+static void check_compositor_focus_line(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    unsigned int lit[2] = {0, 0}, unlit[2] = {0, 0}, wall[2] = {0, 0};
+    b32 accents = true;
+
+    for (unsigned int dark = 0; dark < 2; dark++)
+    {
+        struct windows address_to table;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+            check("focus line: the table is mapped", false);
+            return;
+        }
+        table = compositor.table;
+        table->themed = 1, table->theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT, table->accent = UI_ACCENT_STANDARD;
+        table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+        table->x[2] = 180, table->y[2] = 110, table->width[2] = 60, table->height[2] = 60;
+        glass_paint(1, 0, 0, 120, 80, dark ? 0x111113u : 0xf7f7f8u, true);
+        glass_paint(2, 0, 0, 60, 60, dark ? 0x111113u : 0xf7f7f8u, true);
+        compositor.focus = 1;
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        lit[dark] = glass_at(49, 70) | 0xff000000u, unlit[dark] = glass_at(179, 140) | 0xff000000u, wall[dark] = glass_at(5, 5) | 0xff000000u;
+        string_format(log, "  focus line: %s: with the keys %p, without %p, %p hundredths apart; without on the wallpaper %p hundredths\n",
+                      dark ? "dark" : "light", (positive)(lit[dark] & 0xffffffu), (positive)(unlit[dark] & 0xffffffu),
+                      (positive)ui_contrast(lit[dark], unlit[dark]), (positive)ui_contrast(unlit[dark], wall[dark]));
+    }
+    // Every accent of four bits a channel, set on the table and read back through the lines the frames are given.
+    for (unsigned int k = 0; k < 4096; k++)
+        for (unsigned int dark = 0; dark < 2; dark++)
+        {
+            compositor.table->themed = 1, compositor.table->theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT;
+            compositor.table->accent = (k >> 8 & 15) * 0x110000u | (k >> 4 & 15) * 0x1100u | (k & 15) * 0x11u;
+            accents &= ui_contrast(compositor_line_lit() | 0xff000000u, compositor_line_unlit() | 0xff000000u) >= 300;
+        }
+    compositor.table->themed = 0;
+    check("focus line: on the light theme the window with the keys has a line 3 to 1 or more from the line of one without them",
+          wall[0] == (COMPOSITOR_INK_DESKTOP | 0xff000000u) && ui_contrast(lit[0], unlit[0]) >= 300);
+    check("focus line: on the dark theme too, and the line of a window without the keys is 2 to 1 or more on the dark default wallpaper",
+          wall[1] == (COMPOSITOR_INK_DESKTOP | 0xff000000u) && ui_contrast(lit[1], unlit[1]) >= 300 && ui_contrast(unlit[1], wall[1]) >= 200);
+    check("focus line: every accent, light and dark, has its line with the keys 3 to 1 or more from the line without them", accents);
 }
 
 /*
@@ -133846,12 +133904,12 @@ static void check_compositor_tile_line(void)
     inside_at = layout_pixels[12 * 256 + 12] & 0xffffffu;
     check("tile line: a half is drawn with the window's 1 px line on its inner side, and nothing past it",
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.w[1] == 128 &&
-              line_at == (compositor_ink_shadow() & 0xffffffu) && beyond_at == (ground & 0xffffffu));
+              line_at == (compositor_line_unlit() & 0xffffffu) && beyond_at == (ground & 0xffffffu));
     check("tile corners: a half's corners are square: the corner pixel is its picture, the same as 12 px in",
           corner_at == picture && inside_at == picture);
     check("tile corners: and so are the corners of its line, which runs the whole height of its inner side",
-          (layout_pixels[0 * 256 + 128] & 0xffffffu) == (compositor_ink_shadow() & 0xffffffu) &&
-              (layout_pixels[255 * 256 + 128] & 0xffffffu) == (compositor_ink_shadow() & 0xffffffu) &&
+          (layout_pixels[0 * 256 + 128] & 0xffffffu) == (compositor_line_unlit() & 0xffffffu) &&
+              (layout_pixels[255 * 256 + 128] & 0xffffffu) == (compositor_line_unlit() & 0xffffffu) &&
               (layout_pixels[255 * 256 + 127] & 0xffffffu) == picture && (layout_pixels[0 * 256 + 127] & 0xffffffu) == picture);
     compositor_float(1);
 }
@@ -135838,7 +135896,7 @@ static void check_compositor_wheel(void)
 /*
         What of a window's line is lit, by a mouse, with what the compositor had before it lit any (so the rows run
         against it, and fail there): the edge the pointer is over in the hover ink 9a9a9a, an edge held to resize the
-        window in the held ink e4e4e4 (the text's, well over the 4d4d4d of the line with the keys), a corner held along
+        window in the held ink e4e4e4 (the text's, over the a7a7a7 of the dark standard's line with the keys), a corner held along
         both its edges, all of the line of a window taken by its top, and only the line drawn again when it changes.
 */
 static void check_compositor_lit(void)
@@ -135876,33 +135934,33 @@ static void check_compositor_lit(void)
           compositor.damages && !inside);
     compositor_present();
     check("lit: the edge the pointer is over is lit in the hover ink, and the others are the line with the keys",
-          glass_at(49, 70) == 0x9a9a9au && glass_at(100, 29) == 0x4d4d4du && glass_at(170, 70) == 0x4d4d4du);
+          glass_at(49, 70) == 0x9a9a9au && glass_at(100, 29) == 0xa7a7a7u && glass_at(170, 70) == 0xa7a7a7u);
     compositor.pointer_x = 100;
     compositor_motion();
     compositor_present();
-    check("lit: off the edge it is the line again", glass_at(49, 70) == 0x4d4d4du);
+    check("lit: off the edge it is the line again", glass_at(49, 70) == 0xa7a7a7u);
 
     compositor.pointer_x = 47;
     compositor_motion();
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_present();
     check("lit: pressed, the edge the hand holds is lit in the held ink, well over the line with the keys",
-          glass_at(49, 70) == 0xe4e4e4u && glass_at(100, 29) == 0x4d4d4du && glass_at(100, 110) == 0x4d4d4du);
+          glass_at(49, 70) == 0xe4e4e4u && glass_at(100, 29) == 0xa7a7a7u && glass_at(100, 110) == 0xa7a7a7u);
     compositor.pointer_x = 37;
     compositor_motion();
     compositor_present();
     check("lit: and it stays lit as the edge moves with the hand", compositor.x[1] == 40 && glass_at(39, 70) == 0xe4e4e4u);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_present();
-    check("lit: let go, the line is the line with the keys", glass_at(39, 70) == 0x4d4d4du);
+    check("lit: let go, the line is the line with the keys", glass_at(39, 70) == 0xa7a7a7u);
 
     compositor.pointer_x = 38, compositor.pointer_y = 28;
     compositor_motion();
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_present();
     check("lit: a corner held is lit along its two edges thirty-two pixels from its square, and no further",
-          glass_at(39, 45) == 0xe4e4e4u && glass_at(60, 29) == 0xe4e4e4u && glass_at(39, 90) == 0x4d4d4du &&
-              glass_at(120, 29) == 0x4d4d4du);
+          glass_at(39, 45) == 0xe4e4e4u && glass_at(60, 29) == 0xe4e4e4u && glass_at(39, 90) == 0xa7a7a7u &&
+              glass_at(120, 29) == 0xa7a7a7u);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
 
     compositor.pointer_x = 100, compositor.pointer_y = 35;
@@ -135914,7 +135972,7 @@ static void check_compositor_lit(void)
               glass_at(100, 110) == 0xe4e4e4u);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_present();
-    check("lit: and none once it is let go", glass_at(100, 29) == 0x4d4d4du && glass_at(39, 70) == 0x4d4d4du);
+    check("lit: and none once it is let go", glass_at(100, 29) == 0xa7a7a7u && glass_at(39, 70) == 0xa7a7a7u);
 }
 
 // The pixels of the hover ink on the left edge's row (y 70) of the window at 50, 30: the band is the line's one at width 1, and
@@ -139081,7 +139139,7 @@ static void check_glass_lift(void)
                                 else
                                         plain += centre == 0x404040u && desktop == wall;
                                 cornered += corner == desktop;
-                                bordered += edge == compositor_ink_shadow();
+                                bordered += edge == compositor_line_unlit();
                                 compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
                                                 0, 0);
                                 compositor_ground = COMPOSITOR_INK_DESKTOP;
@@ -150776,16 +150834,17 @@ static fn check_kit_theme(void)
                         b32 before, standard, light, white, tabs;
 
                         compositor.table->themed = 0;
-                        before = compositor_line_lit() == 0x4d4d4du && compositor_tab_target(0) == 0x111113u;
+                        before = compositor_line_lit() == 0xa7a7a7u && compositor_line_unlit() == 0x52525bu && compositor_tab_target(0) == 0x111113u;
                         compositor.table->themed = 1, compositor.table->theme = 1, compositor.table->accent = 0xffffff;
-                        standard = compositor_line_lit() == 0x4d4d4du;
+                        standard = compositor_line_lit() == 0xa7a7a7u && compositor_line_unlit() == 0x52525bu;
                         tabs = compositor_tab_target(0) == 0x111113 && compositor_tab_target(1) == 0xffffff;
                         compositor.table->theme = 0, compositor.table->accent = 0xff8800;
-                        light = compositor_line_lit() == 0xff8800u && compositor_tab_target(0) == 0xf7f7f8;
+                        light = compositor_line_lit() == 0x7d4300u && compositor_line_unlit() == 0xa1a1aau && compositor_tab_target(0) == 0xf7f7f8;
                         compositor.table->accent = 0xffffff;
                         white = compositor_line_lit() == 0x18181bu && compositor_tab_target(1) == 0x18181bu;
                         compositor.table->themed = themed, compositor.table->theme = mode, compositor.table->accent = accent;
-                        check("kit theme: the lit window line and the tabs follow the theme (the standard's line is 4d4d4d, as it was)",
+                        check("kit theme: the window lines and the tabs follow the theme: the dark standard's line with the keys is a7a7a7 and without "
+                              "them 52525b, the light theme's 18181b (the amber deepened to 7d4300) and a1a1aa",
                               before && standard && light && white && tabs);
                         compositor.table = was_table;
                 }
@@ -169495,6 +169554,7 @@ b32 main()
         check_compositor_lit();
         check_compositor_border();
         check_compositor_chrome();
+        check_compositor_focus_line();
         check_compositor_minimise();
         check_compositor_predict();
         check_compositor_predict_drag();

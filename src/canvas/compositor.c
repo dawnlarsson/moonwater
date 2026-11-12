@@ -65,14 +65,15 @@
 
 /* ---- backend: the look on the CPU ---- */
 
-// The desktop's ink: neutral grey, no hue, and not a kit role. The line round a window, its line with the keys, the
-// chrome's shadow and the band's inks are the kit's roles (compositor_chrome, the theme in ui/ui.c), which is what the windows
-// draw with, so the chrome turns with the theme; the tabs drawn without a font are in ui/ui.c.
+// The desktop's ink: neutral grey, no hue, and not a kit role. The line round a window without the keys and with them, the
+// chrome's shadow and the band's inks are made from the kit's roles (compositor_chrome, the theme in ui/ui.c), which is what the
+// windows draw with, so the chrome turns with the theme; the tabs drawn without a font are in ui/ui.c.
 #define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
 /*
         An edge or a corner of a window the hand holds to resize it, or all of its line while it is moved: the text's
-        ink, well over the line with the keys, so a person sees which handle they have; and an edge the pointer is over,
-        that a press would take, between the two. A finger's mark (`moonwater canvas touch on`) is in the held ink too.
+        ink, well over the dark theme's line with the keys (a7a7a7), so a person sees which handle they have; and an edge the
+        pointer is over, that a press would take, a grey between the line without the keys and the held ink, drawn as wide as
+        the held one. A finger's mark (`moonwater canvas touch on`) is in the held ink too.
 */
 #define COMPOSITOR_INK_LINE_HELD 0xe4e4e4u
 #define COMPOSITOR_INK_LINE_HOVER 0x9a9a9au
@@ -181,8 +182,9 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
 #endif
 
 static struct taskbar_view compositor_taskbar_view(void);
-static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
-static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
+static unsigned int compositor_line_lit(void); // the line of the window with the keys, the theme's (compositor_chrome_now)
+static unsigned int compositor_line_unlit(void); // the line of a window without the keys: the theme's outline
+static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: the close button's halo, the tray and a tab unlit
 static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
 static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at its percent, read on the wallpaper
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
@@ -5816,7 +5818,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            (int)compositor.h[row], scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
                                            compositor_rounded(row) ? UI_RADIUS * scale / 100 : 0, line,
-                                           row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
+                                           row == compositor.focus ? compositor_line_lit() : compositor_line_unlit()};
         if (compositor_lent_pixels(row, &lent_pitch))
                 frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
@@ -12084,17 +12086,41 @@ static unsigned int compositor_theme_day(void)
 }
 
 /*
-        The theme's inks for the compositor's own chrome, the minimal look kept (frameless, 8 px corners, a 1 px line):
-        the lit line of the window with the keys is the kit's primary at 30% over the shadow on the dark theme (white's
-        is 4d4d4d, the line it always was), and the primary itself on the light one (the kit's ink where the accent is
-        too light to show); a tab's glass is tinted toward the theme's surface, and the tab of the window with the keys
-        toward its primary. A table the compositor has not themed yet has the standard, as the kit has.
+        The theme's inks for the compositor's own chrome, the minimal look kept (frameless, 8 px corners, a 1 px line and no
+        shadow), so the line is what tells the window with the keys from the rest. A window without the keys has the theme's
+        outline (a1a1aa on the light theme, 52525b on the dark, 2.2 to 1 on the dark default wallpaper, so a dark window does
+        not vanish into it). The window with the keys has the primary, made to stand out COMPOSITOR_FOCUS_READ from that
+        outline (compositor_line_focus): the light standard's is the kit's ink, 18181b, at 6.9 to 1. A tab's glass is tinted
+        toward the theme's surface, and the tab of the window with the keys toward its primary. A table the compositor has not
+        themed yet has the standard, as the kit has.
 */
+#define COMPOSITOR_FOCUS_READ 300
 struct compositor_chrome
 {
         struct ui_theme roles;
         unsigned int dark; // the theme the roles are made for: UI_THEME_DARK, else light
+        unsigned int lit, unlit; // the line of the window with the keys and of one without them, 0xrrggbb
 };
+
+/*
+        The line of the window with the keys: the primary, taken a step at a time toward the far end of the theme's lightness
+        (black on the light theme, white on the dark) till it stands out COMPOSITOR_FOCUS_READ from the outline, the line of a
+        window without the keys; an accent that already does is kept. On the dark theme a primary brighter than it needs to
+        be is then taken toward the window's paper while it still does, so the standard's white is a light grey, a7a7a7,
+        and not a glare round every window it is on; the amber, ff8800, is kept as it is. The steps are of 5 percent, so the
+        line ends just past the ratio with as much of the accent's colour as it can keep.
+*/
+static unsigned int compositor_line_focus(const struct ui_theme *roles, unsigned int dark)
+{
+        unsigned int unlit = roles->role[UI_OUTLINE] | 0xff000000u, paper = roles->role[UI_SURFACE] | 0xff000000u;
+        unsigned int lit = roles->role[UI_PRIMARY] | 0xff000000u, pole = dark ? 0xffffffffu : 0xff000000u;
+
+        for (int step = 0; step < 64 && ui_contrast(lit, unlit) < COMPOSITOR_FOCUS_READ; step++)
+                lit = ui_mix(lit, 95, pole);
+        for (int step = 0; dark && step < 64 && ui_contrast(ui_mix(lit, 95, paper), unlit) >= COMPOSITOR_FOCUS_READ; step++)
+                lit = ui_mix(lit, 95, paper);
+        return lit & 0xffffffu;
+}
 
 // The roles the chrome is drawn with, made by the kit (ui/ui.c) for the window table's theme and accent, made again
 // when either changes. A table not themed yet has the standard: dark, with white.
@@ -12110,19 +12136,23 @@ static const struct compositor_chrome *compositor_chrome_now(void)
         {
                 ui_theme_make(&chrome.roles, dark, accent);
                 chrome.dark = dark;
+                chrome.unlit = chrome.roles.role[UI_OUTLINE] & 0xffffffu;
+                chrome.lit = compositor_line_focus(&chrome.roles, dark);
                 made = 1, made_dark = dark, made_accent = accent;
         }
         return &chrome;
 }
 
-// The lit line of the window with the keys: on the dark theme the primary at 30% over the shadow, which on the
-// standard is white's 4d4d4d; on the light one the primary itself.
+// The line of the window with the keys (compositor_line_focus): the light standard's 18181b, the dark standard's a7a7a7.
 static unsigned int compositor_line_lit(void)
 {
-        const struct compositor_chrome *chrome = compositor_chrome_now();
+        return compositor_chrome_now()->lit;
+}
 
-        return (chrome->dark ? ui_mix(chrome->roles.role[UI_PRIMARY], 30, chrome->roles.role[UI_SHADOW])
-                             : chrome->roles.role[UI_PRIMARY]) & 0xffffffu;
+// The line of a window without the keys: the theme's outline, a1a1aa on the light theme and 52525b on the dark.
+static unsigned int compositor_line_unlit(void)
+{
+        return compositor_chrome_now()->unlit;
 }
 
 static unsigned int compositor_ink_shadow(void)
