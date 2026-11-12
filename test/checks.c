@@ -109972,6 +109972,38 @@ static fn census_one(host_census address_to census, string_address path,
 }
 
 /*
+        Where device list says a drive is (usb_drive_bus, usb_drive_external): read off its name, the sysfs path its
+        /sys/class/block link names, its card's type for an MMC card, and its removable flag. An NVMe, a SATA and a virtio
+        disk are internal; an SD card is external, and a soldered eMMC internal; a disk on any other bus is scsi, and any disk
+        whose block device says it is removable is external.
+*/
+static fn device_where(void)
+{
+        static const struct
+        {
+                string_address name, link, type, bus;
+                b32 removable, external;
+        } drives[] = {
+            {"nvme0n1", "../../devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1", "", "nvme", false, false},
+            {"sda", "../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda", "", "ata", false, false},
+            {"sda", "../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda", "", "ata", true, true},
+            {"vda", "../../devices/pci0000:00/0000:00:04.0/virtio1/block/vda", "", "virtio", false, false},
+            {"mmcblk0", "../../devices/platform/soc/fe340000.mmc/mmc_host/mmc0/mmc0:aaaa/block/mmcblk0", "SD", "sd", false, true},
+            {"mmcblk1", "../../devices/platform/soc/fe330000.mmc/mmc_host/mmc1/mmc1:0001/block/mmcblk1", "MMC", "mmc", false, false},
+            {"sdb", "../../devices/pci0000:00/0000:00:10.0/host2/target2:0:0/2:0:0:0/block/sdb", "", "scsi", false, false},
+        };
+        b32 right = true;
+
+        for (positive at = 0; at < sizeof(drives) / sizeof(drives[0]); at++)
+        {
+                string_address bus = usb_drive_bus(drives[at].name, drives[at].link, drives[at].type);
+
+                right &= string_equals(bus, drives[at].bus) && usb_drive_external(bus, drives[at].removable) == drives[at].external;
+        }
+        check("device list: an NVMe, SATA or virtio disk is internal, an SD card external and an eMMC internal, and a removable disk external", right);
+}
+
+/*
         What the census makes of the partitions a hostile bus offers: nine
         disks where it has room for eight, two partitions of one label, a
         label with no identity, and names at and past the room for one.
@@ -111934,6 +111966,7 @@ b32 main(void)
         install_census();
         install_helpers();
         update_scenes();
+        device_where();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);

@@ -17683,7 +17683,10 @@ static fn usb_recover(void)
         has no hold, so it is allowed; device deny of one is refused, as device allow of a name that is no
         port is. A root hub is a controller, not a device, and is not listed. A disk is a whole one in
         /sys/block that is not a loop, ram, device-mapper, optical or floppy disk, and one on a USB bus is
-        listed as the USB device it is. It reads and changes nothing and needs no root.
+        listed as the USB device it is: its line is followed by "    drive NAME N MB" and the disk's
+        segments. Any other disk's segments are followed by "    where internal BUS" or "    where external
+        BUS" (usb_drive_bus). A reader from before these lines skips them: each starts with four blanks and is
+        no part line. It reads and changes nothing and needs no root.
 */
 /*
         The partitions of a disk the list shows, as the strip of its row says them. A segment is where a
@@ -17887,38 +17890,112 @@ static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
         into[at] = 0;
 }
 
-static bool usb_list_disk(string_address directory, string_address name, address_any context)
+// A block device that is no drive a person keeps: a loop, ram, device-mapper, RAID, optical or floppy one, or an eMMC's boot area.
+static b32 usb_not_drive(string_address name)
+{
+        return host_starts(name, "loop") || host_starts(name, "ram") || host_starts(name, "zram") || host_starts(name, "dm-") ||
+               host_starts(name, "md") || host_starts(name, "sr") || host_starts(name, "fd") || (host_starts(name, "mmcblk") && string_find(name, "boot"));
+}
+
+/*
+        The bus a drive is on, from its name and the sysfs path its /sys/class/block link names (empty where it has none), and for an
+        MMC card the type its card says (SD, MMC or SDIO): sd for an SD card, mmc for an MMC one (a soldered eMMC), nvme, virtio, ata
+        (SATA and IDE), and scsi for any other.
+*/
+static string_address usb_drive_bus(string_address name, string_address link, string_address type)
+{
+        if (host_starts(name, "mmcblk") || string_find(link, "/mmc"))
+                return string_equals(type, "MMC") ? (string_address) "mmc" : (string_address) "sd";
+        if (host_starts(name, "nvme") || string_find(link, "/nvme"))
+                return "nvme";
+        if (host_starts(name, "vd") || string_find(link, "/virtio"))
+                return "virtio";
+        if (string_find(link, "/ata"))
+                return "ata";
+        return "scsi";
+}
+
+// Whether a drive on a bus is one a person plugs in and takes away: one whose block device says it is removable, and an SD card.
+static b32 usb_drive_external(string_address bus, b32 removable)
+{
+        return removable || string_equals(bus, "sd");
+}
+
+// A drive's size in sectors of 512 bytes, as sysfs says it (none where it cannot be read).
+static unsigned long long usb_disk_sectors(string_address name)
+{
+        p8 sysfs[HOST_PATH_ROOM], text[32];
+
+        return host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0 ? usb_decimal(text) : 0;
+}
+
+// A drive's segments, as its strip says them (usb_list_strip): its partitions and the room between them.
+static fn usb_disk_strip(string_address name, unsigned long long sectors)
 {
         p8 sysfs[HOST_PATH_ROOM];
-        p8 link[HOST_PATH_ROOM * 2];
-        p8 text[32], shown[64];
-        unsigned long long sectors = 0;
         usb_parts parts;
 
-        (void)directory;
-        (void)context;
-        text[0] = 0;
-        if (host_starts(name, "loop") || host_starts(name, "ram") || host_starts(name, "zram") ||
-            host_starts(name, "dm-") || host_starts(name, "md") || host_starts(name, "sr") || host_starts(name, "fd"))
-                return true;
-        // An eMMC's boot areas are block devices of their own, and no drive a person keeps.
-        if (host_starts(name, "mmcblk") && string_find(name, "boot"))
-                return true;
-        // A disk on a USB bus is listed as the USB device it is. Every other disk is listed, Thunderbolt and unreadable ones too.
-        if (!host_join(sysfs, sizeof(sysfs), "/sys/class/block/", name) ||
-            (file_link_text(sysfs, link, sizeof(link)) > 0 && string_find(link, "/usb")))
-                return true;
-        if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") &&
-            host_read_kernel(sysfs, text, sizeof(text)) > 0)
-                sectors = usb_decimal(text);
-        // No verb holds a drive, so its row is shown and not pressed: it says what is true of it. Its name is one word in the line.
-        usb_plain_copy(shown, sizeof(shown), name);
-        host_say(log, "  %s drive %p MB view only\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
         memory_zero(&parts, sizeof(parts));
         parts.disk = name;
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name))
                 host_each_entry((string_address)sysfs, usb_part_visit, address_of parts);
         usb_list_strip(name, sectors * 512, &parts);
+}
+
+static bool usb_list_disk(string_address directory, string_address name, address_any context)
+{
+        p8 sysfs[HOST_PATH_ROOM];
+        p8 link[HOST_PATH_ROOM * 2];
+        p8 type[16], shown[64];
+        unsigned long long sectors;
+        string_address bus;
+
+        (void)directory;
+        (void)context;
+        link[0] = 0, type[0] = 0;
+        if (usb_not_drive(name))
+                return true;
+        // A disk on a USB bus is listed as the USB device it is (usb_list_device_disk). Every other disk is listed, Thunderbolt and
+        // unreadable ones too.
+        if (!host_join(sysfs, sizeof(sysfs), "/sys/class/block/", name) ||
+            (file_link_text(sysfs, link, sizeof(link)) > 0 && string_find(link, "/usb")))
+                return true;
+        sectors = usb_disk_sectors(name);
+        // No verb holds a drive, so its row is shown and not pressed: it says what is true of it. Its name is one word in the line.
+        usb_plain_copy(shown, sizeof(shown), name);
+        host_say(log, "  %s drive %p MB view only\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
+        usb_disk_strip(name, sectors);
+        // Where it is, after its segments: in the machine, or plugged in.
+        if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/device/type"))
+                host_read_kernel(sysfs, type, sizeof(type));
+        bus = usb_drive_bus(name, (string_address)link, (string_address)type);
+        host_say(log, "    where %s %s\n",
+                 usb_drive_external(bus, host_join(sysfs, sizeof(sysfs), "/sys/block/", name) && host_block_flag(sysfs, "/removable"))
+                     ? (string_address) "external"
+                     : (string_address) "internal",
+                 bus);
+        return true;
+}
+
+/*
+        A USB device's drives, under its line: each disk whose sysfs path runs through the device's own interface (its port, and then
+        the port with a colon: a hub's path runs through its devices' too, and those are theirs), as "    drive NAME N MB" and its
+        segments. A device a deny rule holds has no driver, and so no drive.
+*/
+static bool usb_list_device_disk(string_address directory, string_address name, address_any context)
+{
+        string_address port = (string_address)context;
+        p8 sysfs[HOST_PATH_ROOM], link[HOST_PATH_ROOM * 2], through[64], shown[64];
+        unsigned long long sectors;
+
+        (void)directory;
+        if (usb_not_drive(name) || !host_join(sysfs, sizeof(sysfs), "/sys/class/block/", name) || file_link_text(sysfs, link, sizeof(link)) <= 0 ||
+            !host_join(through, sizeof(through), "/", port, "/", port, ":") || !string_find(link, through))
+                return true;
+        sectors = usb_disk_sectors(name);
+        usb_plain_copy(shown, sizeof(shown), name);
+        host_say(log, "    drive %s %p MB\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
+        usb_disk_strip(name, sectors);
         return true;
 }
 
@@ -17944,6 +18021,7 @@ static b32 usb_list_show(void)
                 state = device->authorized ? (string_address)"allowed" : why == USB_WHY_DENY ? (string_address)"blocked" : (string_address)"waiting";
                 usb_shown(shown, sizeof(shown), device->product, device->product_length);
                 host_say(log, "  %s usb %s %s %s\n", (string_address)device->port, (string_address)device->id, (string_address)shown, state);
+                host_each_entry((string_address)"/sys/block", usb_list_device_disk, (address_any)device->port);
         }
         host_each_entry((string_address)"/sys/block", usb_list_disk, null);
         log_flush();
