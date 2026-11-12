@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	&Ampliar
 menu_zoom_out	9234	&Reducir
 mixer_allow	19d2	Permitir
 mixer_empty	eef1	No se reproduce ningún sonido
-mixer_mute	9f74	Silenciar
 mixer_no_mic	412a	No hay micrófono
 mixer_nobody	cc29	Ningún programa está grabando
 mixer_off	e944	El servidor de sonido está apagado
 mixer_playback	110c	Reproducción
 mixer_recording	f20c	Grabación
 mixer_recording_off	9c09	La grabación está desactivada
-mixer_unmute	72bb	Activar sonido
 mixer_unplugged	3ed9	Nada conectado
 notices_dismiss	9a10	Descartar todo
 notices_item	56a6	%1$s: %2$s

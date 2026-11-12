@@ -57,14 +57,12 @@ menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں
 mixer_allow	19d2	اجازت دیں
 mixer_empty	eef1	کوئی آواز نہیں چل رہی
-mixer_mute	9f74	خاموش
 mixer_no_mic	412a	کوئی مائیکروفون نہیں
 mixer_nobody	cc29	کوئی پروگرام ریکارڈ نہیں کر رہا
 mixer_off	e944	آواز کا سرور بند ہے
 mixer_playback	110c	پلے بیک
 mixer_recording	f20c	ریکارڈنگ
 mixer_recording_off	9c09	ریکارڈنگ بند ہے
-mixer_unmute	72bb	آواز بحال کریں
 mixer_unplugged	3ed9	کچھ لگا ہوا نہیں
 notices_dismiss	9a10	سب کو مسترد کریں
 notices_item	56a6	%1$s: %2$s

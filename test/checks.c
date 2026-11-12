@@ -155394,20 +155394,31 @@ static b64 strips_shift_after(const struct ui address_to ui, struct ui_strips ad
         return strips_shift_now(ui, s);
 }
 
+// The pixels of an element's rectangle (device pixels at 100 percent, the buffer's) that are a role's colour, or, for role -1, not the surface's.
+static int strips_ink(struct ui_node n, int role)
+{
+        int count = 0;
+
+        for (int y = n.y < 0 ? 0 : n.y; y < n.y + n.h && y < 400; y++)
+                for (int x = n.x < 0 ? 0 : n.x; x < n.x + n.w && x < 640; x++)
+                        count += role < 0 ? strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu) : strips_is(x, y, (unsigned int)role);
+        return count;
+}
+
 // The left edge of strip k in the window: its column's, in the strips' tree as ui_strips_place laid it out.
 static int strips_left(const struct ui_strips address_to s, int k)
 {
         return ui_strip_part(s, k, UI_STRIP_NODE_COLUMN).x;
 }
 
-// The same with the strips scrolled by shift: in a row 300 wide, which the strips there are do not fit, and put back where they were.
+// The same with the strips scrolled by shift: in a row 200 wide, which the strips there are do not fit, and put back where they were.
 static int strips_left_scrolled(struct ui address_to ui, struct ui_strips address_to s, int k, int shift)
 {
         int left, w = s->w;
 
-        ui_strips_place(ui, s, s->x, s->y, 300, s->h);
+        ui_strips_place(ui, s, s->x, s->y, 200, s->h);
         ui_scroll_set(&s->scroll, shift);
-        ui_strips_place(ui, s, s->x, s->y, 300, s->h);
+        ui_strips_place(ui, s, s->x, s->y, 200, s->h);
         left = strips_left(s, k);
         ui_scroll_set(&s->scroll, 0);
         ui_strips_place(ui, s, s->x, s->y, w, s->h);
@@ -155528,7 +155539,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         check("mixer: a page that is the server's is read whole", check_mixer_poll_at(mixer_t0) && mixer.have);
         check("mixer: the device, then Firefox (two streams), mpv and the program that gave no name: four strips", s->count == 4);
         check("mixer: the device is a strip of its own, named as the person is shown it, at 80 percent",
-              s->item[0].master && string_equals((string_address)mixer.big->device_name, (string_address) "Speakers (Realtek)") && !s->item[0].name[0] &&
+              s->item[0].master && string_equals((string_address)s->item[0].name, (string_address) "Speakers (Realtek)") &&
                   s->item[0].percent == 80 && !s->item[0].muted);
         check("mixer: a program's streams are one strip at the loudest of their volumes, playing, with the greater peaks",
               string_equals((string_address)s->item[1].name, (string_address) "Firefox") && s->item[1].percent == 100 && s->item[1].playing && !s->item[1].master &&
@@ -155682,6 +155693,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         for (int k = 0; k < 640 * 400; k++)
                 pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
         ui_kit.now = mixer_t0 + 700000000ll;
+        s->keyed = 0; // no strip is lit for the keys: the thumb's gap shows the surface
         mixer_draw(pixels);
         {
                 struct ui_control address_to slider = &s->control[0];
@@ -155695,13 +155707,15 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer: the device's slider is filled up to its thumb at 80 percent, the thumb a gap, and empty above it",
                       strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_SURFACE));
         }
-        // A stood slider focused by a mouse press draws no ring round its thumb: the press takes the strip's focus with no keys, so the
-        // keys' ring (3 out from a pressed thumb of 12, 2 thick: columns 7 to 9 past the track's middle, clear of the bars) is not drawn;
-        // a key on the strip after it draws the ring again. The strip's percent is put back as it was.
+        // Nothing is drawn round a slider's thumb, and the strip the keys are on says so in its name's ink: a mouse press takes the strip's focus
+        // with no keys, and the name is drawn as it was before the press; a key on the strip after it draws the name in the accent. The strip's
+        // percent is put back as it was.
         {
+                static unsigned int before[640 * 400];
                 struct ui_control address_to slider = &s->control[0];
+                struct ui_node name, column;
                 int x = slider->x + slider->w / 2, thumb = ui_slider_thumb(slider), knob = slider->y + slider->h - thumb / 2 - (slider->h - thumb) * 80 / 100;
-                int percent_was = s->item[0].percent, pressed = 0, keyed = 0;
+                int percent_was = s->item[0].percent, pressed = 0, keyed = 0, ring = 0, layer = 0;
                 b32 keys_was = mixer.focused;
                 struct window_event at_knob = {WINDOW_EVENT_MOTION, 0, x, knob, 0};
                 struct window_event hold = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
@@ -155709,26 +155723,43 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 struct window_event let_go = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
 
                 mixer.focused = 1;
+                s->keyed = 0;
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                memory_copy(before, pixels, sizeof(before));
+                name = ui_strip_part(s, 0, UI_STRIP_NODE_NAME);
+                column = ui_strip_part(s, 0, UI_STRIP_NODE_COLUMN);
                 ui_strips_event(&mixer.ui, s, &at_knob);
                 ui_strips_event(&mixer.ui, s, &hold);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer_draw(pixels);
-                for (int py = slider->y; py < slider->y + slider->h; py++)
-                        for (int px = x + 7; px <= x + 9; px++)
-                                pressed += strips_is(px, py, UI_PRIMARY);
+                for (int py = name.y; py < name.y + name.h; py++)
+                        for (int px = name.x; px < name.x + name.w; px++)
+                                pressed += pixels[py * 640 + px] != before[py * 640 + px];
+                // The strip's column's top row, above its slider and its name: nothing is drawn there unless the strip is on the state layer.
+                for (int px = column.x + column.w / 4; px < column.x + 3 * column.w / 4; px++)
+                        pressed += pixels[(column.y + 1) * 640 + px] != before[(column.y + 1) * 640 + px];
                 ui_strips_event(&mixer.ui, s, &key_up);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer_draw(pixels);
+                for (int py = name.y; py < name.y + name.h; py++)
+                        for (int px = name.x; px < name.x + name.w; px++)
+                                keyed += pixels[py * 640 + px] != before[py * 640 + px];
+                for (int px = column.x + column.w / 4; px < column.x + 3 * column.w / 4; px++)
+                        layer += pixels[(column.y + 1) * 640 + px] != before[(column.y + 1) * 640 + px];
+                // The ring was 3 out from a pressed thumb of 12, 2 thick: columns 7 to 9 past the track's middle, clear of the bars.
                 for (int py = slider->y; py < slider->y + slider->h; py++)
                         for (int px = x + 7; px <= x + 9; px++)
-                                keyed += strips_is(px, py, UI_PRIMARY);
+                                ring += strips_is(px, py, UI_PRIMARY);
                 ui_strips_event(&mixer.ui, s, &let_go);
                 s->item[0].percent = percent_was;
                 mixer.focused = keys_was;
-                check("mixer: a stood slider focused by a mouse press draws no ring round its thumb", pressed == 0);
-                check("mixer: a key on the focused strip draws its ring round the thumb", keyed > 0);
+                check("mixer: a strip focused by a mouse press is drawn as it was: its name is not in the keys' ink", pressed == 0);
+                check("mixer: a key on the focused strip draws its name in the accent, and no ring round the slider's thumb", keyed > 20 && ring == 0);
+                check("mixer: and the strip the keys are on lies on the state layer, its column lit to its top", layer == column.w / 2);
         }
         // The playback device at the default size, with a long name and the reason it plays in the page: no note takes rows from the sliders, so the slider
         // keeps its width and its full height, and the name is drawn beside it (on the side the meter is not), in both ways the window reads.
@@ -155747,11 +155778,11 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 ui_kit.now = mixer_t0 + 720000000ll + (b64)rtl * 10000000ll;
                 mixer_draw(pixels);
-                full = s->h * 100 / mixer.ui.scale - 16 - UI_STRIP_MUTE_H - 12 - (16 + UI_STRIP_FACE + 8 + 16 + 24);
+                full = s->h * 100 / mixer.ui.scale - 2 * UI_GAP3 - UI_GAP2 - UI_STRIP_SLIDER_W;
                 for (int y = ui_dev(&mixer.ui, slider->y); y < ui_dev(&mixer.ui, slider->y + slider->h); y++)
-                        for (int x = ui_dev(&mixer.ui, rtl ? slider->x - 20 : slider->x + slider->w + 4); x < ui_dev(&mixer.ui, rtl ? slider->x - 4 : slider->x + slider->w + 20); x++)
+                        for (int x = ui_strip_part(s, 0, UI_STRIP_NODE_NAME).x; x < ui_strip_part(s, 0, UI_STRIP_NODE_NAME).x + ui_strip_part(s, 0, UI_STRIP_NODE_NAME).w; x++)
                                 beside += (pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
-                beside_kept[rtl] = slider->w == UI_STRIP_SLIDER_W && slider->h == full && full >= UI_STRIP_LEAST && !s->noted && beside > 0;
+                beside_kept[rtl] = slider->w == UI_STRIP_SLIDER_W && slider->h == full && full >= UI_STRIP_LEAST && !mixer.note && beside > 0 && s->h == 400 - mixer.strips_box.y;
         }
         ui_kit.rtl = 0;
         check("mixer: the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it", beside_kept[0]);
@@ -155783,7 +155814,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
                         check("mixer popup: the Mixer row is under the strip, in the last row of the window, a button of the kit's buttons",
                               open->kind == UI_BUTTON && string_equals((string_address)open->label, (string_address) "Mixer") && open->y >= MIXER_QUICK_H - ui_row_height() &&
-                                  open->y + open->h <= MIXER_QUICK_H && open->w == UI_BUTTONS_W && s->control[1].y + s->control[1].h <= MIXER_QUICK_H - ui_row_height());
+                                  open->y + open->h <= MIXER_QUICK_H && open->w == UI_STRIP_W && s->control[1].y + s->control[1].h <= MIXER_QUICK_H - ui_row_height());
                         x = open->x + open->w / 2, y = open->y + open->h / 2;
                         for (int py = open->y; py < open->y + open->h; py++)
                                 for (int px = open->x; px < open->x + open->w; px++)
@@ -155995,10 +156026,10 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         for (int py = 0; py < mixer.strips_box.y; py++)
                                 for (int px = 0; px < 640; px++)
                                         tabs += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
-                        for (int py = mixer.strips_box.y + 16; py < mixer.strips_box.y + 16 + UI_STRIP_FACE; py++)
+                        for (int py = mixer.strips_box.y; py < 400; py++)
                                 for (int px = UI_STRIP_PAD; px < UI_STRIP_PAD + UI_STRIP_W; px++)
                                         disc += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
-                        check("mixer pages: the two tabs are drawn along the top, and the microphone's disc below them", tabs > 500 && disc > 200);
+                        check("mixer pages: the two tabs are drawn along the top, and the microphone's strip below them", tabs > 500 && disc > 200);
                 }
 
                 // Recording turned off: it says so, the Allow button has the keys and turns it on (where the server reads it).
@@ -156119,23 +156150,39 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
                 check_mixer_poll_at(mixer_t0 + 1400000000ll);
-                check("mixer: an output with nothing plugged into it is a dim strip that says so under its volume; the programs say nothing",
-                      s->item[0].dim && string_equals((string_address)s->item[0].note[0], (string_address)WORDS(mixer_unplugged)) && !s->item[0].note[1][0] &&
-                          !s->item[1].dim && !s->item[1].note[0][0] && s->noted);
+                check("mixer: an output with nothing plugged into it is a dim strip, and the window says so; the programs are not dim",
+                      s->item[0].dim && mixer.note && string_equals((string_address)mixer.note, (string_address)WORDS(mixer_unplugged)) && !s->item[1].dim);
+                // The line is the window's foot, one row under the strips: no strip has a row of it, and every slider is the same height.
+                {
+                        int said = 0;
+
+                        for (int k = 0; k < 640 * 400; k++)
+                                pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                        mixer_draw(pixels);
+                        // The line's pixels are those of its row that are not the row's own fill (its first pixel's).
+                        for (int py = mixer.strips_box.y + mixer.strips_box.h; py < 400; py++)
+                                for (int px = 0; px < 640; px++)
+                                        said += pixels[py * 640 + px] != pixels[(mixer.strips_box.y + mixer.strips_box.h) * 640];
+                        if (!(said > 100 && mixer.strips_box.y + mixer.strips_box.h == 400 - UI_PAGE_FOOT))
+                                string_format(log, "  dump: the line %p pixels, the strips end at %p, the foot is %p\n", (positive)said, (positive)(mixer.strips_box.y + mixer.strips_box.h), (positive)UI_PAGE_FOOT);
+                        check("mixer: what it says is one line under the strips, and every slider is as tall as the others",
+                              said > 100 && mixer.strips_box.y + mixer.strips_box.h == 400 - UI_PAGE_FOOT && s->control[0].h == s->control[2].h && s->control[2].h == s->control[4].h &&
+                                  s->control[0].h == mixer.strips_box.h - 2 * UI_GAP3 - UI_GAP2 - UI_STRIP_SLIDER_W);
+                }
                 mixer_fixture_page.device_list[0].flags = AUDIO_STATE_DEVICE_ACTIVE;
                 for (unsigned int why = 0; why <= 6; why++)
                 {
                         mixer_fixture_page.output_why = why;
                         mixer_fixture_page.seq += 2;
                         check_mixer_poll_at(mixer_t0 + 1500000000ll + (b64)why * 1000000ll);
-                        quiet &= !s->item[0].dim && !s->item[0].note[0][0] && !s->item[0].note[1][0] && !s->noted;
+                        quiet &= !s->item[0].dim && !mixer.note;
                 }
                 check("mixer: one that is plugged in is not dim and says nothing, whatever the reason it plays, so no slider gives rows to a note", quiet);
                 mixer_fixture_page.output_state = AUDIO_STATE_OUT_CLOCK;
                 mixer_fixture_page.output_why = AUDIO_STATE_WHY_DISPLAY;
                 mixer_fixture_page.seq += 2;
                 check_mixer_poll_at(mixer_t0 + 1600000000ll);
-                check("mixer: a server that plays to a clock says nothing of it", !s->item[0].note[0][0] && !s->item[0].note[1][0] && !s->noted);
+                check("mixer: a server that plays to a clock says nothing of it", !mixer.note);
                 mixer_fixture_page.output_state = 0;
         }
 
@@ -156300,22 +156347,11 @@ static fn check_kit_strips(void)
         {
                 ui_kit.now += 5000000000ll;
                 strips_list(s, 4, steady, ui_kit.now);
-                check("kit strips: a listing is strips in order, the device first, each with its name, its percent and its initial",
+                check("kit strips: a listing is strips in order, the device first, each with its name and its percent",
                       s->count == 4 && s->item[0].master && !s->item[1].master && s->item[0].percent == 80 && s->item[1].percent == 50 && s->item[2].percent == 100 &&
-                          s->item[3].percent == 0 && string_equals((string_address)s->item[1].name, (string_address) "Firefox") &&
-                          string_equals((string_address)s->item[1].initial, (string_address) "F") && string_equals((string_address)s->item[0].initial, (string_address) "S"));
+                          s->item[3].percent == 0 && string_equals((string_address)s->item[1].name, (string_address) "Firefox"));
                 ui_strips_add(s, 7, "x", 5, 0, 0, 0, 0, 0, 0);
                 check("kit strips: an add outside a listing is nothing", s->count == 4);
-                // The first letter of a name whole in UTF-8, and a lower case letter made a capital.
-                {
-                        char into[8];
-
-                        ui_strip_initial(into, sizeof(into), "\xc3\xa9toile");
-                        check("kit strips: the initial is the first character whole, a capital where it has one",
-                              string_equals((string_address)into, (string_address) "\xc3\xa9") &&
-                                  (ui_strip_initial(into, sizeof(into), "mpv"), string_equals((string_address)into, (string_address) "M")) &&
-                                  (ui_strip_initial(into, sizeof(into), ""), into[0] == 0));
-                }
         }
 
         // Where the strips lie, from the start edge: pad, then UI_STRIP_W each, a gap after the device; scrolled by what the shift says; turned over for a window read from the right.
@@ -156330,15 +156366,50 @@ static fn check_kit_strips(void)
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
                 check("kit strips: reading from the right the first strip is at the right edge and the rest follow toward the left",
                       strips_left(s, 0) == 640 - UI_STRIP_PAD - UI_STRIP_W && strips_left(s, 1) == 640 - UI_STRIP_PAD - 2 * UI_STRIP_W - UI_STRIP_GAP &&
-                          ui_strip_part(s, 1, UI_STRIP_NODE_METER).x == strips_left(s, 1) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH);
-                check("kit strips: and the slider's box is mirrored in its strip, so the meter is on the other side of the slider",
-                      s->control[2].x == strips_left(s, 1) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH - 6 - UI_STRIP_SLIDER_W);
+                          ui_strip_part(s, 1, UI_STRIP_NODE_METER).x == strips_left(s, 1) + UI_STRIP_W - 2 * UI_GAP1 - UI_STRIP_LINE - UI_METER_WIDTH);
+                check("kit strips: and the slider's box is mirrored in its strip, so the meter and the name are on the other side of the slider",
+                      s->control[2].x == strips_left(s, 1) + UI_GAP1 && ui_strip_part(s, 1, UI_STRIP_NODE_NAME).x == strips_left(s, 1) + UI_STRIP_W - UI_GAP1 - UI_STRIP_LINE);
                 ui_kit.rtl = 0;
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
-                check("kit strips: reading from the left the slider is right of the meter, and the mute button is under the strip's middle",
-                      s->control[2].x == strips_left(s, 1) + (UI_STRIP_W - UI_STRIP_GROUP) / 2 + UI_METER_WIDTH + 6 &&
-                          s->control[3].x == strips_left(s, 1) + (UI_STRIP_W - UI_STRIP_MUTE_W) / 2 && s->control[3].y + s->control[3].h <= 400 - 16 &&
-                          s->control[2].y + s->control[2].h < s->control[3].y);
+                check("kit strips: reading from the left the name, the meter and the slider follow each other, and the mute glyph's button is under the slider at the strip's foot",
+                      ui_strip_part(s, 1, UI_STRIP_NODE_NAME).x == strips_left(s, 1) + UI_GAP1 &&
+                          ui_strip_part(s, 1, UI_STRIP_NODE_METER).x == strips_left(s, 1) + 2 * UI_GAP1 + UI_STRIP_LINE &&
+                          s->control[2].x == strips_left(s, 1) + 3 * UI_GAP1 + UI_STRIP_LINE + UI_METER_WIDTH && s->control[2].w == UI_STRIP_SLIDER_W &&
+                          s->control[3].x == s->control[2].x && s->control[3].w == UI_STRIP_SLIDER_W && s->control[3].h == UI_STRIP_SLIDER_W &&
+                          s->control[3].y + s->control[3].h == 400 - UI_GAP3 && s->control[2].y + s->control[2].h + UI_GAP2 == s->control[3].y);
+                // One design: nothing is above the slider but the strip's pad and nothing below it but the foot, so the slider has the height of
+                // the strips less 2 UI_GAP3, UI_GAP2 and the foot; the name is beside it in its height; and a device, a program and a microphone
+                // have the same parts at the same places in their own boxes.
+                check("kit strips: nothing is above a slider but the strip's pad and nothing below it but the foot: it has all the height the strips have left",
+                      s->control[2].y == UI_GAP3 && s->control[2].h == 400 - 2 * UI_GAP3 - UI_GAP2 - UI_STRIP_SLIDER_W && s->control[2].h > 2 * UI_STRIP_LEAST &&
+                          ui_strip_part(s, 1, UI_STRIP_NODE_PERCENT).y == s->control[3].y && ui_strip_part(s, 1, UI_STRIP_NODE_PERCENT).h == UI_STRIP_SLIDER_W);
+                check("kit strips: the name is beside the slider and in the slider's height",
+                      ui_strip_part(s, 1, UI_STRIP_NODE_NAME).y == s->control[2].y && ui_strip_part(s, 1, UI_STRIP_NODE_NAME).h == s->control[2].h &&
+                          ui_strip_part(s, 1, UI_STRIP_NODE_NAME).w == UI_STRIP_LINE);
+                {
+                        b32 same = true;
+
+                        ui_strips_begin(s);
+                        ui_strips_add(s, 0xfffffffeul, "Speakers", 80, 0, 1, 0, 0, 0, ui_kit.now);
+                        ui_strips_add(s, 101, "Firefox", 50, 0, 0, 1, 0, 0, ui_kit.now);
+                        ui_strips_add(s, 0xfffffffdul, "Microphone", 50, 1, 2, 0, 0, 0, ui_kit.now);
+                        ui_strips_add(s, 102, "A program with a name much longer than a slider is tall, which is cut", 50, 0, 0, 0, 0, 0, ui_kit.now);
+                        ui_strips_end(s);
+                        ui_strips_place(&ui, s, 0, 0, 640, 400);
+                        for (int k = 1; k < 4; k++)
+                        {
+                                for (int part = 0; part < UI_STRIP_NODES; part++)
+                                {
+                                        struct ui_node a = ui_strip_part(s, 0, part), b = ui_strip_part(s, k, part);
+
+                                        same = same && b.x - strips_left(s, k) == a.x - strips_left(s, 0) && b.y == a.y && b.w == a.w && b.h == a.h;
+                                }
+                                for (int c = 0; c < 2; c++)
+                                        same = same && s->control[2 * k + c].x - strips_left(s, k) == s->control[c].x - strips_left(s, 0) && s->control[2 * k + c].y == s->control[c].y &&
+                                               s->control[2 * k + c].w == s->control[c].w && s->control[2 * k + c].h == s->control[c].h && s->control[2 * k + c].kind == s->control[c].kind;
+                        }
+                        check("kit strips: a device, a program and a microphone are one design: the same parts at the same places in their own boxes", same);
+                }
         }
 
         // The keys, on the device first: one, ten, 100, 0; mute; Left and Right the way the window reads; Tab round.
@@ -156516,8 +156587,7 @@ static fn check_kit_strips(void)
                 bits = ui_strips_event(&ui, s, &release);
                 check("kit strips: its release mutes the strip, and says so", (bits & UI_STRIPS_MUTE) && s->changed == 1 && s->item[1].muted && !s->item[2].muted);
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
-                check("kit strips: the button then says Unmute and is filled, the slider's track is grey",
-                      string_equals((string_address)button->label, (string_address) "Unmute") && button->variant == UI_BUTTON_PRIMARY && s->control[2].on);
+                check("kit strips: the strip is then muted, and its slider's track is grey where no other's is", s->item[1].muted && s->control[2].on && !s->control[0].on && !s->control[4].on);
                 // A press that is on no control and a window with nothing to scroll is nobody's.
                 move.a = 630, move.b = 380;
                 ui_strips_event(&ui, s, &move);
@@ -156601,7 +156671,7 @@ static fn check_kit_strips(void)
         // The picture: the device's speaker, a program's initial, the name, the volume as a number, and the meter in its colours.
         {
                 int percents[] = {80, 50};
-                b32 disc, speaker, meter_bottom, meter_empty, line, amber, red, text;
+                b32 speaker, meter_bottom, meter_empty, line, amber, red, text;
                 struct ui_control address_to slider;
                 int mx;
 
@@ -156614,6 +156684,7 @@ static fn check_kit_strips(void)
                 ui_strips_end(s);
                 ui_strips_place(&ui, s, 0, 0, 640, 400);
                 s->control[0].placed = s->control[2].placed = 0;
+                s->keyed = 0; // no strip is lit for the keys (the state layer of mixer's own row): what is drawn is each strip's own
                 ui_strips_draw(&ui, s, true);
                 slider = &s->control[0];
                 // The device's meter, at -6 dB: nine tenths of its track, green; the program's, at full scale, runs to the top, through amber and red.
@@ -156624,29 +156695,42 @@ static fn check_kit_strips(void)
                 amber = strips_is(mx, slider->y + slider->h - slider->h * 85 / 100, UI_WARNING);
                 red = strips_is(mx, slider->y + slider->h - slider->h * 97 / 100, UI_ERROR);
                 line = strips_is(mx, slider->y + slider->h - slider->h * 70 / 100, UI_SUCCESS) && strips_is(mx, slider->y + slider->h - slider->h * 40 / 100, UI_SUCCESS);
-                disc = strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2) == (ui_role(UI_SURFACE_HIGHEST) & 0xffffffu);
-                speaker = strips_is(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE) ||
-                          strips_is(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE);
-                text = false;
-                for (int y = 60; y < 80; y++)
+                // The foot and the name: the device's speaker in its mute glyph's box, a program's name on end beside its slider and nowhere above
+                // or below the slider, and its volume written under them.
+                speaker = strips_ink(ui_strip_part(s, 0, UI_STRIP_NODE_MUTE), UI_ON_SURFACE) > 20;
+                text = strips_ink(ui_strip_part(s, 1, UI_STRIP_NODE_NAME), -1) > 20 && strips_ink(ui_strip_part(s, 1, UI_STRIP_NODE_PERCENT), -1) > 10;
+                for (int y = 0; y < 400; y++)
                         for (int x = strips_left(s, 1); x < strips_left(s, 1) + UI_STRIP_W; x++)
-                                text |= strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu);
-                if (!(meter_bottom && meter_empty && amber && red))
-                        string_format(log, "  dump: meter %p %p %p %p, slider y %p h %p, mx %p roles %p %p %p; device bar %p %p %p; program bar %p %p %p; disc %p, 1: %p %p\n", (positive)meter_bottom,
-                                      (positive)meter_empty, (positive)amber, (positive)red, (positive)slider->y, (positive)slider->h, (positive)mx, (positive)(ui_role(UI_SUCCESS) & 0xffffffu),
-                                      (positive)(ui_role(UI_WARNING) & 0xffffffu), (positive)(ui_role(UI_ERROR) & 0xffffffu), (positive)strips_pixel(33, 336), (positive)strips_pixel(33, 200),
-                                      (positive)strips_pixel(33, 104), (positive)strips_pixel(mx, 336), (positive)strips_pixel(mx, 136), (positive)strips_pixel(mx, 107),
-                                      (positive)strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2), (positive)strips_left(s, 1),
-                                      (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu));
+                                text = text && (strips_pixel(x, y) == (ui_role(UI_SURFACE) & 0xffffffu) || (y >= slider->y && y < slider->y + slider->h) ||
+                                                (y >= s->control[1].y && y < s->control[1].y + s->control[1].h));
                 check("kit strips: the device's meter at -6 dB is green from its foot and empty at its head; a program's at full scale goes through amber to red",
                       meter_bottom && meter_empty && amber && red && line);
-                if (!(disc && speaker && text))
-                        string_format(log, "  dump: disc %p speaker %p text %p; pixels disc %p speaker %p %p roles %p %p\n", (positive)disc, (positive)speaker, (positive)text,
-                                      (positive)strips_pixel(strips_left(s, 1) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2),
-                                      (positive)strips_pixel(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2),
-                                      (positive)strips_pixel(strips_left(s, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2),
-                                      (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu), (positive)(ui_role(UI_ON_SURFACE) & 0xffffffu));
-                check("kit strips: the speaker is drawn in the device's disc, a program has its disc, and the name is written under it", disc && speaker && text);
+                check("kit strips: the speaker is drawn in the device's mute glyph, a program's name is written beside its slider and its volume in its foot, and nothing else is in a strip",
+                      speaker && text);
+        }
+
+        // A long name is cut to the slider's height and set in the one line beside the slider: it is not wrapped into a second line, and nothing
+        // of it is above the slider or below it.
+        {
+                struct ui_node name, column;
+                int inside, outside = 0;
+
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_kit.now += 5000000000ll;
+                ui_strips_begin(s);
+                ui_strips_add(s, 101, "A program with a name much longer than a slider is tall, which is cut and never wrapped into another line", 50, 0, 0, 0, 0, 0, ui_kit.now);
+                ui_strips_end(s);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                s->control[0].placed = 0;
+                ui_strips_draw(&ui, s, false);
+                name = ui_strip_part(s, 0, UI_STRIP_NODE_NAME), column = ui_strip_part(s, 0, UI_STRIP_NODE_COLUMN);
+                inside = strips_ink(name, -1);
+                for (int y = 0; y < 400; y++)
+                        for (int x = 0; x < 640; x++)
+                                outside += strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu) && (x < column.x || x >= column.x + column.w || y < name.y || (y >= name.y + name.h && y < s->control[1].y));
+                check("kit strips: a long name is cut to the slider's height, in its one line beside the slider, and nothing is written past the strip or over the slider's ends",
+                      inside > 400 && outside == 0 && name.w == UI_STRIP_LINE);
         }
 
         // The speaker: waves add to the right of it (to the left reading from the right), a strike puts a cross there, and nothing is past its box.
@@ -156680,116 +156764,63 @@ static fn check_kit_strips(void)
                       left[0] == 0 && left[1] == right[1] && left[2] == right[2] && left[3] == right[3] && !outside);
         }
 
-        // The device's disc, muted: the cross where the waves were, whatever the volume (and none when it is not muted at zero).
+        // The device's mute glyph, muted: the cross where the waves were, whatever the volume (and none when it is not muted at zero).
         {
                 int counts[2];
 
                 for (int muted = 0; muted < 2; muted++)
                 {
-                        int count = 0;
+                        struct ui_node glyph;
 
                         for (int k = 0; k < 640 * 400; k++)
                                 strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                         ui_kit.now += 5000000000ll;
                         ui_strips_begin(s);
-                        ui_strips_add(s, 0xfffffffeul, "Speakers", 0, muted, 1, 0, 0, 0, ui_kit.now);
+                        ui_strips_add(s, 0xfffffffeul, "", 0, muted, 1, 0, 0, 0, ui_kit.now);
                         ui_strips_end(s);
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
-                        for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
-                                for (int x = strips_left(s, 0) + UI_STRIP_W / 2 + 2; x < strips_left(s, 0) + UI_STRIP_W / 2 + UI_STRIP_FACE / 2; x++)
-                                        count += strips_pixel(x, y) == (ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu);
-                        counts[muted] = count;
+                        glyph = ui_strip_part(s, 0, UI_STRIP_NODE_MUTE);
+                        glyph.x += glyph.w / 2 + 2, glyph.w -= glyph.w / 2 + 2;
+                        counts[muted] = strips_ink(glyph, UI_ON_SURFACE_VARIANT);
                 }
-                check("kit strips: the device's disc, muted, has the cross in its right half and not muted it has none at volume 0", counts[0] == 0 && counts[1] > 8);
+                check("kit strips: the device's mute glyph, muted, has the cross in its right half and not muted it has none at volume 0", counts[0] == 0 && counts[1] > 8);
         }
 
-        // The microphone's disc (master 2): a capsule in the middle in the ink, and muted a diagonal that runs past the glyph's foot at the right.
+        // The microphone's mute glyph (master 2): a capsule in the middle in the ink, and muted a diagonal that runs past the glyph's foot at the right.
         {
                 int capsule[2], past[2];
 
                 for (int muted = 0; muted < 2; muted++)
                 {
-                        int centre, inside = 0, outside = 0;
-                        unsigned int ink = ui_role(muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE) & 0xffffffu;
+                        struct ui_node glyph;
+                        int role = muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE;
 
                         for (int k = 0; k < 640 * 400; k++)
                                 strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                         ui_kit.now += 5000000000ll;
                         ui_strips_begin(s);
-                        ui_strips_add(s, 0xfffffffdul, "Microphone", 50, muted, 2, 0, 0, 0, ui_kit.now);
+                        ui_strips_add(s, 0xfffffffdul, "", 50, muted, 2, 0, 0, 0, ui_kit.now);
                         ui_strips_end(s);
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
-                        centre = strips_left(s, 0) + UI_STRIP_W / 2;
-                        for (int y = 27; y <= 33; y++)
-                                for (int x = centre - 2; x <= centre + 2; x++)
-                                        inside += strips_pixel(x, y) == ink;
-                        for (int y = 38; y <= 46; y++)
-                                for (int x = centre + 5; x <= centre + 11; x++)
-                                        outside += strips_pixel(x, y) == ink;
-                        capsule[muted] = inside, past[muted] = outside;
+                        // The glyph is 20 a side in the middle of its box: the capsule is columns 8 to 11 of rows 3 to 9, in the ink, and the diagonal's end
+                        // is in columns 14 to 18 of rows 14 to 18, which the foot of an unmuted microphone does not reach.
+                        glyph = ui_strip_part(s, 0, UI_STRIP_NODE_MUTE);
+                        glyph.x += (glyph.w - 20) / 2, glyph.y += (glyph.h - 20) / 2;
+                        capsule[muted] = strips_ink((struct ui_node){.x = glyph.x + 8, .y = glyph.y + 3, .w = 4, .h = 7}, role);
+                        past[muted] = strips_ink((struct ui_node){.x = glyph.x + 14, .y = glyph.y + 14, .w = 5, .h = 5}, -1);
                 }
-                check("kit strips: the microphone's disc has a capsule in its middle, and muted a diagonal past the foot that unmuted has none of",
-                      capsule[0] > 20 && capsule[1] > 20 && past[0] == 0 && past[1] > 4);
+                check("kit strips: the microphone's mute glyph has a capsule in its middle, and muted a diagonal past the foot that unmuted has none of",
+                      capsule[0] > 16 && capsule[1] > 16 && past[0] == 0 && past[1] > 4);
         }
 
-        // A text in a block (the notes under a strip's volume): broken at blanks into as many lines as it needs, never more than it is allowed,
-        // centred, and nothing drawn outside the block.
+        // A strip that is dim is drawn in the quiet ink, its name and its glyph.
         {
-                int narrow = ui_kit_measure(&ui, (string_address) "three", UI_LABEL_MEDIUM) + 1, wide = ui_kit_measure(&ui, (string_address) "one two three", UI_LABEL_MEDIUM) + 4;
-                int centre = 320, lines[4], inside = 0, outside = 0;
+                int bright = 0, dim = 0;
 
-                for (int k = 0; k < 640 * 400; k++)
-                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
-                lines[0] = ui_kit_text_block(&ui, centre, 100, wide, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 4);
-                lines[1] = ui_kit_text_block(&ui, centre, 200, narrow, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 4);
-                lines[2] = ui_kit_text_block(&ui, centre, 300, narrow, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 2);
-                lines[3] = ui_kit_text_block(&ui, centre, 350, narrow, "", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 2);
-                for (int y = 200; y < 248; y++)
-                        for (int x = 0; x < 640; x++)
-                                if (strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu))
-                                {
-                                        if (x >= centre - narrow / 2 - 1 && x <= centre + narrow / 2 + 1)
-                                                inside++;
-                                        else
-                                                outside++;
-                                }
-                check("kit strips: a text in a block is one line when it fits, a line a word when it does not, at most as many as allowed, and none for none",
-                      lines[0] == 1 && lines[1] == 3 && lines[2] == 2 && lines[3] == 0);
-                check("kit strips: and is drawn in the block, centred, and nowhere else", inside > 30 && outside == 0);
-        }
-
-        // Notes under a strip's volume, and a strip that is dim: the sliders of every strip start lower to make room when any has a note; a dim strip is drawn in the quiet ink.
-        {
-                int plain_top, noted_top, bright = 0, dim = 0;
-
-                for (int pass = 0; pass < 2; pass++)
-                {
-                        ui_kit.now += 5000000000ll;
-                        ui_strips_begin(s);
-                        ui_strips_add(s, 0xfffffffeul, "Speakers", 50, 0, 1, 0, 0, 0, ui_kit.now);
-                        if (pass)
-                        {
-                                ui_strips_note(s, 0, "Nothing plugged in");
-                                ui_strips_note(s, 1, "Picked: you chose it");
-                                ui_strips_dim(s, 1);
-                        }
-                        ui_strips_add(s, 7, "Firefox", 50, 0, 0, 0, 0, 0, ui_kit.now);
-                        ui_strips_end(s);
-                        ui_strips_place(&ui, s, 0, 0, 640, 400);
-                        if (!pass)
-                                plain_top = s->control[0].y;
-                        else
-                                noted_top = s->control[0].y;
-                }
-                check("kit strips: when any strip has a note every slider starts lower, by the room for four lines, the one that has none as well",
-                      noted_top == plain_top + UI_STRIP_NOTE_ROWS * 16 && s->control[2].y == noted_top && s->noted);
                 for (int dimmed = 0; dimmed < 2; dimmed++)
                 {
-                        int count = 0;
-                        unsigned int ink = ui_role(dimmed ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE) & 0xffffffu;
-
                         for (int k = 0; k < 640 * 400; k++)
                                 strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                         ui_kit.now += 5000000000ll;
@@ -156799,13 +156830,10 @@ static fn check_kit_strips(void)
                         ui_strips_end(s);
                         ui_strips_place(&ui, s, 0, 0, 640, 400);
                         ui_strips_draw(&ui, s, false);
-                        for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
-                                for (int x = strips_left(s, 0); x < strips_left(s, 0) + UI_STRIP_W; x++)
-                                        count += strips_pixel(x, y) == ink;
                         if (dimmed)
-                                dim = count;
+                                dim = strips_ink(ui_strip_part(s, 0, UI_STRIP_NODE_MUTE), UI_ON_SURFACE_VARIANT) + strips_ink(ui_strip_part(s, 0, UI_STRIP_NODE_NAME), UI_ON_SURFACE_VARIANT);
                         else
-                                bright = count;
+                                bright = strips_ink(ui_strip_part(s, 0, UI_STRIP_NODE_MUTE), UI_ON_SURFACE) + strips_ink(ui_strip_part(s, 0, UI_STRIP_NODE_NAME), UI_ON_SURFACE);
                 }
                 check("kit strips: a dim strip's speaker is drawn in the quiet ink and a strip that is not dim's in the ink", dim > 20 && bright > 20);
                 ui_strips_begin(s);

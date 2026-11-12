@@ -7517,14 +7517,12 @@ LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
 LANGUAGE_ID(menu_zoom_out, "Zoom &Out") \
 LANGUAGE_ID(mixer_allow, "Allow") \
 LANGUAGE_ID(mixer_empty, "No sound is playing") \
-LANGUAGE_ID(mixer_mute, "Mute") \
 LANGUAGE_ID(mixer_no_mic, "No microphone") \
 LANGUAGE_ID(mixer_nobody, "No program is recording") \
 LANGUAGE_ID(mixer_off, "Sound server is off") \
 LANGUAGE_ID(mixer_playback, "Playback") \
 LANGUAGE_ID(mixer_recording, "Recording") \
 LANGUAGE_ID(mixer_recording_off, "Recording is off") \
-LANGUAGE_ID(mixer_unmute, "Unmute") \
 LANGUAGE_ID(mixer_unplugged, "Nothing plugged in") \
 LANGUAGE_ID(notices_dismiss, "Dismiss all") \
 LANGUAGE_ID(notices_item, "%1$s: %2$s") \
@@ -9092,6 +9090,121 @@ static b32 ui_shown_blank(const p8 address_to shown, positive size)
         return size > 0;
 }
 
+// A run's scratch line (wide by rows of coverage, drawn on paper for a light or a dark ink) laid over the picture with its first column at
+// pen_x and its first row at top, cut between low and high: ui_run_flagged's second half, and a run's that is set on end (ui_kit_text_stood).
+static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int pen_x, int low, int high, unsigned int colour, unsigned int alpha,
+                     b32 light, unsigned int stroke)
+{
+        unsigned int paper = light ? 0 : 0xffffffu;
+        // The coverage, as the ink at that alpha, over the picture: one tone for each coverage, made once. The columns
+        // drawn are those in low to high and in the picture, worked out once, so the walk over a row has no test in it.
+        //
+        // Text lies mostly on one ground (the surface the band was cleared to, or a fill under it): the tone over that
+        // ground is kept for each coverage as it is first met, so a pixel on it is a compare and a load, and only a
+        // pixel on anything else is laid over (ui_over) -- the same pixel either way.
+        unsigned int ground = ui->opaque ? ui_role_surface() : 0;
+        struct ui_ramp address_to ramp = ui_ramp_for(colour, alpha, ground);
+        int first = 0, last = wide;
+
+        if (low - pen_x > first)
+                first = low - pen_x;
+        if (high - pen_x < last)
+                last = high - pen_x;
+        if (-pen_x > first)
+                first = -pen_x;
+        if (ui->width - pen_x < last)
+                last = ui->width - pen_x;
+        if (ui->scene)
+        {
+                ui_scene_text(ui, wide, rows, top, pen_x, first, last, colour, alpha, light, stroke);
+                return;
+        }
+#if X64
+        {
+                struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
+                                       .last = last, .pixels = ui->pixels, .pitch = (long)ui->pitch, .pen_x = pen_x,
+                                       .ui_top = ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
+                                       .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
+                                       .ground = ground, .flip = light ? 0 : 255, .stroke = stroke, .ramp = ramp};
+
+                ui_run_walk(&walk);
+        }
+#else
+        for (int row = 0; row < rows && first < last; row++)
+        {
+                int y = top + row;
+                const unsigned int address_to coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
+                unsigned int address_to picture;
+
+                if (y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
+                        continue;
+                picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
+                for (int column = first; column < last; column++, picture++)
+                {
+                        unsigned int value, cover, bit;
+
+                        // Paper no glyph touched (most of the run's rows) is no cover: passed a vector at a time.
+                        // A stroke reaches into it from a neighbour, and reads every pixel.
+                        if (!stroke && coverage[column] == paper)
+                        {
+                                int from = column;
+
+                                column += (int)memory_first_differs_u32(coverage + column, (positive)(last - column), paper);
+                                picture += column - from;
+                                if (column >= last)
+                                        break;
+                        }
+                        value = coverage[column] >> 8 & 255;
+                        cover = light ? value : 255 - value;
+                        if (stroke && cover < 255)
+                        {
+                                // The stroke: a pixel takes a share of its strongest neighbour's cover (left, right,
+                                // above, below, those inside the run's scratch). A pixel of paper among paper takes none.
+                                const unsigned int address_to here = coverage + column;
+                                unsigned int most = 0, n[4], have = 0;
+
+                                if (column > 0)
+                                        n[have++] = here[-1];
+                                if (column + 1 < wide)
+                                        n[have++] = here[1];
+                                if (row > 0)
+                                        n[have++] = here[-wide];
+                                if (row + 1 < rows)
+                                        n[have++] = here[wide];
+                                for (unsigned int k = 0; k < have; k++)
+                                {
+                                        unsigned int v = n[k] >> 8 & 255, c = light ? v : 255 - v;
+
+                                        most = c > most ? c : most;
+                                }
+                                cover += most * stroke / 128;
+                                cover = cover > 255 ? 255 : cover;
+                        }
+                        bit = cover & 63;
+
+                        if (!cover)
+                                continue;
+                        if (*picture == ground)
+                        {
+                                if (!(ramp->made[cover >> 6] >> bit & 1))
+                                {
+                                        ramp->over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
+                                        ramp->made[cover >> 6] |= 1ull << bit;
+                                }
+                                *picture = ramp->over[cover];
+                                continue;
+                        }
+                        if (!(ramp->known[cover >> 6] >> bit & 1))
+                        {
+                                ramp->tone[cover] = ui_tone(colour, cover * alpha / 255);
+                                ramp->known[cover >> 6] |= 1ull << bit;
+                        }
+                        *picture = ui_over(ramp->tone[cover], *picture);
+                }
+        }
+#endif
+}
+
 static int ui_run_flagged(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                           string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                           unsigned int stroke, p32 flags)
@@ -9123,115 +9236,7 @@ static int ui_run_flagged(struct ui address_to ui, const font_face address_to co
                           light ? 0xffffffu : 0, paper);
         }
 
-        // The coverage, as the ink at that alpha, over the picture: one tone for each coverage, made once. The columns
-        // drawn are those in low to high and in the picture, worked out once, so the walk over a row has no test in it.
-        //
-        // Text lies mostly on one ground (the surface the band was cleared to, or a fill under it): the tone over that
-        // ground is kept for each coverage as it is first met, so a pixel on it is a compare and a load, and only a
-        // pixel on anything else is laid over (ui_over) -- the same pixel either way.
-        {
-                unsigned int ground = ui->opaque ? ui_role_surface() : 0;
-                struct ui_ramp address_to ramp = ui_ramp_for(colour, alpha, ground);
-                int pen_x = x - left, first = 0, last = wide;
-
-                if (low - pen_x > first)
-                        first = low - pen_x;
-                if (high - pen_x < last)
-                        last = high - pen_x;
-                if (-pen_x > first)
-                        first = -pen_x;
-                if (ui->width - pen_x < last)
-                        last = ui->width - pen_x;
-                if (ui->scene)
-                {
-                        ui_scene_text(ui, wide, rows, top, pen_x, first, last, colour, alpha, light, stroke);
-                        return width;
-                }
-#if X64
-                {
-                        struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
-                                               .last = last, .pixels = ui->pixels, .pitch = (long)ui->pitch, .pen_x = pen_x,
-                                               .ui_top = ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
-                                               .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
-                                               .ground = ground, .flip = light ? 0 : 255, .stroke = stroke, .ramp = ramp};
-
-                        ui_run_walk(&walk);
-                }
-#else
-                for (int row = 0; row < rows && first < last; row++)
-                {
-                        int y = top + row;
-                        const unsigned int address_to coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
-                        unsigned int address_to picture;
-
-                        if (y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
-                                continue;
-                        picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
-                        for (int column = first; column < last; column++, picture++)
-                        {
-                                unsigned int value, cover, bit;
-
-                                // Paper no glyph touched (most of the run's rows) is no cover: passed a vector at a time.
-                                // A stroke reaches into it from a neighbour, and reads every pixel.
-                                if (!stroke && coverage[column] == paper)
-                                {
-                                        int from = column;
-
-                                        column += (int)memory_first_differs_u32(coverage + column, (positive)(last - column), paper);
-                                        picture += column - from;
-                                        if (column >= last)
-                                                break;
-                                }
-                                value = coverage[column] >> 8 & 255;
-                                cover = light ? value : 255 - value;
-                                if (stroke && cover < 255)
-                                {
-                                        // The stroke: a pixel takes a share of its strongest neighbour's cover (left, right,
-                                        // above, below, those inside the run's scratch). A pixel of paper among paper takes none.
-                                        const unsigned int address_to here = coverage + column;
-                                        unsigned int most = 0, n[4], have = 0;
-
-                                        if (column > 0)
-                                                n[have++] = here[-1];
-                                        if (column + 1 < wide)
-                                                n[have++] = here[1];
-                                        if (row > 0)
-                                                n[have++] = here[-wide];
-                                        if (row + 1 < rows)
-                                                n[have++] = here[wide];
-                                        for (unsigned int k = 0; k < have; k++)
-                                        {
-                                                unsigned int v = n[k] >> 8 & 255, c = light ? v : 255 - v;
-
-                                                most = c > most ? c : most;
-                                        }
-                                        cover += most * stroke / 128;
-                                        cover = cover > 255 ? 255 : cover;
-                                }
-                                bit = cover & 63;
-
-                                if (!cover)
-                                        continue;
-                                if (*picture == ground)
-                                {
-                                        if (!(ramp->made[cover >> 6] >> bit & 1))
-                                        {
-                                                ramp->over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
-                                                ramp->made[cover >> 6] |= 1ull << bit;
-                                        }
-                                        *picture = ramp->over[cover];
-                                        continue;
-                                }
-                                if (!(ramp->known[cover >> 6] >> bit & 1))
-                                {
-                                        ramp->tone[cover] = ui_tone(colour, cover * alpha / 255);
-                                        ramp->known[cover >> 6] |= 1ull << bit;
-                                }
-                                *picture = ui_over(ramp->tone[cover], *picture);
-                        }
-                }
-#endif
-        }
+        ui_run_lay(ui, wide, rows, top, x - left, low, high, colour, alpha, light, stroke);
         return width;
 }
 
@@ -11573,6 +11578,40 @@ static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_addre
         ui_kit_text_clip(ui, x, baseline, text, type, argb, stroke, ui->width);
 }
 
+/*
+        A text of a role set on end in the column that starts at x and is the role's line wide (device pixels): the run is drawn through
+        the scratch line as any run is, turned a quarter there, and laid over the picture. In a window that reads from the left it reads
+        upward, its start on the row above start; in one that reads from the right it reads downward from start. Nothing breaks it: what
+        is to fit a height is cut to it first (ui_fit). A face too tall to turn in half the scratch's rows is not drawn.
+*/
+static fn ui_kit_text_stood(struct ui address_to ui, int x, int start, string_address text, int type, unsigned int argb)
+{
+        const struct ui_type address_to t = &ui_types[type];
+        const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular, ui->regular};
+        p32 em = ui_em(ui, t->size), flags = ui_font_flags(ui, faces[0]);
+        positive length = string_length(text);
+        font_metrics metrics = font_metrics_at(faces[0], em);
+        int room = 2 * ui->scale / 100, wide = ui_advance_flagged(ui, faces, text, length, em, flags) + 2 * room, rows = metrics.cell_height + 2 * room;
+        int held = ui->scratch_scale && ui->scratch_scale < ui->scale ? ui->scratch_scale : ui->scale, lead = (t->line * ui->scale / 100 - metrics.cell_height) / 2 - room;
+        b32 light = window_light(argb & 0xffffffu), down = ui_rtl();
+        unsigned int address_to turned;
+
+        wide = wide > ui->scratch_width ? ui->scratch_width : wide;
+        if (!(argb >> 24) || !ui->scratch || 2 * rows > UI_SCRATCH_ROWS * held / 100)
+                return;
+        memory_fill_u32_rect(ui->scratch, (positive)wide, (positive)wide, (positive)rows, light ? 0 : 0xffffffu);
+        font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, flags, &(font_target){ui->scratch, (positive)wide, wide, rows}, (b32)room << 16,
+                  metrics.baseline + room, light ? 0xffffffu : 0, light ? 0 : 0xffffffu);
+        // Turned: upward, the line's first row is the column's left and the run's start its foot; downward, the other way about.
+        turned = ui->scratch + (positive)wide * (positive)rows;
+        for (int row = 0; row < rows; row++)
+                for (int column = 0; column < wide; column++)
+                        turned[down ? column * rows + rows - 1 - row : (wide - 1 - column) * rows + row] = ui->scratch[row * wide + column];
+        memory_copy(ui->scratch, turned, (positive)wide * (positive)rows * sizeof(turned[0]));
+        ui_run_lay(ui, rows, wide, down ? start - room : start - wide + room, down ? x + t->line * ui->scale / 100 - lead - rows : x + lead, 0, ui->width,
+                   argb & 0xffffffu, argb >> 24, light, 0);
+}
+
 static int ui_kit_measure_at(struct ui address_to ui, string_address text, int type, int size)
 {
         const struct ui_type address_to t = &ui_types[type];
@@ -11623,57 +11662,6 @@ static int ui_kit_baseline(struct ui address_to ui, int top, int type)
         font_metrics metrics = font_metrics_at(face, ui_em(ui, t->size));
 
         return top + (t->line * ui->scale / 100 - metrics.cell_height) / 2 + metrics.baseline;
-}
-
-/*
-        A text in a block width device pixels wide, broken at blanks into lines of the role's height from top, each centred on centre,
-        at most lines of them (a word wider than the block is cut at its edges). Answers the lines drawn.
-*/
-static int ui_kit_text_block(struct ui address_to ui, int centre, int top, int width, const char address_to text, int type, unsigned int argb, int lines)
-{
-        int at = 0, drawn = 0, height = ui_types[type].line * ui->scale / 100;
-        char line[96];
-
-        while (text[at] == ' ')
-                at++;
-        while (text[at] && drawn < lines)
-        {
-                int taken = at, stop = at, measured;
-
-                // The longest run of whole words that fits; the first word is taken whatever its width.
-                for (;;)
-                {
-                        int word = stop;
-
-                        while (text[word] && text[word] != ' ')
-                                word++;
-                        if (word - at >= (int)sizeof(line))
-                                break;
-                        memory_copy(line, text + at, (positive)(word - at));
-                        line[word - at] = 0;
-                        if (taken > at && ui_kit_measure(ui, line, type) > width)
-                                break;
-                        taken = word;
-                        for (stop = word; text[stop] == ' ';)
-                                stop++;
-                        if (!text[stop])
-                                break;
-                }
-                if (taken == at)
-                {
-                        taken = at + (int)sizeof(line) - 1;
-                        while (taken > at && (((unsigned char)text[taken]) & 0xc0) == 0x80)
-                                taken--;
-                }
-                memory_copy(line, text + at, (positive)(taken - at));
-                line[taken - at] = 0;
-                measured = ui_kit_measure(ui, line, type);
-                ui_kit_text_in(ui, centre - measured / 2, ui_kit_baseline(ui, top + drawn * height, type), line, type, argb, 0, centre - width / 2, centre + width / 2);
-                drawn++;
-                for (at = taken; text[at] == ' ';)
-                        at++;
-        }
-        return drawn;
 }
 
 /*
@@ -12596,15 +12584,6 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 ui_slider_fill(ui, c, rest, off, null, sum);
         if (ratio > 0)
                 ui_slider_fill(ui, c, fill, fill_ink, null, sum);
-
-        // The keys ring a stood slider's thumb: a ring in the accent, 3 out from the thumb.
-        if (vertical && c->focused)
-        {
-                b32 r = ui_q8(ui, thumb) / 2 + ui_q8(ui, 3), at = ui_slider_point(vertical, zero, stop);
-                struct ui_box ring = ui_slider_box(vertical, at - r, at + r, mid - r, mid + r, r, r);
-
-                ui_kit_ring(ui, &ring, ui_q8(ui, 2), accent);
-        }
 
         // The ghost: hovered and not dragged, from the value to where a press would land, in the accent at 40%.
         if (c->hover && !c->down && c->hover_x >= 0)
@@ -17751,14 +17730,14 @@ static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y
 }
 
 /*
-        Strips: the columns of a mixer, one for each thing that plays and the device first. A strip is a disc (a speaker for the
-        device, the first letter of a program for a program, a dot on it while it plays), its name, its volume as a number, a
-        level meter and a vertical slider side by side, and a mute button under them. Where each of these is comes from the
-        kit's layout and nowhere else (ui_strips_tree: its root a row that scrolls and a column a strip, UI_STRIP_W each, the
-        device's set off from the rest by UI_STRIP_GAP), and the strip the pointer is over is the column it is in. They scroll
-        along when they do not fit, as every region of the kit's does (struct ui_scroll, across): the wheel over the empty
-        ground, the wheel turned sideways, a drag of the ground, and the keys, which move the focus and scroll to it. An app
-        says only what each strip is and acts on what the kit reports:
+        Strips: the channels of a mixer, one for each thing that plays and the device first, and every one the same design. A strip is
+        a track, which takes all the height it can (its name set on end beside a level meter and a vertical slider, in the slider's
+        height), over a foot (its volume as a number, and under the slider the glyph that mutes it: a speaker, or a microphone's
+        microphone, struck while it is muted). Where each of these is comes from the kit's layout and nowhere else (ui_strips_tree:
+        its root a row that scrolls and a column a strip, UI_STRIP_W each, the device's set off from the rest by UI_STRIP_GAP), and
+        the strip the pointer is over is the column it is in. They scroll along when they do not fit, as every region of the kit's
+        does (struct ui_scroll, across): the wheel over the empty ground, the wheel turned sideways, a drag of the ground, and the
+        keys, which move the focus and scroll to it. An app says only what each strip is and acts on what the kit reports:
 
             ui_strips_begin   a new listing is coming; ui_strips_add, one call for each strip in order; ui_strips_end
             ui_strips_event   a key or a pointer event: the UI_STRIPS_ bits of what the strips made of it; the strip that
@@ -17766,25 +17745,20 @@ static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y
             ui_strips_draw    the strips, in the rectangle given to ui_strips_place
 
         The keys, with the window's: Left and Right (the way the window reads) and Tab pick a strip, Up and Down change its
-        volume by one, Page Up and Page Down by ten, Home sets 100 and End sets 0, M and Space and Enter mute and unmute it.
+        volume by one, Page Up and Page Down by ten, Home sets 100 and End sets 0, M and Space and Enter mute and unmute it; the
+        strip they are on has its name and its volume in the accent, and nothing is drawn round its slider's thumb.
         The wheel over a strip changes its volume by two a notch, up raising it. A pointer press on the slider sets the volume
         where it lands and goes on following the hand; a finger does the same with a target at least UI_TARGET each way.
         A volume the person has just changed is not replaced by what the app lists for UI_STRIPS_HOLD_NS: the server reports it
         a moment after it has taken it.
 */
 #define UI_STRIPS_MOST 34
-#define UI_STRIP_W 92         // a strip with its gutter, logical pixels
-#define UI_STRIP_GAP 12       // extra after the first
-#define UI_STRIP_PAD 8        // before the first, and the window's edge
-#define UI_STRIP_FACE 36      // the disc
-#define UI_STRIP_SLIDER_W 28  // the slider's box: the thumb
-#define UI_STRIP_GROUP (UI_METER_WIDTH + 6 + UI_STRIP_SLIDER_W)
-#define UI_STRIP_MUTE_W 76
-#define UI_STRIP_MUTE_H 32
+#define UI_STRIP_LINE 16      // the line of the label a strip's name and its volume are set in (UI_LABEL_MEDIUM), logical pixels
+#define UI_STRIP_SLIDER_W 28  // the slider's box: the thumb; the mute glyph's box under it is this each way
+#define UI_STRIP_W (UI_STRIP_LINE + UI_METER_WIDTH + UI_STRIP_SLIDER_W + 4 * UI_GAP1) // a strip: the name, the meter and the slider, UI_GAP1 between them and at its edges
+#define UI_STRIP_GAP UI_GAP3  // extra after the first
+#define UI_STRIP_PAD UI_GAP2  // before the first, and the window's edge
 #define UI_STRIP_LEAST 60     // the shortest a slider is, before the strips are too short to be used
-#define UI_STRIP_NOTES 2      // the notes a strip may have under its volume (ui_strips_note), each broken to the strip's width,
-#define UI_STRIP_NOTE_ROWS 4  // in this many lines in all, which every slider gives room for when any strip has a note
-#define UI_STRIP_BESIDE UI_STRIP_NOTES // and one note more, set down beside its slider (ui_strip_stood)
 #define UI_STRIPS_HOLD_NS 600000000ll
 #define UI_STRIPS_WHEEL 2     // percent a notch
 #define UI_STRIPS_DRAW 1u     // the strips' picture is due again
@@ -17797,37 +17771,32 @@ struct ui_strip
 {
         unsigned long id;     // the app's own number for it (a sink input's index), which its state follows through a new listing
         char name[96];
-        char initial[8];
         int percent;          // 0 to 100
         b32 muted, master, playing;
-        b32 dim;              // drawn in the quiet ink: a device that is there and cannot be heard (ui_strips_note)
-        char note[UI_STRIP_NOTES + 1][96]; // what is said of it under its volume, in the quiet ink, and (UI_STRIP_BESIDE) beside its slider
+        b32 dim;              // drawn in the quiet ink: a device that is there and cannot be heard (ui_strips_dim)
         struct ui_level level[2];
         b64 changed_at;       // ns: when the person last changed it
 };
 
 // The strips' tree (ui_strips_tree): element 0 is the row, element 1 + k strip k's column, and the last strip's column has its parts in
-// it, in this order (the track is the row the meter and the slider stand in, with a lead before them and the room for a note beside the
-// slider after). Every strip is laid out as the last is, so a part of another strip is the last's moved to that strip's column
-// (ui_strip_part), and 34 strips are 45 of the tree's 128 elements.
-enum { UI_STRIP_NODE_COLUMN, UI_STRIP_NODE_DISC, UI_STRIP_NODE_NAME, UI_STRIP_NODE_PERCENT, UI_STRIP_NODE_NOTES, UI_STRIP_NODE_TRACK, UI_STRIP_NODE_LEAD,
-       UI_STRIP_NODE_METER, UI_STRIP_NODE_SLIDER, UI_STRIP_NODE_BESIDE, UI_STRIP_NODE_MUTE, UI_STRIP_NODES };
+// it, in this order: the track with the name, the meter and the slider in it, and the foot with the volume and the mute glyph's box.
+// Every strip is laid out as the last is, so a part of another strip is the last's moved to that strip's column (ui_strip_part), and
+// 34 strips are 42 of the tree's 128 elements.
+enum { UI_STRIP_NODE_COLUMN, UI_STRIP_NODE_TRACK, UI_STRIP_NODE_NAME, UI_STRIP_NODE_METER, UI_STRIP_NODE_SLIDER, UI_STRIP_NODE_FOOT, UI_STRIP_NODE_PERCENT,
+       UI_STRIP_NODE_MUTE, UI_STRIP_NODES };
 
 struct ui_strips
 {
         struct ui_strip item[UI_STRIPS_MOST], before[UI_STRIPS_MOST];
         int count, before_count, changed, focus;
-        b32 keyed;                                     // the focus came from the keys: a press or a wheel takes it with no ring on the stood slider
-        b32 noted;                                     // some strip has a note: the sliders start lower for it
+        b32 keyed;                                     // the focus came from the keys: a press or a wheel takes it, and the strip says nothing of it
         unsigned long focus_id;
-        struct ui_control control[2 * UI_STRIPS_MOST]; // strip k's slider is 2k and its mute button 2k + 1
-        struct ui_control face;                        // the disc of a program
+        struct ui_control control[2 * UI_STRIPS_MOST]; // strip k's slider is 2k and its mute glyph's button 2k + 1
         struct ui_tree tree;                           // where everything is, device pixels of the window (ui_strips_tree)
         struct ui_scroll scroll;                       // how far they are scrolled: the kit's region, across
         int x, y, w, h;                                // where they are, device pixels
         int pointer_x, pointer_y, wheel, grab_x;
         b32 listing, ready, dragging;
-        char mute_label[UI_STRIPS_MOST][2][24];
 };
 
 static fn ui_strips_begin(struct ui_strips address_to s)
@@ -17843,31 +17812,6 @@ static fn ui_strips_begin(struct ui_strips address_to s)
         s->before_count = s->count;
         s->count = 0;
         s->listing = 1;
-}
-
-// The bytes of the letter a text begins with: one, or a whole UTF-8 sequence.
-static positive ui_strip_unit(const char address_to text)
-{
-        positive size = 1;
-
-        if ((p8)text[0] >= 0xc0)
-                for (; size < 4 && ((p8)text[size] & 0xc0) == 0x80; size++)
-                        ;
-        return size;
-}
-
-// The first letter of a name, capital, whole (UTF-8): the disc's letter.
-static fn ui_strip_initial(char address_to into, positive room, const char address_to name)
-{
-        positive size = ui_strip_unit(name);
-
-        into[0] = 0;
-        if (!name[0] || room < 4)
-                return;
-        memory_copy(into, name, size);
-        into[size] = 0;
-        if (size == 1 && into[0] >= 'a' && into[0] <= 'z')
-                into[0] = (char)(into[0] - 32);
 }
 
 static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const char address_to name, int percent, b32 muted, b32 master, b32 playing,
@@ -17887,9 +17831,8 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         else
                 memory_zero(strip, sizeof(*strip));
         strip->id = id;
-        strip->dim = 0, strip->note[0][0] = strip->note[1][0] = strip->note[UI_STRIP_BESIDE][0] = 0;
+        strip->dim = 0;
         string_copy_bounded((string_address)strip->name, (string_address)name, sizeof(strip->name));
-        ui_strip_initial(strip->initial, sizeof(strip->initial), name);
         strip->master = master, strip->playing = playing;
         if (!old || now - strip->changed_at > UI_STRIPS_HOLD_NS)
         {
@@ -17900,14 +17843,7 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         ui_level_feed(&strip->level[1], right);
 }
 
-// Of the strip added last: a note under its volume (which of the UI_STRIP_NOTES, its words) or beside its slider (UI_STRIP_BESIDE), and
-// whether it is dim. Both are said again at each listing.
-static fn ui_strips_note(struct ui_strips address_to s, int which, const char address_to text)
-{
-        if (s->listing && s->count > 0 && which >= 0 && which <= UI_STRIP_BESIDE)
-                string_copy_bounded((string_address)s->item[s->count - 1].note[which], (string_address)text, sizeof(s->item[0].note[0]));
-}
-
+// Of the strip added last: whether it is dim. It is said again at each listing.
 static fn ui_strips_dim(struct ui_strips address_to s, b32 dim)
 {
         if (s->listing && s->count > 0)
@@ -17917,9 +17853,6 @@ static fn ui_strips_dim(struct ui_strips address_to s, b32 dim)
 static fn ui_strips_end(struct ui_strips address_to s)
 {
         s->listing = 0;
-        s->noted = 0;
-        for (int k = 0; k < s->count; k++)
-                s->noted |= s->item[k].note[0][0] || s->item[k].note[1][0];
         // The keys stay on the strip they were on, by its number, and else on the one in its place.
         for (int k = 0; k < s->count; k++)
                 if (s->item[k].id == s->focus_id)
@@ -17944,16 +17877,17 @@ static struct ui_node address_to ui_strip_open(struct ui_tree address_to t, int 
 /*
         The strips' tree laid out for count strips in the rectangle they were placed in, scrolled by offset; the answer is what the row
         comes to, its strips and the pad at each end (what a window as wide as its strips asks). The root is the row, which scrolls, and a
-        strip is a column, the second with the gap before it that sets the device off. Down a strip: 16, the disc, 8, a line for the name
-        and one for the volume, the room for the notes when any strip has one, 4, the track (what is left, UI_STRIP_LEAST at least), 12, the
-        mute button, 16. Every element is then moved to where the row is, and turned over the row's width when the window reads from the
-        right: the device is at the right and a slider on the other side of its meter, each drawn as it is from the left.
+        strip is a column, the second with the gap before it that sets the device off. A strip is UI_GAP1 in from its sides and UI_GAP3
+        from its top and its foot, and in it, UI_GAP2 apart: the track, which takes what is left (UI_STRIP_LEAST at least), a row of the
+        name's line, the meter and the slider, UI_GAP1 between them; and the foot, a row as tall as the slider is wide, of the volume and,
+        under the slider, the mute glyph's box. Every element is then moved to where the row is, and turned over the row's width when the
+        window reads from the right: the device is at the right and a strip's name on the other side of its slider.
 */
 static int ui_strips_tree(const struct ui address_to ui, struct ui_strips address_to s, int count, int offset)
 {
         struct ui_tree address_to t = &s->tree;
         struct ui_node address_to n;
-        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), room = ui_px(ui, UI_STRIP_W - 8);
+        int gap = ui_px(ui, UI_GAP1), box = ui_px(ui, UI_STRIP_SLIDER_W);
 
         ui_tree_begin(t);
         n = ui_tree_open(t);
@@ -17961,21 +17895,20 @@ static int ui_strips_tree(const struct ui address_to ui, struct ui_strips addres
         for (int k = 0; k < count; k++)
         {
                 n = ui_strip_open(t, ui_px(ui, UI_STRIP_W), 0);
-                n->dir = 1, n->align = UI_CENTER, n->pad[2] = n->pad[3] = ui_px(ui, 16), n->margin[0] = k == 1 ? ui_px(ui, UI_STRIP_GAP) : 0;
+                n->dir = 1, n->gap = ui_px(ui, UI_GAP2), n->pad[0] = n->pad[1] = gap, n->pad[2] = n->pad[3] = ui_px(ui, UI_GAP3);
+                n->margin[0] = k == 1 ? ui_px(ui, UI_STRIP_GAP) : 0;
                 if (k == count - 1)
                 {
-                        ui_strip_open(t, ui_px(ui, UI_STRIP_FACE), ui_px(ui, UI_STRIP_FACE))->margin[3] = ui_px(ui, 8), ui_tree_close(t);
-                        ui_strip_open(t, room, line), ui_tree_close(t);
-                        ui_strip_open(t, 0, ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)), ui_tree_close(t);
-                        ui_strip_open(t, room, s->noted ? UI_STRIP_NOTE_ROWS * line : 0)->margin[3] = ui_px(ui, 4), ui_tree_close(t);
-                        n = ui_strip_open(t, ui_px(ui, UI_STRIP_W), 0);
-                        n->size[1] = (struct ui_size){UI_GROW, 1, ui_px(ui, UI_STRIP_LEAST), UI_TREE_MOST, 0}, n->margin[3] = ui_px(ui, 12);
-                        ui_tree_open(t)->size[0] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, ui_tree_close(t);
-                        ui_strip_open(t, ui_dev(ui, UI_METER_WIDTH), 0)->margin[1] = ui_px(ui, UI_STRIP_GROUP - UI_METER_WIDTH - UI_STRIP_SLIDER_W), ui_tree_close(t);
-                        ui_strip_open(t, ui_px(ui, UI_STRIP_SLIDER_W), 0), ui_tree_close(t);
-                        ui_tree_open(t)->size[0] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, ui_tree_close(t);
+                        n = ui_tree_open(t);
+                        n->gap = gap, n->size[1] = (struct ui_size){UI_GROW, 1, ui_px(ui, UI_STRIP_LEAST), UI_TREE_MOST, 0};
+                        ui_strip_open(t, ui_dev(ui, UI_STRIP_LINE), 0), ui_tree_close(t);
+                        ui_strip_open(t, ui_dev(ui, UI_METER_WIDTH), 0), ui_tree_close(t);
+                        ui_strip_open(t, box, 0), ui_tree_close(t);
                         ui_tree_close(t);
-                        ui_strip_open(t, ui_px(ui, UI_STRIP_MUTE_W), ui_px(ui, UI_STRIP_MUTE_H)), ui_tree_close(t);
+                        ui_strip_open(t, 0, box);
+                        ui_tree_open(t)->size[0] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, ui_tree_close(t);
+                        ui_strip_open(t, box, 0), ui_tree_close(t);
+                        ui_tree_close(t);
                 }
                 ui_tree_close(t);
         }
@@ -17998,8 +17931,8 @@ static struct ui_node ui_strip_part(const struct ui_strips address_to s, int k, 
 
 /*
         Where the strips are, and every control of them placed: the tree laid out where the kit's region rests (its body stepped to now, its
-        extent the row's, a notch of its wheel a strip), the slider's box and the mute button's written from their elements (ui_view_box), and
-        what the controls show of what the strips are (a value, a muted track, the button's words). Said again at every frame and before every
+        extent the row's, a notch of its wheel a strip), the slider's box and the mute glyph's button written from their elements
+        (ui_view_box), and what the slider shows of what its strip is (a value, a muted track). Said again at every frame and before every
         event, so the controls and the picture agree.
 */
 static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s, int x, int y, int w, int h)
@@ -18014,19 +17947,15 @@ static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s
         for (int k = 0; k < s->count; k++)
         {
                 struct ui_control address_to slider = &s->control[2 * k], address_to mute = &s->control[2 * k + 1];
-                struct ui_strip address_to strip = &s->item[k];
                 struct ui_node box = ui_strip_part(s, k, UI_STRIP_NODE_SLIDER), button = ui_strip_part(s, k, UI_STRIP_NODE_MUTE);
 
                 slider->kind = UI_SLIDER, slider->variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE;
-                slider->low = 0, slider->high = ui_q(100), slider->step = ui_q(1), slider->on = strip->muted;
+                slider->low = 0, slider->high = ui_q(100), slider->step = ui_q(1), slider->on = s->item[k].muted;
                 ui_view_box(ui, &box, slider);
                 if (!slider->down && !slider->sliding)
-                        slider->value = ui_q(strip->percent);
-                mute->kind = UI_BUTTON, mute->variant = strip->muted ? UI_BUTTON_PRIMARY : UI_BUTTON_OUTLINED;
+                        slider->value = ui_q(s->item[k].percent);
+                mute->kind = UI_BUTTON, mute->variant = UI_BUTTON_TEXT, mute->label = "";
                 ui_view_box(ui, &button, mute);
-                string_copy_bounded((string_address)s->mute_label[k][strip->muted], (string_address)(strip->muted ? WORDS(mixer_unmute) : WORDS(mixer_mute)),
-                                    sizeof(s->mute_label[k][0]));
-                mute->label = s->mute_label[k][strip->muted];
         }
 }
 
@@ -18043,33 +17972,6 @@ static fn ui_strips_reveal(struct ui_strips address_to s, int k)
                 s->scroll.precise = 0;
 }
 
-// A strip's note set down beside its slider (UI_STRIP_BESIDE: the name of the mixer's output): the kit sets text in rows that run across
-// and has no turned text, so it is a letter a line, upright, each centred on centre, from bottom (the slider's foot) upward for the lines
-// height has. What does not fit is cut, with three dots after the last letter that does.
-static fn ui_strip_stood(struct ui address_to ui, const char address_to name, int centre, int bottom, int height, unsigned int ink)
-{
-        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), fits = line > 0 ? height / line : 0, units = 0, shown, at = 0;
-        b32 dots;
-
-        for (int next = 0; name[next]; next += (int)ui_strip_unit(name + next))
-                units++;
-        if (units == 0 || fits <= 0)
-                return;
-        dots = units > fits;
-        shown = dots ? fits - 1 : units;
-        for (int k = 0; k < shown + dots; k++)
-        {
-                char glyph[8] = "...";
-                int size = k < shown ? (int)ui_strip_unit(name + at) : 0, width;
-
-                if (size)
-                        memory_copy(glyph, name + at, (positive)size), glyph[size] = 0;
-                width = ui_kit_measure(ui, (string_address)glyph, UI_LABEL_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, bottom - (k + 1) * line, UI_LABEL_MEDIUM), (string_address)glyph, UI_LABEL_MEDIUM, ink, 0);
-                at += size;
-        }
-}
-
 static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s, b32 keys)
 {
         UI_CALL();
@@ -18080,60 +17982,42 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
         {
                 struct ui_strip address_to strip = &s->item[k];
                 struct ui_control address_to slider = &s->control[2 * k];
-                struct ui_node column = ui_strip_part(s, k, UI_STRIP_NODE_COLUMN), disc = ui_strip_part(s, k, UI_STRIP_NODE_DISC), at;
-                int centre = column.x + column.w / 2, face = disc.w, width, lines = UI_STRIP_NOTE_ROWS;
-                string_address name;
+                struct ui_node column = ui_strip_part(s, k, UI_STRIP_NODE_COLUMN), name = ui_strip_part(s, k, UI_STRIP_NODE_NAME), at;
+                int waves = strip->muted || !strip->percent ? 0 : strip->percent < 50 ? 1 : 2, size = ui_dev(ui, 20), width;
                 b64 shown[2], hold[2];
+                // A strip that is muted or dim is in the quiet ink, and the one the keys are on says its name and its volume in the accent.
                 unsigned int ink = ui_text_colour(ui, strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
+                unsigned int said = keys && s->focus == k && s->keyed ? ui_role(UI_PRIMARY) : ink;
 
                 if (column.x + column.w <= s->x || column.x >= s->x + s->w)
                         continue;
-                // The disc: the output device's has a speaker in it, the microphone's (master 2) a microphone, a program's its letter and a dot while it plays.
-                if (strip->master)
-                {
-                        int waves = strip->muted || !strip->percent ? 0 : strip->percent < 50 ? 1 : 2, size = ui_dev(ui, 22);
-
-                        ui_kit_fill(ui, &(struct ui_box){(centre - face / 2) * 256, disc.y * 256, (centre + face / 2) * 256, (disc.y + face) * 256, face * 128, face * 128},
-                                    ui_well(ui, UI_SURFACE_HIGHEST, 16), null);
-                        if (strip->master == 2)
-                                ui_microphone(ui, centre - size / 2, disc.y + (face - size) / 2, size, strip->muted, ink);
-                        else
-                                ui_speaker(ui, centre - size / 2, disc.y + (face - size) / 2, size, waves, strip->muted, ink);
-                }
-                else
-                {
-                        s->face.kind = UI_AVATAR, s->face.variant = 0, s->face.on = strip->playing, s->face.label = strip->initial;
-                        ui_view_box(ui, &disc, &s->face);
-                        ui_avatar_draw(ui, &s->face);
-                }
-                // Its name, cut to the strip, and its volume.
-                at = ui_strip_part(s, k, UI_STRIP_NODE_NAME);
-                name = ui_fit(ui, (string_address)strip->name, UI_LABEL_MEDIUM, at.w, fitted, sizeof(fitted));
-                width = ui_kit_measure(ui, name, UI_LABEL_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, at.y, UI_LABEL_MEDIUM), name, UI_LABEL_MEDIUM, ink, 0);
-                language_format(text, sizeof(text), WORDS(settings_percent), (long)strip->percent);
-                width = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
-                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, ui_strip_part(s, k, UI_STRIP_NODE_PERCENT).y, UI_BODY_MEDIUM), (string_address)text,
-                            UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
-                // What is said of it, in the quiet ink, broken to the strip.
-                at = ui_strip_part(s, k, UI_STRIP_NODE_NOTES);
-                for (int note = 0; note < UI_STRIP_NOTES && lines > 0; note++)
-                {
-                        int drawn = strip->note[note][0] ? ui_kit_text_block(ui, centre, at.y, at.w, strip->note[note], UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), lines) : 0;
-
-                        at.y += drawn * ui_dev(ui, 16), lines -= drawn;
-                }
-                // The meter beside the slider, the length of its track as the slider is drawn, and the note on its other side.
+                // The strip the keys are on lies on the kit's state layer, the ink at .10 behind its column, as a pressed row does: the accent of its
+                // name alone is near the ink in a dark theme, and nothing is drawn round its knob.
+                if (said != ink)
+                        ui_kit_fill(ui, &(struct ui_box){column.x * 256, column.y * 256, (column.x + column.w) * 256, (column.y + column.h) * 256,
+                                                         ui_q8(ui, UI_RADIUS), ui_q8(ui, UI_RADIUS)},
+                                    ui_mix(ui_role(UI_ON_SURFACE), 10, 0), null);
+                // The track: the name on end in the slider's height, cut to it; the meter, the length of the slider as it is drawn; the slider.
+                ui_kit_text_stood(ui, name.x, ui_rtl() ? name.y : name.y + name.h, ui_fit(ui, (string_address)strip->name, UI_LABEL_MEDIUM, name.h, fitted, sizeof(fitted)),
+                                  UI_LABEL_MEDIUM, said);
                 for (int channel = 0; channel < 2; channel++)
                         ui_level_now(&strip->level[channel], &shown[channel], &hold[channel]);
                 ui_meter_draw(ui, ui_strip_part(s, k, UI_STRIP_NODE_METER).x, ui_dev(ui, slider->y), ui_dev(ui, slider->y + slider->h), shown, hold);
                 if (shown[0] > 0 || shown[1] > 0 || hold[0] > shown[0] || hold[1] > shown[1])
                         ui_kit.busy = 1;
-                slider->focused = keys && s->focus == k && s->keyed;
                 ui_control_draw(ui, slider);
+                // The foot: the volume as a number in the middle of its box, and the glyph that mutes, in the middle of its button's.
+                at = ui_strip_part(s, k, UI_STRIP_NODE_PERCENT);
+                language_format(text, sizeof(text), WORDS(settings_percent), (long)strip->percent);
+                width = ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM);
+                ui_kit_text(ui, at.x + (at.w - width) / 2, ui_kit_baseline(ui, at.y + (at.h - ui_dev(ui, UI_STRIP_LINE)) / 2, UI_LABEL_MEDIUM), (string_address)text,
+                            UI_LABEL_MEDIUM, said, 0);
+                at = ui_strip_part(s, k, UI_STRIP_NODE_MUTE);
                 ui_control_draw(ui, &s->control[2 * k + 1]);
-                at = ui_strip_part(s, k, UI_STRIP_NODE_BESIDE);
-                ui_strip_stood(ui, strip->note[UI_STRIP_BESIDE], at.x + at.w / 2, ui_dev(ui, slider->y + slider->h), ui_dev(ui, slider->h), ink);
+                if (strip->master == 2)
+                        ui_microphone(ui, at.x + (at.w - size) / 2, at.y + (at.h - size) / 2, size, strip->muted, ink);
+                else
+                        ui_speaker(ui, at.x + (at.w - size) / 2, at.y + (at.h - size) / 2, size, waves, strip->muted, ink);
         }
         ui_scroll_draw(ui, &s->scroll);
 }

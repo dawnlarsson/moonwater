@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	Збільшити
 menu_zoom_out	9234	Зменшити
 mixer_allow	19d2	Дозволити
 mixer_empty	eef1	Звук не відтворюється
-mixer_mute	9f74	Без звуку
 mixer_no_mic	412a	Немає мікрофона
 mixer_nobody	cc29	Жодна програма не записує
 mixer_off	e944	Звуковий сервер вимкнено
 mixer_playback	110c	Відтворення
 mixer_recording	f20c	Запис
 mixer_recording_off	9c09	Запис вимкнено
-mixer_unmute	72bb	Увімкнути звук
 mixer_unplugged	3ed9	Нічого не підключено
 notices_dismiss	9a10	Сховати всі
 notices_item	56a6	%1$s: %2$s

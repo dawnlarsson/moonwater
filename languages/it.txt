@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	I&ngrandisci
 menu_zoom_out	9234	&Riduci
 mixer_allow	19d2	Consenti
 mixer_empty	eef1	Nessun suono in riproduzione
-mixer_mute	9f74	Disattiva audio
 mixer_no_mic	412a	Nessun microfono
 mixer_nobody	cc29	Nessun programma sta registrando
 mixer_off	e944	Il server audio è spento
 mixer_playback	110c	Riproduzione
 mixer_recording	f20c	Registrazione
 mixer_recording_off	9c09	La registrazione è disattivata
-mixer_unmute	72bb	Riattiva audio
 mixer_unplugged	3ed9	Nulla collegato
 notices_dismiss	9a10	Ignora tutto
 notices_item	56a6	%1$s: %2$s

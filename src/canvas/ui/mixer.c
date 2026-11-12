@@ -2,7 +2,7 @@
         The mixer, a window of the sound server's volumes in two pages (the kit's segmented tabs along its top): Playback, the
         output device first and then a strip for every program that has a sound, and Recording, the microphone programs are
         given first and then a strip for every program that records from one (a program that records what plays is none);
-        the kit's strips, ui.c: a disc, its name, its volume, a level meter beside a vertical slider, a mute button. It says
+        the kit's strips, ui.c: every channel its name on end beside a level meter and a vertical slider, and under them its volume and the glyph that mutes it. It says
         what each strip is, hands the strips its events and acts on the one that changed; the sliders,
         the keys, the wheel, the meters' fall and hold, the scrolling when there are more strips than room and the
         mirroring of a window that reads from the right are the kit's.
@@ -70,7 +70,6 @@ struct mixer_big
         unsigned char send[UI_STRIPS_MOST]; // what is to be sent for a strip: 1 its volume, 2 its mute
         char sink[64];                      // the output device as programs name it, for its volume
         char source[64];                    // and the microphone
-        char device_name[96];               // the output's name, the note beside its strip's slider (UI_STRIP_BESIDE): its strip is listed with none
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
         struct ui_view view;                // the window as a tree: the tabs, Allow on the Recording page with recording turned off, and the popup's Mixer row
 };
@@ -91,6 +90,7 @@ static struct
         b32 quick, beside;
         struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
         struct ui_rect strips_box;           // what the tree gave the strips
+        const char address_to note;          // what the window's foot says of the output that plays, or null: nothing is plugged into it
         struct ui_control tabs;              // the two pages: an element of the tree
         const char address_to capture_path;
         string_address font;     // the face this is drawn in (-f), which the mixer it starts is drawn in too
@@ -147,19 +147,18 @@ static int mixer_percent(unsigned int volume)
 }
 
 /*
-        What the page says of the output that plays, under its strip: nothing is plugged into it (and then the strip is dim). Why it is
-        the one that plays is not said here: a note under the volume takes four rows from every slider, and at the default size a
-        plugged output always has a reason, so the sliders would be shorter all the time for a line that is rarely needed.
+        What the page says of the output that plays: nothing is plugged into it, and then its strip is dim and the window's foot says so
+        (mixer.note: one line under the strips, in the window, there only while it has something to say). Nothing is written in a strip,
+        whose height is its slider's. Why a plugged output is the one that plays is not said: it always has a reason.
 */
 static fn mixer_device_notes(const struct audio_state address_to page)
 {
-        struct ui_strips address_to strips = &mixer.big->strips;
         b32 unplugged = false;
 
         for (unsigned int k = 0; k < page->devices && k < AUDIO_STATE_DEVICES; k++)
                 unplugged |= (page->device_list[k].flags & AUDIO_STATE_DEVICE_ACTIVE) && (page->device_list[k].flags & AUDIO_STATE_DEVICE_UNPLUGGED);
-        ui_strips_dim(strips, unplugged);
-        ui_strips_note(strips, 0, unplugged ? WORDS(mixer_unplugged) : "");
+        ui_strips_dim(&mixer.big->strips, unplugged);
+        mixer.note = unplugged ? WORDS(mixer_unplugged) : null;
 }
 
 /*
@@ -183,6 +182,7 @@ static fn mixer_list(b64 now)
         int groups = 0;
 
         ui_strips_begin(&big->strips);
+        mixer.note = null;
         // The Allow button has the keys when it appears: nothing else is on the page to have them. Once recording is on it lets them
         // go (a press on it left them with it), or the strips never show their focus again.
         if (off && !mixer.capture_off)
@@ -192,12 +192,8 @@ static fn mixer_list(b64 now)
         mixer.capture_off = off;
         if (mixer.have && !mixer.recording)
         {
-                // The output's name is not the strip's own line, which is left empty: a name laid across takes the strip's width, so it is the
-                // strip's note beside its slider, set down the strip's margin a letter a line (ui_strip_stood).
-                ui_strips_add(&big->strips, 0xfffffffffffffffeul, "", mixer_percent(page->volume), page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
-                string_copy_bounded((string_address)big->device_name, (string_address)(page->device[0] ? page->device : page->name[0] ? page->name : "?"),
-                                    sizeof(big->device_name));
-                ui_strips_note(&big->strips, UI_STRIP_BESIDE, big->device_name);
+                ui_strips_add(&big->strips, 0xfffffffffffffffeul, page->device[0] ? page->device : page->name[0] ? page->name : "?", mixer_percent(page->volume),
+                              page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
                 mixer_device_notes(page);
         }
@@ -385,8 +381,9 @@ static b32 mixer_tabbed(int which)
 }
 
 // The window as a tree, every size and place the tree's: the tabs (the full window; they take no press while there is no page to show), the
-// strips' area, and the Mixer row at the foot of the popup. With recording off the strips have no height: the line that says so is above
-// Allow, the two in the middle. The strips are put where the tree says.
+// strips' area, the line that says what there is to say of the output (the window; the popup is a strip wide), and the Mixer row at the foot
+// of the popup, a button as wide as a strip. With recording off the strips have no height: the line that says so is above Allow, the two in
+// the middle. The strips are put where the tree says.
 static fn mixer_layout(void)
 {
         struct ui address_to ui = &mixer.ui;
@@ -406,9 +403,12 @@ static fn mixer_layout(void)
                         ui_row(.class = "foot.middle")
                                 ui_button(WORDS(mixer_allow), .class = "action.outlined", .on = mixer_act);
         }
+        if (mixer.note && !mixer.quick)
+                ui_row(.class = "bar")
+                        ui_text(mixer.note, .class = "warning");
         if (mixer.quick)
                 ui_row(.class = "foot.middle")
-                        ui_button(language_of("Mixer"), .class = "action.outlined", .on = mixer_act, .arg = 1);
+                        ui_button(language_of("Mixer"), .class = "outlined", .w = UI_STRIP_W, .h = UI_BUTTONS_H, .on = mixer_act, .arg = 1);
         ui_view_end(&mixer.big->view);
         ui_strips_place(ui, &mixer.big->strips, mixer.strips_box.x, mixer.strips_box.y, mixer.strips_box.w, mixer.strips_box.h);
 }

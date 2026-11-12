@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
 mixer_allow	19d2	Zezwól
 mixer_empty	eef1	Nic nie jest odtwarzane
-mixer_mute	9f74	Wycisz
 mixer_no_mic	412a	Brak mikrofonu
 mixer_nobody	cc29	Żaden program nie nagrywa
 mixer_off	e944	Serwer dźwięku jest wyłączony
 mixer_playback	110c	Odtwarzanie
 mixer_recording	f20c	Nagrywanie
 mixer_recording_off	9c09	Nagrywanie jest wyłączone
-mixer_unmute	72bb	Włącz dźwięk
 mixer_unplugged	3ed9	Nic nie podłączono
 notices_dismiss	9a10	Odrzuć wszystkie
 notices_item	56a6	%1$s: %2$s

@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	&Zooma in
 menu_zoom_out	9234	Zooma &ut
 mixer_allow	19d2	Tillåt
 mixer_empty	eef1	Inget ljud spelas
-mixer_mute	9f74	Ljud av
 mixer_no_mic	412a	Ingen mikrofon
 mixer_nobody	cc29	Inget program spelar in
 mixer_off	e944	Ljudservern är avstängd
 mixer_playback	110c	Uppspelning
 mixer_recording	f20c	Inspelning
 mixer_recording_off	9c09	Inspelning är av
-mixer_unmute	72bb	Ljud på
 mixer_unplugged	3ed9	Inget anslutet
 notices_dismiss	9a10	Avfärda alla
 notices_item	56a6	%1$s: %2$s

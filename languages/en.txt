@@ -56,14 +56,12 @@ menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
 mixer_allow	19d2	Allow
 mixer_empty	eef1	No sound is playing
-mixer_mute	9f74	Mute
 mixer_no_mic	412a	No microphone
 mixer_nobody	cc29	No program is recording
 mixer_off	e944	Sound server is off
 mixer_playback	110c	Playback
 mixer_recording	f20c	Recording
 mixer_recording_off	9c09	Recording is off
-mixer_unmute	72bb	Unmute
 mixer_unplugged	3ed9	Nothing plugged in
 notices_dismiss	9a10	Dismiss all
 notices_item	56a6	%1$s: %2$s
