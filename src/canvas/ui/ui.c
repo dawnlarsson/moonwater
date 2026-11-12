@@ -18684,8 +18684,9 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 */
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
 #define UI_STRIP_MOST 33 // the most segments a strip takes: the host's partitions and the free room round them (settings' SETTINGS_SEGMENTS)
-#define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
+#define UI_SEGMENT_GAP 2   // logical pixels between two segments
 #define UI_SEGMENT_LEAST 8 // the narrowest a segment is, logical pixels
+#define UI_SEGMENT_RADIUS 4 // a segment's corners, logical pixels (a legend's mark, half as tall, has half): a block, not a pill
 #define UI_STRIP_HIGH 16   // the strip's height, logical pixels
 #define UI_LEGEND_LINE 20  // a legend entry's line: the label's 16 and its leading
 #define UI_LEGEND_LEAST 200 // the narrowest column of the legend, logical pixels
@@ -19004,7 +19005,7 @@ static fn ui_row_words(struct ui address_to ui, const struct ui_node address_to 
         ui_kit_text_flipped(ui, n->x + in, baseline, (string_address)text, type, ink, 0, n->x, n->w);
 }
 
-// A segment's pill, or its mark in the legend: its role's colour, or for free room a ring in the outline round nothing.
+// A segment's block, or its mark in the legend: its role's colour, or for free room a ring in the outline round nothing.
 static fn ui_strip_pill(struct ui address_to ui, const struct ui_box address_to box, unsigned int role)
 {
         if (role == UI_STRIP_FREE)
@@ -19037,8 +19038,8 @@ static int ui_list_drive_lit(const struct ui_list address_to l, int id)
 }
 
 /*
-        A drive's strip and its legend, in the parts its row was laid out with. Each segment is a pill of its role's colour (a ring for
-        free room) with its size in its middle where it has room; each entry its mark, its name in the ink, its role's word in the quiet
+        A drive's strip and its legend, in the parts its row was laid out with. Each segment is a block of its role's colour with corners
+        of UI_SEGMENT_RADIUS (a ring for free room) with its size in its middle where it has room; each entry its mark, its name in the ink, its role's word in the quiet
         ink where the name is not it and the room after the name holds it, and its size at its end, the name cut to what is left; the
         partitions not shown are the last entry, in the quiet ink. The segment or the entry under the pointer lights both on the kit's
         state layer, and that segment says its name before its size where it has room. Every place is laid out from the left and turned
@@ -19057,7 +19058,7 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_list address_to
         for (int at = 0; at < count; at++)
                 if ((n = p->segment[at]) && n->w > 0)
                 {
-                        int radius = (n->w < n->h ? n->w : n->h) / 2;
+                        int radius = ui_dev(ui, UI_SEGMENT_RADIUS) * 2 > (n->w < n->h ? n->w : n->h) ? (n->w < n->h ? n->w : n->h) / 2 : ui_dev(ui, UI_SEGMENT_RADIUS);
                         const char address_to text = row->strip_text ? row->strip_text + at * UI_STRIP_TEXT : null;
                         const char address_to name = row->strip_names ? row->strip_names[at] : null;
                         struct ui_box box = {n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, radius * 256, radius * 256};
@@ -19108,7 +19109,8 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_list address_to
                         int size_w = ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM), room = n->w - start - (size_w ? size_w + ui_dev(ui, UI_GAP3) : 0);
                         int name_w = ui_kit_measure(ui, (string_address)name, UI_LABEL_MEDIUM), mark_x = ui_mirror(n->x, mark_w, n->x, n->w), mark_y = n->y + (n->h - mark_h) / 2;
 
-                        ui_strip_pill(ui, &(struct ui_box){mark_x * 256, mark_y * 256, (mark_x + mark_w) * 256, (mark_y + mark_h) * 256, mark_h * 128, mark_h * 128},
+                        ui_strip_pill(ui, &(struct ui_box){mark_x * 256, mark_y * 256, (mark_x + mark_w) * 256, (mark_y + mark_h) * 256, ui_q8(ui, UI_SEGMENT_RADIUS) / 2,
+                                                           ui_q8(ui, UI_SEGMENT_RADIUS) / 2},
                                       row->strip_roles[at]);
                         ui_row_words(ui, n, start, baseline, (const char address_to)ui_fit(ui, (string_address)name, UI_LABEL_MEDIUM, room, cut, sizeof(cut)),
                                      UI_LABEL_MEDIUM, strong);
