@@ -75359,6 +75359,21 @@ static fn tls_name_constraint_rules(void)
             {"an unknown list tag is refused",
              "3007a2053003820161",
              0, null, false},
+            //      A base that is not a GeneralName's DER tag: each was taken
+            //      and then constrained nothing, where OpenSSL holds the CA
+            //      to it (the first two) or refuses the certificate.
+            {"a dNSName base spelled constructed is refused",
+             "3013a011300fa20d040b6578616d706c652e636f6d",
+             0, null, false},
+            {"a base under a long-form tag is refused",
+             "3008a00630049f020161",
+             0, null, false},
+            {"a base that is an OCTET STRING is refused",
+             "3006a00430020400",
+             0, null, false},
+            {"an excluded dNSName spelled constructed is refused",
+             "3011a10f300da20b04096576696c2e74657374",
+             0, null, false},
         };
 
         static p8 constraints[256];

@@ -7620,8 +7620,20 @@ static COLD bool tls_name_allowed(p8 address_to constraints, positive length,
                                            address_of at, address_of tree_stop) ||
                             at == tree_stop)
                                 return false;
+                        //      A base is one of the nine GeneralName forms, in its
+                        //      one DER tag, as the subjectAltName's reader holds a
+                        //      name to. Any other tag was taken whole and then
+                        //      matched no name's form, so a subtree spelled
+                        //      [2] constructed, with a long-form tag, or as a
+                        //      plain OCTET STRING constrained nothing here while
+                        //      OpenSSL held its CA to it.
                         base_tag = constraints[at];
-                        if (tls_asn1_enter(constraints, tree_stop, base_tag,
+                        if ((base_tag != 0xa0 && base_tag != 0x81 &&
+                             base_tag != 0x82 && base_tag != 0xa3 &&
+                             base_tag != 0xa4 && base_tag != 0xa5 &&
+                             base_tag != 0x86 && base_tag != 0x87 &&
+                             base_tag != 0x88) ||
+                            tls_asn1_enter(constraints, tree_stop, base_tag,
                                            address_of at, address_of base_stop) ||
                             base_stop != tree_stop)
                                 return false;
