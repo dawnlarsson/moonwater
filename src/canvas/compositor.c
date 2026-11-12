@@ -2948,15 +2948,14 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 
 
 /*
-        Cursors: one cell for every shape, 32 pixels square, so a shape change is a different bitmap and nothing else. The bitmaps are
-        drawn by hand to the look of the classic Windows cursors (the arrow, the I-beam, the hourglass, the resize arrows, the cross,
-        the four-arrow move, the circle and slash, and the pointing hand with its index finger up). They are not copied from any
-        reference. A row is '#' where the shape is and '.' where it is not. A shape's pixel is its outline when a pixel beside it (up,
-        down, left or right) is clear or lies outside the cell, and its fill otherwise. The hotspot is the pixel the pointer is: the tip
-        of the arrow, the middle of each other shape (the cell's centre, the pixel left of it), and the tip of the hand's index finger.
+        Cursors. The classic set is drawn at the size the classic Windows cursors are (the arrow 12 pixels by 21, the hand 17 by 22, the
+        hourglass 13 by 22, a resize arrow 21 long), each in a cell CP_CELL pixels square, by hand and to their look: none is copied from a
+        file. A row is '#' where the shape is its edge ink (black, on the light look), 'o' where it is its fill ink (white) and '.' where it
+        is clear. The arrow, the hand and the hourglass are white with a black line; the I-beam, the cross, the resize arrows, the four
+        arrows of a move and the circle and slash are black with a white line round them, which is what shows them on a dark ground. The
+        hotspot is the pixel the pointer is: the tip of the arrow and of the hand's index finger, and the middle of each other shape.
 */
-#define CP_CURSOR_W 32
-#define CP_CURSOR_H 32
+#define CP_CELL 24
 #define CP_ARROW 0
 #define CP_RESIZE_H 1
 #define CP_RESIZE_V 2
@@ -2971,419 +2970,342 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 #define CP_SHAPES 11
 _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEXT && WINDOW_POINTER_HAND == CP_HAND,
                "a program's pointer shapes are the compositor's CP_ codes");
-// The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
+// The cursor plane is as large as the smallest a driver makes, and CP_SPAN_MOST the side of the largest picture drawn into a scene.
 #define CP_PLANE 64
+#define CP_SPAN_MOST 384
 
 /*
-        The dynamic cursor (`moonwater canvas cursor style dynamic`, and every pointer a touch uses): one cell of CP_PLANE by CP_PLANE, the
-        plane itself, with its hot cell at its centre, CP_DYN_HOT. The circle's radius is CP_DYN_RADIUS cells, and it grows and stretches
-        along the last motion by at most CP_DYN_SPEED pixels of speed: at the most its outline reaches 16 * 1.25 * 1.5 = 30 cells from the
-        hot cell, and the plane holds 31 on each side of it, so the stretch is always inside the plane and nothing is clipped. A cell is one
-        pixel at a scale of 1, so a cell at a larger scale is a block of pixels and the cell is larger than the plane: a dynamic pointer
-        that is larger than 1 is drawn on the scene, as a classic one is when it is larger than its plane allows (compositor_cursor_fit).
-        A press's squeeze takes CP_DYN_PULSE_NS, two frames of 16 ms.
+        The dynamic cursor (`moonwater canvas cursor style dynamic`, and every pointer a touch uses) is one filled shape with a line at its
+        edge and nothing in it: a circle of CP_DYN_RADIUS cells, which over text is a rounded rectangle in a terminal cell's proportions
+        (one wide, two tall), the one easing into the other. A fast hand stretches it along its motion and squashes it across by as much,
+        so its area stays: nothing under CP_DYN_SLOW logical pixels a second, all of CP_DYN_STRETCH from CP_DYN_FAST up, and it lets go
+        CP_DYN_IDLE_NS after the last motion. Its cell is CP_DYN_CELL square with the pointer at its middle, so the plane holds it at twice
+        its size with the longest stretch.
+
+        Either picture is made a pixel at a time from samples of its cell (compositor_pointer_row), so it is drawn at any scale: a whole
+        scale gives the classic bitmaps pixel for pixel, and a scale between is smooth. That is what a held button uses: the left one
+        shrinks the pointer by the squeeze the settings give and the right one grows it by half that, over CP_SWAY_NS on the kit's ease.
 */
-#define CP_DYN_HOT 32
+#define CP_DYN_CELL 32
 #define CP_DYN_RADIUS 8
-#define CP_DYN_SPEED 48
-#define CP_DYN_PULSE_NS 32000000ull
-#define CP_DYN_IDLE_NS 120000000ull
-#define CP_DYN_SPIN_NS 125000000ull
+#define CP_DYN_TEXT_W 4         // the rectangle over text: its half width, half height and corner radius, in cells
+#define CP_DYN_TEXT_H 8
+#define CP_DYN_TEXT_R 2
+#define CP_DYN_SLOW 1500
+#define CP_DYN_FAST 6000
+#define CP_DYN_STRETCH 154      // 256ths the long axis grows by at most: six tenths
+#define CP_DYN_IDLE_NS 50000000ull
+#define CP_DYN_SAMPLE_NS 8000000ull
+#define CP_SWAY_NS 100000000ull
 
-// The geometry of one dynamic shape, in units of a cell's 64th (so a cell is 64): the outline's semi-axes along and across the
-// stretch, a rounded rectangle's corner radius, and the same one cell in for the inner edge, with the unit direction of the stretch.
-struct compositor_dyn
+// What a pointer's picture is of: everything its pixels come from, so two that are equal are one picture.
+struct compositor_pointer
 {
-        long long ux, uy;      // the unit direction, times 64
-        long long a, b, c;     // the outer edge: semi-axis along the stretch, across it, and the rectangle's corner radius
-        long long ai, bi, ci;  // the inner edge, a cell in from the outer
-        int length;            // the inner mark's half length, in cells
-        int spin;              // the wait arc's eighth of a turn, 0 to 7
+        int dyn;                // the dynamic shape, and not a bitmap
+        unsigned int shape;     // the bitmap (0 for the dynamic shape)
+        int scale;              // device pixels a cell, in 256ths
+        int hw, hh, c;          // the dynamic shape's half width, half height and corner radius, in 256ths of a cell
+        int ux, uy, grow;       // its stretch: the unit direction times 64, and how much longer along it in 256ths (0 for none)
 };
 
-static int compositor_cursor_dynamic(void);
-static void compositor_dyn_setup(struct compositor_dyn *d);
-
-// The bitmap of each shape, one row of CP_CURSOR_W pixels a line (see above).
-static const char compositor_cursor_art[CP_SHAPES][CP_CURSOR_H][CP_CURSOR_W + 1] = {
-    {  // arrow
-        "#...............................",
-        "##..............................",
-        "###.............................",
-        "####............................",
-        "#####...........................",
-        "######..........................",
-        "#######.........................",
-        "########........................",
-        "#########.......................",
-        "##########......................",
-        "###########.....................",
-        "############....................",
-        "#############...................",
-        "##############..................",
-        "##########......................",
-        "####.#####......................",
-        "###..#####......................",
-        "##....#####.....................",
-        "#.....#####.....................",
-        ".......#####....................",
-        ".......#####....................",
-        "........#####...................",
-        "........#####...................",
-        ".........###....................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // resize h
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "........#.............#.........",
-        ".......##.............##........",
-        "......###.............###.......",
-        ".....#####################......",
-        "....#######################.....",
-        "...#########################....",
-        "....#######################.....",
-        ".....#####################......",
-        "......###.............###.......",
-        ".......##.............##........",
-        "........#.............#.........",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // resize v
-        "................................",
-        "................................",
-        "................................",
-        "...............#................",
-        "..............###...............",
-        ".............#####..............",
-        "............#######.............",
-        "...........#########............",
-        "..........###########...........",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        ".............#####..............",
-        "..........###########...........",
-        "...........#########............",
-        "............#######.............",
-        ".............#####..............",
-        "..............###...............",
-        "...............#................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // resize nwse
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "........#######.................",
-        "........######..................",
-        "........######..................",
-        "........#######.................",
-        "........########................",
-        "........#########...............",
-        "........#..#######..............",
-        "............#######.............",
-        ".............#######..#.........",
-        "..............#########.........",
-        "...............########.........",
-        "................#######.........",
-        ".................######.........",
-        ".................######.........",
-        "................#######.........",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // resize nesw
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................#######.........",
-        ".................######.........",
-        ".................######.........",
-        "................#######.........",
-        "...............########.........",
-        "..............#########.........",
-        ".............#######..#.........",
-        "............#######.............",
-        "........#..#######..............",
-        "........#########...............",
-        "........########................",
-        "........#######.................",
-        "........######..................",
-        "........######..................",
-        "........#######.................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the text
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "..........##.......##...........",
-        "..........###########...........",
-        "...........#########............",
-        ".............#####..............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        ".............#####..............",
-        "...........#########............",
-        "..........###########...........",
-        "..........##.......##...........",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the cross
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............#.#...............",
-        "....##########...##########.....",
-        "....#########.....#########.....",
-        "....##########...##########.....",
-        "..............#.#...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the move
-        "................................",
-        "................................",
-        "...............#................",
-        "..............###...............",
-        ".............#####..............",
-        "............#######.............",
-        "...........#########............",
-        "..........###########...........",
-        ".............#####..............",
-        ".............#####..............",
-        ".......#.....#####.....#........",
-        "......##.....#####.....##.......",
-        ".....###.....#####.....###......",
-        "....#######################.....",
-        "...#########################....",
-        "..###########################...",
-        "...#########################....",
-        "....#######################.....",
-        ".....###.....#####.....###......",
-        "......##.....#####.....##.......",
-        ".......#.....#####.....#........",
-        ".............#####..............",
-        ".............#####..............",
-        "..........###########...........",
-        "...........#########............",
-        "............#######.............",
-        ".............#####..............",
-        "..............###...............",
-        "...............#................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the hand
-        "...###..........................",
-        "..#####.........................",
-        "..#####.........................",
-        "..#####.........................",
-        "..#####..##.....................",
-        "..#####.###.....................",
-        "..#####.###.##..................",
-        "..#####.###.###.................",
-        "..#####.###.###.##..............",
-        "..#####.###.###.##..............",
-        "..#####.###.###.##..............",
-        "..################..............",
-        "##################..............",
-        "#################...............",
-        "################................",
-        ".##############.................",
-        "..############..................",
-        "...##########...................",
-        "....#########...................",
-        "....#########...................",
-        "....#########...................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the wait
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "........###############.........",
-        "........###############.........",
-        "........###############.........",
-        ".........##.........##..........",
-        ".........#############..........",
-        ".........#############..........",
-        "..........###########...........",
-        "...........##.#.#.##............",
-        "............##.#.##.............",
-        ".............##.##..............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        "..............###...............",
-        ".............#####..............",
-        "............#######.............",
-        "...........###.#.###............",
-        "..........#.#.#.#.#.#...........",
-        ".........#.#.#.#.#.#.#..........",
-        ".........#############..........",
-        ".........##.........##..........",
-        "........###############.........",
-        "........###############.........",
-        "........###############.........",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
-    {  // the notallowed
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "...........#########............",
-        ".........#############..........",
-        "........###############.........",
-        ".......#################........",
-        "......########.....######.......",
-        "......#########.....#####.......",
-        ".....###########.....#####......",
-        ".....############.....####......",
-        ".....#############....####......",
-        ".....####.#########...####......",
-        ".....####..#########..####......",
-        ".....####...#########.####......",
-        ".....####....#############......",
-        ".....####.....############......",
-        ".....#####.....###########......",
-        "......#####.....#########.......",
-        "......######.....########.......",
-        ".......#################........",
-        "........###############.........",
-        ".........#############..........",
-        "...........#########............",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-        "................................",
-    },
+// A value on its way to another (0 at rest): where it left from, where it goes, and when it left.
+struct compositor_sway
+{
+        int from, to;
+        positive at;
 };
 
-// The pixel of its cell each shape is the pointer at: across, then down.
-static const signed char compositor_cursor_hot[CP_SHAPES][2] = {{0, 0}, {15, 15}, {15, 15}, {15, 15}, {15, 15}, {15, 15}, {15, 15}, {15, 15}, {4, 0}, {15, 15}, {15, 15}};
+// The bitmap of each shape, one row of CP_CELL pixels a line (see above).
+static const char compositor_cursor_art[CP_SHAPES][CP_CELL][CP_CELL + 1] = {
+        [CP_ARROW] = {
+            "#.......................",
+            "##......................",
+            "#o#.....................",
+            "#oo#....................",
+            "#ooo#...................",
+            "#oooo#..................",
+            "#ooooo#.................",
+            "#oooooo#................",
+            "#ooooooo#...............",
+            "#oooooooo#..............",
+            "#ooooooooo#.............",
+            "#oooooooooo#............",
+            "#oooooo#####............",
+            "#ooo#oo#................",
+            "#oo#.#oo#...............",
+            "#o#..#oo#...............",
+            "##....#oo#..............",
+            "#.....#oo#..............",
+            ".......#oo#.............",
+            ".......#oo#.............",
+            "........##..............",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_RESIZE_H] = {
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "....ooo.........ooo.....",
+            "...oo#o.........o#oo....",
+            "..oo##o.........o##oo...",
+            ".oo###o.........o###oo..",
+            "oo####ooooooooooo####oo.",
+            "o#####################o.",
+            "oo####ooooooooooo####oo.",
+            ".oo###o.........o###oo..",
+            "..oo##o.........o##oo...",
+            "...oo#o.........o#oo....",
+            "....ooo.........ooo.....",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_RESIZE_V] = {
+            "..........ooo...........",
+            ".........oo#oo..........",
+            "........oo###oo.........",
+            ".......oo#####oo........",
+            "......oo#######oo.......",
+            "......o#########o.......",
+            "......ooooo#ooooo.......",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "......ooooo#ooooo.......",
+            "......o#########o.......",
+            "......oo#######oo.......",
+            ".......oo#####oo........",
+            "........oo###oo.........",
+            ".........oo#oo..........",
+            "..........ooo...........",
+            "........................",
+        },
+        [CP_RESIZE_NWSE] = {
+            "........................",
+            "........................",
+            "........................",
+            "...ooooooooo............",
+            "...o#######o............",
+            "...o######oo............",
+            "...o#####oo.............",
+            "...o####oo..............",
+            "...o###o#oo.............",
+            "...o##ooo#oo............",
+            "...o#oo.oo#oo...........",
+            "...ooo...oo#oo...ooo....",
+            "..........oo#oo.oo#o....",
+            "...........oo#ooo##o....",
+            "............oo#o###o....",
+            ".............oo####o....",
+            "............oo#####o....",
+            "...........oo######o....",
+            "...........o#######o....",
+            "...........ooooooooo....",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_RESIZE_NESW] = {
+            "........................",
+            "........................",
+            "........................",
+            "...........ooooooooo....",
+            "...........o#######o....",
+            "...........oo######o....",
+            "............oo#####o....",
+            ".............oo####o....",
+            "............oo#o###o....",
+            "...........oo#ooo##o....",
+            "..........oo#oo.oo#o....",
+            "...ooo...oo#oo...ooo....",
+            "...o#oo.oo#oo...........",
+            "...o##ooo#oo............",
+            "...o###o#oo.............",
+            "...o####oo..............",
+            "...o#####oo.............",
+            "...o######oo............",
+            "...o#######o............",
+            "...ooooooooo............",
+            "........................",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_TEXT] = {
+            "........................",
+            "........................",
+            "........................",
+            ".......ooooooooo........",
+            ".......o###o###o........",
+            ".......oooo#oooo........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            ".......oooo#oooo........",
+            ".......o###o###o........",
+            ".......ooooooooo........",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_CROSS] = {
+            "........................",
+            "........................",
+            "..........ooo...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..ooooooooo#ooooooooo...",
+            "..o#################o...",
+            "..ooooooooo#ooooooooo...",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........o#o...........",
+            "..........ooo...........",
+            "........................",
+            "........................",
+            "........................",
+        },
+        [CP_MOVE] = {
+            "..........ooo...........",
+            ".........oo#oo..........",
+            "........oo###oo.........",
+            ".......oo#####oo........",
+            ".......o#######o........",
+            ".......oooo#oooo........",
+            "..........o#o...........",
+            "...ooo....o#o....ooo....",
+            "..oo#o....o#o....o#oo...",
+            ".oo##o....o#o....o##oo..",
+            "oo###oooooo#oooooo###oo.",
+            "o#####################o.",
+            "oo###oooooo#oooooo###oo.",
+            ".oo##o....o#o....o##oo..",
+            "..oo#o....o#o....o#oo...",
+            "...ooo....o#o....ooo....",
+            "..........o#o...........",
+            ".......oooo#oooo........",
+            ".......o#######o........",
+            ".......oo#####oo........",
+            "........oo###oo.........",
+            ".........oo#oo..........",
+            "..........ooo...........",
+            "........................",
+        },
+        [CP_HAND] = {
+            ".....##.................",
+            "....#oo#................",
+            "....#oo#................",
+            "....#oo#................",
+            "....#oo#................",
+            "....#oo###..............",
+            "....#oo#oo###...........",
+            "....#oo#oo#oo##.........",
+            "....#oo#oo#oo#o#........",
+            "###.#oo#oo#oo#oo#.......",
+            "#oo##oooooooo#oo#.......",
+            "#ooo#ooooooooooo#.......",
+            ".#oo#ooooooooooo#.......",
+            "..#o#ooooooooooo#.......",
+            "..#ooooooooooooo#.......",
+            "...#oooooooooooo#.......",
+            "...#ooooooooooo#........",
+            "....#oooooooooo#........",
+            "....#oooooooooo#........",
+            ".....#oooooooo#.........",
+            ".....#oooooooo#.........",
+            ".....##########.........",
+            "........................",
+            "........................",
+        },
+        [CP_WAIT] = {
+            "........................",
+            ".....#############......",
+            ".....##ooooooooo##......",
+            ".....#############......",
+            "......#ooooooooo#.......",
+            "......#ooooooooo#.......",
+            "......#oo#o#o#oo#.......",
+            "......#ooo#o#ooo#.......",
+            "......##ooo#ooo##.......",
+            ".......##ooooo##........",
+            "........##ooo##.........",
+            ".........##o##..........",
+            ".........##o##..........",
+            "........##ooo##.........",
+            ".......##oo#oo##........",
+            "......##ooooooo##.......",
+            "......#oooo#oooo#.......",
+            "......#ooo#o#ooo#.......",
+            "......#oo#o#o#oo#.......",
+            "......#o#o#o#o#o#.......",
+            ".....#############......",
+            ".....##ooooooooo##......",
+            ".....#############......",
+            "........................",
+        },
+        [CP_NOTALLOWED] = {
+            "........................",
+            "........oooooooo........",
+            "......ooo######ooo......",
+            "....ooo##########ooo....",
+            "...oo##############oo...",
+            "...o####oooooooo####o...",
+            "..oo####oo.....oo###oo..",
+            "..o######oo.....oo###o..",
+            ".oo##oo###oo.....oo##oo.",
+            ".o###ooo###oo.....o###o.",
+            ".o###o.oo###oo....o###o.",
+            ".o###o..oo###oo...o###o.",
+            ".o###o...oo###oo..o###o.",
+            ".o###o....oo###oo.o###o.",
+            ".o###o.....oo###ooo###o.",
+            ".oo##oo.....oo###oo##oo.",
+            "..o###oo.....oo######o..",
+            "..oo###oo.....oo####oo..",
+            "...o####oooooooo####o...",
+            "...oo##############oo...",
+            "....ooo##########ooo....",
+            "......ooo######ooo......",
+            "........oooooooo........",
+            "........................",
+        },
+};
+
+static const signed char compositor_cursor_hot[CP_SHAPES][2] = {{0, 0}, {11, 11}, {11, 11}, {11, 11}, {11, 11}, {11, 11}, {11, 11}, {11, 11}, {5, 0}, {11, 11}, {11, 11}};
 
 // The edges of a window a hand has hold of, and the shape that says so.
 #define CP_EDGE_LEFT 1u
@@ -3401,191 +3323,169 @@ static const unsigned char compositor_cursor_by_edges[16] = {
     [CP_EDGE_BOTTOM | CP_EDGE_LEFT] = CP_RESIZE_NESW,
 };
 
-// The cell of a shape at a scale with the pointer at x, y: its top left.
-static void compositor_cursor_cell(int *left, int *top, int x, int y, unsigned int shape, int scale)
+// A picture's square: its side in pixels, and the pixel of it the pointer is on (the dynamic shape's middle).
+static int compositor_pointer_span(const struct compositor_pointer *p, int *hot_x, int *hot_y)
 {
-        const signed char *hot = compositor_cursor_hot[shape < CP_SHAPES ? shape : 0];
-        int hx = compositor_cursor_dynamic() ? CP_DYN_HOT : hot[0], hy = compositor_cursor_dynamic() ? CP_DYN_HOT : hot[1];
+        const signed char *hot = compositor_cursor_hot[p->shape];
+        int span = ((p->dyn ? CP_DYN_CELL : CP_CELL) * p->scale + 255) >> 8;
 
-        *left = x - hx * scale;
-        *top = y - hy * scale;
-}
-
-// The largest whole scale of a shape the plane holds: a classic shape is CP_CURSOR_W cells across, the dynamic one CP_PLANE.
-static int compositor_cursor_fit(int scale)
-{
-        int span = compositor_cursor_dynamic() ? CP_PLANE : CP_CURSOR_W;
-        int most = CP_PLANE / span;
-
-        return scale < most ? scale : most;
-}
-
-// The ink of a pixel of a shape's cell: 0 clear, 1 its fill, 2 its outline (a shape pixel with a clear pixel or the cell's edge
-// beside it, up, down, left or right).
-static int compositor_cursor_inside(unsigned int shape, int row, int column)
-{
-        return row >= 0 && row < CP_CURSOR_H && column >= 0 && column < CP_CURSOR_W &&
-               compositor_cursor_art[shape][row][column] == '#';
+        *hot_x = p->dyn ? span / 2 : hot[0] * p->scale >> 8;
+        *hot_y = p->dyn ? span / 2 : hot[1] * p->scale >> 8;
+        return span < CP_SPAN_MOST ? span : CP_SPAN_MOST;
 }
 
 /*
-        The dynamic pointer's ink, a cell of the plane at a time, with its geometry (compositor_dyn_setup). The circle is an ellipse
-        whose axes are the stretch's: along the last motion it is a times the radius, across it b, and the outline is the one cell
-        at its edge. The shapes that are not the text's are marked inside it, and the text's is a rounded rectangle, which is its
-        own outline and has no mark. Positions are in a cell's 64ths, so the stretch is worked in whole numbers.
+        The dynamic shape's covers at a place, in 256ths of a cell from its middle: its fill's and its edge's. It is a rounded rectangle (a
+        circle when its corner radius is its half extents): the place's distance to the outline is its distance to the nearest side, or
+        to the corner's arc where it is past both of a corner's centre lines, and that distance in pixels is the cover outright, half a
+        pixel either side of the outline, so the edge is as smooth as a pixel's 256 levels allow at any size. The edge ink is the cell
+        inside the outline. A stretched shape is asked where the place was before the stretch (along the motion it is divided by the
+        stretch, across it multiplied, so the area stays), and its distance there is put back in the screen's pixels by the length the
+        stretch gives the outline's normal, which keeps the edge one cell wide all the way round. A place deep inside or well outside
+        is answered without a square root.
 */
-static int compositor_dyn_within(int box, long long along, long long across, long long a, long long b, long long c)
+static void compositor_dyn_cover(const struct compositor_pointer *p, long long u, long long v, unsigned char *fill, unsigned char *edge)
 {
-        long long aa = along < 0 ? -along : along, bb = across < 0 ? -across : across, da, db;
+        long long a = 256 + p->grow, half = 32768 / p->scale + 1, reach = half * a / 256 + 1, x, y, away, nx = 64, ny = 0, along, across, outer, inner;
 
-        if (a <= 0 || b <= 0)
-                return 0;
-        if (!box)
-                return along * along * b * b + across * across * a * a <= a * a * b * b;
-        if (aa > a || bb > b)
-                return 0;
-        if (aa > a - c && bb > b - c)
+        *fill = *edge = 0;
+        away = (p->hw + p->hh) * a / 256 + half; // nothing of the shape is further than this from its middle, on either axis
+        if (u > away || u < -away || v > away || v < -away)
+                return;
+        if (p->grow)
         {
-                da = aa - (a - c);
-                db = bb - (b - c);
-                return da * da + db * db <= c * c;
+                along = (u * p->ux + v * p->uy) / 64 * 256 / a, across = (v * p->ux - u * p->uy) / 64 * a / 256;
+                u = (along * p->ux - across * p->uy) / 64;
+                v = (along * p->uy + across * p->ux) / 64;
         }
-        return 1;
-}
-
-// The quarter turns of the wait arc: each eighth is the two directions its quarter lies between, which are at right angles.
-static const signed char compositor_dyn_quarters[8][2][2] = {{{1, 0}, {0, 1}},   {{1, 1}, {-1, 1}}, {{0, 1}, {-1, 0}}, {{-1, 1}, {-1, -1}},
-                                                             {{-1, 0}, {0, -1}}, {{-1, -1}, {1, -1}}, {{0, -1}, {1, 0}}, {{1, -1}, {1, 1}}};
-
-// The mark a shape wears inside the circle, at dx, dy cells from the hot cell (ax, ay their sizes), with its arms L cells long.
-// The arrows of a resize are double-ended, the cross of move is four-armed, the hand's mark is a dot, the wait is a quarter of an
-// arc turning, and not-allowed is the slash (the same diagonal as a resize's bar).
-static int compositor_dyn_mark(unsigned int shape, int dx, int dy, int ax, int ay, int L, int spin)
-{
-        int d2 = ax * ax + ay * ay;
-        int hx = ax <= L && ax >= L - 4 && ay == L - ax, hy = ay <= L && ay >= L - 4 && ax == L - ay;
-        int tip = ax <= L && ay <= L && ((ax == L && ay >= L - 4) || (ay == L && ax >= L - 4));
-        const signed char (*q)[2] = compositor_dyn_quarters[spin & 7];
-
-        switch (shape)
+        x = (u < 0 ? -u : u) - (p->hw - p->c), y = (v < 0 ? -v : v) - (p->hh - p->c); // from the corner's centre
+        if (x > 0 && y > 0)
         {
-        case CP_RESIZE_H:
-                return (ay == 0 && ax <= L) || hx;
-        case CP_RESIZE_V:
-                return (ax == 0 && ay <= L) || hy;
-        case CP_RESIZE_NWSE:
-                return (dx == dy && ax <= L) || (dx * dy > 0 && tip);
-        case CP_RESIZE_NESW:
-                return (dx == -dy && ax <= L) || (dx * dy < 0 && tip);
-        case CP_CROSS:
-                return (ax == 0 && ay <= L) || (ay == 0 && ax <= L);
-        case CP_MOVE:
-                return (ax == 0 && ay <= L) || (ay == 0 && ax <= L) || hx || hy;
-        case CP_HAND:
-                return d2 <= 9;
-        case CP_WAIT:
-                return d2 <= L * L && d2 >= (L - 1) * (L - 1) && dx * q[0][0] + dy * q[0][1] >= 0 && dx * q[1][0] + dy * q[1][1] >= 0;
-        case CP_NOTALLOWED:
-                return dx == dy && ax <= L;
-        default:
-                return 0;
-        }
-}
+                long long square = x * x + y * y, out = p->c + reach, in = p->c - 256 * a / 256 - reach;
 
-// The ink of a cell of the plane for the dynamic shape d (NULL for the classic bitmap).
-static int compositor_dyn_pixel(const struct compositor_dyn *d, unsigned int shape, int row, int column)
-{
-        int dx = column - CP_DYN_HOT, dy = row - CP_DYN_HOT, ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
-        long long px = dx * 64ll, py = dy * 64ll;
-        long long along = (px * d->ux + py * d->uy) / 64, across = (py * d->ux - px * d->uy) / 64;
-        int text = shape == CP_TEXT;
-
-        if (!compositor_dyn_within(text, along, across, d->a, d->b, d->c))
-                return 0;
-        if (!compositor_dyn_within(text, along, across, d->ai, d->bi, d->ci))
-                return 2;
-        // The inside is filled (ink 1, as the classic cursors' white); a mark is drawn over it in outline ink (2). The text's is all fill.
-        if (text)
-                return 1;
-        return compositor_dyn_mark(shape, dx, dy, ax, ay, d->length, d->spin) ? 2 : 1;
-}
-
-static int compositor_cursor_pixel(const struct compositor_dyn *d, unsigned int shape, int row, int column)
-{
-        if (d)
-                return compositor_dyn_pixel(d, shape, row, column);
-        if (!compositor_cursor_inside(shape, row, column))
-                return 0;
-        if (compositor_cursor_inside(shape, row - 1, column) && compositor_cursor_inside(shape, row + 1, column) &&
-            compositor_cursor_inside(shape, row, column - 1) && compositor_cursor_inside(shape, row, column + 1))
-                return 1;
-        return 2;
-}
-
-/*
-        The cursor with its hotspot at x, y, in two colours that never share a
-        pixel: runs of a row become rectangles, clipped to the target's damage
-        like everything else it draws.
-*/
-static void compositor_cursor_draw(const struct compositor_target *t, int x, int y, unsigned int shape,
-                                   int scale, unsigned int fill, unsigned int edge)
-{
-        struct compositor_dyn dyn;
-        const struct compositor_dyn *d = 0;
-        int left, top, span;
-
-        if (shape >= CP_SHAPES)
-                shape = CP_ARROW;
-        if (compositor_cursor_dynamic())
-        {
-                compositor_dyn_setup(&dyn);
-                d = &dyn;
-        }
-        span = d ? CP_PLANE : CP_CURSOR_W;
-        compositor_cursor_cell(&left, &top, x, y, shape, scale);
-        for (int row = 0; row < span; row++)
-                for (int column = 0; column < span;)
+                if (square >= out * out)
+                        return;
+                if (in > 0 && square <= in * in)
                 {
-                        int ink = compositor_cursor_pixel(d, shape, row, column), run = column + 1;
-
-                        while (run < span && compositor_cursor_pixel(d, shape, row, run) == ink)
-                                run++;
-                        if (ink)
-                                compositor_fill(t, left + column * scale, top + row * scale, (run - column) * scale, scale,
-                                                ink == 2 ? edge : fill);
-                        column = run;
+                        *fill = 255;
+                        return;
                 }
+                away = (long long)compositor_isqrt((unsigned long long)square);
+                nx = x * 64 / away, ny = y * 64 / away, away -= p->c;
+        }
+        else if (x > y)
+                away = x - p->c;
+        else
+                away = y - p->c, nx = 0, ny = 64;
+        if (p->grow)
+        {
+                nx = u < 0 ? -nx : nx, ny = v < 0 ? -ny : ny;
+                along = (nx * p->ux + ny * p->uy) / 64 * 256 / a, across = (ny * p->ux - nx * p->uy) / 64 * a / 256;
+                along = (long long)compositor_isqrt((unsigned long long)(along * along + across * across));
+                away = away * 64 / (along ? along : 1);
+        }
+        away = away * p->scale / 256; // 256ths of a pixel from the outline, less inside it
+        outer = away < -128 ? 256 : away > 128 ? 0 : 128 - away;
+        inner = away + p->scale < -128 ? 256 : away + p->scale > 128 ? 0 : 128 - away - p->scale;
+        *edge = (unsigned char)((outer - inner) * 255 / 256);
+        *fill = (unsigned char)(inner ? inner * 255 / (256 - (outer - inner)) : 0);
+}
+
+/*
+        One row of a picture, span pixels from its left: the cover of its fill ink a pixel, and of its edge ink over that. The fill's
+        cover is of what the edge leaves, so that mixing the fill and then the edge gives each ink its own share. The dynamic shape's
+        are worked out at the pixel's middle (compositor_dyn_cover). A bitmap's pixel is n by n samples of its cell, each at its place
+        (from the hot pixel's corner, over the scale) and no two in one row or one column of the pixel, so at a whole scale every sample
+        of a pixel is in one cell and the covers are all or none, and at a scale between an edge along the rows is as smooth as one
+        across them.
+*/
+static void compositor_pointer_row(const struct compositor_pointer *p, int row, int span, int hot_x, int hot_y, unsigned char *fill, unsigned char *edge)
+{
+        int n = p->dyn ? 1 : p->scale < 4 * 256 ? 4 : 2, all = n * n;
+        long long step = (32768ll << 16) / (all * p->scale); // half a sample's column, in 256ths of a cell, Q16
+        long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
+        long long oy = hot_y * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][1]);
+
+        for (int column = 0; column < span; column++)
+        {
+                int inks[3] = {0, 0, 0};
+
+                if (p->dyn)
+                {
+                        compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
+                        continue;
+                }
+                for (int j = 0; j < n; j++)
+                        for (int i = 0; i < n; i++)
+                        {
+                                long long u = ((2ll * ((column * n + i) * n + j) + 1) * step >> 16) - ox, v = ((2ll * ((row * n + j) * n + i) + 1) * step >> 16) - oy;
+                                char ink = u >= 0 && v >= 0 && u < CP_CELL * 256 && v < CP_CELL * 256 ? compositor_cursor_art[p->shape][v >> 8][u >> 8] : '.';
+
+                                inks[ink == '#' ? 2 : ink == 'o']++;
+                        }
+                edge[column] = (unsigned char)(inks[2] * 255 / all);
+                fill[column] = (unsigned char)(inks[1] ? inks[1] * 255 / (all - inks[2]) : 0);
+        }
+}
+
+/*
+        A pointer's picture with the pointer at x, y, cut to the target's damage: each row's covers mix the fill ink and then the edge ink
+        over it (memory_mix_u32_row, which is what the GPU's records do). A fill ink with an alpha is the plane's: its pixels take the
+        cover of both inks as their alpha, over colours the mixes have already multiplied by it.
+*/
+static void compositor_cursor_draw(const struct compositor_target *t, int x, int y, const struct compositor_pointer *p, unsigned int fill, unsigned int edge)
+{
+        unsigned int inks[2][CP_SPAN_MOST];
+        unsigned char covers[2][CP_SPAN_MOST];
+        int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
+        int x1 = left > t->x1 ? left : t->x1, x2 = left + span < t->x2 ? left + span : t->x2;
+        int y1 = top > t->y1 ? top : t->y1, y2 = top + span < t->y2 ? top + span : t->y2;
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        memory_fill_u32_rect(inks[0], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, fill & 0xffffffu);
+        memory_fill_u32_rect(inks[1], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, edge & 0xffffffu);
+        for (int row = y1; row < y2; row++)
+        {
+                unsigned int *pixels = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                compositor_pointer_row(p, row - top, span, hot_x, hot_y, covers[0], covers[1]);
+                for (int ink = 0; ink < 2; ink++)
+                        memory_mix_u32_row(pixels, inks[ink], covers[ink] + (x1 - left), (positive)(x2 - x1));
+                for (int at = x1 - left; (fill >> 24) && at < x2 - left; at++)
+                        pixels[at - (x1 - left)] |= (covers[1][at] + (covers[0][at] * (255u - covers[1][at]) + 127) / 255) << 24;
+        }
 }
 
 #ifdef MOONWATER_GPU_C
-// The pointer the compositor draws into the scene (compositor_cursor_draw): its runs of the shape's bitmap, as fills over everything.
-static void compositor_gpu_cursor(int x, int y, unsigned int shape, int scale, unsigned int fill, unsigned int edge)
+/*
+        The pointer the compositor draws into the GPU's scene, over everything: its two covers as tables of the pool and a mix of each ink
+        by its table, the same two mixes compositor_cursor_draw makes. The tables are kept by the count of pictures, so one that has not
+        changed is not made again. False when the pool has no room for them or a record no pitch for the picture's side (the processor
+        draws the present).
+*/
+static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *p, unsigned int fill, unsigned int edge)
 {
-        struct compositor_dyn dyn;
-        const struct compositor_dyn *d = 0;
-        int left, top, span;
+        static struct compositor_pointer last;
+        static int count;
+        unsigned char *table[2];
+        int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
+        unsigned int at[2];
 
-        if (shape >= CP_SHAPES)
-                shape = CP_ARROW;
-        if (compositor_cursor_dynamic())
+        if (memory_compare(&last, p, sizeof(last)))
+                last = *p, count++;
+        at[0] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
+        at[1] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
+        if (!at[0] || !at[1])
         {
-                compositor_dyn_setup(&dyn);
-                d = &dyn;
+                compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
+                return false;
         }
-        span = d ? CP_PLANE : CP_CURSOR_W;
-        compositor_cursor_cell(&left, &top, x, y, shape, scale);
-        for (int row = 0; row < span; row++)
-                for (int column = 0; column < span;)
-                {
-                        int ink = compositor_cursor_pixel(d, shape, row, column), run = column + 1;
-
-                        while (run < span && compositor_cursor_pixel(d, shape, row, run) == ink)
-                                run++;
-                        if (ink)
-                                compositor_gpu_rect(0, left + column * scale, top + row * scale, left + run * scale,
-                                                    top + (row + 1) * scale, ink == 2 ? edge : fill, 0, 0, 0);
-                        column = run;
-                }
+        for (int row = 0; table[0] && table[1] && row < span; row++)
+                compositor_pointer_row(p, row, span, hot_x, hot_y, table[0] + row * span, table[1] + row * span);
+        compositor_gpu_rect(5, left, top, left + span, top + span, fill, 0, at[0], span);
+        compositor_gpu_rect(5, left, top, left + span, top + span, edge, 0, at[1], span);
+        return true;
 }
 
 #endif
@@ -4772,12 +4672,11 @@ static struct
         {
                 unsigned int handle[2]; // the plane's two buffers, 0 when it has none
                 int back;               // the one that is not showing
-                int plane_shape, plane_scale; // what the plane wears
+                int plane_on;           // the plane shows a picture, and
+                struct compositor_pointer plane, drawn_as; // the one it wears; and the one the pointer drawn into the scanout is of
                 int soft;               // the pointer is drawn into the scanout
-                int drawn, x, y;        // where the software pointer was last damaged,
-                unsigned int drawn_shape;
+                int drawn, x, y;        // where the software pointer was last damaged
                 int client_hidden;   // a window's client asked for no pointer (wl_pointer.set_cursor with no surface), over that window
-                int drawn_scale;
                 unsigned int shape;     // what the pointer wears now
                 int asked_row;          // the window whose shape the pointer took at the last motion (COMPOSITOR_NONE for none), and the shape it had
                 int asked_seen;
@@ -4785,21 +4684,19 @@ static struct
                 positive magnified_until;
                 int magnify;            // the hand shook it since the last motion
                 int shake_off;          // `moonwater canvas cursor shake off`: a shake finds nothing
-                int click_off;          // `moonwater canvas cursor click off`: a press does not squeeze the pointer (on by default)
-                int click_frames;       // frames left at the squeezed scale, after a press of the left button (compositor_click_press)
+                int click_off;          // `moonwater canvas cursor click off`: a held button leaves the pointer its size (on by default)
                 positive shake_ns;      // how long a shaken pointer stays large (0 is COMPOSITOR_MAGNIFIED_NS)
                 int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
                 int style;              // `moonwater canvas cursor style`: 1 dynamic (the default), 0 classic
                 int dyn;                // the dynamic cursor is what is drawn now: the style, or a touch was the last input (touch.hidden)
-                int squeeze;            // `moonwater canvas cursor squeeze`: the percent a pointer shrinks by on a press (compositor_pointer_squeeze)
-                int pulsing;            // a primary press squeezes the dynamic circle until pulse_until
-                positive pulse_until;
-                int ux, uy;             // the unit direction of the last motion, times 64 (64, 0 for none): the axis the circle stretches along
-                int speed;              // the last motion's speed in pixels, 0 to CP_DYN_SPEED: how far the circle grows and stretches
-                positive idle_until;    // the stretch lets go at this time when nothing moved
-                int last_x, last_y;     // where the pointer was at the last motion
-                int spin;               // the wait arc's eighth of a turn, from the clock when it was drawn
+                int squeeze;            // `moonwater canvas cursor squeeze`: the percent a pointer shrinks by while a button is held (compositor_pointer_press)
+                unsigned int held;      // the buttons held down, a bit each from BTN_LEFT
+                // In 256ths: what a held button adds to the pointer's size, how far the dynamic shape is the text's rectangle, and how far it is stretched.
+                struct compositor_sway press, morph, stretch;
+                int ux, uy;             // the unit direction of the motion that stretches it, times 64
+                int last_x, last_y;     // where the pointer was when its speed was last taken, and when
+                positive last_ns, idle_until; // and when the stretch lets go if nothing moves
         } cursor;
         struct compositor_shake shake;
         char driver[16];            // the card's driver, which says whether it is a real card
@@ -4936,11 +4833,21 @@ static unsigned int compositor_cursor_ink(int outline, unsigned int alpha)
 // small for the size it was asked to be.
 static int compositor_turning(void);
 
+// The pointer's whole size, in pixels a cell: its own when `moonwater canvas cursor size` gave one and the desktop's when it did not,
+// and three times that while it is shaken large.
+static int compositor_cursor_size(void)
+{
+        int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
+
+        return compositor.cursor.magnified ? 3 * base : base;
+}
+
 static int compositor_cursor_in_scene(void)
 {
-        // A screen turned (by the card or by Canvas) has no plane that turns with it: its pointer is drawn into the scene.
+        // A screen turned (by the card or by Canvas) has no plane that turns with it: its pointer is drawn into the scene. So is one
+        // larger than twice its size, shaken or not, which is the most the plane holds of the dynamic shape with its stretch.
         return compositor.cursor.soft || compositor_turning() ||
-               (compositor.cursor.handle[0] && compositor.cursor.size > compositor_cursor_fit(compositor.cursor.size));
+               (compositor.cursor.handle[0] && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL);
 }
 
 // The screens as rectangles of the space, and how many: one, the whole space, where none is listed.
@@ -8001,8 +7908,8 @@ static void compositor_slice_flush(const struct compositor_target *slice, int *f
         // The fingers' marks over the windows and under the pointer.
         compositor_spots_draw(slice);
         if (compositor.cursor.drawn)
-                compositor_cursor_draw(slice, compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                       compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+                compositor_cursor_draw(slice, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
+                                       compositor_cursor_ink(1, 0));
         for (int y = slice->y1; y < slice->y2; y++)
         {
                 const unsigned int *from = slice->pixels + (unsigned long)(y - slice->oy) * slice->pitch +
@@ -9436,9 +9343,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return g->why;
         if (!compositor_gpu_spots()) // the fingers' marks over the scene, and the pointer over them
                 return g->why;
-        if (compositor.cursor.drawn)
-                compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape, compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0),
-                                      compositor_cursor_ink(1, 0));
+        if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
+                return g->why;
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
                 const int *d = compositor.damage[at];
@@ -10281,8 +10187,7 @@ static void compositor_present_frames(void)
                                 if (compositor_spots_any(0))
                                         compositor_spots_compose(&strip, frames, count);
                                 if (compositor.cursor.drawn)
-                                        compositor_cursor_draw(&strip, compositor.cursor.x, compositor.cursor.y,
-                                                               compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
+                                        compositor_cursor_draw(&strip, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as,
                                                                compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
                         }
                 }
@@ -10297,8 +10202,7 @@ static void compositor_present_frames(void)
                 if (!apart && compositor_spots_any(0))
                         compositor_spots_compose(&target, frames, count);
                 if (!apart && compositor.cursor.drawn)
-                        compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
-                                               compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
+                        compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as,
                                                compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
                 }
 
@@ -11160,7 +11064,7 @@ static int compositor_scales_take(void)
         compositor.scale = compositor.output[0].scale;
         if (compositor.table)
                 compositor.table->scale = (unsigned int)compositor.scale;
-        compositor.cursor.plane_scale = 0;
+        compositor.cursor.plane.scale = 0;
         compositor_cursor_move();
         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, compositor.outputs);
         compositor_band_room();
@@ -11471,7 +11375,7 @@ static b32 compositor_space_take(int first)
         compositor_table_outputs();
         for (unsigned int at = 0; at < compositor.outputs; at++)
                 compositor.output[at].shows = 0;
-        compositor.cursor.plane_scale = 0;
+        compositor.cursor.plane.scale = 0;
         if (!first)
                 compositor_cursor_move();
         return 0;
@@ -11516,55 +11420,25 @@ static b32 compositor_card_open(void)
         where it was and where it is, and is drawn over what is composed there.
 */
 
-/*
-        The percent a pointer shrinks by when a primary button is pressed (`moonwater canvas cursor squeeze`, 0 to 50, 25 by
-        default): the dynamic circle's press (compositor_dyn_setup) and the click squeeze read it through this one helper.
-*/
-static int compositor_pointer_squeeze(void)
+// Where a value on its way is now, on the kit's ease: where it goes, and at rest there, once CP_SWAY_NS have passed since it left
+// (a time before it left is the time it left).
+static int compositor_sway_at(struct compositor_sway *s, positive now)
 {
-        return compositor.cursor.squeeze;
+        positive gone = now > s->at ? now - s->at : 0;
+
+        if (s->at && gone >= CP_SWAY_NS)
+                s->at = 0;
+        return s->at ? s->from + (int)((b64)(s->to - s->from) * ui_bezier_at(&ui_ease, ui_progress((b64)gone, (b64)CP_SWAY_NS)) / UI_ONE) : s->to;
 }
 
-// The scale a pointer is drawn at: its own size when `moonwater canvas cursor size` gave one, and the desktop's
-// when it did not, three times that while it is shaken large, and less by the squeeze percent (never less than one
-// pixel) for the frames a press squeezes it. Whole pixels only, so the hot spot stays on its pixel at either scale.
-static int compositor_cursor_scale(void)
+// A value sent on its way from where it is now; with reduced motion it is there at once.
+static void compositor_sway_to(struct compositor_sway *s, int to, positive now)
 {
-        int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
-        int scale = compositor.cursor.magnified ? 3 * base : base, percent = compositor_pointer_squeeze(), squeezed;
-
-        if (compositor.cursor.click_frames && percent)
-        {
-                squeezed = scale * (100 - percent) / 100;
-                scale = squeezed < 1 ? 1 : squeezed;
-        }
-        return scale;
-}
-
-// A press of the left button squeezes the pointer for two frames, when the setting is on (it is by default) and the
-// shared squeeze slider is not 0: the amount is the slider's (compositor_pointer_squeeze), not a fixed one.
-static void compositor_click_press(unsigned int code, int down)
-{
-        if (down && code == COMPOSITOR_BTN_LEFT && !compositor.cursor.click_off && compositor_pointer_squeeze())
-        {
-                compositor.cursor.click_frames = 2;
-                compositor_cursor_move();
-        }
-}
-
-// Each frame drawn is one of the squeezed frames left, and the last of them is followed by the full size.
-static void compositor_click_frame(void)
-{
-        if (compositor.cursor.click_frames)
-        {
-                compositor.cursor.click_frames--;
-                compositor_cursor_move();
-        }
-}
-
-static int compositor_cursor_dynamic(void)
-{
-        return compositor.cursor.dyn;
+        if (to == s->to)
+                return;
+        s->from = compositor_sway_at(s, now);
+        s->to = to;
+        s->at = compositor.table && compositor.table->motion ? 0 : now;
 }
 
 // Whether the pointer is the dynamic one now: the style says so, or the last input was a touch (touch.hidden), which always is.
@@ -11573,100 +11447,94 @@ static int compositor_pointer_dynamic(void)
         return compositor.cursor.style || compositor.touch.hidden;
 }
 
-// The geometry of the dynamic pointer as it is drawn now: a circle of CP_DYN_RADIUS cells, grown and stretched by the last motion,
-// squeezed while a press's pulse is on. The wait arc's turn and the stretch are what compositor_cursor_moved and the clock left.
-static void compositor_dyn_setup(struct compositor_dyn *d)
+/*
+        The pointer as it is to be drawn now: its bitmap or the dynamic shape, at its size (compositor_cursor_size), smaller or larger
+        by what a held button has it at. The dynamic shape is on its way to the rectangle while the pointer is over text.
+*/
+static void compositor_pointer_now(struct compositor_pointer *p)
 {
-        int squeeze = compositor.cursor.pulsing ? compositor_pointer_squeeze() : 0;
-        long long g = compositor.cursor.speed, radius, along, across;
+        // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
+        positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
+        int morph, grow;
 
-        // Units of a cell's 64th: the radius, then grown by up to a quarter, then stretched along the motion by up to a half and
-        // thinned across it by up to a quarter (the speed's g, from 0 to CP_DYN_SPEED).
-        radius = (CP_DYN_RADIUS * 100ll * (100 - squeeze) / 100) * 64 / 100;
-        radius = radius * (192 + g) / 192;
-        along = radius * (96 + g) / 96;
-        across = radius * (192 - g) / 192;
-        d->ux = compositor.cursor.ux;
-        d->uy = compositor.cursor.uy;
-        if (!d->ux && !d->uy)
-                d->ux = 64;
-        d->a = along;
-        d->b = across;
-        d->c = across / 4;
-        d->ai = along - 64;
-        d->bi = across - 64;
-        d->ci = d->c - 64 > 0 ? d->c - 64 : 0;
-        d->length = (int)(2 * (across / 64) / 3);
-        if (d->length < 4)
-                d->length = 4;
-        d->spin = compositor.cursor.spin;
+        compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
+        morph = compositor_sway_at(&compositor.cursor.morph, now);
+        grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
+        *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now))};
+        if (!p->dyn)
+        {
+                p->shape = compositor.cursor.shape < CP_SHAPES ? compositor.cursor.shape : CP_ARROW;
+                return;
+        }
+        p->hw = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_W - CP_DYN_RADIUS) * morph;
+        p->hh = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_H - CP_DYN_RADIUS) * morph;
+        p->c = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_R - CP_DYN_RADIUS) * morph;
+        p->grow = grow;
+        p->ux = grow ? compositor.cursor.ux : 0, p->uy = grow ? compositor.cursor.uy : 0;
 }
 
-// A motion of the pointer: the last movement's direction and speed are what the dynamic circle stretches by, and it lets go of them
-// CP_DYN_IDLE_NS after the last one. A motion with no movement (a button, a redraw) changes nothing.
+/*
+        A button held or let go. While the left one (or any but the right) is down the pointer is smaller by the squeeze the settings give
+        (`moonwater canvas cursor squeeze`, 0 to 50 percent, 25 by default); while the right one alone is down it is larger by half that;
+        with none down it is its own size, and it eases from one to the other. `moonwater canvas cursor click off` leaves it its size.
+*/
+static void compositor_pointer_press(unsigned int code, int down)
+{
+        unsigned int bit = 1u << ((code - COMPOSITOR_BTN_LEFT) & 7);
+        int by = compositor.cursor.click_off ? 0 : compositor.cursor.squeeze * 256 / 100;
+
+        compositor.cursor.held = down ? compositor.cursor.held | bit : compositor.cursor.held & ~bit;
+        compositor_sway_to(&compositor.cursor.press, !compositor.cursor.held ? 0 : compositor.cursor.held == 2 ? by / 2 : -by, clock_monotonic_nanoseconds());
+        compositor_cursor_move();
+}
+
+/*
+        A motion of the pointer, for the dynamic shape's stretch: its speed, taken over CP_DYN_SAMPLE_NS of motion or more, in logical
+        pixels a second, is how far it is stretched (compositor_pointer_now), along the way it went. A motion with no movement (a button,
+        a redraw) changes nothing, and the stretch lets go CP_DYN_IDLE_NS after the last one that had some (compositor_cursor_tick).
+*/
 static void compositor_cursor_moved(positive now)
 {
-        int dx = compositor.pointer_x - compositor.cursor.last_x, dy = compositor.pointer_y - compositor.cursor.last_y;
-        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, major, minor, length = 1;
+        long long dx = compositor.pointer_x - compositor.cursor.last_x, dy = compositor.pointer_y - compositor.cursor.last_y, far, speed;
+        positive took = now - compositor.cursor.last_ns;
 
-        compositor.cursor.last_x = compositor.pointer_x;
-        compositor.cursor.last_y = compositor.pointer_y;
-        if (!dx && !dy)
+        if ((!dx && !dy) || took < CP_DYN_SAMPLE_NS)
                 return;
-        // The speed is the longer axis and half the shorter (an octagon's edge), which needs no square root.
-        major = ax > ay ? ax : ay;
-        minor = ax > ay ? ay : ax;
-        compositor.cursor.speed = major + minor / 2 > CP_DYN_SPEED ? CP_DYN_SPEED : major + minor / 2;
-        // The direction, times 64: the vector over its length, which is worked out by counting up to it.
-        while (length * length < dx * dx + dy * dy)
-                length++;
-        compositor.cursor.ux = dx * 64 / length;
-        compositor.cursor.uy = dy * 64 / length;
+        compositor.cursor.last_x = compositor.pointer_x, compositor.cursor.last_y = compositor.pointer_y, compositor.cursor.last_ns = now;
+        far = (long long)compositor_isqrt((unsigned long long)(dx * dx + dy * dy));
+        speed = far * 1000000000ll / (long long)took * 100 / (compositor.scale > 0 ? compositor.scale : 100);
+        speed = speed < CP_DYN_SLOW ? 0 : speed > CP_DYN_FAST ? 256 : (speed - CP_DYN_SLOW) * 256 / (CP_DYN_FAST - CP_DYN_SLOW);
+        if (speed)
+                compositor.cursor.ux = (int)(dx * 64 / far), compositor.cursor.uy = (int)(dy * 64 / far);
+        compositor_sway_to(&compositor.cursor.stretch, (int)speed, now);
         compositor.cursor.idle_until = now + CP_DYN_IDLE_NS;
 }
 
-// What the dynamic pointer's own times are: the press's pulse, the stretch letting go, and the next eighth of a turn of the wait arc
-// (0 for none). The main loop sleeps until the first of them.
+// When the pointer is to be drawn again for its own reasons: the next frame while a value of it is on its way, or when its stretch lets
+// go (0 for neither). The main loop sleeps until then.
 static positive compositor_cursor_due(void)
 {
-        positive due = 0, now;
-
-        if (compositor.cursor.pulsing)
-                due = compositor.cursor.pulse_until;
-        if (compositor.cursor.speed && (!due || compositor.cursor.idle_until < due))
-                due = compositor.cursor.idle_until;
-        if (compositor.cursor.dyn && compositor.cursor.shape == CP_WAIT)
-        {
-                now = clock_monotonic_nanoseconds();
-                now = (now / CP_DYN_SPIN_NS + 1) * CP_DYN_SPIN_NS;
-                if (!due || now < due)
-                        due = now;
-        }
-        return due;
+        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.stretch.at)
+                return clock_monotonic_nanoseconds() + (compositor.period ? compositor.period : 16000000ull);
+        return compositor.cursor.stretch.to ? compositor.cursor.idle_until : 0;
 }
 
-// The dynamic pointer's times that are up: the press lets go, the stretch goes, and the arc has turned, which redraws it.
+// The pointer's own times that are up: a stretch nothing has moved under lets go, and a value on its way is drawn where it is now.
 static void compositor_cursor_tick(positive now)
 {
-        int wake = 0;
-
-        if (compositor.cursor.pulsing && now >= compositor.cursor.pulse_until)
-                compositor.cursor.pulsing = 0, wake = 1;
-        if (compositor.cursor.speed && now >= compositor.cursor.idle_until)
-                compositor.cursor.speed = 0, compositor.cursor.ux = 64, compositor.cursor.uy = 0, wake = 1;
-        if (compositor.cursor.dyn && compositor.cursor.shape == CP_WAIT && (int)((now / CP_DYN_SPIN_NS) & 7) != compositor.cursor.spin)
-                wake = 1;
-        if (wake)
+        if (compositor.cursor.stretch.to && now >= compositor.cursor.idle_until)
+                compositor_sway_to(&compositor.cursor.stretch, 0, now);
+        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.stretch.at)
                 compositor_cursor_move();
 }
 
-static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int scale)
+// The square of the scene the pointer drawn into it covers is damaged.
+static void compositor_cursor_damage(void)
 {
-        int left, top, span = compositor.cursor.dyn ? CP_PLANE : CP_CURSOR_W;
+        int hot_x, hot_y, span = compositor_pointer_span(&compositor.cursor.drawn_as, &hot_x, &hot_y);
 
-        compositor_cursor_cell(&left, &top, x, y, shape, scale);
         compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(left, top, span * scale, span * scale);
+        compositor_damage(compositor.cursor.x - hot_x, compositor.cursor.y - hot_y, span, span);
         compositor.damage_by = 0;
 }
 
@@ -11694,9 +11562,15 @@ static int compositor_cursor_plane_wanted(void)
         return 1;
 }
 
-// A shape painted into the buffer of the plane that is not showing, which is the one shown from here on: paints counts
+// How far a picture's corner is left of and above its plane's: none unless the picture is larger than the plane, which then shows its middle.
+static int compositor_cursor_inset(int span)
+{
+        return span > CP_PLANE ? (span - CP_PLANE) / 2 : 0;
+}
+
+// A picture painted into the buffer of the plane that is not showing, which is the one shown from here on: paints counts
 // them, and a screen's plane given the newest wears paints.
-static int compositor_cursor_paint(unsigned int shape, int fitted)
+static int compositor_cursor_paint(const struct compositor_pointer *p)
 {
         struct compositor_map_dumb map = {.handle = compositor.cursor.handle[compositor.cursor.back]};
         long mapped;
@@ -11711,19 +11585,16 @@ static int compositor_cursor_paint(unsigned int shape, int fitted)
         memory_zero((void *)mapped, CP_PLANE * CP_PLANE * 4);
         {
                 struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+                int hot_x, hot_y, inset = compositor_cursor_inset(compositor_pointer_span(p, &hot_x, &hot_y));
 
-                int hx = compositor.cursor.dyn ? CP_DYN_HOT : compositor_cursor_hot[shape][0];
-                int hy = compositor.cursor.dyn ? CP_DYN_HOT : compositor_cursor_hot[shape][1];
-
-                compositor_cursor_draw(&t, hx * fitted, hy * fitted, shape, fitted, compositor_cursor_ink(0, 0xff000000u),
-                                       compositor_cursor_ink(1, 0xff000000u));
+                compositor_cursor_draw(&t, hot_x - inset, hot_y - inset, p, compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
         }
         compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
 
         compositor.cursor.back ^= 1;
         compositor.cursor.paints++;
-        compositor.cursor.plane_shape = (int)shape;
-        compositor.cursor.plane_scale = fitted;
+        compositor.cursor.plane = *p;
+        compositor.cursor.plane_on = 1;
         return 0;
 }
 
@@ -11789,14 +11660,14 @@ static void compositor_cursor_planes_off(void)
                 system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
                 compositor.output[at].shows = 0;
         }
-        compositor.cursor.plane_shape = -1;
+        compositor.cursor.plane_on = 0;
 }
 
 static void compositor_cursor_start(void)
 {
         struct compositor_dumb dumb[2] = {{CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}, {CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}};
 
-        compositor.cursor.plane_shape = -1;
+        compositor.cursor.plane_on = 0;
         if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
             system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0)
         {
@@ -11828,88 +11699,47 @@ static int compositor_drawn_y(void)
         return compositor.pointer_y;
 }
 
+/*
+        The pointer where it is and as it is now. Drawn into the scanout, it is a square of damage where it was and where it is, and is
+        drawn over what is composed there; on the plane, the plane is moved, and painted first when the picture is not the one it wears (a
+        value of the dynamic shape or of a held button on its way is a new picture each frame). The classic pointer and the dynamic one
+        are two pictures like any other two. A window's client that asked for no pointer has none.
+*/
 static void compositor_cursor_move(void)
 {
-        int scale = compositor_cursor_scale();
-        unsigned int shape = compositor.cursor.shape;
-        int dyn = compositor_pointer_dynamic();
+        struct compositor_pointer now;
+        int hot_x, hot_y, inset;
 
-        // The classic pointer and the dynamic one are two pictures. The one drawn is taken off where it was, with the picture it
-        // was drawn in, and the other is drawn from here on. A touch was the last input: the dynamic one, whatever the style says.
-        if (dyn != compositor.cursor.dyn)
-        {
-                if (compositor.cursor.drawn)
-                {
-                        compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                                      compositor.cursor.drawn_scale);
-                        compositor.cursor.drawn = 0;
-                }
-                if (compositor.cursor.handle[0] && compositor.cursor.plane_shape >= 0)
-                        compositor_cursor_planes_off();
-                compositor.cursor.dyn = dyn;
-        }
-        if (compositor.cursor.dyn)
-                compositor.cursor.spin = (int)((clock_monotonic_nanoseconds() / CP_DYN_SPIN_NS) & 7);
-
-        if (compositor.cursor.client_hidden)
-        {
-                if (compositor.cursor.handle[0] && compositor.cursor.plane_shape >= 0)
-                        compositor_cursor_planes_off();
-                if (compositor.cursor.drawn)
-                {
-                        compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                                      compositor.cursor.drawn_scale);
-                        compositor.cursor.drawn = 0;
-                }
-                return;
-        }
-
-        if (compositor_cursor_in_scene())
+        compositor.cursor.dyn = compositor_pointer_dynamic();
+        compositor_pointer_now(&now);
+        if (compositor.cursor.drawn)
+                compositor_cursor_damage(), compositor.cursor.drawn = 0;
+        if (compositor.cursor.client_hidden || compositor_cursor_in_scene())
         {
                 // A plane that was showing the pointer shows nothing now, and says so again when it is wanted.
-                if (!compositor.cursor.soft && compositor.cursor.plane_shape >= 0)
+                if (compositor.cursor.handle[0] && compositor.cursor.plane_on)
                         compositor_cursor_planes_off();
-                if (compositor.cursor.drawn)
-                        compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                                      compositor.cursor.drawn_scale);
-                compositor.cursor.x = compositor_drawn_x();
-                compositor.cursor.y = compositor_drawn_y();
-                compositor.cursor.drawn_shape = shape;
-                compositor.cursor.drawn_scale = scale;
-                compositor.cursor.drawn = 1;
-                compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, shape, scale);
+                if (!compositor.cursor.client_hidden)
+                {
+                        compositor.cursor.x = compositor_drawn_x(), compositor.cursor.y = compositor_drawn_y();
+                        compositor.cursor.drawn_as = now, compositor.cursor.drawn = 1;
+                        compositor_cursor_damage();
+                }
                 return;
         }
-
         if (!compositor.cursor.handle[0])
                 return;
+        inset = compositor_cursor_inset(compositor_pointer_span(&now, &hot_x, &hot_y));
+        if ((compositor.cursor.plane_on && !memory_compare(&now, &compositor.cursor.plane, sizeof(now))) || compositor_cursor_paint(&now) == 0)
+                if (compositor_cursor_planes(compositor_drawn_x() - hot_x + inset, compositor_drawn_y() - hot_y + inset) == 0)
+                        return;
 
-        // The pointer drawn into the scanout, which a size the plane holds does not need: it is taken off.
-        if (compositor.cursor.drawn)
-        {
-                compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                              compositor.cursor.drawn_scale);
-                compositor.cursor.drawn = 0;
-        }
-
-        {
-                int fitted = compositor_cursor_fit(scale), left, top;
-
-                compositor_cursor_cell(&left, &top, compositor_drawn_x(), compositor_drawn_y(), shape, fitted);
-
-                // The dynamic circle changes with every motion, a press and the arc's turn, so its plane is painted again each time.
-                if ((!compositor.cursor.dyn && (int)shape == compositor.cursor.plane_shape && fitted == compositor.cursor.plane_scale) ||
-                    compositor_cursor_paint(shape, fitted) == 0)
-                        if (compositor_cursor_planes(left, top) == 0)
-                                return;
-
-                // The card will not take it: the pointer is drawn from here on.
-                compositor_cursor_planes_off();
-                compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
-                compositor.cursor.refused++;
-                compositor.cursor.soft = 1;
-                compositor_cursor_move();
-        }
+        // The card will not take it: the pointer is drawn from here on.
+        compositor_cursor_planes_off();
+        compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
+        compositor.cursor.refused++;
+        compositor.cursor.soft = 1;
+        compositor_cursor_move();
 }
 
 /*
@@ -11967,7 +11797,7 @@ static void compositor_resume(int cycle)
         }
 
         // What the plane wears and where it was is whatever the driver put back: say it all again.
-        compositor.cursor.plane_scale = 0;
+        compositor.cursor.plane.scale = 0;
         compositor.mirror_stale = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_cursor_move();
@@ -12152,7 +11982,7 @@ static void compositor_look_read(void)
                 compositor.cursor.squeeze = squeeze;
                 // The plane wears the old one, and is painted again (a scale it is not at); a plane that is
                 // to be hidden still is told so.
-                compositor.cursor.plane_scale = 0;
+                compositor.cursor.plane.scale = 0;
                 compositor_cursor_move();
         }
 }
@@ -17755,6 +17585,7 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         int drop_screen = 0, drop_box[4];
         unsigned int drop_touch = 0;
 
+        compositor_pointer_press(code, 0);
         // Where the window lands is read before the preview and the grid are taken away: the grid's region, or the snap.
         if (dragged >= 0 && snap && compositor.drag_moved)
         {
@@ -17956,14 +17787,6 @@ static void compositor_button(unsigned int code, int down)
         {
                 compositor_release(code, 1);
                 return;
-        }
-
-        // A primary press squeezes the dynamic pointer for two frames (compositor_dyn_setup), by the squeeze the settings give.
-        if (code == COMPOSITOR_BTN_LEFT && compositor_pointer_squeeze() && compositor_pointer_dynamic())
-        {
-                compositor.cursor.pulsing = 1;
-                compositor.cursor.pulse_until = clock_monotonic_nanoseconds() + CP_DYN_PULSE_NS;
-                compositor_cursor_move();
         }
 
         // A right press while the hand moves or resizes a window takes the move back, as Escape does (compositor_hold_cancel);
@@ -18181,7 +18004,8 @@ static void compositor_press(unsigned int code, int down)
 
 static void compositor_press_at(unsigned int code, int down)
 {
-        compositor_click_press(code, down);
+        if (down)
+                compositor_pointer_press(code, 1);
         if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
         {
                 int at = compositor_assist_at(compositor.pointer_x, compositor.pointer_y);
@@ -20059,6 +19883,8 @@ static void compositor_input_read(unsigned int at)
                                                           WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
                         {
                                 // The left is let go even with no button recorded: a drag of a titlebar or a resize has none.
+                                // The pointer holds no button it was told of either, so it is its own size again.
+                                compositor.cursor.held = 0;
                                 compositor_release(COMPOSITOR_BTN_LEFT, 0);
                                 for (unsigned int index = 1; index < 8; index++)
                                         if (compositor.button_down >> index & 1)
@@ -20558,7 +20384,7 @@ static void compositor_headless_scale(void)
         compositor.scale = scale;
         if (compositor.table)
                 compositor.table->scale = (unsigned int)scale;
-        compositor.cursor.plane_scale = 0;
+        compositor.cursor.plane.scale = 0;
         compositor_cursor_move();
         compositor_band_room();
         compositor_scale_fit();
@@ -21181,7 +21007,7 @@ static b32 compositor_main()
                                                                                      : until;
                 }
 
-                // The dynamic pointer's own times: a press's squeeze, the stretch letting go, the wait arc's next turn.
+                // The pointer's own times: the next frame of a held button's change of size or of the dynamic shape's, and its stretch letting go.
                 {
                         positive due = compositor_cursor_due();
 
@@ -21350,7 +21176,7 @@ static b32 compositor_main()
                         compositor_cursor_move();
                 }
 
-                // The dynamic pointer's press lets go, its stretch goes and its arc turns when their times are up (compositor_cursor_tick).
+                // The pointer's values on their way are drawn where they are now, and a stretch nothing moves under lets go (compositor_cursor_tick).
                 compositor_cursor_tick(clock_monotonic_nanoseconds());
 
                 // The shape the window under a resting pointer publishes is shown (compositor_shape_sync).
@@ -21394,7 +21220,6 @@ static b32 compositor_main()
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
-                                compositor_click_frame();
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
                                 compositor_wl_presented();

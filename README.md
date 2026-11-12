@@ -63,11 +63,11 @@ moonwater canvas modes [largest|preferred]  which mode a screen is driven at [la
 
 # Input
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
-moonwater canvas cursor style [classic|dynamic]  the classic pointers, or one circle that stretches with the hand and shows the state inside it [dynamic]
-moonwater canvas cursor squeeze [PERCENT|default]  how far a pointer shrinks when a button is pressed, 0 to 50 percent, 0 for none [25]
+moonwater canvas cursor style [classic|dynamic]  the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]
+moonwater canvas cursor squeeze [PERCENT|default]  how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
-moonwater canvas cursor click [on|off]  a press of the left button makes the pointer smaller for two frames [on]
+moonwater canvas cursor click [on|off]  a held button changes how large the pointer is: the left shrinks it, the right grows it [on]
 moonwater canvas predict touch [on|off]  a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
 moonwater canvas touch left [off|windows|launcher]  a swipe in from the left edge runs the window switcher, or opens the launcher [off]

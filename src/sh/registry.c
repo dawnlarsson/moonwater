@@ -376,20 +376,19 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
                       .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto",
                       .refusal = "cursor look is light, dark or auto, not %s\n"),
-    //  The pointer's shape: the classic bitmaps, or one circle that stretches with the hand and shows the state as a mark
-    //  (compositor.c's dynamic cursor). A touch always uses the circle, whatever this says.
+    //  The pointer's shape: the classic bitmaps, or one filled shape with nothing in it, a circle that a fast hand stretches and
+    //  that is a rounded block over text (compositor.c's dynamic cursor). A touch always uses it, whatever this says.
     SETTING_PLAIN_ROW(null, "Cursor style", SETTINGS_CHOICE, 0, ("canvas", "cursor", "style"), "style ", "classic dynamic",
                       .path = SETTING_CURSOR_STYLE_PATH, .standard = "dynamic", .reset = "dynamic",
                       .refusal = "cursor style is classic or dynamic, not %s\n",
                       .usage = "canvas cursor style [classic|dynamic]",
-                      .help = "the classic pointers, or one circle that stretches with the hand and shows the state inside it [dynamic]"),
-    //  How far a pointer shrinks when a button is pressed (compositor.c's compositor_pointer_squeeze, which both the dynamic
-    //  circle's press and the click squeeze read): 0 is none.
+                      .help = "the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]"),
+    //  How far a pointer shrinks while a button is held (compositor.c's compositor_pointer_press, for either style): 0 is none.
     SETTING_PLAIN_ROW(null, "Pointer squeeze (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "squeeze"), "squeeze ", null,
                       .type = SETTING_NUMBER, .path = SETTING_SQUEEZE_PATH,
                       .standard = "25", .unit = "percent", .low = 0, .high = 50,
                       .usage = "canvas cursor squeeze [PERCENT|default]",
-                      .help = "how far a pointer shrinks when a button is pressed, 0 to 50 percent, 0 for none [25]"),
+                      .help = "how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]"),
     SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
                       .path = SETTING_SHAKE_PATH, .standard = "on",
                       .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
@@ -398,11 +397,11 @@ static const struct settings_row settings_rows[] = {
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
-    //  A press of the left button squeezes the pointer for two frames (compositor.c's compositor_click_press): on by default.
+    //  A held button changes the pointer's size for as long as it is down (compositor.c's compositor_pointer_press): on by default.
     SETTING_PLAIN_ROW(null, "Pointer squeezes on click", SETTINGS_SWITCH, 0, ("canvas", "cursor", "click"), "click ", null,
                       .path = SETTING_CURSOR_CLICK_PATH, .standard = "on",
                       .usage = "canvas cursor click [on|off]",
-                      .help = "a press of the left button makes the pointer smaller for two frames [on]"),
+                      .help = "a held button changes how large the pointer is: the left shrinks it, the right grows it [on]"),
     //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
     //  pointer is always predicted, so it has no row.
     SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
