@@ -219,6 +219,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
+=Animation speed (percent, or default)	49c2	اینیمیشن کی رفتار (فیصد یا default)
 =Audio	1439	آڈیو
 =Audio modem	0ccb	آڈیو موڈیم
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)

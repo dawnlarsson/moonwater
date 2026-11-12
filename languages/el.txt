@@ -218,6 +218,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
 =Always off	48b1	Πάντα ανενεργό
 =Always on	fab5	Πάντα ενεργό
+=Animation speed (percent, or default)	49c2	Ταχύτητα κινούμενων εικόνων (ποσοστό ή default)
 =Audio	1439	Ήχος
 =Audio modem	0ccb	Μόντεμ ήχου
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)

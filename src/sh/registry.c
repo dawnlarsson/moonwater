@@ -154,6 +154,7 @@
 #define SETTING_THEME_DAY_UNTIL 19
 #define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
 #define SETTING_MOTION_PATH "/root/canvas.motion"
+#define SETTING_MOTION_SPEED_PATH "/root/canvas.motion.speed"
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
 #define SETTING_TRACKPAD_SPEED_PATH "/root/canvas.trackpad.speed"
 #define SETTING_SCROLL_NATURAL_PATH "/root/canvas.scroll.natural"
@@ -259,6 +260,13 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "motion is full or reduced, not %s\n",
                       .usage = "canvas motion [full|reduced]",
                       .help = "reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]"),
+    //  The pace of every transition the windows Canvas draws and the compositor make (ui.c's ui_paced): a percent of the speed they were
+    //  designed at, so 100 is each as designed and the standard, 115, a hair faster. Reduced motion stays no motion at any speed.
+    SETTING_PLAIN_ROW(null, "Animation speed (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "motion", "speed"), "speed ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_MOTION_SPEED_PATH, .standard = "115",
+                      .unit = "percent", .low = 50, .high = 200,
+                      .usage = "canvas motion speed [PERCENT|default]",
+                      .help = "how fast windows, menus and controls move, 50 to 200 percent of the speed they were designed at, higher quicker; reduced motion is none at any speed [115]"),
     //  The caret of every text field and the terminal (ui.c's ui_caret_wave): how it blinks, and how wide it is. Off is solid.
     SETTING_PLAIN_ROW(null, "Caret blink speed", SETTINGS_CHOICE, 0, ("canvas", "caret", "blink"), "blink ", "slow normal fast off",
                       .path = SETTING_CARET_BLINK_PATH, .standard = "normal", .reset = "normal",

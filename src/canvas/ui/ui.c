@@ -517,6 +517,40 @@ static inline void ui_anchor_place(unsigned int side, unsigned int flip, const i
 // A window's own motion, on --ease: a window gliding to where it was put (a snap, a tile, a restore, a take back) and a
 // snap's preview moving between targets or fading. One time for all of them, so a window lands as its preview goes.
 #define UI_WINDOW_NS (180 * UI_MS)
+
+/*
+        The pace of every transition Canvas draws, `moonwater canvas motion speed`: a percent of the speed each was
+        designed at, so 100 is every duration as it is written here and in the compositor, 200 each in half its time and
+        50 each in twice it. The standard is 115, a hair faster than designed. The compositor takes it from its file and
+        puts it in the window table (motion_pace), and each window of the kit takes it from there (ui_kit_pace_take); a
+        process that has not been told keeps the standard. A duration a transition runs for is ui_paced of its designed
+        one, and a curve that is stepped by the time since it began (a spring, a stretch, the slider's landing) is read at
+        ui_paced_elapsed of that time. Reduced motion is no motion at any pace. Not paced: what follows the hand (the scroll
+        body's glide, coast, spring home and rubber band, a throw's speed), the caret's blink, the level meters' fall and
+        hold, what turns for as long as it waits (a spinner, an indeterminate progress), how long a thing is shown before it
+        goes (a chip's hold, a touch's mark), and every time that decides what an input is (a double click, a long press, a
+        key's repeat, a dwell).
+*/
+#define UI_PACE_DESIGNED 100
+#define UI_PACE_STANDARD 115
+#define UI_PACE_LEAST 50
+#define UI_PACE_MOST 200
+static unsigned int ui_pace = UI_PACE_STANDARD;
+
+// A designed duration at the pace: shorter above 100, longer below.
+static inline b64 ui_paced(b64 duration)
+{
+        return ui_pace == UI_PACE_DESIGNED || ui_pace < UI_PACE_LEAST || ui_pace > UI_PACE_MOST ? duration
+                                                                                                 : duration * UI_PACE_DESIGNED / (b64)ui_pace;
+}
+
+// The time since a transition began, as its designed curve counts it: more of it above 100, less below.
+static inline b64 ui_paced_elapsed(b64 elapsed)
+{
+        return ui_pace == UI_PACE_DESIGNED || ui_pace < UI_PACE_LEAST || ui_pace > UI_PACE_MOST ? elapsed
+                                                                                                 : elapsed * (b64)ui_pace / UI_PACE_DESIGNED;
+}
+
 static inline b64 ui_qmul(b64 a, b64 b)
 {
         return (b64)(((b128)a * b + UI_HALF) >> UI_Q);
@@ -9820,14 +9854,15 @@ static b32 ui_spring_at(struct ui_spring address_to s)
                 return 0;
         if (!s->start)
                 s->start = now;
-        h = ui_ms(now - s->start) / 1000;
+        // Stepped by the time as the pace counts it: the same ring in less time above 100 (ui_paced_elapsed).
+        h = ui_ms(ui_paced_elapsed(now - s->start)) / 1000;
         if (s->pace)
                 h = ui_qmul(h, s->pace);
         j = ui_exp_neg(ui_qmul(UI_SPRING_DECAY, h));
         ui_sincos(ui_qmul(UI_SPRING_FREQ, h), &sine, &cosine);
         for (int k = 0; k < 2; k++)
         {
-                b64 a = s->amplitude[k], b = ui_qmul(UI_SPRING_UB, a) + (s->speed[k] ? ui_qdiv(s->pace ? ui_qdiv(s->speed[k], s->pace) : s->speed[k], UI_SPRING_FREQ) : 0);
+                b64 a = s->amplitude[k], b = ui_qmul(UI_SPRING_UB, a) + (s->speed[k] ? ui_qdiv(ui_paced(s->pace ? ui_qdiv(s->speed[k], s->pace) : s->speed[k]), UI_SPRING_FREQ) : 0);
                 b64 f = ui_qmul(j, ui_qmul(a, cosine) + ui_qmul(b, sine));
                 b64 rest = k ? UI_REST_PX : UI_REST_SCALE;
 
@@ -9867,7 +9902,7 @@ static b64 ui_stretch_at(struct ui_stretch address_to s, b32 address_to live)
                 *live = 1;
                 return UI_ONE;
         }
-        e = ui_ms(now - s->at);
+        e = ui_ms(ui_paced_elapsed(now - s->at));
         if (e < ui_q(80))
         {
                 u = UI_ONE - e / 80;
@@ -9964,7 +9999,7 @@ static fn ui_tween_put(struct ui_tween address_to t, b64 value, b32 kind)
         t->placed = 1;
 }
 
-// The value wanted from now on, over duration ns on ease (0: at once).
+// The value wanted from now on, over duration ns on ease (0: at once); its caller paces the duration (ui_paced).
 static fn ui_tween_set(struct ui_tween address_to t, b64 value, b64 duration, const struct ui_bezier address_to ease)
 {
         if (value == (t->pending ? t->want : t->to))
@@ -10125,10 +10160,10 @@ static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h
         r->rides = 0;
 }
 
-// A time of ui.js's ripple, ms, at this ripple's pace: ns.
+// A time of ui.js's ripple, ms, at this ripple's pace and the kit's (ui_paced): ns.
 static inline b64 ui_ripple_ns(const struct ui_ripple address_to r, b64 ms)
 {
-        return ui_qmul(ms * UI_MS, r->pace ? r->pace : UI_ONE);
+        return ui_paced(ui_qmul(ms * UI_MS, r->pace ? r->pace : UI_ONE));
 }
 
 static fn ui_ripple_exit(struct ui_ripple address_to r)
@@ -10163,7 +10198,7 @@ static b32 ui_ripple_at(struct ui_ripple address_to r, b64 address_to cx, b64 ad
         *cy = v + ui_qmul(r->y + r->margin - v, UI_ONE - travel);
         *radius = ui_qmul(r->reach, grow);
         if (!r->exit)
-                a = ui_progress(h, 75 * UI_MS);
+                a = ui_progress(h, ui_paced(75 * UI_MS));
         else
         {
                 b64 n = now - r->exit - r->hold;
@@ -10200,7 +10235,7 @@ static fn ui_slide_go(struct ui_slide address_to s, b64 from, b64 to, b64 span, 
         b64 peak = UI_Q2(1) + UI_Q2(1) / 2 + ui_qmul(ratio, UI_Q2(4));
 
         s->from = from, s->to = to, s->at = at ? at : 1, s->landed = 0;
-        s->duration = 120 * UI_MS + ui_qmul(ratio, 180 * UI_MS);
+        s->duration = ui_paced(120 * UI_MS + ui_qmul(ratio, 180 * UI_MS));
         s->peak = peak > UI_Q2(4) + UI_Q2(1) / 2 ? UI_Q2(4) + UI_Q2(1) / 2 : peak;
 }
 
@@ -10223,7 +10258,7 @@ static b64 ui_slide_land(struct ui_slide address_to s, b32 address_to live)
 
         if (!s->landed)
                 return UI_ONE;
-        e = ui_ms(now - s->landed);
+        e = ui_ms(ui_paced_elapsed(now - s->landed));
         if (e < ui_q(60))
         {
                 u = UI_ONE - e / 60;
@@ -10363,6 +10398,13 @@ static fn ui_kit_scroll_take(const struct windows address_to table)
 {
         ui_kit.scroll_off = table->scroll_off;
         ui_kit.scroll_speed = table->scroll_speed;
+}
+
+// The pace of the transitions (ui_paced), taken with the wheel's: a table that says none in range leaves the pace this process has.
+static fn ui_kit_pace_take(const struct windows address_to table)
+{
+        if (table->motion_pace >= UI_PACE_LEAST && table->motion_pace <= UI_PACE_MOST)
+                ui_pace = table->motion_pace;
 }
 
 // The window reads from the right when the language taken says so, read from the language itself (so the apps' language listeners, which run
@@ -10544,7 +10586,7 @@ static fn ui_kit_theme(unsigned int mode, unsigned int accent, unsigned int moti
                 return;
         }
         ui_tween_put(&ui_kit.turn, 0, UI_TWEEN_NUMBER);
-        ui_tween_set(&ui_kit.turn, UI_ONE, 200 * UI_MS, &ui_ease);
+        ui_tween_set(&ui_kit.turn, UI_ONE, ui_paced(200 * UI_MS), &ui_ease);
 }
 
 // The theme's colours at this frame: a turn under way mixes every role from the old to the new.
@@ -11753,8 +11795,8 @@ struct ui_chase
 
 static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b64 address_to out)
 {
-        b64 now = (b64)ui_kit_time();
-        b64 p = c->start ? ui_bezier_at(&ui_ease, ui_progress(now - c->start, 100 * UI_MS)) : UI_ONE;
+        b64 now = (b64)ui_kit_time(), span = ui_paced(100 * UI_MS);
+        b64 p = c->start ? ui_bezier_at(&ui_ease, ui_progress(now - c->start, span)) : UI_ONE;
         b32 changed = 0;
 
         for (int k = 0; k < 4; k++)
@@ -11771,7 +11813,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
         else if (changed)
                 for (int k = 0; k < 4; k++)
                         c->from[k] = c->to[k] = out[k] = want[k];
-        if (c->start && now - c->start >= 100 * UI_MS && !changed)
+        if (c->start && now - c->start >= span && !changed)
                 c->start = 0;
         if (c->start)
                 ui_kit.busy = 1;
@@ -11943,21 +11985,22 @@ static b64 ui_kit_span(const struct ui_tween address_to t, b64 span)
         return left > 0 ? left : span;
 }
 
-// A colour to transition to over the kit's .2s (or at once with reduced motion); its first is where it starts.
+// A colour to transition to over the kit's .2s at the pace (or at once with reduced motion); its first is where it starts.
 static inline fn ui_kit_colour_to(struct ui_tween address_to t, unsigned int argb, int ms, const struct ui_bezier address_to ease)
 {
         if (!t->placed)
                 ui_tween_put(t, ui_tween_colour(argb), UI_TWEEN_COLOUR);
         else
-                ui_tween_set(t, ui_tween_colour(argb), ui_kit_span(t, ui_kit.motion ? 0 : ms * UI_MS), ease);
+                ui_tween_set(t, ui_tween_colour(argb), ui_kit_span(t, ui_kit.motion ? 0 : ui_paced(ms * UI_MS)), ease);
 }
 
+// A number to transition to over ms as designed, at the pace (or at once with reduced motion); its first is where it starts.
 static inline fn ui_kit_number_to(struct ui_tween address_to t, b64 value, int ms, const struct ui_bezier address_to ease)
 {
         if (!t->placed)
                 ui_tween_put(t, value, UI_TWEEN_NUMBER);
         else
-                ui_tween_set(t, value, ui_kit_span(t, ui_kit.motion ? 0 : ms * UI_MS), ease);
+                ui_tween_set(t, value, ui_kit_span(t, ui_kit.motion ? 0 : ui_paced(ms * UI_MS)), ease);
 }
 
 /*
@@ -12352,8 +12395,8 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         {
                 b32 l = 0;
 
-                psx = ui_keyframes_at(squash_x, 4, &ui_ease, c->pip_squash, 450 * UI_MS, ui_kit.now, &l);
-                psy = ui_keyframes_at(squash_y, 4, &ui_ease, c->pip_squash, 450 * UI_MS, ui_kit.now, &l);
+                psx = ui_keyframes_at(squash_x, 4, &ui_ease, c->pip_squash, ui_paced(450 * UI_MS), ui_kit.now, &l);
+                psy = ui_keyframes_at(squash_y, 4, &ui_ease, c->pip_squash, ui_paced(450 * UI_MS), ui_kit.now, &l);
                 if (!l)
                         c->pip_squash = 0;
                 ui_kit.busy |= l;
@@ -12362,7 +12405,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         {
                 b32 l = 0;
 
-                psx = psy = ui_keyframes_at(press, 3, &ui_ease, c->pip_press, 300 * UI_MS, ui_kit.now, &l);
+                psx = psy = ui_keyframes_at(press, 3, &ui_ease, c->pip_press, ui_paced(300 * UI_MS), ui_kit.now, &l);
                 if (!l)
                         c->pip_press = 0;
                 ui_kit.busy |= l;
@@ -12392,7 +12435,7 @@ static fn ui_radios_choose(struct ui_control address_to c, int item)
 
                         if (along < 0 || along > distance)
                                 continue;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + (b64)along * 240 * UI_MS / distance, UI_Q2(134));
+                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced((b64)along * 240 * UI_MS / distance), UI_Q2(134));
                 }
         c->at = item;
         c->pip_squash = ui_kit.motion ? 0 : 1;
@@ -12557,8 +12600,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         // The bars' scaleX: the jello while dragged past an end, the spring that lets it go, or the landing.
         if (c->moved && c->down)
         {
-                // ui.js eases the stretch toward its target by 0.3 a frame at 60 Hz: the same per 1/60 s at any rate.
-                b64 dt = c->last_frame ? ui_kit.now - c->last_frame : 16666667, keep = UI_Q2(70), k = UI_ONE;
+                // ui.js eases the stretch toward its target by 0.3 a frame at 60 Hz: the same per 1/60 s at any rate, as the pace counts the time.
+                b64 dt = ui_paced_elapsed(c->last_frame ? ui_kit.now - c->last_frame : 16666667), keep = UI_Q2(70), k = UI_ONE;
 
                 for (b64 left = dt; left >= 16666667; left -= 16666667)
                         k = ui_qmul(k, keep);
@@ -12897,7 +12940,7 @@ static fn ui_vtabs_choose(struct ui_control address_to c, int item)
 
                         if (along < 0 || along > distance)
                                 continue;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + (b64)along * 130 * UI_MS / distance, UI_Q2(113));
+                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced((b64)along * 130 * UI_MS / distance), UI_Q2(113));
                 }
         c->at = item;
 }
@@ -12928,7 +12971,7 @@ static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c
                         if (along < -ui_q(6) || along > length + ui_q(6))
                                 continue;
                         along = along < 0 ? 0 : along > length ? length : along;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_qmul(ui_qdiv(along, length), 130 * UI_MS), UI_Q2(113));
+                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced(ui_qmul(ui_qdiv(along, length), 130 * UI_MS)), UI_Q2(113));
                 }
         c->at = item;
 }
@@ -15932,7 +15975,7 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -20656,7 +20699,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -20750,7 +20793,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                         // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
                         // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)
@@ -22995,12 +23038,12 @@ static fn ui_select_overlay_draw(struct ui address_to ui, struct ui_select addre
         if (s->bar_want && ui_select_bar_place(ui, s))
         {
                 int line = ui_px(ui, 1), corner = ui_dev(ui, UI_MENU_RADIUS), baseline, alpha = 255;
-                b64 age = now - (was ? s->bar_since : now);
+                b64 age = now - (was ? s->bar_since : now), fade = ui_paced((b64)UI_SELECT_BAR_FADE_NS);
 
                 if (!was)
                         s->bar_since = now;
-                if (!ui_kit.motion && age < (b64)UI_SELECT_BAR_FADE_NS)
-                        alpha = (int)(age * 255 / (b64)UI_SELECT_BAR_FADE_NS), ui_kit.busy = 1;
+                if (!ui_kit.motion && age < fade)
+                        alpha = (int)(age * 255 / fade), ui_kit.busy = 1;
                 ui_round(ui, s->bar_x, s->bar_y, s->bar_w, s->bar_h, corner, ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, (unsigned int)alpha));
                 ui_round(ui, s->bar_x + line, s->bar_y + line, s->bar_w - 2 * line, s->bar_h - 2 * line, corner > line ? corner - line : 0,
                          ui_tone(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu, (unsigned int)alpha));

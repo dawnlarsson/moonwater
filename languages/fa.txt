@@ -219,6 +219,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Allow recording	f7e5	اجازهٔ ضبط
 =Always off	48b1	همیشه خاموش
 =Always on	fab5	همیشه روشن
+=Animation speed (percent, or default)	49c2	سرعت پویانمایی (درصد یا default)
 =Audio	1439	صدا
 =Audio modem	0ccb	مودم صوتی
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)

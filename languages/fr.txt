@@ -218,6 +218,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Allow recording	f7e5	Autoriser l'enregistrement
 =Always off	48b1	Toujours désactivé
 =Always on	fab5	Toujours activé
+=Animation speed (percent, or default)	49c2	Vitesse des animations (pourcentage ou default)
 =Audio	1439	Audio
 =Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)

@@ -218,6 +218,7 @@ ui_field_full	fe02	that is as much as it holds
 =Allow recording	f7e5	Allow recording
 =Always off	48b1	Always off
 =Always on	fab5	Always on
+=Animation speed (percent, or default)	49c2	Animation speed (percent, or default)
 =Audio	1439	Audio
 =Audio modem	0ccb	Audio modem
 =Authenticated time (NTS)	e533	Authenticated time (NTS)

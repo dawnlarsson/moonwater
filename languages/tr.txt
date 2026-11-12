@@ -218,6 +218,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Allow recording	f7e5	Kayda izin ver
 =Always off	48b1	Her zaman kapalı
 =Always on	fab5	Her zaman açık
+=Animation speed (percent, or default)	49c2	Animasyon hızı (yüzde veya default)
 =Audio	1439	Ses
 =Audio modem	0ccb	Ses modemi
 =Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)

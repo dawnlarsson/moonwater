@@ -219,6 +219,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Allow recording	f7e5	السماح بالتسجيل
 =Always off	48b1	دائماً إيقاف
 =Always on	fab5	دائماً تشغيل
+=Animation speed (percent, or default)	49c2	سرعة الرسوم المتحركة (نسبة مئوية أو default)
 =Audio	1439	الصوت
 =Audio modem	0ccb	مودم الصوت
 =Authenticated time (NTS)	e533	الوقت الموثق (NTS)

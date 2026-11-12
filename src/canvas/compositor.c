@@ -4217,7 +4217,8 @@ struct compositor_swipe
         The chip: what a swipe shows over the desktop, drawn by the compositor over the scene (as the marks are). A controls chip
         (COMPOSITOR_CHIP_CONTROLS) is the window's controls: close, minimise and maximise, three cells over the top band of the
         window it was swiped down on. It slides down into its place (the kit's ease), holds for
-        COMPOSITOR_CHIP_HOLD_NS, and fades over COMPOSITOR_CHIP_FADE_NS. An indicator (COMPOSITOR_CHIP_HINT) is a bar at the edge
+        COMPOSITOR_CHIP_HOLD_NS, and fades over COMPOSITOR_CHIP_FADE_NS; the slide and the fade are at the pace (ui_paced) and the
+        hold is not. An indicator (COMPOSITOR_CHIP_HINT) is a bar at the edge
         the first swipe into a full-screen window came from. Its coverage is kept in cover: the body, then the glyphs, w x h each.
 */
 #define COMPOSITOR_CHIP_NONE 0
@@ -5193,7 +5194,7 @@ static int compositor_frame_line(int row)
 
 /*
         A window's first show lands: its picture starts at 96 percent of its size and grows to all of it over
-        COMPOSITOR_LAND_NS, on the kit's --ease, about its centre. A scale only: no fade, no shadow, no outline.
+        COMPOSITOR_LAND_NS at the pace (ui_paced), on the kit's --ease, about its centre. A scale only: no fade, no shadow, no outline.
         The clock starts at the first present that draws the window (compositor_land_keep), so that frame is the
         96 percent one. Reduced motion, the table's as the kit reads it, lands nothing: the window is drawn at its
         size at once. A window shown again, moved or resized does not land.
@@ -5210,7 +5211,7 @@ static b64 compositor_land_short(int row)
                 return 0;
         if (!compositor.land_at[row])
                 return UI_ONE - COMPOSITOR_LAND_SMALL;
-        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.land_at[row]), COMPOSITOR_LAND_NS));
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.land_at[row]), ui_paced(COMPOSITOR_LAND_NS)));
         return ui_qmul(UI_ONE - COMPOSITOR_LAND_SMALL, UI_ONE - done);
 }
 
@@ -5266,7 +5267,7 @@ static void compositor_land_keep(void)
                 now = clock_monotonic_nanoseconds();
                 if (!compositor.land_at[row])
                         compositor.land_at[row] = now;
-                if (!compositor.showing[row] || !compositor_visible(row) || now - compositor.land_at[row] >= COMPOSITOR_LAND_NS)
+                if (!compositor.showing[row] || !compositor_visible(row) || now - compositor.land_at[row] >= (positive)ui_paced(COMPOSITOR_LAND_NS))
                         compositor.landing[row] = 0;
                 compositor_land_damage(row);
         }
@@ -5274,7 +5275,7 @@ static void compositor_land_keep(void)
 
 /*
         A window arranged or floated glides from the rectangle it had to the one it has, over COMPOSITOR_GLIDE_NS (the kit's
-        window motion) on the kit's --ease, so the eye sees where it went. It is called once the change is made (from is what
+        window motion) at the pace on the kit's --ease, so the eye sees where it went. It is called once the change is made (from is what
         it was, taken before); a window still gliding starts from where it is drawn, not from where it was going, so two
         changes in a row never jump. Reduced motion, the table's as the kit reads it, glides nothing: the window is where it
         is at once. A window that is dragged does not glide, and one that stops being shown ends its glide (compositor_glide_keep).
@@ -5318,7 +5319,7 @@ static void compositor_glide_damage_now(int row)
 // How far a glide that began at `at` is, Q30 on the kit's ease: none before its first present (at 0).
 static b64 compositor_glide_done(positive at)
 {
-        return at ? ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - at), COMPOSITOR_GLIDE_NS)) : 0;
+        return at ? ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - at), ui_paced(COMPOSITOR_GLIDE_NS))) : 0;
 }
 
 // A glide from `from` to where the window is now, begun at its next present.
@@ -5386,7 +5387,7 @@ static void compositor_glide_keep(void)
                 if (!compositor.glide_at[row])
                         compositor.glide_at[row] = now;
                 if (!compositor_visible((int)row) || (row == (unsigned int)compositor.drag && compositor.drag_glide != (int)row + 1) ||
-                    now - compositor.glide_at[row] >= COMPOSITOR_GLIDE_NS)
+                    now - compositor.glide_at[row] >= (positive)ui_paced(COMPOSITOR_GLIDE_NS))
                 {
                         // Where it was is drawn again too: the last picture of it was at the glide's place, not its own.
                         compositor_glide_damage_now((int)row);
@@ -5507,7 +5508,7 @@ static void compositor_preview_keep(void)
         y2 = to[1] + to[3] > compositor.preview_from[1] + compositor.preview_from[3] ? to[1] + to[3]
                                                                                       : compositor.preview_from[1] + compositor.preview_from[3];
         compositor_damage(x1, y1, x2 - x1, y2 - y1);
-        if (now - compositor.preview_at < UI_WINDOW_NS)
+        if (now - compositor.preview_at < (positive)ui_paced(UI_WINDOW_NS))
                 return;
         if (compositor.preview_fading || compositor.preview[2] <= 0)
                 compositor.preview_draw = 0;
@@ -11421,15 +11422,15 @@ static b32 compositor_card_open(void)
         where it was and where it is, and is drawn over what is composed there.
 */
 
-// Where a value on its way is now, on the kit's ease: where it goes, and at rest there, once CP_SWAY_NS have passed since it left
-// (a time before it left is the time it left).
+// Where a value on its way is now, on the kit's ease: where it goes, and at rest there, once CP_SWAY_NS at the pace (ui_paced) have
+// passed since it left (a time before it left is the time it left).
 static int compositor_sway_at(struct compositor_sway *s, positive now)
 {
-        positive gone = now > s->at ? now - s->at : 0;
+        positive gone = now > s->at ? now - s->at : 0, span = (positive)ui_paced((b64)CP_SWAY_NS);
 
-        if (s->at && gone >= CP_SWAY_NS)
+        if (s->at && gone >= span)
                 s->at = 0;
-        return s->at ? s->from + (int)((b64)(s->to - s->from) * ui_bezier_at(&ui_ease, ui_progress((b64)gone, (b64)CP_SWAY_NS)) / UI_ONE) : s->to;
+        return s->at ? s->from + (int)((b64)(s->to - s->from) * ui_bezier_at(&ui_ease, ui_progress((b64)gone, (b64)span)) / UI_ONE) : s->to;
 }
 
 // A value sent on its way from where it is now; with reduced motion it is there at once.
@@ -12244,6 +12245,24 @@ static void compositor_scroll_read(void)
         compositor_scroll_publish(compositor_scroll_bits(natural, momentum, rubber), compositor.trackpad_speed);
 }
 
+/*
+        The pace of every transition (`moonwater canvas motion speed`, ui.c's ui_paced) for the word its file holds: the row's
+        standard, 115, when it holds none or none of the row's words. The compositor's own transitions take it at once, and the
+        table carries it to every window, which a change knocks, as a theme change does.
+*/
+static void compositor_pace_set(const char *word)
+{
+        struct windows *table = compositor.table;
+        long percent = UI_PACE_STANDARD;
+
+        compositor_setting_kept(SETTING_MOTION_SPEED_PATH, word, &percent);
+        ui_pace = percent < UI_PACE_LEAST || percent > UI_PACE_MOST ? UI_PACE_STANDARD : (unsigned int)percent;
+        if (!table || table->motion_pace == ui_pace)
+                return;
+        table->motion_pace = ui_pace;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
@@ -12282,6 +12301,9 @@ static void compositor_theme_read(void)
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);
+        // The pace after the theme, so a window that takes the table's first count takes its theme with it.
+        compositor_word(SETTING_MOTION_SPEED_PATH, word, sizeof(word));
+        compositor_pace_set(word);
 }
 
 // Auto, again by the clock: a minute's wake is enough.
@@ -14053,7 +14075,7 @@ static int compositor_assist_at(int x, int y)
 
 /*
         The overlays' fade: the percent they are drawn at now, from overlay_from toward overlay_goal over COMPOSITOR_SNAP_FADE_NS
-        on the kit's ease (reduced motion: the goal at once). They are shown while they are up or still fading out.
+        at the pace on the kit's ease (reduced motion: the goal at once). They are shown while they are up or still fading out.
 */
 static unsigned int compositor_overlay_alpha(void)
 {
@@ -14062,7 +14084,7 @@ static unsigned int compositor_overlay_alpha(void)
 
         if (!compositor.overlay_at || !compositor_glides())
                 return compositor.overlay_goal;
-        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.overlay_at), COMPOSITOR_SNAP_FADE_NS));
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.overlay_at), ui_paced(COMPOSITOR_SNAP_FADE_NS)));
         return (unsigned int)(from + (int)((long long)(goal - from) * (long long)done / (long long)UI_ONE));
 }
 
@@ -14089,7 +14111,7 @@ static void compositor_overlays_keep(void)
 {
         if (!compositor.overlay_at)
                 return;
-        if (clock_monotonic_nanoseconds() - compositor.overlay_at < COMPOSITOR_SNAP_FADE_NS)
+        if (clock_monotonic_nanoseconds() - compositor.overlay_at < (positive)ui_paced(COMPOSITOR_SNAP_FADE_NS))
         {
                 compositor_overlays_damage();
                 return;
@@ -18934,7 +18956,7 @@ static int compositor_chip_controls(int row, positive now)
         c->rel_x = ((int)compositor.w[row] - w) / 2, c->rel_y = COMPOSITOR_CHIP_TOP_DP * scale / 100;
         c->w = w, c->h = h, c->alpha = 255;
         c->slide = compositor_chip_reduced() ? 0 : h;
-        c->shown = now, c->hold = COMPOSITOR_CHIP_HOLD_NS, c->fade = COMPOSITOR_CHIP_FADE_NS;
+        c->shown = now, c->hold = COMPOSITOR_CHIP_HOLD_NS, c->fade = (positive)ui_paced(COMPOSITOR_CHIP_FADE_NS);
         compositor_chip_redraw();
         return 1;
 }
@@ -19016,7 +19038,7 @@ static void compositor_chip_tick(positive now)
         c->alpha = elapsed <= c->hold ? 255 : (unsigned int)(255 * (total - elapsed) / c->fade);
         if (c->kind == COMPOSITOR_CHIP_CONTROLS)
         {
-                b64 e = ui_bezier_at(&ui_ease, ui_progress((b64)elapsed, (b64)COMPOSITOR_CHIP_SLIDE_NS));
+                b64 e = ui_bezier_at(&ui_ease, ui_progress((b64)elapsed, ui_paced((b64)COMPOSITOR_CHIP_SLIDE_NS)));
 
                 c->slide = compositor_chip_reduced() ? 0 : c->h - (int)(((b64)c->h * e) / UI_ONE);
         }

@@ -148907,6 +148907,169 @@ static fn check_kit_theme(void)
         }
 }
 
+// The ms from its change at which a tween of 200 ms as designed is at its end and still, at a pace and with motion full or reduced; -1 for none in a second.
+static b64 pace_tween_end(unsigned int pace, unsigned int motion)
+{
+        struct ui_tween tween;
+        const b64 start = 5000000000ll;
+
+        ui_pace = pace;
+        ui_kit.motion = motion;
+        memory_zero(&ui_kit.turn, sizeof(ui_kit.turn));
+        ui_kit.now = start;
+        ui_tween_put(&tween, 0, UI_TWEEN_NUMBER);
+        ui_kit_number_to(&tween, UI_ONE, 200, &ui_ease);
+        for (b64 ms = 0; ms <= 1000; ms++)
+        {
+                b32 live = 0;
+                b64 value;
+
+                ui_kit.now = start + ms * UI_MS;
+                value = ui_tween_at(&tween, &live);
+                if (!live && value == UI_ONE)
+                        return ms;
+        }
+        return -1;
+}
+
+// A spring let go at a pace, its two channels after `after` ns of it.
+static fn pace_spring(unsigned int pace, b64 after, b64 address_to value)
+{
+        struct ui_spring spring;
+        struct ui_squash pull = ui_squash_of(ui_q(40), ui_q(12));
+
+        ui_pace = pace;
+        ui_spring_go(&spring, pull.sx, pull.tx);
+        ui_kit.now = 7000000000ll;
+        ui_spring_at(&spring);
+        ui_kit.now += after;
+        ui_spring_at(&spring);
+        value[0] = spring.value[0], value[1] = spring.value[1];
+}
+
+/*
+        The pace (`moonwater canvas motion speed`, ui.c's ui_paced): a transition runs for its designed time over the pace in percent,
+        so at 200 a tween of 200 ms is at its end in 100 ms and at 50 in 400; a spring and a stretch are stepped by the time as the pace
+        counts it, so at 200 each is at 50 ms where it was at 100; the compositor's landing and the pointer's eases are half as long at
+        200; reduced motion is none at any pace; the row's standard is 115, a hair faster than designed; and the word the compositor's
+        file holds is carried by the table to the kit. Every other row runs at 100, the times as designed.
+*/
+static fn check_motion_pace(void)
+{
+        const struct settings_row address_to row = setting_by_path((string_address)SETTING_MOTION_SPEED_PATH);
+        struct ui_kit was = ui_kit;
+        static __typeof__(compositor) compositor_was;
+        static struct windows table;
+        b64 at_full[2], at_half[2], at_double[2], at_once[2];
+        b32 springs, stretches, landing, lands_none, sways;
+
+        compositor_was = compositor;
+        check("motion pace: the row is Animation speed, a slider of 50 to 200 percent whose standard is 115",
+              row && row->kind == SETTINGS_SLIDER && row->type == SETTING_NUMBER && row->low == 50 && row->high == 200 &&
+                  string_equals((string_address)row->standard, (string_address) "115") && setting_standard(row) == UI_PACE_STANDARD &&
+                  setting_percent(row) && string_equals((string_address)row->read[2], (string_address) "speed"));
+        check("motion pace: a process no table has told runs at the standard, and the checks at 100, as designed",
+              UI_PACE_STANDARD == 115 && UI_PACE_DESIGNED == 100 && ui_pace == UI_PACE_DESIGNED);
+        check("motion pace: a tween of 200 ms is at its end at 200 ms as designed, at 100 ms at 200 percent and at 400 ms at 50",
+              pace_tween_end(100, 0) == 200 && pace_tween_end(200, 0) == 100 && pace_tween_end(50, 0) == 400);
+        check("motion pace: at the standard, 115, it is at its end at 174 ms, a hair sooner", pace_tween_end(115, 0) == 174);
+        check("motion pace: reduced motion is no motion at any pace: the tween is at its end at once",
+              pace_tween_end(50, 1) == 0 && pace_tween_end(100, 1) == 0 && pace_tween_end(200, 1) == 0);
+        pace_spring(100, 100 * UI_MS, at_full);
+        pace_spring(200, 50 * UI_MS, at_half);
+        pace_spring(50, 200 * UI_MS, at_double);
+        pace_spring(100, 50 * UI_MS, at_once);
+        springs = at_full[0] == at_half[0] && at_full[1] == at_half[1] && at_full[0] == at_double[0] && at_full[1] == at_double[1] &&
+                  at_once[0] != at_full[0];
+        {
+                struct ui_stretch a, b;
+                b32 live = 0;
+                b64 one, two;
+
+                ui_pace = 100, ui_stretch_go(&a, 1000, UI_Q2(134)), ui_kit.now = 1000 + 60 * UI_MS, one = ui_stretch_at(&a, &live);
+                ui_pace = 200, ui_stretch_go(&b, 1000, UI_Q2(134)), ui_kit.now = 1000 + 30 * UI_MS, two = ui_stretch_at(&b, &live);
+                stretches = one == two && one > UI_ONE;
+                ui_kit.now = 1000 + 153 * UI_MS, two = ui_stretch_at(&b, &live);
+                ui_pace = 100, ui_kit.now = 1000 + 153 * UI_MS, one = ui_stretch_at(&a, &live);
+                stretches = stretches && two == UI_ONE && !b.at && one > UI_ONE && a.at;
+        }
+        check("motion pace: a spring and a stretch are stepped by the time as the pace counts it: at 200 at 50 ms as at 100 at 100 ms",
+              springs && stretches);
+        {
+                positive now;
+
+                ui_pace = 200;
+                check_land_setup(&table, 0);
+                compositor_take(2);
+                now = clock_monotonic_nanoseconds();
+                compositor.land_at[2] = now - 85 * UI_MS;
+                landing = compositor.landing[2] && compositor_land_short(2) == 0;
+                compositor_land_keep();
+                landing = landing && !compositor.landing[2];
+                ui_pace = 100;
+                check_land_setup(&table, 0);
+                compositor_take(2);
+                compositor.land_at[2] = clock_monotonic_nanoseconds() - 85 * UI_MS;
+                landing = landing && compositor_land_short(2) > 0;
+                compositor_land_keep();
+                landing = landing && compositor.landing[2];
+                lands_none = 1;
+                for (unsigned int pace = 50; pace <= 200; pace += 150)
+                {
+                        ui_pace = pace;
+                        check_land_setup(&table, 1);
+                        compositor_take(2);
+                        lands_none = lands_none && !compositor.landing[2];
+                }
+        }
+        check("motion pace: a window lands in half its 170 ms at 200 percent, and is still landing then at 100", landing);
+        check("motion pace: with reduced motion a window lands nothing at 50 or at 200 percent", lands_none);
+        {
+                struct compositor_sway sway;
+
+                check_land_setup(&table, 0);
+                memory_zero(&sway, sizeof(sway));
+                ui_pace = 200;
+                compositor_sway_to(&sway, 100, 1000);
+                sways = compositor_sway_at(&sway, 1000 + CP_SWAY_NS / 2) == 100 && sway.at == 0;
+                memory_zero(&sway, sizeof(sway));
+                ui_pace = 100;
+                compositor_sway_to(&sway, 100, 1000);
+                sways = sways && compositor_sway_at(&sway, 1000 + CP_SWAY_NS / 2) < 100 && sway.at == 1000;
+        }
+        check("motion pace: the pointer's ease is over in half its time at 200 percent, and half way at 100", sways);
+        {
+                b32 carried, standard, kept_none, untold;
+
+                check_land_setup(&table, 0);
+                ui_pace = 100;
+                compositor_pace_set("150");
+                carried = ui_pace == 150 && table.motion_pace == 150 && table.themed == 1;
+                ui_pace = 100;
+                ui_kit_pace_take(&table);
+                carried = carried && ui_pace == 150;
+                compositor_pace_set("");
+                standard = ui_pace == UI_PACE_STANDARD && table.motion_pace == UI_PACE_STANDARD;
+                compositor_pace_set("default");
+                standard = standard && ui_pace == UI_PACE_STANDARD;
+                compositor_pace_set("250");
+                kept_none = ui_pace == UI_PACE_STANDARD;
+                compositor_pace_set("sideways");
+                kept_none = kept_none && ui_pace == UI_PACE_STANDARD;
+                table.motion_pace = 0, ui_pace = 100;
+                ui_kit_pace_take(&table);
+                untold = ui_pace == 100;
+                check("motion pace: the word the file keeps is the compositor's pace and the table's, and a window takes it from the table",
+                      carried);
+                check("motion pace: no file, default, a number past the range or a word that is none is the standard, 115",
+                      standard && kept_none);
+                check("motion pace: a table that has said no pace leaves a window the pace it has", untold);
+        }
+        compositor = compositor_was;
+        ui_kit = was;
+        ui_pace = UI_PACE_DESIGNED;
+}
+
 /*
         A corner's root (ui_arc) is the bit loop's for every place in a corner: 65536 places, each the hardware's root
         against the bit loop's. A corner's lines are places too (u = dy over ry, 16.16), so every one is asked.
@@ -158045,6 +158208,9 @@ b32 main()
         positive size = 0, bytes;
         long engine;
 
+        // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
+        ui_pace = UI_PACE_DESIGNED;
+
         if (program_argument_count() < 5)
         {
                 string_format(log, "  kit-frames REGULAR BOLD MONO OUTDIR [SCENARIO]\n");
@@ -166127,6 +166293,9 @@ b32 main()
         string_address paths[1];
         positive compared = 0, wrong = 0, refused = 0;
 
+        // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
+        ui_pace = UI_PACE_DESIGNED;
+
         if (program_argument_count() < 2)
         {
                 string_format(log, "  NOT RUN: the terminal's frames, no font was given\n");
@@ -166487,6 +166656,7 @@ b32 main()
 #if MOONWATER_UI_ANY
         check_kit_motion();
         check_kit_theme();
+        check_motion_pace();
         check_kit_arc();
         check_kit_ramps();
 #if X64
@@ -228258,6 +228428,9 @@ static void flip_wait_rows(void)
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
+        ui_pace = UI_PACE_DESIGNED;
+
         gpu_fault_rows();
         gpu_bo_rows();
         gpu_vmfault_rows();
@@ -231667,6 +231840,8 @@ static void dl_backoff_rows(void)
 
 b32 main(void)
 {
+        // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
+        ui_pace = UI_PACE_DESIGNED;
         dl_list_rows();
         dl_app_rows();
         dl_rows();

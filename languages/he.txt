@@ -219,6 +219,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Allow recording	f7e5	אפשר הקלטה
 =Always off	48b1	תמיד כבוי
 =Always on	fab5	תמיד מופעל
+=Animation speed (percent, or default)	49c2	מהירות האנימציה (אחוזים או default)
 =Audio	1439	שמע
 =Audio modem	0ccb	מודם שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)

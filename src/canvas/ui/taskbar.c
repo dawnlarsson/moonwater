@@ -121,7 +121,7 @@ static int taskbar_off(const struct taskbar_view *view, b64 shift)
 
 /*
         The slide (`taskbar fullscreen on`): while a window is fullscreen the band moves off its edge, and back when none is. The
-        move is the kit's window motion (UI_WINDOW_NS on --ease, the glide a window makes), from where the band is when it is
+        move is the kit's window motion (UI_WINDOW_NS at the pace, ui_paced, on --ease: the glide a window makes), from where the band is when it is
         asked to go. The compositor asks on every pass of its loop, with the clock (taskbar_slide_now), damages the band where it
         was and where it goes when the answer moves it, and keeps asking through taskbar_sliding while it is still going.
 */
@@ -137,7 +137,7 @@ static b64 taskbar_shift_at(positive now)
                 return taskbar.slide_to;
         if (now <= taskbar.slide_at)
                 return taskbar.slide_from;
-        done = ui_bezier_at(&ui_ease, ui_progress((b64)(now - taskbar.slide_at), TASKBAR_SLIDE_NS));
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(now - taskbar.slide_at), ui_paced(TASKBAR_SLIDE_NS)));
         moved = ((long long)taskbar.slide_to - (long long)taskbar.slide_from) * (long long)done / (long long)UI_ONE;
         return (b64)((long long)taskbar.slide_from + moved);
 }
@@ -163,7 +163,7 @@ static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *bef
 // Whether a slide is still going at now: its band is damaged again after each present until it ends.
 static int taskbar_sliding(positive now)
 {
-        return taskbar.slide_at && now > taskbar.slide_at && now - taskbar.slide_at < TASKBAR_SLIDE_NS;
+        return taskbar.slide_at && now > taskbar.slide_at && now - taskbar.slide_at < (positive)ui_paced(TASKBAR_SLIDE_NS);
 }
 
 // How far off its edge the band is now.

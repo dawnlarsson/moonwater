@@ -218,6 +218,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Allow recording	f7e5	Consenti registrazione
 =Always off	48b1	Sempre disattivato
 =Always on	fab5	Sempre attivato
+=Animation speed (percent, or default)	49c2	Velocità delle animazioni (percentuale o default)
 =Audio	1439	Audio
 =Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Ora autenticata (NTS)

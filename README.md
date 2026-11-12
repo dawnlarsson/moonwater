@@ -47,6 +47,7 @@ moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 1
 moonwater canvas gpu [on|off]          draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]
 moonwater canvas identify              show the number of each screen for three seconds
 moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
+moonwater canvas motion speed [PERCENT|default]  how fast windows, menus and controls move, 50 to 200 percent of the speed they were designed at, higher quicker; reduced motion is none at any speed [115]
 moonwater canvas record [SECONDS]      record the presents of the compositor for SECONDS (1 to 10, 3 by default)
 moonwater canvas record report         the report of the presents: the paths, flips, late and held presents
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
@@ -348,8 +349,9 @@ Canvas's own windows are drawn with one UI kit (src/canvas/ui/ui.c), Dawning Nat
 controls and their motion to the number: a press springs, a drag squashes, a toggle
 stretches its row, a radio's pip flies, and so on. `moonwater canvas theme` picks light,
 dark or auto (light from 7 to 19), `canvas theme accent` the colour its controls fill
-with, and `canvas motion reduced` turns the motion off; every open window turns to a
-change at once. `moonwater settings gallery` opens the settings window on the kit's
+with, `canvas motion speed` how fast the motion runs (115 percent of the speed it was
+designed at unless set), and `canvas motion reduced` turns the motion off; every open
+window turns to a change at once. `moonwater settings gallery` opens the settings window on the kit's
 gallery: every control, as the kit's own demo page has them, to see and press.
 
 The words those windows say are one table of ids (src/canvas/ui/ui.c), English being the table itself, and

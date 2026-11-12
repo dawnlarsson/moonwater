@@ -218,6 +218,7 @@ ui_field_full	fe02	больше не помещается
 =Allow recording	f7e5	Разрешить запись
 =Always off	48b1	Всегда выключена
 =Always on	fab5	Всегда включена
+=Animation speed (percent, or default)	49c2	Скорость анимации (проценты или default)
 =Audio	1439	Звук
 =Audio modem	0ccb	Аудиомодем
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)

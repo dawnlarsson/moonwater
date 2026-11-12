@@ -218,6 +218,7 @@ ui_field_full	fe02	meer past er niet in
 =Allow recording	f7e5	Opnemen toestaan
 =Always off	48b1	Altijd uit
 =Always on	fab5	Altijd aan
+=Animation speed (percent, or default)	49c2	Animatiesnelheid (procent of default)
 =Audio	1439	Audio
 =Audio modem	0ccb	Audiomodem
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)

@@ -930,6 +930,10 @@ struct windows
         // The compositor's: the text's size in percent, `moonwater canvas text scale` as /root/canvas.text.scale keeps it (50 to 300); 0
         // when none is kept, which is 100. A change counts themed up, as a theme's does.
         unsigned int text_scale;
+        // The compositor's: the pace of every transition in percent, `moonwater canvas motion speed` as /root/canvas.motion.speed keeps it
+        // (50 to 200, the standard 115; ui.c's ui_paced). 0 before the compositor has said one, which leaves a window the pace it has. A
+        // change counts themed up, as a theme's does.
+        unsigned int motion_pace;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
