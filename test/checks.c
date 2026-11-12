@@ -125254,6 +125254,10 @@ static void check_compositor_screens(void)
     check("screens: windows_output reads a screen of the list, and the primary for one past it",
           x == SCREENS_A_W && y == 0 && w == SCREENS_B_W && h == SCREENS_H &&
               windows_output(table, 7, &x, &y, &w, &h) == 0 && x == 0 && w == SCREENS_A_W);
+    check("screens: windows_output_at reads the screen a point is on, the second for a point on it, and the primary for one on none",
+          windows_output_at(table, SCREENS_A_W + 5, 5, &x, &y, &w, &h) == 1 && x == SCREENS_A_W && w == SCREENS_B_W &&
+              windows_output_at(table, SCREENS_A_W - 1, SCREENS_H - 1, &x, &y, &w, &h) == 0 && x == 0 && w == SCREENS_A_W &&
+              windows_output_at(table, -5, 5, &x, &y, &w, &h) == 0 && windows_output_at(table, SCREENS_A_W + SCREENS_B_W, 5, &x, &y, &w, &h) == 0);
 
     table->x[1] = 30, table->y[1] = 30;
     screens_paint(1, 60, 40, 0x2060c0u);

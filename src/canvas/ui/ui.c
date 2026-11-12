@@ -15944,7 +15944,13 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         memory_zero(&p->menu.press, sizeof(p->menu.press));
         p->menu.ripple.live = 0, p->menu.ripple_at = -1, p->menu.moving = 0;
         ui_popmenu_to(&p->menu, 0);
-        windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
+        // The menu is as tall as the screen it opens on allows: the one its parent's point is on, not the primary's. A parent with no table
+        // (a check's) has its point where it is.
+        if (parent->table && parent->row < WINDOWS)
+                x += parent->table->x[parent->row], y += parent->table->y[parent->row];
+        windows_output_at(table, x, y, &screen_x, &screen_y, &screen_w, &screen_h);
+        if (parent->table && parent->row < WINDOWS)
+                x -= parent->table->x[parent->row], y -= parent->table->y[parent->row];
         ui_popmenu_size(&p->ui, &p->menu, screen_h);
         table->popup_parent[p->own.row] = parent->row + 1;
         table->popup_x[p->own.row] = x, table->popup_y[p->own.row] = y;

@@ -3641,6 +3641,20 @@ static unsigned int windows_output(const struct windows *table, unsigned int ind
 }
 
 /*
+        The screen a point of the desktop is on, as windows_output reads each: the first whose rectangle holds it, and the primary's
+        (index 0) when none does. Answers the index it read; x, y, width and height are that screen's.
+*/
+static unsigned int windows_output_at(const struct windows *table, int px, int py, int *x, int *y, int *width, int *height)
+{
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+
+        for (unsigned int at = 0; count <= WINDOWS_OUTPUTS && at < count; at++)
+                if (windows_output(table, at, x, y, width, height) == at && px >= *x && px - *x < *width && py >= *y && py - *y < *height)
+                        return at;
+        return windows_output(table, 0, x, y, width, height);
+}
+
+/*
         The identify numbers of the screens the table lists: number[i] is screen i's, from 1, in reading order: the screens
         are read as lines of text, the top edge first and then the left edge (the top row left to right, then the row
         below it), and a screen level with another in both is numbered by its place in the list. Answers the count, which
