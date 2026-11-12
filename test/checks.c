@@ -144072,7 +144072,8 @@ static fn check_settings_device_strip(void)
         A drive's row as the kit lays it out and draws it, in the window with the shipped faces. Every segment of a disk of sixteen
         partitions and the free room round them has a leaf at least UI_SEGMENT_LEAST wide where the strip has the room for that, and
         each is the strip over the count where it has not; a partition of 512 MB on a disk of 1 TB is drawn in its colour; free room
-        is in no partition's colour, a ring round the ground; the legend has an entry for each segment, the partition's name and its
+        is the bar's track, in no partition's colour; every role's colour stands out from the track and the surface in both themes;
+        the legend has an entry for each segment, the partition's name and its
         size, and the partitions not shown are its last entry; the row is as tall as its legend, at the window's width and at a narrow
         one; and reading from the right the strip and the legend are where they are reading from the left, turned over.
 */
@@ -144155,7 +144156,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
         long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
         struct windows address_to window = (struct windows address_to)table;
-        b32 least = true, fills = true, equal = true, drawn = false, free_ring = false, listed = false, last = false, tall = true, mirrored = true;
+        b32 least = true, fills = true, equal = true, drawn = false, free_track = false, apart = true, listed = false, last = false, tall = true, mirrored = true;
         int heights[2] = {0, 0}, widths[] = {SETTINGS_WIDTH, 420, 300};
 
         if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
@@ -144342,7 +144343,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         {
                 const struct ui_node address_to efi = &drive.segment[0];
 
-                drawn = efi->w >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && drive_pixel(efi->x + efi->w / 2, efi->y + efi->h / 2) == (ui_role(UI_PRIMARY) & 0xffffffu);
+                drawn = efi->w >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) &&
+                        drive_pixel(efi->x + efi->w / 2, efi->y + efi->h / 2) == (ui_role(ui_strip_colour(UI_STRIP_EFI)) & 0xffffffu);
                 listed = drive.row.strip_names && drive.row.strip_text;
                 for (int k = 0; k < 5 && listed; k++)
                 {
@@ -144358,21 +144360,41 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         check("settings drive rows: a partition of 512 MB on a disk of 1 TB is drawn, at least the least wide, in its role's colour", drawn);
         check("settings drive rows: the legend has an entry for each segment, the partition's name or its role's word, and its size", listed);
 
-        // Free room is no partition's colour: a free segment of the least width is the ground at its middle, as the gap beside it is, and its
-        // ring is drawn at its top.
+        // Free room is the bar's track: a free segment of the least width is the track's colour at its middle, as the gap beside it is,
+        // which is no partition's colour, and the window's surface is above the bar.
         drive_feed(sixteen);
         drive_show(SETTINGS_WIDTH, 1, false);
-        if (drive_lay() && drive.has_segment[0] && drive.has_segment[1] && drive.row.strip_roles[0] == 4)
+        if (drive_lay() && drive.has_segment[0] && drive.has_segment[1] && drive.row.strip_roles[0] == UI_STRIP_FREE)
         {
                 const struct ui_node address_to room = &drive.segment[0], address_to next = &drive.segment[1];
                 unsigned int ground = drive_pixel(room->x + room->w + (next->x - room->x - room->w) / 2, room->y + room->h / 2);
                 unsigned int middle = drive_pixel(room->x + room->w / 2, room->y + room->h / 2);
 
-                free_ring = room->w == ui_dev(&settings.ui, UI_SEGMENT_LEAST) && middle == ground && drive_pixel(room->x + room->w / 2, room->y) != ground;
+                free_track = room->w == ui_dev(&settings.ui, UI_SEGMENT_LEAST) && middle == ground && middle == (ui_role(UI_SURFACE_HIGHEST) & 0xffffffu) &&
+                             drive_pixel(room->x + room->w / 2, room->y - 1) == (ui_role_surface() & 0xffffffu);
                 for (int role = 0; role < 6; role++)
-                        free_ring &= role == 4 || middle != (ui_role(ui_strip_colour((unsigned int)role, ui_strip_role_colours)) & 0xffffffu);
+                        free_track &= role == UI_STRIP_FREE || middle != (ui_role(ui_strip_colour((unsigned int)role)) & 0xffffffu);
         }
-        check("settings drive rows: free room is drawn in no partition's colour: the ground in a ring", free_ring);
+        check("settings drive rows: free room is the bar's track, in no partition's colour, and the gaps between segments are the track too", free_track);
+
+        // Every role's colour stands out from the track and from the window's surface by 3:1 at the least, in both themes, and no two roles
+        // share a colour.
+        for (int theme = 0; theme < 2; theme++)
+        {
+                ui_kit_theme(theme ? UI_THEME_LIGHT : UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+                for (int role = 0; role < 6; role++)
+                {
+                        unsigned int colour = ui_role(ui_strip_colour((unsigned int)role)) | 0xff000000u;
+
+                        if (role == UI_STRIP_FREE)
+                                continue;
+                        apart &= ui_contrast(colour, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u) >= 300 && ui_contrast(colour, ui_role_surface()) >= 300;
+                        for (int other = 0; other < role; other++)
+                                apart &= other == UI_STRIP_FREE || ui_strip_colour((unsigned int)other) != ui_strip_colour((unsigned int)role);
+                }
+        }
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        check("settings drive rows: every role's colour stands out from the track and from the surface by 3:1, light and dark, and each is its own", apart);
 
         ui_kit.rtl = 0;
         if (ui_cuts)
