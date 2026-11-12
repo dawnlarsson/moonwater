@@ -176,7 +176,7 @@ static struct
         // The bar as the view declares it (launcher_view): its tree and its buttons, the boxes it gave the field and the rows, and how many
         // starts the power buttons made (what a check counts).
         struct ui_view view;
-        struct ui_rect field_box, list_box;
+        struct ui_rect list_box;
         unsigned int power_runs;
 } launcher;
 
@@ -664,11 +664,24 @@ static fn launcher_power_row(void)
                                   .on = launcher_power_act, .arg = at, .grow = ui_width() < LAUNCHER_NARROW);
 }
 
-// The bar as a tree, every size and look a class's: the field's band across the top, then the rows and the power row in from the
-// margin. The field and the list are the old composites, so they are hosts: the tree says where they are (field_box, list_box).
+static struct ui_text address_to launcher_field(void);
+
+// The bar as a tree, every size and look a class's: the field across the top, then the rows and the power row in from the margin.
+// The field is the kit's, bare (no label), an element: it runs edge to edge, as the list's rows do, from the panel's top to where
+// the list begins, and in it are the engine's text, selection and caret, which have the keys while the bar does (the caret is drawn
+// only with the keys, not before the window has them). The list is the old composite, so it is a host: the tree says where it is.
 static fn launcher_view(void)
 {
-        ui_host(&launcher.field_box, .class = "head");
+        struct ui_control address_to search = &launcher.search;
+
+        if (!search->kind)
+        {
+                search->kind = UI_INPUT, search->variant = UI_FIELD_BARE;
+                search->items[0] = WORDS(launcher_search_hint);
+                search->edit = launcher_field();
+        }
+        search->focused = launcher.focused && !launcher.view.group.keys;
+        ui_control(search, .class = "head");
         ui_col(.class = "inset")
         {
                 long rows = ui_value(&launcher.entries);
@@ -921,25 +934,8 @@ static fn launcher_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
         launcher_layout();
-
-        // The field is the kit's, bare (no label): its well, and in it the engine's text, selection and caret, which
-        // have the keys while the bar does.
-        {
-                struct ui_control address_to search = &launcher.search;
-
-                if (!search->kind)
-                {
-                        search->kind = UI_INPUT, search->variant = UI_FIELD_BARE;
-                        search->items[0] = WORDS(launcher_search_hint);
-                        search->edit = launcher_field();
-                }
-                search->focused = launcher.focused && !launcher.view.group.keys; // the caret is drawn only with the keys (not before the window has them)
-                // The field runs edge to edge, as the list's rows do, from the panel's top to where the list begins: its text keeps its inset.
-                search->x = launcher.field_box.x * 100 / ui->scale, search->y = launcher.field_box.y * 100 / ui->scale;
-                search->w = launcher.field_box.w * 100 / ui->scale, search->h = launcher.field_box.h * 100 / ui->scale;
-                ui_control_draw(ui, search);
-        }
-        // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field).
+        // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field). Then the view: the
+        // field and the power row.
         launcher.list.lit = true;
         ui_list_draw(ui, &launcher.list);
         ui_view_draw(ui, &launcher.view, launcher.focused || !launcher_app.had_keys);

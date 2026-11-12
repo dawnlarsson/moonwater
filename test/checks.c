@@ -155784,7 +155784,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
                         for (int py = 0; py < allow->y - 4; py++)
                                 for (int px = 100; px < 540; px++)
-                                        said_ink += py > mixer.tabs_box.y + mixer.tabs_box.h && (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                                        said_ink += py > mixer.tabs.y + mixer.tabs.h && (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
                         for (int py = allow->y; py < allow->y + allow->h; py++)
                                 for (int px = allow->x; px < allow->x + allow->w; px++)
                                         button_ink += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);

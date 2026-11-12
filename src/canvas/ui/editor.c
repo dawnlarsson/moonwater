@@ -55,9 +55,9 @@ static struct
         unsigned int ground;
         int width, height, shown;
         struct ui_findbar find; // the kit's find bar: its field, its mode (find, replace, go to a line) and its flags
-        struct ui_control strip; // the file tabs, the kit's segmented tabs
-        struct ui_view view;     // the window as a view (editor_layout): the bands, the code view's box and the status bar
-        struct ui_rect tabs_box, find_box, text_box; // the device pixels the view gave them
+        struct ui_control strip; // the file tabs, the kit's segmented tabs: an element of the view
+        struct ui_view view;     // the window as a view (editor_layout): the tabs, the bands, the code view's box and the status bar
+        struct ui_rect find_box, text_box; // the device pixels the view gave them
         char bar_text[256];      // the status bar's line at the left, which the view measures
         char status[160];
         struct ui_popup menu;
@@ -602,7 +602,8 @@ static fn editor_chose(int id)
 
 /*
         The file tabs: the kit's segmented tabs, one item a file's name (untitled for none), the file shown chosen; a dot
-        after a name that has changes. The strip is the top band of the window, UI_TABS_H high.
+        after a name that has changes. The strip is an element of the window's view, its top band, UI_TABS_H high: the view
+        places it, draws it and hands it the pointer, and a tab chosen there is shown (editor_tabbed).
 */
 // A tab's name: the file's last part, untitled for none (the kit's tabs take it as the item's name).
 static const char address_to editor_tab_name(int at)
@@ -620,17 +621,6 @@ static b32 editor_tab_dirty(int at)
         return doc_dirty(&editor.tabs[at].view.doc);
 }
 
-static fn editor_tabs_layout(struct ui address_to ui)
-{
-        struct ui_control address_to c = &editor.strip;
-        struct ui_rect address_to box = &editor.tabs_box;
-
-        if (c->kind != UI_TABS)
-                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = box->x * 100 / ui->scale, c->y = box->y * 100 / ui->scale, c->w = box->w * 100 / ui->scale, c->h = UI_TABS_H;
-        ui_tabs_fill(c, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
-}
-
 // The file shown is at is: the keys and the mouse choose a tab alike.
 static fn editor_show_tab(int at)
 {
@@ -639,28 +629,13 @@ static fn editor_show_tab(int at)
         editor.dirty = true;
 }
 
-/*
-        The file tabs take the mouse as the kit's tabs do: a press on one shows it pressed, and its release on the same tab
-        chooses it; a press released elsewhere chooses nothing. Only a press in the strip, and the release of one, are the
-        strip's; a motion over it moves its hover. Answers true when the event was the strip's.
-*/
-static b32 editor_tabs_event(const struct window_event address_to event)
+// A tab was chosen in the strip (a press on it and its release on the same tab, as the kit's tabs take them): its file is shown.
+static b32 editor_tabbed(int which)
 {
-        struct ui_control address_to strip = &editor.strip;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && ui_kit.pointer_y >= 0 && ui_kit.pointer_y < ui_px(&editor.ui, UI_TABS_H);
-        p32 bits;
-
-        // The strip's own: a left press in its band (or the release of a press it holds), and a motion over it. The kit's tabs take the rest.
-        if (event->type == WINDOW_EVENT_BUTTON && (event->a != UI_POINTER_LEFT || (down ? !band : !strip->down)))
-                return false;
-        if (event->type == WINDOW_EVENT_MOTION && !band && !strip->hover)
-                return false;
-        editor_tabs_layout(&editor.ui);
-        bits = ui_tabs_pointer(&editor.ui, strip, event, ui_kit.pointer_x, ui_kit.pointer_y);
-        if ((bits & UI_TABS_CHOSEN) && strip->at != editor.tab)
-                editor_show_tab(strip->at);
-        editor.dirty = true;
-        return event->type == WINDOW_EVENT_BUTTON;
+        (void)which;
+        if (editor.strip.at != editor.tab)
+                editor_show_tab(editor.strip.at);
+        return true;
 }
 
 // Words put into the status text at at, cut to the room left and a NUL after them: the place they end at, at most room - 1.
@@ -702,16 +677,20 @@ static positive editor_status_text(char address_to text, positive room, struct d
 }
 
 /*
-        The window as a view, laid out each draw and event: the tabs' band (none with one file), the find bar's (none while closed),
+        The window as a view, laid out each draw and event: the file tabs (none with one file), the find bar's band (none while closed),
         the code view below them, and the status bar at the foot. Its words are made first, so the view measures them.
 */
 static fn editor_layout(void)
 {
         struct editor_tab address_to tab = editor_now();
+        struct ui_control address_to strip = &editor.strip;
 
         editor_status_text(editor.bar_text, sizeof(editor.bar_text), &tab->view.doc);
+        if (strip->kind != UI_TABS)
+                strip->kind = UI_TABS, strip->variant = UI_TABS_SEGMENTED, ui_control_start(strip);
+        ui_tabs_fill(strip, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
         ui_view_begin(&editor.view, &editor.ui, editor.width, -editor.height);
-        ui_host(&editor.tabs_box, .h = UI_TABS_H, .hidden = editor.count <= 1);
+        ui_control(strip, .h = UI_TABS_H, .hidden = editor.count <= 1, .on = editor_tabbed);
         ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
         ui_host(&editor.text_box, .grow = 1);
         ui_row(.class = "bar")
@@ -735,11 +714,6 @@ static fn editor_draw(unsigned int address_to pixels)
         // ui_begin clears the window to the kit's surface (the editor is an opaque app), so the ground is not painted again here.
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
         editor_layout();
-        if (editor.count > 1)
-        {
-                editor_tabs_layout(ui);
-                ui_control_draw(ui, &editor.strip);
-        }
         if (editor.find.mode != UI_FINDBAR_CLOSED)
         {
                 const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
@@ -802,7 +776,11 @@ static b32 editor_event(const struct window_event address_to event)
               (editor_reload_key(event) ? EDITOR_RELOAD : ui_key_command(event)) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
         editor_layout();
-        if (editor_tabs_event(event))
+        // The file tabs are the view's: a press on one and its release are not the find bar's or the text's.
+        asks = ui_view_event(&editor.ui, &editor.view, event);
+        if (asks & UI_VIEW_DRAW)
+                editor.dirty = true;
+        if (asks & UI_VIEW_TAKEN)
                 return true;
         // What was typed since the file was read goes with the read: over unsaved changes the first press says so and the second reads.
         if (editor_reload_key(event) && (event->flags & WINDOW_KEY_DOWN) && tab->changed_on_disk)

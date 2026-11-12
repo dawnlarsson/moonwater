@@ -74,7 +74,7 @@ struct mixer_big
         char source[64];                    // and the microphone
         char device_name[96];               // the output's name, drawn beside its slider (mixer_device_name): its strip is listed with none
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
-        struct ui_view view;                // the window as a tree: Allow, on the Recording page with recording turned off, and the popup's Mixer row
+        struct ui_view view;                // the window as a tree: the tabs, Allow on the Recording page with recording turned off, and the popup's Mixer row
 };
 
 static struct
@@ -92,8 +92,8 @@ static struct
         // The tray's popup (-q), and where it opens (-a).
         b32 quick, beside;
         struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
-        struct ui_rect tabs_box, strips_box; // what the tree gave the tabs and the strips
-        struct ui_control tabs;              // the two pages
+        struct ui_rect strips_box;           // what the tree gave the strips
+        struct ui_control tabs;              // the two pages: an element of the tree
         const char address_to capture_path;
         string_address font;     // the face this is drawn in (-f), which the mixer it starts is drawn in too
 } mixer;
@@ -378,15 +378,27 @@ static b32 mixer_act(int which)
         return !ui_start_apart(words, mixer.recording ? 4 : 3);
 }
 
-// The window as a tree, every size and place the tree's: the tabs' band (the full window), the strips' area, and the Mixer row at the foot of the
-// popup. With recording off the strips have no height: the line that says so is above Allow, the two in the middle. The tabs and strips are put there.
+// A tab was chosen: its page is shown.
+static b32 mixer_tabbed(int which)
+{
+        return (void)which, mixer_page(mixer.tabs.at == 1), true;
+}
+
+// The window as a tree, every size and place the tree's: the tabs (the full window; they take no press while there is no page to show), the
+// strips' area, and the Mixer row at the foot of the popup. With recording off the strips have no height: the line that says so is above
+// Allow, the two in the middle. The strips are put where the tree says.
 static fn mixer_layout(void)
 {
         struct ui address_to ui = &mixer.ui;
         struct ui_control address_to c = &mixer.tabs;
 
+        if (c->kind != UI_TABS)
+                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
+        c->count = 2;
+        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
+        c->at = mixer.recording, c->disabled = !mixer.have;
         ui_view_begin(&mixer.big->view, ui, mixer.width, -mixer.height);
-        ui_host(&mixer.tabs_box, .class = "tabs", .hidden = mixer.quick);
+        ui_control(c, .class = "tabs", .hidden = mixer.quick, .on = mixer_tabbed);
         ui_col(.class = "middle", .grow = 1)
         {
                 ui_host(&mixer.strips_box, .grow = !mixer.capture_off);
@@ -399,12 +411,6 @@ static fn mixer_layout(void)
                         ui_button(language_of("Mixer"), .class = "action.outlined", .on = mixer_act, .arg = 1);
         ui_view_end(&mixer.big->view);
         ui_strips_place(ui, &mixer.big->strips, mixer.strips_box.x, mixer.strips_box.y, mixer.strips_box.w, mixer.strips_box.h);
-        if (c->kind != UI_TABS)
-                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = mixer.tabs_box.x * 100 / ui->scale, c->y = mixer.tabs_box.y * 100 / ui->scale, c->w = mixer.tabs_box.w * 100 / ui->scale, c->h = UI_TABS_H;
-        c->count = 2;
-        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
-        c->at = mixer.recording;
 }
 
 static fn mixer_dirty(void)
@@ -479,8 +485,6 @@ static fn mixer_draw(unsigned int address_to pixels)
                 ui_strips_message(ui, strips, WORDS(mixer_off), false);
                 return;
         }
-        if (!mixer.quick)
-                ui_control_draw(ui, &mixer.tabs);
         ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys);
         if (!mixer.recording && strips->count && strips->item[0].master == 1)
                 mixer_device_name(ui, strips);
@@ -510,7 +514,7 @@ static b32 mixer_event(const struct window_event address_to event)
 
         if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE)
                 return false;
-        // The pages: Control with Page Up and Page Down, or Tab, and a press on a tab.
+        // The pages: Control with Page Up and Page Down, or Tab (a press on a tab is the view's, below).
         if (!mixer.quick && mixer.have && event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) &&
             (event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->a == UI_KEY_TAB))
         {
@@ -518,18 +522,9 @@ static b32 mixer_event(const struct window_event address_to event)
                 return true;
         }
         mixer_layout();
-        if (!mixer.quick && mixer.have)
-        {
-                p32 tabs = ui_tabs_pointer(ui, &mixer.tabs, event, ui_kit.pointer_x, ui_kit.pointer_y);
-
-                if (tabs & UI_TABS_CHOSEN)
-                        mixer_page(mixer.tabs.at == 1);
-                mixer.dirty |= (tabs & UI_TABS_DRAW) != 0;
-                if (tabs & UI_TABS_TAKEN)
-                        return true;
-        }
-        // The buttons of the window: Allow (recording is off), and the popup's Mixer row; not asked while a strip's control is held (the kit hands its release to whoever asks first).
-        asks = ui_kit_held >= mixer.big->strips.control && ui_kit_held < mixer.big->strips.control + 2 * mixer.big->strips.count ? 0 : ui_view_event(ui, &mixer.big->view, event);
+        // The view's: the tabs (a press on one and its release show its page), Allow (recording is off) and the popup's Mixer row. It is not asked
+        // for the motions and the release of a strip's control that is held (the kit hands a release to whoever asks first); a press it always is.
+        asks = ui_kit_held >= mixer.big->strips.control && ui_kit_held < mixer.big->strips.control + 2 * mixer.big->strips.count && !(event->type == WINDOW_EVENT_BUTTON && down) ? 0 : ui_view_event(ui, &mixer.big->view, event);
         if (asks & UI_VIEW_QUIT)
                 return false;
         mixer.dirty |= (asks & UI_VIEW_DRAW) != 0;

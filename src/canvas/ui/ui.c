@@ -16446,9 +16446,10 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key).
 
         What is still a host: the list, the page, the lines and the strips, the old composites with a scroller of their own, and the
-        text of a field (a field's control is an element; what is typed in it is still handed to its engine by its app). What
-        removing the old way needs: those given elements, the checks that read the old structs' fields (settings.page, mixer.row)
-        read the view's, and then ui_buttons and the apps' damage marking deleted.
+        text of a field (a field's control is an element, placed and drawn by the view; what is typed in it and the pointer on it
+        are still handed to its engine by its app, ui_field_event, and the view gives such a field no pointer). What removing the
+        old way needs: those given elements, the checks that read the old structs' fields (settings.page, mixer.row) read the
+        view's, and then ui_buttons and the apps' damage marking deleted.
 */
 #define UI_VIEW_WATCHES 16
 #define UI_VIEW_SCROLLS 4         // the scroll containers of one build
@@ -17093,17 +17094,20 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         {
                 struct ui_control address_to c = v->item[at].control;
                 int look, ghost;
+                b32 on;
 
                 if (!c)
                         continue;
-                // The pointer is on what shows of a control: not on a part its scroll container has scrolled out of sight.
+                // The pointer is on what shows of a control: not on a part its scroll container has scrolled out of sight, and not on a
+                // field whose text is an engine's, which has the pointer from its app (ui_field_event).
                 ui_view_rows(v, v->tree.node[at].parent, &top, &bottom);
+                on = y >= top && y < bottom && !(c->kind == UI_INPUT && c->edit);
                 look = c->hover << 9 | c->focused << 8 | (c->item & 255), ghost = c->hover_x;
                 if (motion)
-                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, y >= top && y < bottom ? y : -UI_TREE_MOST, false, event->flags);
+                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, on ? y : -UI_TREE_MOST, false, event->flags);
                 else
                         c->focused = 0;
-                if (button && !ui_kit_held && y >= top && y < bottom && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
+                if (button && !ui_kit_held && on && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
                 {
                         asks |= UI_VIEW_DRAW | UI_VIEW_TAKEN;
                         if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, y, true, event->flags))
