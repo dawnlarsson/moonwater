@@ -388,6 +388,113 @@ else
         row FAIL "a pool cut under the compositor's read does not end the compositor" "$(tail -3 "$work/compositor.log")"
 fi
 
+# A client that grows a pool whose picture the compositor shows in place (a whole-window buffer is read where the client
+# keeps it): the pool is the middle one of three, so it moves when it grows, and the window is then drawn again with no
+# commit of its own. The picture is read where the pool now is; read where it was, the compositor ended (SIGSEGV).
+grown=$(python3 - << 'PY' 2>&1
+import array, os, select, socket, struct, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('/run/moonwater/wayland-0')
+ids = [1]
+held = b''
+
+def new():
+    ids[0] += 1
+    return ids[0]
+
+def send(obj, op, body=b'', fds=()):
+    text = struct.pack('<II', obj, (8 + len(body)) << 16 | op) + body
+    if fds:
+        s.sendmsg([text], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', fds))])
+    else:
+        s.sendall(text)
+
+def events(wait):
+    global held
+    out = []
+    end = time.time() + wait
+    while time.time() < end and select.select([s], [], [], max(0, end - time.time()))[0]:
+        got = s.recv(65536)
+        if not got:
+            break
+        held += got
+        while len(held) >= 8:
+            obj, head = struct.unpack_from('<II', held)
+            if len(held) < head >> 16:
+                break
+            out.append((obj, head & 0xffff, held[8:head >> 16]))
+            held = held[head >> 16:]
+    return out
+
+def string(text):
+    raw = text.encode() + b'\0'
+    return struct.pack('<I', len(raw)) + raw + b'\0' * (-len(raw) % 4)
+
+def pool(size, ink):
+    fd = os.memfd_create('pool')
+    os.ftruncate(fd, size)
+    os.pwrite(fd, bytes([ink]) * size, 0)
+    at = new()
+    send(shm, 0, struct.pack('<Ii', at, size), [fd])
+    return fd, at
+
+def window():
+    surface, shell, top = new(), new(), new()
+    send(compositor, 0, struct.pack('<I', surface))
+    send(wm, 2, struct.pack('<II', shell, surface))
+    send(shell, 1, struct.pack('<I', top))
+    send(surface, 6)
+    for obj, op, body in events(0.5):
+        if obj == shell and op == 0:
+            send(shell, 4, body[:4])
+    return surface, shell, top
+
+def show(surface, of, width, height):
+    buffer = new()
+    send(of, 0, struct.pack('<Iiiiii', buffer, 0, width, height, width * 4, 1))
+    send(surface, 1, struct.pack('<Iii', buffer, 0, 0))
+    send(surface, 6)
+
+registry = new()
+send(1, 1, struct.pack('<I', registry))
+names = {}
+for obj, op, body in events(0.5):
+    if obj == registry and op == 0:
+        name, length = struct.unpack_from('<II', body)
+        names[body[8:8 + length - 1].decode()] = name
+bound = []
+for interface in ('wl_compositor', 'wl_shm', 'xdg_wm_base'):
+    bound.append(new())
+    send(registry, 0, struct.pack('<I', names[interface]) + string(interface) + struct.pack('<II', 1, bound[-1]))
+compositor, shm, wm = bound
+side, size = 256, 256 * 256 * 4
+# Three pools, mapped one under another, and the window's picture in the middle one: it has no room to grow where it is.
+first = pool(size, 0x80)
+middle = pool(size, 0x40)
+last = pool(size, 0x80)
+surface, shell, top = window()
+show(surface, middle[1], side, side)
+events(0.5)
+os.ftruncate(middle[0], size * 16)
+send(middle[1], 2, struct.pack('<i', size * 16))
+events(0.3)
+# The window is drawn again without a commit of its own: a second window over it, and gone.
+over = window()
+show(over[0], first[1], side, side)
+events(0.5)
+send(over[2], 0)
+send(over[1], 0)
+send(over[0], 0)
+refused = any(obj == 1 and op == 0 for obj, op, body in events(1.0))
+print('refused' if refused else 'kept')
+PY
+)
+if alive && [ "$grown" = kept ]; then
+        row ok "a pool grown under a picture shown in place moves the picture with it, and the compositor goes on"
+else
+        row FAIL "a pool grown under a picture shown in place does not end the compositor" "$grown $(tail -3 "$work/compositor.log")"
+fi
+
 # The seat, end to end: a pointer, a wheel and keys written to a FIFO the compositor reads as one more input device, and a
 # client with libxkbcommon saying what it was told, on three layouts.
 if [ -n "$input" ]; then

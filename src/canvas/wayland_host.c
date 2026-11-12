@@ -435,6 +435,15 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
                         compositor_wl.map[slot].size = (unsigned long)new_size;
                         compositor_wl.map[slot].at = (unsigned long)got;
                 }
+        // A picture a row shows in place from this pool (compositor_wl_lend) is read where the pool now is: a pool that grew may have moved,
+        // and the address it was lent at is then no mapping at all, which the next compose would read.
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor_wl.lent[row].pixels && compositor_wl.lent[row].map == (const unsigned char *)at)
+                {
+                        compositor_wl.lent[row].pixels =
+                                (const unsigned int *)((const unsigned char *)compositor_wl.lent[row].pixels + (got - (long)at));
+                        compositor_wl.lent[row].map = (const unsigned char *)got;
+                }
         return (void *)got;
 }
 
