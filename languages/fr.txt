@@ -318,6 +318,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Smooth mouse wheel	0dab	Molette de la souris fluide
 =Sound	9a34	Son
 =Sound server	84bf	Serveur de son
+=Splash	e986	Écran de démarrage
 =Start the desktop	be4c	Démarrer le bureau
 =System	84bc	Système
 =System notices	fa89	Avis du système

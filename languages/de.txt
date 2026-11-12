@@ -318,6 +318,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Smooth mouse wheel	0dab	Sanftes Mausrad
 =Sound	9a34	Ton
 =Sound server	84bf	Tonserver
+=Splash	e986	Startbild
 =Start the desktop	be4c	Desktop starten
 =System	84bc	System
 =System notices	fa89	Systemmeldungen

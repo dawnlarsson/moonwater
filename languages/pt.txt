@@ -318,6 +318,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Smooth mouse wheel	0dab	Roda do mouse suave
 =Sound	9a34	Som
 =Sound server	84bf	Servidor de som
+=Splash	e986	Tela de abertura
 =Start the desktop	be4c	Iniciar a área de trabalho
 =System	84bc	Sistema
 =System notices	fa89	Avisos do sistema

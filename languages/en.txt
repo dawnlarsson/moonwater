@@ -318,6 +318,7 @@ ui_field_full	fe02	that is as much as it holds
 =Smooth mouse wheel	0dab	Smooth mouse wheel
 =Sound	9a34	Sound
 =Sound server	84bf	Sound server
+=Splash	e986	Splash
 =Start the desktop	be4c	Start the desktop
 =System	84bc	System
 =System notices	fa89	System notices

@@ -319,6 +319,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Smooth mouse wheel	0dab	גלגלת עכבר חלקה
 =Sound	9a34	צליל
 =Sound server	84bf	שרת השמע
+=Splash	e986	מסך פתיחה
 =Start the desktop	be4c	הפעל את שולחן העבודה
 =System	84bc	מערכת
 =System notices	fa89	הודעות המערכת

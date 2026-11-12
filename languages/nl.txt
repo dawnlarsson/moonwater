@@ -318,6 +318,7 @@ ui_field_full	fe02	meer past er niet in
 =Smooth mouse wheel	0dab	Soepel muiswiel
 =Sound	9a34	Geluid
 =Sound server	84bf	Geluidsserver
+=Splash	e986	Opstartscherm
 =Start the desktop	be4c	Bureaublad starten
 =System	84bc	Systeem
 =System notices	fa89	Systeemmeldingen

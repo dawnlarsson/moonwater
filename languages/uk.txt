@@ -318,6 +318,7 @@ ui_field_full	fe02	більше не вміщається
 =Smooth mouse wheel	0dab	Плавне колесо миші
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковий сервер
+=Splash	e986	Заставка
 =Start the desktop	be4c	Запускати робочий стіл
 =System	84bc	Система
 =System notices	fa89	Сповіщення системи
