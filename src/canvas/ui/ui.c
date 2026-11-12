@@ -14406,6 +14406,27 @@ static void ui_body_fit(struct ui_body address_to b, b64 view, b64 content)
 }
 
 // whether the body is held, carried, springing or following a notch: the caller steps it a frame at a time while it is
+static b32 ui_body_going(const struct ui_body address_to b);
+
+/*
+        The body's extent where content is added at the far end while it is looked at (a terminal printing): a body in motion that is at
+        the far end, or on its way to it, goes with the end as it moves on, so a notch's glide or its bounce there does not leave the
+        view behind what is new. pinned says the view is the end's already, when the position goes with it too and not only the target.
+*/
+static void ui_body_fit_end(struct ui_body address_to b, b64 view, b64 content, b32 pinned)
+{
+        b64 was = ui_body_far(b), grown;
+        b32 there = b->state == BODY_NOTCH ? b->target >= was : b->raw >= was;
+
+        ui_body_fit(b, view, content);
+        grown = ui_body_far(b) - was;
+        if (was <= 0 || grown <= 0 || !there || !ui_body_going(b))
+                return;
+        b->target += grown;
+        if (pinned)
+                b->raw += grown, b->shown += grown, b->rest += grown;
+}
+
 static b32 ui_body_going(const struct ui_body address_to b)
 {
         return b->state == BODY_TRACK || b->state == BODY_COAST || b->state == BODY_SPRING || b->state == BODY_NOTCH || b->bounce || b->bounce_v;
@@ -14527,7 +14548,9 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 }
                 else if (b->state == BODY_NOTCH)
                 {
-                        b64 far = ui_body_far(b), aim = b->target, carry = 0, gap, lo = b->raw < 0 ? b->raw : 0, hi = b->raw > far ? b->raw : far;
+                        // The target is held to the ends as they are now: one set before the content shrank or the view grew is past the far
+                        // end, where the position cannot follow it, and the glide would never rest.
+                        b64 far = ui_body_far(b), aim = b->target < 0 ? 0 : b->target > far ? far : b->target, carry = 0, gap, lo = b->raw < 0 ? b->raw : 0, hi = b->raw > far ? b->raw : far;
                         b64 rate = b->follow > 0 ? b->follow : BODY_NOTCH_RATE;
                         b32 over = false;
 
@@ -14802,7 +14825,9 @@ static void ui_scroll_hold(struct ui_scroll address_to s)
         held, on the track it pages) and a release. A finger (touch) takes the bar within its reach (ui_scroll_reach) and
         the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was not its own
         (a press off it, a motion with nothing held); a press on it that pages answers the new scroll. A held thumb is the
-        body's track: a place past an end is drawn by the rubber band, and the thumb goes off its track with it.
+        body's track: a place past an end is drawn by the rubber band, and the thumb goes off its track with it. The answer
+        is never past the top, whatever the band draws and wherever a page would land: a negative one is "not the bar's" to
+        every caller, which would send the press to what lies under the track and leave a thumb pulled past the top held there.
 */
 static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
 {
@@ -14824,7 +14849,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 ui_body_track(&s->body, (((b64)(y - s->grab - at) * rest / (track - length)) << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
                 s->scroll = ui_body_px(&s->body);
-                return s->scroll;
+                return s->scroll < 0 ? 0 : s->scroll;
         }
         if (type != WINDOW_EVENT_BUTTON)
                 return -1;
@@ -14833,7 +14858,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 b32 was = s->held;
 
                 s->held = 0;
-                return was ? s->scroll : -1;
+                return !was ? -1 : s->scroll < 0 ? 0 : s->scroll;
         }
         if (!on_track)
                 return -1;
@@ -14847,7 +14872,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         // A finger beside the bar but off its thumb is on the content it means to drag or press, not the track: only a pointer pages.
         if (touch)
                 return -1;
-        return y < top ? s->scroll - s->view : s->scroll + s->view;
+        return y >= top ? s->scroll + s->view : s->scroll > s->view ? s->scroll - s->view : 0;
 }
 
 /*

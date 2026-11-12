@@ -149383,6 +149383,24 @@ static fn check_kit_place(void)
                 check("kit scrollbar: the thumb is the view's share of the track where the scroll puts it, 24 at least, none when all shows",
                       geometry && none && least);
                 check("kit scrollbar: dragged it scrolls by the content's share of the move, and a press on the track pages a view", dragged && paged);
+                {
+                        // Within a view of the top a page lands on the top, and a thumb pulled above its track answers the top while it is held
+                        // and when it is let go: neither answer is the negative one that says the event was not the bar's.
+                        b32 to_top, pulled;
+
+                        bar.held = 0, bar.scroll = 100;
+                        ui_body_set(&bar.body, 200ll << UI_Q, 1000ll << UI_Q, 100ll << UI_Q, 0);
+                        to_top = pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 12, true, 0) == 0;
+                        bar.scroll = 0;
+                        ui_body_set(&bar.body, 200ll << UI_Q, 1000ll << UI_Q, 0, 0);
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true, 0);
+                        pulled = bar.held && pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 104, -30, true, 0) == 0 &&
+                                 pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, -30, false, 0) == 0 && !bar.held;
+                        bar.scroll = 0;
+                        ui_body_set(&bar.body, 200ll << UI_Q, 1000ll << UI_Q, 0, 0);
+                        check("kit scrollbar: a press on the track within a view of the top pages to the top, and is the bar's", to_top);
+                        check("kit scrollbar: a thumb pulled above its track answers the top, held and let go, and is the bar's", pulled);
+                }
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
 
@@ -150580,6 +150598,63 @@ static void check_terminal_wheel_curve(void)
               rising && terminal.bar.body.raw == notches * row && !ui_body_going(&terminal.bar.body));
         check("terminal scrollback: the view is the bar's offset to the nearest row, the grid's only rounding of it",
               first == (unsigned int)((terminal.bar.scroll + (int)terminal.cell_h / 2) / (int)terminal.cell_h));
+        // Output arriving while the body moves at the live end: a notch down at the end (its bounce keeps the body going), and a notch's
+        // glide down to the end from six rows up, each with a line printed every few frames. The view is the live one when it rests.
+        {
+                b32 rode, reached, stepped, grew;
+                unsigned int was, kept_lines = history_lines;
+
+                // The rig's scrollback is full (it holds GRID_HISTORY lines), and a full one does not grow: ten lines of it are kept, so there is room.
+                history_lines = 10;
+                terminal_view_live();
+                terminal_bar_follow();
+                terminal_extent(&first, &shown, &total);
+                was = total;
+                clock += 1000000000ll, ui_kit.now += 1000000000ll, ui_kit.test_clock = clock;
+                terminal_bar_turn(&notch, &dirty);
+                for (int k = 0; k < 120; k++)
+                {
+                        if (k < 40 && k % 4 == 0)
+                                term_bytes("more\r\n", 6);
+                        clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                        terminal_bar_step();
+                }
+                rode = terminal.view == TERMINAL_LIVE && !ui_body_going(&terminal.bar.body);
+                terminal_extent(&first, &shown, &total);
+                grew = total == was + 10;
+                terminal_view_set(total - shown - 6);
+                terminal_bar_follow();
+                for (int k = 0; k < 240; k++)
+                {
+                        if (k < 6)
+                                terminal_bar_turn(&notch, &dirty);
+                        if (k < 60 && k % 6 == 0)
+                                term_bytes("more\r\n", 6);
+                        clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                        terminal_bar_step();
+                }
+                reached = terminal.view == TERMINAL_LIVE && !ui_body_going(&terminal.bar.body);
+                check("terminal scrollback: a notch at the live end while lines are printed leaves the view following them", rode && grew);
+                check("terminal scrollback: and notches down to the live end reach it though lines are printed on the way", reached);
+
+                // The wheel smooth off: a notch is three lines at once, with no frame after it.
+                terminal_view_set(0);
+                terminal_bar_follow();
+                terminal_extent(&first, &shown, &total);
+                was = first;
+                ui_kit.wheel_off = 1;
+                clock += 1000000000ll, ui_kit.now += 1000000000ll, ui_kit.test_clock = clock;
+                terminal_bar_turn(&notch, &dirty);
+                ui_kit.wheel_off = 0;
+                terminal_extent(&first, &shown, &total);
+                stepped = first == was + 3 && !ui_body_going(&terminal.bar.body);
+                terminal_bar_place(first, shown, total);
+                terminal_extent(&first, &shown, &total);
+                check("terminal scrollback: with the wheel smooth off a notch moves the view three lines at once, and it stays there", stepped && first == was + 3);
+                history_lines = kept_lines;
+                terminal_view_live();
+                terminal_bar_follow();
+        }
         // The kit's one conversion on the grid too: a trackpad's precise turn is the hand (ui_wheel_turn, one for one, not a notch's
         // glide), and its lift lets the hand go. The bar's body is the grid's, so the rows above and this one share it.
         {
@@ -154048,6 +154123,21 @@ static void check_kit_body(void)
         ui_body_step(&b, 1000000000ll);
         check("kit body: two notches of 48 move the position 49 (51 percent of 96, running at once) in 40 ms, and rest on 96 exactly",
               reach_small >= 48 && reach_small <= 50 && ui_body_drawn(&b) == 96ll << UI_Q && !ui_body_going(&b));
+
+        // The content shrinks under a glide (a fold shuts, a window grows): the target it was given is past the new end, and the glide
+        // rests on that end, from below it and from above it.
+        ui_body_set(&b, 200ll << UI_Q, 1000ll << UI_Q, 500ll << UI_Q, 0);
+        ui_body_notch(&b, 300ll << UI_Q, 0);
+        ui_body_fit(&b, 200ll << UI_Q, 900ll << UI_Q);
+        ui_body_step(&b, 2000000000ll);
+        check("kit body: a glide whose target the content shrank away from rests on the new end", ui_body_drawn(&b) == 700ll << UI_Q && !ui_body_going(&b));
+        ui_body_set(&b, 200ll << UI_Q, 1000ll << UI_Q, 700ll << UI_Q, 0);
+        ui_body_notch(&b, 100ll << UI_Q, 0);
+        ui_body_step(&b, 1000000000ll);
+        ui_body_notch(&b, -10ll << UI_Q, 1000000000ll);
+        ui_body_fit(&b, 200ll << UI_Q, 700ll << UI_Q);
+        ui_body_step(&b, 3000000000ll);
+        check("kit body: and one whose position the content shrank away from comes back to the new end and rests, as it did", ui_body_drawn(&b) == 500ll << UI_Q && !ui_body_going(&b));
 }
 
 /*

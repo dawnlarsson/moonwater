@@ -574,7 +574,9 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
         terminal.bar.height = (int)terminal.height, terminal.bar.inset = UI_CLOSE_BOTTOM;
         terminal.bar.content = (int)total * cell, terminal.bar.view = (int)shown * cell, terminal.bar.scale = terminal_scale();
         terminal.bar.wheel = 3 * cell; // a notch of a wheel is three lines, as every terminal's is
-        ui_body_fit(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE);
+        // A body moving at the live end goes with it as lines are printed (ui_body_fit_end): a notch's glide or bounce there would
+        // otherwise rest a line short of the new end, and the view, which is the body's place, would stop following the output.
+        ui_body_fit_end(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE, terminal.view == TERMINAL_LIVE);
         // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
         if (!ui_body_going(&terminal.bar.body) && ui_body_px(&terminal.bar.body) != (int)first * cell)
                 ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, (b64)first * cell * UI_ONE, terminal.bar.body.at);
@@ -645,8 +647,13 @@ static void terminal_bar_turn(const struct window_event address_to event, b32 ad
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
                 return;
         terminal_bar_place(first, shown, total);
+        // The view is put from the body here as well as in its frames: with the wheel smooth off a notch leaves the body at rest at its
+        // new place, no frame follows, and the next placing would set the body back to the view the notch never moved.
         if (ui_wheel_turn(&kit, &terminal.bar, event))
+        {
+                terminal_bar_out();
                 *dirty = true;
+        }
 }
 
 // The body's motion, a frame: a notch's glide, a finger's throw, a pull's spring, and the view and the bar with it. A change of the
@@ -654,8 +661,13 @@ static void terminal_bar_turn(const struct window_event address_to event, b32 ad
 static void terminal_bar_step(void)
 {
         struct ui kit = terminal_kit(null);
-        int shift = terminal_grid_shift(), before = terminal.bar.scroll;
+        unsigned int first, shown, total;
+        int shift, before;
 
+        // The bar is placed first, so the body has the scrollback as it is now (lines printed since the last frame drawn) before it steps.
+        if (terminal_extent(&first, &shown, &total) && total > shown)
+                terminal_bar_place(first, shown, total);
+        shift = terminal_grid_shift(), before = terminal.bar.scroll;
         ui_kit.busy = 0;
         ui_scroll_frame(&kit, &terminal.bar); // the kit's frame, as every region's: a trackpad's hand that went quiet is let go, and the body steps
         if (terminal_bar_out() || terminal.bar.scroll != before || terminal_grid_shift() != shift)
