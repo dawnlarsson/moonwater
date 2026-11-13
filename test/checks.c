@@ -99424,9 +99424,10 @@ static fn steam_profile(void)
         check("The steam profile has VirtIO Vulkan drivers alongside Radeon, Intel and software drivers",
               chrome_has(part ? part->packages : null, "vulkan-virtio") &&
                   chrome_has(bowl_graphics_arch, "vulkan-virtio"));
-        check("The steam profile has Xwayland, which the session starts beside Steam, and bubblewrap for the Steam Runtime",
+        check("The steam profile has Xwayland, which the session starts beside Steam, bubblewrap for the Steam Runtime, and which for steam.sh",
               chrome_has(part ? part->packages : null, "xorg-xwayland") &&
-                  chrome_has(part ? part->packages : null, "bubblewrap"));
+                  chrome_has(part ? part->packages : null, "bubblewrap") &&
+                  chrome_has(part ? part->packages : null, "which"));
         check("The steam component exposes no program of the bowl by name: its session is the way in",
               part && part->expose && !part->expose[0]);
         check("Steam's launcher is the profile's own name and no other name",
@@ -99479,6 +99480,11 @@ static fn steam_profile(void)
         check("The session probes the DRM render node and falls back to software GL/GSK only when no card or virgl is present",
               gl_probe && sw_export && gl_probe < sw_export && sw_export < wrapped &&
                   strstr(steam->session[sw_export - 1], "GSK_RENDERER=${GSK_RENDERER:-cairo}"));
+        {
+                positive zenity = chrome_line(steam ? steam->session : null, "STEAM_ZENITY=${STEAM_ZENITY:-zenity}");
+                check("The session binds STEAM_ZENITY before starting Steam, so set -u never aborts on an unbound helper variable",
+                      zenity && zenity < wrapped && zenity < run);
+        }
         {
                 p8 arch_root[256];
                 p8 debian_root[256];
@@ -99635,6 +99641,30 @@ static fn chrome_profile(void)
         check("A program is given its capabilities unless the environment it is started with says none",
               bowl_capabilities_wanted(null) && bowl_capabilities_wanted(plain) && bowl_capabilities_wanted(kept) &&
                   bowl_capabilities_wanted(longer) && !bowl_capabilities_wanted(cleared));
+        {
+                static string_address with_expose[] = {"BOWL_CAPABILITIES=none", "PATH=/usr/local/bin:/bin:/usr/bin:" BOWL_EXPOSE_DIRECTORY ":/", "HOME=/root", null};
+                static string_address slashes[] = {"BOWL_CAPABILITIES=none", "PATH=" BOWL_EXPOSE_DIRECTORY "/:/usr/bin://:/opt/bin", null};
+                static string_address only_expose[] = {"BOWL_CAPABILITIES=none", "PATH=" BOWL_EXPOSE_DIRECTORY ":/", null};
+                static string_address clean_none[] = {"BOWL_CAPABILITIES=none", "PATH=/bin:/usr/bin", null};
+                static string_address with_caps[] = {"BOWL_CAPABILITIES=all", "PATH=/bin:/usr/bin:" BOWL_EXPOSE_DIRECTORY ":/", null};
+                static string_address dup_path[] = {"BOWL_CAPABILITIES=none", "PATH=/bin:" BOWL_EXPOSE_DIRECTORY, "PATH=/bowls/bin:/", null};
+                string_address address_to got;
+                p8 stripped_ok = true;
+
+                got = bowl_without_exposed_path(with_expose);
+                stripped_ok &= got != with_expose && string_equals(bowl_env_value(got, "PATH"), "/usr/local/bin:/bin:/usr/bin") &&
+                               string_equals(bowl_env_value(got, "HOME"), "/root");
+                got = bowl_without_exposed_path(slashes);
+                stripped_ok &= string_equals(bowl_env_value(got, "PATH"), "/usr/bin:/opt/bin");
+                got = bowl_without_exposed_path(only_expose);
+                stripped_ok &= string_equals(bowl_env_value(got, "PATH"), "/bin:/usr/bin");
+                got = bowl_without_exposed_path(dup_path);
+                stripped_ok &= string_equals(bowl_env_value(got, "PATH"), "/bin") && got[1] && got[2] == null;
+                stripped_ok &= bowl_without_exposed_path(clean_none) == clean_none &&
+                               bowl_without_exposed_path(with_caps) == with_caps;
+                check("A capability-less bowl strips /bowls/bin and / from PATH so unprivileged wrappers never leak [Bowl] errors to stdout",
+                      stripped_ok);
+        }
         positive nodes = chrome_line(chrome ? chrome->session : null, "/dev/dri/renderD*");
         string_address grant = nodes ? chrome->session[nodes - 1] : (string_address)"";
 
@@ -99650,6 +99680,67 @@ static fn chrome_profile(void)
               exec && !strstr(start, "--disable-gpu") && !strstr(start, "--use-gl") && !strstr(start, "--use-angle") &&
                   !strstr(start, "--no-sandbox") && !strstr(start, "--disable-software-rasterizer") &&
                   !strstr(start, "--disable-features") && !strstr(start, "--in-process-gpu"));
+        positive preload = chrome_line(chrome ? chrome->session : null,
+                                       "LD_PRELOAD=" BOWL_CHROME_PWRITE_LIBRARY);
+        check("The browser preloads its seccomp-safe pwrite shim before starting Chromium, and only Chrome carries that flag",
+              preload && preload < exec &&
+                  strstr(chrome->session[preload - 1],
+                         BOWL_ROOT_PREFIX "alpine" BOWL_CHROME_PWRITE_LIBRARY) &&
+                  chrome->pwrite_shim &&
+                  bowl_find_profile("steam") &&
+                  !bowl_find_profile("steam")->pwrite_shim);
+#ifdef BOWL_CHROME_PWRITE_GAP
+        {
+                bool elf_ok = sizeof(bowl_chrome_pwrite_head) > 64 &&
+                              bowl_chrome_pwrite_head[0] == 0x7f &&
+                              bowl_chrome_pwrite_head[1] == 'E' &&
+                              bowl_chrome_pwrite_head[2] == 'L' &&
+                              bowl_chrome_pwrite_head[3] == 'F' &&
+                              bowl_chrome_pwrite_head[4] == 2 &&
+                              bowl_chrome_pwrite_head[5] == 1 &&
+                              bowl_chrome_pwrite_head[16] == 3 &&
+                              bowl_chrome_pwrite_head[17] == 0;
+#if X64
+                elf_ok = elf_ok && bowl_chrome_pwrite_head[18] == 0x3e &&
+                         bowl_chrome_pwrite_head[19] == 0;
+#elif ARM64
+                elf_ok = elf_ok && bowl_chrome_pwrite_head[18] == 0xb7 &&
+                         bowl_chrome_pwrite_head[19] == 0;
+#elif RISCV64
+                elf_ok = elf_ok && bowl_chrome_pwrite_head[18] == 0xf3 &&
+                         bowl_chrome_pwrite_head[19] == 0;
+#endif
+                static const string_address shim_symbols[] = {
+                    "__errno_location", "pwrite", "pwrite64",
+                    "pwritev", "pwritev64", "pwritev2", null};
+                for (positive s = 0; elf_ok && shim_symbols[s]; s++)
+                {
+                        positive len = string_length(shim_symbols[s]) + 1;
+                        bool found = false;
+
+                        for (positive i = 0; i + len <= sizeof(bowl_chrome_pwrite_head); i++)
+                        {
+                                bool match = true;
+
+                                for (positive j = 0; j < len; j++)
+                                        if (bowl_chrome_pwrite_head[i + j] != (p8)shim_symbols[s][j])
+                                        {
+                                                match = false;
+                                                break;
+                                        }
+                                if (match)
+                                {
+                                        found = true;
+                                        break;
+                                }
+                        }
+                        elf_ok = elf_ok && found;
+                }
+                check("The embedded Chrome pwrite shim is a valid ELF64 shared object exporting all pwrite variants and __errno_location",
+                      elf_ok && BOWL_CHROME_PWRITE_GAP > 0 &&
+                          sizeof(bowl_chrome_pwrite_tail) > 0);
+        }
+#endif
 
         p8 known = true;
 
