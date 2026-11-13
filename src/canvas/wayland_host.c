@@ -386,7 +386,25 @@ static void compositor_wl_release(void *context, void *block, long bytes)
         compositor_call(syscall(munmap), (positive)block, (positive)bytes, 0, 0, 0, 0);
 }
 
-/* A regular file of at least size bytes, mapped read-only and shared; null for anything else. */
+/*
+        Whether a file's pages are memory the kernel holds itself: a file of tmpfs (a memfd, /dev/shm and a file under /run are that), of
+        ramfs or of hugetlbfs, by the filesystem the descriptor is on (fstatfs, f_type first). Every other file's pages are read from
+        somewhere when they are touched, and the compositor touches a pool's pages in its own loop: a file of a filesystem the client
+        serves itself (FUSE) is read by asking the client, which need never answer, and the compositor then waits in the page fault for
+        as long as the client likes, deaf to every window and to SIGKILL (MW-2026-195). A network's file or a disk's waits on a server
+        or a device the same way. What libwayland's clients make a pool of is a memfd or a file of the runtime directory, which are these.
+*/
+static int compositor_wl_memory_file(long fd)
+{
+        unsigned long info[32];
+
+        memory_zero(info, sizeof info);
+        if (compositor_call(syscall(fstatfs), (positive)fd, (positive)info, 0, 0, 0, 0) < 0)
+                return 0;
+        return info[0] == 0x01021994ul || info[0] == 0x858458f6ul || info[0] == 0x958458f6ul; // tmpfs, ramfs, hugetlbfs
+}
+
+/* A regular file of at least size bytes whose pages are memory (compositor_wl_memory_file), mapped read-only and shared; null for anything else. */
 static void *compositor_wl_map(void *context, long fd, long size)
 {
         // struct statx: stx_mode at 28 (u16), stx_size at 40 (u64); asked for the type and the size, of the descriptor itself.
@@ -402,7 +420,7 @@ static void *compositor_wl_map(void *context, long fd, long size)
                 return 0;
         mode = (unsigned int)info[28] | (unsigned int)info[29] << 8;
         length = *(unsigned long *)(info + 40);
-        if ((mode & 0170000) != 0100000 || length < (unsigned long)size)
+        if ((mode & 0170000) != 0100000 || length < (unsigned long)size || !compositor_wl_memory_file(fd))
                 return 0;
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
         if (got < 0 && got > -4096)
@@ -1602,16 +1620,21 @@ static long compositor_wl_dmabuf_table(void *context, long *size)
 
 /*
         A descriptor that is a dma-buf of at least size bytes, mapped read-only and shared, in the table the SIGBUS handler reads, like a pool.
-        A dma-buf is told from any other file by the one ioctl that gives it the answer EINVAL (a sync with no direction), where another
-        file says it knows no such ioctl; its size is what seeking to its end gives.
+        A dma-buf is told from any other file by the filesystem its descriptor is on, the kernel's own for dma-bufs (fstatfs, DMA_BUF_MAGIC),
+        and then by the one ioctl that gives it the answer EINVAL (a sync with no direction), where another file says it knows no such
+        ioctl; its size is what seeking to its end gives. The filesystem is asked first because the ioctl of a file a client serves
+        itself (FUSE) is the client's to answer, with EINVAL if it likes or never, as its pages are (compositor_wl_memory_file).
 */
 static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
 {
-        unsigned long none = 0;
+        unsigned long none = 0, on[32];
         long extent, got;
 
         (void)context;
-        if (size < 1 || compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&none, 0, 0, 0) != -22)
+        memory_zero(on, sizeof on);
+        if (size < 1 || compositor_call(syscall(fstatfs), (positive)fd, (positive)on, 0, 0, 0, 0) < 0 || on[0] != 0x444d4142ul)
+                return 0;
+        if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&none, 0, 0, 0) != -22)
                 return 0;
         extent = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
         if (extent < size)

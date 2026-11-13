@@ -41,6 +41,54 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-195: a pool on a file the client serves held the compositor in a page fault
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-13, `PENDING` |
+| Class | Unbounded wait on a peer inside the main loop (a page fault another process answers); denial of the whole session, and of its end |
+| Attacker | 1 or 8: any program that can open `/run/moonwater/wayland-0` and can mount or reach a FUSE filesystem (a user namespace is enough), or hand over a file of a network filesystem |
+| Reachable | src/canvas/wayland_host.c `compositor_wl_map`, from `wl_shm.create_pool` (src/canvas/wayland.c); `compositor_wl_dmabuf_map` by the same reasoning |
+
+**What happened.** `wl_shm.create_pool` takes a descriptor, and the compositor
+mapped any regular file of the size named. It reads a pool's pixels in its own
+loop: copied at the commit, or, for a whole window's buffer, at every compose
+(`compositor_wl_lend`, which also touches the first and last pixel at the
+commit). A file's pages come from wherever the file lives. On a FUSE mount
+they come from the process that serves the mount, which can be the client, and
+which need never answer the READ. The compositor then sleeps in the page fault
+(`request_wait_answer`, state D). No window is drawn, no input is read, no
+other client is answered. Once the request has been read by the server the
+wait is not ended by a signal: SIGKILL stayed pending for as long as the
+client held the request, so the session could not be ended either. Shown with
+a raw client that serves a one-file FUSE mount from a user namespace, hands
+the file to `wl_shm.create_pool` and shows a 256 by 256 window from it: a
+second client's `wl_display.sync` had no answer in three seconds, and
+`/proc/PID/stack` of the compositor read `fuse_readahead` under
+`filemap_fault` with `ShdPnd` holding SIGKILL.
+
+**The fix.** A pool is mapped only when its file is on a filesystem whose
+pages the kernel holds itself: tmpfs (a memfd, `/dev/shm` and the runtime
+directory are that), ramfs or hugetlbfs, asked with `fstatfs`
+(`compositor_wl_memory_file`). Anything else is refused as a descriptor that
+is not shared memory, `wl_shm`'s `invalid_fd`. A dma-buf is told by its
+filesystem too (`DMA_BUF_MAGIC`) before the ioctl that used to tell it, since
+an ioctl on a FUSE file is also the server's to answer or to sit on.
+
+**Tests that fail without the fix.** test/wayland_e2e.sh (lane `wayland`), "a
+pool on a file the client serves itself (FUSE) is refused, and the compositor
+answers the next client", whose client is test/wayland_held.py. Run by hand
+against a headless compositor built from the parent tree (it printed `frozen`)
+and from the fix (`refused`). The lane itself was NOT RUN where this was
+written: it needs libwayland's client and scanner, which were not there.
+
+**Still open.** The dma-buf half is by reading: there was no card and no
+dma-buf to hand the compositor here, so `DMA_BUF_MAGIC` from `fstatfs` on a
+real dma-buf was not seen. A file on a slow or dead disk was a smaller form of
+the same wait and is refused with the rest; a client that made its pools in a
+directory on disk is now refused, and none is known to. The clipboard's pipes
+are read on a thread with a deadline and are not this.
+
 ### MW-2026-194: a pool grown under a picture shown in place ended the compositor
 
 | | |

@@ -630,6 +630,16 @@ else
         row FAIL "hostile damage (negative, past the buffer, huge, overlapping) is clipped" "$out $(tail -3 "$work/compositor.log")"
 fi
 
+# A pool on a file whose pages the client serves itself and never does (FUSE, test/wayland_held.py): the pool is refused, and the compositor
+# answers the next client. Mapped, its read of the picture waited on the client for as long as the client liked (MW-2026-195).
+out=$(python3 -I "$(dirname "$0")/wayland_held.py" 2>&1)
+case $out in
+refused) if alive; then row ok "a pool on a file the client serves itself (FUSE) is refused, and the compositor answers the next client"
+        else row FAIL "a pool on a file the client serves itself (FUSE) is refused" "the compositor is gone: $(tail -3 "$work/compositor.log")"; fi ;;
+"NOT RUN"*) echo "NOT RUN a pool on a file the client serves itself (FUSE) is refused: ${out#NOT RUN }" ;;
+*) row FAIL "a pool on a file the client serves itself (FUSE) is refused, and the compositor answers the next client" "$out" ;;
+esac
+
 # A window whose damage is a rectangle the card copies (over its threshold): the card's copy into the picture is the processor's, byte for byte, and
 # moonwater debug says the card copied rectangles (not the processor).
 case $extra in
