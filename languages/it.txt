@@ -35,6 +35,20 @@ editor_untitled	8b58	senza titolo
 editor_write_beside	ec75	impossibile scrivere accanto al file
 editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
 editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
+files_back	4bc2	Indietro
+files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
+files_chosen	7a7f	%1$d di %2$d scelti
+files_count	cab8	%d elementi
+files_count_cut	f139	I primi %d elementi: la cartella ne ha altri
+files_empty	751c	Questa cartella è vuota
+files_failed	c564	Impossibile leggere questa cartella
+files_forward	83ba	Avanti
+files_gone	b09c	Questa cartella non c'è più
+files_link	9abb	Un collegamento non viene seguito
+files_not_folder	2663	Questa non è una cartella
+files_reading	64a4	Lettura della cartella
+files_unreadable	986c	Questa cartella non può essere letta
+files_up	5940	Su
 launcher_power_off	ae2f	Spegni
 launcher_power_off_armed	a48f	spegni
 launcher_restart	ed8c	Riavvia
@@ -274,6 +288,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Cursor style	ad1e	Stile del puntatore
 =Date format	7a44	Formato della data
 =Devices	f320	Dispositivi
+=Files	1b30	File
 =Internal storage	e961	Memoria interna
 =External devices	5769	Dispositivi esterni
 =Display	d9b5	Schermo

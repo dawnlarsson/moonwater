@@ -35,6 +35,20 @@ editor_untitled	8b58	unbenannt
 editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
 editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
 editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
+files_back	4bc2	Zurück
+files_changed	df4e	Nicht mehr das Aufgelistete: der Ordner wird neu gelesen
+files_chosen	7a7f	%1$d von %2$d gewählt
+files_count	cab8	%d Einträge
+files_count_cut	f139	Die ersten %d Einträge: der Ordner hat mehr
+files_empty	751c	Dieser Ordner ist leer
+files_failed	c564	Dieser Ordner konnte nicht gelesen werden
+files_forward	83ba	Vor
+files_gone	b09c	Dieser Ordner ist weg
+files_link	9abb	Einer Verknüpfung wird nicht gefolgt
+files_not_folder	2663	Das ist kein Ordner
+files_reading	64a4	Ordner wird gelesen
+files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
+files_up	5940	Nach oben
 launcher_power_off	ae2f	Ausschalten
 launcher_power_off_armed	a48f	ausschalten
 launcher_restart	ed8c	Neu starten
@@ -274,6 +288,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Cursor style	ad1e	Stil des Mauszeigers
 =Date format	7a44	Datumsformat
 =Devices	f320	Geräte
+=Files	1b30	Dateien
 =Internal storage	e961	Interner Speicher
 =External devices	5769	Externe Geräte
 =Display	d9b5	Anzeige

@@ -35,6 +35,20 @@ editor_untitled	8b58	sans titre
 editor_write_beside	ec75	impossible d'écrire à côté du fichier
 editor_writes_over_changed	df15	écrase la modification sur le disque (Ctrl+R la relit)
 editor_writes_over_readonly	e22f	écrase un fichier en lecture seule
+files_back	4bc2	Retour
+files_changed	df4e	Ce n'est plus ce qui était listé : le dossier est relu
+files_chosen	7a7f	%1$d sur %2$d choisis
+files_count	cab8	%d éléments
+files_count_cut	f139	Les %d premiers éléments : le dossier en a plus
+files_empty	751c	Ce dossier est vide
+files_failed	c564	Ce dossier n'a pas pu être lu
+files_forward	83ba	Suivant
+files_gone	b09c	Ce dossier n'existe plus
+files_link	9abb	Un lien n'est pas suivi
+files_not_folder	2663	Ce n'est pas un dossier
+files_reading	64a4	Lecture du dossier
+files_unreadable	986c	Ce dossier ne peut pas être lu
+files_up	5940	Monter
 launcher_power_off	ae2f	Éteindre
 launcher_power_off_armed	a48f	éteindre
 launcher_restart	ed8c	Redémarrer
@@ -274,6 +288,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Cursor style	ad1e	Style du pointeur
 =Date format	7a44	Format de la date
 =Devices	f320	Périphériques
+=Files	1b30	Fichiers
 =Internal storage	e961	Stockage interne
 =External devices	5769	Périphériques externes
 =Display	d9b5	Écran

@@ -36,6 +36,20 @@ editor_untitled	8b58	بدون عنوان
 editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
 editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
 editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
+files_back	4bc2	عقب
+files_changed	df4e	این همان چیزی نیست که فهرست شده بود: پوشه دوباره خوانده می‌شود
+files_chosen	7a7f	%1$d از %2$d انتخاب شد
+files_count	cab8	%d مورد
+files_count_cut	f139	%d مورد نخست: پوشه بیشتر دارد
+files_empty	751c	این پوشه خالی است
+files_failed	c564	خواندن این پوشه ممکن نشد
+files_forward	83ba	جلو
+files_gone	b09c	این پوشه دیگر نیست
+files_link	9abb	پیوند دنبال نمی‌شود
+files_not_folder	2663	این پوشه نیست
+files_reading	64a4	خواندن پوشه
+files_unreadable	986c	خواندن این پوشه مجاز نیست
+files_up	5940	بالا
 launcher_power_off	ae2f	خاموش کردن
 launcher_power_off_armed	a48f	خاموش کردن
 launcher_restart	ed8c	راه‌اندازی مجدد
@@ -275,6 +289,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Cursor style	ad1e	سبک نشانگر
 =Date format	7a44	قالب تاریخ
 =Devices	f320	دستگاه‌ها
+=Files	1b30	پرونده‌ها
 =Internal storage	e961	حافظهٔ داخلی
 =External devices	5769	دستگاه‌های خارجی
 =Display	d9b5	نمایشگر

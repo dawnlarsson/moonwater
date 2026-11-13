@@ -35,6 +35,20 @@ editor_untitled	8b58	sem título
 editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
 editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
 editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
+files_back	4bc2	Voltar
+files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
+files_chosen	7a7f	%1$d de %2$d escolhidos
+files_count	cab8	%d itens
+files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
+files_empty	751c	Esta pasta está vazia
+files_failed	c564	Não foi possível ler esta pasta
+files_forward	83ba	Avançar
+files_gone	b09c	Esta pasta não existe mais
+files_link	9abb	Um link não é seguido
+files_not_folder	2663	Isto não é uma pasta
+files_reading	64a4	Lendo a pasta
+files_unreadable	986c	Esta pasta não pode ser lida
+files_up	5940	Subir
 launcher_power_off	ae2f	Desligar
 launcher_power_off_armed	a48f	desligar
 launcher_restart	ed8c	Reiniciar
@@ -274,6 +288,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Cursor style	ad1e	Estilo do ponteiro
 =Date format	7a44	Formato da data
 =Devices	f320	Dispositivos
+=Files	1b30	Arquivos
 =Internal storage	e961	Armazenamento interno
 =External devices	5769	Dispositivos externos
 =Display	d9b5	Tela

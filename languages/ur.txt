@@ -36,6 +36,20 @@ editor_untitled	8b58	بلا عنوان
 editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
 editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
 editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
+files_back	4bc2	پیچھے
+files_changed	df4e	یہ وہ نہیں جو فہرست میں تھا: فولڈر دوبارہ پڑھا جا رہا ہے
+files_chosen	7a7f	%2$d میں سے %1$d منتخب
+files_count	cab8	%d اشیاء
+files_count_cut	f139	پہلی %d اشیاء: فولڈر میں مزید ہیں
+files_empty	751c	یہ فولڈر خالی ہے
+files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا
+files_forward	83ba	آگے
+files_gone	b09c	یہ فولڈر اب نہیں ہے
+files_link	9abb	لنک کی پیروی نہیں کی جاتی
+files_not_folder	2663	یہ فولڈر نہیں ہے
+files_reading	64a4	فولڈر پڑھا جا رہا ہے
+files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
+files_up	5940	اوپر
 launcher_power_off	ae2f	بند کریں
 launcher_power_off_armed	a48f	بند کریں
 launcher_restart	ed8c	دوبارہ شروع کریں
@@ -275,6 +289,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Cursor style	ad1e	پوائنٹر کا انداز
 =Date format	7a44	تاریخ کی شکل
 =Devices	f320	ڈیوائسز
+=Files	1b30	فائلیں
 =Internal storage	e961	اندرونی اسٹوریج
 =External devices	5769	بیرونی ڈیوائسز
 =Display	d9b5	اسکرین

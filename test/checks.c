@@ -115349,6 +115349,632 @@ b32 main(void)
 }
 #endif /* CHECK_sensors */
 
+#ifdef CHECK_browser
+/*
+        The file browser's model (src/canvas/ui/files_model.c), with no window: folders made here, under /tmp, and the model run
+        on them as the view runs it. A listing holds 12,000 entries in this build, so that one cut short is a few thousand files
+        and not sixty-five thousand; nothing else is changed.
+*/
+#define FILES_MOST 12000u
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/sh/shell.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+static p8 browser_base[96];
+
+static fn browser_path(p8 address_to into, string_address relative)
+{
+        string_copy_bounded(into, browser_base, FILES_PATH);
+        if (relative[0])
+        {
+                string_append_bounded(into, (string_address) "/", FILES_PATH);
+                string_append_bounded(into, relative, FILES_PATH);
+        }
+}
+
+static fn browser_folder(string_address relative)
+{
+        p8 path[FILES_PATH];
+
+        browser_path(path, relative);
+        system_call_3(syscall(mkdirat), AT_FDCWD, (positive)path, 0755);
+}
+
+// A file of so many bytes, changed at a moment (0: now).
+static fn browser_file(string_address relative, positive bytes, b64 seconds)
+{
+        static const p8 fill[4096];
+        p8 path[FILES_PATH];
+        bipolar made;
+
+        browser_path(path, relative);
+        made = (bipolar)system_call_4(syscall(openat), AT_FDCWD, (positive)path, FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+        if (made < 0)
+                return;
+        for (positive left = bytes; left;)
+        {
+                positive part = left < sizeof(fill) ? left : sizeof(fill);
+
+                system_call_3(syscall(write), made, (positive)fill, part);
+                left -= part;
+        }
+        if (seconds)
+        {
+                b64 times[4] = {seconds, 0, seconds, 0};
+
+                system_call_4(syscall(utimensat), made, 0, (positive)times, 0);
+        }
+        system_call_1(syscall(close), made);
+}
+
+static fn browser_link(string_address target, string_address relative)
+{
+        p8 path[FILES_PATH];
+
+        browser_path(path, relative);
+        system_call_3(syscall(symlinkat), (positive)target, AT_FDCWD, (positive)path);
+}
+
+// A name taken away, whatever it is; a folder with all that is in it. Nothing is followed: a link is removed, not what it names.
+static fn browser_remove(string_address path)
+{
+        file_walk walk;
+        file_facts facts;
+        struct linux_dirent64 address_to entry;
+
+        if ((bipolar)system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, 0) >= 0)
+                return;
+        if (file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) < 0 || (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                return;
+        system_call_3(syscall(fchmodat), AT_FDCWD, (positive)path, 0755);
+        if (!file_walk_open(address_of walk, AT_FDCWD, path))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                p8 inner[FILES_PATH];
+
+                if (file_is_dot(entry->d_name))
+                        continue;
+                string_copy_bounded(inner, path, FILES_PATH);
+                string_append_bounded(inner, (string_address) "/", FILES_PATH);
+                string_append_bounded(inner, entry->d_name, FILES_PATH);
+                browser_remove(inner);
+        }
+        file_walk_close(address_of walk);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, AT_REMOVEDIR);
+}
+
+static fn browser_remove_in(string_address relative)
+{
+        p8 path[FILES_PATH];
+
+        browser_path(path, relative);
+        browser_remove(path);
+}
+
+// The reading under way taken to its end, so many entries a step. The steps it took are counted.
+static positive browser_read(struct files_model address_to m, positive step)
+{
+        positive steps = 1;
+
+        while (files_model_step(m, step))
+                steps++;
+        return steps;
+}
+
+static b32 browser_go(struct files_model address_to m, string_address relative)
+{
+        p8 path[FILES_PATH];
+
+        browser_path(path, relative);
+        if (!files_model_go(m, path))
+                return false;
+        browser_read(m, 64);
+        return true;
+}
+
+// The names shown, in their order, a blank after each: what a row of the checks compares.
+static string_address browser_names(const struct files_model address_to m)
+{
+        static p8 text[4096];
+        positive used = 0;
+
+        for (p32 place = 0; place < files_model_count(m); place++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, place);
+
+                if (used + entry->length + 2 > sizeof(text))
+                        break;
+                memory_copy(text + used, files_model_name(m, entry), entry->length);
+                used += entry->length;
+                text[used++] = ' ';
+        }
+        text[used] = end;
+        return text;
+}
+
+static b32 browser_is(const struct files_model address_to m, string_address want)
+{
+        b32 same = string_equals(browser_names(m), want);
+
+        if (!same)
+                string_format(log, "    shown: [%s] wanted: [%s]\n", browser_names(m), want);
+        return same;
+}
+
+static p32 browser_at(const struct files_model address_to m, const char address_to name)
+{
+        return files_model_find(m, (const p8 address_to)name);
+}
+
+static fn browser_wait_a_tick(void)
+{
+        b64 pause[2] = {0, 30000000};
+
+        system_call_2(syscall(nanosleep), (positive)pause, 0);
+}
+
+static fn browser_order(struct files_model address_to m)
+{
+        b32 chosen_kept, cursor_kept;
+        p32 big;
+
+        browser_folder((string_address) "order");
+        browser_folder((string_address) "order/zeta");
+        browser_folder((string_address) "order/Alpha");
+        browser_file((string_address) "order/b.txt", 300, 1700000300);
+        browser_file((string_address) "order/A.txt", 100, 1700000200);
+        browser_file((string_address) "order/a.txt", 200, 1700000100);
+        browser_file((string_address) "order/c", 50, 1700000400);
+        browser_file((string_address) "order/.hidden", 1, 0);
+        browser_go(m, (string_address) "order");
+        check("browser: a folder is listed with its folders first, then by name with capitals among the small letters, and a name with a dot before it is not listed",
+              m->state == FILES_READY && browser_is(m, (string_address) "Alpha zeta A.txt a.txt b.txt c "));
+        check("browser: an entry has its kind, its size and its time, as the disk has them",
+              files_model_entry(m, 0)->kind == FILES_KIND_DIRECTORY && files_model_entry(m, 4)->kind == FILES_KIND_FILE && files_model_entry(m, 4)->size == 300 &&
+                  files_model_entry(m, 4)->modified == 1700000300 && files_model_entry(m, 4)->looked);
+        // Chosen and under the cursor, then another order: the same entries are chosen and the cursor is on the same one.
+        big = browser_at(m, "b.txt");
+        files_model_choose(m, browser_at(m, "c"), FILES_CHOOSE_ONLY);
+        files_model_choose(m, big, FILES_CHOOSE_TOGGLE);
+        files_model_sort(m, FILES_SORT_SIZE, false);
+        check("browser: by size the folders are still first and the files go from the smallest", browser_is(m, (string_address) "Alpha zeta c A.txt a.txt b.txt "));
+        chosen_kept = m->chosen_count == 2 && files_model_chosen(m, browser_at(m, "b.txt")) && files_model_chosen(m, browser_at(m, "c")) &&
+                      !files_model_chosen(m, browser_at(m, "a.txt"));
+        cursor_kept = m->cursor == browser_at(m, "b.txt");
+        check("browser: another order keeps what is chosen chosen and the cursor on its entry", chosen_kept && cursor_kept);
+        files_model_sort(m, FILES_SORT_SIZE, true);
+        check("browser: descending turns the files over and leaves the folders first", browser_is(m, (string_address) "zeta Alpha b.txt a.txt A.txt c "));
+        files_model_sort(m, FILES_SORT_TIME, false);
+        check("browser: by time the files go from the oldest", browser_is(m, (string_address) "Alpha zeta a.txt A.txt b.txt c "));
+        files_model_sort(m, FILES_SORT_NAME, false);
+        // A range from the anchor, and a move held at the ends.
+        files_model_choose(m, 1, FILES_CHOOSE_ONLY);
+        files_model_choose(m, 4, FILES_CHOOSE_RANGE);
+        check("browser: a range is chosen from the entry last chosen alone to the one asked, and no other",
+              m->chosen_count == 4 && !files_model_chosen(m, 0) && files_model_chosen(m, 1) && files_model_chosen(m, 4) && !files_model_chosen(m, 5) && m->cursor == 4);
+        check("browser: the cursor moves by places and is held at the listing's ends, and a move chooses nothing",
+              files_model_move(m, 100) && m->cursor == 5 && !files_model_move(m, 1) && files_model_move(m, -100) && m->cursor == 0 && m->chosen_count == 4);
+        m->hidden = true;
+        files_model_reload(m);
+        browser_read(m, 64);
+        check("browser: with hidden names asked for, the name with a dot before it is listed too", browser_is(m, (string_address) "Alpha zeta .hidden A.txt a.txt b.txt c "));
+        m->hidden = false;
+}
+
+static fn browser_states(struct files_model address_to m)
+{
+        p8 before[FILES_PATH];
+        bipolar child;
+
+        browser_folder((string_address) "empty");
+        browser_go(m, (string_address) "empty");
+        check("browser: an empty folder is read whole and has no entries, which is no error", m->state == FILES_READY && files_model_count(m) == 0 && m->cursor == FILES_NO);
+        browser_go(m, (string_address) "order/b.txt");
+        check("browser: a path that names a file is not a folder, said as a state", m->state == FILES_NOT_DIRECTORY && files_model_count(m) == 0);
+        browser_go(m, (string_address) "nowhere");
+        check("browser: a path that names nothing is gone, said as a state", m->state == FILES_GONE && files_model_count(m) == 0);
+        string_copy_bounded(before, m->path, FILES_PATH);
+        check("browser: a path that is not absolute is refused and the folder shown stays",
+              !files_model_go(m, (string_address) "order") && !files_model_go(m, (string_address) "") && string_equals(m->path, before));
+        check("browser: the kernel's refusals are the states a view says: may not be read, gone, not a folder, and any other with its code",
+              files_state_of(-13) == FILES_UNREADABLE && files_state_of(-1) == FILES_UNREADABLE && files_state_of(-2) == FILES_GONE &&
+                  files_state_of(-20) == FILES_NOT_DIRECTORY && files_state_of(-40) == FILES_NOT_DIRECTORY && files_state_of(-5) == FILES_FAILED);
+        // A folder with no permission at all, read as a user who is not its owner (root reads anything, so a child gives root up).
+        browser_folder((string_address) "locked");
+        browser_file((string_address) "locked/secret", 10, 0);
+        {
+                p8 path[FILES_PATH];
+
+                browser_path(path, (string_address) "locked");
+                system_call_3(syscall(fchmodat), AT_FDCWD, (positive)path, 0);
+        }
+        child = (bipolar)system_fork();
+        if (child == 0)
+        {
+                int answer = 2;
+                b32 root = (bipolar)system_call_1(syscall(getuid), 0) == 0;
+
+                if (!root || ((bipolar)system_call_3(syscall(setresgid), 65534, 65534, 65534) >= 0 &&
+                              (bipolar)system_call_3(syscall(setresuid), 65534, 65534, 65534) >= 0))
+                {
+                        browser_go(m, (string_address) "locked");
+                        answer = m->state == FILES_UNREADABLE && files_model_count(m) == 0 ? 0 : 1;
+                }
+                system_call_1(syscall(exit_group), (positive)answer);
+        }
+        else if (child > 0)
+        {
+                b32 raw = 0;
+
+                system_wait4_retry(child, address_of raw, 0, null);
+                if ((raw & 0x7f) == 0 && (raw >> 8 & 0xff) == 2)
+                        log_direct(str("  browser: a folder that may not be read, read by a user who is not root: NOT RUN (this user cannot become another)\n"));
+                else
+                        check("browser: a folder that may not be read is said to be so, as a state, with no entries", (raw & 0x7f) == 0 && (raw >> 8 & 0xff) == 0);
+        }
+        else
+                log_direct(str("  browser: a folder that may not be read: NOT RUN (no child could be started)\n"));
+}
+
+static fn browser_names_hostile(struct files_model address_to m)
+{
+        static const p8 newline[] = "line\nbreak\x1b[31m", turned[] = "evil\xe2\x80\xaetxt.exe", broken[] = "bad\xff\xfename", tab[] = "tab\there\x7f";
+        static char shown[FILES_NAME * 3 + 4];
+        const p8 address_to const each[] = {newline, turned, broken, tab};
+        b32 kept, clean = true, pictured, replaced, marked;
+
+        browser_folder((string_address) "names");
+        for (int at = 0; at < 4; at++)
+        {
+                p8 path[FILES_PATH];
+
+                browser_path(path, (string_address) "names");
+                string_append_bounded(path, (string_address) "/", FILES_PATH);
+                string_append_bounded(path, (string_address)each[at], FILES_PATH);
+                system_call_1(syscall(close), system_call_4(syscall(openat), AT_FDCWD, (positive)path, FILE_CREATE | FILE_WRITE, 0644));
+        }
+        browser_go(m, (string_address) "names");
+        kept = files_model_count(m) == 4 && files_model_find(m, newline) != FILES_NO && files_model_find(m, turned) != FILES_NO &&
+               files_model_find(m, broken) != FILES_NO && files_model_find(m, tab) != FILES_NO;
+        check("browser: a name with a newline, an escape, a tab, bytes that are not UTF-8 and an override is kept as its bytes are, and found by them", kept);
+        if (!kept)
+                return;
+        // As a row writes them: no control byte, no escape, no override, and nothing that is not UTF-8.
+        for (p32 place = 0; place < files_model_count(m); place++)
+        {
+                positive used = files_name_text(shown, sizeof(shown), m, files_model_entry(m, place));
+
+                for (positive at = 0; at < used;)
+                {
+                        p32 code, size = doc_decode((const p8 address_to)shown + at, used - at, &code);
+
+                        clean = clean && !(code & DOC_INVALID) && code >= 0x20 && code != 0x7f && !(code >= 0x80 && code < 0xa0) && code != 0x202e;
+                        at += size;
+                }
+        }
+        check("browser: a row's words have no control byte, no escape, no override and no byte that is not UTF-8, whatever the name has", clean);
+        files_name_text(shown, sizeof(shown), m, files_model_entry(m, files_model_find(m, newline)));
+        pictured = string_equals((string_address)shown, (string_address) "line\xe2\x90\x8a" "break\xe2\x90\x9b[31m");
+        files_name_text(shown, sizeof(shown), m, files_model_entry(m, files_model_find(m, tab)));
+        pictured = pictured && string_equals((string_address)shown, (string_address) "tab\xe2\x90\x89here\xe2\x90\xa1");
+        check("browser: a control byte is drawn as its picture where it stands: a newline, an escape, a tab and a delete are seen and move nothing", pictured);
+        files_name_text(shown, sizeof(shown), m, files_model_entry(m, files_model_find(m, broken)));
+        replaced = string_equals((string_address)shown, (string_address) "bad\xef\xbf\xbd\xef\xbf\xbdname");
+        files_name_text(shown, sizeof(shown), m, files_model_entry(m, files_model_find(m, turned)));
+        marked = string_equals((string_address)shown, (string_address) "evil\xef\xbf\xbdtxt.exe");
+        check("browser: bytes that are not UTF-8 are a replacement mark each, and an override is one too: the name that ends txt.exe is drawn ending txt.exe", replaced && marked);
+        {
+                static const p8 marks[] = "a\xe2\x80\x8e" "b\xe2\x81\xa6" "c\xe2\x80\xa8" "d\xef\xbb\xbf" "e\xc2\x85" "f";
+                char into[64], tight[6];
+
+                ui_label_foreign(into, sizeof(into), marks, sizeof(marks) - 1);
+                check("browser: the kit's rule for words from outside replaces every mark that orders or hides letters: a direction mark, an isolate, a line separator, a byte order mark, a C1 control",
+                      string_equals((string_address)into, (string_address) "a\xef\xbf\xbd" "b\xef\xbf\xbd" "c\xef\xbf\xbd" "d\xef\xbf\xbd" "e\xef\xbf\xbd" "f"));
+                check("browser: and it writes no half of a character where the room ends, and always an end",
+                      ui_label_foreign(tight, sizeof(tight), (const p8 address_to) "ab\n\ncd", 6) == 5 && string_equals((string_address)tight, (string_address) "ab\xe2\x90\x8a"));
+        }
+}
+
+static fn browser_links(struct files_model address_to m)
+{
+        p8 target[FILES_PATH], before[FILES_PATH];
+        const struct files_entry address_to entry;
+        p32 place;
+
+        browser_folder((string_address) "links");
+        browser_folder((string_address) "links/real");
+        browser_file((string_address) "links/real/inside", 5, 0);
+        browser_file((string_address) "links/file", 1000, 0);
+        browser_path(target, (string_address) "links/real");
+        browser_link(target, (string_address) "links/to-folder");
+        browser_link((string_address) "file", (string_address) "links/to-file");
+        browser_link((string_address) "/nowhere/at/all", (string_address) "links/dangling");
+        browser_go(m, (string_address) "links");
+        place = browser_at(m, "to-folder");
+        entry = files_model_entry(m, place);
+        check("browser: a link is listed as a link, with its own size, whether it names a folder, a file or nothing: none is followed",
+              files_model_count(m) == 5 && entry && entry->kind == FILES_KIND_LINK && entry->size == string_length(target) &&
+                  files_model_entry(m, browser_at(m, "to-file"))->kind == FILES_KIND_LINK && files_model_entry(m, browser_at(m, "to-file"))->size == 4 &&
+                  files_model_entry(m, browser_at(m, "dangling"))->kind == FILES_KIND_LINK);
+        string_copy_bounded(before, m->path, FILES_PATH);
+        check("browser: a link to a folder is not entered: the folder shown stays, whole",
+              files_model_enter(m, place) == FILES_REFUSED && string_equals(m->path, before) && m->state == FILES_READY && files_model_count(m) == 5);
+        check("browser: a file is not entered either, and a place past the listing is none",
+              files_model_enter(m, browser_at(m, "file")) == FILES_REFUSED && files_model_enter(m, 99) == FILES_REFUSED && string_equals(m->path, before));
+}
+
+static fn browser_history(struct files_model address_to m)
+{
+        p8 root[FILES_PATH], sub[FILES_PATH], deep[FILES_PATH];
+        b32 entered, up, back, forward, forgot, bounded = true;
+        p32 backs;
+
+        browser_folder((string_address) "way");
+        browser_folder((string_address) "way/a");
+        browser_folder((string_address) "way/sub");
+        browser_folder((string_address) "way/sub/deep");
+        browser_folder((string_address) "way/z");
+        browser_path(root, (string_address) "way"), browser_path(sub, (string_address) "way/sub"), browser_path(deep, (string_address) "way/sub/deep");
+        browser_go(m, (string_address) "way");
+        backs = m->back_count;
+        entered = files_model_enter(m, browser_at(m, "sub")) == FILES_SAME && string_equals(m->path, sub) && m->state == FILES_READING;
+        browser_read(m, 64);
+        entered = entered && m->state == FILES_READY && browser_is(m, (string_address) "deep ") && m->back_count == backs + 1;
+        check("browser: a folder of the listing is entered: it is the folder shown, read in steps, and the one come from is on the way back", entered);
+        up = files_model_up(m) && string_equals(m->path, root);
+        browser_read(m, 64);
+        up = up && browser_is(m, (string_address) "a sub z ") && m->cursor == 1;
+        check("browser: up shows the folder this one is in, with the cursor on the folder come out of", up);
+        back = files_model_back(m, false) && string_equals(m->path, sub);
+        browser_read(m, 64);
+        back = back && m->forward_count == 1 && files_model_back(m, false) && string_equals(m->path, root);
+        browser_read(m, 64);
+        check("browser: back shows the folder shown before, and again the one before that, the cursor on the folder come out of", back && m->cursor == 1);
+        forward = files_model_back(m, true) && string_equals(m->path, sub);
+        browser_read(m, 64);
+        forward = forward && files_model_back(m, true) && string_equals(m->path, root) && !files_model_back(m, true);
+        browser_read(m, 64);
+        check("browser: forward shows the folder gone back from, as far as there were, and no further", forward);
+        files_model_back(m, false);
+        browser_read(m, 64);
+        forgot = m->forward_count == 1 && files_model_go(m, deep) && m->forward_count == 0 && !files_model_back(m, true);
+        browser_read(m, 64);
+        check("browser: a folder gone to forgets the way forward", forgot && string_equals(m->path, deep));
+        for (int at = 0; at < 3 * FILES_HISTORY; at++)
+        {
+                files_model_go(m, at & 1 ? sub : root);
+                bounded = bounded && m->back_count <= FILES_HISTORY;
+        }
+        browser_read(m, 64);
+        check("browser: the way back holds its last folders and no more, the oldest let go",
+              bounded && m->back_count == FILES_HISTORY && string_equals(m->back + (positive)(FILES_HISTORY - 1) * FILES_PATH, root));
+        files_model_go(m, (string_address) "/");
+        browser_read(m, 64);
+        check("browser: the root has no folder to go up to", !files_model_up(m) && string_equals(m->path, (string_address) "/"));
+}
+
+static fn browser_changes(struct files_model address_to m)
+{
+        p8 before[FILES_PATH], elsewhere[FILES_PATH];
+        p32 was, place;
+        b32 beside, whole;
+        file_facts facts;
+
+        browser_folder((string_address) "live");
+        browser_folder((string_address) "live/inner");
+        browser_file((string_address) "live/one", 10, 0);
+        browser_file((string_address) "live/two", 20, 0);
+        browser_folder((string_address) "elsewhere");
+        browser_file((string_address) "elsewhere/prize", 1, 0);
+        browser_go(m, (string_address) "live");
+        check("browser: a folder nothing touched is fresh", files_model_stale(m) == FILES_FRESH && browser_is(m, (string_address) "inner one two "));
+        browser_wait_a_tick();
+        browser_file((string_address) "live/three", 30, 0);
+        was = files_model_count(m);
+        check("browser: a file added under the listing makes it stale, and what is shown is still the old listing", files_model_stale(m) == FILES_STALE && files_model_count(m) == was);
+        // Read again beside what is shown: every entry of the old listing is there till the new one is whole.
+        files_model_choose(m, browser_at(m, "two"), FILES_CHOOSE_ONLY);
+        files_model_reload(m);
+        beside = m->reloading && m->state == FILES_READY && files_model_count(m) == was && browser_is(m, (string_address) "inner one two ");
+        files_model_step(m, 1);
+        beside = beside && files_model_count(m) == was && browser_is(m, (string_address) "inner one two ");
+        browser_read(m, 1);
+        whole = !m->reloading && m->state == FILES_READY && browser_is(m, (string_address) "inner one three two ");
+        check("browser: a folder read again is read beside the listing shown, which stays whole till the new one takes its place", beside && whole);
+        check("browser: and the cursor is on the entry it was on, by its name, and the folder is fresh again", m->cursor == browser_at(m, "two") && files_model_stale(m) == FILES_FRESH);
+        // A listed file taken away, and one replaced by another thing of its name: neither is the file that was listed.
+        place = browser_at(m, "one");
+        check("browser: a listed entry looked at again is the same file while nothing touched it", files_model_check(m, place, &facts) == FILES_SAME && facts.size == 10);
+        browser_remove_in((string_address) "live/one");
+        check("browser: a listed entry that was removed is missing when it is looked at again, though the listing still has its row",
+              files_model_check(m, place, null) == FILES_MISSING && files_model_entry(m, place) != null);
+        browser_remove_in((string_address) "live/two");
+        browser_folder((string_address) "live/two");
+        check("browser: a listed file whose name another thing has now is changed, and is not acted on",
+              files_model_check(m, browser_at(m, "two"), null) == FILES_CHANGED && files_model_enter(m, browser_at(m, "two")) == FILES_CHANGED);
+        // The swap: a folder that was listed is taken away and a link to another place is given its name. It is not entered.
+        // (The folder is moved aside and not removed, so its inode stays taken and what comes after has another.)
+        browser_path(elsewhere, (string_address) "elsewhere");
+        {
+                p8 from[FILES_PATH], to[FILES_PATH];
+
+                browser_path(from, (string_address) "live/inner"), browser_path(to, (string_address) "live/inner-aside");
+                system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, AT_FDCWD, (positive)to, 0);
+        }
+        browser_link(elsewhere, (string_address) "live/inner");
+        string_copy_bounded(before, m->path, FILES_PATH);
+        check("browser: a listed folder swapped for a link to another place is not entered: the stale row is looked at again first, and nothing is followed",
+              files_model_enter(m, browser_at(m, "inner")) == FILES_CHANGED && string_equals(m->path, before));
+        // The same swap with a folder in its place: another inode under the name, so still not the folder listed.
+        browser_remove_in((string_address) "live/inner");
+        browser_folder((string_address) "live/inner");
+        browser_folder((string_address) "live/inner/new");
+        check("browser: a listed folder replaced by another folder of its name is not the one listed either",
+              files_model_enter(m, browser_at(m, "inner")) == FILES_CHANGED && string_equals(m->path, before));
+        files_model_reload(m);
+        browser_read(m, 64);
+        check("browser: read again, the folder of that name is the one that is there, and is entered", files_model_enter(m, browser_at(m, "inner")) == FILES_SAME);
+        browser_read(m, 64);
+        // The folder shown is itself taken away, and then one that was renamed with another put where it was.
+        browser_go(m, (string_address) "live");
+        browser_remove_in((string_address) "live");
+        check("browser: the folder shown, removed, is lost: its state is gone and it has no entries", files_model_stale(m) == FILES_LOST && m->state == FILES_GONE && files_model_count(m) == 0);
+        browser_folder((string_address) "moved");
+        browser_file((string_address) "moved/kept", 1, 0);
+        browser_go(m, (string_address) "moved");
+        {
+                p8 from[FILES_PATH], to[FILES_PATH];
+
+                browser_path(from, (string_address) "moved"), browser_path(to, (string_address) "moved-away");
+                system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, AT_FDCWD, (positive)to, 0);
+        }
+        browser_folder((string_address) "moved");
+        check("browser: the folder shown, renamed, with another put where it was, is lost too: the path names another folder now",
+              files_model_stale(m) == FILES_LOST && m->state == FILES_GONE);
+}
+
+static fn browser_many_name(p8 address_to name, int at)
+{
+        name[6] = (p8)('0' + at / 10000 % 10), name[7] = (p8)('0' + at / 1000 % 10), name[8] = (p8)('0' + at / 100 % 10);
+        name[9] = (p8)('0' + at / 10 % 10), name[10] = (p8)('0' + at % 10);
+}
+
+static fn browser_many(struct files_model address_to m)
+{
+        p8 name[32] = "many/f00000", path[FILES_PATH];
+        positive steps = 0, most_grown = 0;
+        b32 stepped = true, shown_partly = false, ordered = true;
+
+        browser_folder((string_address) "many");
+        for (int at = 0; at < 10000; at++)
+        {
+                browser_many_name(name, at);
+                browser_file(name, 0, 0);
+        }
+        browser_path(path, (string_address) "many");
+        files_model_go(m, path);
+        // Step by step: a step takes at most what it was given and returns, the entries so far are there to show, and the state says it reads.
+        for (;;)
+        {
+                p32 before = files_model_count(m);
+                b32 more = files_model_step(m, 256);
+
+                steps++;
+                most_grown = files_model_count(m) - before > most_grown ? files_model_count(m) - before : most_grown;
+                if (!more)
+                        break;
+                stepped = stepped && m->state == FILES_READING;
+                shown_partly = shown_partly || (files_model_count(m) > 0 && files_model_count(m) < 10000 && files_model_entry(m, files_model_count(m) - 1) != null);
+        }
+        check("browser: ten thousand entries are read in steps of at most the entries a step is given: forty steps and more, none of them the whole folder",
+              stepped && steps >= 40 && most_grown <= 256 && files_model_count(m) == 10000);
+        check("browser: while it reads, the state says so and the entries so far are there to show", shown_partly);
+        for (p32 place = 0; place < 10000 && ordered && files_model_count(m) == 10000; place++)
+        {
+                const p8 address_to shown = files_model_name(m, files_model_entry(m, place));
+
+                ordered = shown[0] == 'f' && (p32)((shown[1] - '0') * 10000 + (shown[2] - '0') * 1000 + (shown[3] - '0') * 100 + (shown[4] - '0') * 10 + (shown[5] - '0')) == place;
+        }
+        check("browser: read whole, the ten thousand are in order, every one once, the cursor on the first, and none cut", m->state == FILES_READY && ordered && !m->shown.cut && m->cursor == 0);
+        // More than a listing holds: it is cut there and says so, and that is no error.
+        for (int at = 10000; at < 12100; at++)
+        {
+                browser_many_name(name, at);
+                browser_file(name, 0, 0);
+        }
+        files_model_reload(m);
+        browser_read(m, 256);
+        check("browser: a folder with more entries than a listing holds is cut at what it holds and says so, read whole and no error",
+              m->state == FILES_READY && files_model_count(m) == FILES_MOST && m->shown.cut);
+}
+
+// The model names nothing of the kit and nothing of a window: outside its comments, its source has none of their words.
+static fn browser_apart(void)
+{
+        static const char address_to const words[] = {"ui_", "struct ui", "window", "compositor", "font_", "language", "WORDS"};
+        positive size = 0;
+        const p8 address_to text = (const p8 address_to)compositor_map_file((string_address) "src/canvas/ui/files_model.c", address_of size);
+        b32 apart = true, block = false;
+        positive lines = 0;
+
+        if (!text || !size)
+        {
+                log_direct(str("  browser: the model's source is not here to be read (run from the tree's root): NOT RUN\n"));
+                return;
+        }
+        for (positive at = 0; at < size;)
+        {
+                positive stop = at, code;
+
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                // What of the line is code: none of it inside a block comment, and nothing after a // on it.
+                code = at;
+                while (code < stop)
+                {
+                        if (block)
+                        {
+                                if (code + 1 < stop && text[code] == '*' && text[code + 1] == '/')
+                                        block = false, code++;
+                                code++;
+                                continue;
+                        }
+                        if (code + 1 < stop && text[code] == '/' && text[code + 1] == '*')
+                        {
+                                block = true, code += 2;
+                                continue;
+                        }
+                        if (code + 1 < stop && text[code] == '/' && text[code + 1] == '/')
+                                break;
+                        for (positive which = 0; which < sizeof(words) / sizeof(words[0]); which++)
+                        {
+                                positive length = string_length((string_address)words[which]);
+
+                                if (code + length <= stop && !memory_compare((address_any)(text + code), (address_any)words[which], length))
+                                        apart = false;
+                        }
+                        code++;
+                }
+                lines++;
+                at = stop + 1;
+        }
+        check("browser: the model's code names nothing of the kit, a window, a font or a language: it is apart from the view", apart && lines > 300);
+}
+
+b32 main(void)
+{
+        static struct files_model model;
+        p8 digits[24];
+
+        digits[positive_into(digits, (positive)system_call_1(syscall(getpid), 0))] = end;
+        string_copy_bounded(browser_base, (string_address) "/tmp/mw-browser.", sizeof(browser_base));
+        string_append_bounded(browser_base, digits, sizeof(browser_base));
+        browser_remove(browser_base);
+        system_call_3(syscall(mkdirat), AT_FDCWD, (positive)browser_base, 0755);
+        if (!files_model_open(address_of model))
+        {
+                check("browser: the model's memory is mapped", false);
+                return test_report(null);
+        }
+        browser_order(address_of model);
+        browser_states(address_of model);
+        browser_names_hostile(address_of model);
+        browser_links(address_of model);
+        browser_history(address_of model);
+        browser_changes(address_of model);
+        browser_many(address_of model);
+        browser_apart();
+        files_model_close(address_of model);
+        browser_remove(browser_base);
+        return test_report(null);
+}
+#endif /* CHECK_browser */
+
 #ifdef CHECK_tensor
 #include "../src/lib.util.c"
 
@@ -141198,7 +141824,7 @@ static fn check_launcher(void)
 
         launcher_type_text("");
         check("launcher: with nothing typed the list is the desktop's programs",
-              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,w:Mixer,"));
+              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,w:Mixer,w:Files,"));
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
               launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);
@@ -141347,7 +141973,7 @@ static fn check_launcher(void)
                   string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
         launcher.height = 0;
         launcher_changed();
-        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 4 * UI_ROW + UI_GAP2 + UI_ROW);
+        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 5 * UI_ROW + UI_GAP2 + UI_ROW);
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
@@ -141666,7 +142292,7 @@ static fn check_launcher_anchor(void)
         launcher.height = 0;
         launcher.width = 560;
         launcher_changed();
-        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 4 * UI_ROW + UI_GAP2 + UI_ROW;
+        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 5 * UI_ROW + UI_GAP2 + UI_ROW;
         launcher.anchor.button[1] = 100;
         launcher.anchor.screen[1] = 0;
         kept &= launcher_most_height() == 100;
@@ -166507,10 +167133,10 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
-    "src/canvas/ui/notices.c"};
+    "src/canvas/ui/notices.c",  "src/canvas/ui/files.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
                                                          "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
-                                                         "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c"};
+                                                         "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c",  "src/canvas/ui/files.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -168717,7 +169343,7 @@ static fn check_field_hands(string_address regular)
                         check("launcher: a press let go off its row runs nothing and leaves no press", launcher_send(&release) && !launcher.list.press.down);
                         ui_kit.motion = motion_was;
                 }
-                // The wheel turns a list longer than its window: the four desktop programs in a window one row tall, a notch a
+                // The wheel turns a list longer than its window: the five desktop programs in a window one row tall, a notch a
                 // row, and the list glides to it (its aim moves, and a frame is asked for).
                 {
                         int pad = ui_px(&launcher.ui, UI_PAD);
@@ -168729,7 +169355,7 @@ static fn check_field_hands(string_address regular)
                         launcher.dirty = false;
                         launcher_send(&turn);
                         check("launcher: the wheel turns a list longer than its window, a notch a row, with the glide",
-                              launcher.entries == 4 && scroll_aim(&launcher.list.scroll) > 0 && launcher.dirty);
+                              launcher.entries == 5 && scroll_aim(&launcher.list.scroll) > 0 && launcher.dirty);
                 }
         }
 

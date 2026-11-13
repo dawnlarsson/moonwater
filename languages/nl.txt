@@ -35,6 +35,20 @@ editor_untitled	8b58	naamloos
 editor_write_beside	ec75	kon niet naast het bestand schrijven
 editor_writes_over_changed	df15	overschrijft de wijziging op schijf (Ctrl+R leest opnieuw)
 editor_writes_over_readonly	e22f	overschrijft een alleen-lezen bestand
+files_back	4bc2	Terug
+files_changed	df4e	Niet meer wat er stond: de map wordt opnieuw gelezen
+files_chosen	7a7f	%1$d van %2$d gekozen
+files_count	cab8	%d items
+files_count_cut	f139	De eerste %d items: de map heeft er meer
+files_empty	751c	Deze map is leeg
+files_failed	c564	Deze map kon niet worden gelezen
+files_forward	83ba	Vooruit
+files_gone	b09c	Deze map is weg
+files_link	9abb	Een koppeling wordt niet gevolgd
+files_not_folder	2663	Dit is geen map
+files_reading	64a4	De map wordt gelezen
+files_unreadable	986c	Deze map mag niet worden gelezen
+files_up	5940	Omhoog
 launcher_power_off	ae2f	Uitschakelen
 launcher_power_off_armed	a48f	uitschakelen
 launcher_restart	ed8c	Opnieuw opstarten
@@ -274,6 +288,7 @@ ui_field_full	fe02	meer past er niet in
 =Cursor style	ad1e	Stijl van de aanwijzer
 =Date format	7a44	Datumnotatie
 =Devices	f320	Apparaten
+=Files	1b30	Bestanden
 =Internal storage	e961	Interne opslag
 =External devices	5769	Externe apparaten
 =Display	d9b5	Scherm

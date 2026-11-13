@@ -35,6 +35,20 @@ editor_untitled	8b58	без имени
 editor_write_beside	ec75	не удалось записать рядом с файлом
 editor_writes_over_changed	df15	перезапишет изменение на диске (Ctrl+R читает заново)
 editor_writes_over_readonly	e22f	перезапишет файл только для чтения
+files_back	4bc2	Назад
+files_changed	df4e	Это уже не то, что было в списке: папка читается заново
+files_chosen	7a7f	Выбрано %1$d из %2$d
+files_count	cab8	Объектов: %d
+files_count_cut	f139	Первые %d объектов: в папке есть ещё
+files_empty	751c	Эта папка пуста
+files_failed	c564	Не удалось прочитать эту папку
+files_forward	83ba	Вперёд
+files_gone	b09c	Этой папки больше нет
+files_link	9abb	Переход по ссылке не выполняется
+files_not_folder	2663	Это не папка
+files_reading	64a4	Чтение папки
+files_unreadable	986c	Эту папку нельзя читать
+files_up	5940	Вверх
 launcher_power_off	ae2f	Выключить
 launcher_power_off_armed	a48f	выключить
 launcher_restart	ed8c	Перезагрузить
@@ -274,6 +288,7 @@ ui_field_full	fe02	больше не помещается
 =Cursor style	ad1e	Стиль указателя
 =Date format	7a44	Формат даты
 =Devices	f320	Устройства
+=Files	1b30	Файлы
 =Internal storage	e961	Внутреннее хранилище
 =External devices	5769	Внешние устройства
 =Display	d9b5	Экран

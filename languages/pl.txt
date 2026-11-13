@@ -35,6 +35,20 @@ editor_untitled	8b58	bez nazwy
 editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
+files_back	4bc2	Wstecz
+files_changed	df4e	To nie to, co było na liście: folder jest czytany ponownie
+files_chosen	7a7f	Wybrano %1$d z %2$d
+files_count	cab8	Elementy: %d
+files_count_cut	f139	Pierwsze %d elementów: folder ma ich więcej
+files_empty	751c	Ten folder jest pusty
+files_failed	c564	Nie udało się odczytać tego folderu
+files_forward	83ba	Dalej
+files_gone	b09c	Tego folderu już nie ma
+files_link	9abb	Dowiązanie nie jest śledzone
+files_not_folder	2663	To nie jest folder
+files_reading	64a4	Czytanie folderu
+files_unreadable	986c	Tego folderu nie wolno czytać
+files_up	5940	W górę
 launcher_power_off	ae2f	Wyłącz
 launcher_power_off_armed	a48f	wyłącz
 launcher_restart	ed8c	Uruchom ponownie
@@ -274,6 +288,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Cursor style	ad1e	Styl wskaźnika
 =Date format	7a44	Format daty
 =Devices	f320	Urządzenia
+=Files	1b30	Pliki
 =Internal storage	e961	Pamięć wewnętrzna
 =External devices	5769	Urządzenia zewnętrzne
 =Display	d9b5	Ekran

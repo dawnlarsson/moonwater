@@ -973,6 +973,12 @@ SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/editor.c"
 SHELL_OPTIMIZE_OS_POP
 #endif
+#if MOONWATER_UI_FILES
+SHELL_OPTIMIZE_OS_PUSH
+#include "../canvas/ui/files_model.c"
+#include "../canvas/ui/files.c"
+SHELL_OPTIMIZE_OS_POP
+#endif
 #if MOONWATER_UI_TASKBAR
 SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/taskbar.c"

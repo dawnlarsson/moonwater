@@ -204,7 +204,12 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define MOONWATER_UI_NOTICES 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES)
+// The file browser: a folder's entries as rows, and the way into, out of and back from one (ui/files.c on the model of ui/files_model.c).
+#ifndef MOONWATER_UI_FILES
+#define MOONWATER_UI_FILES 1
+#endif
+
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES)
 
 #endif /* MOONWATER_CANVAS_UI_SWITCHES */
 
@@ -7618,6 +7623,20 @@ LANGUAGE_ID(editor_untitled, "untitled") \
 LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
 LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
+LANGUAGE_ID(files_back, "Back") \
+LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again") \
+LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
+LANGUAGE_ID(files_count, "%d items") \
+LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
+LANGUAGE_ID(files_empty, "This folder is empty") \
+LANGUAGE_ID(files_failed, "This folder could not be read") \
+LANGUAGE_ID(files_forward, "Forward") \
+LANGUAGE_ID(files_gone, "This folder is gone") \
+LANGUAGE_ID(files_link, "A link is not followed") \
+LANGUAGE_ID(files_not_folder, "This is not a folder") \
+LANGUAGE_ID(files_reading, "Reading the folder") \
+LANGUAGE_ID(files_unreadable, "This folder may not be read") \
+LANGUAGE_ID(files_up, "Up") \
 LANGUAGE_ID(launcher_power_off, "Power off") \
 LANGUAGE_ID(launcher_power_off_armed, "power off") \
 LANGUAGE_ID(launcher_restart, "Restart") \
@@ -17384,6 +17403,48 @@ static int ui_wrap_tall(const struct ui address_to ui, int type, int size, int l
         return ui_dev(ui, ui_types[type].line) + (lines > 1 ? (lines - 1) * ui_wrap_pitch(ui, type, size) : 0);
 }
 
+/* ---- words from outside ---- */
+/*
+        A name that is not the system's own (a file's, off a disk; anything a stranger chose) written as the words of a label, so that
+        what is drawn is what is there and nothing in it can pass for something else. It is the text field's rule (ui_text_layout) for a
+        label: a control byte is its picture (U+2400 and on, U+2421 for delete), so a newline, a tab or an escape is seen and moves
+        nothing; bytes that are not UTF-8, and a C1 control, are U+FFFD each; and every mark that changes the order letters are drawn
+        in or hides in a line is U+FFFD too, seen where it stands and without its effect: the explicit embeddings, overrides and
+        isolates (U+202A to U+202E, U+2066 to U+2069: an override is how "exe.txt" is drawn for a name that ends "txt.exe"), the marks
+        U+200E, U+200F and U+061C, the line and paragraph separators, and the zero width space, the word joiner and the byte order
+        mark. Letters that read from the right are letters and stay, laid out as their script is. Writes at most room bytes with
+        their end and never half a character; answers the bytes written before the end.
+*/
+static positive ui_label_foreign(char address_to into, positive room, const p8 address_to bytes, positive length)
+{
+        positive at = 0, used = 0;
+
+        while (at < length && room)
+        {
+                p8 shown[4];
+                p32 code, taken = doc_decode(bytes + at, length - at, &code);
+                positive size;
+
+                if (code & DOC_INVALID)
+                        code = 0xfffd, taken = 1;
+                else if (code < 0x20)
+                        code += 0x2400;
+                else if (code == 0x7f)
+                        code = 0x2421;
+                else if ((code >= 0x80 && code < 0xa0) || font_bidi_class(code) >= FONT_BIDI_LRE || code == 0x200e || code == 0x200f || code == 0x061c ||
+                         code == 0x2028 || code == 0x2029 || code == 0x200b || code == 0x2060 || code == 0xfeff)
+                        code = 0xfffd;
+                size = memory_utf8_encode(shown, 4, code);
+                if (used + size + 1 > room)
+                        break;
+                memory_copy(into + used, shown, size);
+                used += size, at += taken ? taken : 1;
+        }
+        if (room)
+                into[used] = 0;
+        return used;
+}
+
 /* ---- the view ---- */
 /*
         The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the
@@ -17537,6 +17598,8 @@ static const struct ui_class ui_classes[] = {
         {"spread", .justify = UI_BETWEEN, .align = UI_CENTER},                           // a row's children at its two ends, on its middle line
         {"map", .pad = {UI_GAP2, UI_GAP2, 0, UI_GAP2}},                                  // a panel with a strip of actions across its top: what is in it is in from its sides and its foot
         {"search", .w = UI_SEARCH_W, .margin = {0, UI_SEARCH_RIGHT + UI_PAD, 0, 0}},     // a page's search field at the end of its title's band: clear of the window's buttons
+        {"pathbar", .h = UI_PAD + UI_TARGET, .pad = {UI_PAD, UI_SEARCH_RIGHT + UI_PAD, 0, 0}, .gap = UI_GAP2, .align = UI_CENTER}, // a band across a window's top: where it is, and the ways from there; clear of the window's buttons
+        {"rows", .pad = {UI_PAD, UI_PAD, 0, 0}, .shrink = 1},                            // a list's own box in from the window's margin at either side: its rows run to the edges (the list's row_x, row_w), its words keep to the box
         // Text.
         {"pagetitle", .type = UI_ROLE(UI_TITLE_LARGE), .ink = UI_ROLE(UI_ON_SURFACE), .margin = {UI_PAD + UI_PAGE_INSET, 0, 8, 0}, .grow = 1, .cut = 1}, // a page's title: in from the margin, in the middle of its band under the window's edge, as wide as what follows leaves it, one line
         {"caption", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .margin = {0, 0, UI_GAP2, UI_GAP2}}, // a quiet line under what it is about, a gap from it and from what follows
@@ -17544,6 +17607,7 @@ static const struct ui_class ui_classes[] = {
         {"figure", .type = UI_ROLE(UI_LABEL_LARGE), .cut = 1},                           // a bold text, sized by the element, one line
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE), .cut = 1}, // a card's title, one line
         {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
+        {"path", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE), .grow = 1, .cut = 1}, // a path in its band: one line, the rest of the band's
         {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .cut = 1}, // a status bar's words, one line in its band
         {"warning", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_WARNING), .cut = 1},           // a status bar's warning, one line in its band
         // Buttons: the size of an action, and the variants.

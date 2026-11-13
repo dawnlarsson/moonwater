@@ -116,6 +116,9 @@ static const struct launcher_program launcher_programs[] = {
 #if MOONWATER_UI_MIXER
     {"Mixer", "mixer sound volume audio", "/mixer", 0},
 #endif
+#if MOONWATER_UI_FILES
+    {"Files", "files folders browser directory", "/files", 0},
+#endif
 };
 
 #define LAUNCHER_PROGRAMS (sizeof(launcher_programs) / sizeof(launcher_programs[0]))

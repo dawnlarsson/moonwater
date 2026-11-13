@@ -35,6 +35,20 @@ editor_untitled	8b58	namnlös
 editor_write_beside	ec75	kunde inte skriva bredvid filen
 editor_writes_over_changed	df15	skriver över ändringen på disken (Ctrl+R läser om den)
 editor_writes_over_readonly	e22f	skriver över en skrivskyddad fil
+files_back	4bc2	Bakåt
+files_changed	df4e	Det är inte det som listades: mappen läses om
+files_chosen	7a7f	%1$d av %2$d valda
+files_count	cab8	%d objekt
+files_count_cut	f139	De första %d objekten: mappen har fler
+files_empty	751c	Den här mappen är tom
+files_failed	c564	Den här mappen kunde inte läsas
+files_forward	83ba	Framåt
+files_gone	b09c	Den här mappen är borta
+files_link	9abb	En länk följs inte
+files_not_folder	2663	Det här är ingen mapp
+files_reading	64a4	Läser mappen
+files_unreadable	986c	Den här mappen får inte läsas
+files_up	5940	Upp
 launcher_power_off	ae2f	Stäng av
 launcher_power_off_armed	a48f	stäng av
 launcher_restart	ed8c	Starta om
@@ -274,6 +288,7 @@ ui_field_full	fe02	mer ryms inte
 =Cursor style	ad1e	Pekarstil
 =Date format	7a44	Datumformat
 =Devices	f320	Enheter
+=Files	1b30	Filer
 =Internal storage	e961	Intern lagring
 =External devices	5769	Externa enheter
 =Display	d9b5	Skärm

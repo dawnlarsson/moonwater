@@ -36,6 +36,20 @@ editor_untitled	8b58	بدون عنوان
 editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
 editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
 editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
+files_back	4bc2	رجوع
+files_changed	df4e	ليس ما كان في القائمة: يُقرأ المجلد من جديد
+files_chosen	7a7f	تم اختيار %1$d من %2$d
+files_count	cab8	%d عنصر
+files_count_cut	f139	أول %d عنصر: في المجلد المزيد
+files_empty	751c	هذا المجلد فارغ
+files_failed	c564	تعذرت قراءة هذا المجلد
+files_forward	83ba	تقدم
+files_gone	b09c	هذا المجلد لم يعد موجودا
+files_link	9abb	لا يُتبع الرابط
+files_not_folder	2663	هذا ليس مجلدا
+files_reading	64a4	قراءة المجلد
+files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
+files_up	5940	للأعلى
 launcher_power_off	ae2f	إيقاف التشغيل
 launcher_power_off_armed	a48f	إيقاف التشغيل
 launcher_restart	ed8c	إعادة التشغيل
@@ -275,6 +289,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Cursor style	ad1e	نمط المؤشر
 =Date format	7a44	تنسيق التاريخ
 =Devices	f320	الأجهزة
+=Files	1b30	الملفات
 =Internal storage	e961	التخزين الداخلي
 =External devices	5769	الأجهزة الخارجية
 =Display	d9b5	الشاشة
