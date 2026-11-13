@@ -152801,7 +152801,7 @@ static fn check_kit_focus(void)
         struct ui_control button, field, toggle;
         positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
         unsigned int ground, ring_ink, darkest = 0xffffffu, pill;
-        b32 ringed, bare, clicked, dawn_ink, placeholder, disabled;
+        b32 ringed, bare, clicked, dawn_ink, placeholder, disabled, unkeyed = 0, modality = 0;
 
         if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
         {
@@ -152822,9 +152822,35 @@ static fn check_kit_focus(void)
         button.kind = UI_BUTTON, button.variant = UI_BUTTON_PRIMARY, button.x = 40, button.y = 40, button.w = 120, button.h = 36, button.label = "Save";
         ui_control_start(&button);
         button.focused = 1;
+        ui_kit.keyed = 1; // the hand is on the keys
         ui_control_draw(&ui, &button);
         ring_ink = focus_at(pixels, 37, 58);
         ringed = ring_ink != ground && ui_contrast(ring_ink, ground) >= 300;
+        // The same button, the keys' still, after a press of the pointer anywhere: no ring (a click leaves none behind).
+        {
+                struct window_event tab = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_TAB, 0}, arrow = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_DOWN, 0};
+                struct window_event letter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a'}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                struct window_event lift = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0}, move = {WINDOW_EVENT_MOTION, 0, 10, 10};
+                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 10, 10}, wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0};
+                b64 clock = ui_kit.test_clock;
+                b32 by_tab, by_arrow, by_press, by_finger, kept;
+
+                ui_kit.test_clock = 5000000000ll;
+                ui_kit.keyed = 0, ui_event_context(&letter);
+                kept = !ui_kit.keyed; // a letter moves no focus
+                ui_event_context(&tab), by_tab = ui_kit.keyed;
+                ui_event_context(&move), ui_event_context(&wheel), ui_event_context(&lift), ui_event_context(&letter);
+                kept = kept && ui_kit.keyed; // a nudge of the mouse, a wheel, a release and a letter take no ring away
+                ui_event_context(&press), by_press = !ui_kit.keyed;
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                ui_control_draw(&ui, &button);
+                unkeyed = by_press && button.focused && focus_at(pixels, 37, 58) == ground && focus_at(pixels, 38, 58) == ground;
+                ui_event_context(&arrow), by_arrow = ui_kit.keyed;
+                ui_event_context(&finger), by_finger = !ui_kit.keyed;
+                modality = by_tab && by_arrow && by_press && by_finger && kept;
+                ui_kit.test_clock = clock, ui_kit.keyed = 1;
+        }
         for (int at = 0; at < 400 * 200; at++)
                 pixels[at] = 0xff000000u | ground;
         button.focused = 0;
@@ -152884,10 +152910,59 @@ static fn check_kit_focus(void)
                 pure = focus_at(pixels, 26, 36) == (ui_role(UI_PRIMARY) & 0xffffffu) && ui_kit_layer(&tabs) > 0;
                 check("kit focus: a hovered tab's state layer is under the tabs' pip, so the pip is the accent itself where it lies", pure);
         }
+        // A list's row the keys are on, and the chosen group of a column with the keys in it, with the hand on the keys: each is its
+        // fill from edge to edge and has no ring (where a ring was, a gap in from the edge, is the fill).
+        {
+                struct ui_list rows;
+                struct ui_control column;
+                int top, height, rx, rw;
+                unsigned int lit, pip;
+                b32 row_bare, column_bare;
+
+                ui_kit.keyed = 1;
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                bounds_list_make(&ui, &rows, 3, 150);
+                rows.lit = 1, rows.keys = 1, rows.focus = 1;
+                ui_list_draw(&ui, &rows);
+                top = bounds_span(&ui, &rows, 1, &height);
+                lit = ui_kit_lit(&ui) & 0xffffffu;
+                row_bare = lit != ground && height > 12;
+                for (int y = top; y < top + height && row_bare; y++)
+                        row_bare = focus_at(pixels, 100, y) == lit && focus_at(pixels, 102, y) == lit && focus_at(pixels, 103, y) == lit &&
+                                   focus_at(pixels, 399, y) == lit && focus_at(pixels, 397, y) == lit && focus_at(pixels, 396, y) == lit;
+                for (int x = 100; x < 400 && row_bare; x++)
+                        row_bare = focus_at(pixels, x, top) == lit && focus_at(pixels, x, top + 2) == lit && focus_at(pixels, x, top + 3) == lit &&
+                                   focus_at(pixels, x, top + height - 1) == lit && focus_at(pixels, x, top + height - 3) == lit;
+                check("kit focus: a list's row the keys are on is lit from edge to edge and has no ring, with the hand on the keys: the fill says where they are", row_bare);
+
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                memory_zero(&column, sizeof(column));
+                column.kind = UI_TABS, column.variant = UI_TABS_VERTICAL, column.x = 10, column.y = 10, column.w = 150, column.h = 34, column.count = 4;
+                column.items[0] = "Machine", column.items[1] = "Canvas", column.items[2] = "Display", column.items[3] = "Input";
+                ui_control_start(&column);
+                column.at = 1, column.focused = 1;
+                ui_control_draw(&ui, &column);
+                ui_kit.now += 2000000000ll;
+                ui_control_draw(&ui, &column);
+                ui_vtabs_row(&column, &rx, &rw);
+                pip = ui_role(UI_SURFACE_HIGH) & 0xffffffu;
+                column_bare = pip != ground && rw > 12;
+                for (int y = 10 + 34; y < 10 + 68 && column_bare; y++)
+                        column_bare = focus_at(pixels, rx, y) == pip && focus_at(pixels, rx + 2, y) == pip && focus_at(pixels, rx + 3, y) == pip;
+                for (int x = rx; x < rx + 8 && column_bare; x++)
+                        column_bare = focus_at(pixels, x, 10 + 34) == pip && focus_at(pixels, x, 10 + 36) == pip && focus_at(pixels, x, 10 + 37) == pip;
+                check("kit focus: the chosen group of a column the keys are in is under its pip and has no ring: the pip says where they are", column_bare);
+        }
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        ui_kit.keyed = 0;
         check("kit focus: a button the keys are on has the focus ring a gap out from its pill, 3:1 from the ground, and one they are not on has nothing round it",
               ringed && bare);
         check("kit focus: a click on a button does not focus it: the ring is the keys'", clicked);
+        check("kit focus: a button the keys were on has no ring once a button of the pointer is pressed, anywhere: a click leaves none behind", unkeyed);
+        check("kit focus: Tab and an arrow put the hand on the keys, a press and a finger take it off, and a letter, a mouse's nudge, a wheel and a release change nothing",
+              modality);
         check("kit focus: the ring's ink stands out 3:1 from the light surface and from a lit row's white with Dawn's orange too, which is 2.4:1 on white as it is",
               dawn_ink);
         check("kit focus: a field's placeholder is the quiet ink at full strength, 4.5:1 or more from the light surface (the ink at 36 percent was 2.2:1)", placeholder);

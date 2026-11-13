@@ -22,6 +22,8 @@ X = "src/canvas/ui/mixer.c"
 T = "src/canvas/ui/taskbar.c"
 C = "src/canvas/compositor.c"
 TM = "src/canvas/ui/terminal.c"
+L = "src/canvas/ui/launcher.c"
+R = "src/sh/registry.c"
 
 M = [
     # ---- the level meter ----
@@ -171,6 +173,18 @@ M = [
     (TM, "the terminal's kit has no text scratch (the bar's labels are blank)", "        ui_scratch_fit(&terminal.ui, terminal.width);\n", ""),
     (TM, "the terminal's kit text is in the grid's mono face (the menu and the bar in mono)", "        terminal.ui.regular = ui_face_load(&terminal.ui.faces[0], terminal_ui_regular_path) ? &terminal.ui.faces[0] : terminal.plain[0];\n", "        terminal.ui.regular = terminal.plain[0];\n"),
     (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
+    # ---- the keys' focus: a ring only for the keys, and only where no fill says where they are ----
+    (U, "a click leaves the ring on a button", "        if (c->focused && !c->disabled && ui_kit.keyed)", "        if (c->focused && !c->disabled)"),
+    (U, "a press does not take the hand off the keys", "        if ((event->flags & WINDOW_KEY_TOUCH) || (event->type == WINDOW_EVENT_BUTTON && down))\n                ui_kit.keyed = 0;", "        if (event->flags & WINDOW_KEY_TOUCH)\n                ui_kit.keyed = 0;"),
+    (U, "a finger does not take the hand off the keys", "        if ((event->flags & WINDOW_KEY_TOUCH) || (event->type == WINDOW_EVENT_BUTTON && down))\n                ui_kit.keyed = 0;", "        if (event->type == WINDOW_EVENT_BUTTON && down)\n                ui_kit.keyed = 0;"),
+    (U, "any key puts the hand on the keys", "        else if (event->type == WINDOW_EVENT_KEY && down &&\n                 (event->a == 15 ||", "        else if (event->type == WINDOW_EVENT_KEY && down &&\n                 (event->a == 30 || event->a == 15 ||"),
+    (U, "an arrow does not put the hand on the keys", "event->a == 106 || event->a == 107 ||\n                  event->a == 108 || event->a == 109))", "event->a == 106 || event->a == 107 ||\n                  event->a == 109))"),
+    (U, "a lit row is ringed", "                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring).\n", "                if (l->keys && !ui->glass)\n                {\n                        struct ui_box ring = box;\n\n                        ring.x0 += 512, ring.y0 += 512, ring.x1 -= 512, ring.y1 -= 512;\n                        ui_kit_focus_ring(ui, &ring);\n                }\n"),
+    (U, "the column's chosen group is ringed", "                // The keys in the column have no ring: the pip is the chosen group and the group the keys are on, and it says so.\n", "                if (c->focused && !c->disabled)\n                {\n                        struct ui_box ring = pip;\n\n                        ring.x0 += 512, ring.y0 += 512, ring.x1 -= 512, ring.y1 -= 512;\n                        ui_kit_focus_ring(ui, &ring);\n                }\n"),
+    # ---- the launcher's rows, edge to edge ----
+    (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
+    # ---- a mouse drags a list unless a person turned it off ----
+    (R, "the mouse's drag of a list is off unless set", '.path = SETTING_SCROLL_DRAG_PATH, .standard = "on",', '.path = SETTING_SCROLL_DRAG_PATH, .standard = "off",'),
 ]
 
 check = os.path.join(root, "test/checks.c")

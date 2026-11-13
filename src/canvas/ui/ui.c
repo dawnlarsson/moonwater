@@ -10956,6 +10956,7 @@ static struct ui_kit
         b32 reached;
         int reach_top, reach_bottom;
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
+        b32 keyed;                         // the hand is on the keys: the last thing that moved the focus was a key, and no press came since (ui_kit_keyed_note)
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
         b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a hand reads its time from it (ui_press_now)
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
@@ -12562,9 +12563,11 @@ static inline b32 ui_q8(const struct ui address_to ui, int logical) { return log
 static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1) > 256 ? ui_q8(ui, 1) : 256; }
 
 /*
-        The focus ring: the one outline the kit draws whatever UI_KIT_OUTLINES says, because it is how a person on the keys
-        sees where they are (WCAG 2.4.7), and a fill alone (a lit row is a step toward white on a light ground) is too faint
-        to be that. Two logical pixels, on the box it is given (a row set in by UI_FOCUS_GAP, or a control's face grown by it).
+        The focus ring: the one outline the kit draws whatever UI_KIT_OUTLINES says, and only where nothing else says where the
+        keys are, and only while the hand is on the keys (ui_kit.keyed: a click or a touch leaves none). That is a button of a
+        row of buttons, whose face is the same with the keys on it or off. A list's row and a group of the column have no ring:
+        the row the keys are on is lit (ui_kit_lit) and the chosen group is under its pip, and those fills are what say it.
+        Two logical pixels, on a control's face grown by UI_FOCUS_GAP.
         Its ink is the accent, deepened (toward black on a light surface, white on a dark one) until it stands out 3:1 from the
         surface and from the white a lit row comes to, so Dawn's orange, 2.4:1 on white, is drawn a deeper orange; on glass
         it is the window's ink, which stands out from the tint.
@@ -12587,17 +12590,6 @@ static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
 static fn ui_kit_focus_ring(struct ui address_to ui, const struct ui_box address_to box)
 {
         ui_kit_ring(ui, box, ui_q8(ui, UI_FOCUS_WIDTH), ui_kit_focus_ink(ui));
-}
-
-// A row's box set in by the ring's gap on every side, its corners UI_RADIUS: the box a row's ring is drawn on, inside the row, so a row
-// that runs to the window's or a column's edge keeps its whole ring and the ring is the kit's rounded shape, not the row's square edge.
-static struct ui_box ui_kit_focus_inset(const struct ui address_to ui, struct ui_box row)
-{
-        b32 in = ui_q8(ui, UI_FOCUS_GAP);
-
-        row.x0 += in, row.y0 += in, row.x1 -= in, row.y1 -= in;
-        row.rx = row.ry = ui_q8(ui, 8);
-        return row;
 }
 
 // A face grown by the focus ring's gap and width on every side, its corners with it: the box an outset ring is drawn on.
@@ -12903,8 +12895,8 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
                 ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
         ui_kit_layer_fill(ui, &face, ink, layer);
-        // The keys on it: the focus ring, a gap out from the pill, whatever its variant.
-        if (c->focused && !c->disabled)
+        // The keys on it: the focus ring, a gap out from the pill, whatever its variant, while the hand is on the keys (a click leaves none).
+        if (c->focused && !c->disabled && ui_kit.keyed)
         {
                 struct ui_box ring = ui_kit_focus_outset(ui, face);
 
@@ -13612,13 +13604,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 
                 if (!c->disabled && c->count > 0) // no items, no chosen one to show
                         ui_kit_fill(ui, &pip, ui_role(UI_SURFACE_HIGH), null);
-                // The keys in the column: the kit's focus ring, on the row's own edge (it runs to the window's).
-                if (c->focused && !c->disabled)
-                {
-                        struct ui_box ring = ui_kit_focus_inset(ui, pip);
-
-                        ui_kit_focus_ring(ui, &ring);
-                }
+                // The keys in the column have no ring: the pip is the chosen group and the group the keys are on, and it says so.
         }
         for (int item = 0; item < c->count; item++)
         {
@@ -14400,8 +14386,28 @@ static fn ui_kit_pass(void)
         }
 }
 
+/*
+        Whether the hand is on the keys (ui_kit.keyed), which is all the focus ring is drawn for: a key that moves the focus (Tab, an
+        arrow, Home, End, a page) says it is, and a press of any button of the pointer, or anything a finger does, says it is not, so a
+        click or a touch never leaves a ring behind on what it pressed, and a ring the keys left is gone at the next press wherever
+        that is. A motion or a wheel says nothing: a mouse nudged while the keys are used takes no ring away. It is :focus-visible's
+        rule, kept in the one place every event passes (ui_event_context), so no control and no app decides it.
+*/
+static fn ui_kit_keyed_note(const struct window_event address_to event)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+
+        if ((event->flags & WINDOW_KEY_TOUCH) || (event->type == WINDOW_EVENT_BUTTON && down))
+                ui_kit.keyed = 0;
+        else if (event->type == WINDOW_EVENT_KEY && down &&
+                 (event->a == 15 || event->a == 102 || event->a == 103 || event->a == 104 || event->a == 105 || event->a == 106 || event->a == 107 ||
+                  event->a == 108 || event->a == 109)) // UI_KEY_TAB, _HOME, _UP, _PAGE_UP, _LEFT, _RIGHT, _END, _DOWN, _PAGE_DOWN
+                ui_kit.keyed = 1;
+}
+
 static fn ui_event_context(const struct window_event address_to event)
 {
+        ui_kit_keyed_note(event);
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
         ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
@@ -19401,7 +19407,7 @@ struct ui_list
         fn (*damaged)(int top, int bottom);
         const char address_to empty;       // what it says when it shows nothing
         b32 lit;                           // the row the keys are on is shown (the keys are in it, or a search lists it)
-        b32 keys;                          // and ringed: the keys are in it and the window has them
+        b32 keys;                          // the keys are in it and the window has them: a field of a row has its caret
         int focus;                         // the row the keys are on, -1 none
         b32 wrap;                          // a row's words that do not fit the room it gives them wrap, and the row is as tall as they are (else they are cut with dots)
         unsigned int revision;             // counted up when a row's words changed (ui_list_row_changed): what a least worked out of them is kept against
@@ -20486,8 +20492,8 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 }
 
 /*
-        A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
-        the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
+        A row at its place, y its top: the row the keys are on, the whole row lit, square (the fill is the keys' mark:
+        a row has no ring), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
 */
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
@@ -20499,8 +20505,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
         int across, across_w, baseline, size = ui_dev(ui, 4);
         // Whether any of its rows may be written, with room for a run's rows round its line.
-        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4)), ringed = 0;
-        struct ui_box ring = {0};
+        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
         ui_list_describe(l, id, &row);
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
@@ -20514,11 +20519,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
-                // The keys on the list: the focus ring on the row's own edge, drawn last, over the row's own control's hover and
-                // press. A glass list (the launcher's) keeps the keys in its search, and its lit row is the one Enter takes, not a
-                // focus of its own: it has no ring.
-                if (l->keys && !ui->glass)
-                        ring = ui_kit_focus_inset(ui, box), ringed = 1;
+                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring).
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
                 // its quiet words are the ink too, which stands out from the well (ui_glass_well).
                 if (ui->glass && !row.tall)
@@ -20591,9 +20592,6 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_list_drive(ui, &row, seen, strong, quiet);
         else if (row.kind == UI_ROW_SHARE)
                 ui_list_share(ui, &row, seen, strong, quiet);
-        // The ring last, over a drive's strip and a share row's square too: the one mark the keys add to any row.
-        if (ringed)
-                ui_kit_focus_ring(ui, &ring);
 }
 
 // Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which
@@ -21175,8 +21173,8 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
 }
 
 /*
-        The column drawn: the chosen group under the accent's pip, which slides to another however it is chosen, ringed
-        while the keys are in it; none chosen (disabled) while a search lists the rows of every group.
+        The column drawn: the chosen group under the accent's pip, which slides to another however it is chosen (the pip is the keys'
+        mark too: the column has no ring); none chosen (disabled) while a search lists the rows of every group.
 */
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
@@ -22467,7 +22465,12 @@ static int ui_app_run(struct ui_app address_to app)
                         app->pass();
                 while (running && windows_event(app->own, &event))
                 {
+                        b32 keyed = ui_kit.keyed;
+
                         ui_event_context(&event);
+                        // The hand went to the keys or left them: a ring is due or is gone, wherever the event itself landed.
+                        if (keyed != ui_kit.keyed)
+                                ui_app_changed(app);
                         // A scroll over the window closes its open popup before the app has the scroll (ui_popmenu_scroll).
                         if (app->popup)
                         {
@@ -22503,6 +22506,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if ((table->focus == row) != *app->focused)
                 {
                         *app->focused = table->focus == row;
+                        ui_kit.keyed = 0; // the keys came or went: no ring till a key moves the focus here
                         ui_app_changed(app);
                         if (!ui_app_keys(app, *app->focused))
                                 running = false;
