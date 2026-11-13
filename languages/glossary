@@ -79,3 +79,5 @@ N min ago (the minutes cut short, so no number needs a plural) | hace %d min | i
 folder (a directory, as a window shows one) | carpeta | dossier | Ordner | pasta | cartella | map | folder | klasör | mapp | папка | тека | φάκελος | مجلد | תיקייה | پوشه | فولڈر
 file (what a folder holds; Files is the browser's name) | archivo | fichier | Datei | arquivo | file | bestand | plik | dosya | fil | файл | файл | αρχείο | ملف | קובץ | پرونده | فائل
 link (a symbolic link in a folder) | enlace | lien | Verknüpfung | link | collegamento | koppeling | dowiązanie | bağlantı | länk | ссылка | посилання | σύνδεσμος | رابط | קישור | پیوند | لنک
+log out (end the desktop's session) | cerrar sesión | se déconnecter | abmelden | sair | uscire | afmelden | wylogować | oturumu kapat | logga ut | выйти | вийти | αποσύνδεση | تسجيل الخروج | התנתקות | خروج | لاگ آؤٹ
+sleep (the machine suspended to memory) | suspender | mettre en veille | Standby | suspender | sospendere | slaapstand | uśpić | uyku | vila | сон | сон | αναστολή | سكون | שינה | خواب | سلیپ

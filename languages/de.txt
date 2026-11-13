@@ -49,12 +49,16 @@ files_not_folder	2663	Das ist kein Ordner
 files_reading	64a4	Ordner wird gelesen
 files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
 files_up	5940	Nach oben
+launcher_log_out	d8b5	Abmelden
+launcher_log_out_armed	8615	abmelden
 launcher_power_off	ae2f	Ausschalten
 launcher_power_off_armed	a48f	ausschalten
 launcher_restart	ed8c	Neu starten
 launcher_restart_armed	11ec	neu starten
 launcher_run	61b6	Ausführen %s
 launcher_search_hint	334b	Programme suchen oder einen Befehl eingeben
+launcher_sleep	2ca8	Standby
+launcher_sleep_armed	bb08	in Standby gehen
 menu_copy	43e0	&Kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen

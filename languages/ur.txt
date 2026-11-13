@@ -50,12 +50,16 @@ files_not_folder	2663	یہ فولڈر نہیں ہے
 files_reading	64a4	فولڈر پڑھا جا رہا ہے
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
+launcher_log_out	d8b5	لاگ آؤٹ
+launcher_log_out_armed	8615	لاگ آؤٹ
 launcher_power_off	ae2f	بند کریں
 launcher_power_off_armed	a48f	بند کریں
 launcher_restart	ed8c	دوبارہ شروع کریں
 launcher_restart_armed	11ec	دوبارہ شروع کریں
 launcher_run	61b6	چلائیں %s
 launcher_search_hint	334b	پروگرام تلاش کریں یا کمانڈ لکھیں
+launcher_sleep	2ca8	سلیپ
+launcher_sleep_armed	bb08	سلیپ
 menu_copy	43e0	کاپی
 menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں

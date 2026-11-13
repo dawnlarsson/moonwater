@@ -196,6 +196,9 @@ M = [
     (C, "a chord with the logo key is a tap too", "                if (value == 1)\n                        *alone = 0;\n                return 0;", "                return 0;"),
     (C, "the logo key with Shift held is a tap", "        if (value == 1)\n                *alone = !others;", "        if (value == 1)\n                *alone = 1;"),
     (C, "one press of the logo key taps twice", "        else if (value == 0 && *alone)\n        {\n                *alone = 0;\n                return !others;", "        else if (value == 0 && *alone)\n        {\n                return !others;"),
+    (L, "Sleep is offered whatever the kernel says", "        if (got > 0 && launcher_sleeps(text, (positive)got))\n                launcher.session |= LAUNCHER_SLEEP;", "        launcher.session |= LAUNCHER_SLEEP;"),
+    (L, "a button that is not offered is still there", "                        if (launcher_power_offered(at))\n                                ui_button(", "                        if (1)\n                                ui_button("),
+    (L, "a button that is not offered still starts", "        if (!launcher_power_offered(which))\n                return true;", "        if (which < 0 || which >= LAUNCHER_POWERS)\n                return true;"),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
     # ---- a mouse drags a list unless a person turned it off ----

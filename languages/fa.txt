@@ -50,12 +50,16 @@ files_not_folder	2663	این پوشه نیست
 files_reading	64a4	خواندن پوشه
 files_unreadable	986c	خواندن این پوشه مجاز نیست
 files_up	5940	بالا
+launcher_log_out	d8b5	خروج
+launcher_log_out_armed	8615	خروج
 launcher_power_off	ae2f	خاموش کردن
 launcher_power_off_armed	a48f	خاموش کردن
 launcher_restart	ed8c	راه‌اندازی مجدد
 launcher_restart_armed	11ec	راه‌اندازی مجدد
 launcher_run	61b6	اجرا %s
 launcher_search_hint	334b	جستجوی برنامه یا تایپ یک فرمان
+launcher_sleep	2ca8	خواب
+launcher_sleep_armed	bb08	خواب
 menu_copy	43e0	کپی
 menu_cut	5c17	برش
 menu_delete	1e3e	حذف

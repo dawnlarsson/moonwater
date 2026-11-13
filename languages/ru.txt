@@ -49,12 +49,16 @@ files_not_folder	2663	Это не папка
 files_reading	64a4	Чтение папки
 files_unreadable	986c	Эту папку нельзя читать
 files_up	5940	Вверх
+launcher_log_out	d8b5	Выйти
+launcher_log_out_armed	8615	выйти
 launcher_power_off	ae2f	Выключить
 launcher_power_off_armed	a48f	выключить
 launcher_restart	ed8c	Перезагрузить
 launcher_restart_armed	11ec	перезагрузить
 launcher_run	61b6	Выполнить %s
 launcher_search_hint	334b	Поиск программ или ввод команды
+launcher_sleep	2ca8	Сон
+launcher_sleep_armed	bb08	перейти в сон
 menu_copy	43e0	Копировать
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить

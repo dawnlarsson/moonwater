@@ -50,12 +50,16 @@ files_not_folder	2663	هذا ليس مجلدا
 files_reading	64a4	قراءة المجلد
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
+launcher_log_out	d8b5	تسجيل الخروج
+launcher_log_out_armed	8615	تسجيل الخروج
 launcher_power_off	ae2f	إيقاف التشغيل
 launcher_power_off_armed	a48f	إيقاف التشغيل
 launcher_restart	ed8c	إعادة التشغيل
 launcher_restart_armed	11ec	إعادة التشغيل
 launcher_run	61b6	تنفيذ %s
 launcher_search_hint	334b	ابحث عن برنامج أو اكتب أمرا
+launcher_sleep	2ca8	سكون
+launcher_sleep_armed	bb08	السكون
 menu_copy	43e0	نسخ
 menu_cut	5c17	قص
 menu_delete	1e3e	حذف

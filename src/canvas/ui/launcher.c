@@ -97,14 +97,27 @@ struct launcher_program
         unsigned char mono;            // it is drawn in the monospace face
 };
 
-// The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts (the machine's own stop).
-#define LAUNCHER_POWERS 2
+/*
+        The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts. The first two are
+        the machine's own stop and are always there. The two after them are the session's, and each is there only where the system can
+        do it (launcher.session, a bit each, LAUNCHER_SLEEP and LAUNCHER_LOG_OUT): Sleep is `moonwater sleep`, offered where the kernel
+        says it can suspend to memory (launcher_sleeps: the word mem in /sys/power/state), and Log out is `moonwater desktop stop`,
+        which ends the desktop's session and leaves the text console. There is no Lock: the tree has no screen locker for a button to
+        start, and a button that did nothing would be worse than none.
+*/
+#define LAUNCHER_POWERS 4
+#define LAUNCHER_ALWAYS 2    // the first of them are the machine's and are always offered
+#define LAUNCHER_SLEEP 1u    // launcher.session's bits: the third button,
+#define LAUNCHER_LOG_OUT 2u  // and the fourth
+#define LAUNCHER_POWER_STATE "/sys/power/state"
 static const struct launcher_power
 {
         unsigned int label, says;
         const char address_to command;
 } launcher_powers[LAUNCHER_POWERS] = {{LANGUAGE_launcher_power_off, LANGUAGE_launcher_power_off_armed, "poweroff"},
-                                      {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"}};
+                                      {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"},
+                                      {LANGUAGE_launcher_sleep, LANGUAGE_launcher_sleep_armed, "moonwater sleep"},
+                                      {LANGUAGE_launcher_log_out, LANGUAGE_launcher_log_out_armed, "moonwater desktop stop"}};
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {
@@ -181,6 +194,7 @@ static struct
         struct ui_view view;
         struct ui_rect list_box;
         unsigned int power_runs;
+        unsigned int session; // the session's buttons that are offered: LAUNCHER_SLEEP, LAUNCHER_LOG_OUT (launcher_session_read)
 } launcher;
 
 /* ---- the model: what a text names, and what a row starts ---- */
@@ -647,11 +661,50 @@ static positive launcher_power_words(int which, string_address address_to words)
 
 // A power button pressed again to confirm: the shell starts what it is, and the bar goes (false) once it has. Kept (true) when
 // there is no such button, or when nothing could be started.
+// Whether a power button is offered: the machine's two always, a session's only with its bit.
+static b32 launcher_power_offered(int which)
+{
+        return which >= 0 && which < LAUNCHER_POWERS && (which < LAUNCHER_ALWAYS || (launcher.session >> (which - LAUNCHER_ALWAYS) & 1));
+}
+
+// Whether the kernel's list of the sleeps it can do (the text of /sys/power/state: words a blank apart) has suspend to memory, the
+// whole word mem, which is what `moonwater sleep` asks for.
+static b32 launcher_sleeps(const char address_to text, positive length)
+{
+        for (positive at = 0; at < length;)
+        {
+                positive stop = at;
+
+                while (stop < length && text[stop] != ' ' && text[stop] != '\n' && text[stop])
+                        stop++;
+                if (stop - at == 3 && text[at] == 'm' && text[at + 1] == 'e' && text[at + 2] == 'm')
+                        return true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+// The session's buttons this machine can do, read once as the bar starts: Log out wherever there is a desktop to end (the launcher is a
+// window of one), Sleep where the kernel offers it. A file that is not there, or cannot be read, offers no sleep.
+static fn launcher_session_read(const char address_to state_path)
+{
+        char text[128];
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)state_path, FILE_READ), got = 0;
+
+        launcher.session = LAUNCHER_LOG_OUT;
+        if (handle < 0)
+                return;
+        got = system_read_once(handle, text, sizeof(text));
+        system_close(handle);
+        if (got > 0 && launcher_sleeps(text, (positive)got))
+                launcher.session |= LAUNCHER_SLEEP;
+}
+
 static b32 launcher_power_act(int which)
 {
         string_address words[4];
 
-        if (which < 0 || which >= LAUNCHER_POWERS)
+        if (!launcher_power_offered(which))
                 return true;
         launcher.power_runs++;
         return !ui_start_apart(words, launcher_power_words(which, words));
@@ -663,8 +716,9 @@ static fn launcher_power_row(void)
 {
         ui_row(.class = "foot")
                 for (int at = 0; at < LAUNCHER_POWERS; at++)
-                        ui_button(language_text(launcher_powers[at].label), .class = "action.outlined", .says = language_text(launcher_powers[at].says),
-                                  .on = launcher_power_act, .arg = at, .grow = ui_width() < LAUNCHER_NARROW);
+                        if (launcher_power_offered(at))
+                                ui_button(language_text(launcher_powers[at].label), .class = "action.outlined", .says = language_text(launcher_powers[at].says),
+                                          .on = launcher_power_act, .arg = at, .grow = ui_width() < LAUNCHER_NARROW);
 }
 
 static struct ui_text address_to launcher_field(void);
@@ -1103,6 +1157,7 @@ static b32 launcher_main()
         string_address regular = (string_address) UI_FONT_REGULAR;
 
         memory_zero(&launcher, sizeof(launcher));
+        launcher_session_read(LAUNCHER_POWER_STATE);
         ui_buffers_start(&launcher.buffers);
 
         for (positive at = 1; at < (positive)program_argument_count(); at++)

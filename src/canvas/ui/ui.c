@@ -7637,12 +7637,16 @@ LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
+LANGUAGE_ID(launcher_log_out, "Log out") \
+LANGUAGE_ID(launcher_log_out_armed, "log out") \
 LANGUAGE_ID(launcher_power_off, "Power off") \
 LANGUAGE_ID(launcher_power_off_armed, "power off") \
 LANGUAGE_ID(launcher_restart, "Restart") \
 LANGUAGE_ID(launcher_restart_armed, "restart") \
 LANGUAGE_ID(launcher_run, "Run %s") \
 LANGUAGE_ID(launcher_search_hint, "Search programs, or type a command") \
+LANGUAGE_ID(launcher_sleep, "Sleep") \
+LANGUAGE_ID(launcher_sleep_armed, "sleep") \
 LANGUAGE_ID(menu_copy, "&Copy") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \

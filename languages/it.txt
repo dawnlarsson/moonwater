@@ -49,12 +49,16 @@ files_not_folder	2663	Questa non è una cartella
 files_reading	64a4	Lettura della cartella
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
+launcher_log_out	d8b5	Esci
+launcher_log_out_armed	8615	uscire
 launcher_power_off	ae2f	Spegni
 launcher_power_off_armed	a48f	spegni
 launcher_restart	ed8c	Riavvia
 launcher_restart_armed	11ec	riavvia
 launcher_run	61b6	Esegui %s
 launcher_search_hint	334b	Cerca programmi, oppure scrivi un comando
+launcher_sleep	2ca8	Sospendi
+launcher_sleep_armed	bb08	sospendere
 menu_copy	43e0	&Copia
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina

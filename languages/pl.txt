@@ -49,12 +49,16 @@ files_not_folder	2663	To nie jest folder
 files_reading	64a4	Czytanie folderu
 files_unreadable	986c	Tego folderu nie wolno czytać
 files_up	5940	W górę
+launcher_log_out	d8b5	Wyloguj
+launcher_log_out_armed	8615	wylogować
 launcher_power_off	ae2f	Wyłącz
 launcher_power_off_armed	a48f	wyłącz
 launcher_restart	ed8c	Uruchom ponownie
 launcher_restart_armed	11ec	uruchom ponownie
 launcher_run	61b6	Uruchom %s
 launcher_search_hint	334b	Szukaj programów lub wpisz polecenie
+launcher_sleep	2ca8	Uśpij
+launcher_sleep_armed	bb08	uśpić
 menu_copy	43e0	&Kopiuj
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń

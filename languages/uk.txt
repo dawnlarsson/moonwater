@@ -49,12 +49,16 @@ files_not_folder	2663	Це не тека
 files_reading	64a4	Читання теки
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
+launcher_log_out	d8b5	Вийти
+launcher_log_out_armed	8615	вийти
 launcher_power_off	ae2f	Вимкнути
 launcher_power_off_armed	a48f	вимкнути
 launcher_restart	ed8c	Перезавантажити
 launcher_restart_armed	11ec	перезавантажити
 launcher_run	61b6	Виконати %s
 launcher_search_hint	334b	Пошук програм або введення команди
+launcher_sleep	2ca8	Сон
+launcher_sleep_armed	bb08	перейти в сон
 menu_copy	43e0	Копіювати
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити

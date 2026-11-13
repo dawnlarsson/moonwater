@@ -170357,6 +170357,40 @@ static fn check_field_hands(string_address regular)
                                               (ui_role(UI_PRIMARY) & 0xffffffu));
                         }
                 }
+                // The session's buttons: none unless the machine can do it (the kernel's own list has the whole word mem for Sleep), and
+                // with both offered the foot has four, each armed by its first press and started by its second: Sleep is `moonwater
+                // sleep` and Log out `moonwater desktop stop`. A button that is not offered is not there and starts nothing.
+                {
+                        unsigned int was = launcher.session, runs = launcher.power_runs;
+                        string_address words[4];
+                        b32 read, two, four, said, refused;
+
+                        read = launcher_sleeps("freeze mem disk\n", 16) && launcher_sleeps("mem", 3) && !launcher_sleeps("freeze disk\n", 12) &&
+                               !launcher_sleeps("memory\n", 7) && !launcher_sleeps("xmem \n", 6) && !launcher_sleeps("", 0);
+                        launcher_session_read("/tmp/mw-no-such-power-state");
+                        read = read && launcher.session == LAUNCHER_LOG_OUT;
+                        check("launcher: Sleep is offered only where the kernel's list of sleeps has the whole word mem, and a list that cannot be read offers none", read);
+                        launcher.session = 0;
+                        launcher.height = launcher_build(0);
+                        two = launcher.view.group.count == 2 && !launcher_power_offered(2) && !launcher_power_offered(3) && launcher_power_act(2) &&
+                              launcher.power_runs == runs;
+                        launcher.session = LAUNCHER_SLEEP | LAUNCHER_LOG_OUT;
+                        launcher.height = launcher_build(0);
+                        four = launcher.view.group.count == 4 && launcher_power_offered(2) && launcher_power_offered(3) &&
+                               launcher.view.group.button[3].x + launcher.view.group.button[3].w <= LAUNCHER_WIDTH &&
+                               launcher.view.group.button[0].x >= 0 && launcher.view.group.button[2].x > launcher.view.group.button[1].x;
+                        said = launcher_power_words(2, words) == 3 && string_equals(words[2], (string_address) "moonwater sleep") &&
+                               launcher_power_words(3, words) == 3 && string_equals(words[2], (string_address) "moonwater desktop stop") &&
+                               string_equals(words[0], (string_address) "/shell") && launcher.view.group.says[2] && launcher.view.group.says[3];
+                        launcher.session = LAUNCHER_LOG_OUT;
+                        launcher.height = launcher_build(0);
+                        refused = launcher.view.group.count == 3 && launcher_power_act(2) && launcher.power_runs == runs && launcher_power_offered(3);
+                        check("launcher: with no session action offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two && refused);
+                        check("launcher: with Sleep and Log out offered the foot has four buttons inside the bar, each said before it is done, Sleep starting moonwater sleep and Log out moonwater desktop stop",
+                              four && said);
+                        launcher.session = was;
+                        launcher.height = launcher_build(0);
+                }
                 // A name of PATH with an escape and an override in it: the row's words have a picture and a mark where they stood, and no
                 // byte of either, while the name the row starts is the file's own.
                 {

@@ -12,6 +12,8 @@ src/canvas/ui/launcher.c	kernel log klog dmesg messages
 src/canvas/ui/launcher.c	Mixer
 src/canvas/ui/launcher.c	mixer sound volume audio
 src/canvas/ui/launcher.c	Files
+src/canvas/ui/launcher.c	moonwater sleep
+src/canvas/ui/launcher.c	moonwater desktop stop
 src/canvas/ui/launcher.c	files folders browser directory
 src/canvas/ui/files.c	Files
 src/canvas/ui/mixer.c	Mixer

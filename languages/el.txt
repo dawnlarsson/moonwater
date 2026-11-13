@@ -49,12 +49,16 @@ files_not_folder	2663	Αυτό δεν είναι φάκελος
 files_reading	64a4	Ανάγνωση του φακέλου
 files_unreadable	986c	Δεν επιτρέπεται η ανάγνωση του φακέλου
 files_up	5940	Πάνω
+launcher_log_out	d8b5	Αποσύνδεση
+launcher_log_out_armed	8615	αποσύνδεση
 launcher_power_off	ae2f	Τερματισμός
 launcher_power_off_armed	a48f	τερματισμός
 launcher_restart	ed8c	Επανεκκίνηση
 launcher_restart_armed	11ec	επανεκκίνηση
 launcher_run	61b6	Εκτέλεση %s
 launcher_search_hint	334b	Αναζήτηση προγραμμάτων ή πληκτρολόγηση εντολής
+launcher_sleep	2ca8	Αναστολή
+launcher_sleep_armed	bb08	αναστολή
 menu_copy	43e0	Αντιγραφή
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή

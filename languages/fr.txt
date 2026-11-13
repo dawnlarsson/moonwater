@@ -49,12 +49,16 @@ files_not_folder	2663	Ce n'est pas un dossier
 files_reading	64a4	Lecture du dossier
 files_unreadable	986c	Ce dossier ne peut pas être lu
 files_up	5940	Monter
+launcher_log_out	d8b5	Se déconnecter
+launcher_log_out_armed	8615	se déconnecter
 launcher_power_off	ae2f	Éteindre
 launcher_power_off_armed	a48f	éteindre
 launcher_restart	ed8c	Redémarrer
 launcher_restart_armed	11ec	redémarrer
 launcher_run	61b6	Exécuter %s
 launcher_search_hint	334b	Chercher un programme, ou saisir une commande
+launcher_sleep	2ca8	Mettre en veille
+launcher_sleep_armed	bb08	mettre en veille
 menu_copy	43e0	&Copier
 menu_cut	5c17	Co&uper
 menu_delete	1e3e	&Supprimer

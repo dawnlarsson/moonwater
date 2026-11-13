@@ -49,12 +49,16 @@ files_not_folder	2663	Dit is geen map
 files_reading	64a4	De map wordt gelezen
 files_unreadable	986c	Deze map mag niet worden gelezen
 files_up	5940	Omhoog
+launcher_log_out	d8b5	Afmelden
+launcher_log_out_armed	8615	afmelden
 launcher_power_off	ae2f	Uitschakelen
 launcher_power_off_armed	a48f	uitschakelen
 launcher_restart	ed8c	Opnieuw opstarten
 launcher_restart_armed	11ec	opnieuw opstarten
 launcher_run	61b6	Uitvoeren %s
 launcher_search_hint	334b	Zoek programma's, of typ een opdracht
+launcher_sleep	2ca8	Slaapstand
+launcher_sleep_armed	bb08	in slaapstand zetten
 menu_copy	43e0	Ko&piëren
 menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
