@@ -124201,6 +124201,9 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
 static bipolar card_fake_control(positive handle, positive request, positive argument);
 #undef system_control
 #define system_control(handle, request, argument) card_fake_control((positive)(handle), (positive)(request), (positive)(argument))
+// And the cards it opens by their minors are a check's too (card_fake_node): the nodes a check says are there.
+static long card_fake_node(unsigned int minor);
+#define COMPOSITOR_CARD_NODE(minor) card_fake_node(minor)
 #ifdef CHECK_draw_list
 #define COMPOSITOR_LIST_RENDER_EXTERNAL // the list rows below draw their own renderer (compositor_gpu_list_render, after this file)
 #endif
@@ -124241,7 +124244,30 @@ static struct
         unsigned int handles, fbs, fb_width[64], fb_height[64];
         unsigned long offset, handle_offset[64];
         unsigned int crtc_fb, crtc_x, crtc_y, refused, atomic_fb, atomics;
+        // The cards the compositor's walk finds (card_fake_node): the minors that are cards, and of those the ones with no
+        // connected screen, the ones another program is the master of and the firmware's; the minor that is open now (fd
+        // is its descriptor, a copy of base, the memfd), each minor's last descriptor, and the minors opened, in order.
+        unsigned long nodes, dark, busy, firmware;
+        unsigned int minor, opened[160], opens;
+        int base, node[64];
 } card_fake;
+
+static long card_fake_node(unsigned int minor)
+{
+        long node;
+
+        if (card_fake.opens < 160)
+                card_fake.opened[card_fake.opens] = minor;
+        card_fake.opens++;
+        if (minor >= 64 || !(card_fake.nodes >> minor & 1))
+                return -2;
+        node = (long)system_call_3(syscall(fcntl), (positive)card_fake.base, 1030, 200 + minor); // F_DUPFD_CLOEXEC, a number no other minor has
+        if (node < 0)
+                return node;
+        card_fake.fd = card_fake.node[minor] = (int)node;
+        card_fake.minor = minor;
+        return node;
+}
 
 static void card_fake_mode(struct compositor_mode address_to mode)
 {
@@ -124266,6 +124292,17 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                 return (bipolar)system_call_3(syscall(ioctl), handle, request, argument);
         switch (request)
         {
+        case COMPOSITOR_VERSION:
+        {
+                struct compositor_version address_to v = (struct compositor_version address_to)argument;
+                const char address_to name = card_fake.firmware >> card_fake.minor & 1 ? "simpledrm" : "fake";
+
+                for (unsigned long at = 0; name[at] && at < v->name_length; at++)
+                        v->name[at] = name[at];
+                return 0;
+        }
+        case COMPOSITOR_SET_MASTER:
+                return card_fake.busy >> card_fake.minor & 1 ? -13 : 0;
         case COMPOSITOR_GETRESOURCES:
         {
                 struct compositor_card_res address_to r = (struct compositor_card_res address_to)argument;
@@ -124285,7 +124322,7 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
         {
                 struct compositor_connector address_to c = (struct compositor_connector address_to)argument;
                 unsigned int id = c->connector_id;
-                int connected = id == CARD_FAKE_CONNECTOR;
+                int connected = id == CARD_FAKE_CONNECTOR && !(card_fake.dark >> card_fake.minor & 1);
 
                 if (card_fake.asked_count < 64)
                         card_fake.asked[card_fake.asked_count++] = id;
@@ -133429,6 +133466,216 @@ static void check_compositor_card_turn(void)
     card_fake_close();
     compositor_displays_path = SETTING_CANVAS_DISPLAYS_PATH;
     system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+}
+
+/*
+        The card the compositor takes at its start (compositor_cards_walk): every minor is tried and the first card that makes
+        the compositor its master and has a connected screen is the one, the real cards before a firmware card; a card that is
+        not taken is closed; and with no screen on any card that could be had the answer is the one the start waits on
+        (-COMPOSITOR_ENODEV), where only /dev/dri/card0 was opened and every other machine's compositor ended at once. The
+        cards are the fake's (card_fake_node), a memfd behind each minor a row says is there.
+*/
+static b32 card_walk_begin(unsigned long nodes, unsigned long dark, unsigned long busy, unsigned long firmware)
+{
+    memory_zero(&compositor, sizeof(compositor));
+    if (!card_fake_open(1024, 768))
+        return false;
+    card_fake.base = card_fake.fd;
+    card_fake.nodes = nodes, card_fake.dark = dark, card_fake.busy = busy, card_fake.firmware = firmware;
+    for (unsigned int at = 0; at < 64; at++)
+        card_fake.node[at] = -1;
+    compositor.card = compositor.uevents = -1;
+    compositor.scale = 100;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    return true;
+}
+
+// Whether a minor's last descriptor is closed (or the minor was never opened).
+static b32 card_walk_closed(unsigned int minor)
+{
+    return card_fake.node[minor] < 0 || system_call_3(syscall(fcntl), (positive)card_fake.node[minor], 1, 0) < 0; // F_GETFD
+}
+
+static fn card_walk_end(void)
+{
+    int taken = compositor.card;
+
+    // The second buffer a taken card was given is outside the compositor's own state, and is the card's to give back.
+    compositor_plate_drop();
+    card_turn_drop();
+    if (taken >= 0 && taken != card_fake.base)
+        system_close(taken);
+    card_fake.fd = card_fake.base;
+    card_fake_close();
+}
+
+static void check_compositor_card_walk(void)
+{
+    b32 status;
+
+    if (!card_walk_begin(1ul << 3, 0, 0, 0))
+    {
+        check("card walk: the fake card is made", false);
+        return;
+    }
+    status = compositor_cards_walk();
+    check("card walk: a screen on card3, with no card0, is taken",
+          status == 0 && compositor.card >= 0 && compositor.card == card_fake.node[3] && compositor.outputs == 1 &&
+              compositor.width == 1024 && compositor.height == 768 && string_equals((string_address)compositor.driver, (string_address) "fake"));
+    card_walk_end();
+
+    card_walk_begin(1ul << 0 | 1ul << 2, 1ul << 0, 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: a card with no connected screen is passed over for the next that has one, and is not left open",
+          status == 0 && compositor.card == card_fake.node[2] && card_fake.minor == 2 && card_walk_closed(0));
+    card_walk_end();
+
+    card_walk_begin(1ul << 1, 1ul << 1, 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: no screen on the only card is the answer the start waits on, and no card is held while it waits",
+          status == -COMPOSITOR_ENODEV && compositor.card == -1 && card_walk_closed(1) && !compositor.driver[0]);
+    card_fake.dark = 0;
+    status = compositor_cards_walk();
+    check("card walk: walked again once a screen is connected, the card is taken",
+          status == 0 && compositor.card == card_fake.node[1] && compositor.outputs == 1);
+    card_walk_end();
+
+    card_walk_begin(1ul << 0 | 1ul << 1, 0, 0, 1ul << 0);
+    status = compositor_cards_walk();
+    check("card walk: a real card is taken before the firmware's, whatever their minors",
+          status == 0 && compositor.card == card_fake.node[1] && card_walk_closed(0) &&
+              string_equals((string_address)compositor.driver, (string_address) "fake"));
+    card_walk_end();
+
+    card_walk_begin(1ul << 0 | 1ul << 1, 1ul << 1, 0, 1ul << 0);
+    status = compositor_cards_walk();
+    check("card walk: the firmware's card is taken when no real card has a screen",
+          status == 0 && compositor.card == card_fake.node[0] && card_walk_closed(1) &&
+              string_equals((string_address)compositor.driver, (string_address) "simpledrm"));
+    check("card walk: and only the firmware's minor is opened a second time", card_fake.opens == 65 && card_fake.opened[64] == 0);
+    card_walk_end();
+
+    card_walk_begin(1ul << 0 | 1ul << 5, 0, 1ul << 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: a card another program is the master of is passed over", status == 0 && compositor.card == card_fake.node[5] && card_walk_closed(0));
+    card_walk_end();
+
+    card_walk_begin(1ul << 0, 0, 1ul << 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: every card another's is busy, which ends the start as it did", status == -COMPOSITOR_EBUSY && compositor.card == -1 && card_walk_closed(0));
+    card_walk_end();
+
+    card_walk_begin(1ul << 0 | 1ul << 1, 1ul << 1, 1ul << 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: one card another's and one with no screen is a wait for the screen", status == -COMPOSITOR_ENODEV && compositor.card == -1);
+    card_walk_end();
+
+    card_walk_begin(0, 0, 0, 0);
+    status = compositor_cards_walk();
+    check("card walk: no card at all is no such card, and every minor was asked once", status == -COMPOSITOR_ENOENT && card_fake.opens == 64);
+    card_walk_end();
+}
+
+/*
+        The wait for a screen (compositor_screen_wait) on the socket the kernel's uevents come down, here one end of a pair: a
+        uevent of the drm subsystem ends it at once, one of another subsystem does not, and with none it ends at its time.
+*/
+static void check_compositor_screen_wait(void)
+{
+    static const char usb[] = "add@/devices/usb1\0ACTION=add\0SUBSYSTEM=usb";
+    static const char drm[] = "change@/devices/card1\0ACTION=change\0HOTPLUG=1\0SUBSYSTEM=drm";
+    b32 pair[2] = {-1, -1};
+    positive began;
+    int came;
+
+    if (system_call_4(syscall(socketpair), 1, 2 | 0x80000, 0, (positive)pair) != 0) // AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC
+    {
+        check("screen wait: the pair of sockets is made", false);
+        return;
+    }
+    compositor.uevents = pair[0];
+
+    began = clock_monotonic_nanoseconds();
+    came = compositor_screen_wait(20000000ull);
+    check("screen wait: with nothing said it ends at its time, and not before", !came && clock_monotonic_nanoseconds() - began >= 20000000ull);
+
+    system_write_once(pair[1], usb, sizeof(usb));
+    began = clock_monotonic_nanoseconds();
+    came = compositor_screen_wait(30000000ull);
+    check("screen wait: what another subsystem says does not end it", !came && clock_monotonic_nanoseconds() - began >= 30000000ull);
+
+    system_write_once(pair[1], usb, sizeof(usb));
+    system_write_once(pair[1], drm, sizeof(drm));
+    began = clock_monotonic_nanoseconds();
+    came = compositor_screen_wait(20000000000ull);
+    check("screen wait: a uevent of the drm subsystem ends it at once", came == 1 && clock_monotonic_nanoseconds() - began < 5000000000ull);
+
+    system_close(pair[0]);
+    system_close(pair[1]);
+    compositor.uevents = -1;
+}
+
+/*
+        The descriptor table has its room before the compositor has a thread (compositor_descriptors_room): the size the
+        kernel says the table is (FDSize in /proc/self/status) is the whole of what the limit allows, up to 1024, so no
+        descriptor the session opens grows a table its threads share, which is a wait for every processor (16 ms at the
+        65th descriptor of every start). And the word that the desktop is up (compositor_up_say) is a line and then the
+        end of the file on the descriptor given, and nothing on one that is none or the program's own three.
+*/
+static positive check_descriptor_table_size(void)
+{
+    static p8 text[4096];
+    bipolar handle = system_open_at(AT_FDCWD, (string_address) "/proc/self/status", FILE_READ | O_CLOEXEC);
+    bipolar got = handle < 0 ? -1 : system_read_once(handle, text, sizeof(text) - 1);
+    positive size = 0;
+
+    if (handle >= 0)
+        system_close(handle);
+    if (got <= 0)
+        return 0;
+    text[got] = 0;
+    for (bipolar at = 0; at + 8 < got; at++)
+        if (!memory_compare(text + at, "FDSize:", 7))
+        {
+            for (at += 7; text[at] == ' ' || text[at] == '\t'; at++)
+                ;
+            for (; text[at] >= '0' && text[at] <= '9'; at++)
+                size = size * 10 + (positive)(text[at] - '0');
+            break;
+        }
+    return size;
+}
+
+static void check_compositor_start_room(void)
+{
+    positive limit[2] = {0, 0}, want, size;
+    b32 ends[2] = {-1, -1};
+    p8 word[8];
+
+    system_call_4(syscall(prlimit64), 0, 7, 0, (positive)limit); // RLIMIT_NOFILE
+    want = limit[0] > 1023 ? 1024 : limit[0] > 511 ? 512 : limit[0] > 255 ? 256 : limit[0] > 127 ? 128 : 0;
+    compositor_descriptors_room();
+    size = check_descriptor_table_size();
+    if (!size)
+        log_direct(str("descriptor room: /proc/self/status has no FDSize here, the table's size NOT RUN\n"));
+    else
+        check("descriptor room: the table has the room the limit allows, up to 1024, before any thread shares it", size >= want && want >= 128);
+
+    if (system_call_2(syscall(pipe2), (positive)ends, 0x80000) != 0) // O_CLOEXEC
+    {
+        check("up word: the pipe is made", false);
+        return;
+    }
+    compositor_up_say(-1);
+    compositor_up_say(1);
+    check("up word: no descriptor, or one of the program's own three, is left alone", system_call_3(syscall(fcntl), 1, 1, 0) >= 0);
+    compositor_up_say(ends[1]);
+    check("up word: the descriptor given is told the desktop is up in a line",
+          system_read_once(ends[0], word, sizeof(word)) == 3 && !memory_compare(word, "up\n", 3));
+    check("up word: and is closed, so its reader has the end of the file after it", system_read_once(ends[0], word, sizeof(word)) == 0);
+    system_close(ends[0]);
 }
 
 /*
@@ -171040,6 +171287,9 @@ b32 main()
         check_compositor_card_lists();
         check_compositor_card_turn();
         check_compositor_card_edid();
+        check_compositor_card_walk();
+        check_compositor_screen_wait();
+        check_compositor_start_room();
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
         check_compositor_table_sealed();

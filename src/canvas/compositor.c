@@ -4417,8 +4417,10 @@ static void compositor_pointer_shown(void);
 // How long a pointer that was shaken stays large.
 #define COMPOSITOR_MAGNIFIED_NS 1200000000ull
 #define COMPOSITOR_DAMAGE 8
+#define COMPOSITOR_ENOENT 2
 #define COMPOSITOR_EAGAIN 11
 #define COMPOSITOR_EBUSY 16
+#define COMPOSITOR_ENODEV 19
 #define COMPOSITOR_EINVAL 22
 #define COMPOSITOR_ENOSPC 28
 #define COMPOSITOR_IN_CLOSE_WRITE 0x8u
@@ -11128,8 +11130,9 @@ static b32 compositor_space_take(int first)
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
 
+        // No screen (or a card that is not one for screens) is its own answer: the start waits for one (compositor_card_open).
         if (status < 0 || !found.count)
-                return status < 0 ? status : -COMPOSITOR_EINVAL;
+                return -COMPOSITOR_ENODEV;
         // A flip in flight is the card showing a window's buffer on one crtc: the screens are taken once it has landed.
         if (!first && compositor.flip_pending)
         {
@@ -11409,26 +11412,175 @@ static b32 compositor_space_take(int first)
         return 0;
 }
 
+/*
+        The card. DRM gives its cards minors with no promise that the first is 0 or that they are contiguous, and the
+        display is not always card0: a firmware framebuffer's driver (simpledrm, efidrm) takes the first minor and goes
+        when the real driver takes its screen over, which leaves card1 the only card, and a machine with two cards has its
+        screen on either. So every minor is tried, as Canvas tries them (canvas_claim_range), and the card taken is the first
+        that makes this program its master and has a connected screen: the real cards first, and a firmware card only when
+        no other has a screen, the order Canvas keeps too. Only /dev/dri/card0 was opened before, and a machine whose screen
+        was on another card had a compositor that ended at once every time it was started.
+*/
+#define COMPOSITOR_CARDS 64 // DRM's minors for primary nodes
+
+static int compositor_uevents_open(void);
+static int compositor_uevent_drm(const char *message, long length);
+
+static long compositor_card_node(unsigned int minor)
+{
+        p8 path[24] = "/dev/dri/card";
+
+        path[13 + positive_into_string(path + 13, minor)] = 0;
+        return (long)system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC);
+}
+
+// A check has cards of its own.
+#ifndef COMPOSITOR_CARD_NODE
+#define COMPOSITOR_CARD_NODE(minor) compositor_card_node(minor)
+#endif
+
+static int compositor_card_firmware(void)
+{
+        static const char *const firmware[] = {"simpledrm", "efidrm"};
+
+        return compositor_driver_in(firmware, sizeof(firmware) / sizeof(firmware[0]));
+}
+
+/*
+        One minor tried: 0 with the card taken and its first frame shown; -COMPOSITOR_ENOENT for no card there;
+        -COMPOSITOR_EAGAIN for a firmware card while those are passed over; -COMPOSITOR_EBUSY for one another program is
+        the master of; -COMPOSITOR_ENODEV for one with no connected screen; and any other error is a card that has a
+        screen and could not be taken, which ends the walk. A card that is not taken is closed, and nothing of it is kept.
+*/
+static b32 compositor_card_try(unsigned int minor, int firmware)
+{
+        struct compositor_version version = {0};
+        long card = COMPOSITOR_CARD_NODE(minor);
+        b32 status;
+
+        if (card < 0)
+                return card == -COMPOSITOR_ENOENT ? -COMPOSITOR_ENOENT : -COMPOSITOR_EBUSY;
+        compositor.card = (int)card;
+        version.name_length = sizeof(compositor.driver) - 1;
+        version.name = compositor.driver;
+        memory_zero(compositor.driver, sizeof(compositor.driver));
+        if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) != 0)
+                compositor.driver[0] = 0;
+        if (!firmware && compositor_card_firmware())
+                status = -COMPOSITOR_EAGAIN;
+        else if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
+                status = -COMPOSITOR_EBUSY;
+        else
+                status = compositor_space_take(1);
+        if (status < 0)
+        {
+                system_close(compositor.card);
+                compositor.card = -1;
+                compositor.driver[0] = 0;
+        }
+        return status;
+}
+
+/*
+        Every card tried once. 0 with one taken. With none: the error of a card that has a screen and would not be taken;
+        else -COMPOSITOR_ENODEV when a card that could be had has no screen, which is a wait for one (compositor_card_open);
+        else -COMPOSITOR_EBUSY when every card there is has another master; else -COMPOSITOR_ENOENT, no card at all.
+*/
+static b32 compositor_cards_walk(void)
+{
+        unsigned long firmware = 0; // the minors passed over the first time, which are the only ones tried the second
+        b32 none = -COMPOSITOR_ENOENT;
+
+        for (unsigned int at = 0; at < 2 * COMPOSITOR_CARDS; at++)
+        {
+                unsigned int minor = at % COMPOSITOR_CARDS;
+                b32 status;
+
+                if (at >= COMPOSITOR_CARDS && !(firmware >> minor & 1))
+                        continue;
+                status = compositor_card_try(minor, at >= COMPOSITOR_CARDS);
+                if (status >= 0)
+                        return status;
+                if (status == -COMPOSITOR_EAGAIN)
+                        firmware |= 1ul << minor;
+                else if (status == -COMPOSITOR_ENODEV || (status == -COMPOSITOR_EBUSY && none == -COMPOSITOR_ENOENT))
+                        none = status;
+                else if (status != -COMPOSITOR_ENOENT && status != -COMPOSITOR_EBUSY)
+                        return status;
+        }
+        return none;
+}
+
+/*
+        The wait for a screen: until the kernel says something of the drm subsystem (a screen plugged in, a card that
+        came), which is 1, or the time given has passed, which is 0. What other subsystems say in between is read and
+        passed over, and a read that fails for anything but nothing to read (the socket overran: ENOBUFS) is taken as
+        the word, since what was lost may have been it. The uevent is only the wake: the cards are walked again
+        whichever it was.
+*/
+static int compositor_screen_wait(positive nanoseconds)
+{
+        positive until = clock_monotonic_nanoseconds() + nanoseconds;
+
+        for (;;)
+        {
+                struct compositor_poll wanted = {compositor.uevents, COMPOSITOR_POLLIN, 0};
+                positive now = clock_monotonic_nanoseconds();
+                char message[2048];
+                long wait[2];
+                int drm = 0;
+
+                if (now >= until)
+                        return 0;
+                wait[0] = (long)((until - now) / 1000000000ull);
+                wait[1] = (long)((until - now) % 1000000000ull);
+                if (compositor_call(syscall(ppoll), (positive)&wanted, 1, (positive)wait, 0, 0, 0) <= 0)
+                        continue;
+                for (int reads = 0; reads < 64; reads++)
+                {
+                        bipolar got = socket_receive((b32)compositor.uevents, message, sizeof(message), MSG_DONTWAIT, 0, 0);
+
+                        if (got <= 0)
+                        {
+                                drm |= got < 0 && got != -COMPOSITOR_EAGAIN;
+                                break;
+                        }
+                        drm |= compositor_uevent_drm(message, got);
+                }
+                if (drm)
+                        return 1;
+        }
+}
+
+/*
+        The card taken, and waited for while no card has a screen: a machine started with its monitor off, behind a switch
+        or on a dock that is not yet up has a compositor that waits for the kernel's word that a screen came (the uevent
+        socket the loop listens to afterwards, opened before the first walk so that nothing said between the walk and the
+        wait is missed) and takes it then; where it ended at once, was started again by its supervisor three times in two
+        and a half seconds and then turned the desktop off for good. No card is held while it waits, so the screens are
+        Canvas's. A uevent can be lost and a connector with no hotplug line says nothing, so the cards are also walked
+        again every COMPOSITOR_SCREEN_LOOK, which asks each connector. Every other failure ends the program as before.
+        The signals are not yet the loop's here: a TERM ends the wait as it ends any program.
+*/
+#define COMPOSITOR_SCREEN_LOOK 5000000000ull
+
 static b32 compositor_card_open(void)
 {
-        compositor.card = (int)system_open_at(AT_FDCWD, (string_address) "/dev/dri/card0",
-                                              FILE_READ_WRITE | O_CLOEXEC);
-        if (compositor.card < 0)
-                return compositor.card;
+        int said = 0;
 
-        if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
-                return -COMPOSITOR_EBUSY;
-
+        compositor.uevents = compositor_uevents_open();
+        for (;;)
         {
-                struct compositor_version version = {0};
+                b32 status = compositor_cards_walk();
 
-                version.name_length = sizeof(compositor.driver) - 1;
-                version.name = compositor.driver;
-                if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) != 0)
-                        compositor.driver[0] = 0;
+                if (status != -COMPOSITOR_ENODEV || compositor.uevents < 0)
+                        return status;
+                if (!said)
+                        compositor_kmsg((string_address) "compositor: no screen is connected to a card; the desktop starts when one is", 0,
+                                        (string_address) "");
+                said = 1;
+                compositor_screen_wait(COMPOSITOR_SCREEN_LOOK);
         }
-
-        return compositor_space_take(1);
 }
 
 /*
@@ -20976,7 +21128,7 @@ static void compositor_band_room(void)
 }
 
 /*
-        compositor [-s SCALE] [-l LAYOUT] [-t] [-f FONT.ttf] [-H WIDTHxHEIGHT FILE] [-i FILE]
+        compositor [-s SCALE] [-l LAYOUT] [-t] [-f FONT.ttf] [-u DESCRIPTOR] [-H WIDTHxHEIGHT FILE] [-i FILE]
 
         Takes the card, or with -H maps FILE as the screen instead and takes
         none. -s is the desktop scale when Canvas is not there to say, -t puts
@@ -20984,7 +21136,8 @@ static void compositor_band_room(void)
         titles and the time are written in (without one the tabs are only
         shapes), -l is the keyboard layout when Canvas is not there to say (it
         is otherwise the one `moonwater keyboard` set, and follows it when it
-        is set again), and -i reads one more input device, a file of evdev
+        is set again), -u is a descriptor the compositor writes a line to and closes once its table and sockets are made
+        (compositor_up_say), and -i reads one more input device, a file of evdev
         records: what a test types and points with when there is no hardware
         to do it.
 */
@@ -20994,13 +21147,52 @@ static void compositor_band_room(void)
 #include "wayland_host.c"
 #endif
 
+/*
+        Room in the descriptor table for every descriptor the session can have, made while the program is one thread. The
+        kernel grows a table when a descriptor past its end is asked for, and a table that threads share is grown with a
+        wait for every processor to pass a quiet state (expand_fdtable's synchronize_rcu). The table starts at 64, the
+        composing threads are started by the first frame and the 65th descriptor is the door of the 29th window, so every
+        start stood still there: 9 to 16 ms between the first frame and the window table's doors, measured headless, and
+        the same again at the 129th, 257th and 513th, in the middle of a session. A descriptor made at the last number the
+        limit allows (1023 with the kernel's own limit) and closed leaves the table that size for good.
+*/
+static void compositor_descriptors_room(void)
+{
+        for (long last = 1023; last >= 127; last = (last - 1) / 2)
+        {
+                long made = compositor_call(syscall(fcntl), 0, 1030, (positive)last, 0, 0, 0); // F_DUPFD_CLOEXEC
+
+                if (made >= 0)
+                {
+                        system_close(made);
+                        return;
+                }
+        }
+}
+
+/*
+        The word that the desktop is up, for what started the compositor with -u DESCRIPTOR: a line written to the
+        descriptor, which is then closed. The machine script hands the writing end of a FIFO and reads the other, so it
+        goes on the moment the table, its doors and the sockets are there, and reads the end of the file at once if the
+        compositor ends before that (the compositor's is the only writing end); it looked for the table's name every
+        fiftieth of a second.
+*/
+static void compositor_up_say(int descriptor)
+{
+        if (descriptor < 3)
+                return;
+        system_write_once(descriptor, "up\n", 3);
+        system_close(descriptor);
+}
+
 static b32 compositor_main()
 {
         b32 status;
-        int running = 1, extra = -1, tablet = 0;
+        int running = 1, extra = -1, tablet = 0, up = -1;
         string_address headless = null, file = null, font = null;
 
         claim_standard_descriptors();
+        compositor_descriptors_room();
 
         memory_zero(&compositor, sizeof(compositor));
         compositor.watch = compositor.uevents = -1;
@@ -21023,6 +21215,8 @@ static b32 compositor_main()
                         compositor.scale = (int)compositor_number(program_argument(++at), 0) * 100;
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))
                         font = program_argument(++at);
+                else if (at + 1 < program_argument_count() && compositor_option(option, 'u'))
+                        up = (int)compositor_number(program_argument(++at), 0);
 #ifdef MOONWATER_GPU_C
                 else if (compositor_option(option, 'G'))
                         compositor_gpu_state.force = 1;
@@ -21061,10 +21255,7 @@ static b32 compositor_main()
         }
 
         if (!headless)
-        {
                 compositor_cursor_start();
-                compositor.uevents = compositor_uevents_open();
-        }
         compositor_inputs_open();
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
@@ -21115,6 +21306,7 @@ static b32 compositor_main()
         compositor_osk_setting_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 compositor_input_publish(at);
+        compositor_up_say(up);
 
         string_format(log, "compositor: %b by %b (scale %b), %p input devices, pointer %s, windows in %s\n",
                       (bipolar)compositor.width, (bipolar)compositor.height,
