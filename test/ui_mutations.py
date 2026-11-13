@@ -191,6 +191,11 @@ M = [
     (U, "a dark row has the edge too", "                edged = l->keys && ui_kit.keyed && !ui->glass && ui_kit_light(ui);", "                edged = l->keys && ui_kit.keyed && !ui->glass;"),
     (U, "the edge is not turned for a window read from the right", "x = ui_rtl() ? across + across_w - wide : across;", "x = across;"),
     (L, "a name of PATH is drawn as its bytes are", "                ui_label_foreign(into, room, (const p8 address_to)name, string_length((string_address)name));", "                string_copy_bounded((string_address)into, (string_address)name, room);"),
+    # ---- the launcher's tab and the logo key ----
+    (R, "the launcher's tab is off unless set", '.path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "on",', '.path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off",'),
+    (C, "a chord with the logo key is a tap too", "                if (value == 1)\n                        *alone = 0;\n                return 0;", "                return 0;"),
+    (C, "the logo key with Shift held is a tap", "        if (value == 1)\n                *alone = !others;", "        if (value == 1)\n                *alone = 1;"),
+    (C, "one press of the logo key taps twice", "        else if (value == 0 && *alone)\n        {\n                *alone = 0;\n                return !others;", "        else if (value == 0 && *alone)\n        {\n                return !others;"),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
     # ---- a mouse drags a list unless a person turned it off ----

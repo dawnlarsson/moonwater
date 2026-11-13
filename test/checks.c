@@ -143765,7 +143765,7 @@ static fn check_settings(string_address regular, string_address bold)
 "Taskbar\n"
 "  taskbar display [primary|all]     the screens the taskbar is on: the primary, or all, each listing its windows [primary]\n"
 "  taskbar fullscreen [on|off]       the taskbar slides away while a window is fullscreen, and comes back when none is [on]\n"
-"  taskbar launcher [on|off]         a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again [off]\n"
+"  taskbar launcher [on|off]         a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again, as the logo key alone does [on]\n"
 "  taskbar padding [PX|default]      the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]\n"
 "  taskbar position [bottom|top|left|right]\n"
 "                                    the edge of the screen the taskbar sits on [bottom]\n"
@@ -160566,6 +160566,44 @@ static fn check_wheel_stream(void)
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
 }
 
+/*
+        The launcher's tab and the logo key. The tab is on unless its file says off (nothing kept, default, and a word that is none of the
+        row's are on). The logo key pressed and let go alone is a tap, which is a press on the tab: not with another key pressed between
+        (Super and an arrow, Super and Space), not with another modifier held when it went down or when it came up, not for a repeat of
+        it, not twice for one press, and either logo key is one; and a tap of the logo key asks for the launcher beside the tab once,
+        with the tab's rectangle in the table, and asks for nothing with the tab off.
+*/
+static fn check_logo_tap(void)
+{
+        unsigned char alone = 0;
+        b32 standard, tap, right, chord, between, held_down, held_up, repeat, once, modifier;
+
+        standard = compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, "") && compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, "default") &&
+                   compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, "on") && compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, "sideways") &&
+                   !compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, "off");
+        check("launcher tab: the taskbar has the launcher's tab unless its file says off: nothing kept, default and a word that is none of the row's are on", standard);
+
+        tap = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 1, 0) && alone && compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0) && !alone;
+        right = !compositor_logo_tap(&alone, CK_HELD_RSUPER, 1, 0) && compositor_logo_tap(&alone, CK_HELD_RSUPER, 0, 0);
+        check("logo key: pressed and let go alone it is a tap, the left one or the right", tap && right);
+        // Super and Space, Super and an arrow: a key that is no modifier went down between.
+        chord = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 1, 0) && !compositor_logo_tap(&alone, 0, 1, 0) && !compositor_logo_tap(&alone, 0, 0, 0) &&
+                !compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0);
+        // Super and Shift: a modifier went down between, and is let go before the logo key or after it.
+        modifier = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 1, 0) && !compositor_logo_tap(&alone, CK_HELD_LSHIFT, 1, 1) &&
+                   !compositor_logo_tap(&alone, CK_HELD_LSHIFT, 0, 0) && !compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0);
+        between = chord && modifier;
+        check("logo key: with another key pressed while it is held, a letter's or a modifier's, it is that chord's and no tap", between);
+        held_down = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 1, 1) && !alone && !compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0);
+        alone = 1;
+        held_up = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 1) && !alone;
+        check("logo key: pressed while another modifier is held, or let go while one is, it is no tap", held_down && held_up);
+        repeat = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 1, 0) && !compositor_logo_tap(&alone, CK_HELD_LSUPER, 2, 0) && alone &&
+                 !compositor_logo_tap(&alone, 0, 2, 0) && !compositor_logo_tap(&alone, 0, 0, 0) && alone && compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0);
+        once = !compositor_logo_tap(&alone, CK_HELD_LSUPER, 0, 0);
+        check("logo key: its own repeat, and a repeat or a release of another key, end no tap, and one press is one tap and no more", repeat && once);
+}
+
 // The compositor's reading of the Scrolling switches (compositor_scroll_bits) from the words their files hold. A switch's value is its word's
 // place in "on off", so on is 0; it was read as if on were 1, which left momentum and the rubber band off in a desktop that had never set them
 // (a release threw nothing, an end stopped dead) and turned them off by setting them on.
@@ -173545,6 +173583,7 @@ b32 main()
         check_wheel_stream();
         check_wheel_mouse();
         check_scroll_bits();
+        check_logo_tap();
         check_wheel_memory();
         check_kit_precise_stream();
         check_stream_notch();

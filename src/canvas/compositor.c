@@ -4655,6 +4655,7 @@ static struct
         struct taskbar_cells cells;  // the panel's cells: what a press on one does (taskbar_cell_press), and the tray's double press
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         unsigned int launcher_asked; // the times the script was asked for the launcher by its button (compositor_launcher_open)
+        unsigned char logo_alone;    // a logo key is down and nothing else has been pressed since: its release is a press on the launcher's tab (compositor_logo_tap)
         int drag_x, drag_y;
         int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
         // The floating rectangle the window being moved is remembered by, taken at the press: its own if it floated, else the
@@ -12169,7 +12170,8 @@ static void compositor_taskbar_settings_read(void)
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
         taskbar_tray_set(tray);
-        taskbar_launcher_set(string_equals((string_address)launcher, (string_address) "on"));
+        // The row's standard is on: no file, or one that says default or a word that is none of the row's, has the tab; only "off" has none.
+        taskbar_launcher_set(compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, launcher));
         taskbar_scale_set((int)percent);
         taskbar_padding_set((int)pixels);
         compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
@@ -16761,6 +16763,60 @@ static void compositor_launcher_open(int x, int y)
         compositor_script_say("launcher_button");
 }
 
+/*
+        The logo key alone. A logo key (Super, either one) pressed with no other modifier held and let go with no other key and no
+        button of the pointer pressed between is a tap, and a tap is a press on the launcher's tab: the launcher opens beside the tab,
+        or is put away if it is up (compositor_logo_act). Held with another key it is the chord it always was (Super and an arrow,
+        Super and Space, a chord of the script's) and no tap, and so it is if it was pressed while another modifier was held. The
+        rule is this function and one byte of state, so it is checked with no keyboard: bit is the key's held bit (0 for a key that
+        is no modifier), value its event (1 down, 0 up, 2 a repeat), others whether any modifier but the logo keys is held after it.
+        Answers 1 for the release that ends a tap.
+*/
+static int compositor_logo_tap(unsigned char *alone, unsigned int bit, int value, int others)
+{
+        if (!(bit & (CK_HELD_LSUPER | CK_HELD_RSUPER)))
+        {
+                // Any other key going down, a modifier or not, ends it; a release or a repeat of one says nothing.
+                if (value == 1)
+                        *alone = 0;
+                return 0;
+        }
+        if (value == 1)
+                *alone = !others;
+        else if (value == 0 && *alone)
+        {
+                *alone = 0;
+                return !others;
+        }
+        return 0;
+}
+
+// A tap of the logo key: with the launcher up it is put away, as a press on its tab would put it; with none, and a band that has the
+// tab, the script is asked for one beside the tab of the first band that has it. With no tab (`taskbar launcher off`) it does nothing.
+static void compositor_logo_act(void)
+{
+        int up = compositor_launcher_row();
+
+        if (up >= 0)
+        {
+                compositor_close(up);
+                compositor_tabs_changed();
+                return;
+        }
+        for (compositor.band_at = 0; compositor.table && compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_band_view();
+                int x, y, w, h;
+
+                if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
+                        continue;
+                compositor.band_at = 0;
+                compositor_launcher_open(x + w / 2, y + h / 2);
+                return;
+        }
+        compositor.band_at = 0;
+}
+
 // What is held on every keyboard, as the flags a key event carries.
 static unsigned int compositor_modifiers(void)
 {
@@ -16942,6 +16998,13 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor.held[at] |= (unsigned char)bit;
                 else
                         compositor.held[at] &= (unsigned char)~bit;
+        }
+        // The logo key pressed and let go alone is a press on the launcher's tab (compositor_logo_tap). The key itself goes on as it did.
+        if (compositor_logo_tap(&compositor.logo_alone, bit, value,
+                                (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR)) != 0))
+                compositor_logo_act();
+        if (bit)
+        {
                 // A modifier is part of what a drag snaps to (Control is no snap): its target is read again now, not at the
                 // next motion.
                 if (compositor.drag >= 0)
@@ -17867,6 +17930,8 @@ static void compositor_press(unsigned int code, int down)
 
 static void compositor_press_at(unsigned int code, int down)
 {
+        if (down)
+                compositor.logo_alone = 0; // a button pressed while the logo key is held is that chord's, and no tap of the key
         if (down)
                 compositor_pointer_press(code, 1);
         if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
