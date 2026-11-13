@@ -12253,7 +12253,7 @@ static void compositor_text_publish(unsigned int percent)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
-// The scroll body's switches, as the table keeps them (scroll_off: WINDOW_SCROLL_FLIP, _STOPS, _STILL and _DRAG, 0 the standard) with the
+// The scroll body's switches, as the table keeps them (scroll_off: WINDOW_SCROLL_FLIP, _STOPS, _STILL and _DRAG, _DRAG alone the standard) with the
 // trackpad's speed in percent (scroll_speed). A change knocks every window, as a theme change does.
 static void compositor_scroll_publish(unsigned int off, unsigned int speed)
 {
@@ -12279,8 +12279,8 @@ static p8 compositor_switch_on(const char *path, const char *word)
 }
 
 // The table's scroll_off (WINDOW_SCROLL_FLIP, _STOPS, _STILL and _DRAG) for the words of natural direction, momentum, the rubber band and the
-// mouse's drag: nothing set is 0 bits, the standard (natural direction off: the OS's sign; momentum and the rubber band on; a mouse's drag
-// on a list scrolls nothing).
+// mouse's drag: nothing set is the standard (natural direction off: the OS's sign; momentum and the rubber band on, no bits; a mouse's drag
+// of a list on, its one bit).
 static unsigned int compositor_scroll_bits(const char *natural, const char *momentum, const char *rubber, const char *drag)
 {
         return (compositor_switch_on(SETTING_SCROLL_NATURAL_PATH, natural) ? WINDOW_SCROLL_FLIP : 0) |
@@ -12290,7 +12290,7 @@ static unsigned int compositor_scroll_bits(const char *natural, const char *mome
 }
 
 // The Scrolling group's five rows, read in one place: natural direction (off when nothing is kept), momentum and the rubber band (on), the
-// mouse's drag (off), and the trackpad's speed (a percent: 100 when nothing is kept, or what is kept is none of the row's words), which
+// mouse's drag (on), and the trackpad's speed (a percent: 100 when nothing is kept, or what is kept is none of the row's words), which
 // compositor_speed takes for the pads.
 static void compositor_scroll_read(void)
 {

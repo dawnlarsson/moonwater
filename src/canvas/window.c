@@ -695,10 +695,10 @@ struct windows_issue
 // A precise turn that is a wheel's stream (a notch to every report, within UI_HAND_GAP_NS of the last): the kit takes it as a
 // trackpad's motion (WINDOW_WHEEL_PRECISE), and a Wayland client takes it as the wheel it is (value120), not as a pad's fingers.
 #define WINDOW_WHEEL_STREAM 16384u // shares the bit of WINDOW_PINCH_BEGIN: the event's type says which meaning a flag has
-// The scroll body's switches, as the table's scroll_off holds them (0 is the standard: natural direction off, momentum and the rubber
-// band on). FLIP: natural direction is on, so a wheel's notch and a pad's motion move the content the other way from the OS's sign, the way
+// The scroll body's switches, as the table's scroll_off holds them (the standard is DRAG alone: natural direction off, momentum and the rubber
+// band on, a mouse's drag of a list on). FLIP: natural direction is on, so a wheel's notch and a pad's motion move the content the other way from the OS's sign, the way
 // the fingers go (ui_wheel_turn, ui_body_track). STOPS: momentum is off, so a release carries no coast (ui_body_let_go). STILL: the rubber
-// band is off, so past an end the content stops there (ui_body_pin, ui_body_drawn). DRAG: `canvas scroll drag` is on, so a mouse's press on
+// band is off, so past an end the content stops there (ui_body_pin, ui_body_drawn). DRAG: `canvas scroll drag` is on, as it is unless a person turns it off, so a mouse's press on
 // a list drags it as a finger's does and its release throws it (ui_press_drags).
 #define WINDOW_SCROLL_FLIP 1u
 #define WINDOW_SCROLL_STOPS 2u
@@ -924,7 +924,7 @@ struct windows
         unsigned int theme, accent, motion, themed;
         unsigned int wheel_off;
         // The compositor's: the scroll body's switches, `moonwater canvas scroll` and `canvas trackpad speed` as they are kept. scroll_off
-        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS, WINDOW_SCROLL_STILL and WINDOW_SCROLL_DRAG (0 is the standard); scroll_speed is the trackpad's speed
+        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS, WINDOW_SCROLL_STILL and WINDOW_SCROLL_DRAG (DRAG alone is the standard); scroll_speed is the trackpad's speed
         // in percent, 25 to 400 (0 is 100). A change counts themed up, as a theme's does.
         unsigned int scroll_off, scroll_speed;
         unsigned int caret_speed, caret_thick;

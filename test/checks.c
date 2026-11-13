@@ -156197,7 +156197,7 @@ static fn check_kit_view_scroll(void)
 }
 
 /*
-        A mouse that drags a list (`moonwater canvas scroll drag`, ui_press_drags). Off, the standard, a mouse's press on a settings page's rows
+        A mouse that drags a list (`moonwater canvas scroll drag`, ui_press_drags). Off (a person turned it off: on is the standard), a mouse's press on a settings page's rows
         that moves 100 pixels scrolls nothing, and one that moves past the slop and stays on its row is that row's click, as it always was. On,
         the same press drags the rows one for one as a finger's does (from where it passed the slop), shows no row pressed and clicks none, and
         its release throws them on the hand's speed; a press with no motion is still the row's click; a pull down at the top is the rubber band,
@@ -158148,19 +158148,23 @@ static fn check_scroll_bits(void)
 {
         b32 standard, on, off, mixed, junk, drag;
 
-        standard = compositor_scroll_bits("", "", "", "") == 0 && compositor_scroll_bits("default", "default", "default", "default") == 0;
-        on = compositor_scroll_bits("on", "on", "on", "") == WINDOW_SCROLL_FLIP;
-        off = compositor_scroll_bits("off", "off", "off", "") == (WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL);
-        mixed = compositor_scroll_bits("on", "off", "", "") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS) &&
-                compositor_scroll_bits("", "", "off", "") == WINDOW_SCROLL_STILL && compositor_scroll_bits("", "off", "on", "") == WINDOW_SCROLL_STOPS;
-        junk = compositor_scroll_bits("sideways", "maybe", "2", "yes") == 0;
-        // The mouse's drag on a list (canvas scroll drag): off when nothing is kept, the one bit when it is on, and none when off.
-        drag = compositor_scroll_bits("", "", "", "on") == WINDOW_SCROLL_DRAG && compositor_scroll_bits("", "", "", "off") == 0 &&
-               compositor_scroll_bits("on", "off", "off", "on") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL | WINDOW_SCROLL_DRAG);
-        check("scroll switches: nothing set is the standard (natural direction off; momentum and the rubber band on), no bits", standard);
+        // The first three words' bits, with the mouse's drag turned off so its bit is out of the way.
+        standard = compositor_scroll_bits("", "", "", "off") == 0 && compositor_scroll_bits("default", "default", "default", "off") == 0;
+        on = compositor_scroll_bits("on", "on", "on", "off") == WINDOW_SCROLL_FLIP;
+        off = compositor_scroll_bits("off", "off", "off", "off") == (WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL);
+        mixed = compositor_scroll_bits("on", "off", "", "off") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS) &&
+                compositor_scroll_bits("", "", "off", "off") == WINDOW_SCROLL_STILL && compositor_scroll_bits("", "off", "on", "off") == WINDOW_SCROLL_STOPS;
+        junk = compositor_scroll_bits("sideways", "maybe", "2", "off") == 0;
+        // The mouse's drag on a list (canvas scroll drag): on when nothing is kept, when the word is default and when it is none of the row's,
+        // the one bit; none when its file says off.
+        drag = compositor_scroll_bits("", "", "", "") == WINDOW_SCROLL_DRAG && compositor_scroll_bits("", "", "", "default") == WINDOW_SCROLL_DRAG &&
+               compositor_scroll_bits("", "", "", "on") == WINDOW_SCROLL_DRAG && compositor_scroll_bits("", "", "", "yes") == WINDOW_SCROLL_DRAG &&
+               compositor_scroll_bits("", "", "", "off") == 0 &&
+               compositor_scroll_bits("on", "off", "off", "") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL | WINDOW_SCROLL_DRAG);
+        check("scroll switches: nothing set is the standard (natural direction off; momentum and the rubber band on), no bits of theirs", standard);
         check("scroll switches: all three set on is natural direction alone (FLIP), and all three set off is no momentum and no rubber band", on && off);
         check("scroll switches: each is read on its own, and a word that is none of the row's is the standard", mixed && junk);
-        check("scroll switches: the mouse's drag of a list is off unless its file says on, and on is the table's WINDOW_SCROLL_DRAG", drag);
+        check("scroll switches: the mouse's drag of a list is on unless its file says off (nothing kept, default and a word that is none of the row's are on), and on is the table's WINDOW_SCROLL_DRAG", drag);
 }
 
 // The keys held are the wheel's too: a wheel turned with Control or Shift held says so in its flags, the way a key's event does (Control zooms a view,

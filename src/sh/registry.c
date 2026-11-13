@@ -542,11 +542,12 @@ static const struct settings_row settings_rows[] = {
                       .help = "past the top or the bottom the content stretches and springs back; off, it stops at the end [on]"),
     //  A mouse's press on a list that moves past the slop drags the list as a finger's does, and its release throws it (ui.c's
     //  ui_press_drags): the settings page's rows and groups, a list of the kit's, a scroll container of a view. A press on a slider, a
-    //  scroll bar or a text is still theirs. Off by default (the owner's call): a mouse's drag on a list then does what it always did.
+    //  scroll bar or a text is still theirs, and a press let go within the slop is still the row's click. On by default (the owner's call): off, a
+    //  mouse scrolls a list by its wheel and its bar alone.
     SETTING_PLAIN_ROW(null, "Drag lists with the mouse", SETTINGS_SWITCH, 0, ("canvas", "scroll", "drag"), "drag ", null,
-                      .path = SETTING_SCROLL_DRAG_PATH, .standard = "off",
+                      .path = SETTING_SCROLL_DRAG_PATH, .standard = "on",
                       .usage = "canvas scroll drag [on|off]",
-                      .help = "a mouse press on a list that moves drags the list as a finger does, and its release throws it; a slider, a scroll bar or a text keeps its own drag; off, the mouse scrolls a list by its wheel and its bar alone [off]"),
+                      .help = "a mouse press on a list that moves drags the list as a finger does, and its release throws it; a slider, a scroll bar or a text keeps its own drag; off, the mouse scrolls a list by its wheel and its bar alone [on]"),
     //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
     //  when a program (the mixer, the tray, a volume key) changes the volume, so a row here and a slider there are one value.
     //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume
