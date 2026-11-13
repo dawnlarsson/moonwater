@@ -15277,6 +15277,170 @@ fn check_reverse()
 }
 
 /*
+        bins_count, bins_starts, bins_place and hash_fnv_u32 against the loops
+        they stand for.
+
+        Grids of every pitch and height in the lists, with rectangles drawn at
+        random inside them (some with no columns or no rows), each given a
+        number of records from none to sixteen; the three steps are run by the
+        routines on one copy of the cells and by the loops on another, and the
+        cells after each step, the sum answered and every list are compared.
+        The cells end at a page that cannot be touched, the records end at one
+        (so a record read past its count faults), and the lists end at one (so
+        a list filled past what was counted faults); once more with each of
+        them four bytes short of it, where a 64-bit move does not lie at a
+        multiple of eight. The hash is over words that end at such a page, for
+        every count in its list and a seed of each kind.
+*/
+static positive reference_bins_starts(p32 address_to cells, positive count)
+{
+        p32 sum = 0;
+
+        for (positive at = 0; at < count; at++)
+        {
+                p32 had = cells[2 * at + 1];
+
+                cells[2 * at] = sum, cells[2 * at + 1] = 0, sum += had;
+        }
+        return sum;
+}
+
+static fn reference_bins_count(p32 address_to cells, positive pitch, positive columns, positive rows, positive add)
+{
+        for (positive row = 0; row < rows; row++)
+                for (positive column = 0; column < columns; column++)
+                        cells[2 * (row * pitch + column) + 1] += (p32)add;
+}
+
+static fn reference_bins_place(p32 address_to cells, positive pitch, positive columns, positive rows, p32 address_to lists,
+                               const p32 address_to records, positive count)
+{
+        for (positive row = 0; row < rows; row++)
+                for (positive column = 0; column < columns; column++)
+                {
+                        p32 address_to cell = cells + 2 * (row * pitch + column);
+                        p32 at = cell[0] + cell[1];
+
+                        for (positive word = 0; word < 8 * count; word++)
+                                lists[8 * (positive)at + word] = records[word];
+                        cell[1] += (p32)count;
+                }
+}
+
+static positive reference_hash_fnv_u32(const p32 address_to words, positive count, positive hash)
+{
+        p32 now = (p32)hash;
+
+        for (positive at = 0; at < count; at++)
+                now = (now ^ words[at]) * 16777619u;
+        return now;
+}
+
+fn check_bins()
+{
+        enum { RECTS = 10, LISTS = 256 * 4096 };
+        static const positive pitches[] = {1, 2, 3, 8, 31};
+        static const positive heights[] = {1, 2, 5, 17};
+        static const positive hashed[] = {0, 1, 2, 3, 7, 8, 9, 255, 1024};
+        static p32 want_cells[31 * 17 * 2], want_lists[LISTS / 4];
+        p8 address_to cell_pages = memory(3 * 4096);
+        p8 address_to record_pages = memory(2 * 4096);
+        p8 address_to list_pages = memory(LISTS + 4096);
+        p8 mapped = (bipolar)(positive)cell_pages > 0 && (bipolar)(positive)record_pages > 0 && (bipolar)(positive)list_pages > 0;
+        p64 seed = 0x243f6a8885a308d3ull;
+        positive counted = 1, started = 1, placed = 1, hashes = 1, grids = 0, entries = 0, empties = 0;
+
+        same("bins_place", "guard mappings", mapped, 1);
+        if (!mapped)
+                return;
+        p8 protected = system_call_3(syscall(mprotect), (positive)(cell_pages + 8192), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(record_pages + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(list_pages + LISTS), 4096, 0) == 0;
+        same("bins_place", "guard pages protected", protected, 1);
+        if (!protected)
+                return;
+
+#define BINS_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
+        for (positive skew = 0; skew <= 4; skew += 4)
+                for (positive pw = 0; pw < array_count(pitches); pw++)
+                        for (positive ph = 0; ph < array_count(heights); ph++)
+                                for (positive round = 0; round < 40; round++)
+                                {
+                                        positive pitch = pitches[pw], height = heights[ph], count = pitch * height, total, want_total;
+                                        p32 address_to cells = (p32 address_to)(cell_pages + 8192 - skew - 8 * count);
+                                        positive rect[RECTS][5];
+
+                                        for (positive at = 0; at < 2 * count; at++)
+                                                cells[at] = want_cells[at] = at & 1 ? 0 : (p32)BINS_NEXT(); // the starts are rubbish until they are made
+                                        for (positive r = 0; r < RECTS; r++)
+                                        {
+                                                positive x = BINS_NEXT() % pitch, y = BINS_NEXT() % height;
+
+                                                rect[r][0] = x, rect[r][1] = y;
+                                                rect[r][2] = BINS_NEXT() % (pitch - x + 1), rect[r][3] = BINS_NEXT() % (height - y + 1);
+                                                rect[r][4] = r == 3 ? 0 : r == 5 ? 16 : BINS_NEXT() % 5;
+                                                empties += !rect[r][2] || !rect[r][3] || !rect[r][4];
+                                                (bins_count)(cells + 2 * (y * pitch + x), pitch, rect[r][2], rect[r][3], rect[r][4]);
+                                                reference_bins_count(want_cells + 2 * (y * pitch + x), pitch, rect[r][2], rect[r][3], rect[r][4]);
+                                        }
+                                        counted &= !memory_compare(cells, want_cells, 8 * count);
+                                        total = (bins_starts)(cells, count), want_total = reference_bins_starts(want_cells, count);
+                                        started &= total == want_total && !memory_compare(cells, want_cells, 8 * count);
+                                        if (32 * want_total + skew > LISTS)
+                                        {
+                                                placed = 0; // the lists' room is the check's to get right
+                                                continue;
+                                        }
+                                        p32 address_to lists = (p32 address_to)(list_pages + LISTS - skew - 32 * want_total);
+
+                                        for (positive r = 0; r < RECTS; r++)
+                                        {
+                                                p32 address_to records = (p32 address_to)(record_pages + 4096 - skew - 32 * rect[r][4]);
+
+                                                for (positive word = 0; word < 8 * rect[r][4]; word++)
+                                                        records[word] = (p32)BINS_NEXT();
+                                                (bins_place)(cells + 2 * (rect[r][1] * pitch + rect[r][0]), pitch, rect[r][2], rect[r][3], lists, records, rect[r][4]);
+                                                reference_bins_place(want_cells + 2 * (rect[r][1] * pitch + rect[r][0]), pitch, rect[r][2], rect[r][3], want_lists, records,
+                                                                     rect[r][4]);
+                                        }
+                                        placed &= !memory_compare(cells, want_cells, 8 * count) && !memory_compare(lists, want_lists, 32 * want_total);
+                                        grids++, entries += want_total;
+                                }
+        for (positive skew = 0; skew <= 4; skew += 4)
+                for (positive h = 0; h < array_count(hashed); h++)
+                {
+                        p32 address_to words = (p32 address_to)(cell_pages + 8192 - skew - 4 * hashed[h]);
+
+                        for (positive at = 0; at < hashed[h]; at++)
+                                words[at] = (p32)BINS_NEXT();
+                        for (positive kind = 0; kind < 4; kind++)
+                        {
+                                positive from = kind == 0 ? 2166136261u : kind == 1 ? 0 : kind == 2 ? 0xffffffffu : (p32)BINS_NEXT();
+
+                                hashes &= (hash_fnv_u32)(words, hashed[h], from) == reference_hash_fnv_u32(words, hashed[h], from);
+                        }
+                }
+#undef BINS_NEXT
+
+        same("bins_count", "the counts of every rectangle's cells, every pitch and height", counted, 1);
+        same("bins_starts", "the starts, the counts cleared and the sum answered", started, 1);
+        same("bins_place", "the cells and every list, the records ending at a page that cannot be read", placed, 1);
+        //  The lists reach rectangles with nothing in them and lists with a great deal, or the rows above prove little.
+        same("bins_place", "grids compared, records placed and rectangles with nothing to place", grids == 2 * 5 * 4 * 40 && entries > 100000 && empties > 1000, 1);
+        same("hash_fnv_u32", "the walk over words that end at a page that cannot be read, every count and seed", hashes, 1);
+        same("hash_fnv_u32", "no words answers the hash given, from a pointer that cannot be read",
+             (hash_fnv_u32)((const p32 address_to)(cell_pages + 8192), 0, 77), 77);
+        same("bins_starts", "no cells answers nothing, from a pointer that cannot be touched", (bins_starts)((p32 address_to)(cell_pages + 8192), 0), 0);
+        (bins_count)((p32 address_to)(cell_pages + 8192), 9, 0, 5, 1), (bins_count)((p32 address_to)(cell_pages + 8192), 9, 5, 0, 1);
+        (bins_place)((p32 address_to)(cell_pages + 8192), 9, 0, 5, (p32 address_to)(list_pages + LISTS), (const p32 address_to)(record_pages + 4096), 3);
+        (bins_place)((p32 address_to)(cell_pages + 8192), 9, 5, 0, (p32 address_to)(list_pages + LISTS), (const p32 address_to)(record_pages + 4096), 3);
+        same("bins_place", "no columns or no rows touches no cell, list or record", 1, 1);
+        memory_free(cell_pages, 3 * 4096);
+        memory_free(record_pages, 2 * 4096);
+        memory_free(list_pages, LISTS + 4096);
+}
+
+/*
         automaton_step and automaton_scan against the loop they stand for.
 
         Machines of every row width and row count in the lists, their cells
@@ -31011,6 +31175,10 @@ b32 main()
         // making a formatter change wait on unrelated platform tests when a
         // target is available only through a minimal linker and qemu-user.
         check_formatters();
+#elif defined(VERIFY_BINS_ONLY)
+        // The bins' and the word hash's rows alone: a few seconds on each machine, for a change to those routines
+        // and for showing the rows fail when one of them is broken.
+        check_bins();
 #else
         check_fill();
         check_fill_wide();
@@ -31065,6 +31233,7 @@ b32 main()
         check_reverse();
         check_translate();
         check_automaton();
+        check_bins();
         check_wire();
         check_cells_from_ascii();
         check_unicode_width();

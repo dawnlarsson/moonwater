@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        483 routines (457 public, 26 local), 472 of them on all three and 11 local to one.
+        487 routines (461 public, 26 local), 476 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -77,6 +77,9 @@
           automaton_scan                 public  yes     yes     yes
           automaton_step                 public  yes     yes     yes
           bf16_to_f32                    public  yes     yes     yes
+          bins_count                     public  yes     yes     yes
+          bins_place                     public  yes     yes     yes
+          bins_starts                    public  yes     yes     yes
           bipolar_into                   public  yes     yes     yes
           bipolar_into_core              local   yes     yes     yes
           bipolar_into_string            public  yes     yes     yes
@@ -193,6 +196,7 @@
           hash_crc32_msb                 public  yes     yes     yes
           hash_crc32c                    public  yes     yes     yes
           hash_crc64                     public  yes     yes     yes
+          hash_fnv_u32                   public  yes     yes     yes
           hash_half_md4_wide             public  yes     yes     yes
           hash_hmac_sha256_prepared      public  yes     yes     yes
           hash_xxh64                     public  yes     yes     yes
@@ -13750,6 +13754,62 @@ __asm__(
     ASM_END(automaton_scan)
 
     //
+    //       bins_starts, bins_count, bins_place and hash_fnv_u32: the bins of
+    //       a scene (the declarations say what they are). A cell is two
+    //       32-bit words, a start and a count, and every sum of them is of
+    //       32 bits. No vector register: the loops are a load, an add and a
+    //       store, and a record is four 64-bit moves.
+    //
+    //       bins_starts: rdi the cells, rsi how many. eax the running sum.
+    //
+    ASM_FUNC(bins_starts)
+    "xor %eax, %eax\n   test %rsi, %rsi\n   jz 2f\n"
+    "1:  mov 4(%rdi), %edx\n   mov %eax, (%rdi)\n   movl $0, 4(%rdi)\n   add %edx, %eax\n   add $8, %rdi\n   sub $1, %rsi\n   jnz 1b\n"
+    "2:\n" ASM_RET
+    ASM_END(bins_starts)
+
+    //
+    //       bins_count: rdi the first cell, rsi the pitch (cells a row), rdx
+    //       the columns, rcx the rows, r8 what is added to each count.
+    //
+    ASM_FUNC(bins_count)
+    "test %rdx, %rdx\n   jz 3f\n   test %rcx, %rcx\n   jz 3f\n   shl $3, %rsi\n"
+    "1:  xor %eax, %eax\n"
+    "2:  add %r8d, 4(%rdi,%rax,8)\n   add $1, %rax\n   cmp %rdx, %rax\n   jb 2b\n"
+    "add %rsi, %rdi\n   sub $1, %rcx\n   jnz 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_count)
+
+    //
+    //       bins_place: rdi the first cell, rsi the pitch, rdx the columns,
+    //       rcx the rows, r8 the lists, r9 the records, the seventh (on the
+    //       stack) how many records. rax the column, r10 the records, r12
+    //       their bytes, r11 where they go, rbx the byte in hand, r13 a word.
+    //
+    ASM_FUNC(bins_place)
+    "push %rbx\n   push %r12\n   push %r13\n   mov 32(%rsp), %r10\n"
+    "test %rdx, %rdx\n   jz 5f\n   test %rcx, %rcx\n   jz 5f\n   shl $3, %rsi\n   mov %r10, %r12\n   shl $5, %r12\n"
+    "1:  xor %eax, %eax\n"
+    "2:  mov (%rdi,%rax,8), %r11d\n   add 4(%rdi,%rax,8), %r11d\n   add %r10d, 4(%rdi,%rax,8)\n   shl $5, %r11\n   add %r8, %r11\n"
+    "xor %ebx, %ebx\n   test %r12, %r12\n   jz 4f\n"
+    "3:  mov (%r9,%rbx), %r13\n   mov %r13, (%r11,%rbx)\n   mov 8(%r9,%rbx), %r13\n   mov %r13, 8(%r11,%rbx)\n"
+    "mov 16(%r9,%rbx), %r13\n   mov %r13, 16(%r11,%rbx)\n   mov 24(%r9,%rbx), %r13\n   mov %r13, 24(%r11,%rbx)\n"
+    "add $32, %rbx\n   cmp %r12, %rbx\n   jb 3b\n"
+    "4:  add $1, %rax\n   cmp %rdx, %rax\n   jb 2b\n"
+    "add %rsi, %rdi\n   sub $1, %rcx\n   jnz 1b\n"
+    "5:  pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_END(bins_place)
+
+    //
+    //       hash_fnv_u32: rdi the words, rsi how many, edx the hash so far.
+    //
+    ASM_FUNC(hash_fnv_u32)
+    "mov %edx, %eax\n   test %rsi, %rsi\n   jz 2f\n"
+    "1:  xor (%rdi), %eax\n   imul $16777619, %eax, %eax\n   add $4, %rdi\n   sub $1, %rsi\n   jnz 1b\n"
+    "2:\n" ASM_RET
+    ASM_END(hash_fnv_u32)
+
+    //
     //       wire_message: rdi the bytes, rsi how many, rdx the most a message
     //       may be, rcx the two words of the head. The size is the sixteen
     //       bits at byte 6, and is looked at before anything is stored: 0 in
@@ -25544,6 +25604,43 @@ __asm__(
     "2:  strh w8, [x3]\n   mov x0, x9\n" ASM_RET
     ASM_END(automaton_scan)
 
+    //       bins_starts, bins_count, bins_place and hash_fnv_u32: the x86_64
+    //       block has the reasons. x0 the cells, x1 the pitch (bins_starts:
+    //       how many), x2 the columns, x3 the rows, x4 the lists (bins_count:
+    //       what is added), x5 the records, x6 how many of them. A record is
+    //       two pairs of 64-bit words loaded and stored where they lie.
+    ASM_FUNC(bins_starts)
+    "mov w8, #0\n   cbz x1, 2f\n"
+    "1:  ldr w9, [x0, #4]\n   str w8, [x0]\n   str wzr, [x0, #4]\n   add w8, w8, w9\n   add x0, x0, #8\n   subs x1, x1, #1\n   b.ne 1b\n"
+    "2:  mov w0, w8\n" ASM_RET
+    ASM_END(bins_starts)
+
+    ASM_FUNC(bins_count)
+    "cbz x2, 3f\n   cbz x3, 3f\n   lsl x1, x1, #3\n"
+    "1:  add x8, x0, #4\n   mov x9, x2\n"
+    "2:  ldr w10, [x8]\n   add w10, w10, w4\n   str w10, [x8], #8\n   subs x9, x9, #1\n   b.ne 2b\n"
+    "add x0, x0, x1\n   subs x3, x3, #1\n   b.ne 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_count)
+
+    ASM_FUNC(bins_place)
+    "cbz x2, 5f\n   cbz x3, 5f\n   lsl x1, x1, #3\n   lsl x7, x6, #5\n"
+    "1:  mov x8, x0\n   mov x9, x2\n"
+    "2:  ldp w10, w11, [x8]\n   add w12, w11, w6\n   str w12, [x8, #4]\n   add w10, w10, w11\n   add x10, x4, x10, lsl #5\n"
+    "cbz x7, 4f\n   mov x13, #0\n"
+    "3:  add x12, x5, x13\n   ldp x14, x15, [x12]\n   ldp x16, x17, [x12, #16]\n   add x12, x10, x13\n   stp x14, x15, [x12]\n   stp x16, x17, [x12, #16]\n"
+    "add x13, x13, #32\n   cmp x13, x7\n   b.lo 3b\n"
+    "4:  add x8, x8, #8\n   subs x9, x9, #1\n   b.ne 2b\n"
+    "add x0, x0, x1\n   subs x3, x3, #1\n   b.ne 1b\n"
+    "5:\n" ASM_RET
+    ASM_END(bins_place)
+
+    ASM_FUNC(hash_fnv_u32)
+    "mov w8, #0x0193\n   movk w8, #0x0100, lsl #16\n   cbz x1, 2f\n"
+    "1:  ldr w9, [x0], #4\n   eor w2, w2, w9\n   mul w2, w2, w8\n   subs x1, x1, #1\n   b.ne 1b\n"
+    "2:  mov w0, w2\n" ASM_RET
+    ASM_END(hash_fnv_u32)
+
     //       wire_message, wire_slot and rects_clip: the x86_64 block has the
     //       reasons. wire_message: x0 the bytes, x1 how many, x2 the most, x3
     //       the head; w9 the size. wire_slot: x0 the index, x1 its cells, x2
@@ -35474,6 +35571,45 @@ __asm__(
     "lhu t0, 0(t2)\n   addi t1, t1, 1\n   bgeu t0, a2, 2f\n   bltu t1, a5, 1b\n"
     "2:  sh t0, 0(a3)\n   mv a0, t1\n" ASM_RET
     ASM_END(automaton_scan)
+
+    //       bins_starts, bins_count, bins_place and hash_fnv_u32: the x86_64
+    //       block has the reasons. a0 the cells, a1 the pitch (bins_starts:
+    //       how many), a2 the columns, a3 the rows, a4 the lists (bins_count:
+    //       what is added), a5 the records, a6 how many of them. The words of
+    //       a record are moved as the 32-bit words they are: they lie at a
+    //       multiple of four, and a 64-bit load there may be one the machine
+    //       has to be helped through. A sum of 32 bits is cleared above them
+    //       by two shifts (no Zba), the second leaving it times 32.
+    ASM_FUNC(bins_starts)
+    "li t0, 0\n   beqz a1, 2f\n"
+    "1:  lw t1, 4(a0)\n   sw t0, 0(a0)\n   sw zero, 4(a0)\n   addw t0, t0, t1\n   addi a0, a0, 8\n   addi a1, a1, -1\n   bnez a1, 1b\n"
+    "2:  slli a0, t0, 32\n   srli a0, a0, 32\n" ASM_RET
+    ASM_END(bins_starts)
+
+    ASM_FUNC(bins_count)
+    "beqz a2, 3f\n   beqz a3, 3f\n   slli a1, a1, 3\n"
+    "1:  mv t0, a0\n   mv t1, a2\n"
+    "2:  lw t2, 4(t0)\n   addw t2, t2, a4\n   sw t2, 4(t0)\n   addi t0, t0, 8\n   addi t1, t1, -1\n   bnez t1, 2b\n"
+    "add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_count)
+
+    ASM_FUNC(bins_place)
+    "beqz a2, 5f\n   beqz a3, 5f\n   slli a1, a1, 3\n   slli a7, a6, 5\n"
+    "1:  mv t0, a0\n   mv t1, a2\n"
+    "2:  lw t2, 0(t0)\n   lw t3, 4(t0)\n   addw t4, t3, a6\n   sw t4, 4(t0)\n   addw t2, t2, t3\n   slli t2, t2, 32\n   srli t2, t2, 27\n   add t2, a4, t2\n"
+    "beqz a7, 4f\n   mv t3, a5\n   add t4, a5, a7\n"
+    "3:  lw t5, 0(t3)\n   lw t6, 4(t3)\n   sw t5, 0(t2)\n   sw t6, 4(t2)\n   addi t3, t3, 8\n   addi t2, t2, 8\n   bltu t3, t4, 3b\n"
+    "4:  addi t0, t0, 8\n   addi t1, t1, -1\n   bnez t1, 2b\n"
+    "add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "5:\n" ASM_RET
+    ASM_END(bins_place)
+
+    ASM_FUNC(hash_fnv_u32)
+    "li t0, 16777619\n   beqz a1, 2f\n"
+    "1:  lw t1, 0(a0)\n   xor a2, a2, t1\n   mulw a2, a2, t0\n   addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 1b\n"
+    "2:  slli a0, a2, 32\n   srli a0, a0, 32\n" ASM_RET
+    ASM_END(hash_fnv_u32)
 
     //       wire_message, wire_slot and rects_clip: the x86_64 block has the
     //       reasons. wire_message: a0 the bytes, a1 how many, a2 the most, a3
@@ -53110,6 +53246,49 @@ address_any memory_translate(address_any block, positive size,
 PURE positive automaton_step(const p16 address_to moves, positive state, positive event);
 positive automaton_scan(const p16 address_to moves, const p8 address_to classes, positive stop,
                       p16 address_to state, const p8 address_to bytes, positive size);
+/*
+        The bins of a scene: which records touch which square of a grid.
+
+        A picture is cut into squares, and each square has a cell of two
+        32-bit words, where its list starts and how many records it has,
+        both counted in records of eight 32-bit words. The lists lie one
+        after another in one run of memory. They are made in three steps,
+        which these are: every record's squares are counted, the counts
+        are turned into starts, and every record is put into the list of
+        each of its squares.
+
+        bins_count adds `add` to the count of every cell of a rectangle:
+        `cells` is the rectangle's first cell, `pitch` the cells in a row
+        of the grid, and the rectangle is `columns` by `rows` cells. No
+        columns or no rows touches nothing.
+
+        bins_starts makes the starts: each of `count` cells gets the sum
+        of the counts before it as its start and a count of zero, and the
+        sum of them all is answered.
+
+        bins_place puts `count` records (count times eight words, at
+        `records`) at the end of the list of every cell of a rectangle,
+        given as bins_count takes it: a cell's list ends at its start
+        plus its count, in records, from `lists`; the records are copied
+        there and the cell's count grows by `count`. Run after bins_count
+        with the same rectangles and bins_starts, each list is filled
+        exactly.
+
+        Every sum is of 32 bits, as the cells are. The cells, the lists
+        and the records are the caller's and are believed: nothing is
+        checked against a size, the records are not in the lists they are
+        copied to, and the cells and the words lie at a multiple of four.
+
+        hash_fnv_u32 is the FNV-1a walk over 32-bit words, a word a step:
+        from `hash`, each of `count` words is folded in by an exclusive
+        or and a multiplication by 16777619, in 32 bits. No words answers
+        `hash`.
+*/
+positive bins_starts(p32 address_to cells, positive count);
+fn bins_count(p32 address_to cells, positive pitch, positive columns, positive rows, positive add);
+fn bins_place(p32 address_to cells, positive pitch, positive columns, positive rows, p32 address_to lists,
+              const p32 address_to records, positive count);
+PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive hash);
 /*
         The wire of a protocol whose messages are words of thirty-two
         bits, least byte first, behind a head of two: the object the
