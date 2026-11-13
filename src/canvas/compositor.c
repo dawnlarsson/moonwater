@@ -19148,18 +19148,10 @@ static void compositor_chip_draw(const struct compositor_target *t)
                 int x1 = box[0] > t->x1 ? box[0] : t->x1, y1 = box[1] > t->y1 ? box[1] : t->y1;
                 int x2 = box[0] + box[2] < t->x2 ? box[0] + box[2] : t->x2, y2 = box[1] + box[3] < t->y2 ? box[1] + box[3] : t->y2;
 
-                for (int py = y1; py < y2; py++)
-                {
-                        unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
-
-                        for (int px = x1; px < x2; px++, at++)
-                        {
-                                unsigned int share = (unsigned int)cover[(py - box[1]) * c->w + (px - box[0])] * c->alpha / 255;
-
-                                if (share)
-                                        *at = compositor_mix(*at, ink, share);
-                        }
-                }
+                memory_mix_const_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
+                                          t->pitch,
+                                          cover + (unsigned long)(y1 - box[1]) * c->w + (unsigned long)(x1 - box[0]),
+                                          (positive)c->w, (positive)(x2 - x1), (positive)(y2 - y1), ink, c->alpha);
         }
 }
 

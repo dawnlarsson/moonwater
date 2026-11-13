@@ -2735,9 +2735,10 @@ static void compositor_wl_wake(void)
                 return;
         wayland_stats_get(&stats);
         // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
-        if (compositor_wl_screens_digest() != compositor_wl.screens_told)
+        unsigned long digest = compositor_wl_screens_digest();
+        if (digest != compositor_wl.screens_told)
         {
-                compositor_wl.screens_told = compositor_wl_screens_digest();
+                compositor_wl.screens_told = digest;
                 wayland_screens_changed();
         }
         wayland_idle_tick();
