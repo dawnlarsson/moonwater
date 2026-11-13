@@ -2486,9 +2486,16 @@ static void compositor_wl_flush(long slot)
 
 static void compositor_wl_flush_all(void)
 {
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        unsigned int dirty = (unsigned int)wayland_out_mask();
+
+        while (dirty)
+        {
+                int slot = (int)bottom_bit_known((positive)dirty);
+
+                dirty &= dirty - 1;
                 if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_flush(slot);
+        }
 }
 
 /* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
@@ -2497,7 +2504,7 @@ static void compositor_wl_flush_all(void)
 #define COMPOSITOR_WL_POLLS (1 + WAYLAND_CLIENTS + 1 + WAYLAND_CLIENTS + COMPOSITOR_XWM_POLLS)
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
-        unsigned int base = count;
+        unsigned int base = count, dirty = (unsigned int)wayland_out_mask();
 
         if (!compositor_wl.started)
                 return count;
@@ -2510,7 +2517,7 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 // A client whose commit waits for its GPU is not read (a hangup is told all the same), and the loop wakes to ask.
                 short events = compositor_wl.fd[slot] >= 0 && wayland_stalled(slot) ? 0 : COMPOSITOR_POLLIN;
 
-                if (compositor_wl.fd[slot] >= 0 && wayland_out(slot, &bytes, &fds, &fd_count))
+                if (compositor_wl.fd[slot] >= 0 && (dirty & (1u << slot)) && wayland_out(slot, &bytes, &fds, &fd_count))
                         events |= COMPOSITOR_POLLOUT;
                 wanted[count++] = (struct compositor_poll){compositor_wl.fd[slot], events, 0};
         }

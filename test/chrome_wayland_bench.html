@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moonwater Chrome / Wayland Hardware-Floor Benchmark Suite</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel2: #1c222b;
+    --border: #2a323d;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4493f8;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 10px 16px;
+    background: rgba(14, 17, 22, 0.84);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: 0.2px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px; border-radius: 999px; background: var(--panel2);
+    border: 1px solid var(--border); font-variant-numeric: tabular-nums;
+  }
+  .btn {
+    cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--ink);
+    padding: 5px 11px; border-radius: 6px; font: inherit; font-weight: 500;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #081018; font-weight: 600; }
+  .btn.active { background: #1f3b5c; border-color: var(--accent); }
+  main { padding: 14px 16px 40px; max-width: 1480px; margin: 0 auto; display: grid; gap: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+  section.card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 {
+    margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .metrics {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px;
+  }
+  .stat {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px;
+  }
+  .stat .k { font-size: 11px; color: var(--muted); }
+  .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .good { color: var(--good); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  canvas.viz {
+    width: 100%; height: 150px; background: #090c10; border: 1px solid var(--border);
+    border-radius: 8px; display: block;
+  }
+  #input-pad {
+    height: 150px; background: radial-gradient(circle at 50% 50%, #162235 0%, #090c10 75%);
+    border: 1px dashed #39485c; border-radius: 8px; display: flex; align-items: center;
+    justify-content: center; text-align: center; color: var(--muted); user-select: none;
+    touch-action: none; position: relative; overflow: hidden;
+  }
+  #input-dot {
+    width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+    position: absolute; pointer-events: none; transform: translate(-50%, -50%);
+    box-shadow: 0 0 12px rgba(68, 147, 248, 0.8);
+  }
+  #heavy-scroller {
+    height: 290px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;
+    background: #0b0f14; position: relative;
+  }
+  .scroll-sticky {
+    position: sticky; top: 0; z-index: 4; padding: 8px 12px;
+    background: rgba(22, 27, 34, 0.78); backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border); display: flex; justify-content: space-between;
+  }
+  .heavy-grid {
+    padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 10px;
+  }
+  .heavy-item {
+    background: linear-gradient(145deg, #1b2230, #131822);
+    border: 1px solid #2b3545; border-radius: 10px; padding: 10px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+    will-change: transform;
+  }
+  .heavy-bar {
+    height: 6px; border-radius: 3px; background: linear-gradient(90deg, #4493f8, #3fb950);
+    margin-top: 6px;
+  }
+  input[type="text"], input[type="number"] {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--ink);
+    padding: 4px 8px; border-radius: 6px; font: inherit;
+  }
+  pre#json-out {
+    margin: 0; padding: 10px; background: #090c10; border: 1px solid var(--border);
+    border-radius: 8px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-height: 220px; overflow: auto;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Moonwater / Wayland Browser Floor Suite</h1>
+  <span class="pill">Hz: <strong id="hdr-hz">--</strong></span>
+  <span class="pill">rAF: <strong id="hdr-raf">--</strong></span>
+  <span class="pill">DPR: <strong id="hdr-dpr">--</strong></span>
+  <span class="pill">Viewport: <strong id="hdr-size">--</strong></span>
+  <span class="pill">UA: <strong id="hdr-ua">detecting</strong></span>
+  <button class="btn primary" id="btn-run-all">Run Automated Suite (~8s)</button>
+  <button class="btn" id="btn-reset">Reset Stats</button>
+  <button class="btn" id="btn-copy">Copy JSON</button>
+</header>
+
+<main>
+  <div class="grid">
+    <!-- 1. INPUT LATENCY -->
+    <section class="card">
+      <h2>
+        <span>1. Input Latency &amp; Wayland Coalescing</span>
+        <span id="input-mode-badge" class="muted">Live pointer + wheel + key</span>
+      </h2>
+      <div id="input-pad" tabindex="0">
+        <div id="input-dot" style="left:50%;top:50%"></div>
+        <span>Move pointer fast / scroll wheel / hold keys here<br>Measures event.timeStamp -&gt; JS delivery -&gt; rAF commit &amp; coalescing</span>
+      </div>
+      <div class="metrics">
+        <div class="stat"><div class="k">Event-&gt;JS p50 / p95</div><div class="v" id="in-js-lag">--</div></div>
+        <div class="stat"><div class="k">Event-&gt;rAF p50 / p95</div><div class="v" id="in-raf-lag">--</div></div>
+        <div class="stat"><div class="k">Coalesced avg / max</div><div class="v" id="in-coal">--</div></div>
+        <div class="stat"><div class="k">Pointer rate (Hz)</div><div class="v" id="in-rate">--</div></div>
+        <div class="stat"><div class="k">Wheel evt-&gt;rAF p95</div><div class="v" id="in-wheel-lag">--</div></div>
+        <div class="stat"><div class="k">Key-&gt;rAF p95</div><div class="v" id="in-key-lag">--</div></div>
+      </div>
+    </section>
+
+    <!-- 2. SURFACE COMMIT / DAMAGE BENCH -->
+    <section class="card">
+      <h2>
+        <span>2. Compositor Surface Commit (Partial vs Full Damage)</span>
+        <div class="row">
+          <button class="btn active" id="btn-dmg-partial">Partial 64x64</button>
+          <button class="btn" id="btn-dmg-full">Full Frame</button>
+          <button class="btn" id="btn-dmg-alpha">Alpha Layer</button>
+          <button class="btn" id="btn-dmg-pause">Pause</button>
+        </div>
+      </h2>
+      <canvas id="commit-canvas" class="viz"></canvas>
+      <div class="metrics">
+        <div class="stat"><div class="k">rAF dt p50 / p95</div><div class="v" id="ren-dt">--</div></div>
+        <div class="stat"><div class="k">rAF dt p99 / max</div><div class="v" id="ren-max">--</div></div>
+        <div class="stat"><div class="k">JS draw CPU (ms)</div><div class="v" id="ren-cpu">--</div></div>
+        <div class="stat"><div class="k">Jank frames (&gt;1.5x)</div><div class="v" id="ren-jank">--</div></div>
+        <div class="stat"><div class="k">Pixel rate</div><div class="v" id="ren-mpix">--</div></div>
+      </div>
+    </section>
+
+    <!-- 3. WINDOW RESIZE LATENCY -->
+    <section class="card">
+      <h2>
+        <span>3. Browser Window Resize &amp; Configure Cadence</span>
+        <div class="row">
+          <button class="btn" id="btn-resize-popup">Auto-Resize Popup</button>
+        </div>
+      </h2>
+      <div class="metrics">
+        <div class="stat"><div class="k">Resize events</div><div class="v" id="rsz-count">0</div></div>
+        <div class="stat"><div class="k">Resize rate (Hz)</div><div class="v" id="rsz-rate">--</div></div>
+        <div class="stat"><div class="k">Reflow + Paint p50</div><div class="v" id="rsz-p50">--</div></div>
+        <div class="stat"><div class="k">Resize-&gt;rAF p95</div><div class="v" id="rsz-p95">--</div></div>
+        <div class="stat"><div class="k">Resize-&gt;rAF max</div><div class="v" id="rsz-max">--</div></div>
+      </div>
+      <canvas id="resize-canvas" class="viz" style="height:102px"></canvas>
+      <div class="row" style="color:var(--muted);font-size:12px">
+        Drag the browser window corner freely, or click Auto-Resize Popup to hammer xdg_toplevel.configure / configure_late / buffer realloc.
+      </div>
+    </section>
+
+    <!-- 4. NETWORK + IPC UNDER COMPOSITOR LOAD -->
+    <section class="card">
+      <h2>
+        <span>4. Network Fetch &amp; Async Wakeup vs Compositor Jank</span>
+        <div class="row">
+          <button class="btn" id="btn-net-burst">Run Fetch Burst (40 reqs)</button>
+        </div>
+      </h2>
+      <div class="row">
+        <label>URL (same-origin HTTP or blank = current/blob):
+          <input type="text" id="net-url" size="28" placeholder="auto (location.href or blob)">
+        </label>
+        <label>Concurrency:
+          <input type="number" id="net-conc" value="6" min="1" max="32" style="width:60px">
+        </label>
+      </div>
+      <div class="metrics">
+        <div class="stat"><div class="k">Fetch p50 / p95 (ms)</div><div class="v" id="net-rtt">--</div></div>
+        <div class="stat"><div class="k">TTFB avg (ms)</div><div class="v" id="net-ttfb">--</div></div>
+        <div class="stat"><div class="k">Throughput</div><div class="v" id="net-mbps">--</div></div>
+        <div class="stat"><div class="k">rAF max during burst</div><div class="v" id="net-jank">--</div></div>
+        <div class="stat"><div class="k">Completed / Err</div><div class="v" id="net-ok">--</div></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 5. HEAVY WEBSITE DOM SCROLL STRESS -->
+  <section class="card">
+    <h2>
+      <span>5. Heavy Website Scroll Stress (400 Cards, Sticky Backdrop-Blur, Rounded Shadows, Live Progress Bars)</span>
+      <div class="row">
+        <button class="btn" id="btn-scroll-auto">Run Auto-Scroll Stress (3s)</button>
+        <button class="btn" id="btn-scroll-mix">Toggle Backdrop Blur</button>
+      </div>
+    </h2>
+    <div id="heavy-scroller">
+      <div class="scroll-sticky" id="scroll-sticky-bar">
+        <span>Heavy DOM + Translucent Backdrop Scroll Test</span>
+        <span id="scroll-readout">Scroll p50/p95: -- | Missed frames: 0</span>
+      </div>
+      <div class="heavy-grid" id="heavy-grid"></div>
+    </div>
+  </section>
+
+  <!-- 6. FRAME TIMELINE & JSON REPORT -->
+  <section class="card">
+    <h2>
+      <span>6. Frame Time Timeline (ms, target line = vsync) &amp; JSON Summary</span>
+      <span style="color:var(--muted);font-size:11px">Automated hooks: window.runAllBenchmarks() / window.__MW_BENCH__</span>
+    </h2>
+    <canvas id="timeline-canvas" class="viz" style="height:110px"></canvas>
+    <pre id="json-out">{}</pre>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  const q = (id) => document.getElementById(id);
+  const clampArr = (arr, max = 4096) => { if (arr.length > max) arr.splice(0, arr.length - max); };
+  const pct = (arr, p) => {
+    if (!arr.length) return null;
+    const s = Float64Array.from(arr).sort();
+    const idx = Math.min(s.length - 1, Math.max(0, Math.floor((s.length - 1) * p)));
+    return s[idx];
+  };
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const fmt = (v, d = 2) => v == null || !Number.isFinite(v) ? '--' : v.toFixed(d);
+
+  // Build 400 heavy DOM cards
+  const grid = q('heavy-grid');
+  const bars = [];
+  for (let i = 0; i < 400; i++) {
+    const el = document.createElement('div');
+    el.className = 'heavy-item';
+    el.innerHTML = `<div style="display:flex;justify-content:space-between"><strong>Card #${i + 1}</strong><span style="color:#8b949e">tile ${(i * 17) % 97}</span></div>`
+      + `<div style="color:#8b949e;font-size:11px;margin-top:4px">Rounded box-shadow layer + gradient + dynamic repaint stress item</div>`
+      + `<div class="heavy-bar" style="width:${35 + (i * 13) % 65}%"></div>`;
+    grid.appendChild(el);
+    bars.push(el.lastElementChild);
+  }
+
+  // State store
+  const S = {
+    rafDt: [],
+    rafBaseDt: 16.6667,
+    estHz: 60,
+    jankFrames: 0,
+    totalFrames: 0,
+    ptrJsLag: [],
+    ptrRafLag: [],
+    ptrCoalesced: [],
+    ptrTimes: [],
+    wheelRafLag: [],
+    keyRafLag: [],
+    pendingPtrTs: [],
+    pendingWheelTs: [],
+    pendingKeyTs: [],
+    commitMode: 'partial', // 'partial' | 'full' | 'paused'
+    commitAlpha: false,
+    commitCpuMs: [],
+    commitPixelsPerFrame: 0,
+    rszTimes: [],
+    rszRafLag: [],
+    rszCpuMs: [],
+    pendingResizeTs: [],
+    netRttMs: [],
+    netTtfbMs: [],
+    netBytes: 0,
+    netOk: 0,
+    netErr: 0,
+    netBurstRotsMax: 0,
+    netActive: false,
+    scrollRunning: false,
+    scrollDt: [],
+    scrollJank: 0,
+    blurOn: true,
+    spriteX: 32,
+    spriteY: 32,
+    spriteVx: 5.5,
+    spriteVy: 3.7,
+    phase: 0,
+  };
+
+  q('hdr-ua').textContent = (navigator.userAgent.match(/Chrom(?:e|ium)\/[\d.]+/) || ['Browser'])[0];
+
+  function updateViewportHeader() {
+    q('hdr-dpr').textContent = (window.devicePixelRatio || 1).toFixed(2);
+    q('hdr-size').textContent = `${window.innerWidth}x${window.innerHeight}`;
+  }
+  updateViewportHeader();
+
+  // ---- Input latency instrumentation ----
+  const pad = q('input-pad');
+  const dot = q('input-dot');
+  const recordPointer = (e) => {
+    const now = performance.now();
+    const lag = now - e.timeStamp;
+    if (lag >= 0 && lag < 2000) {
+      S.ptrJsLag.push(lag);
+      clampArr(S.ptrJsLag);
+    }
+    if (e.timeStamp > 0) {
+      S.pendingPtrTs.push(e.timeStamp);
+      clampArr(S.pendingPtrTs, 512);
+    }
+    const coal = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents().length : 1;
+    S.ptrCoalesced.push(coal || 1);
+    clampArr(S.ptrCoalesced);
+    S.ptrTimes.push(now);
+    clampArr(S.ptrTimes, 256);
+
+    const rect = pad.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      const lx = Math.max(6, Math.min(rect.width - 6, e.clientX - rect.left));
+      const ly = Math.max(6, Math.min(rect.height - 6, e.clientY - rect.top));
+      dot.style.left = lx + 'px';
+      dot.style.top = ly + 'px';
+    }
+  };
+
+  pad.addEventListener('pointermove', recordPointer, { passive: true });
+  if ('onpointerrawupdate' in window && window.isSecureContext) {
+    let rawCount = 0;
+    let rawWindowStart = performance.now();
+    pad.addEventListener('pointerrawupdate', (e) => {
+      rawCount++;
+      const now = performance.now();
+      const dt = (now - rawWindowStart) / 1000;
+      if (dt >= 0.4) {
+        q('input-mode-badge').textContent = `raw ${Math.round(rawCount / dt)} Hz + coalesced`;
+        rawCount = 0;
+        rawWindowStart = now;
+      }
+      if (e.timeStamp > 0) {
+        const lag = now - e.timeStamp;
+        if (lag >= 0 && lag < 2000) { S.ptrJsLag.push(lag); clampArr(S.ptrJsLag); }
+      }
+    }, { passive: true });
+  }
+
+  window.addEventListener('wheel', (e) => {
+    if (e.timeStamp > 0) {
+      S.pendingWheelTs.push(e.timeStamp);
+      clampArr(S.pendingWheelTs, 256);
+    }
+  }, { passive: true });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.timeStamp > 0) {
+      S.pendingKeyTs.push(e.timeStamp);
+      clampArr(S.pendingKeyTs, 256);
+    }
+  });
+
+  // ---- Surface Commit Canvas (Partial vs Full damage) ----
+  const cCan = q('commit-canvas');
+  const cCtx = cCan.getContext('2d', { alpha: true });
+  const rCan = q('resize-canvas');
+  const rCtx = rCan.getContext('2d');
+  const tCan = q('timeline-canvas');
+  const tCtx = tCan.getContext('2d');
+
+  function syncCanvasSize(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const tw = Math.max(1, Math.round(rect.width * dpr));
+    const th = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== tw || canvas.height !== th) {
+      canvas.width = tw;
+      canvas.height = th;
+      return true;
+    }
+    return false;
+  }
+
+  function initCommitBackdrop() {
+    syncCanvasSize(cCan);
+    cCtx.clearRect(0, 0, cCan.width, cCan.height);
+    if (!S.commitAlpha) {
+      cCtx.fillStyle = '#090c10';
+      cCtx.fillRect(0, 0, cCan.width, cCan.height);
+    }
+    cCtx.strokeStyle = '#1b2432';
+    cCtx.lineWidth = 1;
+    for (let x = 0; x < cCan.width; x += 32) {
+      cCtx.beginPath(); cCtx.moveTo(x, 0); cCtx.lineTo(x, cCan.height); cCtx.stroke();
+    }
+    for (let y = 0; y < cCan.height; y += 32) {
+      cCtx.beginPath(); cCtx.moveTo(0, y); cCtx.lineTo(cCan.width, y); cCtx.stroke();
+    }
+  }
+
+  // ---- Resize Stress Instrumentation ----
+  const handleResizeMark = (ts) => {
+    const t0 = performance.now();
+    syncCanvasSize(rCan);
+    initCommitBackdrop();
+    syncCanvasSize(tCan);
+    updateViewportHeader();
+    rCtx.fillStyle = '#090c10';
+    rCtx.fillRect(0, 0, rCan.width, rCan.height);
+    rCtx.fillStyle = '#4493f8';
+    rCtx.fillRect(10, 10, Math.max(20, (rCan.width - 20) * ((S.rszTimes.length % 10) + 1) / 10), rCan.height - 20);
+    rCtx.fillStyle = '#e6edf3';
+    rCtx.font = `${Math.round(12 * (window.devicePixelRatio || 1))}px monospace`;
+    rCtx.fillText(`vp=${window.innerWidth}x${window.innerHeight} c=${rCan.width}x${rCan.height}`, 18, Math.round(rCan.height * 0.58));
+    const cpu = performance.now() - t0;
+    S.rszCpuMs.push(cpu);
+    clampArr(S.rszCpuMs);
+    S.rszTimes.push(t0);
+    clampArr(S.rszTimes, 256);
+    if (ts > 0) {
+      S.pendingResizeTs.push(ts);
+      clampArr(S.pendingResizeTs, 128);
+    }
+    q('rsz-count').textContent = String(S.rszTimes.length);
+  };
+
+  window.addEventListener('resize', (e) => handleResizeMark(e.timeStamp || performance.now()));
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(() => handleResizeMark(performance.now()));
+    ro.observe(document.body);
+  }
+
+  // ---- Commit Controls ----
+  const setDmgMode = (mode) => {
+    S.commitMode = mode;
+    q('btn-dmg-partial').classList.toggle('active', mode === 'partial');
+    q('btn-dmg-full').classList.toggle('active', mode === 'full');
+    q('btn-dmg-pause').classList.toggle('active', mode === 'paused');
+    initCommitBackdrop();
+  };
+  q('btn-dmg-partial').onclick = () => setDmgMode('partial');
+  q('btn-dmg-full').onclick = () => setDmgMode('full');
+  q('btn-dmg-pause').onclick = () => setDmgMode(S.commitMode === 'paused' ? 'partial' : 'paused');
+  q('btn-dmg-alpha').onclick = () => {
+    S.commitAlpha = !S.commitAlpha;
+    q('btn-dmg-alpha').classList.toggle('active', S.commitAlpha);
+    initCommitBackdrop();
+  };
+
+  // ---- Main rAF Loop ----
+  let lastRaf = performance.now();
+  let lastHud = 0;
+
+  function tick(rafNow) {
+    const dt = rafNow - lastRaf;
+    lastRaf = rafNow;
+    if (dt > 0 && dt < 250) {
+      S.totalFrames++;
+      S.rafDt.push(dt);
+      clampArr(S.rafDt, 600);
+      if (S.rafDt.length > 20) {
+        const med = pct(S.rafDt.slice(-120), 0.5);
+        if (med > 2 && med < 50) {
+          S.rafBaseDt = med;
+          S.estHz = Math.round(1000 / med);
+        }
+      }
+      if (dt > S.rafBaseDt * 1.5) S.jankFrames++;
+      if (S.netActive && dt > S.netBurstRotsMax) S.netBurstRotsMax = dt;
+      if (S.scrollRunning) {
+        S.scrollDt.push(dt);
+        clampArr(S.scrollDt, 600);
+        if (dt > S.rafBaseDt * 1.5) S.scrollJank++;
+      }
+    }
+
+    // Drain pending input timestamps at commit frame
+    while (S.pendingPtrTs.length) {
+      const lag = rafNow - S.pendingPtrTs.shift();
+      if (lag >= 0 && lag < 2000) { S.ptrRafLag.push(lag); clampArr(S.ptrRafLag); }
+    }
+    while (S.pendingWheelTs.length) {
+      const lag = rafNow - S.pendingWheelTs.shift();
+      if (lag >= 0 && lag < 2000) { S.wheelRafLag.push(lag); clampArr(S.wheelRafLag); }
+    }
+    while (S.pendingKeyTs.length) {
+      const lag = rafNow - S.pendingKeyTs.shift();
+      if (lag >= 0 && lag < 2000) { S.keyRafLag.push(lag); clampArr(S.keyRafLag); }
+    }
+    while (S.pendingResizeTs.length) {
+      const lag = rafNow - S.pendingResizeTs.shift();
+      if (lag >= 0 && lag < 4000) {
+        S.rszRafLag.push(lag);
+        clampArr(S.rszRafLag);
+        if (window.name === 'mw_resize_target' && window.opener) {
+          try {
+            const cpu = S.rszCpuMs.length ? S.rszCpuMs[S.rszCpuMs.length - 1] : 0;
+            window.opener.postMessage({ type: 'mw_resize_sample', lag, cpu, at: performance.now() }, '*');
+          } catch (_) {}
+        }
+      }
+    }
+
+    // Render surface commit test
+    if (syncCanvasSize(cCan)) initCommitBackdrop();
+    if (S.commitMode !== 'paused') {
+      const tDraw = performance.now();
+      const cw = cCan.width, ch = cCan.height;
+      const box = Math.round(64 * (window.devicePixelRatio || 1));
+      if (S.commitMode === 'partial') {
+        // Erase only old dirty rect
+        const ox = Math.max(0, Math.floor(S.spriteX) - 2);
+        const oy = Math.max(0, Math.floor(S.spriteY) - 2);
+        if (S.commitAlpha) cCtx.clearRect(ox, oy, box + 4, box + 4);
+        else {
+          cCtx.fillStyle = '#090c10';
+          cCtx.fillRect(ox, oy, box + 4, box + 4);
+        }
+        S.spriteX += S.spriteVx;
+        S.spriteY += S.spriteVy;
+        if (S.spriteX < 4 || S.spriteX + box > cw - 4) S.spriteVx = -S.spriteVx;
+        if (S.spriteY < 4 || S.spriteY + box > ch - 4) S.spriteVy = -S.spriteVy;
+        S.spriteX = Math.max(4, Math.min(cw - box - 4, S.spriteX));
+        S.spriteY = Math.max(4, Math.min(ch - box - 4, S.spriteY));
+        cCtx.fillStyle = '#4493f8';
+        cCtx.fillRect(Math.round(S.spriteX), Math.round(S.spriteY), box, box);
+        S.commitPixelsPerFrame = (box + 4) * (box + 4);
+      } else {
+        S.phase = (S.phase + 3) % Math.max(1, cw);
+        if (S.commitAlpha) cCtx.clearRect(0, 0, cw, ch);
+        else {
+          cCtx.fillStyle = '#0b1017';
+          cCtx.fillRect(0, 0, cw, ch);
+        }
+        for (let x = S.phase % 24; x < cw; x += 24) {
+          cCtx.fillStyle = ((x >> 4) & 1) ? '#1f4b82' : '#18375f';
+          cCtx.fillRect(x, 0, 12, ch);
+        }
+        cCtx.fillStyle = '#3fb950';
+        cCtx.fillRect((S.phase * 2) % Math.max(1, cw - box), Math.round(ch * 0.35), box, box);
+        S.commitPixelsPerFrame = cw * ch;
+      }
+      S.commitCpuMs.push(performance.now() - tDraw);
+      clampArr(S.commitCpuMs, 512);
+    }
+
+    // Periodic UI + Timeline refresh (~6 Hz so HUD doesn't pollute benchmarks)
+    if (rafNow - lastHud > 160) {
+      lastHud = rafNow;
+      renderHud();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function exportSummary() {
+    const dtNow = S.rafDt.slice(-240);
+    return {
+      timestamp: new Date().toISOString(),
+      viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 },
+      display: { estHz: S.estHz, rafBaseDtMs: Number(S.rafBaseDt.toFixed(3)), totalFrames: S.totalFrames, jankFrames: S.jankFrames },
+      input: {
+        ptrSamples: S.ptrJsLag.length,
+        ptrJsLagMs: { p50: pct(S.ptrJsLag, 0.5), p95: pct(S.ptrJsLag, 0.95) },
+        ptrRafLagMs: { p50: pct(S.ptrRafLag, 0.5), p95: pct(S.ptrRafLag, 0.95) },
+        coalesced: { avg: avg(S.ptrCoalesced), max: S.ptrCoalesced.length ? Math.max(...S.ptrCoalesced) : null },
+        wheelRafLagMs: { p50: pct(S.wheelRafLag, 0.5), p95: pct(S.wheelRafLag, 0.95) },
+        keyRafLagMs: { p50: pct(S.keyRafLag, 0.5), p95: pct(S.keyRafLag, 0.95) },
+      },
+      render: {
+        commitMode: S.commitMode,
+        alphaLayer: S.commitAlpha,
+        rafDtMs: { p50: pct(dtNow, 0.5), p95: pct(dtNow, 0.95), p99: pct(dtNow, 0.99), max: dtNow.length ? Math.max(...dtNow) : null },
+        cpuDrawMs: { p50: pct(S.commitCpuMs, 0.5), p95: pct(S.commitCpuMs, 0.95) },
+        scrollDtMs: { p50: pct(S.scrollDt, 0.5), p95: pct(S.scrollDt, 0.95), jank: S.scrollJank },
+      },
+      resize: {
+        events: S.rszTimes.length,
+        reflowCpuMs: { p50: pct(S.rszCpuMs, 0.5), p95: pct(S.rszCpuMs, 0.95) },
+        resizeToRafMs: { p50: pct(S.rszRafLag, 0.5), p95: pct(S.rszRafLag, 0.95), max: S.rszRafLag.length ? Math.max(...S.rszRafLag) : null },
+      },
+      network: {
+        completed: S.netOk,
+        errors: S.netErr,
+        bytes: S.netBytes,
+        rttMs: { p50: pct(S.netRttMs, 0.5), p95: pct(S.netRttMs, 0.95) },
+        ttfbAvgMs: avg(S.netTtfbMs),
+        rafMaxDuringBurstMs: S.netBurstRotsMax || null,
+      },
+    };
+  }
+
+  function renderHud() {
+    const dtNow = S.rafDt.slice(-240);
+    const p50 = pct(dtNow, 0.5), p95 = pct(dtNow, 0.95), p99 = pct(dtNow, 0.99);
+    const mx = dtNow.length ? Math.max(...dtNow) : null;
+    q('hdr-hz').textContent = String(S.estHz);
+    q('hdr-raf').textContent = `${fmt(p50, 1)}/${fmt(p95, 1)} ms`;
+
+    q('in-js-lag').textContent = `${fmt(pct(S.ptrJsLag, 0.5))} / ${fmt(pct(S.ptrJsLag, 0.95))} ms`;
+    q('in-raf-lag').textContent = `${fmt(pct(S.ptrRafLag, 0.5))} / ${fmt(pct(S.ptrRafLag, 0.95))} ms`;
+    q('in-coal').textContent = S.ptrCoalesced.length ? `${fmt(avg(S.ptrCoalesced), 1)} / ${Math.max(...S.ptrCoalesced)}` : '--';
+    let ptrHz = null;
+    if (S.ptrTimes.length >= 2) {
+      const span = (S.ptrTimes[S.ptrTimes.length - 1] - S.ptrTimes[0]) / 1000;
+      if (span > 0.05) ptrHz = (S.ptrTimes.length - 1) / span;
+    }
+    q('in-rate').textContent = ptrHz ? `${Math.round(ptrHz)} Hz` : '--';
+    q('in-wheel-lag').textContent = S.wheelRafLag.length ? `${fmt(pct(S.wheelRafLag, 0.95))} ms` : '--';
+    q('in-key-lag').textContent = S.keyRafLag.length ? `${fmt(pct(S.keyRafLag, 0.95))} ms` : '--';
+
+    q('ren-dt').textContent = `${fmt(p50)} / ${fmt(p95)} ms`;
+    q('ren-max').textContent = `${fmt(p99)} / ${fmt(mx)} ms`;
+    q('ren-cpu').textContent = `${fmt(pct(S.commitCpuMs, 0.5))} / ${fmt(pct(S.commitCpuMs, 0.95))}`;
+    q('ren-jank').textContent = `${S.jankFrames} / ${S.totalFrames}`;
+    q('ren-mpix').textContent = p50 ? `${((S.commitPixelsPerFrame * (1000 / p50)) / 1e6).toFixed(1)} MP/s` : '--';
+
+    if (S.rszTimes.length >= 2) {
+      const rSpan = (S.rszTimes[S.rszTimes.length - 1] - S.rszTimes[0]) / 1000;
+      q('rsz-rate').textContent = rSpan > 0.02 ? `${Math.round((S.rszTimes.length - 1) / rSpan)} Hz` : '--';
+    }
+    q('rsz-p50').textContent = S.rszCpuMs.length ? `${fmt(pct(S.rszCpuMs, 0.5))} ms` : '--';
+    q('rsz-p95').textContent = S.rszRafLag.length ? `${fmt(pct(S.rszRafLag, 0.95))} ms` : '--';
+    q('rsz-max').textContent = S.rszRafLag.length ? `${fmt(Math.max(...S.rszRafLag))} ms` : '--';
+
+    q('scroll-readout').textContent = S.scrollDt.length
+      ? `Scroll p50/p95: ${fmt(pct(S.scrollDt, 0.5))}/${fmt(pct(S.scrollDt, 0.95))} ms | Missed frames: ${S.scrollJank}`
+      : 'Scroll manually or click Auto-Scroll Stress';
+
+    // Timeline bar chart
+    if (!syncCanvasSize(tCan)) {
+      const w = tCan.width, h = tCan.height;
+      tCtx.fillStyle = '#090c10';
+      tCtx.fillRect(0, 0, w, h);
+      const maxMs = Math.max(35, S.rafBaseDt * 2.5);
+      const targetY = h - (S.rafBaseDt / maxMs) * h;
+      tCtx.strokeStyle = '#3fb950';
+      tCtx.beginPath(); tCtx.moveTo(0, targetY); tCtx.lineTo(w, targetY); tCtx.stroke();
+      const samples = S.rafDt.slice(-Math.min(200, Math.floor(w / 3)));
+      const bw = Math.max(2, w / Math.max(1, samples.length));
+      for (let i = 0; i < samples.length; i++) {
+        const v = samples[i];
+        const bh = Math.min(h, (v / maxMs) * h);
+        tCtx.fillStyle = v > S.rafBaseDt * 1.5 ? '#f85149' : v > S.rafBaseDt * 1.15 ? '#d29922' : '#4493f8';
+        tCtx.fillRect(i * bw, h - bh, Math.max(1, bw - 1), bh);
+      }
+    }
+
+    const summary = exportSummary();
+    window.__MW_BENCH__ = summary;
+    q('json-out').textContent = JSON.stringify(summary, null, 2);
+  }
+
+  // ---- Auto-Scroll Stress (3s smooth scroll sweep + bar repaint) ----
+  function runAutoScroll(durationMs = 3000) {
+    return new Promise((resolve) => {
+      const scroller = q('heavy-scroller');
+      S.scrollDt = [];
+      S.scrollJank = 0;
+      S.scrollRunning = true;
+      const start = performance.now();
+      let dir = 1;
+      function step(now) {
+        if (!S.scrollRunning || now - start >= durationMs) {
+          S.scrollRunning = false;
+          resolve(exportSummary().render);
+          return;
+        }
+        const maxTop = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+        let next = scroller.scrollTop + dir * 24;
+        if (next >= maxTop) { next = maxTop; dir = -1; }
+        else if (next <= 0) { next = 0; dir = 1; }
+        scroller.scrollTop = next;
+        // Force a tiny visual repaint across visible cards during scroll
+        const k = Math.floor(now / 16) % bars.length;
+        bars[k].style.width = `${30 + (Math.floor(now) % 65)}%`;
+        requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    });
+  }
+  q('btn-scroll-auto').onclick = () => runAutoScroll(3000);
+  q('btn-scroll-mix').onclick = () => {
+    S.blurOn = !S.blurOn;
+    q('scroll-sticky-bar').style.backdropFilter = S.blurOn ? 'blur(10px)' : 'none';
+  };
+
+  // ---- Auto-Resize Popup Stress ----
+  window.addEventListener('message', (ev) => {
+    const d = ev.data;
+    if (!d || d.type !== 'mw_resize_sample') return;
+    S.rszTimes.push(performance.now());
+    clampArr(S.rszTimes, 256);
+    if (typeof d.lag === 'number') { S.rszRafLag.push(d.lag); clampArr(S.rszRafLag); }
+    if (typeof d.cpu === 'number') { S.rszCpuMs.push(d.cpu); clampArr(S.rszCpuMs); }
+    q('rsz-count').textContent = String(S.rszTimes.length);
+  });
+
+  q('btn-resize-popup').onclick = () => {
+    const w = window.open(location.href, 'mw_resize_target', 'width=720,height=520');
+    if (!w) {
+      alert('Popup blocked: allow popups or drag the main Chrome window edge manually.');
+      return;
+    }
+    let step = 0;
+    const timer = setInterval(() => {
+      if (w.closed || step >= 45) {
+        clearInterval(timer);
+        if (!w.closed) setTimeout(() => { try { w.close(); } catch (_) {} }, 250);
+        return;
+      }
+      const nw = 640 + ((step * 37) % 420);
+      const nh = 460 + ((step * 29) % 280);
+      try { w.resizeTo(nw, nh); } catch (_) {}
+      step++;
+    }, 32);
+  };
+
+  // ---- Network Burst Bench (HTTP/S or local Blob URL fallback) ----
+  async function runNetBurst(total = 40) {
+    const rawUrl = q('net-url').value.trim();
+    let targetUrl = rawUrl;
+    let blobUrl = null;
+    if (!targetUrl) {
+      if (location.protocol === 'http:' || location.protocol === 'https:') {
+        targetUrl = location.href;
+      } else {
+        const payload = new Uint8Array(256 * 1024);
+        blobUrl = URL.createObjectURL(new Blob([payload], { type: 'application/octet-stream' }));
+        targetUrl = blobUrl;
+      }
+    }
+    const conc = Math.max(1, Math.min(32, parseInt(q('net-conc').value, 10) || 6));
+    S.netRttMs = []; S.netTtfbMs = []; S.netBytes = 0; S.netOk = 0; S.netErr = 0; S.netBurstRotsMax = 0;
+    S.netActive = true;
+    const tStart = performance.now();
+    let issued = 0;
+
+    async function worker() {
+      while (issued < total) {
+        const idx = issued++;
+        const sep = targetUrl.includes('?') ? '&' : '?';
+        const u = targetUrl.startsWith('blob:') ? targetUrl : `${targetUrl}${sep}mw_t=${idx}_${Math.random()}`;
+        const t0 = performance.now();
+        try {
+          const resp = await fetch(u, { cache: 'no-store' });
+          const buf = await resp.arrayBuffer();
+          const dt = performance.now() - t0;
+          S.netRttMs.push(dt);
+          S.netBytes += buf.byteLength;
+          S.netOk++;
+          if (typeof performance.getEntriesByName === 'function') {
+            const entries = performance.getEntriesByName(resp.url);
+            const last = entries[entries.length - 1];
+            if (last && last.responseStart > last.requestStart) {
+              S.netTtfbMs.push(last.responseStart - last.requestStart);
+            }
+          }
+        } catch (_) {
+          S.netErr++;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, () => worker()));
+    S.netActive = false;
+    const elapsedSec = Math.max(0.001, (performance.now() - tStart) / 1000);
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+
+    q('net-rtt').textContent = `${fmt(pct(S.netRttMs, 0.5))} / ${fmt(pct(S.netRttMs, 0.95))}`;
+    q('net-ttfb').textContent = S.netTtfbMs.length ? `${fmt(avg(S.netTtfbMs))}` : 'blob/local';
+    q('net-mbps').textContent = `${((S.netBytes / (1024 * 1024)) / elapsedSec).toFixed(1)} MB/s`;
+    q('net-jank').textContent = `${fmt(S.netBurstRotsMax)} ms`;
+    q('net-ok').textContent = `${S.netOk} / ${S.netErr}`;
+    renderHud();
+    return exportSummary().network;
+  }
+  q('btn-net-burst').onclick = () => runNetBurst(40);
+
+  // ---- Automated Suite Runner (callable from UI or CDP) ----
+  window.runAllBenchmarks = async () => {
+    setDmgMode('partial');
+    await new Promise((r) => setTimeout(r, 1500));
+    const partial = exportSummary().render;
+
+    setDmgMode('full');
+    await new Promise((r) => setTimeout(r, 1500));
+    const full = exportSummary().render;
+
+    setDmgMode('partial');
+    const scroll = await runAutoScroll(2500);
+    const network = await runNetBurst(40);
+    const report = { partial, full, scroll, network, fullReport: exportSummary() };
+    window.__MW_BENCH__ = report.fullReport;
+    q('json-out').textContent = JSON.stringify(report, null, 2);
+    return report;
+  };
+  q('btn-run-all').onclick = () => window.runAllBenchmarks();
+
+  q('btn-reset').onclick = () => {
+    S.rafDt = []; S.jankFrames = 0; S.totalFrames = 0;
+    S.ptrJsLag = []; S.ptrRafLag = []; S.ptrCoalesced = []; S.ptrTimes = [];
+    S.wheelRafLag = []; S.keyRafLag = [];
+    S.commitCpuMs = []; S.rszTimes = []; S.rszRafLag = []; S.rszCpuMs = [];
+    S.netRttMs = []; S.netTtfbMs = []; S.netBytes = 0; S.netOk = 0; S.netErr = 0; S.netBurstRotsMax = 0;
+    S.scrollDt = []; S.scrollJank = 0;
+    renderHud();
+  };
+
+  q('btn-copy').onclick = async () => {
+    const btn = q('btn-copy');
+    const txt = JSON.stringify(exportSummary(), null, 2);
+    try {
+      await navigator.clipboard.writeText(txt);
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy JSON'; }, 1200);
+  };
+
+  initCommitBackdrop();
+  handleResizeMark(0);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

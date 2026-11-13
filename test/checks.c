@@ -185501,6 +185501,51 @@ static void test_subsurfaces(void)
         }
         wlc_end(c);
 
+        /* set_opaque_region: an ARGB8888 subsurface declared opaque takes partial damage without blending or re-copying the root */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long reg = wlc_id(c, WLI_wl_region, 1);
+                unsigned long opaque = wl_buffer_of(&t.s, 8, 8, 0x80112233u, WLN_wl_shm_format_argb8888);
+                unsigned long dirty = wl_buffer_of(&t.s, 8, 8, 0x80445566u, WLN_wl_shm_format_argb8888);
+
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach,
+                         wl_buffer_of(&t.s, 32, 24, 0xff808080u, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_region, reg);
+                wlc_send(c, reg, WLQ_wl_region_add, 0L, 0L, 8L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_set_opaque_region, reg);
+                wlc_send(c, reg, WLQ_wl_region_destroy);
+                wlc_send(c, t.child, WLQ_wl_surface_attach, opaque, 0L, 0L);
+                wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+                WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0x80112233u,
+                        "an ARGB subsurface with full opaque_region copies without blending (%#x)", fake.row[0].pixels[5 * FAKE_W + 5]);
+
+                fake.copied = 0;
+                wlc_send(c, t.child, WLQ_wl_surface_attach, dirty, 0L, 0L);
+                wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 1L, 1L, 2L, 2L);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+                WLCHECK(fake.copied == 4 && fake.row[0].pixels[5 * FAKE_W + 5] == 0x80445566u &&
+                        fake.row[0].pixels[4 * FAKE_W + 4] == 0x80112233u,
+                        "opaque ARGB subsurface partial damage copies only damaged pixels (%ld copied, corner %#x)",
+                        fake.copied, fake.row[0].pixels[4 * FAKE_W + 4]);
+
+                /* Clearing opaque_region restores translucent blending over root */
+                wlc_send(c, t.child, WLQ_wl_surface_set_opaque_region, 0L);
+                wlc_send(c, t.child, WLQ_wl_surface_attach, wl_buffer_of(&t.s, 8, 8, 0x80000000u, WLN_wl_shm_format_argb8888), 0L, 0L);
+                wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+                {
+                        unsigned pixel = fake.row[0].pixels[5 * FAKE_W + 5];
+
+                        WLCHECK((pixel & 0xffu) >= 0x3fu && (pixel & 0xffu) <= 0x41u,
+                                "clearing opaque_region restores blending (%#x)", pixel);
+                }
+        }
+        wlc_end(c);
+
         /* order: the later sibling is on top, and place_below puts it under */
         tree_open(&t, 1);
         c = t.s.c;
