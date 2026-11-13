@@ -249,7 +249,7 @@ describe()
         stack)    echo "what each function puts on the stack, and what a deep walk costs" ;;
         differential_oracle) echo "the differential engine's own checks: comparison, covering arrays, ledger and shrinking" ;;
         clang)    echo "the shell built by clang for three machines and run, as gcc builds it: lib.c and the code the programs share take only what both compilers take (NOT RUN without clang, a cross ld or qemu-user)" ;;
-        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the GPU's kernels assembled by the build and held to LLVM's, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
+        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the GPU's kernels assembled by the build and held to LLVM's (NOT RUN without an LLVM that writes the same words), the compositor's GPU path with no card under it (CHECK_gpu_kit: its rows that need a card NOT RUN without one), the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
         text)     echo "the text utilities against GNU coreutils, every option combination the grammar reaches, and tr's threaded pieces on one processor and on all" ;;
         files)    echo "the file utilities against coreutils, by output and by effect on the directory" ;;
         misc)     echo "the utilities that are neither text nor files -- dd, diff, ps, the checksums, the process wrappers -- against the system's own" ;;
@@ -1182,9 +1182,23 @@ build_tool()
 gpu_kernels_ready()
 {
         [ ! -e "$work/gpu-kernels.ready" ] || return 0
+        #       Once for a run also when the rows that ask run side by side (the gate's gpu-kit, gpu-kernels and
+        #       gpu-kernels-llvm): the first to ask builds, and the others wait for it, ten minutes at most.
+        if ! mkdir "$work/gpu-kernels.building" 2> /dev/null; then
+                gpu_kernels_waited=0
+                while [ ! -e "$work/gpu-kernels.ready" ] && [ ! -e "$work/gpu-kernels.failed" ] &&
+                      [ "$gpu_kernels_waited" -lt 3000 ]; do
+                        sleep 0.2
+                        gpu_kernels_waited=$((gpu_kernels_waited + 1))
+                done
+                [ -e "$work/gpu-kernels.ready" ] && return 0
+                note "gpu kernels: the build of them another row began did not finish"
+                return 1
+        fi
         build_tool gpu-kernels > "$work/gpu-kernels.log" 2>&1 || {
                 note "gpu kernels: build gpu-kernels failed:"
                 sed 's/^/    /' "$work/gpu-kernels.log" | head -20
+                : > "$work/gpu-kernels.failed"
                 return 1
         }
         : > "$work/gpu-kernels.ready"
@@ -7464,6 +7478,11 @@ gate_row()
         gate_status=$?
         if [ "$gate_status" = 0 ]; then
                 tally "gate-$gate_name" 1 1
+                #       A row that passed may have had parts it could not run here (a check says NOT RUN for them, with why):
+                #       they are said with the row, since the row's own output is kept in the work directory and not shown.
+                sed -n 's/^.*NOT RUN.*$/gate '"$gate_name"': &/p' "$work/gate.$gate_name.out" | while IFS= read -r gate_part; do
+                        not_run_part "$gate_part"
+                done
         elif [ "$gate_status" = 2 ]; then
                 note "gate $gate_name: NOT RUN -- $(tail -n 1 "$work/gate.$gate_name.out")"
         else
@@ -7519,6 +7538,16 @@ gate_kit_frames()
         "$work/kit-frames-check" fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf \
                 fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf \
                 fonts/inter/Inter-Bold.ttf
+}
+
+#       CHECK_gpu_kit: the compositor's GPU path (src/canvas/gpu.c) with no card under it: the fake card, fence, kernel log and kernel
+#       DRM the check puts under it hold the imports and their handles, the maps of a job still running, a late job and its end, a lost
+#       card, the bo list and the fault's words. With an amdgpu card the same binary goes on to draw on it and compare with the
+#       processor; without one those rows, and the prerequisites' steps past the node, say NOT RUN (shown with the row, never a pass).
+gate_gpu_kit()
+{
+        freestanding_check gpu_kit "$work/gpu-kit-check" || return 1
+        "$work/gpu-kit-check"
 }
 
 gate_inventory()
@@ -7624,6 +7653,7 @@ lane_gate()
         job hard gate_row terminal gate_terminal
         job hard gate_row kit-frames gate_kit_frames
         job hard gate_row draw-list gate_draw_list
+        job hard gate_row gpu-kit gate_gpu_kit
         job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row gpu-kernels gate_gpu_kernels
