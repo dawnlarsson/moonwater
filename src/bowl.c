@@ -135,6 +135,7 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
 */
 static string_address bowl_fast_layers[] = {
     "/lib",
+    "/lib32",
     "/lib64",
     "/opt",
     "/nix",
@@ -143,6 +144,7 @@ static string_address bowl_fast_layers[] = {
 
 static string_address bowl_fast_usr_layers[] = {
     "/usr/lib",
+    "/usr/lib32",
     "/usr/lib64",
     "/usr/share",
     "/usr/share/terminfo",
@@ -1150,7 +1152,7 @@ static bipolar bowl_isolated_enter(string_address root)
         files are the bowl's and not Moonwater's. A program found below one
         of them is executed by that name, so the kernel reports it.
 */
-#define BOWL_VIEW_MAX 16
+#define BOWL_VIEW_MAX 24
 #define BOWL_HOST_ETC "/run/bowl-etc"
 #define BOWL_HOST_BIN "/run/bowl-bin"
 #define BOWL_HOST_SBIN "/run/bowl-sbin"
@@ -1232,16 +1234,33 @@ static bool bowl_real_directory(string_address root, string_address path,
 }
 
 /* Bind only the loader search paths a guest binary still spells in ELF. */
+static bipolar bowl_fast_layer_source(string_address root, string_address layer,
+                                      p8 address_to source, positive room)
+{
+        if (!bowl_root_path(source, room, root, layer))
+                return -ENAMETOOLONG;
+
+        if (system_access_at(AT_FDCWD, source, 0) >= 0)
+                return 1;
+
+        // Merged-/usr Arch has /usr/lib32/ld-linux.so.2 without a /lib32 symlink;
+        // binding <root>/lib directly over /lib would otherwise leave ../lib32 unresolved.
+        if (!string_equals(layer, "/lib32"))
+                return 0;
+
+        if (!bowl_root_path(source, room, root, "/usr/lib32"))
+                return -ENAMETOOLONG;
+
+        return system_access_at(AT_FDCWD, source, 0) >= 0 ? 1 : 0;
+}
+
 static bipolar bowl_fast_layer(string_address root, string_address layer)
 {
         p8 source[BOWL_PATH_LIMIT];
-        bipolar failed;
+        bipolar failed = bowl_fast_layer_source(root, layer, source, sizeof(source));
 
-        if (!bowl_root_path(source, sizeof(source), root, layer))
-                return -ENAMETOOLONG;
-
-        if (system_access_at(AT_FDCWD, source, 0) < 0)
-                return 0;
+        if (failed <= 0)
+                return failed;
 
         bowl_doing("make the directory", layer);
         failed = bowl_mkdir_parents(layer);
@@ -2080,7 +2099,7 @@ static b32 bowl_session_host_path(string_address path)
         /* Read by every shell start (session preparation), so with the other
            tables a start reads (spark.ld). */
         static string_address const trees[] __attribute__((section(".rodata.hot"))) = {
-            "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64",
+            "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib32", "/lib64",
             "/proc", "/sys", null};
         positive i;
 
@@ -2639,11 +2658,38 @@ static fn bowl_session_tree(void)
         bowl_quiet = false;
 }
 
+static fn bowl_ensure_tmp_x11(void)
+{
+        p8 held[256];
+        bool sticky = false;
+        bool sockets = false;
+
+        if (system_stat_at(AT_FDCWD, "/tmp", AT_SYMLINK_NOFOLLOW, 0x7ff, held) >= 0)
+        {
+                unsigned mode = (unsigned)(held[28] | held[29] << 8);
+
+                sticky = (mode & 0170000) == 0040000 && (mode & 07777) == 01777;
+        }
+        if (!sticky)
+        {
+                bowl_mkdir("/tmp");
+                bowl_chmod_directory("/tmp", 01777);
+        }
+        /* Where Xwayland, and every X client of any bowl, puts its socket:
+           kwin_wayland_wrapper stops at "/tmp/.X11-unix does not exist". */
+        if (system_access_at(AT_FDCWD, "/tmp/.X11-unix", 0) < 0)
+        {
+                bowl_mkdir_parents_made("/tmp/.X11-unix", BOWL_MAKE_LEAF,
+                                        address_of sockets);
+                if (sockets)
+                        bowl_chmod_directory("/tmp/.X11-unix", 01777);
+        }
+}
+
 static fn bowl_session_prepare_at(string_address home, string_address runtime,
                                   bool user_dirs)
 {
         bool made = false;
-        bool sockets = false;
 
         /* A shell start (no home directories asked for) is the one that may
            ask for what its own start already filled. */
@@ -2695,33 +2741,7 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 if (made && !bowl_runtime_shared(runtime))
                         bowl_chmod_directory(runtime, 0700);
         }
-        {
-                p8 held[256];
-                bool sticky = false;
-
-                if (system_stat_at(AT_FDCWD, "/tmp", AT_SYMLINK_NOFOLLOW,
-                                   0x7ff, held) >= 0)
-                {
-                        unsigned mode = (unsigned)(held[28] | held[29] << 8);
-
-                        sticky = (mode & 0170000) == 0040000 &&
-                                 (mode & 07777) == 01777;
-                }
-                if (!sticky)
-                {
-                        bowl_mkdir("/tmp");
-                        bowl_chmod_directory("/tmp", 01777);
-                }
-        }
-        /* Where Xwayland, and every X client of any bowl, puts its socket:
-           kwin_wayland_wrapper stops at "/tmp/.X11-unix does not exist". */
-        if (system_access_at(AT_FDCWD, "/tmp/.X11-unix", 0) < 0)
-        {
-                bowl_mkdir_parents_made("/tmp/.X11-unix", BOWL_MAKE_LEAF,
-                                        address_of sockets);
-                if (sockets)
-                        bowl_chmod_directory("/tmp/.X11-unix", 01777);
-        }
+        bowl_ensure_tmp_x11();
         /*  The rest is the machine's and not a session's: /run/lock and
             /var, the two links and the three identity files are there or
             not for every shell after the first, until the machine is
@@ -3291,8 +3311,9 @@ static fn bowl_user_store_prepare(void)
             {BOWL_ACCOUNTS_DIRECTORY, true},
             {BOWL_HOST_BIN, false}, {BOWL_HOST_SBIN, false},
             {BOWL_HOST_ETC, false},
-            {"/lib", false}, {"/lib64", false}, {"/opt", false},
-            {"/nix", false}, {"/usr/lib", false}, {"/usr/lib64", false},
+            {"/lib", false}, {"/lib32", false}, {"/lib64", false},
+            {"/opt", false}, {"/nix", false}, {"/usr/lib", false},
+            {"/usr/lib32", false}, {"/usr/lib64", false},
             {"/usr/share", false}, {"/usr/share/terminfo", false},
             {"/usr/libexec", false}, {"/usr/local/lib", false},
             {"/usr/local/share", false}, {"/usr/local/bin", false},
@@ -3300,6 +3321,7 @@ static fn bowl_user_store_prepare(void)
         };
 
         bowl_quiet = true;
+        bowl_ensure_tmp_x11();
         for (positive at = 0; at < array_count(made); at++)
         {
                 /*  A /run/user/<uid> a root-run bowl left as a symlink to
@@ -8281,7 +8303,8 @@ static string_address bowl_graphics_debian[] = {
     "libasound2t64", "libpulse0", "fontconfig", "fonts-dejavu-core", null};
 static string_address bowl_graphics_arch[] = {
     "mesa", "libglvnd", "vulkan-icd-loader", "vulkan-radeon", "vulkan-intel",
-    "vulkan-swrast", "alsa-lib", "libpulse", "fontconfig", "ttf-dejavu", null};
+    "vulkan-virtio", "vulkan-swrast", "alsa-lib", "libpulse", "fontconfig",
+    "ttf-dejavu", null};
 static string_address bowl_graphics_fedora[] = {
     "mesa-libEGL", "mesa-libGL", "mesa-libGLES", "mesa-libgbm",
     "mesa-dri-drivers", "mesa-vulkan-drivers", "vulkan-loader", "alsa-lib",
@@ -8437,12 +8460,13 @@ static string_address bowl_chrome_names[] = {
 static string_address bowl_steam_arch[] = {
     // Steam itself; its dependencies are pacman's.
     "steam",
-    // The GPU: Mesa's GL and the Vulkan loader, with the Radeon, Intel and
-    // software Vulkan drivers, in 64 and 32 bits.
+    // The GPU: Mesa's GL and the Vulkan loader, with the Radeon, Intel, VirtIO
+    // and software Vulkan drivers, in 64 and 32 bits.
     "mesa", "lib32-mesa", "libglvnd", "lib32-libglvnd",
     "vulkan-icd-loader", "lib32-vulkan-icd-loader", "vulkan-radeon",
     "lib32-vulkan-radeon", "vulkan-intel", "lib32-vulkan-intel",
-    "vulkan-swrast",
+    "vulkan-virtio", "lib32-vulkan-virtio", "vulkan-swrast",
+    "lib32-vulkan-swrast",
     // Sound: the PulseAudio client and ALSA's plugin for it, to Moonwater's
     // sound server, in 64 and 32 bits.
     "libpulse", "lib32-libpulse", "alsa-lib", "alsa-plugins",
@@ -8461,7 +8485,7 @@ static string_address bowl_steam_arch[] = {
 static string_address bowl_steam_expose[] = {null};
 
 #if X64
-#define BOWL_STEAM_ARCH_BYTES ((p64)1250 * 1024 * 1024)
+#define BOWL_STEAM_ARCH_BYTES ((p64)1300 * 1024 * 1024)
 #else
 #define BOWL_STEAM_ARCH_BYTES 0
 #endif
@@ -8664,6 +8688,9 @@ static string_address bowl_steam_session[] = {
     "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
     "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node\" ] || continue; "
+    "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",
+    "[ \"$gl\" = card ] || export LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-1} GSK_RENDERER=${GSK_RENDERER:-cairo}",
     // Rootless, through the wrapper, when Canvas listens for a window manager of Xwayland: Steam runs under it, so the X server
     // ends with Steam. Status 125 is that the server could not be started, and the rootful one below is the fallback.
     "if [ -S " BOWL_STEAM_WM " ]; then",

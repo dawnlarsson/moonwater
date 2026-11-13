@@ -99417,8 +99417,13 @@ static fn steam_profile(void)
         check("The steam profile has the 32-bit Mesa, sound and Vulkan loader packages Steam loads by name",
               chrome_has(part ? part->packages : null, "lib32-mesa") &&
                   chrome_has(part ? part->packages : null, "lib32-vulkan-radeon") &&
+                  chrome_has(part ? part->packages : null, "lib32-vulkan-virtio") &&
+                  chrome_has(part ? part->packages : null, "lib32-vulkan-swrast") &&
                   chrome_has(part ? part->packages : null, "lib32-libpulse") &&
                   chrome_has(part ? part->packages : null, "lib32-vulkan-icd-loader"));
+        check("The steam profile has VirtIO Vulkan drivers alongside Radeon, Intel and software drivers",
+              chrome_has(part ? part->packages : null, "vulkan-virtio") &&
+                  chrome_has(bowl_graphics_arch, "vulkan-virtio"));
         check("The steam profile has Xwayland, which the session starts beside Steam, and bubblewrap for the Steam Runtime",
               chrome_has(part ? part->packages : null, "xorg-xwayland") &&
                   chrome_has(part ? part->packages : null, "bubblewrap"));
@@ -99440,6 +99445,8 @@ static fn steam_profile(void)
         positive wm_socket = chrome_line(steam ? steam->session : null, "-S /run/moonwater/xwm/wm-0");
         positive wrapped = chrome_line(steam ? steam->session : null, "/usr/local/bin/xwayland-moonwater /usr/bin/steam \"$@\"");
         positive fallback = chrome_line(steam ? steam->session : null, "-ne 125");
+        positive gl_probe = chrome_line(steam ? steam->session : null, "gl=software; for node in /sys/class/drm/renderD*;");
+        positive sw_export = chrome_line(steam ? steam->session : null, "export LIBGL_ALWAYS_SOFTWARE=");
         check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
               socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
         check("The session names the socket as an absolute path, and marks the launch as the person's",
@@ -99469,6 +99476,41 @@ static fn steam_profile(void)
         check("The session gives Steam no flags of its own (its CEF sandbox runs on the bowl's user namespaces)",
               run && !strstr(steam->session[run - 1], "--no-sandbox") &&
                   !strstr(steam->session[run - 1], "-no-cef-sandbox"));
+        check("The session probes the DRM render node and falls back to software GL/GSK only when no card or virgl is present",
+              gl_probe && sw_export && gl_probe < sw_export && sw_export < wrapped &&
+                  strstr(steam->session[sw_export - 1], "GSK_RENDERER=${GSK_RENDERER:-cairo}"));
+        {
+                p8 arch_root[256];
+                p8 debian_root[256];
+                p8 bare_root[256];
+                p8 source[BOWL_PATH_LIMIT];
+                p8 want[BOWL_PATH_LIMIT];
+
+                unpack_path(arch_root, "lib32arch", "");
+                unpack_path(debian_root, "lib32deb", "");
+                unpack_path(bare_root, "lib32bare", "");
+                unpack_directory(arch_root, "/usr/lib32");
+                unpack_directory(debian_root, "/lib32");
+                unpack_directory(debian_root, "/usr/lib32");
+                unpack_directory(bare_root, "/usr/lib");
+
+                p8 deb_source[BOWL_PATH_LIMIT];
+                p8 expected_arch[BOWL_PATH_LIMIT];
+                p8 expected_deb[BOWL_PATH_LIMIT];
+                bipolar arch_hit = bowl_fast_layer_source(arch_root, "/lib32", source, sizeof(source));
+                bipolar deb_hit = bowl_fast_layer_source(debian_root, "/lib32", deb_source, sizeof(deb_source));
+                bipolar bare_hit = bowl_fast_layer_source(bare_root, "/lib32", want, sizeof(want));
+
+                unpack_path(expected_arch, "lib32arch", "/usr/lib32");
+                unpack_path(expected_deb, "lib32deb", "/lib32");
+                check("An Arch-layout bowl resolves fast-view /lib32 to <root>/usr/lib32 while a tree with /lib32 keeps it",
+                      arch_hit == 1 && string_equals(source, expected_arch) &&
+                          deb_hit == 1 && string_equals(deb_source, expected_deb) &&
+                          bare_hit == 0 && bowl_session_host_path("/lib32/ld-linux.so.2"));
+                bowl_forget_path(arch_root);
+                bowl_forget_path(debian_root);
+                bowl_forget_path(bare_root);
+        }
         {
                 positive session_bytes = 0;
                 const char address_to script = bowl_xwayland_script;
@@ -187311,18 +187353,46 @@ static void test_dmabuf(void)
         }
         wlc_end(c);
 
-        /* the host that takes none: the global is not offered, and is when it takes some again, with the feedback sent again */
+        /* the host that takes none: the global is not offered, is announced to open clients when it appears, and removed when it goes */
         fake.dmabuf_off = 1;
         wayland_dmabuf_changed();
         session_open(&other);
         c = other.c;
         {
                 long listed = 0;
+                unsigned long dmabuf_name = 0;
+                long remove_at;
 
                 for (long at = 0; at < c->events; at++)
                         listed += c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
                                   !strcmp(c->ev[at].text[1], "zwp_linux_dmabuf_v1");
                 WLCHECK(listed == 0 && other.dmabuf == 0, "a host that takes no dma-bufs has no global for them");
+
+                wlc_forget(c);
+                fake.dmabuf_off = 0;
+                wayland_dmabuf_changed();
+                wlc_pump(c);
+                for (long at = 0; at < c->events; at++)
+                        if (c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
+                            !strcmp(c->ev[at].text[1], "zwp_linux_dmabuf_v1"))
+                                dmabuf_name = c->ev[at].u[0];
+                other.dmabuf = wl_global(c, other.registry, WLI_zwp_linux_dmabuf_v1, 4);
+                feedback = wlc_id(c, WLI_zwp_linux_dmabuf_feedback_v1, 4);
+                wlc_forget(c);
+                wlc_send(c, other.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_default_feedback, feedback);
+                wlc_pump(c);
+                WLCHECK(dmabuf_name != 0 && other.dmabuf != 0 && c->errors == 0 &&
+                            wlc_count(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_done) == 1,
+                        "an open client is offered zwp_linux_dmabuf_v1 when a render node appears (%s)", c->error_text);
+
+                wlc_forget(c);
+                fake.dmabuf_off = 1;
+                wayland_dmabuf_changed();
+                wlc_pump(c);
+                remove_at = event_at(c, WLI_wl_registry, WLE_wl_registry_global_remove, 0);
+                WLCHECK(wlc_count(c, WLI_wl_registry, WLE_wl_registry_global_remove) == 1 && remove_at >= 0 &&
+                            c->ev[remove_at].u[0] == dmabuf_name,
+                        "and zwp_linux_dmabuf_v1 is removed when the host no longer takes dma-bufs");
         }
         wlc_end(c);
         fake.dmabuf_off = 0;
@@ -190665,6 +190735,9 @@ static void db_test_portal(void)
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.FileChooser", "version");
         DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
                 "the FileChooser answers its version, 1, which is below what a browser needs to use it (the reason is in dbus.c)");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.host.portal.Registry", "version");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
+                "the host Registry portal answers version 1");
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.FileChooser", "OpenFile", "", 0, 0);
         DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod"), "and its methods are not there");
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "Write", "", 0, 0);
@@ -190684,12 +190757,14 @@ static void db_test_portal(void)
         }
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
         {
-                int found = 0;
+                int found = 0, found_registry = 0;
 
                 DBCHECK(db_find(a, &s, DBUS_RETURN, 0), "Introspect answers");
                 for (long at = 0; at + 31 < s.size; at++)
                         found |= !memcmp(s.bytes + at, "org.freedesktop.portal.Settings", 31);
-                DBCHECK(found, "and names the Settings interface");
+                for (long at = 0; at + 36 < s.size; at++)
+                        found_registry |= !memcmp(s.bytes + at, "org.freedesktop.host.portal.Registry", 36);
+                DBCHECK(found && found_registry, "and names the Settings and Registry interfaces");
         }
 
         // a change is told to those who listen for it, once

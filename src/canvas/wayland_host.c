@@ -98,7 +98,7 @@ static struct
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
         positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
-        unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
+        unsigned long render;           // the render node clients allocate on (a dev_t), 0 when there is none
         positive slow_until[WAYLAND_CLIENTS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
         struct
@@ -1607,6 +1607,21 @@ static char *compositor_wl_text(char *at, const char *text)
         return at;
 }
 
+// Lets clients in the render group (105, matching src/bowl.c's BOWL_GROUP_RENDER) open the render node for Vulkan and EGL.
+#define COMPOSITOR_WL_RENDER_GID 105
+
+static unsigned long compositor_wl_render_probe(const char *path)
+{
+        unsigned long device = compositor_wl_node(path);
+
+        if (device && device != compositor_wl.render)
+        {
+                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, COMPOSITOR_WL_RENDER_GID, 0, 0);
+                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)path, 0660, 0, 0, 0);
+        }
+        return device;
+}
+
 /*
         The render node that goes with the card: the node next to it in sysfs (its device's drm directory holds both), else the first
         render node the machine has. 0 when there is none.
@@ -1636,7 +1651,7 @@ static unsigned long compositor_wl_render_node(void)
                                 tail = compositor_wl_text(path, "/dev/dri/renderD");
                                 tail = compositor_wl_decimal(tail, number);
                                 *tail = 0;
-                                device = compositor_wl_node(path);
+                                device = compositor_wl_render_probe(path);
                                 if (device)
                                         return device;
                         }
@@ -1646,7 +1661,7 @@ static unsigned long compositor_wl_render_node(void)
                 tail = compositor_wl_text(path, "/dev/dri/renderD");
                 tail = compositor_wl_decimal(tail, number);
                 *tail = 0;
-                device = compositor_wl_node(path);
+                device = compositor_wl_render_probe(path);
                 if (device)
                         return device;
         }
@@ -1656,13 +1671,8 @@ static unsigned long compositor_wl_render_node(void)
 static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
 {
         (void)context;
+        compositor_wl.render = compositor_wl_render_node();
         if (!compositor_wl.render)
-        {
-                unsigned long found = compositor_wl_render_node();
-
-                compositor_wl.render = found ? found : 1;
-        }
-        if (compositor_wl.render == 1)
                 return 0;
         info->device = compositor_wl.render;
         info->count = 2;
@@ -1678,6 +1688,18 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
         info->tranche[0].index[0] = 0;
         info->tranche[0].index[1] = 1;
         return 1;
+}
+
+// Re-probes the render node after startup (a GPU that probed late or a drm uevent); tells the Wayland shim if it changed.
+static void compositor_wl_dmabuf_refresh(void)
+{
+        unsigned long was;
+
+        if (!compositor_wl.started)
+                return;
+        was = compositor_wl.render;
+        if (compositor_wl_render_node() != was)
+                wayland_dmabuf_changed();
 }
 
 // The table the feedback names the pairs by: a sealed file of entries of a format, four bytes of padding and a modifier.

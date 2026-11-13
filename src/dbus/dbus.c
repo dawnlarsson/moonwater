@@ -1750,6 +1750,10 @@ static const char dbus_introspect_portal[] =
     "<method name=\"ReadOne\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"v\" direction=\"out\"/></method>\n"
     "<signal name=\"SettingChanged\"><arg type=\"s\"/><arg type=\"s\"/><arg type=\"v\"/></signal>\n"
     "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
+    "</interface>\n"
+    "<interface name=\"org.freedesktop.host.portal.Registry\">\n"
+    "<method name=\"Register\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/></method>\n"
+    "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
     "</interface>\n</node>\n";
 
 // The variant of a setting: its signature and its value.
@@ -1883,7 +1887,9 @@ static struct
 {
         char name[56];
         unsigned char version;
-} dbus_interfaces[8] = {{"org.freedesktop.portal.Settings", 2}, {"org.freedesktop.portal.FileChooser", 1}};
+} dbus_interfaces[8] = {{"org.freedesktop.portal.Settings", 2},
+                        {"org.freedesktop.portal.FileChooser", 1},
+                        {"org.freedesktop.host.portal.Registry", 1}};
 
 static long dbus_interface_version(const char *name)
 {

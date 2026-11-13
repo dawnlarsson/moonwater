@@ -1204,6 +1204,11 @@ static void compositor_xwm_start(void)
                 address[2 + length] = (unsigned char)COMPOSITOR_XWM_PATH[length];
                 length++;
         }
+        // Pre-create /tmp/.X11-unix under the compositor's identity (root on default Moonwater) so Xwayland does not warn about user ownership.
+        if (compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)"/tmp", 01777, 0, 0, 0) >= 0)
+                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)"/tmp", 01777, 0, 0, 0);
+        if (compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)"/tmp/.X11-unix", 01777, 0, 0, 0) >= 0)
+                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)"/tmp/.X11-unix", 01777, 0, 0, 0);
         // The directory is private to the session's user, and an old socket at the path is taken away (a compositor that died left it).
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_DIR, 0700, 0, 0, 0);
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_DIR, 0700, 0, 0, 0);

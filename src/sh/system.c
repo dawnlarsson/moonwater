@@ -292,6 +292,44 @@ static COLD fn system_input_group(void)
 #endif
 
 /*
+        /dev/dri/renderD* in the render group (105, matching src/bowl.c's
+        BOWL_GROUP_RENDER), 0660 root:105, and /tmp/.X11-unix owned by root
+        at 01777. devtmpfs leaves DRM render nodes 0600 root:root before any
+        bowl or udev runs, and an unprivileged bowl session dropping to uid
+        1000 would otherwise either lack permission for Vulkan/EGL or make
+        /tmp/.X11-unix owned by user instead of root.
+*/
+#ifndef SHELL_NO_CANVAS
+#define SYSTEM_RENDER_GID 105
+
+static COLD fn system_render_group(void)
+{
+        p8 path[32];
+
+        for (positive number = 128; number < 192; number++)
+        {
+                positive at = sizeof("/dev/dri/renderD") - 1;
+
+                memory_copy(path, "/dev/dri/renderD", at);
+                at += positive_into_string(path + at, number);
+                path[at] = end;
+                if (system_access_at(AT_FDCWD, path, 0) < 0)
+                        continue;
+                system_change_owner_at(AT_FDCWD, path, 0, SYSTEM_RENDER_GID, 0);
+                system_change_mode_at(AT_FDCWD, path, 0660);
+        }
+}
+
+static COLD fn system_x11_directory(void)
+{
+        if (system_make_directory_at(AT_FDCWD, "/tmp", 01777) >= 0)
+                system_change_mode_at(AT_FDCWD, "/tmp", 01777);
+        if (system_make_directory_at(AT_FDCWD, "/tmp/.X11-unix", 01777) >= 0)
+                system_change_mode_at(AT_FDCWD, "/tmp/.X11-unix", 01777);
+}
+#endif
+
+/*
         The names a program opens by habit for the descriptors it holds:
         /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
         not make and a machine with a udev has made for it. Bash's process
@@ -488,6 +526,10 @@ static DEAD_END b32 system_init()
         link_dev_fd();
 #ifndef SHELL_NO_INPUT_GROUP
         system_input_group();
+#endif
+#ifndef SHELL_NO_CANVAS
+        system_render_group();
+        system_x11_directory();
 #endif
 
         bipolar settling = start_service((string_address)settle_program,

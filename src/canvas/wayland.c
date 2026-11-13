@@ -5743,20 +5743,54 @@ none:
         info->count = 0;
 }
 
+static void wayland_global_remove_send(struct wayland_client *c, unsigned long registry, long name)
+{
+        struct wayland_event e = wayland_begin(c, registry, WLE_wl_registry_global_remove);
+
+        wayland_word(&e, (unsigned long)name);
+        wayland_end(&e);
+}
+
+static long wayland_dmabuf_global_name(void)
+{
+        for (long at = 0; at < WAYLAND_GLOBAL_COUNT; at++)
+                if (wayland_globals[at].iface == WLI_zwp_linux_dmabuf_v1)
+                        return at + 1;
+        return 0;
+}
+
 /*
-        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again and
-        every feedback object of every client is sent it again. A client that bound at version 3 keeps what it was told.
+        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again,
+        zwp_linux_dmabuf_v1 is advertised or withdrawn on open registries if its availability flipped, and every feedback
+        object of every client is sent it again. A client that bound at version 3 keeps what it was told.
 */
 WAYLAND_API void wayland_dmabuf_changed(void)
 {
+        int was_offered, offered;
+        long dmabuf_name;
+
         if (!wayland.host)
                 return;
+        was_offered = wayland.dmabuf.count > 0;
         wayland_dmabuf_load();
+        offered = wayland.dmabuf.count > 0;
+        dmabuf_name = offered != was_offered ? wayland_dmabuf_global_name() : 0;
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                for (long at = 0; c && wayland.dmabuf.count > 0 && at < c->feedbacks; at++)
+                if (!c)
+                        continue;
+                if (dmabuf_name)
+                        for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                                if (c->objects[at].iface == WLI_wl_registry)
+                                {
+                                        if (offered)
+                                                wayland_global_send(c, c->objects[at].id, dmabuf_name);
+                                        else
+                                                wayland_global_remove_send(c, c->objects[at].id, dmabuf_name);
+                                }
+                for (long at = 0; offered && at < c->feedbacks; at++)
                 {
                         long object = wayland_slot_of(c, c->feedback_id[at]);
 
@@ -7500,12 +7534,7 @@ WAYLAND_API void wayland_screens_changed(void)
                                 for (long screen = was; screen < wayland.screens; screen++)
                                         wayland_global_send(c, c->objects[at].id, wayland_output_name(screen));
                                 for (long screen = wayland.screens; screen < was; screen++)
-                                {
-                                        struct wayland_event e = wayland_begin(c, c->objects[at].id, WLE_wl_registry_global_remove);
-
-                                        wayland_word(&e, (unsigned long)wayland_output_name(screen));
-                                        wayland_end(&e);
-                                }
+                                        wayland_global_remove_send(c, c->objects[at].id, wayland_output_name(screen));
                         }
                 for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
                         if (c->objects[at].iface == WLI_zxdg_output_v1)

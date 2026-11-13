@@ -7149,6 +7149,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
+static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 #endif
 
 static void compositor_flip_done(void)
@@ -9172,6 +9173,9 @@ static void compositor_gpu_late_tick(positive now)
         compositor_gpu_state.dead = 0;
         if (compositor_gpu_up())
                 compositor_gpu_lists_sync();
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_dmabuf_refresh();
+#endif
 }
 
 /*
@@ -20659,7 +20663,12 @@ static void compositor_uevents_read(void)
                 drm |= compositor_uevent_drm(message, got);
         }
         if (drm)
+        {
                 compositor_space_retake();
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_dmabuf_refresh();
+#endif
+        }
 }
 
 /*
