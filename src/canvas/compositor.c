@@ -7115,6 +7115,19 @@ static positive compositor_flip_wait(positive now)
         return compositor.flip_pending && now < last ? last : 0;
 }
 
+/*
+        A flip whose event never comes is taken as landed. The wait above ends after four periods, but the flip stayed pending for good: a present that
+        finds one pending draws nothing, and a retake of the screens waits for it too, so one event the card lost (the driver's "flip_done timed out")
+        was a screen that took input and drew nothing until the session ended. Past a second, sixty periods of a 60 Hz screen, no flip is still coming:
+        it is let go of as its event would have let go of it, and the whole space is drawn again. A card that had not finished refuses the next flip,
+        which is tried again a second on.
+*/
+#define COMPOSITOR_FLIP_LOST 1000000000ull
+static int compositor_flip_lost(positive now)
+{
+        return compositor.flip_pending && now >= compositor.flip_issued && now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST;
+}
+
 // The card's events, read when its descriptor is readable: a flip's completion is the one asked for.
 static void compositor_card_read(void)
 {
@@ -21255,6 +21268,11 @@ static b32 compositor_main()
                         }
                 }
 #endif
+                if (compositor.flip_pending && compositor_flip_lost(clock_monotonic_nanoseconds()))
+                {
+                        compositor_flip_done();
+                        compositor_damage_space();
+                }
                 if (compositor.damages)
                 {
                         positive frame, waiting;

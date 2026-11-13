@@ -232542,8 +232542,13 @@ static void flip_wait_rows(void)
         check("flip: a flip in flight is waited for, to a deadline of four periods", compositor_flip_wait(1000000000ull + 16666666ull) == 1000000000ull + 4 * 16666666ull);
         check("flip: the wait holds until its deadline", compositor_flip_wait(1000000000ull + 4 * 16666666ull - 1) == 1000000000ull + 4 * 16666666ull);
         check("flip: past the deadline it is no wait (an event that never comes)", compositor_flip_wait(1000000000ull + 4 * 16666666ull) == 0);
+        check("flip: a flip is not lost while its wait runs, or a moment short of a second", !compositor_flip_lost(1000000000ull + 4 * 16666666ull) &&
+              !compositor_flip_lost(1000000000ull + COMPOSITOR_FLIP_LOST - 1));
+        check("flip: a second on with no event it is lost, and is let go of", compositor_flip_lost(1000000000ull + COMPOSITOR_FLIP_LOST) == 1);
+        check("flip: a clock read before the flip was asked loses nothing", !compositor_flip_lost(999999999ull));
         compositor.flip_pending = 0;
         check("flip: no flip in flight, no wait", compositor_flip_wait(1000000000ull + 1) == 0);
+        check("flip: and none to lose", !compositor_flip_lost(1000000000ull + 2 * COMPOSITOR_FLIP_LOST));
         compositor.period = 0, compositor.flip_pending = 1;
         check("flip: before a screen has said its period the frame is a 60th of a second", compositor_flip_wait(1000000000ull + 1) == 1000000000ull + 4 * 16666667ull);
         compositor.period = period, compositor.flip_issued = issued, compositor.flip_pending = pending;
