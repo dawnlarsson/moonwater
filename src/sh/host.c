@@ -23975,6 +23975,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (table->gpu_map_why & 255) == 6 ? (string_address) "udmabuf would not make the pages a dma-buf" :
                          (table->gpu_map_why & 255) == 7 ? (string_address) "the render node would not import the dma-buf" :
                          (table->gpu_map_why & 255) == 9 ? (string_address) "it would let go of a map the card reads in this present (the picture is the processor's)" :
+                         (table->gpu_map_why & 255) == 10 ? (string_address) "it would let go of a map while a job given up on may still read it" :
                                                            (string_address) "the card would not map the dma-buf",
                          (positive)(table->gpu_map_why >> 8));
         //      The metrics: the presents' time on the card and on the processor (the mean and the worst of the last 128 each, microseconds), the maps,

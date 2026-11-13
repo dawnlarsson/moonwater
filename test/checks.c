@@ -124088,6 +124088,112 @@ static unsigned int gpu_fake_vm_status, gpu_fake_vm_hub;
                 else if (gpu_fake_vm < 0)                                                                                                                              \
                         (error) = 22;                                                                                                                                  \
         } while (0)
+/*
+        The fake kernel's DRM under gpu.c (GPU_CONTROL), for two descriptors the rows make up: GPU_KERNEL_FD the render node and GPU_KERNEL_CARD the display's
+        node. It answers as drm_prime.c and drm_gem.c do where the rows turn on it: a dma-buf imported a second time is answered with the handle it has, and
+        nothing is counted (drm_gem_prime_fd_to_handle); one GEM_CLOSE lets the handle and its map go, and a handle that is not there is EINVAL
+        (drm_gem_handle_delete); a map of a handle that is not there is ENOENT; GET_UNIQUE copies the name with no 0 after it, writes its length back, and is
+        refused on a render node (EACCES: the request has no DRM_RENDER_ALLOW). A dma-buf's descriptor is GPU_KERNEL_DMABUF and its buffer's number, a
+        number no row has open. Every other descriptor's request is made as it always is, but for the context a fake card with no descriptor is asked for
+        (gpu_fake_card: the kernel makes one, as it does on a card).
+*/
+#define GPU_KERNEL_FD 1000
+#define GPU_KERNEL_CARD 1001
+#define GPU_KERNEL_DMABUF 2000
+static struct
+{
+        int on, no_context;           // answering; a context is refused (ENODEV: a device that is gone)
+        unsigned int buffer[16];      // a handle's buffer and 1 (the handle is the index), 0 for a handle that is free
+        unsigned int mapped[16];      // the maps the handle's buffer has in the address space
+        positive va[16];              // the last of them
+        unsigned int closes, refused; // the handles closed, and the closes of a handle that was not there
+        unsigned int contexts;
+        char unique[40];              // the display node's bus as GET_UNIQUE says it
+        unsigned int unique_length;
+} gpu_kernel;
+
+static unsigned int gpu_kernel_live(void)
+{
+        unsigned int live = 0;
+
+        for (unsigned int h = 1; h < 16; h++)
+                live += gpu_kernel.buffer[h] != 0;
+        return live;
+}
+
+// The handle the render node has for a buffer, 0 for none.
+static unsigned int gpu_kernel_handle(unsigned int buffer)
+{
+        for (unsigned int h = 1; h < 16; h++)
+                if (gpu_kernel.buffer[h] == buffer + 1)
+                        return h;
+        return 0;
+}
+
+static long gpu_kernel_control(int fd, unsigned int request, void *a)
+{
+        unsigned int *words = (unsigned int *)a;
+        p64 *longs = (p64 *)a;
+
+        if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD))
+        {
+                if (gpu_fake_card && fd < 0 && request == 0xc0106442u && !gpu_kernel.no_context) // DRM_IOCTL_AMDGPU_CTX
+                        return words[0] == 1 ? (words[0] = 2 + ++gpu_kernel.contexts, 0) : 0;
+                return system_control(fd, request, a);
+        }
+        switch (request)
+        {
+        case 0xc00c642du: // DRM_IOCTL_PRIME_HANDLE_TO_FD: the display node's handle is the buffer's number
+                words[2] = GPU_KERNEL_DMABUF + words[0];
+                return 0;
+        case 0xc00c642eu: // DRM_IOCTL_PRIME_FD_TO_HANDLE
+        {
+                unsigned int buffer = words[2] - GPU_KERNEL_DMABUF, h = gpu_kernel_handle(buffer);
+
+                for (unsigned int free = 1; !h && free < 16; free++)
+                        if (!gpu_kernel.buffer[free])
+                                h = free, gpu_kernel.buffer[h] = buffer + 1, gpu_kernel.mapped[h] = 0;
+                if (!h)
+                        return -12;
+                words[0] = h;
+                return 0;
+        }
+        case 0x40086409u: // DRM_IOCTL_GEM_CLOSE
+                if (words[0] == 0 || words[0] >= 16 || !gpu_kernel.buffer[words[0]])
+                        return gpu_kernel.refused++, -22;
+                gpu_kernel.buffer[words[0]] = 0, gpu_kernel.mapped[words[0]] = 0, gpu_kernel.closes++;
+                return 0;
+        case 0x40406448u: // DRM_IOCTL_AMDGPU_GEM_VA: the handle, the operation (1 map, 2 unmap), the address
+        {
+                unsigned int h = (unsigned int)longs[0], op = (unsigned int)longs[1];
+
+                if (h == 0 || h >= 16 || !gpu_kernel.buffer[h])
+                        return -2;
+                if (op == 1)
+                        gpu_kernel.mapped[h]++, gpu_kernel.va[h] = longs[2];
+                else if (!gpu_kernel.mapped[h])
+                        return -2;
+                else
+                        gpu_kernel.mapped[h]--;
+                return 0;
+        }
+        case 0xc0106442u: // DRM_IOCTL_AMDGPU_CTX: 1 a context made, 2 one freed
+                if (gpu_kernel.no_context)
+                        return -19;
+                if (words[0] == 1)
+                        words[0] = 2 + ++gpu_kernel.contexts;
+                return 0;
+        case 0xc0106401u: // DRM_IOCTL_GET_UNIQUE
+                if (fd == GPU_KERNEL_FD)
+                        return -13;
+                if (longs[0] >= gpu_kernel.unique_length)
+                        memory_copy((void *)longs[1], gpu_kernel.unique, gpu_kernel.unique_length);
+                longs[0] = gpu_kernel.unique_length;
+                return 0;
+        }
+        return -22;
+}
+#define GPU_CONTROL(fd, request, a) gpu_kernel_control((int)(fd), (unsigned int)(request), (void *)(a))
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -231110,7 +231216,7 @@ int main(int argc, char **argv)
         The GPU's four operations against the CPU's own routines (memory_copy, memory_fill_u32_rect, memory_over_tone_u32,
         memory_glass_over_u32), pixel for pixel over a whole screen, on a window of an odd width at an odd place, with
         random pixels of every alpha; then each operation timed on a window of a real size against the same routine.
-        Needs an amdgpu render node; without one it says so and passes.
+        Needs an amdgpu render node; without one it says NOT RUN, and nothing of it has passed.
 */
 #define SHARED_counted
 #include "checks.c"
@@ -231156,8 +231262,9 @@ b32 main(void)
 
         if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH + (positive)7680 * 4320) * 4 + (33 << 20)))
         {
-                check("gpu: the card passes the self-test", !gpu.broken);
-                string_format(log, "gpu: no amdgpu render node, skipped\n");
+                check("gpu: a card that is there passes the self-test", !gpu.broken);
+                string_format(log, "gpu: the card's four operations against the processor's NOT RUN -- no card starts here: step %p of the prerequisites failed (error %p)\n",
+                              (positive)gpu_req.first, (positive)gpu_req.error);
                 return test_report(null);
         }
         src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
@@ -231343,8 +231450,9 @@ b32 main(void)
 /*
         The kit's anti-aliased box on the GPU against ui_kit_fill, the painter it replaces: rounds of random boxes laid in order
         over a random picture, in 256ths, off every edge, thin as a hair, wider than tall, with radii past the half (CSS
-        scales them), none at all, no area, and every alpha, the whole picture compared after each round. Needs an amdgpu
-        render node; without one it says so and passes.
+        scales them), none at all, no area, and every alpha, the whole picture compared after each round. Those rows need
+        an amdgpu render node: without one they are said NOT RUN, and so are the prerequisites' steps a machine with no card
+        cannot reach. The rows before them need none (the fake card, fence, log and kernel under gpu.c): they run anywhere.
 */
 static unsigned int gpu_seed = 88172645u;
 static unsigned int gpu_random(void)
@@ -232832,6 +232940,136 @@ static void gpu_flight_rows(void)
         compositor_gpu = saved_gpu, compositor.card = saved_card;
 }
 
+/*
+        The imports, the lost card and the maps of a job still running, against the fake kernel (gpu_kernel: no card). The kernel answers a dma-buf it has
+        imported with the handle that import has and counts nothing, so a handle closed for a buffer the table holds takes the buffer and its map from the
+        holder: the rows ask the kernel whether the handle is still there and mapped after each way a held buffer is asked for again.
+*/
+static void gpu_import_rows(void)
+{
+        unsigned char kept_gpu[sizeof(gpu)], kept_req[sizeof(gpu_req)], kept_state[sizeof(compositor_gpu_state)];
+        positive kept_bytes = gpu_bytes, kept_next = gpu_map_next, first, again, other, big;
+        unsigned int kept_tick = gpu_tick, kept_at = gpu_gone_at, kept_recovered = gpu_recovered, kept_count = gpu_map_count, kept_why = gpu_map_why, h, before;
+        b32 kept_lost = gpu_lost, kept_off = gpu_userptr_off, kept_gone = gpu_userptr_gone;
+        int kept_on = compositor_gpu;
+        char bus[32];
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_req, &gpu_req, sizeof(gpu_req)), memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state));
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        gpu_kernel.on = 1;
+        gpu.fd = GPU_KERNEL_FD, gpu.at = 0, gpu.size = 0, gpu.broken = 0, gpu.pending = 0, gpu.imports = 0, gpu.ctx = 1;
+        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_errno = 0, gpu_tick = 100, gpu_map_count = 0, gpu_gone_at = 0, gpu_map_next = GPU_VA_MAPS, gpu_lost = 0;
+
+        // 1. A client's dma-buf imported: one handle, mapped once, at the address answered.
+        first = gpu_import_fd(GPU_KERNEL_DMABUF + 1, 8192);
+        h = gpu_kernel_handle(1);
+        check("gpu import: a client's dma-buf is imported: one handle of the kernel's, mapped at the address answered",
+              first != 0 && gpu.imports == 1 && h != 0 && gpu.imported[0] == h && gpu_kernel.mapped[h] == 1 && gpu_kernel.va[h] == first);
+
+        // 2. Released and asked for again before the trim has unmapped it (two commits of one buffer inside a present): the kernel answers the handle the
+        // import has. It is held again at its address, and the kernel still has the handle and its map.
+        gpu_release_import(first);
+        again = gpu_import_fd(GPU_KERNEL_DMABUF + 1, 8192);
+        check("gpu import: a released import asked for again is held again at its address", again == first && gpu.imports == 1 && !gpu.imported_dead[0]);
+        check("gpu import: and the kernel still has its handle and its map (the handle the kernel answered is the import's own, not closed)",
+              gpu_kernel_handle(1) == h && gpu_kernel.mapped[h] == 1 && gpu_kernel.closes == 0);
+
+        // 3. The same buffer asked for while it is held (a row's damage copies read it, and the row then shows it in place): held twice, one handle, one map.
+        other = gpu_import_fd(GPU_KERNEL_DMABUF + 1, 8192);
+        check("gpu import: a buffer asked for while it is held is held twice at the one address", other == first && gpu.imports == 1 && gpu.imported_holds[0] == 2);
+        check("gpu import: and the kernel still has its handle and its map", gpu_kernel_handle(1) == h && gpu_kernel.mapped[h] == 1 && gpu_kernel.closes == 0);
+        big = gpu_import_fd(GPU_KERNEL_DMABUF + 1, 1 << 20);
+        check("gpu import: asked for with more bytes than its map has, it is refused and held no more often", big == 0 && gpu.imported_holds[0] == 2 && gpu_kernel.closes == 0);
+
+        // 4. Each holder lets go once: the first leaves it held, the last releases it, and the trim of an idle card unmaps it and closes its handle, once.
+        gpu_release_import(first);
+        gpu_trim();
+        check("gpu import: one of two holders letting go leaves it held and mapped", gpu.imports == 1 && !gpu.imported_dead[0] && gpu_kernel.mapped[h] == 1);
+        gpu_release_import(first);
+        check("gpu import: the last holder letting go releases it", gpu.imports == 1 && gpu.imported_dead[0]);
+        gpu_trim();
+        check("gpu import: and the trim unmaps it and closes its handle, once, and no handle that was not there",
+              gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.closes == 1 && gpu_kernel.refused == 0);
+
+        // 5. A scanout's buffer (the display node's handle 7) asked for twice: one import, and the first let go of leaves the second its map.
+        first = gpu_import(GPU_KERNEL_CARD, 7, 16384);
+        again = gpu_import(GPU_KERNEL_CARD, 7, 16384);
+        h = gpu_kernel_handle(7);
+        check("gpu import: a scanout's buffer asked for twice is one import, held twice", first != 0 && again == first && gpu.imports == 1 && h != 0 && gpu_kernel.mapped[h] == 1);
+        gpu_unimport(first, GPU_GONE_UNIMPORT);
+        check("gpu import: let go of once, it is still the other holder's: the handle and the map are the kernel's still", gpu.imports == 1 && gpu_kernel_handle(7) == h && gpu_kernel.mapped[h] == 1);
+        gpu_unimport(first, GPU_GONE_UNIMPORT);
+        check("gpu import: let go of by the last, it is unmapped and its handle closed", gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
+
+        // 6. The table is eight imports: a ninth buffer is refused, and the handle the kernel made for it is closed (it is not left open with no import to close it).
+        for (unsigned int b = 0; b < 8; b++)
+                gpu_import_fd(GPU_KERNEL_DMABUF + 1 + (int)b, 4096);
+        before = gpu_kernel.closes;
+        check("gpu import: eight buffers are eight imports", gpu.imports == 8 && gpu_kernel_live() == 8);
+        check("gpu import: a ninth is refused, and its handle is closed", gpu_import_fd(GPU_KERNEL_DMABUF + 9, 4096) == 0 && gpu.imports == 8 && gpu_kernel_live() == 8 && gpu_kernel.closes == before + 1);
+        check("gpu import: one of the eight asked for again with the table full is held twice, not refused", gpu_import_fd(GPU_KERNEL_DMABUF + 3, 4096) != 0 && gpu.imports == 8);
+        while (gpu.imports)
+                gpu_unimport(gpu.imported_va[0], GPU_GONE_UNIMPORT);
+        check("gpu import: every import let go of by its holders leaves the kernel no handle", gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
+
+        // 7. A job the wait gave up on, and a map last used more than 120 ticks ago: the trim does not unmap it while that job may run, and does once it has ended.
+        gpu_maps[0].from = 0x10000000ull, gpu_maps[0].to = 0x10004000ull, gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = 0x4000;
+        gpu_maps[0].handle = 9, gpu_maps[0].used = gpu_tick - 200, gpu_maps[0].written = 0, gpu_maps[0].dma = 0, gpu_maps[0].handed = 1, gpu_maps[0].offset = 0;
+        gpu_map_count = 1, gpu_gone_at = 0;
+        gpu.pending = 77, gpu_fake_busy = 1, gpu_fake_idle = 0;
+        gpu_trim();
+        check("gpu trim: a map unused for 120 ticks is not unmapped while a job given up on may still read it", gpu_map_count == 1 && gpu_gone_at == 0 && gpu.pending == 77);
+        // 8. Nor is it let go of for a written map put over it: that map is refused (10).
+        check("gpu map: a written map over a map a job given up on may still read is refused (10), and the map is kept",
+              !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) == 10 && gpu_map_count == 1 && gpu_gone_at == 0);
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        gpu_trim();
+        check("gpu trim: once the job has ended the trim unmaps it, as unused", gpu_map_count == 0 && gpu_gone_at == 1 && gpu_gone[0].why == GPU_GONE_TRIM && gpu.pending == 0);
+
+        // 9. A wait the kernel refuses, with a new context to be had: the job is over, and the jobs after it have a context of their own.
+        gpu.pending = 77, gpu.ctx = 1, gpu_fake_idle = 0, gpu_fake_errno = 1, gpu_lost = 0;
+        check("gpu idle: a wait the kernel refuses ends the job, and the next jobs have a new context", gpu_idle() && gpu.pending == 0 && gpu.ctx != 1 && !gpu_lost);
+        // 10. With no context to be had either (the descriptor answers nothing: the device is gone), the job can never be asked after: the card is lost, and
+        // the compositor starts it again instead of holding its buffer for good. Every node is absent here, so the start finds no card and says so.
+        gpu.pending = 77, gpu.ctx = 1, gpu_kernel.no_context = 1;
+        check("gpu idle: a wait refused with no new context to be had is a lost card, not a job waited on for good", !gpu_idle() && gpu_lost && gpu.pending == 77);
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_until = 0;
+        before = gpu_recovered, gpu_fake_absent = 8;
+        compositor_gpu_lost_check();
+        gpu_fake_absent = 0;
+        check("gpu idle: the lost card is started again (here to no node: given up as no card), and nothing is pending on the old one",
+              gpu_recovered == before + 1 && gpu.pending == 0 && !gpu_lost && compositor_gpu_state.dead && gpu.fd == -1);
+        gpu_kernel.no_context = 0, gpu_fake_errno = 0;
+
+        // 11. The bus of a node. The display node's is GET_UNIQUE's, which ends at the length the kernel writes back (it writes no 0): the bytes the room held
+        // before are not part of it. A render node is refused the request. The name is the device's own, the same as sysfs gives for either node.
+        memory_copy(gpu_kernel.unique, "pci:0000:c5:00.0", 16), gpu_kernel.unique_length = 16;
+        memory_fill(bus, 'x', sizeof(bus));
+        check("gpu bus: the display node's bus ends where the kernel says it does, whatever the room held",
+              gpu_bus_of(GPU_KERNEL_CARD, bus, sizeof(bus)) && string_equals((string_address)bus, (string_address) "0000:c5:00.0"));
+        memory_fill(bus, 'x', sizeof(bus));
+        check("gpu bus: a render node the kernel refuses the request has no bus by it", !gpu_bus_of(GPU_KERNEL_FD, bus, sizeof(bus)) && bus[0] == 0);
+        check("gpu bus: sysfs's link from a node to its device names the same device",
+              gpu_bus_name("../../../0000:c5:00.0", 21, bus, sizeof(bus)) && string_equals((string_address)bus, (string_address) "0000:c5:00.0"));
+        check("gpu bus: a device that is not on PCI is named as it is", gpu_bus_name("../../../fe9b0000.gpu", 21, bus, sizeof(bus)) && string_equals((string_address)bus, (string_address) "fe9b0000.gpu"));
+        check("gpu bus: a name that does not fit, or none, is no bus", !gpu_bus_name("../../../0000:c5:00.0", 21, bus, 8) && bus[0] == 0 && !gpu_bus_name("../", 3, bus, sizeof(bus)) &&
+              !gpu_bus_name("", 0, bus, sizeof(bus)));
+        {
+                char candidate[2][32];
+                unsigned int why = 9;
+
+                gpu_bus_name("../../../0000:04:00.0", 21, candidate[0], sizeof(candidate[0])), gpu_bus_name("../../../0000:c5:00.0", 21, candidate[1], sizeof(candidate[1]));
+                gpu_bus_of(GPU_KERNEL_CARD, bus, sizeof(bus));
+                check("gpu bus: the render node on the display's device is picked by it, the display's bus read from the kernel and the nodes' from sysfs",
+                      gpu_pick(candidate, 2, bus, &why) == 1 && why == 1);
+        }
+
+        gpu_kernel.on = 0, gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_fake_errno = 0, gpu_fake_absent = 0;
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&gpu_req, kept_req, sizeof(gpu_req)), memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));
+        gpu_bytes = kept_bytes, gpu_map_next = kept_next, gpu_tick = kept_tick, gpu_gone_at = kept_at, gpu_recovered = kept_recovered, gpu_map_count = kept_count;
+        gpu_lost = kept_lost, gpu_userptr_off = kept_off, gpu_userptr_gone = kept_gone, gpu_map_why = kept_why, compositor_gpu = kept_on;
+}
+
 static unsigned int gpu_late_buffer[(4 << 20) / 4]; // the fake card's buffer (gpu_late_rows): the ops, the tables and the bins of a 64 by 4 scene
 static unsigned int gpu_late_screen[64 * 4];        // and its scanout
 
@@ -233026,6 +233264,7 @@ b32 main(void)
         gpu_bo_rows();
         gpu_vmfault_rows();
         gpu_flight_rows();
+        gpu_import_rows();
         gpu_late_rows();
         flip_wait_rows();
         close_ask_rows();
@@ -233035,18 +233274,33 @@ b32 main(void)
         struct ui ui;
         positive bad = 0;
 
-        // The prerequisites (gpu.c's gpu_req), with no card to see: the fake fails each step in turn, and the start stops at that step with its error kept,
-        // every step before it passed, and nothing of the card left open (the buffer, the context, the descriptor). The message of each step is there.
+        // The prerequisites (gpu.c's gpu_req): the fake fails each step in turn, and the start stops at that step with its error kept, every step before it
+        // passed, and nothing of the card left open (the buffer, the context, the descriptor). The fake only fails a step: the steps before it are the
+        // machine's own, so a step is asked only where the machine passes every step before it (a start with nothing faked says how far that is). On a
+        // machine with no card that is the node's step alone, and the others are said NOT RUN with the step that stops them. The message of each step is there.
         {
                 // The required steps: a fake that fails one stops the start there.
                 static const enum gpu_req steps[] = {GPU_REQ_NODE, GPU_REQ_DRIVER, GPU_REQ_FAMILY, GPU_REQ_USERPTR, GPU_REQ_CONTEXT, GPU_REQ_RING, GPU_REQ_SELFTEST};
                 static const unsigned int errors[] = {2, 0, 0, 19, 12, 62, 0};
+                unsigned int own_first, own_error;
+                int own_started = gpu_start(1 << 20);
 
+                own_first = gpu_req.first, own_error = gpu_req.error; // the step this machine stops at by itself (0: it has a card that starts)
+                if (own_started)
+                        gpu_stop();
+                check("gpu requirements: a start that stops by itself keeps the step it stopped at, and leaves nothing of the card open",
+                      own_started ? own_first == 0 : own_first != 0 && gpu.fd == -1 && gpu.at == 0);
                 for (unsigned int k = 0; k < sizeof(steps) / sizeof(steps[0]); k++)
                 {
                         unsigned int want = (1u << steps[k]) - 2; // the steps before it, not its own bit (bit 0 is no step)
                         int started;
 
+                        if (own_first && own_first < (unsigned int)steps[k])
+                        {
+                                string_format(log, "gpu requirements: a card failing at %s NOT RUN -- this machine stops before it, at %s (error %p)\n",
+                                              windows_gpu_req_names[steps[k]], windows_gpu_req_names[own_first], (positive)own_error);
+                                continue;
+                        }
                         gpu_fake_step = (int)steps[k], gpu_fake_error = errors[k];
                         started = gpu_start(1 << 20);
                         gpu_fake_step = -1;
@@ -233066,9 +233320,12 @@ b32 main(void)
                         if (openable)
                                 system_close((int)probe);
 
-                        if (!openable)
-                                string_format(log, "gpu requirements: /dev/udmabuf does not open for this user: the PRIME row is not run\n");
-                        for (unsigned int k = 0; k < (openable ? 2u : 1u); k++)
+                        if (own_first)
+                                string_format(log, "gpu requirements: a failed dma-buf step leaving the card up NOT RUN -- no card starts here to be left up (%s, error %p)\n",
+                                              windows_gpu_req_names[own_first], (positive)own_error);
+                        else if (!openable)
+                                string_format(log, "gpu requirements: a failed PRIME step NOT RUN -- /dev/udmabuf does not open for this user\n");
+                        for (unsigned int k = 0; !own_first && k < (openable ? 2u : 1u); k++)
                         {
                                 int started;
 
@@ -233086,8 +233343,11 @@ b32 main(void)
         }
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
-                check("gpu: the card passes the self-test", !gpu.broken);
-                string_format(log, "gpu: no amdgpu render node, skipped\n");
+                // A card that is there and draws the self-test wrong fails here; no card at all is no failure, and no pass either: every row after this one
+                // draws on the card and compares with the processor, and none of them ran.
+                check("gpu: a card that is there passes the self-test", !gpu.broken);
+                string_format(log, "gpu kit: the rows that draw on the card NOT RUN -- no card starts here: %s failed (error %p): %s\n", windows_gpu_req_names[gpu_req.first],
+                              (positive)gpu_req.error, windows_gpu_req_fixes[gpu_req.first]);
                 return test_report(null);
         }
         // What gpu_start's look at each render node stands on: the version call writes back the whole length of the driver's name and puts no 0 after the
