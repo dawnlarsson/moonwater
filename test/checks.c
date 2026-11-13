@@ -185142,11 +185142,133 @@ static void test_versions(void)
         wayland_stop();
 }
 
+/*
+        The budget of copies is a window's, not its client's: one client's two windows each have their own, so a busy one does not
+        use up what the other may draw. And a window resized by hand is told a size a frame, the last one the hand came to.
+*/
+static void test_window_scope(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long surface, xdg, toplevel, buffer;
+        struct wl_event_seen *e;
+        unsigned char run[16 * 52];
+        long at = 0, first, second;
+
+        wl_reset();
+        fake.screen.width = 64;
+        fake.screen.height = 48;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        c = s.c;
+        buffer = wl_buffer_of(&s, 32, 24, 0xff654321, WLN_wl_shm_format_xrgb8888);
+        surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface);
+        xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, xdg, surface);
+        toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, xdg, WLQ_xdg_surface_get_toplevel, toplevel);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].used && fake.row[1].used, "one client has two windows (%s)", c->error_text);
+        fake.clock_still = 1;
+        fake.now += WAYLAND_BUDGET_MS;
+        // Eight copies of each window in one read, in turn: sixteen pictures, each window's own eight.
+        for (int k = 0; k < 16; k++)
+        {
+                wlc_put(run + at, k & 1 ? surface : s.surface);
+                wlc_put(run + at + 4, WLQ_wl_surface_attach | 20UL << 16);
+                wlc_put(run + at + 8, k & 1 ? buffer : s.buffer);
+                wlc_put(run + at + 12, 0);
+                wlc_put(run + at + 16, 0);
+                wlc_put(run + at + 20, k & 1 ? surface : s.surface);
+                wlc_put(run + at + 24, WLQ_wl_surface_damage_buffer | 24UL << 16);
+                wlc_put(run + at + 28, 0);
+                wlc_put(run + at + 32, 0);
+                wlc_put(run + at + 36, 32);
+                wlc_put(run + at + 40, 24);
+                wlc_put(run + at + 44, k & 1 ? surface : s.surface);
+                wlc_put(run + at + 48, WLQ_wl_surface_commit | 8UL << 16);
+                at += 52;
+        }
+        first = fake.row[0].pictures;
+        second = fake.row[1].pictures;
+        wayland_feed(c->slot, run, at, 0, 0);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - first == 8 && fake.row[1].pictures - second == 8 && !wayland_stalled(c->slot) && c->errors == 0,
+                "eight copies of each of a client's two windows in one read are all made: the budget is a window's (%ld and %ld, stalled %ld)",
+                fake.row[0].pictures - first, fake.row[1].pictures - second, wayland_stalled(c->slot));
+        // The ninth of one window waits, and is made in that window's next window of time.
+        wayland_feed(c->slot, run, 52, 0, 0);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - first == 8 && wayland_stalled(c->slot), "the ninth of one of them waits (%ld)", fake.row[0].pictures - first);
+        fake.now += WAYLAND_BUDGET_MS;
+        wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - first == 9 && !wayland_stalled(c->slot) && c->errors == 0, "and is made in its next window of time (%ld)",
+                fake.row[0].pictures - first);
+        fake.clock_still = 0;
+
+        // A hand's resize: twenty sizes in one frame are one configure, and the frame's end says the last.
+        wlc_forget(c);
+        fake.row[0].states = WAYLAND_STATE_RESIZING | WAYLAND_STATE_ACTIVATED;
+        fake.row[0].width_asked = 100;
+        fake.row[0].height_asked = 80;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 100 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1, "a resize begun is said at once, with its size");
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_forget(c);
+        for (int k = 1; k <= 20; k++)
+        {
+                fake.row[0].width_asked = 100 + k;
+                wayland_row_wake(0);
+        }
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 0 && wayland_frame_wanted(),
+                "twenty sizes of the hand in the frame the last was told in are not said, and a frame is wanted (%ld said)",
+                wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wayland_frame();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 120 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1,
+                "the frame's end says the size the hand came to, once (%lu, %ld)", e ? e->u[0] : 0, wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_forget(c);
+        wayland_frame();
+        fake.row[0].width_asked = 121;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1, "a size in a frame that has told none yet is said in it, at once");
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_forget(c);
+        // The hand lets go in the same frame: the state's change is said at once, with the size.
+        fake.row[0].width_asked = 130;
+        fake.row[0].states = WAYLAND_STATE_ACTIVATED;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 130, "the resize ended is said at once, not kept for the frame (%lu)", e ? e->u[0] : 0);
+        WLCHECK(!wayland_frame_wanted() || wayland.client[c->slot]->waiting, "and no size is owed after it");
+        wlc_end(c);
+        leak_check("window scope");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
 
         test_damage_outside();
+        test_window_scope();
         test_lent();
         test_versions();
         test_popup_place();
@@ -233702,6 +233824,31 @@ static void flip_wait_rows(void)
         compositor.period = period, compositor.flip_issued = issued, compositor.flip_pending = pending;
 }
 
+// A frame is dated when it was due, not when the loop woke to make it (compositor_frame_dated), so the next is due a period after that and the
+// time each wake took is not added to every frame after it; a first frame, an early one and one a period or more late are dated as made.
+static void frame_dated_rows(void)
+{
+        positive period = 16666667ull, at = 5000000000ull, wake = 150000ull;
+
+        check("frame: the first frame is dated when it is made", compositor_frame_dated(0, period, at) == at);
+        check("frame: one made a moment after it was due is dated when it was due", compositor_frame_dated(at, period, at + period + wake) == at + period);
+        check("frame: and one made the moment it was due", compositor_frame_dated(at, period, at + period) == at + period);
+        check("frame: one made a nanosecond short of a period late is still dated when it was due",
+              compositor_frame_dated(at, period, at + 2 * period - 1) == at + period);
+        check("frame: one made a period late is dated as made: nothing was owed in between", compositor_frame_dated(at, period, at + 2 * period) == at + 2 * period);
+        check("frame: one made before it was due is dated as made", compositor_frame_dated(at, period, at + period - 1) == at + period - 1);
+        check("frame: with no period said, as made", compositor_frame_dated(at, 0, at + 5) == at + 5);
+        {
+                // A thousand frames, each woken 150 microseconds late: the last is dated a thousand periods after the first, where the
+                // latenesses added up it was 150 milliseconds (nine frames) behind.
+                positive dated = at;
+
+                for (int frame = 0; frame < 1000; frame++)
+                        dated = compositor_frame_dated(dated, period, dated + period + wake);
+                check("frame: a thousand frames each woken late are a thousand periods, the latenesses not added", dated == at + 1000 * period);
+        }
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -233715,6 +233862,7 @@ b32 main(void)
         gpu_import_rows();
         gpu_late_rows();
         flip_wait_rows();
+        frame_dated_rows();
         close_ask_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);

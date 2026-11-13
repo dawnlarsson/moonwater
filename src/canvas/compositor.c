@@ -7113,6 +7113,23 @@ static void compositor_flip_done(void)
         is for COMPOSITOR_FLIP_PERIODS periods at the most, for an event that never comes (a screen that is off). The deadline, or 0 when nothing is waited for.
 */
 #define COMPOSITOR_FLIP_PERIODS 4
+static positive compositor_flip_wait(positive now);
+
+/*
+        The time a frame made at `stamp` is dated, which the next one is due a period after: the time this one was due (a period
+        after the last) when it is made within a period of that, and `stamp` itself for the first frame, one made early, and one
+        a period or more late (nothing was owed in between: the count starts again from now). Dated by the clock as it was read,
+        every frame was late by the time the loop took to wake and each lateness was kept, so a client drawing on its frame
+        callbacks with no card's flip to pace it had them 16.8 ms apart on a 16.667 ms screen, 59.5 frames a second and a frame
+        of drift every two seconds; dated when it was due, the latenesses do not add up.
+*/
+static positive compositor_frame_dated(positive last, positive period, positive stamp)
+{
+        positive due = last + period;
+
+        return last && period && stamp >= due && stamp - due < period ? due : stamp;
+}
+
 static positive compositor_flip_wait(positive now)
 {
         positive period = compositor.period ? compositor.period : 16666667ull, last = compositor.flip_issued + COMPOSITOR_FLIP_PERIODS * period;
@@ -21605,7 +21622,7 @@ static b32 compositor_main()
 
                         if (stamp - compositor.presented >= compositor.period && !compositor_flip_wait(stamp))
                         {
-                                compositor.presented = stamp;
+                                compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, stamp);
                                 compositor_present();
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
@@ -21631,7 +21648,7 @@ static b32 compositor_main()
                 else if (compositor_wl.started && wayland_frame_wanted() &&
                          clock_monotonic_nanoseconds() - compositor.presented >= compositor.period)
                 {
-                        compositor.presented = clock_monotonic_nanoseconds();
+                        compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, clock_monotonic_nanoseconds());
                         compositor_wl_idle();
                 }
 #endif

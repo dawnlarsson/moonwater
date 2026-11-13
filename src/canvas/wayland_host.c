@@ -2804,8 +2804,9 @@ static void compositor_wl_presented(void)
         if (compositor_wl.presenting_waiting && now - compositor_wl.presenting_since < 2 * compositor.period)
                 return;
         compositor_wl.presenting_waiting = 0;
+        // Not sent here: the frame's callbacks follow in the same pass (compositor_wl_frame), and one write carries the feedbacks, the
+        // releases and the callbacks to a client, where each had a write of its own.
         wayland_presented((unsigned long)now, (unsigned long)compositor.period, compositor_wl.presents++, 0);
-        compositor_wl_flush_all();
 }
 
 /*

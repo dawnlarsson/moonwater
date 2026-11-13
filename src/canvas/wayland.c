@@ -126,12 +126,16 @@
 #define WAYLAND_STASH 20480        // one read of the host (16384) and the message it was completing (4096)
 #define WAYLAND_STALL_MS 10000     // a client whose buffer is not ready by then is ended: its GPU hung
 /*
-        A commit is also made to wait when its client has had more pictures copied than its share of a frame: what a picture costs
+        A commit is also made to wait when its window has had more pictures copied than its share of a frame: what a picture costs
         the compositor is its pixels, copied at the commit, and a commit is 52 bytes, so a client that sent 64 KB of commits of a
-        window the size of a 4K screen held the compositor (every window, the pointer, the keys) for 4.5 s a read. A client may have
+        window the size of a 4K screen held the compositor (every window, the pointer, the keys) for 4.5 s a read. A window may have
         WAYLAND_BUDGET_SCREENS of the largest screen copied in WAYLAND_BUDGET_MS, which a window that draws every frame of a screen at
-        twice 60 Hz keeps within; the commit past it waits, with the rest, until the next window of time. A client whose budget is
-        untouched always has its commit made, so one picture larger than the budget is never refused.
+        twice 60 Hz keeps within; the commit past it waits, with the rest of what its client sent, until the window's next window of
+        time. A window whose budget is untouched always has its commit made, so one picture larger than the budget is never refused.
+        The budget is the window's (its root surface's), not the client's: the compositor has WAYLAND_ROWS windows whoever's they
+        are, so what all of them may cost it is the same, and a client's one busy window does not use up what its others may draw
+        (a browser is one client and many windows). Its commit that waits still holds the client's stream behind it: the requests
+        of one connection are made in the order they came.
 */
 #define WAYLAND_BUDGET_MS 16
 #define WAYLAND_BUDGET_SCREENS 2
@@ -431,6 +435,12 @@ struct wayland_surface
         unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, shown_full, translucent;
         long translucent_x, translucent_y, translucent_w, translucent_h; // where a translucent picture was laid
         struct wayland_rect shown_rect;
+        // The window's budget (a root surface's): the window of time its copies are counted in (its start, ms), and its pixels so far.
+        long budget_at, budget_used;
+        // A size the compositor asked while the window is being resized by hand, not yet said: the frame count the last configure was
+        // sent in (and one), and whether one is owed at the next frame.
+        long configure_frame;
+        unsigned char configure_late;
         // What the window was last told.
         long told_width, told_height, told_states;
         unsigned char told;
@@ -542,7 +552,7 @@ struct wayland_client
         // A commit that waits for its GPU, and what the client sent from it on: the bytes, the descriptor to ask of, since when.
         unsigned char stash[WAYLAND_STASH];
         long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
-        long budget_at, budget_used; // the window of time the client's copies are counted in (its start, ms), and its pixels so far
+        long budget_surface;         // the root surface whose budget the stalled commit waits for
         long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
         long presenting_surfaces;    // surfaces of the client holding presentation feedbacks for a frame (presentings above zero), exact: a client with none is passed over
         long subsurfaces;            // live surfaces whose role is a subsurface's, exact (counted where the role is given, and where the surface goes): none, and no child scan is made
@@ -1387,6 +1397,8 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
         wayland_end(&e);
         s->serial[s->serials++] = (unsigned int)serial;
         s->flags |= WAYLAND_SURFACE_SENT;
+        s->configure_frame = wayland.frames + 1;
+        s->configure_late = 0;
 }
 
 /* A row given up, whatever its window was. */
@@ -1720,21 +1732,22 @@ static struct wayland_rect wayland_window_of(struct wayland_client *c, const str
 }
 
 /*
-        A client's budget (WAYLAND_BUDGET_*): its window of time begun again when it is over (or the clock went back), and whether
-        the pixels copied for it in this one leave room. The largest screen is the unit, a screen of 1920 by 1080 with none.
+        A window's budget (WAYLAND_BUDGET_*, its root surface's): its window of time begun again when it is over (or the clock went
+        back), and whether the pixels copied for it in this one leave room. The largest screen is the unit, a screen of 1920 by
+        1080 with none.
 */
-static int wayland_budget_left(struct wayland_client *c)
+static int wayland_budget_left(struct wayland_surface *root)
 {
         long now = wayland.host->now(wayland.host->context), most = wayland.screens ? 0 : 1920L * 1080L;
 
         for (long at = 0; at < wayland.screens; at++)
                 most = wayland_max(most, wayland.screen[at].width * wayland.screen[at].height);
-        if (now - c->budget_at >= WAYLAND_BUDGET_MS || now < c->budget_at)
+        if (now - root->budget_at >= WAYLAND_BUDGET_MS || now < root->budget_at)
         {
-                c->budget_at = now;
-                c->budget_used = 0;
+                root->budget_at = now;
+                root->budget_used = 0;
         }
-        return c->budget_used < WAYLAND_BUDGET_SCREENS * most;
+        return root->budget_used < WAYLAND_BUDGET_SCREENS * most;
 }
 
 /* A subsurface's held buffer laid over the window's picture, all of it or where only (row pixels) says; window is its root's. */
@@ -1783,7 +1796,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         }
         if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
                 root->need_full = 1;
-        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : picture.damage[0].width * picture.damage[0].height;
+        root->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : picture.damage[0].width * picture.damage[0].height;
 }
 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
@@ -2583,9 +2596,9 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         // all the same, a window the size of the screen drawn at more than twice in sixteen milliseconds (a 144 Hz screen) had every
         // third commit, and all its client sent after it, held to the next window of time.
         if (!lent)
-                c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
+                s->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
         for (long at = 0; !lent && !picture.full && at < picture.damages; at++)
-                c->budget_used += picture.damage[at].width * picture.damage[at].height;
+                s->budget_used += picture.damage[at].width * picture.damage[at].height;
         if (status < 0)
                 return wayland_fail(c, self->id, WAYLAND_IMPLEMENTATION, "the window refused the picture");
         if (status > 0)
@@ -2699,9 +2712,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
         // pending state is taken (wayland_commit_take) only once the commit is sure to be made, so a commit that waits here or
         // for its dma-buf is made again with the state it was sent with.
-        if (!wayland_budget_left(c))
+        if (!wayland_budget_left(wayland_root_of(c, s)))
         {
                 c->stalled_fd = -1;
+                c->budget_surface = wayland_surface_index(c, wayland_root_of(c, s));
                 return WAYLAND_STALL;
         }
         shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
@@ -3326,6 +3340,8 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
         wayland_end(&e);
         s->serial[s->serials++] = (unsigned int)serial;
         s->flags |= WAYLAND_SURFACE_SENT;
+        s->configure_frame = wayland.frames + 1;
+        s->configure_late = 0;
 }
 
 static int wayland_positioner_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
@@ -7056,7 +7072,7 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
         if (c->hold)
                 return c->hold_at; // a timed hold wakes the loop at its time; a barrier's is woken by the frames (wayland_frame_wanted)
         if (c->stalled_fd < 0)
-                return c->budget_at + WAYLAND_BUDGET_MS;
+                return c->surfaces[c->budget_surface].budget_at + WAYLAND_BUDGET_MS;
         *fd = c->stalled_fd;
         return c->stalled_at + WAYLAND_STALL_MS + 1;
 }
@@ -7083,7 +7099,7 @@ WAYLAND_API int wayland_resume(long slot)
                 c->hold = 0;
         }
         // A commit that waits for its budget is made in the client's next window of time; one that waits for its GPU, when it is done.
-        if (c->stalled_fd < 0 ? !wayland_budget_left(c)
+        if (c->stalled_fd < 0 ? c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
                               : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
         {
                 if (c->stalled_fd >= 0 && wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
@@ -7288,7 +7304,16 @@ WAYLAND_API void wayland_row_wake(long row)
         }
         if (s->role == WAYLAND_ROLE_TOPLEVEL && s->told &&
             (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states))
-                wayland_configure(c, s, 0);
+        {
+                // A window resized by hand is told a size a frame: the hand moves many times in one (a mouse reports a thousand times a
+                // second), and each size told is a buffer the client allocates and a picture it draws to be shown for none of them. A
+                // size that changed again in the frame the last one was told in is owed, and the frame's end says what the size is
+                // then (wayland_frame). A state that changed (the resize begun or ended, the keys taken) is said at once.
+                if (facts.states == s->told_states && (facts.states & WAYLAND_STATE_RESIZING) && s->configure_frame == wayland.frames + 1)
+                        s->configure_late = 1;
+                else
+                        wayland_configure(c, s, 0);
+        }
 }
 
 /*
@@ -7308,6 +7333,13 @@ WAYLAND_API void wayland_frame(void)
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row_surface[row]] : 0;
                 struct wayland_facts facts;
+
+                // The size a hand's resize came to in the frame that ended, said now (wayland_row_wake kept it back).
+                if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].configure_late)
+                {
+                        c->surfaces[wayland.row_surface[row]].configure_late = 0;
+                        wayland_configure_owed(c, &c->surfaces[wayland.row_surface[row]]);
+                }
 
                 int any = s && s->live && s->readies;
 
@@ -7483,6 +7515,9 @@ WAYLAND_API long wayland_frame_wanted(void)
                 struct wayland_facts facts;
                 int waits;
 
+                // A size owed to a window resized by hand is said at the frame's end: a frame is wanted for it.
+                if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].configure_late)
+                        return 1;
                 // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows).
                 if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].lent_gone &&
                     wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
