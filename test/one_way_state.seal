@@ -1,0 +1,138 @@
+# State that is set and never taken back, and why each is right as it is: test/one_way_state.py.
+# One line each, the finding, a tab, the reason. A finding with no reason here fails the check.
+bit ADJ_FREQUENCY	a word of one adjtimex request, built for the call
+bit AUDIO_STATE_DEVICE_ACTIVE	the state page is built whole each time it is published; the bit is that build's
+bit AUDIO_STATE_OUT_HW_OFF	the state page is built whole each time it is published; the bit is that build's
+bit AUDIO_STATE_OUT_HW_SET	the state page is built whole each time it is published; the bit is that build's
+bit AUDIO_STATE_OUT_NO_MIXER	the state page is built whole each time it is published; the bit is that build's
+bit AWK_HAS_NUMBER	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
+bit AWK_HAS_TEXT	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
+bit AWK_STRNUM	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
+bit COLUMN_NOEXTREME	a column's properties from the command line, for the one run
+bit COLUMN_ORDERED	a column's properties from the command line, for the one run
+bit COMPOSITOR_XWM_OVERRIDE	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
+bit COMPOSITOR_XWM_POPUPTYPE	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
+bit COMPOSITOR_XWM_PROPS_READ	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
+bit COMPOSITOR_XWM_PROTO_DELETE	protocols is assigned 0 before each WM_PROTOCOLS reply is read into it
+bit COMPOSITOR_XWM_PROTO_FOCUS	protocols is assigned 0 before each WM_PROTOCOLS reply is read into it
+bit COMPOSITOR_XWM_PROTO_KNOWN	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
+bit CONVERSION_FLAG_LEFT	a flag of one parsed conversion, on the stack of its format
+bit DBUS_HAS_DESTINATION	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_ERROR	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_FDS	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_INTERFACE	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_MEMBER	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_PATH	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_REPLY	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_SENDER	the fields one parsed message has; the message is parsed into a record of its own
+bit DBUS_HAS_SIGNATURE	the fields one parsed message has; the message is parsed into a record of its own
+bit DOC_MOD_ALT	the modifiers of one key binding as it is parsed
+bit DOC_MOD_CONTROL	the modifiers of one key binding as it is parsed
+bit DOC_MOD_SHIFT	the modifiers of one key binding as it is parsed
+bit DOC_MOD_SUPER	the modifiers of one key binding as it is parsed
+bit EDIT_HARDWARE_EIGHT	a termios word made raw; the saved word is written back whole at the end
+bit EXPAND_IFS_BLANK	the table of IFS's bytes, each entry assigned whole before the bit is added
+bit FORMAT_FLAG_LEFT	a flag of one parsed conversion, on the stack of its format
+bit GREP_MANY_END	the automaton of one pattern set, built once for the run
+bit GREP_MANY_OUT	the automaton of one pattern set, built once for the run
+bit LINK_GROUP_DONE	a one-use code that has been used: spent is where it ends, by design
+bit MS_MOVE	a mount's flags from the command line, for the one call
+bit MS_REMOUNT	a mount's flags from the command line, for the one call
+bit PF_RANDOMIZE	the kernel's own per-task flag, set for the image being started
+bit RX_ANCHORED	what a compiled pattern is, decided at compile and true for its life
+bit RX_BRANCHING	what a compiled pattern is, decided at compile and true for its life
+bit RX_FIRST_KNOWN	what a compiled pattern is, decided at compile and true for its life
+bit RX_HAS_BACKREF	what a compiled pattern is, decided at compile and true for its life
+bit RX_LAST_KNOWN	what a compiled pattern is, decided at compile and true for its life
+bit RX_LITERAL_PROVES	what a compiled pattern is, decided at compile and true for its life
+bit SETTINGS_ITEM_CANNOT	the list of items is zeroed and built again at each reading (settings_feed_wifi and its like)
+bit SETTINGS_ITEM_DISK	the list of items is zeroed and built again at each reading (settings_feed_wifi and its like)
+bit SETTINGS_ITEM_OPEN	the list of items is zeroed and built again at each reading (settings_feed_wifi and its like)
+bit SETTINGS_ITEM_SAVED	the list of items is zeroed and built again at each reading (settings_feed_wifi and its like)
+bit SETTINGS_ITEM_USB	the list of items is zeroed and built again at each reading (settings_feed_wifi and its like)
+bit SHELL_ARRAY_ASSIGNED	what a variable is; it ends with the variable (unset)
+bit SHELL_ARRAY_INDEXED	what a variable is; it ends with the variable (unset)
+bit SHELL_ARRAY_READONLY	readonly cannot be taken back, by the language
+bit SHELL_WAIT_DONE	a waited child's entry: done and told are where it ends, and the entry is dropped from the table
+bit SHELL_WAIT_TOLD	a waited child's entry: done and told are where it ends, and the entry is dropped from the table
+bit SIGNAL_KERNEL_RESTORER	a word of one sigaction request, built for the call
+bit SORT_DICTIONARY	a key's ordering from the command line, for the one run
+bit SORT_FOLD	a key's ordering from the command line, for the one run
+bit SORT_PRINTABLE	a key's ordering from the command line, for the one run
+bit SPARK_BIND_BOOT	a reply's flags, assigned 0 before they are set for the one request
+bit SPARK_BIND_DEFAULT	a reply's flags, assigned 0 before they are set for the one request
+bit SPARK_BIND_PENDING	a reply's flags, assigned 0 before they are set for the one request
+bit SPARK_BIND_RUNNING	a reply's flags, assigned 0 before they are set for the one request
+bit STREAM_MODE_KNOWN	flags is assigned whole when a stream is opened; the mode once found stays the stream's
+bit TERMINAL_UL_ALTERNATIVE	ul's mode word for the one run of text it is reading
+bit TERMINAL_UL_BOLD	ul's mode word for the one run of text it is reading
+bit TERMINAL_UL_SUB	ul's mode word for the one run of text it is reading
+bit TERMINAL_UL_SUPER	ul's mode word for the one run of text it is reading
+bit TERMINAL_UL_UNDERLINE	ul's mode word for the one run of text it is reading
+bit UI_BIDI_BREAK	the classes of one line being ordered, written afresh for each line
+bit UI_BIDI_ISLAND	the classes of one line being ordered, written afresh for each line
+bit UL_SCHED_RESET_ON_FORK	a word of one sched_setattr request, built for the call
+bit UL_SCHED_UTIL_MAX	a word of one sched_setattr request, built for the call
+bit UL_SCHED_UTIL_MIN	a word of one sched_setattr request, built for the call
+bit WAYLAND_ICON_CONTENT	wayland.c (another hand's): what an icon object has been given, for the object's life
+bit WAYLAND_ICON_SET	wayland.c (another hand's): what an icon object has been given, for the object's life
+bit WIFI_AKM_OTHER	what one heard network offers; akms is assigned before the bits are added
+bit WIFI_AKM_PSK	what one heard network offers; akms is assigned before the bits are added
+bit WIFI_AKM_PSK_SHA256	what one heard network offers; akms is assigned before the bits are added
+bit WIFI_AKM_SAE	what one heard network offers; akms is assigned before the bits are added
+bit WINDOWS_DISPLAY_OTHER	what is wrong with one display record as it is read; bad is assigned 0 first
+bit WINDOWS_DISPLAY_X	what is wrong with one display record as it is read; bad is assigned 0 first
+bit WINDOWS_DISPLAY_Y	what is wrong with one display record as it is read; bad is assigned 0 first
+bit WINDOW_CELL_SELECTED	a cell's attributes, written with the cell each time it is drawn
+bit WINDOW_CELL_WIDE	a cell's attributes, written with the cell each time it is drawn
+bit WINDOW_NO_TAB	wayland_host.c (another hand's): a property of the row's window, cleared with the row
+bit WINDOW_PLACE_SCREEN	what one placement asks, on the placement's own record
+bit WINDOW_PLACE_SIZE	what one placement asks, on the placement's own record
+field src/canvas/font.c:ready	a face set that has been read: true for its life
+field src/canvas/font.c:started	an edge of an outline being walked, in a table zeroed for each glyph
+field src/canvas/ui/editor.c:dirty	cleared by the kit through the app's pointer (ui.c, *app->dirty), not in this file
+field src/canvas/ui/editor.c:leaving	the editor's end: the process exits on it
+field src/canvas/ui/identify.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/launcher.c:asked_beside	an option of the command line (-a), for the process
+field src/canvas/ui/launcher.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/mixer.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/notices.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/osk.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/settings.c:filter_open	the filter's field has been made: made once and kept, emptied and not unmade (settings_filter_clear)
+field src/canvas/ui/settings.c:told	the first reading's one line in the log, said once for the process
+field src/canvas/ui/terminal.c:gone	the far end has gone: the terminal's end, by design
+field src/canvas/ui/ui.c:auto_close	a property a document is opened with
+field src/canvas/ui/ui.c:dirty	a popup's picture is due; cleared as a whole with the popup's record when it is presented
+field src/canvas/ui/ui.c:started	a parse state on the stack of one call
+field src/net/net.c:closed	a TLS session that has had its close_notify: the session's end
+field src/net/net.c:done	one netlink exchange's turn, on the stack of the call
+field src/net/net.c:extended_key_usage	what one parsed certificate has, in a record zeroed for each
+field src/net/net.c:held	the resolver's servers as held for a confined process, which never lets go of them
+field src/net/net.c:leased	an input of one link search, on the stack of the call
+field src/net/net.c:path_length_present	what one parsed certificate has, in a record zeroed for each
+field src/net/net.c:present	what one parsed extension has, in a record zeroed for each
+field src/sh/file.c:done	a directory walk that has ended, on the stack of the walk
+field src/sh/gzip.c:finished	a stream that has ended; the state is zeroed for each member
+field src/sh/host.c:acked	one exchange's turn, on the stack of the call
+field src/sh/host.c:done	one exchange's turn, on the stack of the call
+field src/sh/host.c:ended	one exchange's turn, on the stack of the call
+field src/sh/host.c:got_ack	one exchange's turn, on the stack of the call
+field src/sh/host.c:held	what the device policy says of one stick, in a census taken afresh
+field src/sh/host.c:taken	one exchange's turn, on the stack of the call
+field src/sh/host.c:token_sent	one exchange's turn, on the stack of the call
+field src/sh/net.c:lost	cleared with the whole holding when the lost lease is released (net_holding_release fills it with 0)
+field src/sh/net.c:skip_loopback	an input of one link search, on the stack of the call
+field src/sh/text.c:shown_any	one run's own tally
+field src/sh/tools.c:timestamp_present	what one parsed record has, in a record zeroed for each
+field src/waterlink/discover.c:asked	what one parsed DNS message held, in a record zeroed for each
+field src/waterlink/nearby.c:linked	read only by link_discovery_reason, which nothing calls: no effect today; if it is ever called this wants an end
+field src/waterlink/nearby.c:refused_code	read only by link_discovery_reason, which nothing calls: no effect today; if it is ever called this wants an end
+field src/waterlink/nearby.c:state_dirty	cleared in service.c, where the state is written out
+field src/waterlink/service.c:answered	a session's own record, zeroed when the session begins
+field src/waterlink/service.c:dialed	a session's own record, zeroed when the session begins
+field src/waterlink/service.c:done	a stream that has ended, in a session's own record
+field src/waterlink/service.c:exit_sent	a session's end, in its own record
+field src/waterlink/service.c:exited	a session's end, in its own record
+field src/waterlink/service.c:finished	a session's end, in its own record
+field src/waterlink/service.c:linked	a peer's entry in a list read afresh each pass
+field src/waterlink/service.c:refused	a session's own record, zeroed when the session begins
