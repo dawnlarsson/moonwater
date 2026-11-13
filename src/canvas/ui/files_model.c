@@ -248,7 +248,7 @@ struct files_order
 };
 
 // Folders first whatever the order is, then the key (turned over when descending), then the name, which settles every tie.
-static b32 files_order_compare(const address_any left, const address_any right, address_any context)
+static b32 files_order_compare(address_any left, address_any right, address_any context)
 {
         const struct files_order address_to o = (const struct files_order address_to)context;
         const struct files_entry address_to a = &o->listing->entry[*(const p32 address_to)left];
