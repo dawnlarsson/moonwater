@@ -7006,6 +7006,19 @@ struct compositor_plate
 };
 static struct compositor_plate compositor_spare;      // the buffer the screen is not showing (fb 0: none; headless, the scan image's other name, 2)
 static int compositor_front_stale[4], compositor_front_stale_any; // the stale of the buffer in compositor.* (the target, or the one shown)
+/*
+        A stale's own rectangles, beside its box: the damage of a present is up to COMPOSITOR_DAMAGE rectangles, and the buffer
+        that missed them misses those and not the box round them (two windows that draw in opposite corners were composed again,
+        in the other buffer at the next present, as the rectangle that holds both). The parts are the stale exactly while of is
+        the box they were joined into (compositor_parts_hold): a box set or joined by anything else is no longer theirs, and then
+        the box is what is composed, as it was. More rectangles than there is room for give the parts up the same way.
+*/
+struct compositor_parts
+{
+        int rect[COMPOSITOR_DAMAGE][4], of[4];
+        unsigned int count;
+};
+static struct compositor_parts compositor_front_parts, compositor_spare_parts;
 static unsigned int compositor_flip_refused; // presents the card refused a flip in a row (three: a modeset)
 static int compositor_plate_refused;                  // the card would not make the second buffer: none until the scanout changes
 static char compositor_scan_name[512], compositor_spare_name[512]; // headless: the scan image's file and its spare
@@ -7029,6 +7042,38 @@ static void compositor_stale_join(int *rect, int *any, const int *add)
         rect[3] = add[3] > rect[3] ? add[3] : rect[3];
 }
 
+// A stale that is the whole screen: its box, and no parts (the box of parts that reached every edge is this box too, and is not this).
+static void compositor_stale_all(int *box, int *any, struct compositor_parts *parts)
+{
+        box[0] = box[1] = 0, box[2] = compositor.width, box[3] = compositor.height;
+        *any = 1;
+        parts->count = 0;
+}
+
+// Whether a stale's parts are the box's: there are some, and the box is the one they were joined into.
+static int compositor_parts_hold(const struct compositor_parts *parts, const int *box, int any)
+{
+        return any && parts->count && !memory_compare(parts->of, box, sizeof(parts->of));
+}
+
+// A rectangle joined into a stale and into its parts (compositor_stale_join for the box): the parts go on being the stale when they
+// were, or when the stale was empty, and there is room; else they are given up and the box stands for them.
+static void compositor_stale_part(int *box, int *any, struct compositor_parts *parts, const int *add)
+{
+        int held = !*any || compositor_parts_hold(parts, box, *any);
+
+        if (!*any)
+                parts->count = 0;
+        compositor_stale_join(box, any, add);
+        if (!held || parts->count == COMPOSITOR_DAMAGE)
+        {
+                parts->count = 0;
+                return;
+        }
+        memory_copy(parts->rect[parts->count++], add, sizeof(parts->of));
+        memory_copy(parts->of, box, sizeof(parts->of));
+}
+
 // The screen's buffer and the spare trade places: the one composed into is the scanout (compositor.*), with its stale; the spare is the one
 // shown before. The screen's output 0 follows its framebuffer, which a crtc set or a plane would name.
 static void compositor_plate_swap(void)
@@ -7046,6 +7091,12 @@ static void compositor_plate_swap(void)
         compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
         memory_copy(compositor_spare.stale, stale, sizeof(stale));
         compositor_spare.stale_any = stale_any;
+        {
+                struct compositor_parts parts = compositor_front_parts;
+
+                compositor_front_parts = compositor_spare_parts;
+                compositor_spare_parts = parts;
+        }
         if (compositor.outputs && compositor.output[0].fb == fb)
                 compositor.output[0].fb = compositor.fb;
 }
@@ -9568,7 +9619,8 @@ static void compositor_present_frames(void)
         int flip_own = 0;
         // This present's own damage, its box, taken before the stale of the buffer composed into is added to it: the other buffer
         // misses this and nothing else (see the join below).
-        int scene[4] = {0, 0, 0, 0}, scene_any = 0;
+        int scene[COMPOSITOR_DAMAGE][4];
+        unsigned int scenes = 0;
 
         if (!turning && compositor_output_count() < 2 && compositor.plane_row < 0)
         {
@@ -9581,8 +9633,17 @@ static void compositor_present_frames(void)
                         compositor_plate_swap();
                         flip_own = 1;
                         for (unsigned int at = 0; at < compositor.damages; at++)
-                                compositor_stale_join(scene, &scene_any, compositor.damage[at]);
-                        if (compositor_front_stale_any)
+                                memory_copy(scene[scenes++], compositor.damage[at], sizeof(scene[0]));
+                        // What this buffer missed: its rectangles where they are known, each its own damage, or the box round them.
+                        if (compositor_parts_hold(&compositor_front_parts, compositor_front_stale, compositor_front_stale_any))
+                        {
+                                struct compositor_parts parts = compositor_front_parts;
+
+                                for (unsigned int at = 0; at < parts.count; at++)
+                                        compositor_damage(parts.rect[at][0], parts.rect[at][1], parts.rect[at][2] - parts.rect[at][0],
+                                                          parts.rect[at][3] - parts.rect[at][1]);
+                        }
+                        else if (compositor_front_stale_any)
                                 compositor_damage(compositor_front_stale[0], compositor_front_stale[1], compositor_front_stale[2] - compositor_front_stale[0],
                                                   compositor_front_stale[3] - compositor_front_stale[1]);
                 }
@@ -9670,8 +9731,8 @@ static void compositor_present_frames(void)
         {
                 if (flip_own)
                 {
-                        if (scene_any)
-                                compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, scene);
+                        for (unsigned int at = 0; at < scenes; at++)
+                                compositor_stale_part(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts, scene[at]);
                 }
                 else
                         for (unsigned int at = 0; at < compositor.damages; at++)
@@ -9679,7 +9740,7 @@ static void compositor_present_frames(void)
                                 const int *d = compositor.damage[at];
                                 int r[4] = {d[0], d[1], d[2], d[3]};
 
-                                compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, r);
+                                compositor_stale_part(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts, r);
                         }
         }
         compositor_front_stale_any = 0;
@@ -9705,10 +9766,8 @@ static void compositor_present_frames(void)
                 {
                         // The scan image was not exchanged: the composed frame is not shown, so the buffers are both whole again from the next present.
                         compositor_plate_swap();
-                        compositor_front_stale[0] = compositor_front_stale[1] = 0, compositor_front_stale[2] = compositor.width;
-                        compositor_front_stale[3] = compositor.height, compositor_front_stale_any = 1;
-                        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width;
-                        compositor_spare.stale[3] = compositor.height, compositor_spare.stale_any = 1;
+                        compositor_stale_all(compositor_front_stale, &compositor_front_stale_any, &compositor_front_parts);
+                        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
                 }
                 else if (++compositor_flip_refused >= 3)
                 {
@@ -10358,8 +10417,7 @@ static void compositor_plate_make(void)
         }
         compositor_spare.fb = fb, compositor_spare.handle = handle, compositor_spare.pixels = pixels;
         compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
-        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width, compositor_spare.stale[3] = compositor.height;
-        compositor_spare.stale_any = 1;
+        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
 }
 
 // The spare given back (the scanout is replaced: a space of another size, or the second screen). Not shown: no flip is in flight then.
@@ -20516,8 +20574,7 @@ static b32 compositor_headless_plate(string_address path, long bytes)
                 return 0;
         compositor_spare.fb = 2, compositor_spare.handle = 0, compositor_spare.pixels = (unsigned int *)mapped; // 2: the other name, as a framebuffer is
         compositor_spare.bytes = (unsigned long)bytes, compositor_spare.pitch = compositor.scanout_pitch;
-        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width, compositor_spare.stale[3] = compositor.height;
-        compositor_spare.stale_any = 1;
+        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
         return 1;
 }
 
