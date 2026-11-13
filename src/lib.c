@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        478 routines (452 public, 26 local), 467 of them on all three and 11 local to one.
+        480 routines (454 public, 26 local), 469 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -228,6 +228,8 @@
           lzma_range_shift               public  yes     yes     yes
           lzma_relax                     public  yes     yes     yes
           lzma_tree_walk                 public  yes     yes     yes
+          machine_scan                   public  yes     yes     yes
+          machine_step                   public  yes     yes     yes
           matrix_engine_f32              local   yes     yes     yes
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
@@ -13721,6 +13723,28 @@ __asm__(
     ".popsection\n"
 #endif
     ASM_END(memory_translate)
+
+    //
+    //       machine_step: the cell at state + event. rdi the moves, rsi the
+    //       state, rdx the event.
+    //
+    ASM_FUNC(machine_step)
+    "add %rdx, %rsi\n   movzwl (%rdi,%rsi,2), %eax\n" ASM_RET
+    ASM_END(machine_step)
+
+    //
+    //       machine_scan: rdi the moves, rsi the classes, rdx the stop, rcx
+    //       where the state is kept, r8 the bytes, r9 how many. rax is the
+    //       state and r10 the bytes taken. A byte costs two loads, and only
+    //       the second waits for the state before it: the byte and its class
+    //       are loaded ahead of the move they feed.
+    //
+    ASM_FUNC(machine_scan)
+    "movzwl (%rcx), %eax\n   xor %r10d, %r10d\n   test %r9, %r9\n   jz 2f\n   cmp %rdx, %rax\n   jae 2f\n"
+    "1:  movzbl (%r8,%r10), %r11d\n   movzbl (%rsi,%r11), %r11d\n   add %rax, %r11\n   movzwl (%rdi,%r11,2), %eax\n   add $1, %r10\n"
+    "cmp %rdx, %rax\n   jae 2f\n   cmp %r9, %r10\n   jb 1b\n"
+    "2:  mov %ax, (%rcx)\n   mov %r10, %rax\n" ASM_RET
+    ASM_END(machine_scan)
 #undef TRX_X64_LOOP
 #undef TRY_X64_LOOP
 #undef TRY_X64_ROW
@@ -25457,6 +25481,20 @@ __asm__(
 #endif
     ASM_END(memory_translate)
 
+    //       machine_step and machine_scan: the x86_64 block has the reasons.
+    //       x0 the moves, x1 the classes, x2 the stop, x3 where the state is
+    //       kept, x4 the bytes, x5 how many; w8 the state, x9 the bytes taken.
+    ASM_FUNC(machine_step)
+    "add x1, x1, x2\n   ldrh w0, [x0, x1, lsl #1]\n" ASM_RET
+    ASM_END(machine_step)
+
+    ASM_FUNC(machine_scan)
+    "ldrh w8, [x3]\n   mov x9, #0\n   cbz x5, 2f\n   cmp x8, x2\n   b.hs 2f\n"
+    "1:  ldrb w10, [x4, x9]\n   ldrb w10, [x1, x10]\n   add x10, x10, x8\n   ldrh w8, [x0, x10, lsl #1]\n   add x9, x9, #1\n"
+    "cmp x8, x2\n   b.hs 2f\n   cmp x9, x5\n   b.lo 1b\n"
+    "2:  strh w8, [x3]\n   mov x0, x9\n" ASM_RET
+    ASM_END(machine_scan)
+
 #ifndef KERNEL_MODE
     //       memory_average_ahead: urhadd is the whole of the work, 64 bytes
     //       a turn in four registers by ldp and stp, sixteen at a time after
@@ -35343,6 +35381,21 @@ __asm__(
 #if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     ".option pop\n"
 #endif
+
+    //       machine_step and machine_scan: the x86_64 block has the reasons.
+    //       a0 the moves, a1 the classes, a2 the stop, a3 where the state is
+    //       kept, a4 the bytes, a5 how many; t0 the state, t1 the bytes
+    //       taken. With no Zba the cell's place is a shift and an addition.
+    ASM_FUNC(machine_step)
+    "add a1, a1, a2\n   slli a1, a1, 1\n   add a0, a0, a1\n   lhu a0, 0(a0)\n" ASM_RET
+    ASM_END(machine_step)
+
+    ASM_FUNC(machine_scan)
+    "lhu t0, 0(a3)\n   li t1, 0\n   beqz a5, 2f\n   bgeu t0, a2, 2f\n"
+    "1:  add t2, a4, t1\n   lbu t2, 0(t2)\n   add t2, a1, t2\n   lbu t2, 0(t2)\n   add t2, t2, t0\n   slli t2, t2, 1\n   add t2, a0, t2\n"
+    "lhu t0, 0(t2)\n   addi t1, t1, 1\n   bgeu t0, a2, 2f\n   bltu t1, a5, 1b\n"
+    "2:  sh t0, 0(a3)\n   mv a0, t1\n" ASM_RET
+    ASM_END(machine_scan)
 
 #ifndef KERNEL_MODE
     //       memory_average_ahead: with V, as many bytes as eight registers
@@ -52913,6 +52966,35 @@ READS_WRITES(1, 2) address_any memory_to_upper_ascii(address_any block, positive
 READS_WRITES(1, 2)
 address_any memory_translate(address_any block, positive size,
                              address_any table);
+/*
+        State machines, as a table and the two routines that run one.
+
+        A machine's moves are rows of cells, one row a state and one cell
+        in a row for each kind of input, sixteen bits a cell. A state is
+        the place its row starts, in cells (the row's number times the
+        row's width), and a cell holds the state the machine is in next:
+        so a move is one addition and one load, with nothing to multiply.
+
+        machine_step is one move, for a machine that is told of events:
+        the state after `event` (a cell's place in the row) in `state`.
+
+        machine_scan is the moves of a run of bytes. `classes` says for
+        each of the 256 byte values which cell of a row it is. The run
+        goes on while the state is below `stop` and bytes are left: the
+        rows from `stop` up are the states the caller has to hear of (a
+        thing recognised, a thing refused), and the byte that moved the
+        machine into one is the last one taken. It answers how many
+        bytes were taken, and leaves the state in `state`. A machine
+        that starts at or past `stop`, or is given no bytes, takes none
+        and reads neither table; `state` is read and written back.
+
+        The tables are the caller's own and are believed: a cell is a
+        row's start, below the cells there are, and a class is below the
+        row's width. Bytes are anyone's, and index nothing but classes.
+*/
+PURE positive machine_step(const p16 address_to moves, positive state, positive event);
+positive machine_scan(const p16 address_to moves, const p8 address_to classes, positive stop,
+                      p16 address_to state, const p8 address_to bytes, positive size);
 #ifndef KERNEL_MODE
 // height rows of width bytes, from_stride bytes apart, made 32-bit words
 // through table into rows into_stride words apart: into[r][i] is
