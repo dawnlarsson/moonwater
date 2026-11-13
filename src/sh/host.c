@@ -26729,7 +26729,7 @@ static const host_row host_rows[] = {
     {null, "@bluetooth", null, 'r'},
     {null, "bluetooth add NAME", "keep the name of a device, found once the radio is on", 'b'},
     {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
-    {null, "bluetooth share [on|off]", "the machine's internet over Bluetooth to the devices that pair with it; off until on (root)", 'b'},
+    {null, "bluetooth share [on|off]", "the internet of this machine over Bluetooth to the devices that pair with it; off until on (root)", 'b'},
     {null, "@device", null, 'r'},
     {null, "device [lock|unlock]", "lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]", 'b'},
     {null, "device class NAME [allow|deny]", "what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]", 'b'},
@@ -26788,8 +26788,8 @@ static const host_row host_rows[] = {
     {null, "link doctor", "the listener, the udp port, the addresses, a route and discovery, each a pass or a fail with its fix", 'f'},
     {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},
     {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]", 'f'},
-    {null, "link modem key", "the audio modem's key, in hex, made on first use: the receiver needs the same", 'f'},
-    {null, "link modem send FILE", "FILE over the sound card to the Mac's receiver (tools/modem_rx.c); nothing is acknowledged", 'f'},
+    {null, "link modem key", "the key of the audio modem, in hex, made on first use: the receiver needs the same", 'f'},
+    {null, "link modem send FILE", "FILE over the sound card to the receiver on the Mac (tools/modem_rx.c); nothing is acknowledged", 'f'},
 };
 
 /* The column the words of a row start in. A command that would not leave two

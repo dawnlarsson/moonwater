@@ -150,8 +150,8 @@ moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network
 moonwater link group leave NAME [forget]  stop, and forget the key of the group
 moonwater link key                     the public key of this machine, which link add takes
 moonwater link log NAME                follow the kernel log of NAME
-moonwater link modem key               the audio modem's key, in hex, made on first use: the receiver needs the same
-moonwater link modem send FILE         FILE over the sound card to the Mac's receiver (tools/modem_rx.c); nothing is acknowledged
+moonwater link modem key               the key of the audio modem, in hex, made on first use: the receiver needs the same
+moonwater link modem send FILE         FILE over the sound card to the receiver on the Mac (tools/modem_rx.c); nothing is acknowledged
 moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its status
 moonwater link NAME CODE               link to the machine called NAME, which waits
 moonwater link on|off                  the listener, kept across boots [off]
@@ -173,8 +173,8 @@ moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
 moonwater bluetooth add NAME           keep the name of a device, found once the radio is on
 moonwater bluetooth remove NAME        forget a bluetooth device
-moonwater bluetooth share [on|off]     the machine's internet, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]
-moonwater bluetooth share [on|off]     the machine's internet over Bluetooth to the devices that pair with it; off until on (root)
+moonwater bluetooth share [on|off]     the internet of this machine, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]
+moonwater bluetooth share [on|off]     the internet of this machine over Bluetooth to the devices that pair with it; off until on (root)
 
 
 # Devices

@@ -46458,8 +46458,14 @@ def moonwater_sandbox(shell, top):
     for name in ("usr", "dev", "proc", "root", "run", "etc", "home", "tmp",
                  "bowls/one/etc", "bowls/two/etc"):
         (sandbox / name).mkdir(parents=True, exist_ok=True)
+    #       The links are the host's own where it has them into its /usr, since
+    #       /usr is the host's: a loader named /lib64/ld-linux-x86-64.so.2 is in
+    #       usr/lib on Arch and in usr/lib64 on Debian and Ubuntu, where a
+    #       lib64 linked to usr/lib had no loader and no program started.
     for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
                          ("sbin", "usr/bin")):
+        if os.path.islink("/" + name) and os.readlink("/" + name).startswith("usr/"):
+            target = os.readlink("/" + name)
         (sandbox / name).symlink_to(target)
     for name in ("passwd", "group", "hosts"):
         if Path("/etc", name).exists():
@@ -46712,7 +46718,7 @@ def harness_moonwater_cli(argv):
             #       The keyboard row of that table is the layouts of the keyboard table (host.c, asked as keyboard list):
             #       its help names every one, and its menu names each layout once, leaving out gb, sv and nb, which
             #       are the same layouts as uk, se and no under their country's name.
-            keyboard_row = re.search(r'"Keyboard", .*?\{"keyboard"\}, "((?:[a-z]{2} ?)+)", 0, null,\s*\.usage = "[^"]*",\s*'
+            keyboard_row = re.search(r'"Keyboard", .*?\{"keyboard"\}, "((?:[a-z]{2} ?)+)", 0,(?: null,)?\s*\.usage = "[^"]*",\s*'
                                      r'\.help = "([^"]*)"', registry_source, re.S)
             menu = keyboard_row.group(1).split() if keyboard_row else []
             helped = [word for word in keyboard_row.group(2).split() if not word.startswith("[")] if keyboard_row else []
