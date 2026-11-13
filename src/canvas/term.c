@@ -4141,28 +4141,55 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
 */
 static positive term_paste_filter(const p8 address_to text, positive length, p8 address_to into)
 {
+        static const p16 moves[4] = { 0, 2, 2, 2 };
+        static p8 classes[256];
+        static p8 classes_ready = 0;
         positive out = 0;
+        positive at = 0;
 
-        for (positive at = 0; at < length; at++)
+        if (!classes_ready)
         {
-                p8 byte = text[at];
+                for (int i = 0; i < 256; i++)
+                        classes[i] = ((i >= ' ' && i != 0x7f && i != 0xc2) || i == '\t') ? 0 : 1;
+                classes_ready = 1;
+        }
+        while (at < length)
+        {
+                p16 state = 0;
+                positive taken = automaton_scan(moves, classes, 2, &state, text + at, length - at);
 
-                if (byte == '\r' && at + 1 < length && text[at + 1] == '\n')
-                        continue;
-                if (byte == '\n' || byte == '\r')
+                if (state < 2)
                 {
-                        into[out++] = '\r';
-                        continue;
+                        memory_copy_apart(into + out, text + at, taken);
+                        out += taken;
+                        break;
                 }
-                if ((byte < ' ' && byte != '\t') || byte == 0x7f)
-                        continue;
-                // U+0080 to U+009F are C2 80 to C2 9F in UTF-8.
-                if (byte == 0xc2 && at + 1 < length && text[at + 1] >= 0x80 && text[at + 1] <= 0x9f)
+                if (taken > 1)
                 {
-                        at++;
-                        continue;
+                        memory_copy_apart(into + out, text + at, taken - 1);
+                        out += taken - 1;
                 }
-                into[out++] = byte;
+                at += taken - 1;
+                {
+                        p8 byte = text[at++];
+
+                        if (byte == '\r' && at < length && text[at] == '\n')
+                                continue;
+                        if (byte == '\n' || byte == '\r')
+                        {
+                                into[out++] = '\r';
+                                continue;
+                        }
+                        if ((byte < ' ' && byte != '\t') || byte == 0x7f)
+                                continue;
+                        // U+0080 to U+009F are C2 80 to C2 9F in UTF-8.
+                        if (byte == 0xc2 && at < length && text[at] >= 0x80 && text[at] <= 0x9f)
+                        {
+                                at++;
+                                continue;
+                        }
+                        into[out++] = byte;
+                }
         }
         return out;
 }

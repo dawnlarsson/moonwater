@@ -20688,9 +20688,15 @@ static b32 compositor_headless_plate(string_address path, long bytes)
                 compositor_spare_name[length + at] = suffix[at];
         compositor_spare_name[length + sizeof(suffix) - 1] = 0;
         handle = (long)system_open_at_mode(AT_FDCWD, (string_address)compositor_spare_name, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
-        if (handle < 0 || compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+        if (handle < 0)
                 return 0;
+        if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+        {
+                system_close((positive)handle);
+                return 0;
+        }
         mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
+        system_close((positive)handle);
         if (mapped < 0 && mapped > -4096)
                 return 0;
         compositor_spare.fb = 2, compositor_spare.handle = 0, compositor_spare.pixels = (unsigned int *)mapped; // 2: the other name, as a framebuffer is
@@ -20701,28 +20707,42 @@ static b32 compositor_headless_plate(string_address path, long bytes)
 
 static b32 compositor_headless(string_address size, string_address path)
 {
-        long width = 0, height = 0, handle, bytes;
+        long width = 0, height = 0, handle, mapped, bytes;
 
         while (*size >= '0' && *size <= '9')
+        {
                 width = width * 10 + (*size++ - '0');
+                if (width > 16384)
+                        return -COMPOSITOR_EINVAL;
+        }
         if (*size++ != 'x')
                 return -COMPOSITOR_EINVAL;
         while (*size >= '0' && *size <= '9')
+        {
                 height = height * 10 + (*size++ - '0');
-        if (width < 64 || height < 64 || width > 16384 || height > 16384)
+                if (height > 16384)
+                        return -COMPOSITOR_EINVAL;
+        }
+        if (width < 64 || height < 64)
                 return -COMPOSITOR_EINVAL;
 
         bytes = width * height * 4;
         handle = (long)system_open_at_mode(AT_FDCWD, path, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
-        if (handle < 0 || compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+        if (handle < 0)
                 return -COMPOSITOR_EINVAL;
+        if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+        {
+                system_close((positive)handle);
+                return -COMPOSITOR_EINVAL;
+        }
 
-        handle = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
-        if (handle < 0 && handle > -4096)
+        mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
+        system_close((positive)handle);
+        if (mapped < 0 && mapped > -4096)
                 return -COMPOSITOR_ENOSPC;
 
         compositor.card = -1;
-        compositor.scanout = (unsigned int *)handle;
+        compositor.scanout = (unsigned int *)mapped;
         compositor.scanout_bytes = (unsigned long)bytes;
         compositor.scanout_pitch = (unsigned long)width * 4;
         compositor.width = (int)width;

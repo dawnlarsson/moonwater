@@ -9407,7 +9407,7 @@ static fn font_blend_turned(font_engine address_to e, const font_target address_
         b32 left = right ? target->width - y - glyph.height : y;
         b32 most = (b32)(FONT_STRIP / (positive)(glyph.height > 0 ? glyph.height : 1));
 
-        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || left >= target->width ||
+        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || most <= 0 || left >= target->width ||
             left + glyph.height <= 0)
                 return;
         for (b32 from = 0; from < glyph.width; from += most)

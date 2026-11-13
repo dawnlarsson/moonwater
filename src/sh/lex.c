@@ -912,6 +912,7 @@ typedef struct
         p8 state[LEX_CASES];
         positive depth[LEX_CASES];
         positive count;
+        positive overflow;
         positive pattern_parens;
         bool pattern_started;
         bool command; // the next word is in command position
@@ -964,11 +965,21 @@ static fn lex_cases_word(lex_cases address_to cases, string_address at,
         if (!command)
                 return;
 
-        if (lex_word_is(at, "case", 4) && cases->count < LEX_CASES)
+        if (lex_word_is(at, "case", 4))
         {
+                if (cases->overflow || cases->count >= LEX_CASES)
+                {
+                        cases->overflow++;
+                        return;
+                }
                 cases->state[cases->count] = LEX_CASE_SUBJECT;
                 cases->depth[cases->count] = depth;
                 cases->count++;
+                return;
+        }
+        if (cases->overflow && lex_word_is(at, "esac", 4))
+        {
+                cases->overflow--;
                 return;
         }
         if (here && state == LEX_CASE_BODY && lex_word_is(at, "esac", 4))

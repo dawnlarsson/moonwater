@@ -3535,7 +3535,8 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 c->props = props;
                 {
                         char pid[24];
-                        long n = 0, v = c->pid;
+                        long n = 0;
+                        unsigned long v = c->pid > 0 ? (unsigned long)c->pid : 0;
                         char digits[24];
                         int count = 0;
 

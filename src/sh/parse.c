@@ -1039,7 +1039,7 @@ static COLD positive parse_strip_continuations(p8 address_to text,
 {
         p8 context[PARSE_STRIP_DEPTH];
         positive parens[PARSE_STRIP_DEPTH];
-        positive depth = 0;
+        positive depth = 0, overflow = 0;
         positive at = 0;
         positive out = 0;
 
@@ -1102,23 +1102,47 @@ static COLD positive parse_strip_continuations(p8 address_to text,
                         at = until;
                         continue;
                 }
-                if (depth + 1 < PARSE_STRIP_DEPTH && value == '$' &&
-                    at + 1 < length &&
-                    (text[at + 1] == '{' || text[at + 1] == '('))
+                if (value == '$' && at + 1 < length &&
+                    (text[at + 1] == '{' ||
+                     (text[at + 1] == '(' && at + 2 < length && text[at + 2] == '(')))
                 {
                         bool arith = text[at + 1] == '(';
 
-                        context[++depth] = arith ? 4 : now == 0 || now == 2 ? 2 : 3;
-                        parens[depth] = 0;
+                        if (overflow || depth + 1 >= PARSE_STRIP_DEPTH)
+                                overflow++;
+                        else
+                        {
+                                context[++depth] = arith ? 4 : now == 0 || now == 2 ? 2 : 3;
+                                parens[depth] = 0;
+                        }
                         text[out++] = text[at++];
                         text[out++] = text[at++];
                         if (arith)
                                 text[out++] = text[at++];
                         continue;
                 }
-                if (value == '"' && (now == 0 || now == 2 || now == 3) &&
-                    depth + 1 < PARSE_STRIP_DEPTH)
-                        context[++depth] = 1, parens[depth] = 0;
+                if (overflow)
+                {
+                        if (value == '"')
+                        {
+                                // Track quotes/braces roughly? Wait: we only need to avoid popping parent depth!
+                        }
+                        if (value == '}' || (value == ')' && at + 1 < length && text[at + 1] == ')'))
+                        {
+                                if (value == ')')
+                                        text[out++] = text[at++];
+                                overflow--;
+                                text[out++] = text[at++];
+                                continue;
+                        }
+                }
+                else if (value == '"' && (now == 0 || now == 2 || now == 3))
+                {
+                        if (depth + 1 < PARSE_STRIP_DEPTH)
+                                context[++depth] = 1, parens[depth] = 0;
+                        else
+                                overflow++;
+                }
                 else if (value == '"' && now == 1 && depth)
                         depth--;
                 else if (value == '}' && (now == 2 || now == 3) && depth)

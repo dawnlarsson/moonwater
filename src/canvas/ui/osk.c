@@ -794,6 +794,10 @@ static b32 osk_purpose_take(void)
                    : mail                                                          ? OSK_PAGE_SYMBOLS
                                                                                    : OSK_PAGE_LETTERS;
         osk.shift = 0;
+        osk.held = -1;
+        osk.repeat = -1;
+        osk.long_key = -1;
+        osk.alt_key = -1;
         return true;
 }
 

@@ -1121,14 +1121,10 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         if (right <= left || bottom <= top)
                                 continue;
                         if (picture->blend)
-                                for (long r = top; r < bottom; r++)
-                                {
-                                        const unsigned int *from = (const unsigned int *)(picture->pixels + r * picture->stride);
-                                        unsigned int *into = to + (unsigned long)(y + r) * pitch + (unsigned long)x;
-
-                                        for (long c = left; c < right; c++)
-                                                into[c] = compositor_wl_over(from[c], into[c]);
-                                }
+                                memory_over_u32_rect(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                     (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                     (unsigned long)picture->stride / 4,
+                                                     (unsigned long)(right - left), (unsigned long)(bottom - top));
                         else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, card_wanted))
                                 table->client_rects_card++;
                         else if (picture->sync_fd >= 0)

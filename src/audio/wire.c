@@ -73,6 +73,8 @@ static long wire_len(const char *s)
 
 static void wire_w_raw(struct wire_w *w, const void *data, long n)
 {
+        if (w->bad)
+                return;
         if (w->len + n > w->cap)
         {
                 w->bad = 1;

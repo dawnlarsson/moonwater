@@ -3480,46 +3480,48 @@ static bool edit_input_paste_append(string_address bytes, positive length)
 
 static fn edit_input_paste_byte(p8 byte)
 {
-        if (byte == edit_input_paste_end[edit_input_paste_match])
+        // KMP automaton for "\x1b[201~" (6 states, row width 7: classes 0..5 for "\x1b[201~", 6 for other).
+        static const p16 moves[42] = {
+                /* 0  */ 7,  0,  0,  0,  0,  0,  0,
+                /* 7  */ 7, 14,  0,  0,  0,  0,  0,
+                /* 14 */ 7,  0, 21,  0,  0,  0,  0,
+                /* 21 */ 7,  0,  0, 28,  0,  0,  0,
+                /* 28 */ 7,  0,  0,  0, 35,  0,  0,
+                /* 35 */ 7,  0,  0,  0,  0, 42,  0,
+        };
+        positive event = byte == 0x1b ? 0 : byte == '[' ? 1 : byte == '2' ? 2 : byte == '0' ? 3 : byte == '1' ? 4 : byte == '~' ? 5 : 6;
+        positive prev = edit_input_paste_match;
+        positive next = automaton_step(moves, prev * 7, event) / 7;
+
+        if (next == 6)
         {
-                edit_input_paste_match++;
-
-                if (edit_input_paste_match == sizeof(edit_input_paste_end))
-                {
-                        edit_input_pasting = false;
-                        edit_input_paste_match = 0;
-
-                        if (edit_input_paste_failed)
-                                edit_status_say((string_address)"paste did not fit");
-                        else if (edit_input_paste_length)
-                        {
-                                edit_insert(edit_input_paste,
-                                            edit_input_paste_length,
-                                            EDIT_STEP_OTHER);
-                                edit_repaint_all();
-                        }
-
-                        edit_input_paste_length = 0;
-                        edit_input_paste_failed = false;
-                }
-
-                return;
-        }
-
-        if (edit_input_paste_match)
-        {
-                edit_input_paste_append(edit_input_paste_end,
-                                        edit_input_paste_match);
+                edit_input_pasting = false;
                 edit_input_paste_match = 0;
 
-                if (byte == edit_input_paste_end[0])
+                if (edit_input_paste_failed)
+                        edit_status_say((string_address)"paste did not fit");
+                else if (edit_input_paste_length)
                 {
-                        edit_input_paste_match = 1;
-                        return;
+                        edit_insert(edit_input_paste,
+                                    edit_input_paste_length,
+                                    EDIT_STEP_OTHER);
+                        edit_repaint_all();
                 }
-        }
 
-        edit_input_paste_append(address_of byte, 1);
+                edit_input_paste_length = 0;
+                edit_input_paste_failed = false;
+                return;
+        }
+        if (next <= prev)
+        {
+                positive flush = prev + 1 - next;
+
+                if (flush > 1)
+                        edit_input_paste_append(edit_input_paste_end, flush - 1);
+                if (next == 0)
+                        edit_input_paste_append(address_of byte, 1);
+        }
+        edit_input_paste_match = next;
 }
 
 /*

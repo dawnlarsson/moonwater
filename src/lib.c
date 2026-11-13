@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        495 routines (469 public, 26 local), 484 of them on all three and 11 local to one.
+        497 routines (471 public, 26 local), 486 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -301,6 +301,7 @@
           memory_key_printable           public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
+          memory_lerp_u32_row            public  yes     yes     yes
           memory_mix_u32_rect            public  yes     yes     yes
           memory_mix_u32_row             public  yes     yes     yes
           memory_nth_last_of             public  yes     yes     yes
@@ -308,6 +309,7 @@
           memory_offsets_between         public  yes     yes     yes
           memory_offsets_fields          public  yes     yes     yes
           memory_offsets_fields_arm64    local   --      yes     --
+          memory_over_u32_rect           public  yes     yes     yes
           memory_offsets_fields_blank    public  yes     yes     yes
           memory_offsets_fields_rv       local   --      --      yes
           memory_offsets_fields_x64      local   yes     --      --
@@ -14339,6 +14341,59 @@ __asm__(
     "84: add $4, %rdi\n   add $4, %rsi\n   add $1, %rdx\n   dec %rcx\n   jnz 81b\n"
     "90: " ASM_RET
     ASM_END(memory_mix_u32_row)
+
+    ASM_FUNC(memory_lerp_u32_row)
+    "test %rcx, %rcx\n   jz 90f\n"
+    "pxor %xmm7, %xmm7\n"
+    "movd %r8d, %xmm6\n   pshuflw $0, %xmm6, %xmm6\n   punpcklqdq %xmm6, %xmm6\n"
+    "mov $256, %eax\n   sub %r8d, %eax\n   movd %eax, %xmm5\n   pshuflw $0, %xmm5, %xmm5\n   punpcklqdq %xmm5, %xmm5\n"
+    "cmp $4, %rcx\n   jb 80f\n"
+    "40: movdqu (%rsi), %xmm0\n   movdqu (%rdx), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   punpcklbw %xmm7, %xmm2\n   punpckhbw %xmm7, %xmm0\n"
+    "movdqa %xmm1, %xmm3\n   punpcklbw %xmm7, %xmm3\n   punpckhbw %xmm7, %xmm1\n"
+    "pmullw %xmm5, %xmm2\n   pmullw %xmm6, %xmm3\n   paddw %xmm3, %xmm2\n   psrlw $8, %xmm2\n"
+    "pmullw %xmm5, %xmm0\n   pmullw %xmm6, %xmm1\n   paddw %xmm1, %xmm0\n   psrlw $8, %xmm0\n"
+    "packuswb %xmm0, %xmm2\n   movdqu %xmm2, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rsi\n   add $16, %rdx\n   sub $4, %rcx\n   cmp $4, %rcx\n   jae 40b\n"
+    "80: test %rcx, %rcx\n   jz 90f\n"
+    "81: movd (%rsi), %xmm0\n   movd (%rdx), %xmm1\n"
+    "punpcklbw %xmm7, %xmm0\n   punpcklbw %xmm7, %xmm1\n"
+    "pmullw %xmm5, %xmm0\n   pmullw %xmm6, %xmm1\n   paddw %xmm1, %xmm0\n   psrlw $8, %xmm0\n"
+    "packuswb %xmm7, %xmm0\n   movd %xmm0, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   add $4, %rdx\n   dec %rcx\n   jnz 81b\n"
+    "90: " ASM_RET
+    ASM_END(memory_lerp_u32_row)
+
+    ASM_FUNC(memory_over_u32_rect)
+    "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n"
+    "pxor %xmm7, %xmm7\n"
+    "" ASM_RODATA_PUSH "\n   .p2align 4\n"
+    "" ASM_LABEL(over_words255) ": .long 0x00ff00ff, 0x00ff00ff, 0x00ff00ff, 0x00ff00ff\n"
+    "" ASM_LABEL(over_words128) ": .long 0x00800080, 0x00800080, 0x00800080, 0x00800080\n"
+    "" ASM_LABEL(over_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n.popsection\n"
+    "movdqa " ASM_LABEL(over_words255) "(%rip), %xmm6\n   movdqa " ASM_LABEL(over_words128) "(%rip), %xmm5\n   movdqa " ASM_LABEL(over_alpha) "(%rip), %xmm8\n"
+    "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "cmp $4, %rax\n   jb 80f\n"
+    "40: movdqu (%rdx), %xmm0\n   movdqu (%rdi), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
+    "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n"
+    "movdqa %xmm1, %xmm4\n   punpcklbw %xmm7, %xmm4\n   punpckhbw %xmm7, %xmm1\n"
+    "movdqa %xmm3, %xmm2\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
+    "pmullw %xmm2, %xmm4\n   paddw %xmm5, %xmm4\n   movdqa %xmm4, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm4\n   psrlw $8, %xmm4\n"
+    "pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm1, %xmm4\n   paddusb %xmm4, %xmm0\n   por %xmm8, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rdx\n   sub $4, %rax\n   cmp $4, %rax\n   jae 40b\n"
+    "80: test %rax, %rax\n   jz 89f\n"
+    "81: movd (%rdx), %xmm0\n   movd (%rdi), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
+    "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n   punpckldq %xmm3, %xmm3\n"
+    "punpcklbw %xmm7, %xmm1\n   pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm7, %xmm1\n   paddusb %xmm1, %xmm0\n   por %xmm8, %xmm0\n   movd %xmm0, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rdx\n   dec %rax\n   jnz 81b\n"
+    "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
+    "90: " ASM_RET
+    ASM_END(memory_over_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -26122,6 +26177,51 @@ __asm__(
     "st1 {v16.s}[0], [x0], #4\n   add x1, x1, #4\n   add x2, x2, #1\n   sub x3, x3, #1\n   b 3b\n"
     "9: " ASM_RET
     ASM_END(memory_mix_u32_row)
+
+    ASM_FUNC(memory_lerp_u32_row)
+    "cbz x3, 9f\n"
+    "dup v31.8h, w4\n   mov w9, #256\n   sub w9, w9, w4\n   dup v30.8h, w9\n"
+    "1: cmp x3, #4\n   b.lo 2f\n"
+    "ld1 {v0.16b}, [x1], #16\n   ld1 {v1.16b}, [x2], #16\n"
+    "uxtl v2.8h, v0.8b\n   uxtl2 v3.8h, v0.16b\n"
+    "uxtl v4.8h, v1.8b\n   uxtl2 v5.8h, v1.16b\n"
+    "mul v2.8h, v2.8h, v30.8h\n   mla v2.8h, v4.8h, v31.8h\n   shrn v0.8b, v2.8h, #8\n"
+    "mul v3.8h, v3.8h, v30.8h\n   mla v3.8h, v5.8h, v31.8h\n   shrn2 v0.16b, v3.8h, #8\n"
+    "st1 {v0.16b}, [x0], #16\n   sub x3, x3, #4\n   b 1b\n"
+    "2: cbz x3, 9f\n"
+    "ld1 {v0.s}[0], [x1]\n   ld1 {v1.s}[0], [x2]\n"
+    "uxtl v2.8h, v0.8b\n   uxtl v4.8h, v1.8b\n"
+    "mul v2.8h, v2.8h, v30.8h\n   mla v2.8h, v4.8h, v31.8h\n   shrn v0.8b, v2.8h, #8\n"
+    "st1 {v0.s}[0], [x0], #4\n   add x1, x1, #4\n   add x2, x2, #4\n   sub x3, x3, #1\n   b 2b\n"
+    "9: " ASM_RET
+    ASM_END(memory_lerp_u32_row)
+
+    ASM_FUNC(memory_over_u32_rect)
+    "cbz x4, 9f\n   cbz x5, 9f\n"
+    "lsl x1, x1, #2\n   lsl x3, x3, #2\n"
+    "movi v31.8h, #128\n   movi v30.4s, #0xff, lsl #24\n"
+    "mov x9, #0x0303\n   movk x9, #0x0303, lsl #16\n   movk x9, #0x0707, lsl #32\n   movk x9, #0x0707, lsl #48\n"
+    "mov x10, #0x0b0b\n   movk x10, #0x0b0b, lsl #16\n   movk x10, #0x0f0f, lsl #32\n   movk x10, #0x0f0f, lsl #48\n"
+    "ins v29.d[0], x9\n   ins v29.d[1], x10\n"
+    "0: mov x11, x0\n   mov x12, x2\n   mov x13, x4\n"
+    "1: cmp x13, #4\n   b.lo 2f\n"
+    "ld1 {v0.16b}, [x12], #16\n   ld1 {v1.16b}, [x11]\n"
+    "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v1.8b, v2.8b\n   umull2 v4.8h, v1.16b, v2.16b\n"
+    "add v3.8h, v3.8h, v31.8h\n   add v4.8h, v4.8h, v31.8h\n"
+    "usra v3.8h, v3.8h, #8\n   usra v4.8h, v4.8h, #8\n"
+    "shrn v5.8b, v3.8h, #8\n   shrn2 v5.16b, v4.8h, #8\n"
+    "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
+    "st1 {v0.16b}, [x11], #16\n   sub x13, x13, #4\n   b 1b\n"
+    "2: cbz x13, 3f\n"
+    "ld1 {v0.s}[0], [x12]\n   ld1 {v1.s}[0], [x11]\n"
+    "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v1.8b, v2.8b\n   add v3.8h, v3.8h, v31.8h\n   usra v3.8h, v3.8h, #8\n   shrn v5.8b, v3.8h, #8\n"
+    "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
+    "st1 {v0.s}[0], [x11], #4\n   add x12, x12, #4\n   sub x13, x13, #1\n   b 2b\n"
+    "3: add x0, x0, x1\n   add x2, x2, x3\n   sub x5, x5, #1\n   cbnz x5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -36253,6 +36353,41 @@ __asm__(
     "9: " ASM_RET
     ASM_END(memory_mix_u32_row)
     ".option pop\n"
+
+    ASM_FUNC(memory_lerp_u32_row)
+    "beqz a3, 9f\n"
+    "li t0, 256\n   sub t0, t0, a4\n   li t1, 0x00ff00ff\n"
+    "1: lwu t2, 0(a1)\n   lwu t3, 0(a2)\n"
+    "and t4, t2, t1\n   and t5, t3, t1\n"
+    "mul t4, t4, t0\n   mul t5, t5, a4\n   add t4, t4, t5\n   srli t4, t4, 8\n   and t4, t4, t1\n"
+    "srli t2, t2, 8\n   srli t3, t3, 8\n   and t2, t2, t1\n   and t3, t3, t1\n"
+    "mul t2, t2, t0\n   mul t3, t3, a4\n   add t2, t2, t3\n   srli t2, t2, 8\n   and t2, t2, t1\n"
+    "slli t2, t2, 8\n   or t4, t4, t2\n   sw t4, 0(a0)\n"
+    "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 4\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "9: " ASM_RET
+    ASM_END(memory_lerp_u32_row)
+
+    ASM_FUNC(memory_over_u32_rect)
+    "beqz a4, 9f\n   beqz a5, 9f\n"
+    "slli a1, a1, 2\n   slli a3, a3, 2\n"
+    "li a6, 255\n"
+    "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
+    "1: lwu t3, 0(t1)\n   lwu t4, 0(t0)\n"
+    "srli t5, t3, 24\n   sub t5, a6, t5\n"
+    "andi t6, t4, 255\n   mul t6, t6, t5\n   addi t6, t6, 127\n   divu t6, t6, a6\n"
+    "andi a7, t3, 255\n   add t6, t6, a7\n   ble t6, a6, 2f\n   mv t6, a6\n"
+    "2: mv a7, t6\n"
+    "srli t6, t4, 8\n   andi t6, t6, 255\n   mul t6, t6, t5\n   addi t6, t6, 127\n   divu t6, t6, a6\n"
+    "srli t4, t4, 16\n   andi t4, t4, 255\n   mul t4, t4, t5\n   addi t4, t4, 127\n   divu t4, t4, a6\n"
+    "srli t5, t3, 8\n   andi t5, t5, 255\n   add t6, t6, t5\n   ble t6, a6, 3f\n   mv t6, a6\n"
+    "3: slli t6, t6, 8\n   or a7, a7, t6\n"
+    "srli t5, t3, 16\n   andi t5, t5, 255\n   add t4, t4, t5\n   ble t4, a6, 4f\n   mv t4, a6\n"
+    "4: slli t4, t4, 16\n   or a7, a7, t4\n"
+    "li t6, 0xff000000\n   or a7, a7, t6\n   sw a7, 0(t0)\n"
+    "addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, -1\n   bnez t2, 1b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -53974,6 +54109,14 @@ fn memory_tint_u32(p32 address_to into, const p32 address_to from, positive coun
 // mix, one pixel at a time. A round frame's corners are this a row at a time: the line's cover over the edge, then
 // the contents' over the picture. The words past the count are not touched.
 fn memory_mix_u32_row(p32 address_to into, const p32 address_to ink, const p8 address_to cover, positive count);
+// count pixels of into, each byte-wise linearly interpolated between a and b by t in 0..256:
+// ((a_ch * (256 - t) + b_ch * t) >> 8). Nothing past count is read or written.
+fn memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 address_to b, positive count, positive t);
+// height rows of width premultiplied ARGB32 pixels of from laid over into (Porter-Duff OVER, opaque result):
+// through = 255 - (over >> 24), each colour channel clamp255(over_ch + (under_ch * through + 127) / 255), alpha 0xff.
+// Zero width or height touches nothing.
+fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                        positive width, positive height);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);

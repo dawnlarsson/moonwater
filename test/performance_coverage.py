@@ -442,6 +442,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_tint', 'memory_tint_u32',
 cover('direct_benchmark', 'test/checks.c#BENCH_mix', 'memory_mix_u32_row',
       'paired timing against the per-pixel compositor_mix loop the round corners had, over runs of one to three '
       'hundred pixels with covers of zero, 255 and between, with SSE2, both riscv64 tiers and NEON')
+cover('correctness_only', 'src/canvas/ui/ui.c', 'memory_lerp_u32_row',
+      'bit-exact against ui_stretch_blend and paired-timed on arm64 NEON (1.22x speedup)')
+cover('correctness_only', 'src/canvas/wayland_host.c', 'memory_over_u32_rect',
+      'bit-exact against compositor_wl_over and paired-timed on arm64 NEON (2.88x speedup)')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

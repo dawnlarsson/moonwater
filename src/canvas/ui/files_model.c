@@ -1123,6 +1123,7 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
                 string_copy_bounded(job->at, (string_address)files_model_name(m, entry), FILES_NAME);
                 if (files_model_check(m, place, &job->facts[job->count]) != FILES_SAME)
                 {
+                        files_job_end(job);
                         job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY;
                         return false;
                 }

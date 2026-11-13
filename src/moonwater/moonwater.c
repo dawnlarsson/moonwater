@@ -201,7 +201,8 @@ struct script_read {
         unsigned long at;
         unsigned short line;
         unsigned char heredoc_tabs;     // <<- strips leading tabs
-        unsigned char heredoc_length;   // a body waits for the next newline
+        unsigned char heredoc_active;   // a body waits for the next newline (even if delimiter is empty)
+        unsigned char heredoc_length;   // length of the delimiter prefix kept in heredoc[]
         unsigned long heredoc_total;    // its ending line's length, all of it
         unsigned long rescan;           // what may still be read again for one
         char heredoc[SCRIPT_WORD];      // the start of the line that ends it
@@ -286,6 +287,7 @@ static void script_heredoc_start(struct script_read *scan)
                 scan->at++;
         }
         scan->heredoc[used] = 0;
+        scan->heredoc_active = 1;
         scan->heredoc_length = (unsigned char)used;
         scan->heredoc_total = total;
 }
@@ -335,6 +337,7 @@ static void script_skip_heredoc(struct script_read *scan)
                 scan->at++;
                 scan->line++;
         }
+        scan->heredoc_active = 0;
         scan->heredoc_length = 0;
 }
 
@@ -350,7 +353,7 @@ static void script_next(struct script_read *scan, struct script_token *token)
         while (scan->at < scan->length) {
                 value = scan->text[scan->at];
                 kind = script_kind[value];
-                if (kind == SK_NL && scan->heredoc_length) {
+                if (kind == SK_NL && scan->heredoc_active) {
                         script_skip_heredoc(scan);
                         fresh = 1;
                         continue;

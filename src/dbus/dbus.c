@@ -736,6 +736,8 @@ struct dbus_out
 
 static void dbus_o_pad(struct dbus_out *w, long align)
 {
+        if (w->bad)
+                return;
         while (w->length % align)
         {
                 if (w->length >= w->room)
@@ -749,6 +751,8 @@ static void dbus_o_pad(struct dbus_out *w, long align)
 
 static void dbus_o_raw(struct dbus_out *w, const void *bytes, long n)
 {
+        if (w->bad)
+                return;
         if (n < 0 || w->length + n > w->room)
         {
                 w->bad = 1;
@@ -2198,7 +2202,7 @@ static int dbus_external_ok(struct dbus_client *c, const char *hex)
         long n = 0;
 
         {
-                long id = c->uid;
+                unsigned long id = (unsigned long)(unsigned int)c->uid;
                 char rev[12];
                 long k = 0;
 
@@ -2237,6 +2241,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
         {
                 if (count == 1 || (count >= 2 && !dbus_equal(word[1], "EXTERNAL") && !dbus_equal(word[1], "ANONYMOUS")))
                 {
+                        c->uid_ok = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                         return 0;
                 }
@@ -2252,6 +2257,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 {
                         // EXTERNAL with nothing after it: the client answers DATA with its data, or with none (sd-bus sends
                         // that line without waiting) to say that the credentials of the socket are enough.
+                        c->uid_ok = 0;
                         c->want_data = 1;
                         dbus_say(c, "DATA\r\n");
                         return 0;
@@ -2264,7 +2270,10 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                         dbus_say(c, "\r\n");
                 }
                 else
+                {
+                        c->uid_ok = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
+                }
                 return 0;
         }
         if (dbus_equal(word[0], "DATA"))
@@ -2280,7 +2289,10 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                         dbus_say(c, "\r\n");
                 }
                 else
+                {
+                        c->uid_ok = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
+                }
                 return 0;
         }
         if (dbus_equal(word[0], "NEGOTIATE_UNIX_FD"))

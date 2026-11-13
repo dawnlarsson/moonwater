@@ -913,11 +913,19 @@ static b32 terminal_recording(void)
 static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned int width,
                           unsigned int height, unsigned int colour)
 {
-        unsigned int x2 = x + width > terminal.width ? terminal.width : x + width;
-        unsigned int y2 = y + height > terminal.height ? terminal.height : y + height;
+        long x0 = x < 0 ? 0 : (long)x;
+        long y0 = y < 0 ? 0 : (long)y;
+        long x2 = (long)x + (long)width;
+        long y2 = (long)y + (long)height;
 
-        if ((unsigned int)x >= x2 || (unsigned int)y >= y2)
+        if (x2 > (long)terminal.width)
+                x2 = (long)terminal.width;
+        if (y2 > (long)terminal.height)
+                y2 = (long)terminal.height;
+        if (x0 >= x2 || y0 >= y2)
                 return;
+        x = (int)x0;
+        y = (int)y0;
         if (terminal_recording())
         {
                 // The grid's fills are offset by the paper round it; the picture's (the margins and the bar) are not. Any other is lost.
@@ -963,8 +971,7 @@ static void terminal_grid_slide(unsigned int address_to whole, int shift)
         {
                 unsigned int colour = whole[(positive)(height - 1) * pitch];
 
-                for (unsigned int y = 0; y + up < height; y++)
-                        memory_copy(whole + (positive)y * pitch, whole + (positive)(y + up) * pitch, (positive)width * sizeof(unsigned int));
+                memory_copy_rect_u32(whole, pitch, whole + (positive)up * pitch, pitch, width, height - up);
                 terminal_fill(whole, 0, (int)(height - up), width, up, colour);
         }
 }

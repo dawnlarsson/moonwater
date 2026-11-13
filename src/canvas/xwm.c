@@ -1270,7 +1270,12 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
         // What a drained queue lets be taken of the input.
         compositor_xwm_flush();
         compositor_xwm_messages();
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS && x->fd >= 0; at++)
+        if (x->fd >= 0 && x->broken)
+        {
+                compositor_xwm_drop("a message the codec refused, or a queue that overflowed");
+                return;
+        }
+        for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS && x->fd >= 0 && !x->broken; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
 
@@ -1309,6 +1314,11 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                                         compositor_focus(w->row);
                         }
                 }
+        }
+        if (x->fd >= 0 && x->broken)
+        {
+                compositor_xwm_drop("a message the codec refused, or a queue that overflowed");
+                return;
         }
         // The window that has the keys has the X focus (and is told, if it asked to be: WM_TAKE_FOCUS).
         if (x->fd >= 0 && (int)compositor.focus != x->focus_row)

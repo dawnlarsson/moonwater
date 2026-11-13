@@ -16100,8 +16100,7 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
                 if (!f || row == next)
                         memory_copy_rect_u32(to, ui->pitch, a, (unsigned long)wide, (unsigned long)wide, 1);
                 else
-                        for (int k = 0; k < wide; k++)
-                                to[k] = ui_stretch_blend(a[k], b[k], f);
+                        memory_lerp_u32_row(to, a, b, (positive)wide, (positive)f);
         }
         return true;
 }
