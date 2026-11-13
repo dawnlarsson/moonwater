@@ -2650,6 +2650,7 @@ static fn host_machine_hook(positive slot, unsigned int which,
 */
 #define HOST_MACHINE_EARLY_OFF "moonwater.early=0"
 #define HOST_MACHINE_EARLY_FN "desktop_early"
+#define HOST_MACHINE_EARLY_NS ((p64)5000000000)
 
 static fn desktop_yield(void);
 
@@ -2667,6 +2668,7 @@ static bool host_machine_early_wanted(void)
 static bool host_machine_early(void)
 {
         positive status = 0;
+        bool stopped = false;
         bipolar child;
 
         if (!host_machine_early_wanted())
@@ -2685,8 +2687,11 @@ static bool host_machine_early(void)
                 log_flush();
                 system_call_1(syscall(exit), slot == positive_max);
         }
-        return system_wait4_retry(child, address_of status, 0, null) == child &&
-               !wait_status_code(status);
+        //      Five seconds at most: a child that has not come back by then
+        //      (a script whose desktop_early waits on something) is ended,
+        //      and the boot goes on in the old order.
+        status = host_event_wait(child, HOST_MACHINE_EARLY_NS, address_of stopped);
+        return !stopped && !wait_status_code(status);
 }
 
 static b32 host_machine_run(void)
