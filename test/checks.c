@@ -116869,6 +116869,73 @@ static fn browser_history(struct files_model address_to m)
         check("browser: the root has no folder to go up to", !files_model_up(m) && string_equals(m->path, (string_address) "/"));
 }
 
+/*
+        A path that is typed (files_model_try, files_model_complete) and the crumbs a path is shown as (files_crumbs_of). A typed path
+        that is a folder is the folder shown, with the one before it on the way back; one that names nothing, names a file, or is no
+        absolute path is refused with its reason and the folder shown stays, whole, the way back as it was; a link that was typed is
+        followed, which a link of a listing never is. A name being typed is finished from the folders of the listing shown: to the
+        whole name when one starts so, to what they share when several do, never to a file's. And a path is its folders in order,
+        each with the path that goes to it.
+*/
+static fn browser_typed(struct files_model address_to m)
+{
+        p8 root[FILES_PATH], real[FILES_PATH], through[FILES_PATH], before[FILES_PATH], missing[FILES_PATH], file[FILES_PATH], into[FILES_NAME], longest[FILES_PATH + 64];
+        struct files_crumb crumb[8];
+        p32 backs, count;
+        b32 went, kept, linked, finished, crumbs;
+        int n;
+
+        browser_folder((string_address) "typed");
+        browser_folder((string_address) "typed/alpha");
+        browser_folder((string_address) "typed/alphabet");
+        browser_folder((string_address) "typed/beta");
+        browser_file((string_address) "typed/alpine", 1, 0);
+        browser_file((string_address) "typed/gamma", 1, 0);
+        browser_folder((string_address) "typed/alpha/inside");
+        browser_path(root, (string_address) "typed"), browser_path(real, (string_address) "typed/alpha");
+        browser_path(through, (string_address) "typed/way-in"), browser_path(missing, (string_address) "typed/nothing"), browser_path(file, (string_address) "typed/gamma");
+        browser_link(real, (string_address) "typed/way-in");
+        browser_go(m, (string_address) "typed");
+        backs = m->back_count;
+        string_copy_bounded(before, m->path, FILES_PATH);
+        memory_fill(longest, 'a', sizeof(longest) - 1), longest[0] = '/', longest[sizeof(longest) - 1] = end;
+        kept = files_model_try(m, missing) == FILES_GONE && files_model_try(m, file) == FILES_NOT_DIRECTORY &&
+               files_model_try(m, (string_address) "typed/alpha") == FILES_NOT_DIRECTORY && files_model_try(m, (string_address) "") == FILES_NOT_DIRECTORY &&
+               files_model_try(m, longest) == FILES_NOT_DIRECTORY && string_equals(m->path, before) && m->state == FILES_READY && m->back_count == backs &&
+               files_model_count(m) == 6;
+        check("browser: a typed path that names nothing, names a file, is not absolute or is longer than a path is refused with its reason, and the folder shown stays whole with the way back as it was",
+              kept);
+        // Finishing a name from the listing shown: folders only.
+        count = files_model_complete(m, (const p8 address_to) "b", 1, into, sizeof(into));
+        finished = count == 1 && string_equals(into, (string_address) "beta");
+        count = files_model_complete(m, (const p8 address_to) "al", 2, into, sizeof(into));
+        finished = finished && count == 2 && string_equals(into, (string_address) "alpha"); // alpha and alphabet: alpine is a file
+        count = files_model_complete(m, (const p8 address_to) "g", 1, into, sizeof(into));
+        finished = finished && count == 0 && string_equals(into, (string_address) "g");
+        count = files_model_complete(m, (const p8 address_to) "", 0, into, sizeof(into));
+        finished = finished && count == 3 && string_equals(into, (string_address) ""); // the three folders: the link and the files are none
+        check("browser: a name being typed is finished from the folders listed: the whole name when one starts so, what they share when several do, and never a file's",
+              finished);
+        went = files_model_try(m, real) == FILES_READING && string_equals(m->path, real) && m->back_count &&
+               string_equals(m->back + (positive)(m->back_count - 1) * FILES_PATH, before);
+        browser_read(m, 64);
+        went = went && browser_is(m, (string_address) "inside ") && files_model_back(m, false) && string_equals(m->path, before);
+        browser_read(m, 64);
+        check("browser: a typed path that is a folder is the folder shown, read in steps, and the one shown before it is on the way back", went);
+        // The link in the listing is not entered; the same link typed is followed, and the path shown is what was typed.
+        linked = files_model_enter(m, browser_at(m, "way-in")) == FILES_REFUSED && files_model_try(m, through) == FILES_READING && string_equals(m->path, through);
+        browser_read(m, 64);
+        check("browser: a link that was typed is followed, as naming it asks, where the same link in a listing is not entered", linked && browser_is(m, (string_address) "inside "));
+        n = files_crumbs_of((const p8 address_to) "/usr/share/fonts", crumb, 8);
+        crumbs = n == 4 && crumb[0].to == 1 && crumb[1].from == 1 && crumb[1].to == 4 && crumb[2].from == 5 && crumb[2].to == 10 && crumb[3].from == 11 &&
+                 crumb[3].to == 16 && files_crumbs_of((const p8 address_to) "/", crumb, 8) == 1 && crumb[0].to == 1 &&
+                 files_crumbs_of((const p8 address_to) "relative", crumb, 8) == 0;
+        n = files_crumbs_of((const p8 address_to) "/a/b/c/d/e", crumb, 3);
+        crumbs = crumbs && n == 3 && crumb[0].from == 5 && crumb[0].to == 6 && crumb[2].from == 9 && crumb[2].to == 10;
+        check("browser: a path is its folders in order, the root first, each with the path that goes to it, and one deeper than there is room for keeps its last folders",
+              crumbs);
+}
+
 static fn browser_changes(struct files_model address_to m)
 {
         p8 before[FILES_PATH], elsewhere[FILES_PATH];
@@ -117077,6 +117144,7 @@ b32 main(void)
         browser_names_hostile(address_of model);
         browser_links(address_of model);
         browser_history(address_of model);
+        browser_typed(address_of model);
         browser_changes(address_of model);
         browser_many(address_of model);
         browser_apart();

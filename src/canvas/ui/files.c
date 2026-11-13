@@ -17,6 +17,15 @@
         many entries there are and asked for a row by its place in them, so a folder of any length scrolls from end to end, its
         bar's thumb is the view's share of the whole folder, and nothing here keeps a window of it.
 
+        The path. At rest the band shows the folders of the path as crumbs, each a press that goes to it (files_crumbs_lay: the
+        root, then each name, as many from the end as the band has room for). A press in the band that is on no crumb, or
+        Ctrl+L, turns the band into the kit's text field holding the whole path: Enter goes where it says, Escape or a press
+        elsewhere puts the crumbs back, and Tab finishes the folder name being typed from the listing shown when the text's
+        folder is the one shown (it reads no disk). What is typed is not trusted: the field holds at most a path's bytes, and
+        the text goes to the model's own open (files_model_try), which follows a link anywhere in what was typed, its last part
+        too, because typing a name asks for what it names. A path that is no folder, may not be read or is not there says so in
+        the foot, and the folder shown stays as it was.
+
         Starts: files [PATH] [-f FONT] [-b BOLD]. With no path it shows HOME, or the root.
 */
 #ifndef MOONWATER_CANVAS_FILES
@@ -32,6 +41,9 @@
 #define FILES_KEY_R 19
 #define FILES_KEY_H 35
 #define FILES_KEY_A 30
+#define FILES_KEY_L 38
+#define FILES_CRUMBS 48              // the folders of a path that are crumbs at most: a deeper path shows its last ones
+#define FILES_CRUMB_GAP 6            // logical pixels either side of the stroke between two crumbs
 
 // Everything that is large: one mapping, not the image's bss.
 struct files_big
@@ -39,7 +51,6 @@ struct files_big
         struct files_model model;
         struct ui_list list;
         struct ui_view view;
-        char path[FILES_PATH * 3 + 1]; // the path as the top of the window writes it
         char status[192];              // the foot's words
 };
 
@@ -57,6 +68,18 @@ static struct
         b64 clicked_at, next_look, next_show;
         unsigned int said;       // LANGUAGE_files_* the foot says of the last thing asked, 0 none
         string_address start;    // the folder asked for as it started
+        // The path's band: the crumbs at rest, the field while the path is typed.
+        struct ui_rect crumbs_box;
+        struct files_crumb
+        {
+                int x, w;        // where its words are, device pixels in the window
+                p16 from, to;    // its name is the path's bytes from..to, and the folder it goes to is the path's first `to` bytes (the root's: 1)
+        } crumb[FILES_CRUMBS];
+        int crumbs, crumb_hover; // how many are laid out (the last ones of a path too long for the band), and the one under the pointer, -1 none
+        b32 editing;             // the band is the field
+        struct ui_text field;    // the kit's text engine for it
+        struct ui_control path;  // and the kit's bare field it is drawn in
+        struct ui_popup menu;    // the field's own menu (copy, paste)
 } files;
 
 /* ---- the rows ---- */
@@ -160,6 +183,127 @@ static fn files_status_text(void)
                 language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : WORDS(files_count), (int)m->shown.count);
 }
 
+/* ---- the path's band ---- */
+
+// The field, made the first time it is wanted: one line of the engine, at most a path's bytes.
+static struct ui_text address_to files_field(void)
+{
+        if (!files.field.doc.selections && ui_field_open(&files.field, &files.own, ""))
+                files.field.most = FILES_PATH - 1;
+        return &files.field;
+}
+
+/*
+        The folders of a path as crumbs: the root (the path's first byte), then each name between slashes, in order. Each has the
+        bytes of its name and how much of the path is the folder it goes to. Writes at most `room` and answers how many; a path
+        with more folders than that has its last ones (the first is then no root). Nothing is measured or drawn here.
+*/
+static int files_crumbs_of(const p8 address_to path, struct files_crumb address_to into, int room)
+{
+        positive length = string_length((string_address)path), at = 1;
+        int count = 0;
+
+        if (!length || path[0] != '/' || room < 1)
+                return 0;
+        into[count++] = (struct files_crumb){0, 0, 0, 1};
+        while (at < length)
+        {
+                positive stop = at;
+
+                while (stop < length && path[stop] != '/')
+                        stop++;
+                if (stop > at)
+                {
+                        if (count == room)
+                        {
+                                for (int k = 1; k < room; k++)
+                                        into[k - 1] = into[k];
+                                count--;
+                        }
+                        into[count++] = (struct files_crumb){0, 0, (p16)at, (p16)stop};
+                }
+                at = stop + 1;
+        }
+        return count;
+}
+
+// A crumb's words: the root's is the stroke, a folder's its name as words from outside.
+static fn files_crumb_text(char address_to into, positive room, const p8 address_to path, const struct files_crumb address_to crumb)
+{
+        ui_label_foreign(into, room, path + crumb->from, (positive)(crumb->to - crumb->from));
+}
+
+// The crumbs laid out in the band's box: as many from the path's end as fit, each as wide as its words, a stroke's room between two.
+static fn files_crumbs_lay(void)
+{
+        struct ui address_to ui = &files.ui;
+        const p8 address_to path = files.big->model.path;
+        static char words[FILES_NAME * 3 + 4];
+        int gap = ui_px(ui, FILES_CRUMB_GAP), stroke = ui_kit_measure(ui, (string_address) "/", UI_BODY_MEDIUM), room = files.crumbs_box.w, first, x;
+
+        files.crumbs = files_crumbs_of(path, files.crumb, FILES_CRUMBS);
+        for (int k = 0; k < files.crumbs; k++)
+        {
+                files_crumb_text(words, sizeof(words), path, &files.crumb[k]);
+                files.crumb[k].w = ui_kit_measure(ui, (string_address)words, UI_BODY_MEDIUM);
+        }
+        // From the end: the folder shown is always there, and those above it while there is room.
+        first = files.crumbs ? files.crumbs - 1 : 0;
+        for (int k = files.crumbs - 1, used = 0; k >= 0; k--)
+        {
+                used += files.crumb[k].w + (k < files.crumbs - 1 ? 2 * gap + stroke : 0);
+                if (used > room && k < files.crumbs - 1)
+                        break;
+                first = k;
+        }
+        for (int k = first; k < files.crumbs; k++)
+                files.crumb[k - first] = files.crumb[k];
+        files.crumbs -= first;
+        x = files.crumbs_box.x;
+        for (int k = 0; k < files.crumbs; k++)
+        {
+                files.crumb[k].x = x;
+                x += files.crumb[k].w + 2 * gap + stroke;
+        }
+}
+
+// The crumb a point of the window is on, -1 for none (the band's own ground, which is the field's to open).
+static int files_crumb_at(int x, int y)
+{
+        int gap = ui_px(&files.ui, FILES_CRUMB_GAP);
+
+        if (files.editing || y < files.crumbs_box.y || y >= files.crumbs_box.y + files.crumbs_box.h)
+                return -1;
+        for (int k = 0; k < files.crumbs; k++)
+                if (x >= files.crumb[k].x - gap && x < files.crumb[k].x + files.crumb[k].w + gap)
+                        return k;
+        return -1;
+}
+
+// The crumbs drawn: the folder shown in the ink, those above it quiet, the one under the pointer in the ink too, a quiet stroke between.
+static fn files_crumbs_draw(void)
+{
+        struct ui address_to ui = &files.ui;
+        const p8 address_to path = files.big->model.path;
+        static char words[FILES_NAME * 3 + 4];
+        int gap = ui_px(ui, FILES_CRUMB_GAP), stroke = ui_kit_measure(ui, (string_address) "/", UI_BODY_MEDIUM);
+        int baseline = ui_kit_baseline(ui, files.crumbs_box.y + (files.crumbs_box.h - ui_px(ui, 20)) / 2, UI_BODY_MEDIUM);
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+        int right = files.crumbs_box.x + files.crumbs_box.w;
+
+        for (int k = 0; k < files.crumbs; k++)
+        {
+                const struct files_crumb address_to crumb = &files.crumb[k];
+
+                files_crumb_text(words, sizeof(words), path, crumb);
+                ui_kit_text_clip(ui, crumb->x, baseline, (string_address)words, UI_BODY_MEDIUM, k == files.crumbs - 1 || k == files.crumb_hover ? strong : quiet, 0, right);
+                // The root's words are the stroke already: no second one after it.
+                if (k < files.crumbs - 1 && crumb->to > 1)
+                        ui_kit_text_clip(ui, crumb->x + crumb->w + gap, baseline, (string_address) "/", UI_BODY_MEDIUM, quiet, 0, right);
+        }
+        (void)stroke;
+}
+
 /* ---- the layout ---- */
 
 static b32 files_act(int which);
@@ -178,15 +322,24 @@ static fn files_layout(void)
                 l->damaged = files_damaged;
                 l->hover = l->down = -1;
         }
-        ui_label_foreign(files.big->path, sizeof(files.big->path), m->path, string_length(m->path));
         files_status_text();
+        if (!files.path.kind)
+        {
+                files.path.kind = UI_INPUT, files.path.variant = UI_FIELD_BARE;
+                files.path.edit = files_field();
+        }
+        files.path.focused = files.editing && files.focused;
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
         ui_row(.class = "pathbar")
         {
                 ui_button(WORDS(files_back), .class = "ghost", .on = files_act, .arg = 0);
                 ui_button(WORDS(files_forward), .class = "ghost", .on = files_act, .arg = 1);
                 ui_button(WORDS(files_up), .class = "ghost", .on = files_act, .arg = 2);
-                ui_text(files.big->path, .class = "path");
+                // The path: the field while it is typed, else the room its crumbs are laid out and drawn in (files_crumbs_lay).
+                if (files.editing)
+                        ui_control(&files.path, .grow = 1, .h = UI_ROW);
+                else
+                        ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
         }
         ui_col(.class = "rows", .grow = 1)
                 ui_host(&files.list_box, .class = "list", .grow = 1);
@@ -202,6 +355,8 @@ static fn files_layout(void)
         l->row_x = 0, l->row_w = files.width;
         l->empty = files_state_text(m);
         ui_list_layout(ui, l);
+        if (!files.editing)
+                files_crumbs_lay();
 }
 
 // The cursor's row in sight: the list scrolled to it, wherever in the listing it is.
@@ -216,9 +371,90 @@ static fn files_show_cursor(void)
 
 /* ---- what a person asks ---- */
 
+static fn files_moved(void);
+
+// The band becomes the field, holding the whole path with the caret at its end; or the crumbs again.
+static fn files_edit(b32 on)
+{
+        const p8 address_to path = files.big->model.path;
+
+        files.editing = on;
+        if (on)
+                ui_text_set(files_field(), path, string_length((string_address)path));
+        files.crumb_hover = -1, files.said = 0;
+        files.dirty = true;
+}
+
+// To the folder the field's text names, if it is one: the crumbs come back with it. One that is not says why in the foot, and the
+// field stays as it is for the text to be put right.
+static fn files_edit_go(void)
+{
+        static p8 typed[FILES_PATH];
+        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        int came;
+
+        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        came = files_model_try(&files.big->model, typed);
+        if (came == FILES_READING)
+        {
+                files_edit(false);
+                files_moved();
+                return;
+        }
+        files.said = came == FILES_GONE ? LANGUAGE_files_gone : came == FILES_UNREADABLE ? LANGUAGE_files_unreadable
+                     : came == FILES_NOT_DIRECTORY ? LANGUAGE_files_not_folder : LANGUAGE_files_failed;
+        files.dirty = true;
+}
+
+// Tab in the field: the folder name being typed finished from the listing shown, when the text's folder is the folder shown.
+static fn files_edit_complete(void)
+{
+        static p8 typed[FILES_PATH], whole[FILES_PATH], name[FILES_NAME];
+        const struct files_model address_to m = &files.big->model;
+        positive length = ui_text_string(files_field(), typed, sizeof(typed)), cut, folder;
+        p32 found;
+
+        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        length = string_length(typed);
+        for (cut = length; cut > 0 && typed[cut - 1] != '/'; cut--)
+                ;
+        // The text's folder: what is before its last stroke (the root's is the stroke itself).
+        folder = cut > 1 ? cut - 1 : cut;
+        if (!cut || folder != string_length(m->path) || memory_compare((address_any)typed, (address_any)m->path, folder) || length - cut >= FILES_NAME)
+                return;
+        found = files_model_complete(m, typed + cut, length - cut, name, sizeof(name));
+        if (!found || cut + string_length(name) + 2 >= sizeof(whole))
+                return;
+        memory_copy(whole, typed, cut);
+        memory_copy(whole + cut, name, string_length(name) + 1);
+        if (found == 1)
+                string_append_bounded(whole, (string_address) "/", sizeof(whole));
+        ui_text_set(files_field(), whole, string_length(whole));
+        files.dirty = true;
+}
+
+// To the folder a crumb is of.
+static fn files_crumb_go(int which)
+{
+        static p8 to[FILES_PATH];
+        struct files_model address_to m = &files.big->model;
+
+        if (which < 0 || which >= files.crumbs)
+                return;
+        memory_copy(to, m->path, files.crumb[which].to);
+        to[files.crumb[which].to] = end;
+        if (string_equals(to, m->path))
+                return;
+        if (files_model_try(m, to) == FILES_READING)
+                files_moved();
+        else
+                files.said = LANGUAGE_files_gone, files.dirty = true;
+}
+
 // Another folder is shown: its rows from the top, nothing said of the folder before.
 static fn files_moved(void)
 {
+        files.editing = false, files.crumb_hover = -1;
         files.clicked = FILES_NO, files.said = 0;
         ui_scroll_set(&files.big->list.scroll, 0);
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
@@ -338,6 +574,40 @@ static b32 files_event(const struct window_event address_to event)
         int row;
 
         files_layout();
+        // The path's field while it is typed: its keys, its pointer, its menu. Enter goes, Escape and a press elsewhere put the crumbs
+        // back (the press goes on to what it is on), Tab finishes a name, and no other key is the rows' while the field has them.
+        if (files.editing)
+        {
+                asks = ui_field_send(ui, files_field(), &files.menu, event);
+                if (asks & UI_TEXT_SUBMIT)
+                {
+                        files_edit_go();
+                        return true;
+                }
+                if (asks & (UI_TEXT_CANCEL | UI_TEXT_COMMIT))
+                {
+                        files_edit(false);
+                        if (event->type == WINDOW_EVENT_KEY)
+                                return true;
+                        files_layout();
+                }
+                else if (asks)
+                {
+                        files.said = 0, files.dirty = true;
+                        return true;
+                }
+                else if (event->type == WINDOW_EVENT_KEY)
+                {
+                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT))
+                                files_edit_complete();
+                        return true;
+                }
+        }
+        else if (event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) && event->a == FILES_KEY_L)
+        {
+                files_edit(true);
+                return true;
+        }
         // The band's buttons first: a press on one, and the keys while they are on one (Shift+Tab gives them the keys).
         asks = ui_view_event(ui, &files.big->view, event);
         if (asks & UI_VIEW_QUIT)
@@ -351,6 +621,10 @@ static b32 files_event(const struct window_event address_to event)
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
                 ui_list_click(ui, l, event, event->a, event->b);
+                // A crumb under the pointer is the hand's, and is drawn in the ink.
+                files.crumb_hover = files_crumb_at(event->a, event->b);
+                if (files.crumb_hover >= 0)
+                        ui_kit_shape = WINDOW_POINTER_HAND;
                 files.dirty = true;
                 break;
         case WINDOW_EVENT_WHEEL:
@@ -359,6 +633,19 @@ static b32 files_event(const struct window_event address_to event)
                 break;
         case WINDOW_EVENT_BUTTON:
                 files.dirty = true;
+                // The band: a press on a crumb goes to its folder, and one on the band's own ground opens the field.
+                if (down && event->a == UI_POINTER_LEFT && !files.editing && ui_kit.pointer_x >= files.crumbs_box.x &&
+                    ui_kit.pointer_x < files.crumbs_box.x + files.crumbs_box.w && ui_kit.pointer_y >= files.crumbs_box.y &&
+                    ui_kit.pointer_y < files.crumbs_box.y + files.crumbs_box.h)
+                {
+                        int crumb = files_crumb_at(ui_kit.pointer_x, ui_kit.pointer_y);
+
+                        if (crumb >= 0)
+                                files_crumb_go(crumb);
+                        else
+                                files_edit(true);
+                        break;
+                }
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 // The press itself puts the cursor on its row, as the list lights it.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
@@ -396,6 +683,10 @@ static fn files_draw(unsigned int address_to pixels)
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys;
         ui_list_draw(ui, l);
         ui_view_draw(ui, &files.big->view, files.focused);
+        if (files.editing)
+                ui_text_overlay(ui, files_field()); // a finger's selection in the field: its handles, over the rows
+        else
+                files_crumbs_draw();
         files.seen = files.big->model.revision;
 }
 
@@ -431,6 +722,14 @@ static long files_tick(long timeout, long address_to other)
         b64 now = (b64)ui_kit.now, wait;
 
         (void)other;
+        // The field's caret blinks while the path is typed.
+        if (files.editing)
+        {
+                b32 redraw = false;
+
+                timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
+                files.dirty |= redraw;
+        }
         if (m->walking)
         {
                 b64 began = (b64)ui_kit_clock();
@@ -487,7 +786,7 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-        files.clicked = FILES_NO;
+        files.clicked = FILES_NO, files.crumb_hover = -1;
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
@@ -496,6 +795,13 @@ static int files_open_window(void)
         ui_centre(table, files.own.row, files.width, files.height, ui_px(&files.ui, 12));
         files_frame();
         return -1;
+}
+
+// An item of the path field's own menu (copy, paste), done to the field.
+static fn files_chose(int id)
+{
+        if (ui_text_menu_do(&files.ui, files.menu.field, id))
+                files.dirty = true;
 }
 
 static struct ui_app files_app = {
@@ -516,6 +822,8 @@ static struct ui_app files_app = {
         .changed = files_dirty,
         .size = files_size,
         .tick = files_tick,
+        .popup = &files.menu,
+        .chose = files_chose,
 };
 
 static b32 files_main()

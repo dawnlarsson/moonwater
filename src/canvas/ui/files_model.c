@@ -694,6 +694,73 @@ static b32 files_model_go(struct files_model address_to m, string_address path)
         return true;
 }
 
+/*
+        To a folder a person typed, if it is one: the path is opened first, as typed (a link anywhere in it is followed, its last
+        part too: typing a name is asking for what it names, which is what files_model_go's rule is), and only one that opened is
+        shown, with the folder shown before it on the way back. FILES_READING when it is the folder shown from now on. Else the
+        state it would have had (FILES_GONE, FILES_UNREADABLE, FILES_NOT_DIRECTORY, FILES_FAILED; FILES_NOT_DIRECTORY too for text
+        that is no absolute path or does not fit one), and nothing has changed: the folder shown stays, whole, and so does the
+        way back. The text is bytes with an end and is not trusted: its length is held to FILES_PATH and nothing in it is read as
+        anything but a path for the kernel to resolve.
+*/
+static int files_model_try(struct files_model address_to m, string_address path)
+{
+        p8 taken[FILES_PATH];
+        file_walk opened;
+
+        if (!files_path_take(taken, path))
+                return FILES_NOT_DIRECTORY;
+        if (!file_walk_open(&opened, AT_FDCWD, taken))
+                return files_state_of(opened.error);
+        if (m->state != FILES_NONE)
+                files_history_push(m->back, &m->back_count, m->path);
+        m->forward_count = 0;
+        m->came[0] = end;
+        files_model_show(m, taken, opened.handle, 0);
+        return FILES_READING;
+}
+
+/*
+        The start of a folder's name finished from the listing shown: of the folders listed whose names start with the bytes given,
+        what all of them go on to share is written to into (the whole name when there is one such folder), with its end. Answers
+        how many folders start so; into is the bytes given when none goes further. Files are not offered: a path being typed is a
+        folder's. The listing is the one in memory, so this reads no disk.
+*/
+static p32 files_model_complete(const struct files_model address_to m, const p8 address_to start, positive length, p8 address_to into, positive room)
+{
+        p32 found = 0;
+        positive shared = 0;
+
+        if (!room)
+                return 0;
+        length = length < room - 1 ? length : room - 1;
+        memory_copy(into, start, length);
+        into[length] = end;
+        for (p32 place = 0; m->state == FILES_READY && place < m->shown.count; place++)
+        {
+                const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
+                const p8 address_to name = m->shown.names + entry->name;
+
+                if (entry->kind != FILES_KIND_DIRECTORY || entry->length < length || entry->length >= room ||
+                    (length && memory_compare((address_any)name, (address_any)start, length)))
+                        continue;
+                if (!found++)
+                {
+                        memory_copy(into, name, (positive)entry->length + 1);
+                        shared = entry->length;
+                        continue;
+                }
+                for (positive at = length; at < shared; at++)
+                        if (at >= entry->length || into[at] != name[at])
+                        {
+                                shared = at;
+                                break;
+                        }
+                into[shared] = end;
+        }
+        return found;
+}
+
 // Into the folder at a place of the listing: only one that is, now, the folder that was listed (files_model_check), opened without
 // following and held to that inode. FILES_SAME when it is the folder shown from now on; else why not, and the folder shown stays.
 static int files_model_enter(struct files_model address_to m, p32 place)
