@@ -15747,6 +15747,226 @@ fn check_wire()
 }
 
 /*
+        wire_arguments and wire_event against the C they stand for (the
+        Wayland shim's argument loop and its event writer).
+
+        wire_arguments: lists of kinds drawn from every kind the shim's
+        table has and one it has not, from none to ten of them, with room
+        for eight records, for as many as there are and for one fewer; the
+        bytes a right encoding of the list and then that encoding cut at
+        every length from nothing to all of it, with a byte too many and
+        four too many, and with a count made nothing, one past what is
+        left, as much as is left, the largest a word holds, and a text's
+        last byte made not a zero. The bytes end at a page that cannot be
+        read and the records at one that cannot be written. wire_event:
+        every count of words to forty, at each of the four places in a
+        word, the bytes written ending at a page that cannot be written
+        and the words read at one that cannot be read.
+*/
+static positive reference_wire_arguments(const p8 address_to kinds, const p8 address_to classes, const p8 address_to bytes, positive left,
+                                         p32 address_to out, positive room)
+{
+        positive n = 0, at = 0;
+
+#define REFERENCE_WORD(place) ((p32)bytes[place] | (p32)bytes[(place) + 1] << 8 | (p32)bytes[(place) + 2] << 16 | (p32)bytes[(place) + 3] << 24)
+        for (; kinds[0]; kinds += 2, n++)
+        {
+                positive class, word, padded;
+
+                if (n >= room)
+                        return n | WIRE_END_ROOM << 8;
+                class = classes[kinds[0]];
+                if (class == WIRE_NONE)
+                {
+                        out[n * 4] = out[n * 4 + 1] = out[n * 4 + 2] = out[n * 4 + 3] = 0;
+                        continue;
+                }
+                if (left < 4)
+                        return n | WIRE_END_SHORT << 8;
+                word = REFERENCE_WORD(at);
+                at += 4;
+                left -= 4;
+                if (!class)
+                        return n | WIRE_END_KIND << 8;
+                out[n * 4] = (p32)word;
+                out[n * 4 + 1] = (p32)at;
+                out[n * 4 + 2] = out[n * 4 + 3] = 0;
+                if (!(class & WIRE_TEXT))
+                        continue;
+                if (!word && !(class & WIRE_EMPTY))
+                        return n | WIRE_END_NOTHING << 8;
+                if (word)
+                {
+                        padded = (word + 3) & ~(positive)3;
+                        if (word > left || padded > left)
+                                return n | WIRE_END_LONG << 8;
+                        if ((class & WIRE_ENDED) && bytes[at + word - 1])
+                                return n | WIRE_END_OPEN << 8;
+                        at += padded;
+                        left -= padded;
+                }
+                if (class & WIRE_PAIR)
+                {
+                        if (left < 8)
+                                return n | WIRE_END_PAIR << 8;
+                        out[n * 4 + 2] = REFERENCE_WORD(at);
+                        out[n * 4 + 3] = REFERENCE_WORD(at + 4);
+                        at += 8;
+                        left -= 8;
+                }
+        }
+#undef REFERENCE_WORD
+        return n | (positive)(left ? WIRE_END_OVER : WIRE_END_DONE) << 8;
+}
+
+static positive reference_wire_event(p8 address_to into, positive object, positive opcode, const p32 address_to words, positive count)
+{
+        positive size = 8 + count * 4;
+        p32 second = (p32)(size << 16 | (opcode & 0xffff));
+
+        for (positive at = 0; at < 4; at++)
+                into[at] = (p8)(object >> (at * 8)), into[4 + at] = (p8)(second >> (at * 8));
+        for (positive word = 0; word < count; word++)
+                for (positive at = 0; at < 4; at++)
+                        into[8 + word * 4 + at] = (p8)(words[word] >> (at * 8));
+        return size;
+}
+
+fn check_wire_arguments()
+{
+        static const p8 letters[] = {'i', 'u', 'f', 'o', 'O', 'n', 's', 'S', 'N', 'a', 'h', '?'};
+        static p8 classes[256], kinds[2 * 12 + 2], right[4096];
+        static p32 want[12 * 4];
+        p8 address_to pages = memory(3 * 4096);
+        p8 address_to records = memory(2 * 4096);
+        p8 address_to written = memory(2 * 4096);
+        p8 mapped = (bipolar)(positive)pages > 0 && (bipolar)(positive)records > 0 && (bipolar)(positive)written > 0;
+        p64 seed = 0x853c49e6748fea9bull;
+        positive agreed = 1, same_records = 1, runs = 0, ends[9] = {0};
+
+        same("wire_arguments", "guard mappings", mapped, 1);
+        if (!mapped)
+                return;
+        p8 protected = system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(records + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(written + 4096), 4096, 0) == 0;
+        same("wire_arguments", "guard pages protected", protected, 1);
+        if (!protected)
+                return;
+        classes['h'] = WIRE_NONE;
+        classes['i'] = classes['u'] = classes['f'] = classes['o'] = classes['O'] = classes['n'] = WIRE_WORD;
+        classes['s'] = WIRE_TEXT | WIRE_ENDED;
+        classes['S'] = WIRE_TEXT | WIRE_ENDED | WIRE_EMPTY;
+        classes['N'] = WIRE_TEXT | WIRE_ENDED | WIRE_PAIR;
+        classes['a'] = WIRE_TEXT | WIRE_EMPTY;
+
+#define WIRE_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
+        for (positive round = 0; round < 3000; round++)
+        {
+                positive count = round < 11 ? round : WIRE_NEXT() % 11, size = 0, texts = 0, text_at[12], text_count[12];
+
+                //  A list of kinds, and a right encoding of it.
+                for (positive at = 0; at < count; at++)
+                {
+                        p8 kind = letters[WIRE_NEXT() % (round % 7 == 3 ? 12 : 11)];
+                        positive class = classes[kind];
+
+                        kinds[at * 2] = kind;
+                        kinds[at * 2 + 1] = (p8)WIRE_NEXT();
+                        if (class == WIRE_NONE)
+                                continue;
+                        if (class & WIRE_TEXT)
+                        {
+                                positive length = (class & WIRE_EMPTY) && WIRE_NEXT() % 4 == 0 ? 0 : 1 + WIRE_NEXT() % 23;
+
+                                text_at[texts] = size;
+                                text_count[texts++] = length;
+                                right[size] = (p8)length, right[size + 1] = right[size + 2] = right[size + 3] = 0;
+                                size += 4;
+                                for (positive byte = 0; byte < ((length + 3) & ~(positive)3); byte++)
+                                        right[size + byte] = byte + 1 < length ? (p8)(1 + WIRE_NEXT() % 255) : 0;
+                                size += (length + 3) & ~(positive)3;
+                                if (class & WIRE_PAIR)
+                                        for (positive byte = 0; byte < 8; byte++)
+                                                right[size++] = (p8)WIRE_NEXT();
+                        }
+                        else
+                                for (positive byte = 0; byte < 4; byte++)
+                                        right[size++] = (p8)WIRE_NEXT();
+                }
+                kinds[count * 2] = 0;
+                //  The encoding cut at every length, with too many bytes, and with a count or an end spoiled.
+                for (positive variant = 0; variant < size + 3 + texts * 5; variant++)
+                {
+                        positive left = variant <= size ? variant : variant == size + 1 ? size + 1 : variant == size + 2 ? size + 4 : size;
+                        p8 address_to bytes = pages + 8192 - left;
+                        positive rooms[3] = {8, count, count ? count - 1 : 0};
+
+                        for (positive at = 0; at < left; at++)
+                                bytes[at] = at < size ? right[at] : (p8)WIRE_NEXT();
+                        if (variant > size + 2)
+                        {
+                                positive which = (variant - size - 3) / 5, how = (variant - size - 3) % 5, place = text_at[which];
+                                positive after = size - place - 4;
+                                p32 said = how == 0 ? 0 : how == 1 ? (p32)(after + 1) : how == 2 ? (p32)after : how == 3 ? 0xffffffffu : (p32)text_count[which];
+
+                                for (positive at = 0; at < 4; at++)
+                                        bytes[place + at] = (p8)(said >> (at * 8));
+                                if (how == 4 && text_count[which])
+                                        bytes[place + 4 + text_count[which] - 1] = 0x41;
+                        }
+                        for (positive r = 0; r < 3; r++)
+                        {
+                                positive room = rooms[r];
+                                p32 address_to out = (p32 address_to)(records + 4096 - room * 16);
+                                positive wanted = reference_wire_arguments(kinds, classes, bytes, left, want, room);
+                                positive got = (wire_arguments)(kinds, classes, bytes, left, out, room);
+
+                                agreed &= got == wanted;
+                                same_records &= !(wanted & 255) || !memory_compare(want, out, (wanted & 255) * 16);
+                                ends[wanted >> 8 < 9 ? wanted >> 8 : 0]++;
+                                runs++;
+                        }
+                }
+        }
+        same("wire_arguments", "how many were read and why it stopped, every cut and every spoiled count", agreed, 1);
+        same("wire_arguments", "the records of the arguments read", same_records, 1);
+        //  Every way the walk ends is reached, or the rows above prove nothing of it.
+        same("wire_arguments", "walks that ended each of the nine ways",
+             ends[0] > 100 && ends[1] > 100 && ends[2] > 100 && ends[3] > 100 && ends[4] > 100 && ends[5] > 100 && ends[6] > 100 && ends[7] > 100 && ends[8] > 100, 1);
+        same("wire_arguments", "walks compared", runs > 100000, 1);
+        kinds[0] = 0;
+        same("wire_arguments", "no kinds and no bytes is done, with nothing read or written",
+             (wire_arguments)(kinds, classes, pages + 8192, 0, (p32 address_to)(records + 4096), 0), 0);
+
+        {
+                static p8 wanted_bytes[8 + 40 * 4];
+                positive wrote = 1;
+
+                for (positive count = 0; count <= 40; count++)
+                        for (positive odd = 0; odd < 4; odd++)
+                        {
+                                positive size = 8 + count * 4, object = WIRE_NEXT(), opcode = WIRE_NEXT();
+                                p8 address_to into = written + 4096 - size - odd;
+                                p32 address_to words = (p32 address_to)(pages + 8192 - count * 4);
+
+                                for (positive at = 0; at < count; at++)
+                                        words[at] = (p32)WIRE_NEXT();
+                                memory_fill(into, 0x6b, size + odd);
+                                wrote &= (wire_event)(into, object, opcode, words, count) == reference_wire_event(wanted_bytes, object, opcode, words, count);
+                                wrote &= !memory_compare(wanted_bytes, into, size);
+                                for (positive at = 0; at < odd; at++)
+                                        wrote &= into[size + at] == 0x6b;
+                        }
+                same("wire_event", "the head, the words and the size, every count and every place in a word, and no byte after them", wrote, 1);
+        }
+#undef WIRE_NEXT
+        memory_free(pages, 3 * 4096);
+        memory_free(records, 2 * 4096);
+        memory_free(written, 2 * 4096);
+}
+
+/*
         Call the assembly entry even for compile-time small sizes. Disjoint
         maps cover every byte value and noninjective maps; aliased maps retain
         the original four-byte load-all-then-store-all contract. On x86_64
@@ -31235,6 +31455,7 @@ b32 main()
         check_automaton();
         check_bins();
         check_wire();
+        check_wire_arguments();
         check_cells_from_ascii();
         check_unicode_width();
         check_unicode_case();

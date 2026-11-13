@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        487 routines (461 public, 26 local), 476 of them on all three and 11 local to one.
+        489 routines (463 public, 26 local), 478 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -530,6 +530,8 @@
           unicode_width                  public  yes     yes     yes
           wait_status_code               public  yes     yes     yes
           wait_status_code_base          public  yes     yes     yes
+          wire_arguments                 public  yes     yes     yes
+          wire_event                     public  yes     yes     yes
           wire_message                   public  yes     yes     yes
           wire_slot                      public  yes     yes     yes
           working_directory_get          public  yes     yes     yes
@@ -13854,6 +13856,45 @@ __asm__(
     "8:  add $32, %r8\n   cmp %rsi, %r8\n   jb 1b\n"
     "9:  shl $63, %r10\n   mov %r9, %rax\n   or %r10, %rax\n" ASM_RET
     ASM_END(rects_clip)
+
+    //
+    //       wire_arguments: rdi the kinds, rsi the classes, rdx the bytes,
+    //       rcx how many are left, r8 the records, r9 how many there is room
+    //       for. rax counts the arguments read, r10 is the place in the
+    //       bytes, r11 the class, r12 the word, r13 a text's padded length
+    //       and ebx the reason the walk would end for, set before each
+    //       question that can end it. A record is written for the argument
+    //       being read before its text is asked about, which is inside the
+    //       room and past the count answered.
+    //
+    ASM_FUNC(wire_arguments)
+    "push %rbx\n   push %r12\n   push %r13\n   xor %eax, %eax\n   xor %r10d, %r10d\n"
+    "1:  movzbl (%rdi), %r11d\n   test %r11d, %r11d\n   jz 7f\n   mov $7, %ebx\n   cmp %r9, %rax\n   jae 8f\n"
+    "movzbl (%rsi,%r11), %r11d\n   cmp $1, %r11d\n   jne 2f\n   movq $0, (%r8)\n   movq $0, 8(%r8)\n   jmp 6f\n"
+    "2:  mov $1, %ebx\n   cmp $4, %rcx\n   jb 8f\n   mov (%rdx,%r10), %r12d\n   add $4, %r10\n   sub $4, %rcx\n"
+    "mov $6, %ebx\n   test %r11d, %r11d\n   jz 8f\n   mov %r12d, (%r8)\n   mov %r10d, 4(%r8)\n   movq $0, 8(%r8)\n"
+    "test $4, %r11b\n   jz 6f\n   test %r12, %r12\n   jnz 3f\n   mov $2, %ebx\n   test $8, %r11b\n   jz 8f\n   jmp 5f\n"
+    "3:  lea 3(%r12), %r13\n   and $-4, %r13\n   mov $3, %ebx\n   cmp %rcx, %r12\n   ja 8f\n   cmp %rcx, %r13\n   ja 8f\n"
+    "test $16, %r11b\n   jz 4f\n   lea (%rdx,%r10), %rbx\n   cmpb $0, -1(%rbx,%r12)\n   mov $4, %ebx\n   jne 8f\n"
+    "4:  add %r13, %r10\n   sub %r13, %rcx\n"
+    "5:  test $32, %r11b\n   jz 6f\n   mov $5, %ebx\n   cmp $8, %rcx\n   jb 8f\n"
+    "mov (%rdx,%r10), %r12d\n   mov %r12d, 8(%r8)\n   mov 4(%rdx,%r10), %r12d\n   mov %r12d, 12(%r8)\n   add $8, %r10\n   sub $8, %rcx\n"
+    "6:  add $1, %rax\n   add $16, %r8\n   add $2, %rdi\n   jmp 1b\n"
+    "7:  xor %ebx, %ebx\n   test %rcx, %rcx\n   jz 8f\n   mov $8, %ebx\n"
+    "8:  shl $8, %rbx\n   or %rbx, %rax\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_END(wire_arguments)
+
+    //
+    //       wire_event: rdi where, rsi the object, rdx the opcode, rcx the
+    //       words, r8 how many. The size is eight and four a word, in rax
+    //       and in the high half of the head's second word.
+    //
+    ASM_FUNC(wire_event)
+    "lea 8(,%r8,4), %rax\n   mov %esi, (%rdi)\n   mov %eax, %r9d\n   shl $16, %r9d\n   movzwl %dx, %edx\n   or %edx, %r9d\n   mov %r9d, 4(%rdi)\n"
+    "xor %r10d, %r10d\n   test %r8, %r8\n   jz 2f\n"
+    "1:  mov (%rcx,%r10,4), %r9d\n   mov %r9d, 8(%rdi,%r10,4)\n   add $1, %r10\n   cmp %r8, %r10\n   jb 1b\n"
+    "2:  " ASM_RET
+    ASM_END(wire_event)
 #undef TRX_X64_LOOP
 #undef TRY_X64_LOOP
 #undef TRY_X64_ROW
@@ -25670,6 +25711,35 @@ __asm__(
     "9:  orr x0, x9, x10, lsl #63\n" ASM_RET
     ASM_END(rects_clip)
 
+    //       wire_arguments and wire_event: the x86_64 block has the reasons.
+    //       wire_arguments: x0 the kinds, x1 the classes, x2 the bytes, x3
+    //       how many are left, x4 the records, x5 the room; x8 counts, x9 is
+    //       the place, w10 the class, x11 the word, x12 the padded length,
+    //       x13 the reason. wire_event: x0 where, x1 the object, x2 the
+    //       opcode, x3 the words, x4 how many.
+    ASM_FUNC(wire_arguments)
+    "mov x8, #0\n   mov x9, #0\n"
+    "1:  ldrb w10, [x0]\n   cbz w10, 7f\n   mov x13, #7\n   cmp x8, x5\n   b.hs 8f\n   ldrb w10, [x1, x10]\n   cmp w10, #1\n   b.ne 2f\n"
+    "stp xzr, xzr, [x4]\n   b 6f\n"
+    "2:  mov x13, #1\n   cmp x3, #4\n   b.lo 8f\n   ldr w11, [x2, x9]\n   add x9, x9, #4\n   sub x3, x3, #4\n   mov x13, #6\n   cbz w10, 8f\n"
+    "stp w11, w9, [x4]\n   str xzr, [x4, #8]\n   tbz w10, #2, 6f\n   cbnz x11, 3f\n   mov x13, #2\n   tbz w10, #3, 8f\n   b 5f\n"
+    "3:  add x12, x11, #3\n   and x12, x12, #-4\n   mov x13, #3\n   cmp x11, x3\n   b.hi 8f\n   cmp x12, x3\n   b.hi 8f\n   tbz w10, #4, 4f\n"
+    "add x14, x2, x9\n   add x14, x14, x11\n   ldurb w14, [x14, #-1]\n   mov x13, #4\n   cbnz w14, 8f\n"
+    "4:  add x9, x9, x12\n   sub x3, x3, x12\n"
+    "5:  tbz w10, #5, 6f\n   mov x13, #5\n   cmp x3, #8\n   b.lo 8f\n   add x14, x2, x9\n   ldp w11, w12, [x14]\n   stp w11, w12, [x4, #8]\n"
+    "add x9, x9, #8\n   sub x3, x3, #8\n"
+    "6:  add x8, x8, #1\n   add x4, x4, #16\n   add x0, x0, #2\n   b 1b\n"
+    "7:  mov x13, #0\n   cbz x3, 8f\n   mov x13, #8\n"
+    "8:  orr x0, x8, x13, lsl #8\n" ASM_RET
+    ASM_END(wire_arguments)
+
+    ASM_FUNC(wire_event)
+    "mov x8, x0\n   lsl x0, x4, #2\n   add x0, x0, #8\n   str w1, [x8]\n   and w2, w2, #0xffff\n   orr w2, w2, w0, lsl #16\n   str w2, [x8, #4]\n"
+    "add x8, x8, #8\n   cbz x4, 2f\n"
+    "1:  ldr w9, [x3], #4\n   str w9, [x8], #4\n   subs x4, x4, #1\n   b.ne 1b\n"
+    "2:  " ASM_RET
+    ASM_END(wire_event)
+
 #ifndef KERNEL_MODE
     //       memory_average_ahead: urhadd is the whole of the work, 64 bytes
     //       a turn in four registers by ldp and stp, sixteen at a time after
@@ -35645,6 +35715,41 @@ __asm__(
     "8:  addi t0, t0, 32\n   bltu t0, a1, 1b\n"
     "9:  slli t3, t3, 63\n   or a0, t2, t3\n" ASM_RET
     ASM_END(rects_clip)
+
+    //       wire_arguments and wire_event: the x86_64 block has the reasons.
+    //       wire_arguments: a0 the kinds, a1 the classes, a2 the bytes, a3
+    //       how many are left, a4 the records, a5 the room; t0 counts, t1 is
+    //       the place, t2 the class, t3 the word, a7 the padded length, a6
+    //       the reason. A word of the bytes is read a byte at a time, as
+    //       wire_message reads its head, by the lines at 20, which the walk
+    //       calls with its own return kept in t6. wire_event: a0 where, a1
+    //       the object, a2 the opcode, a3 the words, a4 how many; the bytes
+    //       it writes are at any address, and are stored one at a time (21).
+    ASM_FUNC(wire_arguments)
+    "mv t6, ra\n   li t0, 0\n   li t1, 0\n"
+    "1:  lbu t2, 0(a0)\n   beqz t2, 7f\n   li a6, 7\n   bgeu t0, a5, 8f\n   add t2, a1, t2\n   lbu t2, 0(t2)\n   li t4, 1\n   bne t2, t4, 2f\n"
+    "sw zero, 0(a4)\n   sw zero, 4(a4)\n   sw zero, 8(a4)\n   sw zero, 12(a4)\n   j 6f\n"
+    "2:  li a6, 1\n   li t4, 4\n   bltu a3, t4, 8f\n   jal ra, 20f\n   li a6, 6\n   beqz t2, 8f\n"
+    "sw t3, 0(a4)\n   sw t1, 4(a4)\n   sw zero, 8(a4)\n   sw zero, 12(a4)\n   andi t4, t2, 4\n   beqz t4, 6f\n   bnez t3, 3f\n"
+    "li a6, 2\n   andi t4, t2, 8\n   beqz t4, 8f\n   j 5f\n"
+    "3:  addi a7, t3, 3\n   andi a7, a7, -4\n   li a6, 3\n   bltu a3, t3, 8f\n   bltu a3, a7, 8f\n   andi t4, t2, 16\n   beqz t4, 4f\n"
+    "add t4, a2, t1\n   add t4, t4, t3\n   lbu t4, -1(t4)\n   li a6, 4\n   bnez t4, 8f\n"
+    "4:  add t1, t1, a7\n   sub a3, a3, a7\n"
+    "5:  andi t4, t2, 32\n   beqz t4, 6f\n   li a6, 5\n   li t4, 8\n   bltu a3, t4, 8f\n   jal ra, 20f\n   sw t3, 8(a4)\n   jal ra, 20f\n   sw t3, 12(a4)\n"
+    "6:  addi t0, t0, 1\n   addi a4, a4, 16\n   addi a0, a0, 2\n   j 1b\n"
+    "7:  li a6, 0\n   beqz a3, 8f\n   li a6, 8\n"
+    "8:  slli a6, a6, 8\n   or a0, t0, a6\n   mv ra, t6\n" ASM_RET
+    "20: add t4, a2, t1\n   lbu t3, 0(t4)\n   lbu t5, 1(t4)\n   slli t5, t5, 8\n   or t3, t3, t5\n   lbu t5, 2(t4)\n   slli t5, t5, 16\n   or t3, t3, t5\n"
+    "lbu t5, 3(t4)\n   slli t5, t5, 24\n   or t3, t3, t5\n   addi t1, t1, 4\n   addi a3, a3, -4\n   jr ra\n"
+    ASM_END(wire_arguments)
+
+    ASM_FUNC(wire_event)
+    "mv t6, ra\n   mv t0, a0\n   slli a0, a4, 2\n   addi a0, a0, 8\n   mv t1, a1\n   jal ra, 21f\n"
+    "slli t1, a0, 16\n   slli a2, a2, 48\n   srli a2, a2, 48\n   or t1, t1, a2\n   jal ra, 21f\n   beqz a4, 2f\n"
+    "1:  lwu t1, 0(a3)\n   jal ra, 21f\n   addi a3, a3, 4\n   addi a4, a4, -1\n   bnez a4, 1b\n"
+    "2:  mv ra, t6\n" ASM_RET
+    "21: sb t1, 0(t0)\n   srli t2, t1, 8\n   sb t2, 1(t0)\n   srli t2, t1, 16\n   sb t2, 2(t0)\n   srli t2, t1, 24\n   sb t2, 3(t0)\n   addi t0, t0, 4\n   jr ra\n"
+    ASM_END(wire_event)
 
 #ifndef KERNEL_MODE
     //       memory_average_ahead: with V, as many bytes as eight registers
@@ -53326,6 +53431,63 @@ PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive 
 positive wire_message(const p8 address_to bytes, positive size, positive most, p32 address_to head);
 PURE bipolar wire_slot(const p16 address_to index, positive count, positive at);
 positive rects_clip(b64 address_to rects, positive count, positive width, positive height);
+/*
+        wire_arguments walks the arguments of one message by the list
+        of their kinds. `kinds` is a pair of bytes an argument, the kind
+        and a byte that is the caller's own (an interface), ended by a
+        kind of zero. `classes` says of each of the 256 kinds how it is
+        read: WIRE_NONE takes no bytes (a descriptor, which comes beside
+        the message); WIRE_WORD is one word; WIRE_TEXT is a count in a
+        word and then that many bytes, padded to a word, and may also be
+        WIRE_EMPTY (a count of nothing is taken, with no bytes after
+        it), WIRE_ENDED (the last of the bytes counted is a zero) and
+        WIRE_PAIR (two more words follow the padded bytes); a class of
+        0 is a kind that cannot be read. `bytes` are the message's after
+        its head and `left` how many they are.
+
+        Each argument read is a record of four words in `out`, which
+        has room for `room` of them: the word (a value, or a text's
+        count), the place in `bytes` of what follows the word (a text's
+        first byte), and the pair, 0 where there is none; a WIRE_NONE's
+        is four zeros. It answers how many arguments were read whole in
+        its low eight bits and, above them, why it stopped:
+        WIRE_END_DONE when the kinds and the bytes ended together, and
+        otherwise, in the order they are asked of an argument, that
+        there is no room for its record (WIRE_END_ROOM), that fewer than
+        four bytes are left for its word (WIRE_END_SHORT), that its kind
+        cannot be read (WIRE_END_KIND), that its text has a count of
+        nothing and may not (WIRE_END_NOTHING), that its count or its
+        padded count is more than is left (WIRE_END_LONG), that its last
+        byte is not a zero (WIRE_END_OPEN), that fewer than eight bytes
+        are left for its pair (WIRE_END_PAIR); or that the kinds ended
+        and bytes are left over (WIRE_END_OVER). The records past the
+        count answered are not to be read. No byte past `left` is read;
+        the kinds and the classes are the caller's own and are believed.
+
+        wire_event writes a message of `count` words at `into`, which
+        is at any address and has room for eight bytes and four a word:
+        the object, the size with the low sixteen bits of `opcode`
+        under it, and the words, each least byte first. It answers the
+        size.
+*/
+#define WIRE_NONE 1
+#define WIRE_WORD 2
+#define WIRE_TEXT 4
+#define WIRE_EMPTY 8
+#define WIRE_ENDED 16
+#define WIRE_PAIR 32
+#define WIRE_END_DONE 0
+#define WIRE_END_SHORT 1
+#define WIRE_END_NOTHING 2
+#define WIRE_END_LONG 3
+#define WIRE_END_OPEN 4
+#define WIRE_END_PAIR 5
+#define WIRE_END_KIND 6
+#define WIRE_END_ROOM 7
+#define WIRE_END_OVER 8
+positive wire_arguments(const p8 address_to kinds, const p8 address_to classes, const p8 address_to bytes, positive left,
+                        p32 address_to out, positive room);
+positive wire_event(p8 address_to into, positive object, positive opcode, const p32 address_to words, positive count);
 #ifndef KERNEL_MODE
 // height rows of width bytes, from_stride bytes apart, made 32-bit words
 // through table into rows into_stride words apart: into[r][i] is

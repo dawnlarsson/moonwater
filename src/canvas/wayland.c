@@ -659,15 +659,35 @@ static struct
 
 /*
         What this file asks of the library (src/lib.c), which is the machine's own instructions on each of the three machines and not
-        C: the head of a message read and checked (wire_message), an id looked up in an index (wire_slot), and a commit's damage cut
-        to its buffer (rects_clip). Their contracts are at their declarations there, and the verify lane holds each to the C this
-        file had in its place. The compositor is built with the library in front of this file; built alone (the engine's own row,
+        C: the head of a message read and checked (wire_message), its arguments walked by the list of their kinds (wire_arguments), an
+        event of words written (wire_event), an id looked up in an index (wire_slot), and a commit's damage cut to its buffer
+        (rects_clip). Their contracts are at their declarations there, and the verify lane holds each to the C this file had in
+        its place. The compositor is built with the library in front of this file; built alone (the engine's own row,
         and the checks, which link the library beside it), the routines are declared here, in the plain types theirs are.
 */
 #ifndef STANDARD_MODERN_C
 unsigned long long wire_message(const unsigned char *bytes, unsigned long long size, unsigned long long most, unsigned int *head);
 long long wire_slot(const unsigned short *index, unsigned long long count, unsigned long long at);
 unsigned long long rects_clip(long long *rects, unsigned long long count, unsigned long long width, unsigned long long height);
+unsigned long long wire_arguments(const unsigned char *kinds, const unsigned char *classes, const unsigned char *bytes, unsigned long long left,
+                                  unsigned int *out, unsigned long long room);
+unsigned long long wire_event(unsigned char *into, unsigned long long object, unsigned long long opcode, const unsigned int *words,
+                              unsigned long long count);
+#define WIRE_NONE 1
+#define WIRE_WORD 2
+#define WIRE_TEXT 4
+#define WIRE_EMPTY 8
+#define WIRE_ENDED 16
+#define WIRE_PAIR 32
+#define WIRE_END_DONE 0
+#define WIRE_END_SHORT 1
+#define WIRE_END_NOTHING 2
+#define WIRE_END_LONG 3
+#define WIRE_END_OPEN 4
+#define WIRE_END_PAIR 5
+#define WIRE_END_KIND 6
+#define WIRE_END_ROOM 7
+#define WIRE_END_OVER 8
 #endif
 
 static inline unsigned long wayland_get(const unsigned char *at)
@@ -760,6 +780,22 @@ static void wayland_words(struct wayland_event *e, const unsigned long *words, l
         wayland_word(e, (unsigned long)count * 4);
         for (long at = 0; at < count; at++)
                 wayland_word(e, words[at]);
+}
+
+/*
+        An event that is words alone, which most are: its room asked once, as wayland_begin asks it, and its head and words written by
+        the library (wire_event). The frame's own events go this way: a callback's done, a buffer's release, an id let go.
+*/
+static void wayland_send(struct wayland_client *c, unsigned long object, long opcode, const unsigned int *words, long count)
+{
+        int ok = c->out_length + WAYLAND_EVENT <= WAYLAND_OUT && !c->dead;
+        long size;
+
+        if (!ok && !c->dead)
+                c->dead = 2; // a queue that is full: a client that does not read
+        size = (long)wire_event(ok ? c->out + c->out_length : wayland_sink, object, (unsigned long long)opcode, words, (unsigned long long)count);
+        if (ok)
+                c->out_length += size;
 }
 
 static void wayland_end(struct wayland_event *e)
@@ -856,10 +892,9 @@ static void wayland_object_delete(struct wayland_client *c, long slot)
         wayland_object_free(c, slot);
         if (id < WAYLAND_IDS)
         {
-                struct wayland_event e = wayland_begin(c, 1, WLE_wl_display_delete_id);
+                unsigned int word = (unsigned int)id;
 
-                wayland_word(&e, id);
-                wayland_end(&e);
+                wayland_send(c, 1, WLE_wl_display_delete_id, &word, 1);
         }
 }
 
@@ -1042,9 +1077,7 @@ static inline long wayland_surface_index(struct wayland_client *c, const struct 
 
 static void wayland_release_buffer(struct wayland_client *c, long slot)
 {
-        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_buffer_release);
-
-        wayland_end(&e);
+        wayland_send(c, c->objects[slot].id, WLE_wl_buffer_release, 0, 0);
 }
 
 /* ---- the globals ---- */
@@ -1474,10 +1507,9 @@ static void wayland_callback_answer(struct wayland_client *c, unsigned int id, l
         if (slot < 0)
                 return;
         {
-                struct wayland_event e = wayland_begin(c, id, WLE_wl_callback_done);
+                unsigned int word = (unsigned int)time;
 
-                wayland_word(&e, (unsigned long)time);
-                wayland_end(&e);
+                wayland_send(c, id, WLE_wl_callback_done, &word, 1);
         }
         wayland_object_delete(c, slot);
 }
@@ -2174,10 +2206,9 @@ static int wayland_display_request(struct wayland_client *c, long op, struct way
 {
         if (op == WLQ_wl_display_sync)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[a[0].slot].id, WLE_wl_callback_done);
+                unsigned int word = (unsigned int)wayland_serial(c);
 
-                wayland_word(&e, (unsigned long)wayland_serial(c));
-                wayland_end(&e);
+                wayland_send(c, c->objects[a[0].slot].id, WLE_wl_callback_done, &word, 1);
                 wayland_object_delete(c, a[0].slot);
                 return WAYLAND_OK;
         }
@@ -6467,21 +6498,48 @@ static int wayland_gestures_request(struct wayland_client *c, struct wayland_obj
         must end in its NUL; a descriptor is the next one the client sent. The whole message is read before any
         handler runs, and nothing is left over.
 */
+// How each kind of argument in the generated table is read off the wire (wire_arguments' classes): a descriptor takes no bytes, a number,
+// a fixed, an object and a new id are a word, and a string, a string that may be none, a global's name with its version and id, and an
+// array are a count and its bytes.
+static const unsigned char wayland_kinds[256] = {
+    ['h'] = WIRE_NONE,
+    ['i'] = WIRE_WORD,
+    ['f'] = WIRE_WORD,
+    ['u'] = WIRE_WORD,
+    ['o'] = WIRE_WORD,
+    ['O'] = WIRE_WORD,
+    ['n'] = WIRE_WORD,
+    ['s'] = WIRE_TEXT | WIRE_ENDED,
+    ['S'] = WIRE_TEXT | WIRE_ENDED | WIRE_EMPTY,
+    ['N'] = WIRE_TEXT | WIRE_ENDED | WIRE_PAIR,
+    ['a'] = WIRE_TEXT | WIRE_EMPTY,
+};
+
+/*
+        A request's arguments. The library walks the bytes by the table's list of kinds (wire_arguments): how many arguments are
+        there whole, a record of each, and why the walk stopped. What an argument means is then taken here in the order they came
+        (a descriptor from the ones sent, an object looked up and its interface asked, a new id made), each failing as it did when
+        the bytes were read here an argument at a time; and only when every argument before it has been taken is the request
+        refused for what the walk found wrong with its bytes, so the first thing wrong is still the thing said.
+*/
 static int wayland_args(struct wayland_client *c, const struct wayland_object *self, const struct wl_message *msg,
                         const unsigned char *at, long left, struct wayland_arg *a, long *begun)
 {
-        long n = 0;
+        unsigned int records[WAYLAND_ARGS][4];
+        unsigned long long walked = wire_arguments(msg->args, wayland_kinds, at, (unsigned long long)left, &records[0][0], WAYLAND_ARGS);
+        long whole = (long)(walked & 255), why = (long)(walked >> 8);
+        // The argument the walk stopped in is begun as the ones before it are (initialized, and counted for the caller), unless it
+        // stopped before one: with no room for it, or past the last.
+        long count = whole + (why != WIRE_END_DONE && why != WIRE_END_ROOM && why != WIRE_END_OVER);
 
         *begun = 0;
-        for (const unsigned char *kind = msg->args; kind[0]; kind += 2)
+        for (long n = 0; n < count; n++)
         {
-                struct wayland_arg *arg;
-                unsigned long word, count, padded;
+                const unsigned char *kind = msg->args + 2 * n;
+                struct wayland_arg *arg = &a[n];
+                unsigned long word = records[n][0], length;
 
-                if (n >= WAYLAND_ARGS)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "too many arguments");
-                arg = &a[n++];
-                *begun = n; // every argument begun is initialized below, so the caller reads no further than this
+                *begun = n + 1; // every argument begun is initialized below, so the caller reads no further than this
                 arg->u = 0;
                 arg->i = 0;
                 arg->text = 0;
@@ -6489,23 +6547,18 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                 arg->slot = -1;
                 arg->fd = -1;
                 arg->version = 0;
-                if (kind[0] == 'h')
+                if (n == whole)
+                        break;
+                switch (kind[0])
                 {
+                case 'h':
                         if (c->in_fd_count < 1)
                                 return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a descriptor is missing");
                         arg->fd = c->in_fds[0];
                         for (long more = 1; more < c->in_fd_count; more++)
                                 c->in_fds[more - 1] = c->in_fds[more];
                         c->in_fd_count--;
-                        continue;
-                }
-                if (left < 4)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are short");
-                word = wayland_get(at);
-                at += 4;
-                left -= 4;
-                switch (kind[0])
-                {
+                        break;
                 case 'i':
                 case 'f':
                         arg->i = (long)(int)word;
@@ -6536,41 +6589,40 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                         if (arg->slot < 0)
                                 return wayland_new_fail(c, self->id, word);
                         break;
-                case 's':
-                case 'S':
-                case 'N':
-                case 'a':
-                        count = word;
-                        if (count == 0 && kind[0] == 'S')
+                default: // a string, a string that may be none, a global's name, an array: the count, and where its bytes are
+                        length = word;
+                        if (!length && kind[0] == 'S')
                                 break;
-                        if (count == 0 && kind[0] != 'a')
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string has no length");
-                        padded = (count + 3) & ~3UL;
-                        if (count > (unsigned long)left || padded > (unsigned long)left)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is longer than its message");
-                        if (kind[0] != 'a' && at[count - 1] != 0)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is not ended");
-                        arg->text = at;
-                        arg->length = kind[0] == 'a' ? (long)count : (long)count - 1;
-                        at += padded;
-                        left -= (long)padded;
+                        arg->text = at + records[n][1];
+                        arg->length = kind[0] == 'a' ? (long)length : (long)length - 1;
                         if (kind[0] == 'N')
                         {
-                                if (left < 8)
-                                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are short");
-                                arg->version = (long)wayland_get(at);
-                                arg->u = wayland_get(at + 4);
-                                at += 8;
-                                left -= 8;
+                                arg->version = (long)records[n][2];
+                                arg->u = records[n][3];
                         }
                         break;
-                default:
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the table has an argument that cannot be read");
                 }
         }
-        if (left != 0)
+        switch (why)
+        {
+        case WIRE_END_DONE:
+                return WAYLAND_OK;
+        case WIRE_END_ROOM:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "too many arguments");
+        case WIRE_END_SHORT:
+        case WIRE_END_PAIR:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are short");
+        case WIRE_END_NOTHING:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string has no length");
+        case WIRE_END_LONG:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is longer than its message");
+        case WIRE_END_OPEN:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is not ended");
+        case WIRE_END_OVER:
                 return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are longer than the request");
-        return WAYLAND_OK;
+        default:
+                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the table has an argument that cannot be read");
+        }
 }
 
 static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
@@ -7376,16 +7428,11 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                         continue;
                 {
                         unsigned int id = s->presenting[at];
-                        struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_feedback_presented);
+                        // The last word is the presentation flags the compositor can vouch for (vsync, hw_clock, hw_completion).
+                        unsigned int words[7] = {(unsigned int)(seconds >> 32), (unsigned int)seconds, (unsigned int)nanoseconds, (unsigned int)refresh,
+                                                 (unsigned int)(seq >> 32), (unsigned int)seq, (unsigned int)flags};
 
-                        wayland_word(&e, (unsigned long)(seconds >> 32));
-                        wayland_word(&e, (unsigned long)(seconds & 0xffffffffu));
-                        wayland_word(&e, nanoseconds);
-                        wayland_word(&e, refresh);
-                        wayland_word(&e, (unsigned long)(seq >> 32));
-                        wayland_word(&e, (unsigned long)(seq & 0xffffffffu));
-                        wayland_word(&e, flags); // the presentation flags the compositor can vouch for (vsync, hw_clock, hw_completion)
-                        wayland_end(&e);
+                        wayland_send(c, id, WLE_wp_presentation_feedback_presented, words, 7);
                         wayland_object_delete(c, slot);
                 }
         }
