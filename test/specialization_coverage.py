@@ -486,6 +486,8 @@ cover('folds_already', 'count', 'memory_lerp_u32_row',
       'ui_stretch hands it a row of the stretched view width at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_over_u32_rect',
       'compositor_wl_row_picture hands it the clipped damage rectangle width and height at run time; no reachable call site passes a literal')
+cover('folds_already', 'width', 'memory_add_sat_u8_rect',
+      'font_cluster_plan hands it the clipped glyph box width and height at run time; no reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_tint_u32',
       'the compositor tints the same spans, and whole blocks when the side turns; the length is run time, and the '
       'side the glass takes is the window\'s, so toward, cap and floor are run time too')

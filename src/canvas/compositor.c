@@ -1576,12 +1576,13 @@ unsigned long compositor_tint_pixels;
 static void compositor_mix_run(unsigned int *pixels, long count, unsigned int ink, const unsigned int *colour,
                                const unsigned char *cover)
 {
-        if ((ink >> 24) == 0 || (ink >> 24) >= 255)
+        if ((ink >> 24) >= 255)
         {
-                for (long at = 0; at < count; at++)
-                        pixels[at] = compositor_mix(pixels[at], ink & 0xffffffu, ink >> 24);
+                memory_fill_u32(pixels, (positive)count, ink & 0xffffffu);
                 return;
         }
+        if ((ink >> 24) == 0)
+                return;
         for (long done = 0; done < count; done += COMPOSITOR_TINT_RUN)
         {
                 long n = count - done < COMPOSITOR_TINT_RUN ? count - done : COMPOSITOR_TINT_RUN;
@@ -6372,8 +6373,7 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
 
                 if (!made)
                         return 0;
-                for (int row = 0; row < y1 - y0; row++)
-                        memory_copy(into + (long)row * gw, made + (unsigned long)row * pitch, (positive)(x1 - x0) * 4);
+                memory_copy_rect_u32(into, (unsigned long)gw, made, pitch, (unsigned long)(x1 - x0), (unsigned long)(y1 - y0));
         }
         return 1;
 }
@@ -7381,10 +7381,12 @@ static void compositor_direct_unpatch(void)
                 return;
         compositor_runs_forget(row);
         pixels = compositor_buffer(row, which);
-        for (int y = rect[1]; y < rect[3]; y++)
-                memory_copy(pixels + (unsigned long)y * (unsigned long)compositor_stride() + (unsigned long)rect[0],
-                            compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
-                            (unsigned long)(rect[2] - rect[0]) * 4);
+        memory_copy_rect_u32(pixels + (unsigned long)rect[1] * (unsigned long)compositor_stride() + (unsigned long)rect[0],
+                             (unsigned long)compositor_stride(),
+                             compositor.under[which],
+                             (unsigned long)(rect[2] - rect[0]),
+                             (unsigned long)(rect[2] - rect[0]),
+                             (unsigned long)(rect[3] - rect[1]));
         compositor.patched[row][which] = 0;
 }
 
@@ -7410,10 +7412,12 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                         return;
                 compositor.under[which] = (unsigned int *)mapped;
         }
-        for (int y = rect[1]; y < rect[3]; y++)
-                memory_copy(compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
-                            pixels + (unsigned long)y * (unsigned long)compositor_stride() + (unsigned long)rect[0],
-                            (unsigned long)(rect[2] - rect[0]) * 4);
+        memory_copy_rect_u32(compositor.under[which],
+                             (unsigned long)(rect[2] - rect[0]),
+                             pixels + (unsigned long)rect[1] * (unsigned long)compositor_stride() + (unsigned long)rect[0],
+                             (unsigned long)compositor_stride(),
+                             (unsigned long)(rect[2] - rect[0]),
+                             (unsigned long)(rect[3] - rect[1]));
         memory_copy(compositor.under_rect[which], rect, sizeof(rect));
 
         struct compositor_target target = {pixels, (unsigned long)compositor_stride(), compositor.width, compositor.height,
@@ -21663,8 +21667,7 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
 {
         unsigned int *pixels = windows_pixels(own, which);
 
-        for (unsigned int line = 0; line < height; line++)
-                memory_fill_u32(pixels + (unsigned long)line * own->stride, width, colour);
+        memory_fill_u32_rect(pixels, own->stride, width, height, colour);
 
         // Glass has no ground to draw text on.
         if (font && !own->table->glass[own->row])

@@ -12320,9 +12320,10 @@ static fn ui_kit_text_stood(struct ui address_to ui, int x, int start, string_ad
                   metrics.baseline + room, light ? 0xffffffu : 0, light ? 0 : 0xffffffu);
         // Turned: upward, the line's first row is the column's left and the run's start its foot; downward, the other way about.
         turned = ui->scratch + (positive)wide * (positive)rows;
-        for (int row = 0; row < rows; row++)
-                for (int column = 0; column < wide; column++)
-                        turned[down ? column * rows + rows - 1 - row : (wide - 1 - column) * rows + row] = ui->scratch[row * wide + column];
+        if (down)
+                memory_transpose_u32(turned, (positive)rows, ui->scratch + (long)(rows - 1) * wide, -(long)wide, 1, (positive)wide, (positive)rows);
+        else
+                memory_transpose_u32(turned, (positive)rows, ui->scratch + (long)(wide - 1), (long)wide, -1, (positive)wide, (positive)rows);
         memory_copy(ui->scratch, turned, (positive)wide * (positive)rows * sizeof(turned[0]));
         ui_run_lay(ui, rows, wide, down ? start - room : start - wide + room, down ? x + t->line * ui->scale / 100 - lead - rows : x + lead, 0, ui->width,
                    argb & 0xffffffu, argb >> 24, light, 0);

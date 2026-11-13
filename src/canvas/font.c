@@ -12043,19 +12043,15 @@ fn font_cluster_plan(font_engine address_to e, const font_face address_to const 
                 p32 ident = chain ? font_identify(e, chain, font_cell_shape(grid, count, 1), 1 << 3 | count) : 0;
                 font_bitmap box = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, font_cell_base(faces, count, size, flags), ident, &dx, &dy, ink);
 
-                for (b32 r = 0; r < box.height; r++)
-                        for (b32 c = 0; c < box.width; c++)
-                        {
-                                b32 cx = dx + c, cy = dy + r;
-                                p8 address_to at;
-                                unsigned int sum;
+                b32 c0 = dx < 0 ? -dx : 0;
+                b32 c1 = dx + box.width > width ? width - dx : box.width;
+                b32 r0 = dy < 0 ? -dy : 0;
+                b32 r1 = dy + box.height > height ? height - dy : box.height;
 
-                                if (cx < 0 || cy < 0 || cx >= width || cy >= height)
-                                        continue;
-                                at = scratch + (positive)cy * (positive)width + (positive)cx;
-                                sum = (unsigned int)*at + box.coverage[(positive)r * box.stride + c];
-                                *at = (p8)(sum > 255 ? 255 : sum);
-                        }
+                if (box.coverage && c0 < c1 && r0 < r1)
+                        memory_add_sat_u8_rect(scratch + (positive)(dy + r0) * (positive)width + (positive)(dx + c0), (positive)width,
+                                               box.coverage + (positive)r0 * box.stride + c0, box.stride,
+                                               (positive)(c1 - c0), (positive)(r1 - r0));
         }
 
         //      The cell's rectangle on the target, cut to it, and the coverage's box the whole cell.

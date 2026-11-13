@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        497 routines (471 public, 26 local), 486 of them on all three and 11 local to one.
+        498 routines (472 public, 26 local), 487 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -238,6 +238,7 @@
           matrix_engine_f32              local   yes     yes     yes
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
+          memory_add_sat_u8_rect         public  yes     yes     yes
           memory_ascii_span              public  yes     yes     yes
           memory_average_ahead           public  yes     yes     yes
           memory_blend_u32_rect          public  yes     yes     yes
@@ -14394,6 +14395,22 @@ __asm__(
     "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
     "90: " ASM_RET
     ASM_END(memory_over_u32_rect)
+
+    ASM_FUNC(memory_add_sat_u8_rect)
+    "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "cmp $16, %rax\n   jb 80f\n"
+    "40: movdqu (%rdi), %xmm0\n   movdqu (%rdx), %xmm1\n   paddusb %xmm1, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rdx\n   sub $16, %rax\n   cmp $16, %rax\n   jae 40b\n"
+    "80: test %rax, %rax\n   jz 89f\n"
+    "push %rbx\n   push %r12\n"
+    "81: movzbl (%rdi), %ebx\n   movzbl (%rdx), %r12d\n"
+    "add %r12d, %ebx\n   cmp $255, %ebx\n   jbe 82f\n   mov $255, %ebx\n"
+    "82: mov %bl, (%rdi)\n   inc %rdi\n   inc %rdx\n   dec %rax\n   jnz 81b\n"
+    "pop %r12\n   pop %rbx\n"
+    "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
+    "90: " ASM_RET
+    ASM_END(memory_add_sat_u8_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -26222,6 +26239,19 @@ __asm__(
     "3: add x0, x0, x1\n   add x2, x2, x3\n   sub x5, x5, #1\n   cbnz x5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_over_u32_rect)
+
+    ASM_FUNC(memory_add_sat_u8_rect)
+    "cbz x4, 9f\n   cbz x5, 9f\n"
+    "0: mov x11, x0\n   mov x12, x2\n   mov x13, x4\n"
+    "1: cmp x13, #16\n   b.lo 2f\n"
+    "ld1 {v0.16b}, [x11]\n   ld1 {v1.16b}, [x12], #16\n   uqadd v0.16b, v0.16b, v1.16b\n   st1 {v0.16b}, [x11], #16\n"
+    "sub x13, x13, #16\n   b 1b\n"
+    "2: cbz x13, 3f\n"
+    "ldrb w9, [x11]\n   ldrb w10, [x12], #1\n   add w9, w9, w10\n   cmp w9, #255\n   csel w9, w9, w9, ls\n   mov w10, #255\n   csel w9, w10, w9, hi\n"
+    "strb w9, [x11], #1\n   sub x13, x13, #1\n   b 2b\n"
+    "3: add x0, x0, x1\n   add x2, x2, x3\n   sub x5, x5, #1\n   cbnz x5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_add_sat_u8_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -36388,6 +36418,15 @@ __asm__(
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_over_u32_rect)
+
+    ASM_FUNC(memory_add_sat_u8_rect)
+    "beqz a4, 9f\n   beqz a5, 9f\n   li a6, 255\n"
+    "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
+    "1: lbu t3, 0(t0)\n   lbu t4, 0(t1)\n   add t3, t3, t4\n   ble t3, a6, 2f\n   mv t3, a6\n"
+    "2: sb t3, 0(t0)\n   addi t0, t0, 1\n   addi t1, t1, 1\n   addi t2, t2, -1\n   bnez t2, 1b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_add_sat_u8_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -54117,6 +54156,10 @@ fn memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 ad
 // Zero width or height touches nothing.
 fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// height rows of width bytes of from saturating-added into into (into[i] = min(255, into[i] + from[i])),
+// into_stride and from_stride bytes apart. Zero width or height touches nothing.
+fn memory_add_sat_u8_rect(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
+                          positive width, positive height);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
