@@ -2772,15 +2772,9 @@ static int compositor_keymap_event(struct compositor_keymap *map, unsigned int c
 #define CP_ACCEL_CEILING 8
 #define CP_ACCEL_MAX (CP_ACCEL_ONE * 5 / 2)
 
-static int compositor_gain(int speed)
-{
-        if (speed <= CP_ACCEL_FLOOR)
-                return CP_ACCEL_ONE;
-        if (speed >= CP_ACCEL_CEILING)
-                return CP_ACCEL_MAX;
-        return CP_ACCEL_ONE + (CP_ACCEL_MAX - CP_ACCEL_ONE) * (speed - CP_ACCEL_FLOOR) /
-                                  (CP_ACCEL_CEILING - CP_ACCEL_FLOOR);
-}
+// The curve is the library's (pointer_gain, src/lib.c), which is written with these numbers in it.
+_Static_assert(CP_ACCEL_ONE == 1024 && CP_ACCEL_FLOOR == 1 && CP_ACCEL_CEILING == 8 && CP_ACCEL_MAX == 2560,
+               "the curve pointer_gain is written for");
 
 static unsigned long long compositor_isqrt(unsigned long long value)
 {
@@ -2799,17 +2793,11 @@ static unsigned long long compositor_isqrt(unsigned long long value)
         return root;
 }
 
-// The gain of one movement of the hand, dx and dy together, in the time since the last.
+// The gain of one movement of the hand, dx and dy together, in the time since the last: the distance's whole root, the speed
+// in counts a millisecond, and the curve's gain at it, which are the library's instructions on each machine (pointer_gain).
 static int compositor_gain_of(int dx, int dy, unsigned long long interval)
 {
-        unsigned long long distance, speed;
-
-        if (interval < 1000000)
-                interval = 1000000;
-        distance = compositor_isqrt((unsigned long long)((long long)dx * dx) +
-                                    (unsigned long long)((long long)dy * dy));
-        speed = distance * 1000000 / interval;
-        return compositor_gain((int)(speed < CP_ACCEL_CEILING ? speed : CP_ACCEL_CEILING));
+        return (int)pointer_gain(dx, dy, interval);
 }
 
 // A count turned into pixels. The remainder is what stops a gain that is not
@@ -2817,13 +2805,7 @@ static int compositor_gain_of(int dx, int dy, unsigned long long interval)
 // up short of where it was aimed.
 static int compositor_accel(int delta, int *remainder, int gain)
 {
-        long long scaled = (long long)delta * gain + *remainder;
-
-        if (!delta)
-                return 0;
-        *remainder = (int)(scaled % CP_ACCEL_ONE);
-        scaled /= CP_ACCEL_ONE;
-        return (int)(scaled < -2147483647 ? -2147483647 : scaled > 2147483647 ? 2147483647 : scaled);
+        return (int)pointer_scale(delta, remainder, (unsigned long long)(long long)gain);
 }
 
 // A device's counts added up, held to WINDOW_COORD_MAX either way: an evdev value is any 32 bits a device (a USB one is
@@ -4074,6 +4056,15 @@ struct compositor_input_event
         unsigned short type, code;
         int value;
 };
+
+// A record as the loop reads it (evdev_decode, src/lib.c): the device's stamp in nanoseconds, and the type, code and value as they lay.
+struct compositor_report_event
+{
+        unsigned long long stamp;
+        unsigned short type, code;
+        int value;
+};
+_Static_assert(sizeof(struct compositor_input_event) == 24 && sizeof(struct compositor_report_event) == 16, "what evdev_decode reads and writes");
 
 struct compositor_absinfo
 {
@@ -12658,7 +12649,7 @@ static unsigned char compositor_osk_held[WINDOWS];
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
-        unsigned int head, used, last, at;
+        unsigned int head, used, last;
 
         if (row < 0)
                 return 0;
@@ -12682,16 +12673,6 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         last = (head - 1) % WINDOWS_EVENTS;
         compositor.woken |= 1u << row;
 
-        if (type == WINDOW_EVENT_MOTION && used && used <= WINDOWS_EVENTS &&
-            table->event_type[row][last] == WINDOW_EVENT_MOTION)
-        {
-                table->event_a[row][last] = a;
-                table->event_b[row][last] = b;
-                table->event_flags[row][last] = (unsigned short)flags;
-                table->event_when[row][last] = compositor_stamp_now;
-                return 1;
-        }
-
         if (type == WINDOW_EVENT_WHEEL && used >= WINDOWS_EVENTS / 2 && used <= WINDOWS_EVENTS &&
             table->event_type[row][last] == WINDOW_EVENT_WHEEL && table->event_b[row][last] == b &&
             table->event_flags[row][last] == flags)
@@ -12708,17 +12689,17 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                 }
         }
 
-        if (used >= WINDOWS_EVENTS)
-                return 0;
+        // The record in the row's ring (ring_post, src/lib.c): a motion over the last unread motion, so a program that is behind
+        // has one place to catch up to; else in the cell after the last, the head stored once the cell is whole; and nothing
+        // when the ring is full, which the program's tail may say whatever is true.
+        {
+                const address_any ring[7] = {table->event_type[row], table->event_flags[row], table->event_a[row], table->event_b[row],
+                                             table->event_when[row], &table->event_head[row], &table->event_tail[row]};
+                const p64 record[3] = {compositor_stamp_now, (p64)(unsigned int)a | (p64)(unsigned int)b << 32,
+                                       (p64)(unsigned short)type | (p64)(unsigned short)flags << 16};
 
-        at = head % WINDOWS_EVENTS;
-        table->event_type[row][at] = (unsigned short)type;
-        table->event_flags[row][at] = (unsigned short)flags;
-        table->event_a[row][at] = a;
-        table->event_b[row][at] = b;
-        table->event_when[row][at] = compositor_stamp_now;
-        __atomic_store_n(&table->event_head[row], head + 1, __ATOMIC_RELEASE);
-        return 1;
+                return (int)ring_post(ring, WINDOWS_EVENTS, record, type == WINDOW_EVENT_MOTION);
+        }
 }
 
 /*
@@ -13098,22 +13079,50 @@ static int compositor_band_hit(int x, int y)
 */
 static int compositor_band_hit(int x, int y);
 
+/*
+        How far outside a window's contents its grip can be, at the most, for any window: what compositor_edge_zone reaches
+        with, and no less. A pointer's grip is the setting's at the desktop's scale and the window's line; a finger's is its
+        own grip or a corner's target, which is a square of COMPOSITOR_FINGER_TARGET about the corner's own box. The line is
+        the thickest any screen's scale draws.
+*/
+static int compositor_reach_most(void)
+{
+        int scale = compositor.scale, line;
+
+        for (unsigned int at = 0; at < compositor.outputs; at++)
+                scale = compositor.output[at].scale > scale ? compositor.output[at].scale : scale;
+        line = compositor_line_px(scale);
+        return (compositor.touching ? COMPOSITOR_TOUCH_GRIP + COMPOSITOR_GRIP + COMPOSITOR_FINGER_TARGET : compositor_grip()) *
+                   compositor.scale / 100 + line + 1;
+}
+
 static int compositor_under(int x, int y, int *tab)
 {
+        const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
+        positive reach, count = compositor.stacked;
+
         *tab = compositor_band_hit(x, y);
         if (*tab != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
 
-        for (unsigned int at = compositor.stacked; at--;)
+        // The stack is asked from the top for a window whose rectangle, grown by the furthest a grip reaches, holds the point
+        // (rects_point, src/lib.c: two compares a window), and only such a window is asked what it has there, where every
+        // window above the one found, and every window when none was, had its grip worked out at each motion.
+        reach = (positive)compositor_reach_most();
+        while (count)
         {
-                int row = compositor.stack[at];
+                bipolar at = rects_point(columns, compositor.stack, count, x, y, reach);
+                int row;
 
-                if (!compositor_visible(row))
-                        continue;
-                if ((x >= compositor.x[row] && x < compositor.x[row] + (int)compositor.w[row] && y >= compositor.y[row] &&
-                     y < compositor.y[row] + (int)compositor.h[row]) ||
-                    compositor_edge_zone(row, x, y))
+                if (at < 0)
+                        break;
+                row = compositor.stack[at];
+                if (compositor_visible(row) &&
+                    ((x >= compositor.x[row] && x < compositor.x[row] + (int)compositor.w[row] && y >= compositor.y[row] &&
+                      y < compositor.y[row] + (int)compositor.h[row]) ||
+                     compositor_edge_zone(row, x, y)))
                         return row;
+                count = (positive)at;
         }
 
         return COMPOSITOR_NONE;
@@ -18304,14 +18313,6 @@ static void compositor_predict_read(void)
         compositor_predict_set(COMPOSITOR_PREDICT_PEN, touch);
 }
 
-// When an event was made by its device (its own stamp, in nanoseconds on the device's clock), or now when it has none.
-static positive compositor_stamp(const struct compositor_input_event *event, positive now)
-{
-        positive stamp = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
-
-        return event->seconds || event->microseconds ? stamp : now;
-}
-
 /*
         One report of a device is over: a mouse's counts since the last one are
         one movement of the hand, with the gain of its speed, and a tablet's
@@ -19234,7 +19235,7 @@ static void compositor_touch_point(unsigned int at, int slot, int *x, int *y)
 }
 
 // A touch screen's event, kept until its report is over: its slot, a finger's id and its place.
-static void compositor_touch_event(unsigned int at, const struct compositor_input_event *event)
+static void compositor_touch_event(unsigned int at, const struct compositor_report_event *event)
 {
         struct compositor_touch_screen *screen = &compositor.screen_touch[at];
         int slot = screen->slots ? screen->slot : 0;
@@ -19867,12 +19868,14 @@ static void compositor_touch_tick(positive now)
 #define COMPOSITOR_INPUT_READS 16
 static void compositor_input_read(unsigned int at)
 {
-        struct compositor_input_event events[64];
+        struct compositor_input_event raw[64];
+        struct compositor_report_event events[64];
         int moved = 0;
 
         for (unsigned int reads = 0; reads < COMPOSITOR_INPUT_READS; reads++)
         {
-                bipolar got = system_read_once(compositor.inputs[at], events, sizeof(events));
+                bipolar got = system_read_once(compositor.inputs[at], raw, sizeof(raw));
+                positive count;
 
                 // A device that went away answers every poll at once, so it
                 // is let go of rather than read in a loop.
@@ -19921,10 +19924,12 @@ static void compositor_input_read(unsigned int at)
                 if (compositor.wakeonly[at])
                         continue;
 
-                for (unsigned int i = 0; i < (unsigned int)got / sizeof(events[0]); i++)
+                // The whole records of what was read, each with its stamp worked out, in one pass (evdev_decode).
+                count = evdev_decode((const p8 *)raw, (positive)got, (p64 *)events, 64);
+                for (positive i = 0; i < count; i++)
                 {
-                        struct compositor_input_event *event = &events[i];
-                        positive now = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
+                        const struct compositor_report_event *event = &events[i];
+                        positive now = event->stamp;
 
                         // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                         compositor_stamp_now = now;
@@ -20041,7 +20046,7 @@ static void compositor_input_read(unsigned int at)
                         {
                                 if (compositor.touchpad[at])
                                         compositor_pad_apply(at, now);
-                                moved |= compositor_report(now, compositor_stamp(event, now));
+                                moved |= compositor_report(now, now);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
                                  compositor_pad_finger_key(event->code))
@@ -20077,7 +20082,7 @@ static void compositor_input_read(unsigned int at)
                                                                                                              : COMPOSITOR_BTN_LEFT;
                                         code = compositor.pad[at].clicked ? compositor.pad[at].clicked : code;
                                 }
-                                moved |= compositor_report(now, compositor_stamp(event, now));
+                                moved |= compositor_report(now, now);
                                 if (moved)
                                         compositor_motion(), moved = 0;
                                 compositor_press(code, event->value != 0);
@@ -20090,7 +20095,7 @@ static void compositor_input_read(unsigned int at)
                                 compositor_key(at, event->code, event->value, now);
                         }
                 }
-                if (got < (bipolar)sizeof(events))
+                if (got < (bipolar)sizeof(raw))
                         break;
         }
 

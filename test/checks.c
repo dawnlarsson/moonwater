@@ -139181,6 +139181,82 @@ static void check_compositor_wheel(void)
     }
 
     /*
+            What is under a point is what the walk that asked every window of the stack found, for every point of a desktop
+            and round it: the list is asked first for the windows whose rectangle, grown by the furthest a grip reaches, holds
+            the point (rects_point), and a grip that reached further than that growth would be a window no hand could take.
+            Windows over each other, one put away, a menu (no grip), at two scales, the grip at its least and its most, a
+            pointer and a finger.
+    */
+    {
+        static const int rects[7][4] = {{20, 20, 90, 70}, {60, 50, 120, 90}, {150, 10, 80, 60}, {5, 150, 60, 80}, {100, 160, 100, 70},
+                                        {200, 120, 40, 120}, {110, 100, 30, 30}};
+        unsigned int was_stacked = compositor.stacked, differ = 0, points = 0, gripped = 0, none = 0;
+        int was_scale = compositor.scale, was_grip = compositor.grip, was_touching = compositor.touching;
+        unsigned char was_stack[WINDOWS];
+
+        memory_copy(was_stack, compositor.stack, sizeof(was_stack));
+        compositor.stacked = 0;
+        for (int row = 2; row < 9; row++)
+        {
+            compositor.x[row] = rects[row - 2][0], compositor.y[row] = rects[row - 2][1];
+            compositor.w[row] = (unsigned int)rects[row - 2][2], compositor.h[row] = (unsigned int)rects[row - 2][3];
+            compositor.showing[row] = 1;
+            compositor.state[row] = row == 5 ? WINDOW_MINIMIZED : 0;
+            compositor.arranged[row] = COMPOSITOR_FLOATING;
+            compositor_popup_parent[row] = row == 8 ? 3 : -1;
+            compositor.stack[compositor.stacked++] = (unsigned char)row;
+        }
+        for (int turn = 0; turn < 16; turn++)
+        {
+            compositor.scale = turn & 1 ? 200 : 100;
+            compositor.touching = turn >> 1 & 1;
+            compositor.grip = turn >> 2 & 1 ? 16 : 2;
+            // The stack the other way up for half of them, so each window is found over and under the others.
+            if (turn == 8)
+                for (unsigned int at = 0; at < compositor.stacked / 2; at++)
+                {
+                    unsigned char other = compositor.stack[compositor.stacked - 1 - at];
+
+                    compositor.stack[compositor.stacked - 1 - at] = compositor.stack[at];
+                    compositor.stack[at] = other;
+                }
+            for (int y = -130 + (turn >> 3 & 1); y < GLASS_SIDE + 130; y += 2)
+                for (int x = -130; x < GLASS_SIDE + 130; x++)
+                {
+                    int tab, found = compositor_under(x, y, &tab), wanted = COMPOSITOR_NONE;
+
+                    if (compositor_band_hit(x, y) == TASKBAR_HIT_NONE)
+                        for (unsigned int at = compositor.stacked; at-- && wanted < 0;)
+                        {
+                            int row = compositor.stack[at];
+
+                            if (compositor_visible(row) &&
+                                ((x >= compositor.x[row] && x < compositor.x[row] + (int)compositor.w[row] && y >= compositor.y[row] &&
+                                  y < compositor.y[row] + (int)compositor.h[row]) ||
+                                 compositor_edge_zone(row, x, y)))
+                                wanted = row;
+                        }
+                    differ += found != wanted;
+                    points++;
+                    none += wanted < 0;
+                    gripped += wanted >= 0 && !(x >= compositor.x[wanted] && x < compositor.x[wanted] + (int)compositor.w[wanted] &&
+                                                y >= compositor.y[wanted] && y < compositor.y[wanted] + (int)compositor.h[wanted]);
+                }
+        }
+        check("under: the list asked first finds the window the walk of every window found, at every point of a desktop and round it",
+              differ == 0 && points > 2000000);
+        check("under: and the points were on windows' grips outside them, and on no window at all", gripped > 20000 && none > 200000);
+        for (int row = 2; row < 9; row++)
+        {
+            compositor.showing[row] = 0, compositor.state[row] = 0, compositor_popup_parent[row] = -1;
+            compositor.x[row] = compositor.y[row] = 0, compositor.w[row] = compositor.h[row] = 0;
+        }
+        memory_copy(compositor.stack, was_stack, sizeof(was_stack));
+        compositor.stacked = was_stacked;
+        compositor.scale = was_scale, compositor.grip = was_grip, compositor.touching = was_touching;
+    }
+
+    /*
             A device that never stops: one turn reads it COMPOSITOR_INPUT_READS times, sixty-four records a read, and leaves the
             rest for the next turn, so the frame and the doors have a turn between; and a read that comes back short is the last.
             A file stands for the device: it is readable for ever, as a device that floods is.
@@ -179802,7 +179878,12 @@ static void *compositor_map_zeroed(unsigned long bytes) { return calloc(1,bytes)
    pointer; the backend's cut never looks inside them. */
 typedef struct font_face font_face;
 typedef struct font_engine font_engine;
+/* The curve and the step are the library's (src/lib.c: pointer_gain, pointer_scale), lifted beside the Canvas loops. */
+unsigned long long pointer_gain(long long dx, long long dy, unsigned long long interval);
+long long pointer_scale(long long delta, int *remainder, unsigned long long gain);
 #include "compositor-backend.inc"
+/* The curve at a speed: a movement of that many counts along one axis in a millisecond. */
+static int compositor_gain(int speed) { return compositor_gain_of(speed, 0, 1000000); }
 /* A failed row says which one, not only that one failed. */
 #define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)
 #define COMPOSITOR_GS1_1 "c03fc7b82739b497cd5eff57c85b696a8d52772cf69a0a0ff9cacf0b9f1170e3"
