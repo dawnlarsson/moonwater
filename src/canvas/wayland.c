@@ -567,6 +567,7 @@ struct wayland_client
         unsigned char pointers, keyboards, touches;
         unsigned char finger_scroll; // a precise (finger) scroll was sent to this client and no axis_stop since
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
+        unsigned int pointer_enter; // the serial of the last wl_pointer.enter this client was sent, which its cursor requests name (0 before the first)
         unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
         unsigned char devices[2];
         unsigned int input_serial[WAYLAND_INPUT_SERIALS]; // the serials of the last input this client was sent
@@ -918,6 +919,19 @@ static unsigned long wayland_input_serial(struct wayland_client *c)
 
         c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
         return serial;
+}
+
+/*
+        Whether a serial names the pointer's being on the client's surface now, which is what a cursor request must say
+        (wl_pointer.set_cursor and wp_cursor_shape's set_shape take the serial of the enter): the last enter's own, or any serial the
+        client was sent since it. One from before that enter is stale (the pointer has left and come back since) and is not taken.
+        The enter's serial was looked for among the last eight input serials, which a few keys and clicks push it out of: a browser
+        that hides the pointer over a video three seconds after the hand stops names the enter it had minutes ago, and was ignored
+        from the ninth key or click on, so the pointer never hid and its shape stopped following the page.
+*/
+static int wayland_pointer_serial_ok(const struct wayland_client *c, unsigned long serial)
+{
+        return c->pointer_enter && (unsigned int)serial - c->pointer_enter <= (unsigned int)c->serial - c->pointer_enter;
 }
 
 static int wayland_input_serial_ok(const struct wayland_client *c, unsigned long serial)
@@ -4018,6 +4032,7 @@ WAYLAND_API void wayland_pointer_to(long row, long x, long y)
                 unsigned long serial = wayland_input_serial(now);
                 long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_pointer, slots);
 
+                now->pointer_enter = (unsigned int)serial;
                 for (long at = 0; at < count; at++)
                         wayland_pointer_enter_one(now, slots[at], is, serial, sx, sy);
         }
@@ -4802,11 +4817,11 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
 /* A pointer or a keyboard let go: out of its client's list. A pointer's set_cursor is taken and its image not yet shown. */
 static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        // wl_pointer.set_cursor (serial, surface, hotspot): the serial must be a recent input of the client's, and only the client
+        // wl_pointer.set_cursor (serial, surface, hotspot): the serial is the enter's (wayland_pointer_serial_ok), and only the client
         // with the pointer may set its cursor. No surface hides the pointer over its window. A surface is not drawn yet: its window
         // gets the arrow, the compositor's own, rather than the client's picture (a gap in the protocol, not a fake of it).
         if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && wayland.pointer_row >= 0 &&
-            wayland.row_client[wayland.pointer_row] == c->slot && wayland_input_serial_ok(c, a[0].u))
+            wayland.row_client[wayland.pointer_row] == c->slot && wayland_pointer_serial_ok(c, a[0].u))
                 wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR,
                                      a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
         if (op == WLQ_wl_pointer_release && self->iface == WLI_wl_pointer)
@@ -5376,7 +5391,7 @@ static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland
             (a[1].u < WLN_wp_cursor_shape_device_v1_shape_default || a[1].u > WLN_wp_cursor_shape_device_v1_shape_all_resize))
                 return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
         if (op == WLQ_wp_cursor_shape_device_v1_set_shape && wayland.pointer_row >= 0 &&
-            wayland.row_client[wayland.pointer_row] == c->slot && wayland_input_serial_ok(c, a[0].u))
+            wayland.row_client[wayland.pointer_row] == c->slot && wayland_pointer_serial_ok(c, a[0].u))
                 wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, wayland_cursor_code(a[1].u), 0);
         return WAYLAND_OK;
 }

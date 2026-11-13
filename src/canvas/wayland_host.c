@@ -61,6 +61,14 @@ static struct
                 unsigned char open, touched, full, which;
                 int x1, y1, x2, y2;
         } laying[WINDOWS];
+        // The rectangles a commit changed of each window, in the window's pixels, beside the one box the table has room for: what
+        // compositor_take damages in the box's place, one by one (compositor_wl_parts). count is how many, -1 for more than there is
+        // room for (the box is what is damaged then), and they are good for the one take that follows the commit.
+        struct
+        {
+                int count;
+                int rect[WAYLAND_DAMAGE][4];
+        } parts[WINDOWS];
         // The keymap of each layout, made when a keyboard first needs it: a sealed file of xkb's text, kept for as long as the
         // compositor runs, and the layout the clients were last told.
         int keymap[16];
@@ -654,8 +662,48 @@ static unsigned int compositor_wl_over(unsigned int over, unsigned int under)
         this one (a window that is scanned out by itself), seeded from the one shown unless the first picture covers it. Whatever
         goes into the other buffer is a window the compositor has to compose again from the start.
 */
+// One rectangle a commit changed of a row's window (x1, y1 to x2, y2 in its pixels), kept for the take (compositor_wl.parts).
+static void compositor_wl_part(int row, long x1, long y1, long x2, long y2)
+{
+        int count = compositor_wl.parts[row].count;
+
+        if (count < 0 || x2 <= x1 || y2 <= y1)
+                return;
+        if (count >= WAYLAND_DAMAGE)
+        {
+                compositor_wl.parts[row].count = -1;
+                return;
+        }
+        compositor_wl.parts[row].rect[count][0] = (int)x1;
+        compositor_wl.parts[row].rect[count][1] = (int)y1;
+        compositor_wl.parts[row].rect[count][2] = (int)(x2 - x1);
+        compositor_wl.parts[row].rect[count][3] = (int)(y2 - y1);
+        compositor_wl.parts[row].count = count + 1;
+}
+
+/*
+        The rectangles the commit being taken changed of a row's window, and how many: what compositor_take damages where the table
+        says only their box. A commit of two small changes in far corners of a window was one box of nearly all of it, composed
+        whole at every present (2,048 changed pixels, 347 to 555 thousand composed). 0 for a commit that says no more than its box.
+*/
+static int compositor_wl_parts(int row, const int (**rects)[4])
+{
+        if (row < 0 || row >= WINDOWS || compositor_wl.parts[row].count < 2)
+                return 0;
+        *rects = compositor_wl.parts[row].rect;
+        return compositor_wl.parts[row].count;
+}
+
+// The row's picture taken by the compositor, with the commit's rectangles, which are that one take's.
+static void compositor_wl_take(int row)
+{
+        compositor_take(row);
+        compositor_wl.parts[row].count = 0;
+}
+
 static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
 {
+        compositor_wl_part(row, x1, y1, x2, y2);
         if (compositor_wl.laying[row].touched)
         {
                 x1 = x1 < compositor_wl.laying[row].x1 ? x1 : compositor_wl.laying[row].x1;
@@ -928,6 +976,7 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
         long x1 = width, y1 = height, x2 = 0, y2 = 0;
 
         table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+        compositor_wl.parts[row].count = 0;
         if (picture->full || picture->damages <= 0 || picture->damages > WAYLAND_DAMAGE)
                 return;
         for (long at = 0; at < picture->damages; at++)
@@ -941,6 +990,7 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
                 bottom = bottom > height ? height : bottom;
                 if (right <= left || bottom <= top)
                         continue;
+                compositor_wl_part(row, left, top, right, bottom);
                 x1 = left < x1 ? left : x1;
                 y1 = top < y1 ? top : y1;
                 x2 = right > x2 ? right : x2;
@@ -987,14 +1037,17 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 // A row that was the table's, or of another size, is drawn whole from the buffer; one that was read in place at this size
                 // is drawn again only where the commit says it changed.
                 if (!was_lent || width != (long)table->width[row] || height != (long)table->height[row])
+                {
                         table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+                        compositor_wl.parts[row].count = 0;
+                }
                 else
                         compositor_wl_lent_damage(table, row, picture, width, height);
                 table->width[row] = (unsigned int)width;
                 table->height[row] = (unsigned int)height;
                 table->client_in_place++;
                 __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
-                compositor_take(row);
+                compositor_wl_take(row);
                 return WAYLAND_PICTURE_LENT;
         }
         if (!compositor_wl.laying[row].open)
@@ -1006,6 +1059,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
 
                 compositor_wl.laying[row].open = 1;
                 compositor_wl.laying[row].touched = 0;
+                compositor_wl.parts[row].count = 0;
                 compositor_wl.laying[row].full = (unsigned char)pinned;
                 compositor_wl.laying[row].which = (unsigned char)(shown ^ (unsigned int)pinned);
                 if (pinned && !covers)
@@ -1121,7 +1175,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         table->damage_height[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].y2 - compositor_wl.laying[row].y1;
         compositor_wl.laying[row].open = 0;
         __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
-        compositor_take(row);
+        compositor_wl_take(row);
         return 0;
 }
 

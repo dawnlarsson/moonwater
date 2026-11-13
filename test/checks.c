@@ -188665,11 +188665,129 @@ static void test_window_scope(void)
         wayland_stop();
 }
 
+/*
+        The pointer's picture is its client's to ask for while the pointer is on the client's surface, by the serial of the enter:
+        hidden (set_cursor with no surface), or one of the compositor's shapes (wp_cursor_shape). The enter's serial is good for as
+        long as the pointer stays, however many keys and clicks the client is sent meanwhile; one from an enter before the last is
+        stale. The pointer leaving, and the client going, give the pointer back.
+*/
+static void test_cursor_serial(void)
+{
+        struct seated t;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long manager, device, enter, older;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        seated_open(&t, 9, 9);
+        c = t.s.c;
+        {
+                // The globals again (seated_open has read its registry's events away).
+                unsigned long registry = wlc_id(c, WLI_wl_registry, 1);
+
+                wlc_send(c, 1, WLQ_wl_display_get_registry, registry);
+                manager = wl_global(c, registry, WLI_wp_cursor_shape_manager_v1, 2);
+        }
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, t.pointer);
+        wlc_forget(c);
+        wayland_pointer_to(0, 5, 5);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        older = e ? e->u[0] : 0;
+        wayland_pointer_to(-1, 0, 0);
+        wlc_forget(c);
+        wayland_pointer_to(0, 6, 6);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        enter = e ? e->u[0] : 0;
+        WLCHECK(enter && older && enter != older && fake_cursor[0] == -1, "the pointer enters, with a serial, and wears no shape of the client's yet");
+        // A dozen keys and clicks, as a person watching a video makes: the enter's serial is far out of the last eight.
+        wayland_keyboard_to(0);
+        for (int at = 0; at < 12; at++)
+        {
+                wayland_key(0, 30, 1);
+                wayland_key(0, 30, 0);
+                wayland_pointer_button(0, 0x110, at & 1);
+        }
+        wlc_pump(c);
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, (long)enter, 0UL, 0L, 0L);
+        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_HIDDEN,
+                "set_cursor with no surface and the enter's serial hides the pointer, a dozen keys and clicks after the enter (%ld)", fake_cursor[0]);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (long)enter, (long)WLN_wp_cursor_shape_device_v1_shape_pointer);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HAND, "and a shape by the same serial is worn (%ld)", fake_cursor[0]);
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, (long)older, 0UL, 0L, 0L);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HAND, "the serial of an enter before the last is stale: it hides nothing (%ld)", fake_cursor[0]);
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, (long)enter + 100000, 0UL, 0L, 0L);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HAND, "nor does a serial the client was never sent (%ld)", fake_cursor[0]);
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, (long)enter, 0UL, 0L, 0L);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HIDDEN, "hidden again by the enter's");
+        // The pointer leaves: the window's pointer is the compositor's again. Back on it, it stays so until the client asks anew.
+        wayland_pointer_to(-1, 0, 0);
+        WLCHECK(fake_cursor[0] == -1, "the pointer leaving gives the compositor's pointer back (%ld)", fake_cursor[0]);
+        wlc_forget(c);
+        wayland_pointer_to(0, 7, 7);
+        wlc_pump(c);
+        WLCHECK(fake_cursor[0] == -1, "and it is the compositor's when the pointer comes back");
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, (long)enter, 0UL, 0L, 0L);
+        WLCHECK(fake_cursor[0] == -1, "where the serial it hid with before is stale now (%ld)", fake_cursor[0]);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        wlc_send(c, t.pointer, WLQ_wl_pointer_set_cursor, e ? (long)e->u[0] : 0L, 0UL, 0L, 0L);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HIDDEN, "and the new enter's hides it");
+        // The client goes with the pointer hidden: its window goes, and with it the hiding (the host's word of a row ends with the row).
+        wlc_end(c);
+        WLCHECK(!fake.row[0].used && wayland.pointer_row == -1, "a client gone with the pointer hidden has no window for it to be hidden over");
+        leak_check("cursor serial");
+        wayland_stop();
+}
+
+/*
+        A commit with more damage requests than the shim keeps apart (WAYLAND_DAMAGE): the rest are joined into the last, the picture
+        is taken, and the commit's frame callback is answered by the next frame like any other's.
+*/
+static void test_damage_many(void)
+{
+        struct session s;
+        struct wlc *c;
+
+        wl_reset();
+        fake.lend = 1;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff101010);
+        c = s.c;
+        for (int kind = 0; kind < 3; kind++)
+        {
+                unsigned long callback = wlc_id(c, WLI_wl_callback, 1);
+                long pictures = fake.row[0].pictures;
+
+                wlc_forget(c);
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+                for (long at = 0; at < 24; at++)
+                        wlc_send(c, s.surface, kind == 0 || (kind == 2 && (at & 1)) ? WLQ_wl_surface_damage_buffer : WLQ_wl_surface_damage, at, at % 20, 4L, 3L);
+                wlc_send(c, s.surface, WLQ_wl_surface_frame, callback);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures == pictures + 1 && wayland_frame_wanted(),
+                        "a commit with twenty-four damage requests is made, and a frame is wanted for its callback (kind %d, %s)", kind, c->error_text);
+                wayland_drawn();
+                wayland_frame();
+                wlc_pump(c);
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "and the next frame answers it (kind %d: %ld)", kind,
+                        wlc_count(c, WLI_wl_callback, WLE_wl_callback_done));
+        }
+        wlc_end(c);
+        leak_check("damage many");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
 
         test_damage_outside();
+        test_cursor_serial();
+        test_damage_many();
         test_window_scope();
         test_lent();
         test_versions();

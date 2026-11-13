@@ -15071,6 +15071,10 @@ static b32 compositor_osk_is(unsigned int pid)
         on the output, over the others and with the keys unless it asked to
         be put away.
 */
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_parts(int row, const int (**rects)[4]); // wayland_host.c: the rectangles the commit being taken changed, beside their box
+#endif
+
 static void compositor_take(int row)
 {
         struct windows *table = compositor.table;
@@ -15226,12 +15230,31 @@ static void compositor_take(int row)
         {
                 long x1 = damage[0] < 0 ? 0 : damage[0], y1 = damage[1] < 0 ? 0 : damage[1];
                 long x2 = (long)damage[0] + damage[2], y2 = (long)damage[1] + damage[3];
+#ifdef CONFIG_MOONWATER_WAYLAND
+                const int (*part)[4] = 0;
+                int parts = 0;
+#endif
 
                 x2 = x2 > (long)width ? (long)width : x2;
                 y2 = y2 > (long)height ? (long)height : y2;
                 compositor.damage_by = row + 1;
                 if (damage[2] <= 0)
                         compositor_damage_row(row);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A Wayland client's commit of several rectangles: each is damaged, cut to the picture as the box is, and not the box
+                // round them all (compositor_wl_parts; the table has room for the box alone).
+                else if (x2 > x1 && y2 > y1 && (parts = compositor_wl_parts(row, &part)) > 0)
+                        for (int at = 0; at < parts; at++)
+                        {
+                                long px1 = part[at][0] < 0 ? 0 : part[at][0], py1 = part[at][1] < 0 ? 0 : part[at][1];
+                                long px2 = (long)part[at][0] + part[at][2], py2 = (long)part[at][1] + part[at][3];
+
+                                px2 = px2 > (long)width ? (long)width : px2;
+                                py2 = py2 > (long)height ? (long)height : py2;
+                                if (px2 > px1 && py2 > py1)
+                                        compositor_damage(compositor.x[row] + (int)px1, compositor.y[row] + (int)py1, (int)(px2 - px1), (int)(py2 - py1));
+                        }
+#endif
                 else if (x2 > x1 && y2 > y1)
                         compositor_damage(compositor.x[row] + (int)x1, compositor.y[row] + (int)y1, (int)(x2 - x1),
                                           (int)(y2 - y1));
@@ -21442,6 +21465,17 @@ static b32 compositor_main()
                 // The devices first, and what they said forwarded before anything else is done with the turn (compositor_inputs_turn):
                 // a settings file read again, a door's picture taken, a client's commit and the frame all come after it.
                 compositor_inputs_turn(wanted + inputs);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A Wayland client's share of that is written to its socket now (the enter, the keys, the motion: compositor_wl_wake
+                // sends what the shim queued), not after the doors, the other clients' commits and the ticks below: a commit that
+                // copies a picture takes milliseconds, and sat in front of every client's input of the same turn.
+                for (unsigned int at = 0; at < compositor.input_count; at++)
+                        if (wanted[inputs + at].returned)
+                        {
+                                compositor_wl_wake();
+                                break;
+                        }
+#endif
 
                 // The settings' watch after the devices: it may open and close them, and the answers above are the list's as it was polled.
                 if (wanted[1].returned)
