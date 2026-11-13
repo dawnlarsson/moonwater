@@ -125513,6 +125513,12 @@ static struct
         unsigned long nodes, dark, busy, firmware;
         unsigned int minor, opened[160], opens;
         int base, node[64];
+        // The crtc's sets in the order they came, 0 for one that turned it off and 1 for one that turned it on (set_count of them, the first 32 kept).
+        unsigned char set_was[32];
+        unsigned int set_count;
+        // A card whose first connector is a ghost: connected at the first look, with a list of modes that grew by the second (so none is read) and an
+        // encoder that can have only a crtc the card has not, and whose second connector is the panel, with no encoder of its own yet.
+        int ghost;
 } card_fake;
 
 static long card_fake_node(unsigned int minor)
@@ -125585,12 +125591,22 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
         {
                 struct compositor_connector address_to c = (struct compositor_connector address_to)argument;
                 unsigned int id = c->connector_id;
-                int connected = id == CARD_FAKE_CONNECTOR && !(card_fake.dark >> card_fake.minor & 1);
+                int connected = id == CARD_FAKE_CONNECTOR + (card_fake.ghost ? 1u : 0u) && !(card_fake.dark >> card_fake.minor & 1);
 
                 if (card_fake.asked_count < 64)
                         card_fake.asked[card_fake.asked_count++] = id;
                 if (id < CARD_FAKE_CONNECTOR || id - CARD_FAKE_CONNECTOR >= listed)
                         return -2;
+                if (card_fake.ghost && id == CARD_FAKE_CONNECTOR)
+                {
+                        if (c->encoder_count >= 1 && c->encoders)
+                                ((unsigned int address_to)c->encoders)[0] = CARD_FAKE_ENCODER + 1;
+                        c->mode_count = c->modes ? 2 : 1; // one more than it was asked with: the kernel copies none
+                        c->encoder_count = 1, c->prop_count = 0, c->encoder_id = 0;
+                        c->connector_type = 11, c->connector_type_id = 1; // HDMI-A-1
+                        c->connection = 1;
+                        return 0;
+                }
                 if (connected && c->mode_count >= 1 && c->modes)
                         card_fake_mode((struct compositor_mode address_to)c->modes);
                 if (connected && c->encoder_count >= 1 && c->encoders)
@@ -125598,6 +125614,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                 c->mode_count = c->encoder_count = (unsigned int)connected;
                 c->prop_count = 0;
                 c->encoder_id = connected ? CARD_FAKE_ENCODER : 0;
+                if (card_fake.ghost)
+                        c->encoder_count = 0, c->encoder_id = 0;
                 c->connector_type = 14, c->connector_type_id = id - CARD_FAKE_CONNECTOR + 1; // eDP-N
                 c->connection = connected ? 1 : 2;
                 return 0;
@@ -125606,6 +125624,11 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
         {
                 struct compositor_encoder address_to e = (struct compositor_encoder address_to)argument;
 
+                if (card_fake.ghost && e->encoder_id == CARD_FAKE_ENCODER + 1)
+                {
+                        e->crtc_id = 0, e->possible_crtcs = 2, e->possible_clones = 0; // the second crtc, of a card with one
+                        return 0;
+                }
                 if (e->encoder_id != CARD_FAKE_ENCODER)
                         return -2;
                 e->crtc_id = CARD_FAKE_CRTC, e->possible_crtcs = 1, e->possible_clones = 0;
@@ -125795,11 +125818,17 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
 
                 if (!s->fb_id || !s->mode_valid)
                 {
+                        if (card_fake.set_count < 32)
+                                card_fake.set_was[card_fake.set_count] = 0;
+                        card_fake.set_count++;
                         card_fake.crtc_fb = 0;
                         return 0;
                 }
                 if (!fb || fb > card_fake.fbs)
                         return -2;
+                if (card_fake.set_count < 32)
+                        card_fake.set_was[card_fake.set_count] = 1;
+                card_fake.set_count++;
                 // The viewport, with the primary plane's turn as the kernel takes it: a quarter turn swaps the mode's sides.
                 if (card_fake.plane_rotation & (2 | 8))
                         across = down, down = swap;
@@ -134816,7 +134845,42 @@ static void check_compositor_card_walk(void)
     check("card walk: a screen on card3, with no card0, is taken",
           status == 0 && compositor.card >= 0 && compositor.card == card_fake.node[3] && compositor.outputs == 1 &&
               compositor.width == 1024 && compositor.height == 768 && string_equals((string_address)compositor.driver, (string_address) "fake"));
+    // The only screen unplugged and plugged back: the same connector, crtc and mode, so nothing of the desktop's changed, and the link is
+    // set up only by a mode set. The crtc is turned off and then on, which is one; taken as the same screens, no SETCRTC was made at all.
+    if (status == 0)
+    {
+        unsigned int sets;
+
+        card_fake.dark = 1ul << 3;
+        status = compositor_space_take(0);
+        check("screens gone: a take that finds no screen where there was one is the answer for none, and the desktop keeps what it has",
+              status == -COMPOSITOR_ENODEV && compositor.outputs == 1 && compositor.width == 1024 && compositor.screens_gone == 1);
+        card_fake.dark = 0, sets = card_fake.set_count;
+        status = compositor_space_take(0);
+        check("screens gone: the screen that comes back is set anew, its crtc turned off and then on",
+              status == 0 && compositor.outputs == 1 && !compositor.screens_gone && card_fake.set_count >= sets + 2 && sets + 1 < 32 &&
+                  card_fake.set_was[sets] == 0 && card_fake.set_was[sets + 1] == 1 && card_fake.crtc_fb != 0);
+        sets = card_fake.set_count;
+        status = compositor_space_take(0);
+        check("screens gone: and a take after that, with nothing changed, sets nothing", status == 0 && card_fake.set_count == sets);
+    }
     card_walk_end();
+
+    // A connector passed over after it was read into its slot leaves the slot empty for the next (compositor_connected_blank): the ghost's
+    // encoder can have only a crtc the card has not, and left in the slot that was the panel's too, so the panel had no crtc and was no screen.
+    if (card_walk_begin(1ul << 0, 0, 0, 0))
+    {
+        struct compositor_connected found;
+
+        card_fake.connectors = 2, card_fake.ghost = 1;
+        card_fake_node(0);
+        compositor.card = card_fake.fd;
+        status = compositor_connected_read(&found);
+        check("connector slot: a connector passed over leaves nothing in its slot for the next one read",
+              status == 0 && found.count == 1 && found.connector[0] == CARD_FAKE_CONNECTOR + 1 && found.crtc[0] == CARD_FAKE_CRTC &&
+                  found.possible[0] == 0 && found.mode[0].hdisplay == 1024 && string_equals((string_address)found.name[0], (string_address) "eDP-2"));
+        card_walk_end();
+    }
 
     card_walk_begin(1ul << 0 | 1ul << 2, 1ul << 0, 0, 0);
     status = compositor_cards_walk();
@@ -235238,6 +235302,27 @@ static void close_ask_rows(void)
         compositor.showing[3] = 0, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = parent;
         table.close_asks[3] = 0;
         compositor.woken = woken, compositor.table = kept;
+        // A title's request that cannot be queued is not waited for: counted as asked, no reply ever came to take it off, and the title was
+        // never asked of again for as long as the window lived.
+        {
+                struct compositor_xwm_window *t = compositor_xwm_find(0x7700003u, 1);
+                long out = compositor_xwm.out_len;
+                unsigned int seq = compositor_xwm.seq, at = compositor_xwm.pending_at, count = compositor_xwm.pending_count;
+                int broken = compositor_xwm.broken;
+
+                compositor_xwm.out_len = COMPOSITOR_XWM_OUT;
+                if (t)
+                        compositor_xwm_ask_title(t);
+                check("xwm title: a request with no room in the queue is not waited for", t && t->asking == 0 && compositor_xwm.pending_count == count);
+                compositor_xwm.out_len = 0, compositor_xwm.broken = 0;
+                if (t)
+                        compositor_xwm_ask_title(t);
+                check("xwm title: and the title is asked of when there is room, and waited for once",
+                      t && t->asking == 1 && compositor_xwm.pending_count == count + 1 && !(t->state & COMPOSITOR_XWM_TITLE_AGAIN));
+                compositor_xwm_forget(0x7700003u);
+                compositor_xwm.out_len = out, compositor_xwm.seq = seq, compositor_xwm.pending_at = at, compositor_xwm.pending_count = count;
+                compositor_xwm.broken = broken;
+        }
 }
 
 // A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
@@ -235261,6 +235346,31 @@ static void flip_wait_rows(void)
         compositor.period = 0, compositor.flip_pending = 1;
         check("flip: before a screen has said its period the frame is a 60th of a second", compositor_flip_wait(1000000000ull + 1) == 1000000000ull + 4 * 16666667ull);
         compositor.period = period, compositor.flip_issued = issued, compositor.flip_pending = pending;
+        // A flip's event is its own (compositor_card_events): the event of a flip given up on as lost, come late, is not the next flip's. Taken
+        // for it, every flip after was let go of a frame early. The events are struct drm_event_vblank: type 2, length 32, the user data, a
+        // stamp and a sequence.
+        {
+                static struct windows flip_table;
+                struct windows *kept = compositor.table;
+                positive serial = compositor.flip_serial;
+                unsigned int held = compositor.held_rows, dropping = compositor.dropping;
+                p8 events[64];
+                unsigned int type = COMPOSITOR_EVENT_FLIP_COMPLETE, length = 32;
+                positive stale = 7, mine = 8;
+
+                compositor.table = &flip_table, compositor.held_rows = compositor.dropping = 0;
+                memory_zero(events, sizeof(events));
+                memory_copy(events, &type, 4), memory_copy(events + 4, &length, 4), memory_copy(events + 8, &stale, 8);
+                memory_copy(events + 32, &type, 4), memory_copy(events + 36, &length, 4), memory_copy(events + 40, &mine, 8);
+                compositor.flip_serial = 8, compositor.flip_pending = 1;
+                check("flip: the late event of a flip given up on is not the flip in flight's", compositor_card_events(events, 32) == 0 && compositor.flip_pending == 1);
+                check("flip: the flip in flight's own event lets go of it, once", compositor_card_events(events, 64) == 1 && compositor.flip_pending == 0);
+                check("flip: an event with no flip in flight lets go of nothing", compositor_card_events(events + 32, 32) == 0 && compositor.flip_pending == 0);
+                compositor.flip_pending = 1;
+                check("flip: an event cut short is read as far as it is whole", compositor_card_events(events, 40) == 0 && compositor.flip_pending == 1);
+                compositor.table = kept, compositor.flip_serial = serial, compositor.flip_pending = pending;
+                compositor.held_rows = held, compositor.dropping = dropping;
+        }
 }
 
 // A frame is dated when it was due, not when the loop woke to make it (compositor_frame_dated), so the next is due a period after that and the

@@ -358,8 +358,9 @@ static void compositor_xwm_composite(const unsigned char *in, long size)
 /* ---- the properties: a request, and the table that says whose reply it is ---- */
 
 /* GetProperty for a window's property (the first 128 bytes of it), the reply to be found by its sequence. The replies come back in
-   the order of the requests, so the table is a queue: a reply or an error to the oldest one asked is its answer. */
-static void compositor_xwm_ask(unsigned int window, unsigned int what, unsigned int property, unsigned int type)
+   the order of the requests, so the table is a queue: a reply or an error to the oldest one asked is its answer. 0 when the request
+   is queued and its reply waited for, and -1 when it is not (nothing will answer it, so nothing is to wait for it). */
+static int compositor_xwm_ask(unsigned int window, unsigned int what, unsigned int property, unsigned int type)
 {
         struct compositor_xwm *x = &compositor_xwm;
         unsigned char req[32];
@@ -367,19 +368,20 @@ static void compositor_xwm_ask(unsigned int window, unsigned int what, unsigned 
         struct compositor_xwm_pending *p;
 
         if (n <= 0 || compositor_xwm_queue(req, n) != 0)
-                return;
+                return -1;
         // A table that is full is a server that does not answer: the connection is closed at the pass (a reply that is forgotten
         // leaves its window without the word it waits for, so the window is never shown).
         if (x->pending_count == COMPOSITOR_XWM_PENDING)
         {
                 x->broken = 1;
-                return;
+                return -1;
         }
         p = &x->pending[(x->pending_at + x->pending_count) % COMPOSITOR_XWM_PENDING];
         p->seq = x->seq;
         p->window = window;
         p->what = what;
         x->pending_count++;
+        return 0;
 }
 
 /* The oldest request waited for has been answered (or refused): it is no longer waited for. */
@@ -404,9 +406,9 @@ static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
                 return;
         }
         // The title is _NET_WM_NAME's when it has one, and WM_NAME's when it has not: WM_NAME is asked of only then (its reply is the
-        // second of the two, and it is counted in asking until it comes).
-        w->asking = 1;
-        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]);
+        // second of the two, and it is counted in asking until it comes). A request that could not be queued is not waited for: counted,
+        // no reply ever took it off, and the window's title was never asked of again.
+        w->asking = compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]) == 0;
 }
 
 /* One of a window's title requests has been answered, or refused: when the last is, a title that changed meanwhile is asked of. */
@@ -494,8 +496,10 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                         else
                         {
                                 // No _NET_WM_NAME: the title is WM_NAME's, asked of now. The request in hand stays counted until that reply.
+                                // One that could not be queued is the end of this title's asking, as its reply would have been.
                                 w->state &= ~COMPOSITOR_XWM_NET_TITLE;
-                                compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING);
+                                if (compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING) != 0)
+                                        compositor_xwm_title_done(w);
                                 return;
                         }
                 }

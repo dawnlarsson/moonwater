@@ -4492,6 +4492,8 @@ static struct
         unsigned int scanout_handle;        // the scanout's dumb buffer, given back when another takes its place
         unsigned long composing_bytes, mirror_bytes; // what compositor_changed_ready mapped, given back with it
         int space_wanted;   // the screens are to be taken again once the card has finished a flip
+        int screens_gone;   // a take found no screen connected where there had been some: the next that finds one sets every crtc anew
+        positive screens_look; // while they are gone, when the connectors are next asked without a word from the kernel
         int kept_x, kept_y; // where the pointer was last kept on a screen, which a movement starts from
         int absolute;       // the pointer was put by a tablet, whose point comes from no screen
         int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
@@ -4530,6 +4532,7 @@ static struct
         int table_memfd, table_giver, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
         positive flip_when;  // the last flip-complete event's time (its vblank, on the monotonic clock), and its sequence
         positive flip_issued; // when the flip in flight was asked of the card (the monotonic clock)
+        positive flip_serial; // the number the flip in flight was asked with (its event's user data): an event with another is a flip given up on
         unsigned int flip_seq;
         int flip_stamped;    // whether flip_when came with the event (a card that stamps its vblanks)
         /*
@@ -7071,6 +7074,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 compositor_flip_done();
                 return 1;
         }
+        flip.user_data = ++compositor.flip_serial;
         if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
                 return 0;
         compositor_flip_refused = 0;
@@ -7159,11 +7163,16 @@ static int compositor_flip_lost(positive now)
         return compositor.flip_pending && now >= compositor.flip_issued && now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST;
 }
 
-// The card's events, read when its descriptor is readable: a flip's completion is the one asked for.
-static void compositor_card_read(void)
+/*
+        The card's events, as read: a flip's completion is the one asked for, and it is the flip in flight's only when it carries that
+        flip's number (flip_serial, the user data it was asked with). A flip taken as landed after a second (compositor_flip_lost) may
+        still send its event, late; taken for the next flip's, every flip after it was let go of when the one before it landed, a
+        window's buffer the card still showed was said free to its program, and the card refused each present that followed. Such an
+        event is passed over, and so is one that comes with no flip in flight. The count of flips it let go of.
+*/
+static unsigned int compositor_card_events(const p8 *events, long got)
 {
-        p8 events[512];
-        long got = compositor_call(syscall(read), (positive)compositor.card, (positive)events, sizeof(events), 0, 0, 0);
+        unsigned int landed = 0;
 
         for (long at = 0; at + 8 <= got;)
         {
@@ -7177,7 +7186,16 @@ static void compositor_card_read(void)
                 {
                         // The card's stamp of the vblank: struct drm_event_vblank is user data, then tv_sec, tv_usec and sequence.
                         unsigned int sec, usec, sequence;
+                        positive serial = 0;
 
+                        if (length >= 16)
+                                memory_copy(address_of serial, events + at + 8, 8);
+                        if (!compositor.flip_pending || serial != compositor.flip_serial)
+                        {
+                                at += length;
+                                continue;
+                        }
+                        landed++;
                         if (length >= 28)
                         {
                                 memory_copy(address_of sec, events + at + 16, 4);
@@ -7192,6 +7210,16 @@ static void compositor_card_read(void)
                 }
                 at += length;
         }
+        return landed;
+}
+
+// The card's events, read when its descriptor is readable.
+static void compositor_card_read(void)
+{
+        p8 events[512];
+        long got = compositor_call(syscall(read), (positive)compositor.card, (positive)events, sizeof(events), 0, 0, 0);
+
+        compositor_card_events(events, got);
 }
 
 // A row's buffer which, from the compositor's own copy of the layout: the table is shared, so the header's pixels,
@@ -7829,6 +7857,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, overlay ? 2u : 1u, (unsigned long)objects,
                     (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
 
+        commit.user_data = ++compositor.flip_serial;
         if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
                 return 0;
         compositor.flip_pending = 1;
@@ -9990,6 +10019,25 @@ static void compositor_rates_take(struct compositor_connected *found, unsigned i
                                     found->mode[n].vdisplay);
 }
 
+/*
+        Slot n of the list emptied: a connector read into it and then passed over (it lists no mode it can be shown at and no crtc
+        drives it, or its mode has no size) leaves nothing there for the connector read into the slot next. What it had written
+        stayed: the crtc its encoder was on, which the next connector then took as the one driving it, whether or not it can have
+        that crtc; the crtcs its encoders can have, added to the next one's; a mode, which kept the next one's from being looked
+        for; and its rates.
+*/
+static void compositor_connected_blank(struct compositor_connected *found, unsigned int n)
+{
+        found->connector[n] = found->crtc[n] = found->possible[n] = 0;
+        found->current[n] = 0;
+        memory_zero(&found->mode[n], sizeof(found->mode[n]));
+        memory_zero(found->name[n], sizeof(found->name[n]));
+        memory_zero(found->model[n], sizeof(found->model[n]));
+        found->size[n][0] = found->size[n][1] = 0;
+        memory_zero(found->hz[n], sizeof(found->hz[n]));
+        found->hz_count[n] = 0;
+}
+
 static b32 compositor_connected_read(struct compositor_connected *found)
 {
         struct compositor_card_res resources = {0};
@@ -10073,7 +10121,10 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                 if (listed)
                         compositor_refresh_pick(found->name[n], probe.mode_count, modes, &found->mode[n]);
                 if (!found->current[n] && !listed)
+                {
+                        compositor_connected_blank(found, n);
                         continue;
+                }
                 found->size[n][0] = found->mode[n].hdisplay;
                 found->size[n][1] = found->mode[n].vdisplay;
                 // A screen turned a quarter is laid out at its turned size, its width and height the other way round.
@@ -10089,6 +10140,8 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                                 compositor_rates_take(found, n, modes, probe.mode_count);
                         found->count++;
                 }
+                else
+                        compositor_connected_blank(found, n);
         }
 
         // A crtc is one screen's: those a crtc drives now keep it, and the rest take the first free one they can have.
@@ -10503,14 +10556,19 @@ static b32 compositor_space_take(int first)
         unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
         b32 status;
-        int carried = 0;
+        int carried = 0, regained = 0;
 
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
 
-        // No screen (or a card that is not one for screens) is its own answer: the start waits for one (compositor_card_open).
+        // No screen (or a card that is not one for screens) is its own answer: the start waits for one (compositor_card_open), and a
+        // desktop whose screens all went keeps what it has and is marked, so that the take that finds one again is a mode set.
         if (status < 0 || !found.count)
+        {
+                if (!first && compositor.outputs)
+                        compositor.screens_gone = 1;
                 return -COMPOSITOR_ENODEV;
+        }
         // A flip in flight is the card showing a window's buffer on one crtc: the screens are taken once it has landed.
         if (!first && compositor.flip_pending)
         {
@@ -10552,7 +10610,21 @@ static b32 compositor_space_take(int first)
                         continue;
                 }
 
-                same = !first && lit == compositor.outputs && box[2] == compositor.width && box[3] == compositor.height;
+                /*
+                        Every screen had gone and one is back. It may be the same connector at the same mode on the same crtc, and
+                        nothing of the desktop's has changed; the link has, and is set up only by a mode set (a DisplayPort link is
+                        trained by one), which the card makes of a SETCRTC only when something of the crtc changes. So the crtcs
+                        the screens were on are turned off first, and what follows turns each on: a commit that enables a crtc is
+                        always a mode set. Taken as the same, the screen that came back stayed dark with the desktop running.
+                */
+                if (!first && compositor.screens_gone)
+                {
+                        for (unsigned int at = 0; at < was_count; at++)
+                                compositor_crtc_off(was_crtc[at]);
+                        compositor.screens_gone = 0;
+                        regained = 1;
+                }
+                same = !first && !regained && lit == compositor.outputs && box[2] == compositor.width && box[3] == compositor.height;
                 for (unsigned int at = 0; same && at < lit; at++)
                         same = compositor.output[at].crtc == found.crtc[order[at]] &&
                                compositor.output[at].connector == found.connector[order[at]] &&
@@ -20162,6 +20234,7 @@ static void compositor_space_retake(void)
                 unsigned int degrees;
         } was[WINDOWS_OUTPUTS];
         b32 status = 0, turned = 0;
+        int gone = compositor.screens_gone;
 
         // Each screen's turn before the take, by its name: a screen that turns is one whose turn is another after it (the keyboard is put
         // away for it, compositor_osk_turned).
@@ -20180,9 +20253,10 @@ static void compositor_space_retake(void)
                             was[each].degrees != compositor.output[at].degrees)
                                 turned = 1;
 
-        if (status < 0)
+        // Screens that are still gone were said so when they went: the look every COMPOSITOR_SCREEN_LOOK says nothing more.
+        if (status < 0 && !(gone && status == -COMPOSITOR_ENODEV))
                 compositor_say("the screens could not be taken again, error", status);
-        else if (compositor.layout != layout)
+        else if (status >= 0 && compositor.layout != layout)
                 compositor_screens_say();
         if (turned)
                 compositor_osk_turned();
@@ -20894,6 +20968,14 @@ static b32 compositor_main()
                         compositor_flip_done();
                         compositor_damage_space();
                 }
+                // No screen is connected: the connectors are asked again in a while, for a uevent that was lost and a connector that says none.
+                if (compositor.screens_gone)
+                {
+                        now = clock_monotonic_nanoseconds();
+                        if (!compositor.screens_look)
+                                compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
+                        until = !until || compositor.screens_look < until ? compositor.screens_look : until;
+                }
                 if (compositor.damages)
                 {
                         positive frame, waiting;
@@ -20975,6 +21057,11 @@ static b32 compositor_main()
                         compositor_uevents_read();
                 if (compositor.space_wanted && !compositor.flip_pending)
                         compositor_space_retake();
+                if (compositor.screens_gone && compositor.screens_look && clock_monotonic_nanoseconds() >= compositor.screens_look)
+                {
+                        compositor.screens_look = 0;
+                        compositor_space_retake();
+                }
 
                 // A pointer that was shaken is its own size again when its time is up.
                 if (compositor.cursor.magnified && clock_monotonic_nanoseconds() >= compositor.cursor.magnified_until)
