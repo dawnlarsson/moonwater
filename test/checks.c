@@ -170439,6 +170439,20 @@ static fn check_field_hands(string_address regular)
                                !launcher_sleeps("memory\n", 7) && !launcher_sleeps("xmem \n", 6) && !launcher_sleeps("", 0);
                         launcher_session_read("/tmp/mw-no-such-power-state");
                         read = read && launcher.session == LAUNCHER_LOG_OUT;
+                        // And as the bar reads it: a list that is there and has no mem offers no Sleep, and one that has it offers it.
+                        for (int which = 0; which < 2; which++)
+                        {
+                                const char address_to text = which ? "freeze mem disk\n" : "freeze disk\n";
+                                bipolar made = system_open_at_mode(AT_FDCWD, (string_address) "/tmp/mw-launcher-power-state", FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+
+                                if (made >= 0)
+                                {
+                                        system_write_once(made, text, string_length((string_address)text));
+                                        system_close(made);
+                                }
+                                launcher_session_read("/tmp/mw-launcher-power-state");
+                                read = read && made >= 0 && launcher.session == (which ? (LAUNCHER_SLEEP | LAUNCHER_LOG_OUT) : LAUNCHER_LOG_OUT);
+                        }
                         check("launcher: Sleep is offered only where the kernel's list of sleeps has the whole word mem, and a list that cannot be read offers none", read);
                         launcher.session = 0;
                         launcher.height = launcher_build(0);
