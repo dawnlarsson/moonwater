@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        500 routines (474 public, 26 local), 489 of them on all three and 11 local to one.
+        502 routines (476 public, 26 local), 491 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -255,6 +255,7 @@
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
           memory_copy_rect_nt_row        local   yes     --      --
+          memory_copy_rect_reverse_u32   public  yes     yes     yes
           memory_copy_rect_stream_u32    public  yes     yes     yes
           memory_copy_rect_u32           public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
@@ -330,6 +331,7 @@
           memory_runs_u32                public  yes     yes     yes
           memory_s16_to_u8               public  yes     yes     yes
           memory_saturate_u32            public  yes     yes     yes
+          memory_scale_u8                public  yes     yes     yes
           memory_search                  public  yes     yes     yes
           memory_search_ascii_case       public  yes     yes     yes
           memory_search_ascii_case_prepared public  yes     yes     yes
@@ -14414,6 +14416,35 @@ __asm__(
     "90: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
 
+    ASM_FUNC(memory_scale_u8)
+    // rdi=into, rsi=from, rdx=count, rcx=scale
+    "test %rdx, %rdx\n   jz 9f\n   and $255, %ecx\n"
+    "cmp $8, %rdx\n   jb 1f\n"
+    "movd %ecx, %xmm4\n   pshuflw $0, %xmm4, %xmm4\n   punpcklqdq %xmm4, %xmm4\n"
+    "pxor %xmm5, %xmm5\n   mov $0x00010001, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "8: movq (%rsi), %xmm0\n   punpcklbw %xmm5, %xmm0\n   pmullw %xmm4, %xmm0\n   paddw %xmm6, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n   psrlw $8, %xmm1\n   paddw %xmm1, %xmm0\n   psrlw $8, %xmm0\n"
+    "packuswb %xmm5, %xmm0\n   movq %xmm0, (%rdi)\n"
+    "add $8, %rsi\n   add $8, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae 8b\n"
+    "1: test %rdx, %rdx\n   jz 9f\n"
+    "2: movzbl (%rsi), %eax\n   imul %ecx, %eax\n   inc %eax\n   mov %eax, %r8d\n   shr $8, %r8d\n"
+    "add %r8d, %eax\n   shr $8, %eax\n   movb %al, (%rdi)\n   inc %rsi\n   inc %rdi\n   dec %rdx\n   jnz 2b\n"
+    "9: " ASM_RET
+    ASM_END(memory_scale_u8)
+
+    ASM_FUNC(memory_copy_rect_reverse_u32)
+    // rdi=into, rsi=into_pitch, rdx=from, rcx=from_pitch, r8=width, r9=height
+    "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   shl $2, %rsi\n   shl $2, %rcx\n"
+    "10: mov %rdi, %r10\n   lea (%rdx,%r8,4), %r11\n   mov %r8, %rax\n"
+    "cmp $4, %rax\n   jb 1f\n"
+    "4: sub $16, %r11\n   movdqu (%r11), %xmm0\n   pshufd $0x1b, %xmm0, %xmm0\n   movdqu %xmm0, (%r10)\n"
+    "add $16, %r10\n   sub $4, %rax\n   cmp $4, %rax\n   jae 4b\n"
+    "1: test %rax, %rax\n   jz 2f\n   push %rbx\n"
+    "3: sub $4, %r11\n   mov (%r11), %ebx\n   mov %ebx, (%r10)\n   add $4, %r10\n   dec %rax\n   jnz 3b\n   pop %rbx\n"
+    "2: add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz 10b\n"
+    "9: " ASM_RET
+    ASM_END(memory_copy_rect_reverse_u32)
+
     ASM_FUNC(memory_over_cover_u32_rect)
     "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
     "shl $2, %rsi\n"
@@ -26305,6 +26336,43 @@ __asm__(
     "9: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
 
+    ASM_FUNC(memory_scale_u8)
+    "cbz x2, 9f\n   and w3, w3, #255\n"
+    "cmp x2, #16\n   b.lo 1f\n"
+    "dup v4.16b, w3\n   movi v5.8h, #1\n"
+    "16:\n"
+    "ldr q0, [x1], #16\n"
+    "umull v1.8h, v0.8b, v4.8b\n   umull2 v2.8h, v0.16b, v4.16b\n"
+    "add v1.8h, v1.8h, v5.8h\n   add v2.8h, v2.8h, v5.8h\n"
+    "ushr v3.8h, v1.8h, #8\n   ushr v6.8h, v2.8h, #8\n"
+    "add v1.8h, v1.8h, v3.8h\n   add v2.8h, v2.8h, v6.8h\n"
+    "shrn v0.8b, v1.8h, #8\n   shrn2 v0.16b, v2.8h, #8\n"
+    "str q0, [x0], #16\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 16b\n"
+    "1: cbz x2, 9f\n"
+    "2: ldrb w4, [x1], #1\n   mul w4, w4, w3\n   add w4, w4, #1\n"
+    "add w4, w4, w4, lsr #8\n   lsr w4, w4, #8\n   strb w4, [x0], #1\n"
+    "subs x2, x2, #1\n   b.ne 2b\n"
+    "9: " ASM_RET
+    ASM_END(memory_scale_u8)
+
+    ASM_FUNC(memory_copy_rect_reverse_u32)
+    "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   lsl x3, x3, #2\n"
+    "10: mov x6, x0\n   add x7, x2, x4, lsl #2\n   mov x9, x4\n"
+    "cmp x9, #8\n   b.lo 4f\n"
+    "8: sub x7, x7, #32\n   ldp q0, q1, [x7]\n"
+    "rev64 v0.4s, v0.4s\n   ext v0.16b, v0.16b, v0.16b, #8\n"
+    "rev64 v1.4s, v1.4s\n   ext v1.16b, v1.16b, v1.16b, #8\n"
+    "stp q1, q0, [x6], #32\n   sub x9, x9, #8\n   cmp x9, #8\n   b.hs 8b\n"
+    "4: cmp x9, #4\n   b.lo 1f\n"
+    "sub x7, x7, #16\n   ldr q0, [x7]\n"
+    "rev64 v0.4s, v0.4s\n   ext v0.16b, v0.16b, v0.16b, #8\n"
+    "str q0, [x6], #16\n   sub x9, x9, #4\n"
+    "1: cbz x9, 2f\n"
+    "3: ldr w10, [x7, #-4]!\n   str w10, [x6], #4\n   subs x9, x9, #1\n   b.ne 3b\n"
+    "2: add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 10b\n"
+    "9: " ASM_RET
+    ASM_END(memory_copy_rect_reverse_u32)
+
     ASM_FUNC(memory_over_cover_u32_rect)
     "cbz x4, 9f\n   cbz x5, 9f\n"
     "lsl x1, x1, #2\n   and w6, w6, #0xffffff\n   dup v28.4s, w6\n"
@@ -36601,6 +36669,22 @@ __asm__(
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
+
+    ASM_FUNC(memory_scale_u8)
+    "beqz a2, 9f\n   andi a3, a3, 255\n"
+    "1: lbu t0, 0(a1)\n   mul t0, t0, a3\n   addi t0, t0, 1\n"
+    "srli t1, t0, 8\n   add t0, t0, t1\n   srli t0, t0, 8\n"
+    "sb t0, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9: " ASM_RET
+    ASM_END(memory_scale_u8)
+
+    ASM_FUNC(memory_copy_rect_reverse_u32)
+    "beqz a4, 9f\n   beqz a5, 9f\n   slli a1, a1, 2\n   slli a3, a3, 2\n   slli t0, a4, 2\n"
+    "0: mv t1, a0\n   add t2, a2, t0\n   mv t3, a4\n"
+    "1: addi t2, t2, -4\n   lwu t4, 0(t2)\n   sw t4, 0(t1)\n   addi t1, t1, 4\n   addi t3, t3, -1\n   bnez t3, 1b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_copy_rect_reverse_u32)
 
     ASM_FUNC(memory_over_cover_u32_rect)
     "beqz a4, 9f\n   beqz a5, 9f\n"
@@ -54392,6 +54476,12 @@ fn memory_mix_u32_rect(p32 address_to into, positive into_stride, const p8 addre
 // rectangles are copied row by row in order, as memory_copy copies them.
 fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// height rows of width 32-bit words copied from from to into with each row reversed (into[r*into_pitch + c] =
+// from[r*from_pitch + (width - 1 - c)]). into_pitch and from_pitch are signed word strides. Zero width or height touches nothing.
+fn memory_copy_rect_reverse_u32(p32 address_to into, long into_pitch, const p32 address_to from, long from_pitch,
+                                positive width, positive height);
+// Each byte of from scaled by (scale & 255) / 255 into into, for count bytes. A zero count touches nothing.
+fn memory_scale_u8(p8 address_to into, const p8 address_to from, positive count, unsigned int scale);
 // memory_copy_rect_u32 for a source the processor does not cache (a GPU's buffer mapped write-combined) and for rectangles
 // that do not overlap: on x86_64 with AVX2 a row is read with 32-byte streaming loads, which read such memory nine times as
 // fast as plain loads; elsewhere, and for a row under 128 bytes, it is memory_copy_rect_u32. Overlapping rectangles are

@@ -452,6 +452,10 @@ cover('correctness_only', 'src/canvas/ui/ui.c', 'memory_over_cover_u32_rect',
       'bit-exact against ui_kit_covers loop and paired-timed on arm64 NEON (5.13x on 24x32 glyph, 4.63x on 256x48 rect)')
 cover('correctness_only', 'src/canvas/font.c', 'memory_transpose_u8',
       'bit-exact against font_blend_turned nested loop and paired-timed on arm64 NEON (8.04x on 16x24 right=1, 5.23x on right=0)')
+cover('correctness_only', 'src/canvas/compositor.c', 'memory_scale_u8',
+      'bit-exact against compositor_gpu_spots scalar scale over 256x256 inputs and paired-timed on arm64 NEON (2.64x on 2048B)')
+cover('correctness_only', 'src/canvas/window.c', 'memory_copy_rect_reverse_u32',
+      'bit-exact against windows_rotate_u32 180-degree loop and paired-timed on arm64 NEON (6.15x on 224x48)')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

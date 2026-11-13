@@ -2370,24 +2370,19 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
                 }
                 return;
         }
+        if (degrees == 180)
+        {
+                memory_copy_rect_reverse_u32(into + (unsigned long)(lh - 1 - y0) * into_pitch + (lw - x1), -(long)into_pitch,
+                                             from + (unsigned long)y0 * from_pitch + x0, (long)from_pitch, x1 - x0, y1 - y0);
+                return;
+        }
         for (unsigned int ly = y0; ly < y1; ly++)
         {
-                if (degrees == 180)
-                {
-                        unsigned int *to = into + (unsigned long)(lh - 1 - ly) * into_pitch + (lw - x1);
-                        const unsigned int *row = from + (unsigned long)ly * from_pitch + (x1 - 1);
+                unsigned int *to = into + (unsigned long)ly * into_pitch + x0;
+                const unsigned int *row = from + (unsigned long)ly * from_pitch + x0;
 
-                        for (unsigned int each = x1 - x0; each; each--)
-                                *to++ = *row--;
-                }
-                else
-                {
-                        unsigned int *to = into + (unsigned long)ly * into_pitch + x0;
-                        const unsigned int *row = from + (unsigned long)ly * from_pitch + x0;
-
-                        for (unsigned int each = x1 - x0; each; each--)
-                                *to++ = *row++;
-                }
+                for (unsigned int each = x1 - x0; each; each--)
+                        *to++ = *row++;
         }
 }
 

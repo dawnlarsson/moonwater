@@ -6366,7 +6366,6 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
 
         if (x1 <= x0 || y1 <= y0 || !top || !compositor_frost(frames, count, sx, sy, sw, sh, top, (unsigned long)sw))
                 return 0;
-        memory_zero(into, (positive)gh * (positive)gw * 4);
         {
                 unsigned long pitch;
                 const unsigned int *made = compositor_rise(top, (unsigned long)sw, sx, sy, x0, y0, x1, y1, &pitch);
@@ -6374,6 +6373,10 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
                 if (!made)
                         return 0;
                 memory_copy_rect_u32(into, (unsigned long)gw, made, pitch, (unsigned long)(x1 - x0), (unsigned long)(y1 - y0));
+                if (x1 - x0 < gw)
+                        memory_fill_u32_rect(into + (x1 - x0), (positive)gw, (positive)(gw - (x1 - x0)), (positive)(y1 - y0), 0);
+                if (y1 - y0 < gh)
+                        memory_zero(into + (unsigned long)(y1 - y0) * gw, (positive)(gh - (y1 - y0)) * (positive)gw * 4);
         }
         return 1;
 }
@@ -8801,8 +8804,8 @@ static b32 compositor_gpu_spots(void)
                         if (!at)
                                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                         // A table kept from an earlier present has this key's coverage already (the key is the size, the layer and the alpha).
-                        for (unsigned long i = 0; table && i < cells; i++)
-                                table[i] = (unsigned char)(cover[i] * c->alpha / 255);
+                        if (table)
+                                memory_scale_u8(table, cover, (positive)cells, c->alpha);
                         compositor_gpu_rect(5, box[0], box[1], box[0] + box[2], box[1] + box[3], ink, 0, at, (unsigned int)c->w);
                 }
         }

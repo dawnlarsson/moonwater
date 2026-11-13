@@ -3939,6 +3939,7 @@ static struct wayland_surface *wayland_pick(struct wayland_client *c, struct way
         x += wx;
         y += wy;
 
+        if (c->subsurfaces)
         for (long at = 0; at < WAYLAND_SURFACES; at++)
         {
                 struct wayland_surface *s = &c->surfaces[at];
@@ -3998,17 +3999,23 @@ static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_s
         The pointer is over row (or none, -1), at (x, y) of its picture: the surface it leaves, a subsurface or a window's root,
         is sent its leave and the surface it enters its enter, each to every pointer its client has. The same surface is no event.
 */
-WAYLAND_API void wayland_pointer_to(long row, long x, long y)
+static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surface **picked, long *sx_out, long *sy_out)
 {
         struct wayland_client *old = 0, *now = 0;
         struct wayland_surface *root, *was = 0, *is = 0;
         long sx = 0, sy = 0;
 
         if (!wayland.host)
+        {
+                if (picked) *picked = 0;
                 return;
+        }
         root = wayland_row_surface(row, &now);
         if (root)
                 is = wayland_pick(now, root, x, y, &sx, &sy);
+        if (picked) *picked = is;
+        if (sx_out) *sx_out = sx;
+        if (sy_out) *sy_out = sy;
         wayland.pointer_x = x;
         wayland.pointer_y = y;
         if (is && row == wayland.pointer_row && wayland_surface_index(now, is) == wayland.pointer_surface)
@@ -4038,19 +4045,23 @@ WAYLAND_API void wayland_pointer_to(long row, long x, long y)
         }
 }
 
+WAYLAND_API void wayland_pointer_to(long row, long x, long y)
+{
+        wayland_pointer_to_at(row, x, y, 0, 0, 0);
+}
+
 WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
 {
         struct wayland_client *c;
-        struct wayland_surface *root, *s;
+        struct wayland_surface *root, *s = 0;
         long time, slots[WAYLAND_SEATS], count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
 
         if (!wayland.host || row != wayland.pointer_row || !(root = wayland_row_surface(row, &c)))
                 return;
         // A motion that crosses from one surface of the window to another is a leave and an enter first.
-        wayland_pointer_to(row, x, y);
-        if (wayland.pointer_row != row || wayland.pointer_surface < 0)
+        wayland_pointer_to_at(row, x, y, &s, &sx, &sy);
+        if (wayland.pointer_row != row || wayland.pointer_surface < 0 || !s)
                 return;
-        s = wayland_pick(c, root, x, y, &sx, &sy);
         time = wayland.host->now(wayland.host->context);
         count = wayland_seats(c, WLI_wl_pointer, slots);
         for (long at = 0; at < count; at++)
@@ -7411,6 +7422,7 @@ WAYLAND_API void wayland_frame(void)
 
                 int any = s && s->live && s->readies;
 
+                if (c && c->subsurfaces)
                 for (long at = 0; s && s->live && at < WAYLAND_SURFACES && !any; at++)
                         any = c->surfaces[at].live && c->surfaces[at].readies && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
                               wayland_root_of(c, &c->surfaces[at]) == s;
@@ -7419,6 +7431,7 @@ WAYLAND_API void wayland_frame(void)
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
                 wayland_callbacks_done(c, s, now);
+                if (c->subsurfaces)
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_callbacks_done(c, &c->surfaces[at], now);
@@ -7490,6 +7503,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                         s->lent_gone = 0;
                 }
                 wayland_presentings_done(c, s, when, refresh, seq, flags);
+                if (c->subsurfaces)
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
@@ -7588,6 +7602,7 @@ WAYLAND_API long wayland_frame_wanted(void)
                 if (!c || (!c->waiting && !c->presenting_surfaces))
                         continue;
                 waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies != 0;
+                if (c->subsurfaces)
                 for (long at = 0; c->waiting && !waits && at < WAYLAND_SURFACES; at++)
                         waits = c->surfaces[at].live && c->surfaces[at].readies && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
                                 wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
