@@ -7650,6 +7650,15 @@ gate_gpu_kernels_llvm()
         gpu_kernels_mutant '{"v_xor_b32", GPUASM_VOP2, 0x1d,' '{"v_xor_b32", GPUASM_VOP2, 0x1c,' test/gpu_stress.asm
 }
 
+#       The kernels are written for gfx1036 and let onto the rest of gfx10 where the owner asks (gpu.c's gpu_wide): that they are
+#       the same words for those chips is asked of llvm-mc, which is compared with itself, so any LLVM will do.
+gate_gpu_kernels_chips()
+{
+        command -v llvm-mc > /dev/null 2>&1 && command -v ld.lld > /dev/null 2>&1 ||
+                { echo "no llvm-mc or ld.lld here: the kernels are not assembled for the other gfx10 chips"; return 2; }
+        python3 test/gpu_kernels.py --chips src/canvas/gpu.asm gfx1010 gfx1012 gfx1030
+}
+
 lane_gate()
 {
         gate_began=$(date +%s)
@@ -7666,6 +7675,7 @@ lane_gate()
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row gpu-kernels gate_gpu_kernels
         job maybe gate_row gpu-kernels-llvm gate_gpu_kernels_llvm
+        job maybe gate_row gpu-kernels-chips gate_gpu_kernels_chips
         job hard gate_row inventory gate_inventory
         job hard gate_row engine lane_differential_oracle
         job hard gate_row host-writes python3 test/differential.py --harness host_writes

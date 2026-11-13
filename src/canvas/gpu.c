@@ -33,6 +33,9 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #ifndef GPU_CONTROL
 #define GPU_CONTROL(fd, request, a) system_control(fd, request, a)
 #endif
+#ifndef GPU_WIDE_FAKE
+#define GPU_WIDE_FAKE(fd) // a check answers for the file that lets the other gfx10 families in
+#endif
 #ifndef GPU_SUBMIT_SEEN
 #define GPU_SUBMIT_SEEN(list, count) // a check's copy of the buffers a submit names (gpu_run_job's bos)
 #endif
@@ -475,6 +478,18 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 // Mendocino 151) are tried, and each is held to the hash of the picture one small scene of every kind of op made on the card they were written on.
 #define GPU_FAMILIES(f) ((f) == 144 || (f) == 146 || (f) == 149 || (f) == 151)
 #define GPU_TEST_HASH 2024535671u
+// The rest of the chips the kernels are code for, which nobody has run them on: family 143 (Navi 10, 12 and 14, RDNA1; Navi 21 to 24, the RDNA2 cards). llvm-mc
+// makes of gpu.asm the same 3,018 words for gfx1010, gfx1012, gfx1030 and gfx1036 (the gate asks it: gpu-kernels-chips), so the code is theirs too as far as an assembler can say; what the dispatch's
+// registers and the ring do on them has been seen by no one. They are let in only where the machine's owner asks (the file /run/moonwater/gpu-gfx10, looked for at
+// each start, as gpu-nouserptr is), and then held to the self-test as every card is: a card that draws it wrong is not trusted, and one that hangs on it is the
+// hang's two seconds and no card. Off unless asked: a job that hangs on a ring the kernel ends only after its own timeout (sixty seconds at v6.12) is a minute of
+// the processor drawing on a machine whose owner did not choose to try.
+#define GPU_FAMILIES_WIDE(f) ((f) == 143)
+static b32 gpu_wide; // the owner asked for them
+static b32 gpu_family_ok(unsigned int family)
+{
+        return GPU_FAMILIES(family) || (gpu_wide && GPU_FAMILIES_WIDE(family));
+}
 // The prerequisites of the path, in the order it needs them. gpu_start stops at the first that fails and keeps it: the code, the kernel's error (its
 // errno; 0 where the step failed by what it found, not by a call), and a bit in gpu_req.mask for each that passed. The node the checks looked at (its path,
 // mode and owner), the driver's name and the family are kept whether or not that node was taken: moonwater debug says them.
@@ -753,6 +768,11 @@ static b32 gpu_start(positive bytes)
                 gpu_userptr_off = off >= 0, gpu_userptr_gone = 0;
                 if (off >= 0)
                         system_close((int)off);
+                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
+                GPU_WIDE_FAKE(off);
+                gpu_wide = off >= 0;
+                if (off >= 0)
+                        system_close((int)off);
         }
         for (unsigned int node = 0; node < 8; node++)
         {
@@ -790,7 +810,7 @@ static b32 gpu_start(positive bytes)
                 }
                 amd = 1;
                 // The candidates are the amdgpu nodes of a family the kernels are for; the one on the display's own device is taken (gpu_pick), else the first.
-                if (!family_error && GPU_FAMILIES(who[4]) && candidates < GPU_NODES)
+                if (!family_error && gpu_family_ok(who[4]) && candidates < GPU_NODES)
                         candidate_node[candidates] = node, gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
                 system_close((int)fd);
         }
@@ -800,7 +820,7 @@ static b32 gpu_start(positive bytes)
 
                 path[17] = (char)('0' + (28 + candidate_node[pick]) / 10), path[18] = (char)('0' + (28 + candidate_node[pick]) % 10);
                 gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
-                if (gpu.fd >= 0 && gpu_raw(gpu.fd, GPU_IO(1u, 5, 32), ask) == 0 && GPU_FAMILIES(who[4]))
+                if (gpu.fd >= 0 && gpu_raw(gpu.fd, GPU_IO(1u, 5, 32), ask) == 0 && gpu_family_ok(who[4]))
                 {
                         gpu.family = (unsigned int)who[4], gpu.device = (unsigned int)who[0];
                         memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.bus, candidate_bus[pick], sizeof(gpu_req.bus));

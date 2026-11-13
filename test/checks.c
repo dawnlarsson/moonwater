@@ -125330,6 +125330,10 @@ static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 #define GPU_SUBMIT_FAKE(error, taken) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
+// The file that lets the other gfx10 families in (/run/moonwater/gpu-gfx10), as the check has it: 0 the machine's own answer, 1 there (an fd that is not open: the
+// close of it is refused and does nothing), -1 not there.
+static int gpu_fake_wide;
+#define GPU_WIDE_FAKE(fd) do { if (gpu_fake_wide > 0) { if ((fd) >= 0) system_close((int)(fd)); (fd) = 1000000; } else if (gpu_fake_wide < 0) { if ((fd) >= 0) system_close((int)(fd)); (fd) = -2; } } while (0)
 // The buffers the last submit named (gpu_run_job's bos, seen before the call is made or answered): the rows ask whether a map's handle is in the list.
 static p64 gpu_seen_bos[1 + 8 + 256];
 static unsigned int gpu_seen_count;
@@ -234862,6 +234866,19 @@ static void gpu_import_rows(void)
         check("gpu idle: the lost card is started again (here to no node: given up as no card), and nothing is pending on the old one",
               gpu_recovered == before + 1 && gpu.pending == 0 && !gpu_lost && compositor_gpu_state.dead && gpu.fd == -1);
         gpu_kernel.no_context = 0, gpu_fake_errno = 0;
+
+        // The families: the four the kernels were written and run on are let in always; family 143 (the rest of gfx10: the same words by llvm-mc, run by nobody)
+        // only where the owner's file asks, which a start looks for each time; no other family either way.
+        gpu_fake_wide = -1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        check("gpu family: with no file asking, the families are the four the kernels were run on, and 143 is not one",
+              !gpu_wide && gpu_family_ok(144) && gpu_family_ok(146) && gpu_family_ok(149) && gpu_family_ok(151) && !gpu_family_ok(143));
+        gpu_fake_wide = 1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        check("gpu family: the owner's file lets family 143 in, and no other (RDNA3's 145, 148 and 150, Raven's 142 stay out)",
+              gpu_wide && gpu_family_ok(143) && gpu_family_ok(149) && !gpu_family_ok(145) && !gpu_family_ok(148) && !gpu_family_ok(150) && !gpu_family_ok(142) && !gpu_family_ok(0));
+        gpu_fake_wide = -1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        check("gpu family: the file gone at the next start, 143 is out again", !gpu_wide && !gpu_family_ok(143));
+        gpu_fake_wide = 0, gpu_fake_absent = 0;
+        gpu.fd = GPU_KERNEL_FD, gpu.at = 0;
 
         // 11. The bus of a node. The display node's is GET_UNIQUE's, which ends at the length the kernel writes back (it writes no 0): the bytes the room held
         // before are not part of it. A render node is refused the request. The name is the device's own, the same as sysfs gives for either node.

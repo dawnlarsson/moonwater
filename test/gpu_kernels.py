@@ -10,6 +10,12 @@
                                             assembler is held to, where LLVM's versions differ: 0
                                             when it does, 2 and why when it does not
 
+    python3 test/gpu_kernels.py --chips ASM CHIP...
+                                            fail unless llvm-mc makes of ASM, for each CHIP (gfx1010,
+                                            gfx1012, gfx1030), the words it makes for gfx1036: the
+                                            kernels are then code for those chips as they stand. LLVM
+                                            is compared with itself here, so any LLVM will do
+
 Where LLVM's versions differ. An instruction in the three-source encoding that takes two sources
 has a field for the third that the chip does not read: the build's assembler writes the constant 0
 there (0x80), as the clang that made the kernels in src/canvas/gpu.c did, and LLVM 18 to 21 write
@@ -42,9 +48,14 @@ def tool(name):
     return found
 
 
-def build(asm):
+def build(asm, chip=None):
     work = pathlib.Path(tempfile.mkdtemp())
-    subprocess.run([tool('llvm-mc')] + MC + ['-filetype=obj', str(asm), '-o', str(work / 'k.o')], check=True)
+    mc = MC
+    if chip:
+        #   the same text for another chip: the target line and the processor name it, nothing else does
+        (work / 'k.asm').write_text(pathlib.Path(asm).read_text().replace('--gfx1036"', '--%s"' % chip))
+        asm, mc = work / 'k.asm', [w.replace('gfx1036', chip) for w in MC]
+    subprocess.run([tool('llvm-mc')] + mc + ['-filetype=obj', str(asm), '-o', str(work / 'k.o')], check=True)
     subprocess.run([tool('ld.lld'), '-shared', str(work / 'k.o'), '-o', str(work / 'k.so')], check=True)
     data = (work / 'k.so').read_bytes()
     shutil.rmtree(work)
@@ -86,6 +97,21 @@ def probe():
               'the build\'s assembler the constant 0, 0x80: the kernels are not compared with this LLVM\'s' % (version, third, words[2], words[3]))
         sys.exit(2)
     print('llvm-mc %s writes the words the build\'s assembler is held to' % version)
+
+
+def chips(asm, names):
+    ours = kernels(build(asm))
+    for chip in names:
+        theirs = kernels(build(asm, chip))
+        if [n for n, _ in theirs] != [n for n, _ in ours]:
+            sys.exit('%s: for %s the kernels are %s' % (asm, chip, [n for n, _ in theirs]))
+        for (name, a), (_, b) in zip(ours, theirs):
+            bad = [i for i in range(max(len(a), len(b))) if i >= len(a) or i >= len(b) or a[i] != b[i]]
+            if bad:
+                sys.exit('%s: kernel %s is not the same words for %s as for gfx1036: %d differ, the first at word %d'
+                         % (asm, name, chip, len(bad), bad[0]))
+    print('gpu kernels: %s is the same %d words for gfx1036 and for %s'
+          % (asm, sum(len(w) for _, w in ours), ', '.join(names)))
 
 
 def sections(d):
@@ -139,6 +165,9 @@ def text(made):
 
 
 def main():
+    if len(sys.argv) > 3 and sys.argv[1] == '--chips':
+        chips(sys.argv[2], sys.argv[3:])
+        return
     if len(sys.argv) == 2 and sys.argv[1] == '--probe':
         probe()
         return
