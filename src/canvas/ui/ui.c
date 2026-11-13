@@ -19475,7 +19475,12 @@ struct ui_list
         int focus;                         // the row the keys are on, -1 none
         b32 wrap;                          // a row's words that do not fit the room it gives them wrap, and the row is as tall as they are (else they are cut with dots)
         unsigned int revision;             // counted up when a row's words changed (ui_list_row_changed): what a least worked out of them is kept against
+        // A virtual list (ui_list_window): of `total` rows, any number, each a row high and numbered from 0 in order, so id[] and count are the
+        // kit's and a row's id (what describe is asked, what focus, hover and down hold, what a click answers) is its number in the whole list.
+        b32 virtual;
+        int total;
         // The kit's.
+        int first;                         // a virtual list's row at place 0: the places are the rows in and near the view
         int top[UI_LIST_MOST];             // each place's top, from the list's
         int tall[UI_LIST_MOST];            // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
         int whole[UI_LIST_MOST];           // each place's line as tall as its words: a row, or more where they wrap (a tall row's line is a row)
@@ -19504,16 +19509,75 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
         l->describe(id, row);
 }
 
-// The rows' controls, mapped at the first draw: what is never drawn is never touched.
+/*
+        A virtual list: a list of any number of rows of which the kit lays out and draws only those in the view and a margin of
+        UI_LIST_MARGIN rows either side (the places, at most UI_LIST_MOST), whatever the list's length. The app says how many rows there
+        are (total) and describes a row by its number when asked; it keeps no id[] and no count. Everything else is the list it always
+        was, over the whole length: the scroll's content is every row (so the bar's thumb is the view's share of all of them and stands
+        where the view is in all of them), the wheel, a finger's or a mouse's drag, its throw and the glide move through the whole
+        length with nothing stopping them where the places end, the keys move by a row, a page and to either end of all of it, and focus,
+        hover and down are rows of the whole list wherever the places are. A row's controls (its hover, its press, its ripple) are a
+        place's, taken by the row's number over the places there are, and forgotten when another row comes to the place.
+
+        The rows are one height (UI_ROW at the list's scale): a row's top is its number times that, which is what lets a place be found
+        without the rows before it. Rows of their own heights (a list whose words wrap, a tall row, a folding one, sections with headers)
+        would need each row's top kept or estimated: an array of heights with a prefix sum to search (a Fenwick tree where they change),
+        or an estimate that is corrected as rows are measured with the scroll held to the row at the top of the view. A virtual list
+        asks for none of those, and describe's section, header, tall and reveal are not read for it.
+*/
+#define UI_LIST_MARGIN 8 // rows laid out past each end of the view: a frame's scroll is drawn from them, and a place is not re-made every pixel
+
+// The row a place shows, in either kind of list.
+static inline int ui_list_id(const struct ui_list address_to l, int at)
+{
+        return l->virtual ? l->first + at : l->id[at];
+}
+
+// The rows' controls, mapped at the first draw: what is never drawn is never touched. A virtual list has a pair for each place, a row's
+// being those of its number over the places.
 static struct ui_control address_to ui_list_control(struct ui_list address_to l, int id, int which)
 {
+        if (l->virtual && l->ids <= 0)
+                l->ids = UI_LIST_MOST;
         if (!l->controls && l->ids > 0)
         {
                 long mapped = ui_map((positive)l->ids * 2 * sizeof(struct ui_control));
 
                 l->controls = mapped < 0 && mapped > -4096 ? null : (struct ui_control address_to)mapped;
         }
+        if (l->virtual)
+                return l->controls && id >= 0 && id < l->total ? &l->controls[2 * (id % l->ids) + which] : null;
         return l->controls && id >= 0 && id < l->ids ? &l->controls[2 * id + which] : null;
+}
+
+// A virtual list's places for where it is scrolled to now: the rows of the view at rest and UI_LIST_MARGIN either side, each at its
+// number's top. A row that comes to a place another had forgets that one's hover, press and ripple.
+static fn ui_list_window(const struct ui address_to ui, struct ui_list address_to l)
+{
+        int row = ui_dev(ui, UI_ROW), most, at_rest, first, count, was_first = l->first, was_count = l->count;
+
+        row = row < 1 ? 1 : row;
+        l->total = l->total < 0 ? 0 : l->total;
+        l->content = l->total * row;
+        l->scroll.content = l->content;
+        most = ui_scroll_most(&l->scroll);
+        at_rest = l->scroll.scroll < 0 ? 0 : l->scroll.scroll > most ? most : l->scroll.scroll;
+        first = at_rest / row - UI_LIST_MARGIN;
+        first = first < 0 ? 0 : first;
+        count = (l->scroll.view > 0 ? l->scroll.view : 0) / row + 2 + 2 * UI_LIST_MARGIN;
+        count = count > UI_LIST_MOST ? UI_LIST_MOST : count;
+        count = count > l->total - first ? l->total - first : count;
+        count = count < 0 ? 0 : count;
+        l->first = first, l->count = count;
+        for (int at = 0; at < count; at++)
+        {
+                l->top[at] = (first + at) * row, l->tall[at] = l->whole[at] = row, l->starts[at] = 0;
+                if (l->controls && l->ids > 0 && (first + at < was_first || first + at >= was_first + was_count))
+                {
+                        ui_control_forget(&l->controls[2 * ((first + at) % l->ids)]);
+                        ui_control_forget(&l->controls[2 * ((first + at) % l->ids) + 1]);
+                }
+        }
 }
 
 static int ui_row_drive_height(const struct ui address_to ui, const struct ui_row address_to row);
@@ -19524,6 +19588,14 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
 {
         int y = 0, section = 0;
 
+        if (l->virtual)
+        {
+                // Every row is a row high: the length is their number times that, and the places are those near the view.
+                ui_list_window(ui, l);
+                ui_scroll_clamp(&l->scroll);
+                ui_list_window(ui, l);
+                return;
+        }
         for (int at = 0; at < l->count; at++)
         {
                 struct ui_row row;
@@ -19592,6 +19664,8 @@ static void ui_list_across_logical(const struct ui address_to ui, const struct u
 // The place a row is at in the list, or -1.
 static int ui_list_at(const struct ui_list address_to l, int id)
 {
+        if (l->virtual)
+                return id >= l->first && id < l->first + l->count ? id - l->first : -1;
         for (int at = 0; at < l->count; at++)
                 if (l->id[at] == id)
                         return at;
@@ -19656,6 +19730,13 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
         ui_list_across(l, &across, &wide);
         if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
+        if (l->virtual)
+        {
+                // A row's number is how many rows are above the point: no place is looked for.
+                int row = ui_dev(ui, UI_ROW) < 1 ? 1 : ui_dev(ui, UI_ROW);
+
+                return inside >= 0 && inside / row < l->total ? inside / row : -1;
+        }
         for (int at = 0; at < l->count; at++)
                 if (inside >= l->top[at] && inside < l->top[at] + l->tall[at])
                         return l->id[at];
@@ -19667,14 +19748,22 @@ static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_
 {
         int at = ui_list_at(l, l->focus), top, height;
 
-        if (at < 0)
+        if (l->virtual && l->focus >= 0 && l->focus < l->total)
+        {
+                // The row is where its number puts it, in the places or far from them.
+                top = l->focus * (ui_dev(ui, UI_ROW) < 1 ? 1 : ui_dev(ui, UI_ROW)), height = ui_dev(ui, UI_ROW);
+        }
+        else if (at < 0)
         {
                 ui_scroll_clamp(&l->scroll);
                 return false;
         }
-        top = l->top[at], height = l->tall[at];
-        if (l->starts[at] & UI_LIST_HEADED)
-                top -= ui_dev(ui, UI_SECTION), height += ui_dev(ui, UI_SECTION);
+        else
+        {
+                top = l->top[at], height = l->tall[at];
+                if (l->starts[at] & UI_LIST_HEADED)
+                        top -= ui_dev(ui, UI_SECTION), height += ui_dev(ui, UI_SECTION);
+        }
         ui_scroll_extent(&l->scroll);
         if (!ui_body_reveal(&l->scroll.body, top, height, ui_kit_time()))
                 return false;
@@ -19686,13 +19775,16 @@ static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_
 // The keys moved by whole rows; answers whether they went to another row.
 static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to l, int by)
 {
-        int at = ui_list_at(l, l->focus), last = l->count - 1, before = l->focus;
+        int at = l->virtual ? (l->focus >= 0 && l->focus < l->total ? l->focus : -1) : ui_list_at(l, l->focus);
+        int last = (l->virtual ? l->total : l->count) - 1, before = l->focus;
 
         if (last < 0)
                 return false;
+        // By more rows than there are is to an end (Home, End); the sum is kept inside an int whatever the two are.
+        by = by < -last - 1 ? -last - 1 : by > last + 1 ? last + 1 : by;
         at = (at < 0 ? -1 : at) + by; // with no row the keys count from above the first, so Down takes it
         at = at < 0 ? 0 : at > last ? last : at;
-        l->focus = l->id[at];
+        l->focus = l->virtual ? at : l->id[at];
         ui_list_damage(ui, l, before);
         ui_list_damage(ui, l, l->focus);
         ui_list_reveal(ui, l);
@@ -19709,8 +19801,8 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
         {
         case UI_KEY_UP: by = -1; break;
         case UI_KEY_DOWN: by = 1; break;
-        case UI_KEY_HOME: by = -l->count; break;
-        case UI_KEY_END: by = l->count; break;
+        case UI_KEY_HOME: by = -(l->virtual ? l->total : l->count); break;
+        case UI_KEY_END: by = l->virtual ? l->total : l->count; break;
         case UI_KEY_PAGE_UP: by = -page; break;
         case UI_KEY_PAGE_DOWN: by = page; break;
         default: return false;
@@ -20684,6 +20776,9 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest;
 
         ui_scroll_frame(ui, &l->scroll);
+        // A virtual list's places are the rows near where this frame has it scrolled to.
+        if (l->virtual)
+                ui_list_window(ui, l);
         // The rows have moved under a mouse that has not (a wheel's turn, a throw, a key's reveal, the bar): no motion says so, and the row
         // lit is the one under the pointer as the rows are drawn now, not the one that was there and has gone from under it.
         if (l->pointer_mouse && l->scroll.scroll != l->hover_at)
@@ -20711,7 +20806,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 {
                         struct ui_row row;
 
-                        ui_list_describe(l, l->id[at], &row);
+                        ui_list_describe(l, ui_list_id(l, at), &row);
                         ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
                                             ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
                                             ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
@@ -20723,7 +20818,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 
                         if (height < l->whole[at])
                                 ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
-                        ui_list_row(ui, l, l->id[at], y, height);
+                        ui_list_row(ui, l, ui_list_id(l, at), y, height);
                         ui->top = band_top, ui->bottom = band_bottom;
                 }
         }

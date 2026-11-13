@@ -181,6 +181,12 @@ M = [
     (U, "an arrow does not put the hand on the keys", "event->a == 106 || event->a == 107 ||\n                  event->a == 108 || event->a == 109))", "event->a == 106 || event->a == 107 ||\n                  event->a == 109))"),
     (U, "a lit row is ringed", "                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring).\n", "                if (l->keys && !ui->glass)\n                {\n                        struct ui_box ring = box;\n\n                        ring.x0 += 512, ring.y0 += 512, ring.x1 -= 512, ring.y1 -= 512;\n                        ui_kit_focus_ring(ui, &ring);\n                }\n"),
     (U, "the column's chosen group is ringed", "                // The keys in the column have no ring: the pip is the chosen group and the group the keys are on, and it says so.\n", "                if (c->focused && !c->disabled)\n                {\n                        struct ui_box ring = pip;\n\n                        ring.x0 += 512, ring.y0 += 512, ring.x1 -= 512, ring.y1 -= 512;\n                        ui_kit_focus_ring(ui, &ring);\n                }\n"),
+    # ---- a virtual list: any number of rows, the ones near the view laid out ----
+    (U, "End of a virtual list is the end of its places", "        case UI_KEY_END: by = l->virtual ? l->total : l->count; break;", "        case UI_KEY_END: by = l->count; break;"),
+    (U, "a virtual list is as long as its places", "        l->content = l->total * row;\n", "        l->content = l->count * row;\n"),
+    (U, "a row far from the places is not revealed", "        if (l->virtual && l->focus >= 0 && l->focus < l->total)\n        {\n                // The row is where its number puts it", "        if (0)\n        {\n                // The row is where its number puts it"),
+    (U, "a virtual list's places do not follow the scroll", "        first = at_rest / row - UI_LIST_MARGIN;\n", "        first = 0;\n"),
+    (U, "a point on a virtual list is a place, not a row", "                return inside >= 0 && inside / row < l->total ? inside / row : -1;", "                return inside >= 0 && inside / row < l->count ? inside / row : -1;"),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
     # ---- a mouse drags a list unless a person turned it off ----

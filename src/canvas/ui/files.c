@@ -13,8 +13,9 @@
 
         The folder is read between events, a few milliseconds a pass (files_tick), so a folder of any size never holds the window;
         and it is looked at again once a second while the window is up (files_model_stale): one that changed is read again beside
-        what is shown, and one that is gone says so. A listing is longer than the kit's list holds (UI_LIST_MOST rows), so the list
-        is given a window of the entries, FILES_ROWS of them, which moves as the cursor or the scroll reaches its ends.
+        what is shown, and one that is gone says so. The rows are the kit's virtual list (ui_list_window): the list is told how
+        many entries there are and asked for a row by its place in them, so a folder of any length scrolls from end to end, its
+        bar's thumb is the view's share of the whole folder, and nothing here keeps a window of it.
 
         Starts: files [PATH] [-f FONT] [-b BOLD]. With no path it shows HOME, or the root.
 */
@@ -23,8 +24,6 @@
 
 #define FILES_WIDTH 720              // logical pixels, times the scale
 #define FILES_HEIGHT 480
-#define FILES_ROWS UI_LIST_MOST      // the entries the list is given at once
-#define FILES_SHIFT (FILES_ROWS / 2) // how far its window moves when an end of it is reached
 #define FILES_STEP 128               // the entries of one step of the reading,
 #define FILES_TURN_NS 4000000ll      // steps are taken for this long a pass,
 #define FILES_SHOW_NS 100000000ll    // the entries so far are drawn this often while it reads,
@@ -53,7 +52,6 @@ static struct
         unsigned int ground;
         b32 focused, dirty;
         struct ui_rect list_box; // what the tree gave the rows
-        p32 first;               // the place of the list's first row among the entries
         p32 seen;                // the model's revision as last drawn
         p32 clicked;             // the place a mouse last clicked, and when: a second click there in time opens it
         b64 clicked_at, next_look, next_show;
@@ -100,13 +98,13 @@ static positive files_name_text(char address_to into, positive room, const struc
         return used;
 }
 
-// A row, for the kit's list: the entry at its place in the list's window. A file's size at its right, when it was changed before that,
-// and a dot before the name of one that is chosen.
+// A row, for the kit's list: the entry at that place of the listing (the list is virtual: a row's id is its place). A file's size at its
+// right, when it was changed before that, and a dot before the name of one that is chosen.
 static fn files_describe(int id, struct ui_row address_to row)
 {
         static char label[FILES_NAME * 3 + 4], size[16], when[24];
         const struct files_model address_to m = &files.big->model;
-        const struct files_entry address_to entry = id >= 0 ? files_model_entry(m, files.first + (p32)id) : null;
+        const struct files_entry address_to entry = id >= 0 ? files_model_entry(m, (p32)id) : null;
 
         if (!entry)
                 return;
@@ -120,7 +118,7 @@ static fn files_describe(int id, struct ui_row address_to row)
                 files_time_text(when, entry->modified);
         }
         row->value = size, row->note = when;
-        row->mark = files_model_chosen(m, files.first + (p32)id) && m->chosen_count > 1;
+        row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
 }
 
 static fn files_damaged(int top, int bottom)
@@ -166,21 +164,6 @@ static fn files_status_text(void)
 
 static b32 files_act(int which);
 
-// The list's window on the entries: FILES_ROWS of them from files.first, held inside the listing.
-static fn files_window(void)
-{
-        const struct files_model address_to m = &files.big->model;
-        struct ui_list address_to l = &files.big->list;
-        p32 count = files_model_count(m);
-
-        if (files.first + FILES_ROWS > count)
-                files.first = count > FILES_ROWS ? count - FILES_ROWS : 0;
-        l->count = (int)(count - files.first < FILES_ROWS ? count - files.first : FILES_ROWS);
-        for (int at = 0; at < l->count; at++)
-                l->id[at] = (unsigned short)at;
-        l->focus = m->cursor != FILES_NO && m->cursor >= files.first && m->cursor < files.first + (p32)l->count ? (int)(m->cursor - files.first) : -1;
-}
-
 // The window as a tree: the path's band (the three buttons, then the path), the rows, and the foot.
 static fn files_layout(void)
 {
@@ -188,9 +171,9 @@ static fn files_layout(void)
         struct files_model address_to m = &files.big->model;
         struct ui_list address_to l = &files.big->list;
 
-        if (!l->ids)
+        if (!l->describe)
         {
-                l->ids = FILES_ROWS;
+                l->virtual = true;
                 l->describe = files_describe;
                 l->damaged = files_damaged;
                 l->hover = l->down = -1;
@@ -210,7 +193,9 @@ static fn files_layout(void)
         ui_row(.class = "bar")
                 ui_text(files.big->status, .class = "status");
         ui_view_end(&files.big->view);
-        files_window();
+        // Every entry is a row of the list, and the row the keys are on is the model's cursor.
+        l->total = (int)files_model_count(m);
+        l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
         ui_list_place(ui, l, files.list_box.x, files.list_box.y, files.list_box.w, files.list_box.h);
         // A row runs from one edge of the window to the other, as the settings window's and the launcher's do: the words stay in
         // from the margin, where the list's own box is.
@@ -219,60 +204,22 @@ static fn files_layout(void)
         ui_list_layout(ui, l);
 }
 
-// The cursor's row in the list's window and in sight: the window moved to hold it, then the list scrolled to it.
+// The cursor's row in sight: the list scrolled to it, wherever in the listing it is.
 static fn files_show_cursor(void)
 {
-        const struct files_model address_to m = &files.big->model;
-
-        if (m->cursor == FILES_NO)
+        if (files.big->model.cursor == FILES_NO)
                 return;
-        if (m->cursor < files.first || m->cursor >= files.first + FILES_ROWS)
-        {
-                files.first = m->cursor > FILES_SHIFT ? m->cursor - FILES_SHIFT : 0;
-                files_layout();
-                ui_scroll_set(&files.big->list.scroll, 0);
-        }
         files_layout();
         ui_list_reveal(&files.ui, &files.big->list);
         files.dirty = true;
 }
 
-// The scroll reached an end of the list's window and the listing goes on past it: the window moves that way by FILES_SHIFT entries
-// and the scroll by as many rows the other way, so the rows on the screen stay where they are.
-static fn files_follow_scroll(void)
-{
-        const struct files_model address_to m = &files.big->model;
-        struct ui_list address_to l = &files.big->list;
-        p32 count = files_model_count(m), shift;
-        int row = l->count > 0 ? l->tall[0] : 0, at = l->scroll.scroll, most = ui_scroll_most(&l->scroll);
-
-        if (row <= 0 || count <= FILES_ROWS)
-                return;
-        if (at >= most - row && files.first + FILES_ROWS < count)
-        {
-                shift = count - files.first - FILES_ROWS < FILES_SHIFT ? count - files.first - FILES_ROWS : FILES_SHIFT;
-                files.first += shift;
-                files_layout();
-                ui_scroll_set(&l->scroll, at - (int)shift * row);
-        }
-        else if (at <= row && files.first > 0)
-        {
-                shift = files.first < FILES_SHIFT ? files.first : FILES_SHIFT;
-                files.first -= shift;
-                files_layout();
-                ui_scroll_set(&l->scroll, at + (int)shift * row);
-        }
-        else
-                return;
-        files.dirty = true;
-}
-
 /* ---- what a person asks ---- */
 
-// Another folder is shown: the list's window from the top, nothing said of the folder before.
+// Another folder is shown: its rows from the top, nothing said of the folder before.
 static fn files_moved(void)
 {
-        files.first = 0, files.clicked = FILES_NO, files.said = 0;
+        files.clicked = FILES_NO, files.said = 0;
         ui_scroll_set(&files.big->list.scroll, 0);
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
         files.dirty = true;
@@ -404,23 +351,21 @@ static b32 files_event(const struct window_event address_to event)
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
                 ui_list_click(ui, l, event, event->a, event->b);
-                files_follow_scroll();
                 files.dirty = true;
                 break;
         case WINDOW_EVENT_WHEEL:
                 if (ui_wheel_turn(ui, &l->scroll, event))
                         files.dirty = true;
-                files_follow_scroll();
                 break;
         case WINDOW_EVENT_BUTTON:
                 files.dirty = true;
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 // The press itself puts the cursor on its row, as the list lights it.
-                if (down && l->down >= 0 && files.first + (p32)l->down != m->cursor)
-                        m->cursor = files.first + (p32)l->down, m->revision++;
+                if (down && l->down >= 0 && (p32)l->down != m->cursor)
+                        m->cursor = (p32)l->down, m->revision++;
                 if (row >= 0)
                 {
-                        p32 place = files.first + (p32)row;
+                        p32 place = (p32)row;
                         b32 again = place == files.clicked && (b64)ui_kit.now - files.clicked_at <= ui_click_ns;
 
                         files.said = 0;

@@ -154657,6 +154657,290 @@ static fn check_kit_inks(void)
         check("kit inks: a status badge's words read 4.5:1 on its container, light and dark (the light Failed was 3.9:1)", badges);
 }
 
+/*
+        A virtual list (ui_list_window): a list of any number of rows, of which only those near the view are laid out and drawn. A list of
+        100,000 asks for a bounded number of rows however far it is scrolled; End and Home go to the ends of all of it; the bar's thumb,
+        dragged from one end of its track to the other, goes through the whole length, and is the view's share of the whole list where the
+        view is in it, at the start, the middle and the end; the row the keys are on is lit when it comes back into view after its place
+        was given to other rows, and a row that shares its place's controls is not; a window read from the right has the rows' words at
+        the right. And what a frame of a scroll costs at 100 rows and at 100,000 is said (it is not held to a number: the machine's).
+*/
+static struct
+{
+        int asked, least, most, total; // how many rows were described since it was cleared, and the least and the most of their numbers
+        int marked;                    // the row the app says is chosen
+} virtual_seen;
+
+static void virtual_row(int id, struct ui_row address_to row)
+{
+        static char label[24] = "Row ";
+        int digits = 0, value = id;
+        char turned[12];
+
+        virtual_seen.asked++;
+        virtual_seen.least = id < virtual_seen.least ? id : virtual_seen.least;
+        virtual_seen.most = id > virtual_seen.most ? id : virtual_seen.most;
+        do
+                turned[digits++] = (char)('0' + value % 10), value /= 10;
+        while (value && digits < 11);
+        for (int at = 0; at < digits; at++)
+                label[4 + at] = turned[digits - 1 - at];
+        label[4 + digits] = 0;
+        row->label = label;
+        row->mark = id == virtual_seen.marked;
+}
+
+static fn virtual_clear(void)
+{
+        virtual_seen.asked = 0, virtual_seen.least = 0x7fffffff, virtual_seen.most = -1;
+}
+
+static void virtual_make(struct ui address_to ui, struct ui_list address_to l, int total)
+{
+        memory_zero(l, sizeof(*l));
+        l->virtual = true, l->total = total, l->describe = virtual_row, l->empty = "", l->focus = -1, l->hover = l->down = -1;
+        ui_list_place(ui, l, 20, 10, 300, 160);
+        ui_list_layout(ui, l);
+}
+
+// Frames drawn till the list has stopped moving (a key's reveal glides): how many it took, at most `most`.
+static int virtual_settle(struct ui address_to ui, struct ui_list address_to l, unsigned int address_to pixels, unsigned int ground, int most)
+{
+        int frames = 0, before;
+
+        do
+        {
+                before = l->scroll.scroll;
+                ui_kit.now += 16666667ll, ui_kit.busy = 0;
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                ui_list_draw(ui, l);
+                frames++;
+        } while (frames < most && (ui_kit.busy || before != l->scroll.scroll));
+        return frames;
+}
+
+static fn check_kit_virtual(void)
+{
+        static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
+        static struct ui_list big, small;
+        static font_face face;
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        unsigned int ground, lit;
+        int row, most, top, length, track_top, track, places, bound;
+        b32 bounded = true, ends, dragged, thumb, kept, turned;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("virtual list: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 200, ui.top = 0, ui.bottom = 200, ui.scale = 100;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0, ui.mono = null, ui.glass = 0;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        ui_kit.now = 9000000000ll, ui_kit.keyed = 0;
+        ground = ui_role(UI_SURFACE) & 0xffffffu;
+        row = ui_dev(&ui, UI_ROW);
+        virtual_seen.marked = -1;
+        virtual_make(&ui, &big, 100000);
+        most = ui_scroll_most(&big.scroll);
+        // The rows of a view and the margin either side, and two for the rows cut by the view's ends: what a layout and a draw may ask for.
+        places = 160 / row + 2 + 2 * UI_LIST_MARGIN;
+        bound = 4 * places;
+
+        // Wherever it is scrolled to, a layout and a draw ask for a bounded number of rows, all of them near the view.
+        for (int k = 0; k <= 10; k++)
+        {
+                int at = (int)((long long)most * k / 10), first = at / row;
+
+                ui_scroll_set(&big.scroll, at);
+                virtual_clear();
+                ui_list_layout(&ui, &big);
+                virtual_settle(&ui, &big, pixels, ground, 1);
+                bounded = bounded && big.count <= places && virtual_seen.asked > 0 && virtual_seen.asked <= bound &&
+                          virtual_seen.least >= first - UI_LIST_MARGIN - 1 && virtual_seen.most <= first + 160 / row + UI_LIST_MARGIN + 2 &&
+                          virtual_seen.most < 100000 && big.scroll.scroll == at && ui_list_hit(&ui, &big, big.x + 10, big.y + 2) == first; // and a point is on its row of them all
+        }
+        check("virtual list: a list of 100,000 rows lays out and draws a bounded number of them, the rows of the view and a margin, wherever it is scrolled to",
+              bounded && big.content == 100000 * row && most == 100000 * row - 160);
+
+        // End is the last row of all of them, Home the first: the keys are on it and the list comes to rest with it in view.
+        {
+                b32 moved = false, end_row, home_row;
+
+                ui_scroll_set(&big.scroll, 0);
+                ui_list_layout(&ui, &big);
+                big.focus = 3, big.lit = 1;
+                ui_list_key(&ui, &big, UI_KEY_END, &moved);
+                virtual_settle(&ui, &big, pixels, ground, 2000);
+                end_row = moved && big.focus == 99999 && big.scroll.scroll == most && ui_list_at(&big, 99999) >= 0 &&
+                          ui_list_row_y(&big, ui_list_at(&big, 99999)) + row == big.y + big.h;
+                ui_list_key(&ui, &big, UI_KEY_PAGE_UP, &moved);
+                end_row = end_row && big.focus == 99999 - (160 / row - 1);
+                ui_list_key(&ui, &big, UI_KEY_HOME, &moved);
+                virtual_settle(&ui, &big, pixels, ground, 2000);
+                home_row = moved && big.focus == 0 && big.scroll.scroll == 0 && ui_list_at(&big, 0) == 0 && ui_list_row_y(&big, 0) == big.y;
+                ui_list_key(&ui, &big, UI_KEY_DOWN, &moved);
+                ends = end_row && home_row && moved && big.focus == 1;
+                check("virtual list: End is the last of all the rows and Home the first, a page is a view of rows from wherever the keys are, and the list comes to rest with the row in view",
+                      ends);
+        }
+
+        // The thumb: the view's share of the whole list (never less than the kit's least), at the track's start, middle and end as the view is.
+        {
+                b32 start, middle, last;
+                int least = UI_SCROLL_LEAST * ui.scale / 100, want;
+
+                ui_scroll_track(&ui, &big.scroll, &track_top, &track);
+                want = (int)((long long)track * 160 / (100000 * row));
+                want = want < least ? least : want;
+                ui_scroll_set(&big.scroll, 0);
+                start = ui_scroll_thumb(&ui, &big.scroll, &top, &length) && length == want && top == track_top;
+                ui_scroll_set(&big.scroll, most / 2);
+                middle = ui_scroll_thumb(&ui, &big.scroll, &top, &length) && length == want && top >= track_top + (track - want) / 2 - 1 &&
+                         top <= track_top + (track - want) / 2 + 1;
+                ui_scroll_set(&big.scroll, most);
+                last = ui_scroll_thumb(&ui, &big.scroll, &top, &length) && length == want && top + length == track_top + track;
+                // And in a list a little longer than its view, it is most of the track.
+                virtual_make(&ui, &small, 8);
+                ui_scroll_track(&ui, &small.scroll, &track_top, &track);
+                thumb = start && middle && last && ui_scroll_thumb(&ui, &small.scroll, &top, &length) && length == track * 160 / (8 * row) && small.count == 8;
+                check("virtual list: the bar's thumb is the view's share of the whole list and stands where the view is in it, at the start, the middle and the end",
+                      thumb);
+        }
+
+        // The thumb dragged from one end of its track to the other goes through the whole length, and the rows drawn at each end are that end's.
+        {
+                int x, y0, y1;
+                b32 at_end, at_start;
+
+                ui_scroll_set(&big.scroll, 0);
+                ui_list_layout(&ui, &big);
+                ui_scroll_track(&ui, &big.scroll, &track_top, &track);
+                ui_scroll_thumb(&ui, &big.scroll, &top, &length);
+                x = big.scroll.x + ui_dev(&ui, UI_SCROLL_WIDTH) / 2, y0 = top + length / 2, y1 = y0 + track - length; // the thumb's whole travel, and no further
+                pointer_as(&ui, &big.scroll, WINDOW_EVENT_MOTION, x, y0, false, 0);
+                pointer_as(&ui, &big.scroll, WINDOW_EVENT_BUTTON, x, y0, true, 0);
+                for (int step = 1; step <= 20; step++)
+                        pointer_as(&ui, &big.scroll, WINDOW_EVENT_MOTION, x, y0 + (y1 - y0) * step / 20, false, 0);
+                virtual_clear();
+                virtual_settle(&ui, &big, pixels, ground, 600);
+                at_end = big.scroll.scroll == most && virtual_seen.most == 99999 && ui_list_at(&big, 99999) >= 0;
+                for (int step = 1; step <= 20; step++)
+                        pointer_as(&ui, &big.scroll, WINDOW_EVENT_MOTION, x, y1 + (y0 - y1) * step / 20, false, 0);
+                virtual_clear();
+                virtual_settle(&ui, &big, pixels, ground, 600);
+                at_start = big.scroll.scroll == 0 && virtual_seen.least == 0 && ui_list_at(&big, 0) == 0;
+                pointer_as(&ui, &big.scroll, WINDOW_EVENT_BUTTON, x, track_top, false, 0);
+                dragged = at_end && at_start;
+                check("virtual list: the thumb dragged from one end of its track to the other goes through the whole length, and back, with each end's rows drawn there",
+                      dragged);
+        }
+
+        // The row the keys are on, and the one the app marks, are rows of the whole list: scrolled far away (their places given to other
+        // rows, and their controls with them) and back, they are lit and marked again, and the row 512 on, which shares the place's
+        // controls, is neither.
+        {
+                unsigned int at_lit, at_other, dot_marked, dot_plain;
+                int y;
+
+                ui_scroll_set(&big.scroll, 0);
+                big.focus = 2, big.lit = 1, virtual_seen.marked = 1;
+                ui_list_layout(&ui, &big);
+                virtual_settle(&ui, &big, pixels, ground, 4);
+                lit = ui_kit_lit(&ui) & 0xffffffu;
+                y = ui_list_row_y(&big, ui_list_at(&big, 2)) + 2;
+                at_lit = pixels[y * 400 + 300] & 0xffffffu;
+                kept = lit != ground && at_lit == lit && (pixels[(y + row) * 400 + 300] & 0xffffffu) == ground;
+                // Far away: the rows at these places are others, and none of them is lit.
+                ui_scroll_set(&big.scroll, (UI_LIST_MOST + 0) * row);
+                ui_list_layout(&ui, &big);
+                virtual_clear();
+                virtual_settle(&ui, &big, pixels, ground, 4);
+                y = ui_list_row_y(&big, ui_list_at(&big, UI_LIST_MOST + 2)) + 2;
+                at_other = pixels[y * 400 + 300] & 0xffffffu;
+                kept = kept && at_other == ground && virtual_seen.least > 2 && ui_list_at(&big, 2) < 0 && big.focus == 2;
+                // And back.
+                ui_scroll_set(&big.scroll, 0);
+                ui_list_layout(&ui, &big);
+                virtual_settle(&ui, &big, pixels, ground, 4);
+                y = ui_list_row_y(&big, ui_list_at(&big, 2)) + 2;
+                kept = kept && (pixels[y * 400 + 300] & 0xffffffu) == lit;
+                // The app's mark is asked by the row's number: with row 1 marked no more, row 1's picture is another and row 0's is the same.
+                {
+                        static unsigned int with_mark[400 * 200];
+
+                        memory_copy(with_mark, pixels, sizeof(with_mark));
+                        virtual_seen.marked = -1;
+                        virtual_settle(&ui, &big, pixels, ground, 4);
+                        dot_marked = dot_plain = 0;
+                        for (int dy = 0; dy < row; dy++)
+                                for (int x = big.x; x < big.x + big.w; x++)
+                                {
+                                        dot_marked += pixels[(ui_list_row_y(&big, 1) + dy) * 400 + x] != with_mark[(ui_list_row_y(&big, 1) + dy) * 400 + x];
+                                        dot_plain += pixels[(ui_list_row_y(&big, 0) + dy) * 400 + x] != with_mark[(ui_list_row_y(&big, 0) + dy) * 400 + x];
+                                }
+                        kept = kept && dot_marked > 0 && dot_plain == 0;
+                }
+                check("virtual list: the row the keys are on and the row the app marks are rows of the whole list: scrolled far off and back they are lit and marked, and the rows that had their places meanwhile are not",
+                      kept);
+                virtual_seen.marked = -1, big.focus = -1, big.lit = 0;
+        }
+
+        // Read from the right: a row's words are at the right of the list, and the bar is at its left.
+        {
+                int left = 0, right = 0, y = 0;
+                b32 bar_left;
+
+                ui_kit.rtl = 1;
+                virtual_make(&ui, &big, 100000);
+                bar_left = big.scroll.x < big.x;
+                virtual_settle(&ui, &big, pixels, ground, 2);
+                y = ui_list_row_y(&big, 1);
+                for (int dy = 4; dy < row - 4; dy++)
+                        for (int x = big.x; x < big.x + big.w; x++)
+                                if ((pixels[(y + dy) * 400 + x] & 0xffffffu) != ground)
+                                        left += x < big.x + big.w / 2, right += x >= big.x + big.w / 2;
+                ui_kit.rtl = 0;
+                turned = bar_left && right > 0 && left == 0 && ui_list_hit(&ui, &big, big.x + big.w - 4, big.y + row + 2) == 1;
+                check("virtual list: in a window read from the right the rows' words are at the right, the bar at the left, and a point is still on its row", turned);
+        }
+
+        // What a frame of a scroll costs, at 100 rows and at 100,000: the same steps through each, timed on the machine's clock.
+        {
+                b64 cost[2] = {0, 0}, clock_was = ui_kit.test_clock;
+                const int frames = 240;
+
+                ui_kit.test_clock = 0;
+                for (int which = 0; which < 2; which++)
+                {
+                        struct ui_list address_to l = which ? &big : &small;
+                        b64 began;
+
+                        virtual_make(&ui, l, which ? 100000 : 100);
+                        most = ui_scroll_most(&l->scroll);
+                        virtual_settle(&ui, l, pixels, ground, 2);
+                        began = (b64)ui_kit_clock();
+                        for (int frame = 0; frame < frames; frame++)
+                        {
+                                ui_scroll_set(&l->scroll, (int)((long long)most * frame / (frames - 1)));
+                                ui_list_layout(&ui, l);
+                                ui_kit.now += 16666667ll, ui_kit.busy = 0;
+                                ui_list_draw(&ui, l);
+                        }
+                        cost[which] = ((b64)ui_kit_clock() - began) / frames;
+                }
+                ui_kit.test_clock = clock_was;
+                string_format(log, "  virtual list: a frame of a scroll (a layout and a draw of a 300 by 160 list) costs %p us at 100 rows and %p us at 100,000\n",
+                              (positive)(cost[0] / 1000), (positive)(cost[1] / 1000));
+                check("virtual list: a frame of a scroll at 100,000 rows costs no more than four of one at 100 (it is the rows in view that are drawn, not the rows there are)",
+                      cost[1] <= 4 * cost[0] + 200000);
+        }
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -172767,6 +173051,7 @@ b32 main()
         check_kit_slider_below();
         check_kit_lit();
         check_kit_focus();
+        check_kit_virtual();
         check_kit_inks();
         check_kit_place();
         check_kit_controls();
