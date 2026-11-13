@@ -431,7 +431,6 @@ static unsigned int compositor_xwm_text(char *to, const unsigned char *from, uns
         for (unsigned long at = 0; at < count && length < COMPOSITOR_XWM_TITLE - 4;)
         {
                 unsigned char c = from[at];
-                unsigned long more = 0;
 
                 if (c < 0x20 || c == 0x7f)
                 {
@@ -445,24 +444,36 @@ static unsigned int compositor_xwm_text(char *to, const unsigned char *from, uns
                         at++;
                         continue;
                 }
-                if (!latin1 && c >= 0xc2 && c <= 0xdf)
-                        more = 1;
-                else if (!latin1 && c >= 0xe0 && c <= 0xef)
-                        more = 2;
-                else if (!latin1 && c >= 0xf0 && c <= 0xf4)
-                        more = 3;
-                for (unsigned long k = 1; more && k <= more; k++)
-                        if (at + k >= count || (from[at + k] & 0xc0) != 0x80)
-                                more = 0;
-                if (!more)
+                if (latin1)
                 {
                         to[length++] = '?';
                         at++;
                         continue;
                 }
-                for (unsigned long k = 0; k <= more; k++)
-                        to[length++] = (char)from[at + k];
-                at += more + 1;
+                {
+                        memory_utf8_state state = {0};
+                        unsigned long start = at;
+                        b32 said = 0;
+
+                        while (at < count)
+                        {
+                                said = memory_utf8_feed(&state, from[at]);
+                                if (said != 0)
+                                        break;
+                                at++;
+                        }
+                        if (said > 0)
+                        {
+                                at++;
+                                for (unsigned long k = start; k < at; k++)
+                                        to[length++] = (char)from[k];
+                        }
+                        else
+                        {
+                                to[length++] = '?';
+                                at = start + 1;
+                        }
+                }
         }
         to[length] = 0;
         return length;
