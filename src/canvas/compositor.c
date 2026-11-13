@@ -12735,13 +12735,13 @@ static fn compositor_door_run(address_any context)
 
         for (;;)
         {
-                struct compositor_poll wanted = {compositor_doors.kick[row], COMPOSITOR_POLLIN, 0};
                 unsigned long count = 0;
                 unsigned int asked;
                 char byte = 0;
 
-                compositor_call(syscall(ppoll), (positive)&wanted, 1, 0, 0, 0, 0);
-                compositor_call(syscall(read), (positive)compositor_doors.kick[row], (positive)&count, sizeof count, 0, 0, 0);
+                // The kick waits in its read (compositor_doors_start), so a wake is this read's return and the write below.
+                if (compositor_call(syscall(read), (positive)compositor_doors.kick[row], (positive)&count, sizeof count, 0, 0, 0) == -4)
+                        continue;
                 asked = __atomic_exchange_n(&compositor_doors.asked[row], 0u, __ATOMIC_ACQ_REL);
                 if (asked & COMPOSITOR_DOOR_WAKE)
                         system_write_once(compositor.wake[row], &byte, 1);
@@ -12768,12 +12768,11 @@ static fn compositor_door_misc(address_any context)
         (void)context;
         for (;;)
         {
-                struct compositor_poll wanted = {compositor_doors.kick[COMPOSITOR_DOOR_MISC], COMPOSITOR_POLLIN, 0};
                 unsigned long count = 0;
                 unsigned int asked;
 
-                compositor_call(syscall(ppoll), (positive)&wanted, 1, 0, 0, 0, 0);
-                compositor_call(syscall(read), (positive)compositor_doors.kick[COMPOSITOR_DOOR_MISC], (positive)&count, sizeof count, 0, 0, 0);
+                if (compositor_call(syscall(read), (positive)compositor_doors.kick[COMPOSITOR_DOOR_MISC], (positive)&count, sizeof count, 0, 0, 0) == -4)
+                        continue;
                 asked = __atomic_exchange_n(&compositor_doors.asked[COMPOSITOR_DOOR_MISC], 0u, __ATOMIC_ACQ_REL);
                 while (__atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_doors.line_head, __ATOMIC_ACQUIRE))
                 {
@@ -12805,7 +12804,9 @@ static void compositor_doors_start(int clip)
                 return;
         for (unsigned int slot = 0; slot <= WINDOWS; slot++)
         {
-                compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+                // A kick is read where its thread waits (EFD_CLOEXEC alone: the read blocks), so a thread asked for a wake makes two
+                // calls, the read that ends and the wake's write, where a poll, a read and the write were three.
+                compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000, 0, 0, 0, 0);
                 if (compositor_doors.kick[slot] >= 0)
                         compositor_doors.worker[slot] = thread_start(slot < WINDOWS ? compositor_door_run : compositor_door_misc,
                                                                      (address_any)(positive)slot);
@@ -19797,12 +19798,21 @@ static void compositor_touch_tick(positive now)
 
 /* ---- end of touch ---- */
 
+/*
+        A device's reports, read and acted on. One read takes up to sixty-four records, and a read that comes back short of that had
+        the device's queue empty as it read, so the read that would answer EAGAIN is not made: a mouse's report is one read a turn
+        where it was two. No more than COMPOSITOR_INPUT_READS reads are made of one device in a turn: a device that never stops (a
+        thousand records and more between two polls is no hand's) is read again the next turn, its descriptor still readable, and
+        the turn between them forwards what was read, takes the doors and draws the frame, where the loop stayed in this function
+        for as long as the device went on.
+*/
+#define COMPOSITOR_INPUT_READS 16
 static void compositor_input_read(unsigned int at)
 {
         struct compositor_input_event events[64];
         int moved = 0;
 
-        for (;;)
+        for (unsigned int reads = 0; reads < COMPOSITOR_INPUT_READS; reads++)
         {
                 bipolar got = system_read_once(compositor.inputs[at], events, sizeof(events));
 
@@ -20022,6 +20032,8 @@ static void compositor_input_read(unsigned int at)
                                 compositor_key(at, event->code, event->value, now);
                         }
                 }
+                if (got < (bipolar)sizeof(events))
+                        break;
         }
 
         if (moved)
@@ -20811,6 +20823,46 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
                "the compositor's own descriptors fit the numbers kept for them");
 
 /*
+        What the devices said this turn is on its way to the programs it is for, now: each row of the kit that was given an event is
+        knocked on (its wake's byte, by its thread), before the turn reads a settings file, takes a door's picture or a client's
+        commit, or composes a frame, where the one knock of a turn was made after the frame had been composed and presented and an
+        event read as a frame came due reached its program a composition late. A row that is a Wayland client's is not knocked on:
+        its ring is read and its socket written by compositor_wl_wake, before the frame, and its bit stays for that.
+*/
+static void compositor_forward(void)
+{
+        unsigned int rows = compositor.woken, kept = 0;
+        char byte = 0;
+
+        if (!rows)
+                return;
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                if (!(rows >> row & 1))
+                        continue;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                if (compositor_wl.started && wayland_row_owner(row) >= 0)
+                {
+                        kept |= 1u << row;
+                        continue;
+                }
+#endif
+                if (!compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
+                        system_write_once(compositor.wake[row], &byte, 1);
+        }
+        compositor.woken = kept;
+}
+
+// A turn's devices: each one the poll said has something is read, and what they said is forwarded at once (compositor_forward).
+static void compositor_inputs_turn(const struct compositor_poll *wanted)
+{
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                if (wanted[at].returned)
+                        compositor_input_read(at);
+        compositor_forward();
+}
+
+/*
         Room in the descriptor table for every descriptor the session can have, made while the program is one thread. The
         kernel grows a table when a descriptor past its end is asked for, and a table that threads share is grown with a
         wait for every processor to pass a quiet state (expand_fdtable's synchronize_rcu). The table starts at 64, the
@@ -20873,6 +20925,9 @@ static b32 compositor_main()
 
         claim_standard_descriptors();
         compositor_descriptors_room();
+        // The loop's waits end when they are asked to: the kernel gives every wait of a thread 50 us of slack to end late in
+        // (it joins timers by it), which a frame's timer and every other time of the loop had added to it. PR_SET_TIMERSLACK, 1 ns.
+        compositor_call(syscall(prctl), 29, 1, 0, 0, 0, 0);
 
         memory_zero(&compositor, sizeof(compositor));
         compositor.watch = compositor.uevents = -1;
@@ -21220,12 +21275,13 @@ static b32 compositor_main()
                                 running = 0;
                 }
 
+                // The devices first, and what they said forwarded before anything else is done with the turn (compositor_inputs_turn):
+                // a settings file read again, a door's picture taken, a client's commit and the frame all come after it.
+                compositor_inputs_turn(wanted + inputs);
+
+                // The settings' watch after the devices: it may open and close them, and the answers above are the list's as it was polled.
                 if (wanted[1].returned)
                         compositor_inputs_watch();
-
-                for (unsigned int at = 0; at < compositor.input_count; at++)
-                        if (wanted[inputs + at].returned)
-                                compositor_input_read(at);
 
                 for (unsigned int row = 0; row < WINDOWS; row++)
                         if (wanted[doors + row].returned)

@@ -138612,6 +138612,76 @@ static void check_compositor_wheel(void)
         check("release: a button held over a window that went is not let go in the next window in its row",
               table->event_head[1] == head && !compositor.button_down);
     }
+    /*
+            A turn's devices are read and what they said is forwarded in the same call, before the turn does anything else: the
+            row given an event has its wake's byte when compositor_inputs_turn returns, where it had it after the frame.
+    */
+    {
+        struct compositor_poll turn[1] = {{wheel_pipe[0], COMPOSITOR_POLLIN, COMPOSITOR_POLLIN}};
+        int knock[2] = {-1, -1}, was_wake = compositor.wake[1];
+        char bytes[8];
+
+        if (system_call_2(syscall(pipe2), (positive)knock, O_NONBLOCK) == 0)
+        {
+            table->event_tail[1] = table->event_head[1];
+            compositor.woken = 0;
+            compositor.wake[1] = knock[1];
+            compositor.hires[0] = 0;
+            wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 1);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+            compositor_inputs_turn(turn);
+            check("forward: a device's event is in its window's ring and the window is knocked on when the turn's devices are read",
+                  table->event_head[1] != table->event_tail[1] && system_read_once(knock[0], bytes, sizeof(bytes)) == 1);
+            check("forward: and the row is not owed another knock at the turn's end", !(compositor.woken & 2u));
+            turn[0].returned = 0;
+            wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 1);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+            compositor_inputs_turn(turn);
+            check("forward: a device the poll did not name is not read, and nobody is knocked on for it",
+                  system_read_once(knock[0], bytes, sizeof(bytes)) < 0);
+            compositor_input_read(0);
+            compositor.woken = 0;
+            table->event_tail[1] = table->event_head[1];
+            compositor.wake[1] = was_wake;
+            system_close(knock[0]);
+            system_close(knock[1]);
+        }
+        else
+            check("forward: the wake's pipe is made", false);
+    }
+
+    /*
+            A device that never stops: one turn reads it COMPOSITOR_INPUT_READS times, sixty-four records a read, and leaves the
+            rest for the next turn, so the frame and the doors have a turn between; and a read that comes back short is the last.
+            A file stands for the device: it is readable for ever, as a device that floods is.
+    */
+    {
+        bipolar file = (bipolar)system_call_2(syscall(memfd_create), (positive) "moonwater-input-flood", 0);
+        struct compositor_input_event record = {1, 0, COMPOSITOR_EV_SYN, 0, 0};
+        int was_input = compositor.inputs[0];
+        b32 written = file >= 0;
+
+        for (int at = 0; written && at < 2000; at++)
+            written = system_write_once((int)file, &record, sizeof(record)) == (bipolar)sizeof(record);
+        if (written)
+        {
+            system_call_3(syscall(lseek), (positive)file, 0, 0);
+            compositor.inputs[0] = (int)file;
+            compositor_input_read(0);
+            check("flood: a device with two thousand records waiting is read sixteen times of sixty-four in one turn, and no more",
+                  system_call_3(syscall(lseek), (positive)file, 0, 1) == COMPOSITOR_INPUT_READS * 64 * (long)sizeof(record));
+            compositor_input_read(0);
+            check("flood: the next turn reads the rest, and its short read is its last",
+                  system_call_3(syscall(lseek), (positive)file, 0, 1) == 2000 * (long)sizeof(record));
+            compositor_input_read(0);
+            check("flood: and a device with nothing more is still the compositor's", compositor.inputs[0] == (int)file);
+            compositor.inputs[0] = was_input;
+        }
+        else
+            check("flood: the file that stands for the device is made", false);
+        if (file >= 0)
+            system_close((int)file);
+    }
     system_close(wheel_pipe[0]);
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;
