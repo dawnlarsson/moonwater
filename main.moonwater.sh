@@ -209,6 +209,47 @@ function desktop_wait_for {
   done
 }
 
+# The desktop before the machine's disks are known. The machine process calls this once, before it waits for boot's
+# verdict (a second of uptime on a machine with no disk, more when one is arriving), from the script of the /root there
+# is then: the compositor is started on the image's own settings and font, so the screen is the desktop's from the
+# moment the card can be driven, and desktop_settled holds back what must not see the image's /root. Nothing is done
+# once there is a verdict, or with Canvas not on yet: canvas on starts the desktop after the verdict, as it always did,
+# and finds this one's supervisor if there is one. moonwater.early=0 on the kernel's command line keeps the machine
+# process from calling it.
+function desktop_early {
+  [ -e /run/moonwater/verdict ] && return 0
+  desktop_on || return 0
+  desktop_start
+}
+
+# Until boot has said what this session's /root is, for a session started before it had (desktop_early): fifteen
+# seconds at most, boot's own limit, or until the compositor is gone. The terminal waits for it because its shell
+# would otherwise have the image's /root for its home. A disk taken since the compositor started is another /root:
+# the compositor is told to read it again (SIGUSR1), and when the disk's /root names another face for the tabs the
+# compositor is ended, for its supervisor to start it with that face, and this session starts nothing more (1).
+function desktop_settled {
+  [ -n "$desktop_verdict_was" ] && return 0
+  for desktop_try in 1 2 3; do
+    [ -e /run/moonwater/verdict ] && break
+    desktop_wait_for /run/moonwater/verdict $desktop_compositor
+  done
+  desktop_word=
+  [ -r /run/moonwater/verdict ] && IFS= read -r desktop_word < /run/moonwater/verdict
+  case $desktop_word in
+  disk*)
+    desktop_was=$desktop_text
+    desktop_font
+    if [ "$desktop_text" != "$desktop_was" ]; then
+      echo "desktop: the disk's /root names another face for the tabs; the compositor is started again with it" > /dev/kmsg
+      kill $desktop_compositor 2> /dev/null
+      return 1
+    fi
+    kill -USR1 $desktop_compositor 2> /dev/null
+    ;;
+  esac
+  return 0
+}
+
 # The kernel log, waited for so that it stacks under the terminal.
 function desktop_log {
   desktop_font
@@ -303,6 +344,9 @@ function desktop_keys_answer {
 # compositor with no screen connected waits for one, and the programs below can only run once it has its table.
 function desktop_session {
   rm -f /run/moonwater/windows /run/moonwater/compositor.up
+  # Whether boot had said what /root is when this compositor was started: desktop_settled waits for it if not.
+  desktop_verdict_was=
+  [ -e /run/moonwater/verdict ] && desktop_verdict_was=1
   desktop_font
   desktop_keys_list
   mkfifo -m 600 /run/moonwater/compositor.up
@@ -322,8 +366,10 @@ function desktop_session {
   echo $! >> /run/moonwater/desktop.kids
   desktop_log
   # The terminal the person is at takes the keys when it shows, as a key's would: the mark is its launch's.
-  desktop_asked desktop_terminal
-  desktop_keyboard
+  if desktop_settled; then
+    desktop_asked desktop_terminal
+    desktop_keyboard
+  fi
   wait $desktop_compositor
   desktop_status=$?
   if [ $desktop_status -gt 128 ]; then

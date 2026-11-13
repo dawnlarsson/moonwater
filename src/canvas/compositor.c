@@ -12426,6 +12426,34 @@ static void compositor_inputs_watch(void)
 }
 
 /*
+        /root read again, whole, at SIGUSR1: the desktop is started before the machine's disks are known (the machine
+        script's desktop_early), on the image's own /root, and a disk taken after that is another directory bound over
+        the name, which the watch on the first hears nothing of. The session sends the signal when the disk is taken
+        (desktop_settled): the name is watched again and every setting the start read from it is read as a change of its
+        file would have it read, the screens laid again by the disk's displays and arrangement. What the disk does not
+        say stays as the first frame had it, so a disk with no settings of its own changes nothing on the screen. All
+        on the loop's thread, as the watch's own reads are.
+*/
+static void compositor_root_again(void)
+{
+        if (compositor.watch >= 0)
+                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
+                                COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
+                                0, 0, 0);
+        compositor_clip_settings();
+#ifndef SHELL_NO_GPU
+        compositor_gpu_settings();
+#endif
+        compositor_look_read();
+        compositor_theme_read();
+        compositor_input_settings_read();
+        compositor_osk_setting_read();
+        if (!compositor.layout_given)
+                compositor_layout_read();
+        compositor_space_retake();
+}
+
+/*
         An event into a row's columns. The compositor writes head and the
         program tail, and a full ring keeps what came first; a motion behind
         a motion the program has not read yet replaces it. tail is the
@@ -20059,16 +20087,29 @@ static void compositor_pipe_ignore(void)
         system_signal_install(13, 1, 0, 0, null); // SIGPIPE, SIG_IGN
 }
 
-// SIGTERM, SIGINT and SIGHUP, as a descriptor the loop polls; SIGPIPE ignored.
+/*
+        SIGTERM, SIGINT and SIGHUP, which end the compositor, and SIGUSR1, which has it read /root again
+        (compositor_root_again), as a descriptor the loop polls; SIGPIPE ignored.
+*/
+#define COMPOSITOR_SIGUSR1 10
+
 static int compositor_signals(void)
 {
-        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1);
+        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1);
 
         compositor_pipe_ignore();
 
         compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         return (int)compositor_call(syscall(signalfd4), (positive)-1, (positive)address_of mask, 8,
                                     COMPOSITOR_NONBLOCK | COMPOSITOR_CLOEXEC, 0, 0);
+}
+
+// The signal the descriptor has, taken off it: its number, or 0 when there is none to read (a signalfd_siginfo is 128 bytes, the number first).
+static unsigned int compositor_signal_taken(void)
+{
+        unsigned int said[32];
+
+        return compositor_call(syscall(read), (positive)compositor.signals, (positive)said, sizeof(said), 0, 0, 0) == (long)sizeof(said) ? said[0] : 0;
 }
 
 static void compositor_say(string_address what, bipolar value)
@@ -20898,8 +20939,14 @@ static b32 compositor_main()
                         if (wanted[at].returned)
                                 compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, uevents_at, clip_at, wayland_at)]++;
 
+                // A signal: /root again for SIGUSR1, and the end for any other (and for a descriptor that cannot be read).
                 if (wanted[0].returned)
-                        running = 0;
+                {
+                        if (compositor_signal_taken() == COMPOSITOR_SIGUSR1)
+                                compositor_root_again();
+                        else
+                                running = 0;
+                }
 
                 if (wanted[1].returned)
                         compositor_inputs_watch();

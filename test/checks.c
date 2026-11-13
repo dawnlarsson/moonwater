@@ -134350,6 +134350,35 @@ static void check_compositor_setting_opens(void)
         write, the sound server's socket) is EPIPE, not the compositor's end: it ignores SIGPIPE itself, as it set its signals
         up (compositor_signals), where only the Wayland shim did before. In a child, which writes to such a pipe.
 */
+/*
+        The signal that has the compositor read /root again (SIGUSR1) is one of the descriptor's, and is told from the ones
+        that end it: sent to a child that has the compositor's signals, it is read off the descriptor as its number, and
+        SIGTERM after it as its own; where it was no signal of the compositor's and ended the program, as it does a child
+        that has not taken the signals.
+*/
+static void check_compositor_signal_again(void)
+{
+    bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
+    positive status = 0;
+
+    if (child == 0)
+    {
+        bipolar self = (bipolar)system_call(syscall(getpid));
+        unsigned int first, second;
+
+        compositor.signals = compositor_signals();
+        system_call_2(syscall(kill), (positive)self, COMPOSITOR_SIGUSR1);
+        first = compositor_signal_taken();
+        system_call_2(syscall(kill), (positive)self, 15);
+        second = compositor_signal_taken();
+        system_call_1(syscall(exit_group), first == COMPOSITOR_SIGUSR1 && second == 15 && !compositor_signal_taken() ? 0 : 3);
+    }
+    if (child > 0)
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    check("signal again: SIGUSR1 is read off the compositor's descriptor as itself, SIGTERM after it as itself, and neither ends it unread",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+}
+
 static void check_compositor_pipe_ignored(void)
 {
     bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
@@ -172556,6 +172585,7 @@ b32 main()
         check_compositor_start_room();
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
+        check_compositor_signal_again();
         check_compositor_table_sealed();
         check_compositor_table_taken();
         check_compositor_doors_held();

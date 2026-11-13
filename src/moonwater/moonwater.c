@@ -2618,6 +2618,77 @@ static fn host_machine_hook(positive slot, unsigned int which,
 #define HOST_MACHINE_STOPPED 1
 #define HOST_MACHINE_FAILED 2
 
+/*
+        The desktop before the disks.
+
+        Boot's verdict is a second of uptime away on a machine with no disk
+        of its own (the floor a USB disk is given to arrive, HOST_SETTLE_FLOOR_NS),
+        and up to ten when one is on its way, and this process sources nothing
+        and runs no event before it: the script and what it reads are /root's,
+        which a disk can replace. So the screen stayed Canvas's ground for all
+        of that. The compositor needs none of it. With no verdict yet, the
+        script the kernel holds for the /root there is now (the image's own, or
+        the builtin) is sourced in a child, and its desktop_early, if it has
+        one, is called there: the builtin's starts the compositor's supervisor
+        on the image's settings and font, and the session it runs keeps the
+        terminal back until the verdict (desktop_settled), because a shell
+        started sooner would have the image's /root for its own. The child is
+        waited for, a few milliseconds, so that the script file it sources is
+        not written under it by this process, and this process's own functions
+        are untouched: it sources once, after the verdict, as before.
+
+        What orders it: the child ends before the verdict is waited for; the
+        supervisor it leaves is found by the pid file when canvas on is run
+        after the verdict (desktop_start starts no second one); a disk taken
+        since has the compositor read /root again (the session's SIGUSR1); and
+        a script from the disk that has no desktop_start is not the builtin's
+        desktop, so the early one is ended before that script's first function
+        runs (desktop_yield). The fallback is the old order: no child, a script
+        with no desktop_early, Canvas not yet on, or moonwater.early=0 on the
+        kernel's command line, and the desktop starts at canvas on after the
+        verdict as it did. True when the early desktop was asked for.
+*/
+#define HOST_MACHINE_EARLY_OFF "moonwater.early=0"
+#define HOST_MACHINE_EARLY_FN "desktop_early"
+
+static fn desktop_yield(void);
+
+static bool host_machine_early_wanted(void)
+{
+        p8 line[4096];
+        p8 verdict[HOST_NAME_ROOM + 16];
+
+        if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0)
+                return false;
+        return host_read_kernel("/proc/cmdline", line, sizeof(line)) < 0 ||
+               !string_find(line, HOST_MACHINE_EARLY_OFF);
+}
+
+static bool host_machine_early(void)
+{
+        positive status = 0;
+        bipolar child;
+
+        if (!host_machine_early_wanted())
+                return false;
+        host_machine_publish();
+        child = system_fork();
+        if (child < 0)
+                return false;
+        if (!child) {
+                positive slot = positive_max;
+
+                if (host_machine_source() >= 0)
+                        slot = shell_function_slot(HOST_MACHINE_EARLY_FN);
+                if (slot != positive_max)
+                        (void)host_machine_call(slot, HOST_MACHINE_EARLY_FN, null, null);
+                log_flush();
+                system_call_1(syscall(exit), slot == positive_max);
+        }
+        return system_wait4_retry(child, address_of status, 0, null) == child &&
+               !wait_status_code(status);
+}
+
 static b32 host_machine_run(void)
 {
         struct machine_control control;
@@ -2627,6 +2698,7 @@ static b32 host_machine_run(void)
         p8 dirty[8];
         positive slot[MOONWATER_HOOKS];
         bool marked = false;
+        bool early;
         b32 answer = HOST_MACHINE_ENDED;
 
         if (!bowl_is_root())
@@ -2663,6 +2735,7 @@ static b32 host_machine_run(void)
         //      its own moonwater_poweroff asks for.
         host_machine_self = true;
 
+        early = host_machine_early();
         host_machine_wait_verdict(verdict, sizeof(verdict));
         host_machine_publish();
         failed = host_machine_source();
@@ -2671,6 +2744,10 @@ static b32 host_machine_run(void)
                 host_fail("machine script", failed);
                 return HOST_MACHINE_FAILED;
         }
+        //      The script this session keeps is not the one the early desktop
+        //      was started from, and carries no desktop of the builtin's.
+        if (early && shell_function_slot("desktop_start") == positive_max)
+                desktop_yield();
 
         //      Said before the restores below, which can take a join's time:
         //      a boot waiting to see whether this process has the script is

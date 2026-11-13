@@ -19822,6 +19822,8 @@ make_stub()
         echo on > "$d/canvas"
         echo on > "$d/desktop"
         echo "console=ttyS0" > "$d/cmdline"
+        # Boot has said what this session is, as it has by the time canvas on is run; a case of the early desktop takes it away.
+        echo live > "$d/run/moonwater/verdict"
         : > "$d/starts"
         : > "$d/args"
         : > "$d/calls"
@@ -19849,6 +19851,14 @@ say_up()
         [ -n "$up" ] && eval "echo up >&$up; exec $up>&-"
         up=
 }
+# ready: up at once, with its table, there until it is ended, and noting each time it is told to read /root again.
+if [ -e "$STUB/ready" ]; then
+        trap 'echo again >> "$STUB/again"' USR1
+        trap 'exit 0' TERM
+        : > "$STUB/run/moonwater/windows"
+        say_up
+        while :; do sleep 0.05; done
+fi
 # late: up after six seconds, with its table, and then there until it is ended.
 if [ -e "$STUB/late" ]; then
         sleep 6
@@ -20045,6 +20055,69 @@ report "nothing is started on a compositor that has not said it is up" "$(grep '
 report "the terminal is started when it says so, however late" "$(grep '^after=' "$STUB/out")" "after=1"
 report "and it is not said to have made no table" "$(grep '^notable=' "$STUB/out")" "notable=0"
 report "the FIFO is gone once the word is read" "$(grep '^fifo=' "$STUB/out")" "fifo=gone"
+
+# E3: the desktop before boot's verdict (desktop_early, which the machine process calls before it waits for the verdict):
+# the compositor is started with no verdict, the terminal is not until there is one, a disk taken since has the compositor
+# told to read /root again, and canvas on after the verdict starts no second compositor.
+begin early
+rm -f "$STUB/run/moonwater/verdict"
+touch "$STUB/ready"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_early
+sleep 1.5
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "early=$(grep -c '^terminal ' "$STUB/args")"
+echo "disk sda" > "$STUB/run/moonwater/verdict"
+sleep 1
+echo "after=$(grep -c '^terminal ' "$STUB/args")"
+echo "told=$(grep -c again "$STUB/again" 2> /dev/null)"
+desktop_start
+sleep 0.3
+echo "second=$(wc -l < "$STUB/starts")"
+desktop_stop
+EOF
+run_driver
+report "early: the compositor is started before boot's verdict" "$(grep '^starts=' "$STUB/out")" "starts=1"
+report "early: the terminal is not, while /root is not yet the session's" "$(grep '^early=' "$STUB/out")" "early=0"
+report "early: the terminal is started at the verdict" "$(grep '^after=' "$STUB/out")" "after=1"
+report "early: a disk taken since has the compositor told to read /root again" "$(grep '^told=' "$STUB/out")" "told=1"
+report "early: canvas on after the verdict starts no second compositor" "$(grep '^second=' "$STUB/out")" "second=1"
+
+# E4: the disk's /root names another face for the tabs: the compositor is started again with it, and the terminal with it.
+begin early-font
+rm -f "$STUB/run/moonwater/verdict"
+touch "$STUB/ready"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_early
+sleep 1.5
+printf '%s\n' "$STUB/fonts/Q-Face.ttf" > "$STUB/root/font"
+echo "disk sda" > "$STUB/run/moonwater/verdict"
+sleep 1.5
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "face=$(grep -c "^compositor -f $STUB/fonts/Q-Face.ttf " "$STUB/args")"
+echo "terminal=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
+echo "said=$(grep -c 'names another face' "$STUB/kmsg")"
+desktop_stop
+EOF
+run_driver
+report "early: a disk whose /root names another face has the compositor started again" "$(grep '^starts=' "$STUB/out")" "starts=2"
+report "early: with that face" "$(grep '^face=' "$STUB/out")" "face=1"
+report "early: and one terminal, with it" "$(grep '^terminal=' "$STUB/out")" "terminal=1"
+report "early: and the log says why" "$(grep '^said=' "$STUB/out")" "said=1"
+
+# E5: with a verdict already there is nothing early about a start: desktop_early starts nothing, and canvas on does.
+begin early-late
+touch "$STUB/ready"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_early
+sleep 0.3
+echo "starts=$(wc -l < "$STUB/starts")"
+EOF
+run_driver
+report "early: with a verdict already, desktop_early starts nothing" "$(grep '^starts=' "$STUB/out")" "starts=0"
 
 # F: a second start while a supervisor lives starts nothing.
 begin second
