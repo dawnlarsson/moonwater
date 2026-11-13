@@ -834,6 +834,131 @@ static b32 files_model_back(struct files_model address_to m, b32 forward)
         return true;
 }
 
+/* ---- the trail ---- */
+/*
+        The trail: the deepest path a person has gone to on the branch they are on, and where on it the folder shown is. Going to a
+        folder that is on the trail (one above the folder shown, or one of the deeper ones gone up out of) moves the place and leaves
+        the trail as it is, so up three folders and down again is two moves and nothing is typed. Going to a folder that is not on it
+        (another branch, opened from a listing or typed) makes the trail that folder's path: what was deeper than the fork is dropped
+        and the new folder is its end. files_trail_note is that rule, told the path shown after every move, however the move was made
+        (a crumb, Up, Back and Forward, a row opened, a path typed): the way back and forward keeps paths, as it did, and the trail is
+        worked out from the path gone to by the same rule, so the two cannot disagree.
+
+        A folder of the trail is remembered by what it was, its device and inode, from when it was shown. Before a deeper one is gone
+        back to, files_trail_check looks at its path again without following: FILES_SAME for the folder it was, FILES_MISSING for a
+        path that names nothing now, FILES_CHANGED for anything else there (another folder, a file, a link put in its place). Only
+        the first is gone to; the others are for a view to say, and files_trail_cut then drops the trail from that folder on.
+*/
+#define FILES_TRAIL 48 // the folders of a trail, the root with them: a deeper path keeps its last ones as crumbs
+
+struct files_trail
+{
+        p8 path[FILES_PATH];
+        p16 from[FILES_TRAIL], to[FILES_TRAIL]; // each folder's name is the path's bytes from..to, and its own path the first `to` bytes (the root's: 1)
+        p64 inode[FILES_TRAIL];                 // what each was when it was shown,
+        p32 device_major[FILES_TRAIL], device_minor[FILES_TRAIL];
+        p8 known[FILES_TRAIL];                  // for those that were
+        int count, current;
+};
+
+// The folders of a path: the root, then each name between strokes. A path with more than FILES_TRAIL keeps its last ones.
+static fn files_trail_split(struct files_trail address_to t)
+{
+        positive length = string_length(t->path), at = 1;
+
+        t->count = 0;
+        if (!length || t->path[0] != '/')
+                return;
+        t->from[0] = 0, t->to[0] = 1, t->count = 1;
+        while (at < length)
+        {
+                positive stop = at;
+
+                while (stop < length && t->path[stop] != '/')
+                        stop++;
+                if (stop > at)
+                {
+                        if (t->count == FILES_TRAIL)
+                        {
+                                for (int k = 1; k < FILES_TRAIL; k++)
+                                        t->from[k - 1] = t->from[k], t->to[k - 1] = t->to[k];
+                                t->count--;
+                        }
+                        t->from[t->count] = (p16)at, t->to[t->count] = (p16)stop, t->count++;
+                }
+                at = stop + 1;
+        }
+}
+
+// The path shown is this one now, and this is the folder it is (null: not known). True when the trail was kept and only the place moved.
+static b32 files_trail_note(struct files_trail address_to t, const p8 address_to shown, const file_facts address_to folder)
+{
+        positive length = string_length((string_address)shown);
+        int place = -1;
+
+        for (int k = 0; k < t->count && place < 0; k++)
+                if (t->to[k] == length && !memory_compare((address_any)t->path, (address_any)shown, length))
+                        place = k;
+        if (place < 0)
+        {
+                // Another branch: the trail is this path. What the folders it shares with the old one were is kept with them.
+                struct files_trail was = *t;
+
+                string_copy_bounded(t->path, (string_address)shown, FILES_PATH);
+                files_trail_split(t);
+                for (int k = 0; k < t->count; k++)
+                {
+                        b32 same = k < was.count && was.known[k] && was.to[k] == t->to[k] && !memory_compare((address_any)was.path, (address_any)t->path, t->to[k]);
+
+                        t->known[k] = same;
+                        t->inode[k] = same ? was.inode[k] : 0, t->device_major[k] = same ? was.device_major[k] : 0, t->device_minor[k] = same ? was.device_minor[k] : 0;
+                }
+                place = t->count - 1;
+        }
+        t->current = place < 0 ? 0 : place;
+        if (folder && place >= 0 && folder->inode)
+                t->known[place] = 1, t->inode[place] = folder->inode, t->device_major[place] = folder->device_major, t->device_minor[place] = folder->device_minor;
+        return t->to[t->count ? t->count - 1 : 0] != length;
+}
+
+// The path of the trail's folder number `which`, with its end.
+static fn files_trail_path(const struct files_trail address_to t, int which, p8 address_to into)
+{
+        positive length = which >= 0 && which < t->count ? t->to[which] : 0;
+
+        memory_copy(into, t->path, length);
+        into[length] = end;
+}
+
+// A folder of the trail looked at again, by its path and without following: is it the folder it was?
+static int files_trail_check(const struct files_trail address_to t, int which)
+{
+        p8 path[FILES_PATH];
+        file_facts facts;
+        bipolar looked;
+
+        if (which < 0 || which >= t->count)
+                return FILES_REFUSED;
+        files_trail_path(t, which, path);
+        looked = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, &facts);
+        if (looked < 0)
+                return looked == -ERROR_NO_ENTRY || looked == -ERROR_NOT_DIRECTORY ? FILES_MISSING : FILES_CHANGED;
+        if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                return FILES_CHANGED;
+        if (t->known[which] && (facts.inode != t->inode[which] || facts.device_major != t->device_major[which] || facts.device_minor != t->device_minor[which]))
+                return FILES_CHANGED;
+        return FILES_SAME;
+}
+
+// The trail ends before its folder number `which`: that one and all after it are dropped. The current one is never dropped.
+static fn files_trail_cut(struct files_trail address_to t, int which)
+{
+        if (which <= t->current || which >= t->count)
+                return;
+        t->path[t->to[which - 1]] = end;
+        t->count = which;
+}
+
 /* ---- changing what is in the folder ---- */
 /*
         What changes the disk. Each works on the folder shown through its own descriptor (m->handle), by a name of the listing that

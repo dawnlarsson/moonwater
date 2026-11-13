@@ -17,9 +17,16 @@
         many entries there are and asked for a row by its place in them, so a folder of any length scrolls from end to end, its
         bar's thumb is the view's share of the whole folder, and nothing here keeps a window of it.
 
-        The path. At rest the band shows the folders of the path as crumbs, each a press that goes to it (files_crumbs_lay: the
-        root, then each name, as many from the end as the band has room for). A press in the band that is on no crumb, or
-        Ctrl+L, turns the band into the kit's text field holding the whole path: Enter goes where it says, Escape or a press
+        The path. At rest the band is the kit's trail (ui_trail) of the model's (files_trail): the deepest path gone to on this
+        branch, each folder a press that goes to it, the folders up to the one shown in the ink and the deeper ones, gone up out
+        of, dimmed where they were. A press on any of them, dimmed or not, goes there and the trail stays as it is; so do Up,
+        Backspace and Alt+Up; opening the folder that is the next dimmed one moves along it; and only a folder that is not on it
+        (another branch, opened or typed) makes the trail that folder's path. A dimmed folder is looked at again before it is gone
+        to, by what it was: one that is gone, or has something else in its place (a link too: it is not followed), says so in the
+        foot and the trail is cut there, the folder shown staying. Back and Forward keep paths, as they did, and the trail is
+        worked out from the path gone to by the one rule (files_trail_note), so the two agree. A trail too long for the band
+        shows the folders round the one shown and three dots where others are left out; a press on the dots, or on the band's own
+        ground, or Ctrl+L, turns the band into the kit's text field holding the whole path: Enter goes where it says, Escape or a press
         elsewhere puts the crumbs back, and Tab finishes the folder name being typed from the listing shown when the text's
         folder is the one shown (it reads no disk). What is typed is not trusted: the field holds at most a path's bytes, and
         the text goes to the model's own open (files_model_try), which follows a link anywhere in what was typed, its last part
@@ -54,8 +61,6 @@
 #define FILES_EDIT_PATH 1            // files.editing: the band's field holds the path,
 #define FILES_EDIT_NAME 2            // or the new name of the entry at files.naming
 #define FILES_ASK_NAMES 3            // the names a delete's question says, of however many it would remove
-#define FILES_CRUMBS 48              // the folders of a path that are crumbs at most: a deeper path shows its last ones
-#define FILES_CRUMB_GAP 6            // logical pixels either side of the stroke between two crumbs
 
 // Everything that is large: one mapping, not the image's bss.
 struct files_big
@@ -64,6 +69,7 @@ struct files_big
         struct ui_list list;
         struct ui_view view;
         struct files_job job;          // the delete under way, if one is
+        char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4]; // the trail's folders as the band writes them
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
 };
@@ -84,12 +90,9 @@ static struct
         string_address start;    // the folder asked for as it started
         // The path's band: the crumbs at rest, the field while the path is typed.
         struct ui_rect crumbs_box;
-        struct files_crumb
-        {
-                int x, w;        // where its words are, device pixels in the window
-                p16 from, to;    // its name is the path's bytes from..to, and the folder it goes to is the path's first `to` bytes (the root's: 1)
-        } crumb[FILES_CRUMBS];
-        int crumbs, crumb_hover; // how many are laid out (the last ones of a path too long for the band), and the one under the pointer, -1 none
+        struct files_trail trail; // the model's trail: the deepest path of this branch, and where on it the folder shown is
+        struct ui_trail crumbs;   // and the kit's, which draws it and says what a point is on
+        int crumb_hover;          // the folder of it under the pointer, -1 none
         int editing;             // the band is the field: FILES_EDIT_PATH or FILES_EDIT_NAME, 0 the crumbs
         p32 naming;              // the place of the entry being named
         b32 armed;               // Delete was pressed once: the foot asks, and Delete again does it
@@ -214,115 +217,34 @@ static struct ui_text address_to files_field(void)
         return &files.field;
 }
 
-/*
-        The folders of a path as crumbs: the root (the path's first byte), then each name between slashes, in order. Each has the
-        bytes of its name and how much of the path is the folder it goes to. Writes at most `room` and answers how many; a path
-        with more folders than that has its last ones (the first is then no root). Nothing is measured or drawn here.
-*/
-static int files_crumbs_of(const p8 address_to path, struct files_crumb address_to into, int room)
-{
-        positive length = string_length((string_address)path), at = 1;
-        int count = 0;
-
-        if (!length || path[0] != '/' || room < 1)
-                return 0;
-        into[count++] = (struct files_crumb){0, 0, 0, 1};
-        while (at < length)
-        {
-                positive stop = at;
-
-                while (stop < length && path[stop] != '/')
-                        stop++;
-                if (stop > at)
-                {
-                        if (count == room)
-                        {
-                                for (int k = 1; k < room; k++)
-                                        into[k - 1] = into[k];
-                                count--;
-                        }
-                        into[count++] = (struct files_crumb){0, 0, (p16)at, (p16)stop};
-                }
-                at = stop + 1;
-        }
-        return count;
-}
-
-// A crumb's words: the root's is the stroke, a folder's its name as words from outside.
-static fn files_crumb_text(char address_to into, positive room, const p8 address_to path, const struct files_crumb address_to crumb)
-{
-        ui_label_foreign(into, room, path + crumb->from, (positive)(crumb->to - crumb->from));
-}
-
-// The crumbs laid out in the band's box: as many from the path's end as fit, each as wide as its words, a stroke's room between two.
+// The trail given to the kit and laid out in the band's box: each folder's name as words from outside, the root's the stroke itself.
 static fn files_crumbs_lay(void)
 {
-        struct ui address_to ui = &files.ui;
-        const p8 address_to path = files.big->model.path;
-        static char words[FILES_NAME * 3 + 4];
-        int gap = ui_px(ui, FILES_CRUMB_GAP), stroke = ui_kit_measure(ui, (string_address) "/", UI_BODY_MEDIUM), room = files.crumbs_box.w, first, x;
+        struct ui_trail address_to t = &files.crumbs;
+        const struct files_trail address_to trail = &files.trail;
 
-        files.crumbs = files_crumbs_of(path, files.crumb, FILES_CRUMBS);
-        for (int k = 0; k < files.crumbs; k++)
+        t->count = trail->count, t->current = trail->current;
+        t->separator = "/", t->rooted = trail->count && trail->from[0] == 0 && trail->to[0] == 1;
+        for (int k = 0; k < trail->count; k++)
         {
-                files_crumb_text(words, sizeof(words), path, &files.crumb[k]);
-                files.crumb[k].w = ui_kit_measure(ui, (string_address)words, UI_BODY_MEDIUM);
+                ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k]));
+                t->label[k] = files.big->crumb_words[k];
         }
-        // From the end: the folder shown is always there, and those above it while there is room.
-        first = files.crumbs ? files.crumbs - 1 : 0;
-        for (int k = files.crumbs - 1, used = 0; k >= 0; k--)
-        {
-                used += files.crumb[k].w + (k < files.crumbs - 1 ? 2 * gap + stroke : 0);
-                if (used > room && k < files.crumbs - 1)
-                        break;
-                first = k;
-        }
-        for (int k = first; k < files.crumbs; k++)
-                files.crumb[k - first] = files.crumb[k];
-        files.crumbs -= first;
-        x = files.crumbs_box.x;
-        for (int k = 0; k < files.crumbs; k++)
-        {
-                files.crumb[k].x = x;
-                x += files.crumb[k].w + 2 * gap + stroke;
-        }
+        t->x = files.crumbs_box.x, t->y = files.crumbs_box.y, t->w = files.crumbs_box.w, t->h = files.crumbs_box.h;
+        t->hover = files.crumb_hover;
+        ui_trail_layout(&files.ui, t);
 }
 
-// The crumb a point of the window is on, -1 for none (the band's own ground, which is the field's to open).
+// What of the trail a point of the window is on: a folder's number, UI_TRAIL_MARK, or -1 (the band's own ground, or not the band).
 static int files_crumb_at(int x, int y)
 {
-        int gap = ui_px(&files.ui, FILES_CRUMB_GAP);
-
-        if (files.editing || y < files.crumbs_box.y || y >= files.crumbs_box.y + files.crumbs_box.h)
-                return -1;
-        for (int k = 0; k < files.crumbs; k++)
-                if (x >= files.crumb[k].x - gap && x < files.crumb[k].x + files.crumb[k].w + gap)
-                        return k;
-        return -1;
+        return files.editing ? -1 : ui_trail_hit(&files.ui, &files.crumbs, x, y);
 }
 
-// The crumbs drawn: the folder shown in the ink, those above it quiet, the one under the pointer in the ink too, a quiet stroke between.
 static fn files_crumbs_draw(void)
 {
-        struct ui address_to ui = &files.ui;
-        const p8 address_to path = files.big->model.path;
-        static char words[FILES_NAME * 3 + 4];
-        int gap = ui_px(ui, FILES_CRUMB_GAP), stroke = ui_kit_measure(ui, (string_address) "/", UI_BODY_MEDIUM);
-        int baseline = ui_kit_baseline(ui, files.crumbs_box.y + (files.crumbs_box.h - ui_px(ui, 20)) / 2, UI_BODY_MEDIUM);
-        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
-        int right = files.crumbs_box.x + files.crumbs_box.w;
-
-        for (int k = 0; k < files.crumbs; k++)
-        {
-                const struct files_crumb address_to crumb = &files.crumb[k];
-
-                files_crumb_text(words, sizeof(words), path, crumb);
-                ui_kit_text_clip(ui, crumb->x, baseline, (string_address)words, UI_BODY_MEDIUM, k == files.crumbs - 1 || k == files.crumb_hover ? strong : quiet, 0, right);
-                // The root's words are the stroke already: no second one after it.
-                if (k < files.crumbs - 1 && crumb->to > 1)
-                        ui_kit_text_clip(ui, crumb->x + crumb->w + gap, baseline, (string_address) "/", UI_BODY_MEDIUM, quiet, 0, right);
-        }
-        (void)stroke;
+        files.crumbs.hover = files.crumb_hover;
+        ui_trail_draw(&files.ui, &files.crumbs);
 }
 
 /* ---- the layout ---- */
@@ -576,28 +498,42 @@ static fn files_edit_complete(void)
         files.dirty = true;
 }
 
-// To the folder a crumb is of.
+// To a folder of the trail. One deeper than the folder shown is looked at again first, by what it was: gone, or something else in its
+// place, is said in the foot and the trail is cut there, the folder shown staying. The trail itself does not change by going along it.
 static fn files_crumb_go(int which)
 {
         static p8 to[FILES_PATH];
         struct files_model address_to m = &files.big->model;
+        struct files_trail address_to trail = &files.trail;
+        int seen = FILES_SAME, came;
 
-        if (which < 0 || which >= files.crumbs)
+        if (which < 0 || which >= trail->count || which == trail->current)
                 return;
-        memory_copy(to, m->path, files.crumb[which].to);
-        to[files.crumb[which].to] = end;
-        if (string_equals(to, m->path))
+        if (which > trail->current && (seen = files_trail_check(trail, which)) != FILES_SAME)
+        {
+                files.said = seen == FILES_MISSING ? LANGUAGE_files_gone : LANGUAGE_files_not_folder;
+                files_trail_cut(trail, which);
+                files.dirty = true;
                 return;
-        if (files_model_try(m, to) == FILES_READING)
+        }
+        files_trail_path(trail, which, to);
+        came = files_model_try(m, to);
+        if (came == FILES_READING)
+        {
                 files_moved();
-        else
-                files.said = LANGUAGE_files_gone, files.dirty = true;
+                return;
+        }
+        files.said = came == FILES_GONE ? LANGUAGE_files_gone : came == FILES_UNREADABLE ? LANGUAGE_files_unreadable : LANGUAGE_files_not_folder;
+        files_trail_cut(trail, which);
+        files.dirty = true;
 }
 
 // Another folder is shown: its rows from the top, nothing said of the folder before.
 static fn files_moved(void)
 {
         files.editing = 0, files.crumb_hover = -1, files.armed = false, files.big->note[0] = 0;
+        // The trail is told where the person is now: a folder on it moves the place, any other is a new branch (files_trail_note).
+        files_trail_note(&files.trail, files.big->model.path, files.big->model.handle >= 0 ? &files.big->model.folder : null);
         files.clicked = FILES_NO, files.said = 0;
         ui_scroll_set(&files.big->list.scroll, 0);
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
@@ -809,6 +745,7 @@ static b32 files_event(const struct window_event address_to event)
                 {
                         int crumb = files_crumb_at(ui_kit.pointer_x, ui_kit.pointer_y);
 
+                        // A folder of the trail is gone to; its ground, and the dots that stand for folders left out, open the field.
                         if (crumb >= 0)
                                 files_crumb_go(crumb);
                         else
@@ -985,6 +922,7 @@ static int files_open_window(void)
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
+        files_trail_note(&files.trail, files.big->model.path, files.big->model.handle >= 0 ? &files.big->model.folder : null);
         files_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
                    (unsigned int)(height < room ? height : room > 0 ? room : height));
         ui_centre(table, files.own.row, files.width, files.height, ui_px(&files.ui, 12));

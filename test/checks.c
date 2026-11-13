@@ -116880,10 +116880,8 @@ static fn browser_history(struct files_model address_to m)
 static fn browser_typed(struct files_model address_to m)
 {
         p8 root[FILES_PATH], real[FILES_PATH], through[FILES_PATH], before[FILES_PATH], missing[FILES_PATH], file[FILES_PATH], into[FILES_NAME], longest[FILES_PATH + 64];
-        struct files_crumb crumb[8];
         p32 backs, count;
         b32 went, kept, linked, finished, crumbs;
-        int n;
 
         browser_folder((string_address) "typed");
         browser_folder((string_address) "typed/alpha");
@@ -116926,14 +116924,98 @@ static fn browser_typed(struct files_model address_to m)
         linked = files_model_enter(m, browser_at(m, "way-in")) == FILES_REFUSED && files_model_try(m, through) == FILES_READING && string_equals(m->path, through);
         browser_read(m, 64);
         check("browser: a link that was typed is followed, as naming it asks, where the same link in a listing is not entered", linked && browser_is(m, (string_address) "inside "));
-        n = files_crumbs_of((const p8 address_to) "/usr/share/fonts", crumb, 8);
-        crumbs = n == 4 && crumb[0].to == 1 && crumb[1].from == 1 && crumb[1].to == 4 && crumb[2].from == 5 && crumb[2].to == 10 && crumb[3].from == 11 &&
-                 crumb[3].to == 16 && files_crumbs_of((const p8 address_to) "/", crumb, 8) == 1 && crumb[0].to == 1 &&
-                 files_crumbs_of((const p8 address_to) "relative", crumb, 8) == 0;
-        n = files_crumbs_of((const p8 address_to) "/a/b/c/d/e", crumb, 3);
-        crumbs = crumbs && n == 3 && crumb[0].from == 5 && crumb[0].to == 6 && crumb[2].from == 9 && crumb[2].to == 10;
-        check("browser: a path is its folders in order, the root first, each with the path that goes to it, and one deeper than there is room for keeps its last folders",
-              crumbs);
+        {
+                static struct files_trail trail;
+                p8 part[FILES_PATH];
+
+                string_copy_bounded(trail.path, (string_address) "/usr/share/fonts", FILES_PATH);
+                files_trail_split(&trail);
+                files_trail_path(&trail, 2, part);
+                crumbs = trail.count == 4 && trail.to[0] == 1 && trail.from[1] == 1 && trail.to[1] == 4 && trail.from[2] == 5 && trail.to[2] == 10 &&
+                         trail.from[3] == 11 && trail.to[3] == 16 && string_equals(part, (string_address) "/usr/share");
+                string_copy_bounded(trail.path, (string_address) "/", FILES_PATH);
+                files_trail_split(&trail);
+                crumbs = crumbs && trail.count == 1 && trail.to[0] == 1;
+                string_copy_bounded(trail.path, (string_address) "relative", FILES_PATH);
+                files_trail_split(&trail);
+                crumbs = crumbs && trail.count == 0;
+        }
+        check("browser: a path is its folders in order, the root first, each with the path that goes to it", crumbs);
+}
+
+/*
+        The trail (files_trail): the deepest path of the branch a person is on, and where on it they are. A folder above the one shown
+        moves the place and keeps the deeper folders; so does the next deeper one; a folder off the trail makes the trail its path,
+        keeping what the folders they share were; a deeper folder is the folder it was only while its path, not followed, is a folder
+        of the same device and inode: removed it is missing, and a link or another folder in its place is changed; and a cut drops a
+        folder and all after it, never the one shown.
+*/
+static fn browser_trail(struct files_model address_to m)
+{
+        static struct files_trail trail;
+        p8 a[FILES_PATH], b[FILES_PATH], c[FILES_PATH], x[FILES_PATH], part[FILES_PATH], aside[FILES_PATH];
+        b32 grown, kept, along, branched, same, missing, linked, replaced, cut;
+        p64 inode_a;
+
+        browser_folder((string_address) "trail");
+        browser_folder((string_address) "trail/b");
+        browser_folder((string_address) "trail/b/c");
+        browser_folder((string_address) "trail/x");
+        browser_path(a, (string_address) "trail"), browser_path(b, (string_address) "trail/b"), browser_path(c, (string_address) "trail/b/c");
+        browser_path(x, (string_address) "trail/x"), browser_path(aside, (string_address) "trail/c-aside");
+        memory_fill(&trail, 0, sizeof(trail));
+        // Down the branch, a folder at a time, as a window goes: each is noted with what it is.
+        browser_go(m, (string_address) "trail");
+        files_trail_note(&trail, m->path, &m->folder);
+        inode_a = m->folder.inode;
+        browser_go(m, (string_address) "trail/b");
+        files_trail_note(&trail, m->path, &m->folder);
+        browser_go(m, (string_address) "trail/b/c");
+        grown = !files_trail_note(&trail, m->path, &m->folder) && string_equals(trail.path, c) && trail.current == trail.count - 1 && trail.count >= 4 &&
+                trail.known[trail.count - 1] && trail.known[trail.count - 3] && trail.inode[trail.count - 3] == inode_a;
+        check("browser: a trail grows with the folders gone down into, the folder shown its last, and each folder shown is remembered by what it is", grown);
+        // Up two folders: the place moves, the trail and its deeper folders stay.
+        browser_go(m, (string_address) "trail");
+        kept = files_trail_note(&trail, m->path, &m->folder) && string_equals(trail.path, c) && trail.current == trail.count - 3;
+        files_trail_path(&trail, trail.current, part);
+        kept = kept && string_equals(part, a);
+        check("browser: going to a folder above the one shown moves the place on the trail and keeps the deeper folders where they were", kept);
+        // The next deeper one is opened: still the same trail.
+        browser_go(m, (string_address) "trail/b");
+        along = files_trail_note(&trail, m->path, &m->folder) && string_equals(trail.path, c) && trail.current == trail.count - 2;
+        check("browser: opening the folder that is the next one of the trail moves along it and changes nothing of it", along);
+        same = files_trail_check(&trail, trail.count - 1) == FILES_SAME && files_trail_check(&trail, trail.current) == FILES_SAME &&
+               files_trail_check(&trail, trail.count) == FILES_REFUSED;
+        // The deeper folder moved aside and a link to another folder given its name; then another folder; then nothing.
+        system_call_5(syscall(renameat2), AT_FDCWD, (positive)c, AT_FDCWD, (positive)aside, 0);
+        browser_link(x, (string_address) "trail/b/c");
+        linked = files_trail_check(&trail, trail.count - 1) == FILES_CHANGED;
+        browser_remove_in((string_address) "trail/b/c");
+        browser_folder((string_address) "trail/b/c");
+        replaced = files_trail_check(&trail, trail.count - 1) == FILES_CHANGED;
+        browser_remove_in((string_address) "trail/b/c");
+        missing = files_trail_check(&trail, trail.count - 1) == FILES_MISSING;
+        check("browser: a deeper folder of the trail is the folder it was while its path is a folder of the same device and inode", same);
+        check("browser: a deeper folder that was removed is missing, and one with a link or another folder in its place is changed: neither is the folder it was, and a link is not followed",
+              missing && linked && replaced);
+        {
+                int was = trail.count, at = trail.current;
+
+                files_trail_cut(&trail, trail.current);
+                cut = trail.count == was;
+                files_trail_cut(&trail, trail.count - 1);
+                cut = cut && trail.count == was - 1 && trail.current == at && string_equals(trail.path, b);
+        }
+        check("browser: a cut drops a folder of the trail and all after it, and never the folder shown", cut);
+        // Another branch from the folder above: the trail is that folder's path, and the folders they share are still known.
+        browser_go(m, (string_address) "trail");
+        files_trail_note(&trail, m->path, &m->folder);
+        browser_go(m, (string_address) "trail/x");
+        branched = !files_trail_note(&trail, m->path, &m->folder) && string_equals(trail.path, x) && trail.current == trail.count - 1 &&
+                   trail.known[trail.count - 2] && trail.inode[trail.count - 2] == inode_a;
+        files_trail_path(&trail, trail.count - 2, part);
+        check("browser: opening a folder that is not on the trail makes the trail its path: what was deeper than the fork is dropped, the new folder is the end, and the folders shared are still known",
+              branched && string_equals(part, a));
 }
 
 static fn browser_changes(struct files_model address_to m)
@@ -117386,6 +117468,7 @@ b32 main(void)
         browser_links(address_of model);
         browser_history(address_of model);
         browser_typed(address_of model);
+        browser_trail(address_of model);
         browser_changes(address_of model);
         browser_many(address_of model);
         browser_ops(address_of model);
@@ -156362,6 +156445,98 @@ static fn check_kit_virtual(void)
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
 }
 
+/*
+        A trail (ui_trail). The places up to the current one are in the ink and the ones after it dimmed, where they were; a point on a
+        place answers its number, on the trail's ground -1; a trail too long for its box keeps the current place in sight with a mark
+        where places are left out, and a point on the mark answers UI_TRAIL_MARK; and a window read from the right has the first place
+        at the right.
+*/
+static unsigned int trail_darkest(const unsigned int address_to pixels, int x0, int x1, int y0, int y1, unsigned int ground)
+{
+        unsigned int most = 0;
+
+        for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++)
+                {
+                        unsigned int apart = ui_contrast(pixels[y * 400 + x] & 0xffffffu, ground);
+
+                        most = apart > most ? apart : most;
+                }
+        return most;
+}
+
+static fn check_kit_trail(void)
+{
+        static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
+        static struct ui_trail trail;
+        static font_face face;
+        static const char address_to const names[] = {"/", "home", "person", "documents", "letters", "drafts", "older", "oldest"};
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        unsigned int ground, before, now, after;
+        b32 inks, hits, cut, turned;
+        int k;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("trail: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 200, ui.top = 0, ui.bottom = 200, ui.scale = 100;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0, ui.mono = null, ui.glass = 0;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        ground = ui_role(UI_SURFACE) & 0xffffffu;
+        memory_zero(&trail, sizeof(trail));
+        for (k = 0; k < 4; k++)
+                trail.label[k] = names[k];
+        trail.count = 4, trail.current = 1, trail.separator = "/", trail.rooted = 1, trail.hover = -1;
+        trail.x = 10, trail.y = 20, trail.w = 380, trail.h = 40;
+        ui_trail_layout(&ui, &trail);
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        ui_trail_draw(&ui, &trail);
+        // home is the current place, person and documents are after it: their words are fainter on the ground than home's, and are there.
+        now = trail_darkest(pixels, trail.at[1], trail.at[1] + trail.wide[1], 20, 60, ground);
+        after = trail_darkest(pixels, trail.at[2], trail.at[2] + trail.wide[2], 20, 60, ground);
+        before = trail_darkest(pixels, trail.at[3], trail.at[3] + trail.wide[3], 20, 60, ground);
+        inks = trail.first == 0 && trail.last == 3 && now >= 700 && after > 110 && after < now * 6 / 10 && before > 110 && before < now * 6 / 10 &&
+               trail.at[0] == 10 && trail.at[1] > trail.at[0] && trail.at[2] > trail.at[1] + trail.wide[1] && trail.at[3] > trail.at[2] + trail.wide[2];
+        check("trail: the places up to the current one are in the ink and the places after it are dimmed where they stand, still drawn", inks);
+        hits = ui_trail_hit(&ui, &trail, trail.at[2] + 2, 40) == 2 && ui_trail_hit(&ui, &trail, trail.at[3] + trail.wide[3] - 1, 40) == 3 &&
+               ui_trail_hit(&ui, &trail, trail.at[0] + 1, 40) == 0 && ui_trail_hit(&ui, &trail, 380, 40) == -1 && ui_trail_hit(&ui, &trail, trail.at[2] + 2, 70) == -1;
+        check("trail: a point on a place, dimmed or not, answers its number, and a point on the trail's own ground or outside it answers none", hits);
+        // Eight places in a box that holds three or four: the current one shows, with a mark at each end where places are left out.
+        for (k = 0; k < 8; k++)
+                trail.label[k] = names[k];
+        trail.count = 8, trail.current = 4, trail.w = 200;
+        ui_trail_layout(&ui, &trail);
+        cut = trail.first > 0 && trail.last < 7 && trail.first <= 4 && trail.last >= 4 && trail.at[trail.last] + trail.wide[trail.last] <= trail.x + trail.w &&
+              ui_trail_hit(&ui, &trail, trail.x + 2, 40) == UI_TRAIL_MARK && ui_trail_hit(&ui, &trail, trail.at[4] + 1, 40) == 4;
+        trail.current = 7;
+        ui_trail_layout(&ui, &trail);
+        cut = cut && trail.last == 7 && trail.first > 0;
+        trail.current = 0;
+        ui_trail_layout(&ui, &trail);
+        cut = cut && trail.first == 0 && trail.last < 7 &&
+              ui_trail_hit(&ui, &trail, trail.at[trail.last] + trail.wide[trail.last] + ui_dev(&ui, UI_TRAIL_GAP) + 2, 40) == UI_TRAIL_MARK;
+        check("trail: a trail too long for its box keeps the current place in sight wherever it is, inside the box, with a mark at an end where places are left out that a point can be on",
+              cut);
+        // Read from the right: the first place is at the right, and a point is on the place drawn there.
+        trail.count = 4, trail.current = 1, trail.w = 380;
+        ui_kit.rtl = 1;
+        ui_trail_layout(&ui, &trail);
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u | ground;
+        ui_trail_draw(&ui, &trail);
+        turned = trail_darkest(pixels, 10, 10 + trail.wide[1], 20, 60, ground) <= 105 && // nothing at the left end
+                 trail_darkest(pixels, 390 - (trail.at[1] - 10) - trail.wide[1], 390 - (trail.at[1] - 10), 20, 60, ground) >= 700 &&
+                 ui_trail_hit(&ui, &trail, 390 - (trail.at[1] - 10) - 2, 40) == 1 && ui_trail_hit(&ui, &trail, 388, 40) == 0;
+        ui_kit.rtl = 0;
+        check("trail: in a window read from the right the trail is mirrored in its box, the first place at the right, and a point is on the place drawn there", turned);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -174579,6 +174754,7 @@ b32 main()
         check_kit_lit();
         check_kit_focus();
         check_kit_virtual();
+        check_kit_trail();
         check_kit_inks();
         check_kit_place();
         check_kit_controls();

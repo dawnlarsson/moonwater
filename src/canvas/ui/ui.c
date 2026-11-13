@@ -17457,6 +17457,160 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
         return used;
 }
 
+/* ---- a trail ---- */
+/*
+        A trail (ui_trail): the way a person has come, as a line of places each of which is a press that goes to it, with the place they
+        are at somewhere on it. The places up to and including that one are in the ink; the places after it, deeper than where the person
+        now is, stay where they are, dimmed, so going back up the way and down again is a press each and nothing is typed or made again.
+        The kit knows nothing of what a place is: the app gives each a label (words it has already made safe to draw) and keeps what a
+        label stands for; it says how many there are and which is the current one, and asks what a point is on (ui_trail_hit: a place's
+        number, UI_TRAIL_MARK for the mark that stands for places left out, -1 for the trail's own ground, which an app may give to a
+        field for the whole to be typed). When the trail changes, and which of its places is the current one, is the app's to decide.
+
+        Between two places is the separator, the app's word for it (a path's stroke), in the quiet ink; with `rooted` the first place is
+        the separator itself (a path's root) and none follows it. A trail longer than its box keeps the current place in sight: the
+        places are taken outward from it, one before and one after by turns, while there is room, and what is left out at either end is
+        a mark of three dots there (UI_TRAIL_MARK under a point), so the middle of a long trail is what shows and its ends are what is
+        cut. In a window read from the right the trail is mirrored in its box: its first place is at the right.
+*/
+#define UI_TRAIL_MOST 48    // the places of one trail
+#define UI_TRAIL_GAP 6      // logical pixels either side of the separator, and what a place's own press reaches past its words
+#define UI_TRAIL_MARK (-2)  // what a point is on: the mark for the places left out
+struct ui_trail
+{
+        // The app's.
+        const char address_to label[UI_TRAIL_MOST];
+        const char address_to separator;   // between two places; null for none
+        b32 rooted;                        // the first place is the separator itself: none follows it
+        int count, current;                // how many places, and the one the person is at
+        unsigned char lost[UI_TRAIL_MOST]; // a place after the current one that was looked for and is not there: struck through as well as dimmed
+        int x, y, w, h;                    // its box, device pixels
+        int hover;                         // the place under the pointer (ui_trail_hit's answer the app last kept), -1 none
+        // The kit's (ui_trail_layout).
+        int at[UI_TRAIL_MOST], wide[UI_TRAIL_MOST]; // where each place's words are, as laid from the left, and how wide
+        int first, last;                   // the places that show: first..last, the current one among them
+        int mark, mark_wide;               // the width of the mark, and of a separator with its gaps
+};
+
+static inline int ui_trail_flip(const struct ui_trail address_to t, int x, int w)
+{
+        return ui_rtl() ? t->x + t->w - (x - t->x) - w : x;
+}
+
+// The trail laid out in its box: every place measured, the places that show chosen outward from the current one, each put in its place.
+static fn ui_trail_layout(struct ui address_to ui, struct ui_trail address_to t)
+{
+        int gap = ui_dev(ui, UI_TRAIL_GAP), stroke = t->separator ? ui_kit_measure(ui, (string_address)t->separator, UI_BODY_MEDIUM) : 0, between = stroke + 2 * gap;
+        int mark = ui_kit_measure(ui, (string_address) "...", UI_BODY_MEDIUM) + gap, used, x;
+        b32 before = true;
+
+        t->count = t->count < 0 ? 0 : t->count > UI_TRAIL_MOST ? UI_TRAIL_MOST : t->count;
+        t->current = t->current < 0 ? 0 : t->current >= t->count ? t->count - 1 : t->current;
+        t->mark = mark, t->mark_wide = between;
+        for (int k = 0; k < t->count; k++)
+                t->wide[k] = t->label[k] ? ui_kit_measure(ui, (string_address)t->label[k], UI_BODY_MEDIUM) : 0;
+        if (!t->count)
+        {
+                t->first = 0, t->last = -1;
+                return;
+        }
+        // Outward from the current place, a place before it and a place after it by turns, while they fit with the marks they would leave.
+        t->first = t->last = t->current;
+        used = t->wide[t->current];
+        for (;;)
+        {
+                b32 can_before = t->first > 0, can_after = t->last < t->count - 1;
+                int k, cost, marks;
+
+                if (!can_before && !can_after)
+                        break;
+                before = can_before && (!can_after || before);
+                k = before ? t->first - 1 : t->last + 1;
+                // What it adds: its words, and what is between it and its neighbour (a root has only a gap after it).
+                cost = t->wide[k] + (t->rooted && (before ? k : t->last) == 0 ? gap : between);
+                marks = ((before ? k : t->first) > 0 ? mark : 0) + ((before ? t->last : k) < t->count - 1 ? mark : 0);
+                if (used + cost + marks > t->w)
+                {
+                        // This side has no room: the other is tried once more, then it is over.
+                        if (before && can_after && used + t->wide[t->last + 1] + between + (t->first > 0 ? mark : 0) + (t->last + 1 < t->count - 1 ? mark : 0) <= t->w)
+                        {
+                                before = false;
+                                continue;
+                        }
+                        break;
+                }
+                used += cost;
+                if (before)
+                        t->first = k;
+                else
+                        t->last = k;
+                before = !before;
+        }
+        x = t->x + (t->first > 0 ? mark : 0);
+        for (int k = t->first; k <= t->last; k++)
+        {
+                t->at[k] = x;
+                x += t->wide[k] + (t->rooted && k == 0 ? gap : between);
+        }
+}
+
+// What a point of the window is on: a place's number, UI_TRAIL_MARK, or -1 (the trail's ground, or outside it).
+static int ui_trail_hit(const struct ui address_to ui, const struct ui_trail address_to t, int x, int y)
+{
+        int gap = ui_dev(ui, UI_TRAIL_GAP);
+
+        if (x < t->x || x >= t->x + t->w || y < t->y || y >= t->y + t->h)
+                return -1;
+        x = ui_rtl() ? t->x + t->w - 1 - (x - t->x) : x; // as laid from the left
+        for (int k = t->first; k <= t->last; k++)
+                if (x >= t->at[k] - gap / 2 && x < t->at[k] + t->wide[k] + gap / 2)
+                        return k;
+        if (t->first > 0 && x < t->x + t->mark)
+                return UI_TRAIL_MARK;
+        if (t->last >= 0 && t->last < t->count - 1 && x >= t->at[t->last] + t->wide[t->last] + gap && x < t->at[t->last] + t->wide[t->last] + gap + t->mark)
+                return UI_TRAIL_MARK;
+        return -1;
+}
+
+// The dimmed ink of the places after the current one: the quiet ink half way to the ground it is on.
+static unsigned int ui_trail_dim(const struct ui address_to ui)
+{
+        unsigned int quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), ground = ui->glass ? ui->ground : ui_role(UI_SURFACE);
+
+        return 0xff000000u | (ui_mix(quiet | 0xff000000u, 50, ground | 0xff000000u) & 0xffffffu);
+}
+
+// The trail drawn: the places to the current one in the ink (the current one, and the one under the pointer, at full strength; the ones
+// before it quiet), the places after it dimmed, one that is lost struck through, the separators quiet, and the marks where places are left out.
+static fn ui_trail_draw(struct ui address_to ui, struct ui_trail address_to t)
+{
+        int gap = ui_dev(ui, UI_TRAIL_GAP), stroke = t->separator ? ui_kit_measure(ui, (string_address)t->separator, UI_BODY_MEDIUM) : 0;
+        int baseline = ui_kit_baseline(ui, t->y + (t->h - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), right = t->x + t->w;
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), dim = ui_trail_dim(ui);
+
+        if (t->first > 0)
+                ui_kit_text_clip(ui, ui_trail_flip(t, t->x, t->mark - gap), baseline, (string_address) "...", UI_BODY_MEDIUM, quiet, 0, right);
+        for (int k = t->first; k <= t->last; k++)
+        {
+                unsigned int ink = k == t->hover ? strong : k > t->current ? dim : k == t->current ? strong : quiet;
+                int x = ui_trail_flip(t, t->at[k], t->wide[k]);
+
+                if (t->label[k])
+                        ui_kit_text_clip(ui, x, baseline, (string_address)t->label[k], UI_BODY_MEDIUM, ink, 0, right);
+                if (k > t->current && t->lost[k])
+                {
+                        struct ui_box strike = {x * 256, (t->y + t->h / 2) * 256, (x + t->wide[k]) * 256, (t->y + t->h / 2 + (ui_dev(ui, 1) < 1 ? 1 : ui_dev(ui, 1))) * 256, 0, 0};
+
+                        ui_kit_fill(ui, &strike, ink, null);
+                }
+                if (t->separator && k < t->last && !(t->rooted && k == 0))
+                        ui_kit_text_clip(ui, ui_trail_flip(t, t->at[k] + t->wide[k] + gap, stroke), baseline, (string_address)t->separator, UI_BODY_MEDIUM,
+                                         k >= t->current ? dim : quiet, 0, right);
+        }
+        if (t->last >= 0 && t->last < t->count - 1)
+                ui_kit_text_clip(ui, ui_trail_flip(t, t->at[t->last] + t->wide[t->last] + gap, t->mark - gap), baseline, (string_address) "...", UI_BODY_MEDIUM, dim, 0, right);
+}
+
 /* ---- the view ---- */
 /*
         The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the

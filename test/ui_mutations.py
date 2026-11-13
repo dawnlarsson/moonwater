@@ -199,6 +199,11 @@ M = [
     (L, "Sleep is offered whatever the kernel says", "        if (got > 0 && launcher_sleeps(text, (positive)got))\n                launcher.session |= LAUNCHER_SLEEP;", "        launcher.session |= LAUNCHER_SLEEP;"),
     (L, "a button that is not offered is still there", "                        if (launcher_power_offered(at))\n                                ui_button(", "                        if (1)\n                                ui_button("),
     (L, "a button that is not offered still starts", "        if (!launcher_power_offered(which))\n                return true;", "        if (which < 0 || which >= LAUNCHER_POWERS)\n                return true;"),
+    # ---- a trail ----
+    (U, "the places after the current one are in the ink", "unsigned int ink = k == t->hover ? strong : k > t->current ? dim : k == t->current ? strong : quiet;", "unsigned int ink = k == t->hover ? strong : k == t->current ? strong : quiet;"),
+    (U, "a long trail is laid from its first place", "        t->first = t->last = t->current;\n        used = t->wide[t->current];", "        t->first = t->last = 0;\n        used = t->wide[0];"),
+    (U, "a trail is not mirrored for a window read from the right", "        return ui_rtl() ? t->x + t->w - (x - t->x) - w : x;", "        return x;"),
+    (U, "the mark of a long trail is no place to press", "        if (t->first > 0 && x < t->x + t->mark)\n                return UI_TRAIL_MARK;", ""),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
     # ---- a mouse drags a list unless a person turned it off ----
