@@ -133663,7 +133663,8 @@ static void check_compositor_start_room(void)
     else
         check("descriptor room: the table has the room the limit allows, up to 1024, before any thread shares it", size >= want && want >= 128);
 
-    if (system_call_2(syscall(pipe2), (positive)ends, 0x80000) != 0) // O_CLOEXEC
+    // O_CLOEXEC | O_NONBLOCK: a descriptor left open is a read that answers there is nothing yet, a red row and not a check that never ends.
+    if (system_call_2(syscall(pipe2), (positive)ends, 0x80000 | 0x800) != 0)
     {
         check("up word: the pipe is made", false);
         return;
