@@ -35,6 +35,7 @@ bit EXPAND_IFS_BLANK	the table of IFS's bytes, each entry assigned whole before 
 bit FORMAT_FLAG_LEFT	a flag of one parsed conversion, on the stack of its format
 bit GREP_MANY_END	the automaton of one pattern set, built once for the run
 bit GREP_MANY_OUT	the automaton of one pattern set, built once for the run
+bit LAUNCHER_SLEEP	the word is set whole at each reading of what the kernel can do (launcher_session_read) and the bit is that reading's
 bit LINK_GROUP_DONE	a one-use code that has been used: spent is where it ends, by design
 bit MS_MOVE	a mount's flags from the command line, for the one call
 bit MS_REMOUNT	a mount's flags from the command line, for the one call
