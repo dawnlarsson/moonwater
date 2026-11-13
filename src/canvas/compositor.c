@@ -14893,7 +14893,7 @@ static b32 compositor_osk_is(unsigned int pid)
         handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
         if (handle < 0)
                 return 0;
-        system_read_once((b32)handle, comm, sizeof(comm) - 1);
+        (void)system_read_once((b32)handle, comm, sizeof(comm) - 1); // a read of nothing leaves the zeros, which are no name
         system_close(handle);
         return !memory_compare(comm, COMPOSITOR_OSK_NAME, sizeof(COMPOSITOR_OSK_NAME) - 1);
 }
@@ -15570,7 +15570,27 @@ static struct
         positive gesture[WINDOWS];
         unsigned int history_most, history_count;
         int history[COMPOSITOR_CLIP_HISTORY];
-} compositor_clip = {.door = -1, .fd = {-1, -1}};
+        int blank; // /dev/null, which holds a selection's number while there is no selection (compositor_clip_reserve)
+} compositor_clip = {.door = -1, .fd = {-1, -1}, .blank = -1};
+
+/*
+        The selections' two numbers, WINDOWS_CLIP_FD and the next, are held from the start and for the session, by /dev/null
+        while a selection is empty. A copy is put at its number with dup3, which closes whatever is there, and a paste opens
+        that number of the compositor's through /proc: so the numbers have to be ones the kernel gives to nothing else, and the
+        kernel gives the lowest free number, which is 900 once 900 descriptors are open. The compositor's own are few, but it
+        holds its Wayland clients' too (each may leave 28 it has not used, and its dma-bufs), and with enough of them a client's
+        socket or buffer was at 900: the next copy closed it under the shim, which went on reading the clipboard's memfd as that
+        client, and closed the clipboard when it gave the client up. A selection let go of gives its number back to /dev/null,
+        not to the table.
+*/
+static void compositor_clip_reserve(void)
+{
+        if (compositor_clip.blank < 0)
+                compositor_clip.blank = (int)system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
+        for (unsigned int which = 0; which < 2 && compositor_clip.blank >= 0; which++)
+                if (compositor_clip.fd[which] < 0)
+                        compositor_call(syscall(dup3), (positive)compositor_clip.blank, WINDOWS_CLIP_FD + which, O_CLOEXEC, 0, 0, 0);
+}
 
 /*
         The window a row belongs to: itself, or the window at the root of its popups, as the compositor took them with their
@@ -15609,7 +15629,10 @@ static void compositor_wl_selection(unsigned int which);
 // One selection let go, and its watchers told.
 static void compositor_clip_clear(unsigned int which)
 {
-        if (compositor_clip.fd[which] >= 0)
+        // The number stays the compositor's (compositor_clip_reserve): /dev/null takes the memfd's place in the same call.
+        if (compositor_clip.fd[which] >= 0 &&
+            (compositor_clip.blank < 0 ||
+             compositor_call(syscall(dup3), (positive)compositor_clip.blank, (positive)compositor_clip.fd[which], O_CLOEXEC, 0, 0, 0) < 0))
                 system_close(compositor_clip.fd[which]);
         compositor_clip.fd[which] = -1;
         compositor.table->clip_length[which] = 0;
@@ -15904,6 +15927,7 @@ static int compositor_clip_start(void)
         compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0010000 | WINDOWS_MODE, 0, 0, 0);
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, WINDOWS_MODE, 0, 0, 0);
         compositor_clip.door = (int)system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC);
+        compositor_clip_reserve();
         compositor.table->clip_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
         compositor.table->clip_owner[0] = compositor.table->clip_owner[1] = -1;
         compositor_clip_settings();
@@ -20674,11 +20698,49 @@ static void compositor_band_room(void)
         records: what a test types and points with when there is no hardware
         to do it.
 */
+/*
+        The descriptors the compositor may have, and whose they are. COMPOSITOR_DESCRIPTORS_WANTED is the limit it asks for at its
+        start (compositor_descriptors_room; the kernel's own soft limit is 1024 and its hard one 4096), and compositor_descriptors_most
+        what it got. The last COMPOSITOR_DESCRIPTORS_OWN numbers of that are the compositor's own: a descriptor a client hands it,
+        or a client's connection, that the kernel numbers among them says the rest of the table is full (the kernel gives the
+        lowest free number), and is refused (compositor_descriptor_crowded: the connection is closed, wayland_host.c). So clients
+        cannot take the numbers the compositor opens a window's door, an input device plugged in or a copy with, nor leave the
+        socket's accept failing for want of one, which would turn the loop without a wait for as long as they held them. With the
+        limit asked for, everything the shim's own caps let every client hold at once fits below the line (the assert in
+        wayland_host.c), so no client that keeps to them is refused.
+*/
+#define COMPOSITOR_DESCRIPTORS_WANTED 4096
+#define COMPOSITOR_DESCRIPTORS_OWN 256
+static long compositor_descriptors_most = 1024;
+
+static int compositor_descriptor_crowded(long descriptor)
+{
+        return descriptor >= compositor_descriptors_most - COMPOSITOR_DESCRIPTORS_OWN;
+}
+
 #ifdef CONFIG_MOONWATER_WAYLAND
 // The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
 #include "wayland.c"
 #include "wayland_host.c"
 #endif
+
+/*
+        The loop's poll list, sized by what can be in it: the loop's own (COMPOSITOR_POLLS_OWN: the signals, the watch of the input
+        directory, the doors' threads' knock, the card while a flip is in flight, the uevents and the clipboard's door), every
+        input device, every window's door, and what the Wayland shim adds (COMPOSITOR_WL_POLLS, wayland_host.c, which counts the X
+        window manager's with its own). The size was a sum of numbers written beside the loop, which the X window manager's two
+        were left out of when they came: with every input, every client stalled and a flip in flight the list was written two
+        entries past its end. Whoever adds an entry adds it to the constant its part is counted in.
+*/
+#ifndef COMPOSITOR_WL_POLLS
+#define COMPOSITOR_WL_POLLS 0
+#endif
+#define COMPOSITOR_POLLS_OWN 6
+#define COMPOSITOR_POLLS (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + WINDOWS + COMPOSITOR_WL_POLLS)
+// The compositor's own descriptors fit the share kept for them: the poll list's (but the clients'), a wake for every door, the table,
+// the card, the render node and the buffers given to it, the sound server's socket, the selections and their history, and each transfer's pipe.
+_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_OWN,
+               "the compositor's own descriptors fit the numbers kept for them");
 
 /*
         Room in the descriptor table for every descriptor the session can have, made while the program is one thread. The
@@ -20687,11 +20749,28 @@ static void compositor_band_room(void)
         composing threads are started by the first frame and the 65th descriptor is the door of the 29th window, so every
         start stood still there: 9 to 16 ms between the first frame and the window table's doors, measured headless, and
         the same again at the 129th, 257th and 513th, in the middle of a session. A descriptor made at the last number the
-        limit allows (1023 with the kernel's own limit) and closed leaves the table that size for good.
+        limit allows and closed leaves the table that size for good. The limit is raised first, to COMPOSITOR_DESCRIPTORS_WANTED
+        or as near it as the hard limit lets it be: at the kernel's 1024 the clients of the Wayland socket could fill the table.
 */
 static void compositor_descriptors_room(void)
 {
-        for (long last = 1023; last >= 127; last = (last - 1) / 2)
+        positive limits[2] = {0, 0};
+
+        // RLIMIT_NOFILE: the soft limit and the hard one.
+        if (compositor_call(syscall(prlimit64), 0, 7, 0, (positive)limits, 0, 0) == 0)
+        {
+                positive most = limits[1] < COMPOSITOR_DESCRIPTORS_WANTED ? limits[1] : COMPOSITOR_DESCRIPTORS_WANTED;
+
+                if (limits[0] < most)
+                {
+                        positive raised[2] = {most, limits[1]};
+
+                        if (compositor_call(syscall(prlimit64), 0, 7, (positive)raised, 0, 0, 0) == 0)
+                                limits[0] = most;
+                }
+                compositor_descriptors_most = (long)(limits[0] < COMPOSITOR_DESCRIPTORS_WANTED ? limits[0] : COMPOSITOR_DESCRIPTORS_WANTED);
+        }
+        for (long last = compositor_descriptors_most - 1; last >= 127; last = (last - 1) / 2)
         {
                 long made = compositor_call(syscall(fcntl), 0, 1030, (positive)last, 0, 0, 0); // F_DUPFD_CLOEXEC
 
@@ -20852,10 +20931,7 @@ static b32 compositor_main()
 
         while (running)
         {
-                // The Wayland shim's: its socket, its clients, its transfers' knock, the dma-bufs its stalled clients wait for, and the two of
-                // the X window manager's (its listener and its connection, compositor_xwm_poll), which this count left out: with every input,
-                // every client stalled on a dma-buf and a flip in flight the list was two entries past its end.
-                struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32 + 2]; // 6: one more, the doors' threads
+                struct compositor_poll wanted[COMPOSITOR_POLLS]; // every part of it is counted where it is added (COMPOSITOR_POLLS)
                 static unsigned int turns;
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
                 positive now = 0, until = 0;

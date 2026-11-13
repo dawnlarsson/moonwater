@@ -41,6 +41,75 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-196: clients' descriptors filled the compositor's table and were numbered as the clipboard's
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-13, the commit that adds this entry (`git log -S 'MW-2026-196' -- incident_response.md`) |
+| Class | Resource exhaustion of a shared table (descriptors), and a fixed descriptor number reused (a descriptor closed under its holder); denial of new windows, devices and clients, loss of the clipboard |
+| Attacker | 1 or 8: programs that can open `/run/moonwater/wayland-0`. One uid that is not the compositor's is held to 8 connections, which is about 680 descriptors with its dma-bufs; it takes a second uid, or the session's own clients beside it, to pass 900 |
+| Reachable | src/canvas/wayland_host.c `compositor_wl_read` and `compositor_wl_accept`; src/canvas/compositor.c `compositor_clip_keep`, `compositor_clip_clear` |
+
+**What happened.** A descriptor a client sends beside a request is installed in
+the compositor's own descriptor table by the kernel, and the shim keeps up to
+28 a client that it has not yet used, the four planes of each of 8 buffer
+parameter objects and the client's dma-bufs. Nothing counted them against the
+table. The compositor ran at the limit it was started with (the kernel's 1024),
+so 32 clients leaving 28 descriptors each filled it: the next `recvmsg` lost its
+descriptors (MSG_CTRUNC) and that client was dropped, a window's door could not
+be opened again, an input device plugged in could not be opened, and `accept4`
+failing with EMFILE leaves the listening socket readable, which is a loop that
+turns without waiting.
+
+The clipboard keeps its two selections at descriptors 900 and 901
+(`WINDOWS_CLIP_FD`), "a number nothing else is given": a copy is put there with
+`dup3`, which closes whatever is at the number, and a paste opens that number
+of the compositor's through `/proc`. The kernel gives every new descriptor the
+lowest free number, so once 900 were open a client's descriptor or its
+connection was number 900. The next copy closed it under the shim, which went
+on using the number as that client's (reading the clipboard's memfd as the
+client's connection, or mapping it as the client's buffer) and closed the
+clipboard's descriptor when it let the client go. Shown with a raw client
+(test/wayland_crowd.py) against a headless compositor built from the parent
+tree: 32 connections, 28 descriptors of `/dev/zero` each;
+`/proc/PID/fd/900` and `901` of the compositor read `/dev/zero`, and at a
+limit of 1024 one of the 32 was no longer answered.
+
+**The fix.** Three things. The compositor raises its own limit at its start to
+4096 or the hard limit (`compositor_descriptors_room`), under which everything
+the shim's caps let every client hold at once fits, with 256 numbers over: an
+assertion in wayland_host.c holds the caps to it. The last 256 numbers of the
+limit are the compositor's own (`compositor_descriptor_crowded`): a connection
+the kernel numbers among them is closed at the accept, and a client that sends
+a descriptor numbered among them is dropped with what it sent, so where the
+limit could not be raised it is the client that is refused and the socket is
+never left readable. And the clipboard's two numbers are held from the start
+by `/dev/null` (`compositor_clip_reserve`), which takes a selection's place
+again when the selection is let go of, so the kernel has neither number to
+give.
+
+**Tests that fail without the fix.** The gate's gpu-kit check (test/checks.c
+`descriptor_rows`): the numbers are /dev/null's from the start and after a
+selection is let go of, the next descriptor made is at neither, and a client
+whose descriptor is numbered in the compositor's share is dropped with it;
+with `compositor_clip_clear` closing the number two rows fail, and with the
+read not asking, the check ends at the row. test/wayland_e2e.sh (lane
+`wayland`): "a table's worth of clients' descriptors leaves every client
+answered and the clipboard's numbers the compositor's", run by hand against a
+headless compositor from the parent tree (it printed the two numbers as
+`/dev/zero`, and a client lost at a limit of 1024) and from the fix (`kept`).
+The lane itself was NOT RUN where this was written: it needs libwayland's
+client and scanner, which were not there.
+
+**Still open.** The confusion after the number was reused was reasoned from
+the code and not driven to its end here (no copy was made while a client held
+number 900). A machine whose hard limit is below 4096 gives the clients less
+than their caps allow and drops the client that passes the line, a client that
+kept to its caps among them. The X window manager's socket, the doors and the
+sound server's socket are the compositor's own and are counted in the 256 by
+an assertion. A system-wide shortage of files (ENFILE) still leaves `accept4`
+failing with the socket readable.
+
 ### MW-2026-195: a pool on a file the client serves held the compositor in a page fault
 
 | | |

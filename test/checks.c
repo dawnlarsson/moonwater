@@ -235697,6 +235697,93 @@ static void close_ask_rows(void)
 
 // A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
 // it composed nothing and used up its period. No flip in flight, or one past the deadline (a screen that is off never answers), is no wait.
+/*
+        The descriptor table's shares (compositor_descriptor_crowded) and the clipboard's two numbers (compositor_clip_reserve). The numbers
+        are held by /dev/null while a selection is empty and given back to it when one is let go of, so the kernel never numbers another
+        descriptor 900 or 901, which the next copy would close under its holder; and a client whose descriptors are numbered in the
+        compositor's own share is dropped with them, so the clients cannot fill the table.
+*/
+static int descriptor_held(long number)
+{
+        return (long)system_call_3(syscall(fcntl), (positive)number, 1, 0) >= 0; // F_GETFD
+}
+
+static int descriptor_is(long number, const char *what)
+{
+        char path[40] = "/proc/self/fd/", link[64];
+        long length;
+
+        positive_into_string((string_address)path + 14, (positive)number);
+        memory_zero(link, sizeof(link));
+        length = (long)system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)link, sizeof(link) - 1);
+        if (length <= 0)
+                return 0;
+        for (long at = 0; what[at]; at++)
+                if (link[at] != what[at])
+                        return 0;
+        return 1;
+}
+
+static void descriptor_rows(void)
+{
+        static struct windows table;
+        struct windows *kept = compositor.table;
+        long most = compositor_descriptors_most, memfd, lowest, after;
+        int pair[2] = {-1, -1}, slot = WAYLAND_CLIENTS - 1, was = compositor_wl.fd[WAYLAND_CLIENTS - 1];
+
+        check("descriptors: a number below the compositor's own share is a client's to have",
+              !compositor_descriptor_crowded(3) && !compositor_descriptor_crowded(most - COMPOSITOR_DESCRIPTORS_OWN - 1));
+        check("descriptors: one in the compositor's own share says the clients' is full",
+              compositor_descriptor_crowded(most - COMPOSITOR_DESCRIPTORS_OWN) && compositor_descriptor_crowded(most - 1));
+
+        compositor.table = &table;
+        compositor_clip_reserve();
+        check("clipboard numbers: both are held from the start, by /dev/null",
+              compositor_clip.blank >= 0 && descriptor_is(WINDOWS_CLIP_FD, "/dev/null") && descriptor_is(WINDOWS_CLIP_FD + 1, "/dev/null"));
+        memfd = (long)system_call_2(syscall(memfd_create), (positive) "copy", 1);
+        compositor_clip_keep(WINDOWS_CLIP_CLIPBOARD, (int)memfd, 0, -2);
+        check("clipboard numbers: a copy is at its number", compositor_clip.fd[0] == WINDOWS_CLIP_FD && descriptor_is(WINDOWS_CLIP_FD, "/memfd:copy"));
+        compositor_clip_clear(WINDOWS_CLIP_CLIPBOARD);
+        check("clipboard numbers: a selection let go of gives its number back to /dev/null, not to the table",
+              compositor_clip.fd[0] == -1 && descriptor_is(WINDOWS_CLIP_FD, "/dev/null"));
+        after = (long)system_call_3(syscall(fcntl), 0, 1030, WINDOWS_CLIP_FD); // F_DUPFD_CLOEXEC: the lowest free number from the selection's
+        check("clipboard numbers: so the next descriptor made is at neither", after > WINDOWS_CLIP_FD + 1);
+        if (after >= 0)
+                system_close(after);
+
+        // A client that sends a descriptor when every number left is the compositor's own: it is dropped, and the descriptor is not kept.
+        if ((long)system_call_4(syscall(socketpair), 1, 1, 0, (positive)pair) == 0)
+        {
+                positive control[3] = {0, 0, 0}, message[7] = {0}, vector[2];
+                char byte = 0;
+                int sent = (int)system_call_2(syscall(memfd_create), (positive) "sent", 1);
+
+                // One byte, and SCM_RIGHTS with one descriptor: a cmsghdr of 16 bytes (its length, SOL_SOCKET, SCM_RIGHTS) and the number.
+                control[0] = 20;
+                ((int *)control)[2] = 1, ((int *)control)[3] = 1, ((int *)control)[4] = sent;
+                vector[0] = (positive)&byte, vector[1] = 1;
+                message[2] = (positive)vector, message[3] = 1, message[4] = (positive)control, message[5] = 24;
+                system_call_3(syscall(sendmsg), (positive)pair[1], (positive)message, 0);
+                system_close(sent);
+                lowest = (long)system_call_3(syscall(fcntl), 0, 1030, 3);
+                system_close(lowest);
+                compositor_wl.fd[slot] = pair[0];
+                compositor_descriptors_most = COMPOSITOR_DESCRIPTORS_OWN + 3;
+                compositor_wl_read(slot);
+                compositor_descriptors_most = most;
+                after = (long)system_call_3(syscall(fcntl), 0, 1030, 3);
+                system_close(after);
+                // The connection's own number is free again, so the lowest free is that or lower: the descriptor received took none for good.
+                check("descriptors: a client whose descriptor is numbered in the compositor's share is dropped", compositor_wl.fd[slot] == -1 && !descriptor_held(pair[0]));
+                check("descriptors: and what it sent is not kept open", after <= lowest && after <= pair[0]);
+                system_close(pair[1]);
+        }
+        else
+                check("descriptors: a socket pair is made", false);
+        compositor_wl.fd[slot] = was;
+        compositor.table = kept;
+}
+
 static void flip_wait_rows(void)
 {
         positive period = compositor.period, issued = compositor.flip_issued;
@@ -235782,6 +235869,7 @@ b32 main(void)
         gpu_late_rows();
         gpu_bench_rows();
         flip_wait_rows();
+        descriptor_rows();
         frame_dated_rows();
         close_ask_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)

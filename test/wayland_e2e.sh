@@ -697,6 +697,15 @@ refused) if alive; then row ok "a pool on a file the client serves itself (FUSE)
 *) row FAIL "a pool on a file the client serves itself (FUSE) is refused, and the compositor answers the next client" "$out" ;;
 esac
 
+# Every client the socket takes, each leaving the compositor the most descriptors a client may have sent and not used (test/wayland_crowd.py):
+# all of them are still answered, and the clipboard's two numbers in the compositor's table are not a client's descriptors (MW-2026-196).
+out=$(python3 -I "$(dirname "$0")/wayland_crowd.py" "$cpid" 2>&1)
+case $out in
+kept) if alive; then row ok "a table's worth of clients' descriptors leaves every client answered and the clipboard's numbers the compositor's"
+        else row FAIL "a table's worth of clients' descriptors leaves the compositor running" "the compositor is gone: $(tail -3 "$work/compositor.log")"; fi ;;
+*) row FAIL "a table's worth of clients' descriptors leaves every client answered and the clipboard's numbers the compositor's" "$out" ;;
+esac
+
 # A window whose damage is a rectangle the card copies (over its threshold): the card's copy into the picture is the processor's, byte for byte, and
 # moonwater debug says the card copied rectangles (not the processor). The window has a subsurface (-u): a window of one surface is read where its
 # client keeps it, damage and all, and nothing of it is copied by anyone; one with a subsurface is still laid into the row's picture, its root's damage

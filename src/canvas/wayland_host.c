@@ -2257,6 +2257,13 @@ static void compositor_wl_drop(long slot)
         compositor_wl_transfers_drop(slot);
 }
 
+// Everything the shim's caps let every client hold at once (its connection, the descriptors it sent and has not used, the planes of its
+// buffer parameters, and the dma-bufs of all clients together) is below the line the compositor's own numbers start at, when the limit is
+// the one asked for: no client that keeps to the caps is refused for room.
+_Static_assert(WAYLAND_CLIENTS * (1 + WAYLAND_FDS + WAYLAND_PARAMS * 4) + WAYLAND_DMABUFS_ALL + 2 * COMPOSITOR_WL_TRANSFERS <=
+                   COMPOSITOR_DESCRIPTORS_WANTED - COMPOSITOR_DESCRIPTORS_OWN,
+               "the clients' descriptors fit their share of the table");
+
 /* One connection, if one waits: its peer is read from the socket, and it takes a slot unless the caps say no. */
 static void compositor_wl_accept(void)
 {
@@ -2268,6 +2275,13 @@ static void compositor_wl_accept(void)
 
                 if (fd < 0)
                         return;
+                // The clients' share of the descriptor table is full (compositor_descriptor_crowded): the connection is taken off the
+                // socket and closed, so the socket does not stay readable and the numbers left are the compositor's own.
+                if (compositor_descriptor_crowded(fd))
+                {
+                        system_close((int)fd);
+                        continue;
+                }
                 // SOL_SOCKET, SO_PEERCRED: the kernel's word for who is on the other end, not the client's.
                 if (compositor_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0)
                 {
@@ -2347,6 +2361,10 @@ static void compositor_wl_read(long slot)
                                         }
                         at += (length + 7) & ~7ul;
                 }
+                // A descriptor numbered in the compositor's own share of the table: the clients' share is full, and this client is the one
+                // that is refused the room, with what it sent (compositor_descriptor_crowded).
+                for (long item = 0; item < count; item++)
+                        excess |= compositor_descriptor_crowded(fds[item]);
                 // MSG_CTRUNC: descriptors were lost, and what is left of the stream can no longer be trusted to line up.
                 if ((message[6] & 0x8) || excess)
                 {
@@ -2425,7 +2443,10 @@ static void compositor_wl_flush_all(void)
                         compositor_wl_flush(slot);
 }
 
-/* Where the polls for the clients go in the loop's list, and what comes of them. */
+/* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
+   the loop's list is sized by (COMPOSITOR_POLLS): the socket, every client, the transfers' knock, the dma-buf of every client
+   stalled on one, and the X window manager's. An entry added here is added to it. */
+#define COMPOSITOR_WL_POLLS (1 + WAYLAND_CLIENTS + 1 + WAYLAND_CLIENTS + COMPOSITOR_XWM_POLLS)
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
         unsigned int base = count;

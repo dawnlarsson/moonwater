@@ -43,6 +43,7 @@
 #define COMPOSITOR_XWM_DIR "/run/moonwater/xwm"
 #define COMPOSITOR_XWM_PATH "/run/moonwater/xwm/wm-0"
 #define COMPOSITOR_XWM_BACKLOG 4
+#define COMPOSITOR_XWM_POLLS 2                       // what compositor_xwm_poll adds to the loop's list: the listening socket and the connection
 #define COMPOSITOR_XWM_WINDOWS 64                    // the top-level windows the window manager keeps records of
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 16384                     // what is queued for the server; a queue that would overflow closes the connection
