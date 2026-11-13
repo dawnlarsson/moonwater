@@ -156502,7 +156502,23 @@ static fn check_kit_trail(void)
         before = trail_darkest(pixels, trail.at[3], trail.at[3] + trail.wide[3], 20, 60, ground);
         inks = trail.first == 0 && trail.last == 3 && now >= 700 && after > 110 && after < now * 6 / 10 && before > 110 && before < now * 6 / 10 &&
                trail.at[0] == 10 && trail.at[1] > trail.at[0] && trail.at[2] > trail.at[1] + trail.wide[1] && trail.at[3] > trail.at[2] + trail.wide[2];
-        check("trail: the places up to the current one are in the ink and the places after it are dimmed where they stand, still drawn", inks);
+        // And dimmed is fainter than the quiet ink of a place before the current one: with person the current place, home (before it)
+        // is quiet and documents (after it) is fainter than home.
+        {
+                unsigned int quiet_before, dim_after;
+
+                trail.current = 2;
+                ui_trail_layout(&ui, &trail);
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                ui_trail_draw(&ui, &trail);
+                quiet_before = trail_darkest(pixels, trail.at[1], trail.at[1] + trail.wide[1], 20, 60, ground);
+                dim_after = trail_darkest(pixels, trail.at[3], trail.at[3] + trail.wide[3], 20, 60, ground);
+                inks = inks && dim_after > 110 && dim_after * 10 < quiet_before * 8;
+                trail.current = 1;
+                ui_trail_layout(&ui, &trail);
+        }
+        check("trail: the places up to the current one are in the ink and the places after it are dimmed where they stand, still drawn and fainter than a place before it", inks);
         hits = ui_trail_hit(&ui, &trail, trail.at[2] + 2, 40) == 2 && ui_trail_hit(&ui, &trail, trail.at[3] + trail.wide[3] - 1, 40) == 3 &&
                ui_trail_hit(&ui, &trail, trail.at[0] + 1, 40) == 0 && ui_trail_hit(&ui, &trail, 380, 40) == -1 && ui_trail_hit(&ui, &trail, trail.at[2] + 2, 70) == -1;
         check("trail: a point on a place, dimmed or not, answers its number, and a point on the trail's own ground or outside it answers none", hits);
