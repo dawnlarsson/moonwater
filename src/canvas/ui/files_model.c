@@ -834,4 +834,293 @@ static b32 files_model_back(struct files_model address_to m, b32 forward)
         return true;
 }
 
+/* ---- changing what is in the folder ---- */
+/*
+        What changes the disk. Each works on the folder shown through its own descriptor (m->handle), by a name of the listing that
+        has just been looked at again (files_model_check) or by a new name that is held to be a name; nothing is resolved by a path,
+        so a folder renamed or swapped under the window cannot send an operation somewhere else. Nothing is followed.
+
+        A new folder and a new name are one call each (mkdirat, renameat2 with RENAME_NOREPLACE): a name that is taken is refused
+        (FILES_DID_EXISTS) and never written over. The kernel's refusal is kept (m->did_error) for a view to say.
+
+        Deleting is a job (struct files_job), run in steps as a listing is read: files_delete_begin takes the names (each looked at
+        again first: one that is no longer the entry listed stops the whole job before anything is removed), files_job_step removes
+        at most `most` things and returns, files_job_cancel stops it between two. It is a real delete, not a move to a trash: a trash
+        is a folder on the same filesystem with a record of where each thing came from, which this tree does not have, and a delete
+        that is asked twice (the view's) is honest about what it does. A file, a link and anything else that is no folder is removed
+        as the entry it is, by the tree's own remove for an entry that must still be the one looked at (file_remove_same: opened
+        without following, held to its inode, removed through the held folder), so a link is removed and never what it names. A
+        folder is emptied from the inside, each folder on the way opened without following and held to its inode
+        (file_walk_open_found), and removed when it is empty. What stops it (a folder that may not be written, a busy mount) stops the
+        job there: its state is FILES_JOB_FAILED with the kernel's code and the name it stopped at, and removed says how many things
+        went before it. Nothing is half-made by a delete; what a stopped or cancelled one leaves is whatever it had not reached, and
+        the count says how far it got.
+*/
+#define FILES_JOB_DEEP 64 // the folders inside one another a delete goes down: one deeper stops the job (FILES_JOB_FAILED, too deep)
+
+enum
+{
+        FILES_DID,        // done
+        FILES_DID_EXISTS, // the name is taken: nothing was written over
+        FILES_DID_BAD,    // not a name (empty, a stroke or a NUL in it, . or .., too long), or the entry is no longer the one listed
+        FILES_DID_FAILED, // the kernel refused: did_error has its code
+};
+
+enum
+{
+        FILES_JOB_IDLE,
+        FILES_JOB_RUNNING,
+        FILES_JOB_DONE,
+        FILES_JOB_FAILED,    // error has the kernel's code (or -ERROR_NOT_EMPTY's kin), at the name it stopped at
+        FILES_JOB_CANCELLED,
+};
+
+struct files_job
+{
+        int state;
+        bipolar error;
+        p8 at[FILES_NAME];            // the name it is on, or stopped at
+        p32 removed;                  // the things removed so far, folders and what was in them alike
+        p32 count, next;              // the entries asked for, and the next of them
+        p8 address_to names;          // their names, each with its end (the job's own copy: the listing may be read again under it)
+        file_facts address_to facts;  // and each as it was looked at when the job began
+        bipolar stack[FILES_JOB_DEEP]; // the folders it is inside, the innermost last
+        p8 inside[FILES_JOB_DEEP][FILES_NAME]; // and the name each has in the one before it
+        int depth;
+};
+
+static bipolar files_did_error; // the kernel's code of the last FILES_DID_FAILED
+
+// Whether bytes are a name a folder can hold: not empty, not . or .., no stroke, and short enough.
+static b32 files_name_good(const p8 address_to name)
+{
+        positive length = string_length((string_address)name);
+
+        if (!length || length >= FILES_NAME || file_is_dot((string_address)name))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (name[at] == '/')
+                        return false;
+        return true;
+}
+
+// A folder of this name made in the folder shown. A name that is taken is refused, whatever has it.
+static int files_model_make_folder(struct files_model address_to m, const p8 address_to name)
+{
+        bipolar made;
+
+        if (m->handle < 0 || !files_name_good(name))
+                return FILES_DID_BAD;
+        made = (bipolar)system_call_3(syscall(mkdirat), (positive)m->handle, (positive)name, 0755);
+        if (made >= 0)
+                return FILES_DID;
+        files_did_error = made;
+        return made == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
+}
+
+// The entry at a place given another name in the folder shown: only the entry that was listed, and never over a name that is taken.
+static int files_model_rename(struct files_model address_to m, p32 place, const p8 address_to name)
+{
+        const struct files_entry address_to entry = files_model_entry(m, place);
+        bipolar moved;
+
+        if (!entry || !files_name_good(name) || files_model_check(m, place, null) != FILES_SAME)
+                return FILES_DID_BAD;
+        moved = (bipolar)system_call_5(syscall(renameat2), (positive)m->handle, (positive)files_model_name(m, entry), (positive)m->handle, (positive)name,
+                                       FILE_RENAME_NOREPLACE);
+        if (moved >= 0)
+                return FILES_DID;
+        files_did_error = moved;
+        return moved == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
+}
+
+static positive files_job_bytes(void)
+{
+        return (positive)FILES_MOST * FILES_NAME / 8 + (positive)FILES_MOST / 8 * sizeof(file_facts);
+}
+
+static fn files_job_close(struct files_job address_to job)
+{
+        while (job->depth > 0)
+                system_close(job->stack[--job->depth]);
+}
+
+// The job let go of: its folders closed and its memory given back.
+static fn files_job_end(struct files_job address_to job)
+{
+        files_job_close(job);
+        if (job->names)
+                system_call_2(syscall(munmap), (positive)job->names, files_job_bytes());
+        memory_fill(job, 0, sizeof(*job));
+}
+
+static fn files_job_fail(struct files_job address_to job, bipolar error)
+{
+        files_job_close(job);
+        job->state = FILES_JOB_FAILED, job->error = error;
+}
+
+static fn files_job_cancel(struct files_job address_to job)
+{
+        if (job->state != FILES_JOB_RUNNING)
+                return;
+        files_job_close(job);
+        job->state = FILES_JOB_CANCELLED;
+}
+
+/*
+        A delete of the entries chosen (or of the one at the cursor when none is chosen) begun. Every one is looked at again first and
+        must be the entry listed; one that is not stops the job before it starts (false, and the job is FILES_JOB_FAILED at that
+        name), so a listing that is stale deletes nothing. At most FILES_MOST / 8 entries are taken in one job.
+*/
+static b32 files_delete_begin(struct files_model address_to m, struct files_job address_to job)
+{
+        bipolar mapped;
+        positive used = 0;
+
+        files_job_end(job);
+        mapped = (bipolar)system_call_6(syscall(mmap), 0, files_job_bytes(), 3, 0x22, (positive)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+        {
+                job->state = FILES_JOB_FAILED, job->error = mapped;
+                return false;
+        }
+        job->names = (p8 address_to)mapped;
+        job->facts = (file_facts address_to)(job->names + (positive)FILES_MOST * FILES_NAME / 8);
+        for (p32 place = 0; place < m->shown.count; place++)
+        {
+                const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
+
+                if (m->chosen_count ? !files_model_chosen(m, place) : place != m->cursor)
+                        continue;
+                if (job->count >= FILES_MOST / 8 || used + entry->length + 1 > (positive)FILES_MOST * FILES_NAME / 8)
+                        break;
+                string_copy_bounded(job->at, (string_address)files_model_name(m, entry), FILES_NAME);
+                if (files_model_check(m, place, &job->facts[job->count]) != FILES_SAME)
+                {
+                        job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY;
+                        return false;
+                }
+                memory_copy(job->names + used, files_model_name(m, entry), (positive)entry->length + 1);
+                used += (positive)entry->length + 1;
+                job->count++;
+        }
+        job->at[0] = end;
+        job->state = job->count ? FILES_JOB_RUNNING : FILES_JOB_DONE;
+        return job->count != 0;
+}
+
+// The name of the job's entry number `which`.
+static const p8 address_to files_job_name(const struct files_job address_to job, p32 which)
+{
+        const p8 address_to name = job->names;
+
+        while (which--)
+                name += string_length((string_address)name) + 1;
+        return name;
+}
+
+// One thing of a delete: the next entry inside the innermost folder it is in removed or gone into, or that folder, empty, removed
+// from the one it is in. False when the job is over (done or failed).
+static b32 files_delete_one(struct files_model address_to m, struct files_job address_to job)
+{
+        bipolar in = job->depth ? job->stack[job->depth - 1] : m->handle, gone;
+        file_walk walk;
+        struct linux_dirent64 address_to record;
+        file_facts facts;
+        const p8 address_to name = null;
+        b32 top = !job->depth;
+
+        if (top)
+        {
+                if (job->next >= job->count)
+                {
+                        job->state = FILES_JOB_DONE;
+                        return false;
+                }
+                name = files_job_name(job, job->next);
+                facts = job->facts[job->next];
+        }
+        else
+        {
+                // The first thing still in the folder: read afresh each time, since the last step changed what is there.
+                if (!file_walk_open(&walk, in, (string_address) "."))
+                {
+                        files_job_fail(job, walk.error);
+                        return false;
+                }
+                while ((record = file_walk_next(&walk)) && file_is_dot((string_address)record->d_name))
+                        ;
+                if (record)
+                        string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
+                gone = walk.error;
+                file_walk_close(&walk);
+                if (!record)
+                {
+                        // Empty (or unreadable: the remove says which): out of it, and it is removed from the folder it is in.
+                        if (gone < 0)
+                        {
+                                files_job_fail(job, gone);
+                                return false;
+                        }
+                        system_close(job->stack[--job->depth]);
+                        string_copy_bounded(job->at, job->inside[job->depth], FILES_NAME);
+                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)(job->depth ? job->stack[job->depth - 1] : m->handle), (positive)job->at, AT_REMOVEDIR);
+                        if (gone < 0)
+                        {
+                                files_job_fail(job, gone);
+                                return false;
+                        }
+                        job->removed++;
+                        job->next += !job->depth;
+                        return true;
+                }
+                name = job->at;
+                gone = file_look_code(in, (string_address)name, AT_SYMLINK_NOFOLLOW, &facts);
+                if (gone < 0)
+                {
+                        files_job_fail(job, gone);
+                        return false;
+                }
+        }
+        if (top)
+                string_copy_bounded(job->at, (string_address)name, FILES_NAME);
+        if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                // A folder: gone into, opened without following and held to the inode looked at. It is removed when it is empty.
+                if (job->depth >= FILES_JOB_DEEP)
+                {
+                        files_job_fail(job, -40);
+                        return false;
+                }
+                if (!file_walk_open_found_same(&walk, in, (string_address)job->at, &facts))
+                {
+                        files_job_fail(job, walk.error);
+                        return false;
+                }
+                string_copy_bounded(job->inside[job->depth], job->at, FILES_NAME);
+                job->stack[job->depth++] = walk.handle;
+                return true;
+        }
+        // Anything else is removed as the entry it is: a link is the link, and it must still be what was looked at.
+        gone = file_remove_same(in, (string_address)job->at, 0, &facts);
+        if (gone < 0)
+        {
+                files_job_fail(job, gone);
+                return false;
+        }
+        job->removed++;
+        job->next += top;
+        return true;
+}
+
+// A step of the job: at most `most` things, and back. True while there is more to do.
+static b32 files_job_step(struct files_model address_to m, struct files_job address_to job, positive most)
+{
+        for (positive done = 0; done < most && job->state == FILES_JOB_RUNNING; done++)
+                if (!files_delete_one(m, job))
+                        break;
+        return job->state == FILES_JOB_RUNNING;
+}
+
 #endif // MOONWATER_FILES_MODEL

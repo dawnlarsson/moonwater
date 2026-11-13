@@ -117071,6 +117071,186 @@ static fn browser_many(struct files_model address_to m)
               m->state == FILES_READY && files_model_count(m) == FILES_MOST && m->shown.cut);
 }
 
+static b32 browser_there(string_address relative)
+{
+        p8 path[FILES_PATH];
+        file_facts facts;
+
+        browser_path(path, relative);
+        return file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) == 0;
+}
+
+/*
+        What changes the disk (files_model_make_folder, files_model_rename, the delete job). A new folder and a new name are made
+        only where the name is free and is a name; a rename is of the entry that was listed and no other. A delete removes files,
+        links as links and folders with all that is in them, a bounded number of things a step; it removes nothing when an entry is
+        no longer the one listed, stops where a folder was swapped for a link under it and leaves what the link names alone, stops
+        with the kernel's reason where it may not remove, can be cancelled between two steps with what it has not reached still
+        there, and takes ten thousand files in steps.
+*/
+static fn browser_ops(struct files_model address_to m)
+{
+        static struct files_job job;
+        p8 elsewhere[FILES_PATH], name[32] = "ops/hundred/f000";
+        positive steps;
+        b32 made, renamed, deleted, stale, swapped, cancelled, many;
+        bipolar child;
+
+        browser_folder((string_address) "ops");
+        browser_file((string_address) "ops/one", 10, 0);
+        browser_file((string_address) "ops/two", 20, 0);
+        browser_go(m, (string_address) "ops");
+        made = files_model_make_folder(m, (const p8 address_to) "made") == FILES_DID && browser_there((string_address) "ops/made") &&
+               files_model_make_folder(m, (const p8 address_to) "made") == FILES_DID_EXISTS && files_model_make_folder(m, (const p8 address_to) "one") == FILES_DID_EXISTS &&
+               files_model_make_folder(m, (const p8 address_to) "") == FILES_DID_BAD && files_model_make_folder(m, (const p8 address_to) "a/b") == FILES_DID_BAD &&
+               files_model_make_folder(m, (const p8 address_to) "..") == FILES_DID_BAD && !browser_there((string_address) "ops/a");
+        check("browser: a new folder is made where its name is free, a name that is taken is refused whatever has it, and what is no name (empty, with a stroke, the folder above) makes nothing",
+              made);
+        files_model_reload(m);
+        browser_read(m, 64);
+        renamed = files_model_rename(m, browser_at(m, "one"), (const p8 address_to) "uno") == FILES_DID && browser_there((string_address) "ops/uno") &&
+                  !browser_there((string_address) "ops/one");
+        files_model_reload(m);
+        browser_read(m, 64);
+        renamed = renamed && files_model_rename(m, browser_at(m, "uno"), (const p8 address_to) "two") == FILES_DID_EXISTS && browser_there((string_address) "ops/uno") &&
+                  files_model_rename(m, browser_at(m, "uno"), (const p8 address_to) "x/y") == FILES_DID_BAD;
+        // The listed file replaced by another of its name: it is not the entry listed, and is not renamed.
+        browser_remove_in((string_address) "ops/two");
+        browser_folder((string_address) "ops/two");
+        renamed = renamed && files_model_rename(m, browser_at(m, "two"), (const p8 address_to) "three") == FILES_DID_BAD && !browser_there((string_address) "ops/three");
+        check("browser: an entry is given a new name where the name is free and is a name, never over a name that is taken, and only if it is still the entry that was listed",
+              renamed);
+
+        // A delete: a file, a link to a folder elsewhere (the link goes, the folder it names stays whole) and a folder of folders.
+        browser_folder((string_address) "ops/tree");
+        browser_folder((string_address) "ops/tree/a");
+        browser_folder((string_address) "ops/tree/a/b");
+        browser_file((string_address) "ops/tree/a/b/deep", 5, 0);
+        browser_file((string_address) "ops/tree/top", 5, 0);
+        browser_folder((string_address) "ops-elsewhere");
+        browser_file((string_address) "ops-elsewhere/prize", 1, 0);
+        browser_path(elsewhere, (string_address) "ops-elsewhere");
+        browser_link(elsewhere, (string_address) "ops/tree/a/way-out");
+        browser_link(elsewhere, (string_address) "ops/link");
+        files_model_reload(m);
+        browser_read(m, 64);
+        files_model_choose(m, browser_at(m, "tree"), FILES_CHOOSE_ONLY);
+        files_model_choose(m, browser_at(m, "link"), FILES_CHOOSE_TOGGLE);
+        files_model_choose(m, browser_at(m, "uno"), FILES_CHOOSE_TOGGLE);
+        deleted = files_delete_begin(m, &job) && job.count == 3 && job.state == FILES_JOB_RUNNING;
+        for (steps = 0; files_job_step(m, &job, 1) && steps < 100; steps++)
+                deleted = deleted && job.state == FILES_JOB_RUNNING;
+        // tree, a, b, deep, top, way-out, link, uno: eight things, one a step, with the steps that went into a folder beside them
+        deleted = deleted && job.state == FILES_JOB_DONE && job.removed == 8 && steps >= 8 && !browser_there((string_address) "ops/tree") &&
+                  !browser_there((string_address) "ops/link") && !browser_there((string_address) "ops/uno") && browser_there((string_address) "ops/made") &&
+                  browser_there((string_address) "ops-elsewhere/prize");
+        check("browser: a delete removes a file, a link as the link it is and a folder with all that is in it, one thing a step, and what a link named is left whole",
+              deleted);
+
+        // Stale: the entry listed is replaced before the delete is asked. Nothing is removed.
+        browser_file((string_address) "ops/stale", 3, 0);
+        browser_file((string_address) "ops/kept", 3, 0);
+        files_model_reload(m);
+        browser_read(m, 64);
+        browser_remove_in((string_address) "ops/stale");
+        browser_file((string_address) "ops/stale", 4, 0);
+        files_model_choose(m, browser_at(m, "kept"), FILES_CHOOSE_ONLY);
+        files_model_choose(m, browser_at(m, "stale"), FILES_CHOOSE_TOGGLE);
+        stale = !files_delete_begin(m, &job) && job.state == FILES_JOB_FAILED && string_equals(job.at, (string_address) "stale") && !files_job_step(m, &job, 100) &&
+                job.removed == 0 && browser_there((string_address) "ops/stale") && browser_there((string_address) "ops/kept");
+        check("browser: a delete asked of a listing that is stale removes nothing: one entry that is no longer the one listed stops it before it starts, at that name", stale);
+
+        // Swapped under it: a folder that was looked at is moved aside and a link to another place given its name before the job reaches it.
+        browser_folder((string_address) "ops/victim");
+        browser_file((string_address) "ops/victim/mine", 1, 0);
+        files_model_reload(m);
+        browser_read(m, 64);
+        files_model_choose(m, browser_at(m, "victim"), FILES_CHOOSE_ONLY);
+        swapped = files_delete_begin(m, &job);
+        {
+                p8 from[FILES_PATH], to[FILES_PATH];
+
+                browser_path(from, (string_address) "ops/victim"), browser_path(to, (string_address) "ops/victim-aside");
+                system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, AT_FDCWD, (positive)to, 0);
+        }
+        browser_link(elsewhere, (string_address) "ops/victim");
+        while (files_job_step(m, &job, 8))
+                ;
+        swapped = swapped && job.state == FILES_JOB_FAILED && job.removed == 0 && browser_there((string_address) "ops-elsewhere/prize") &&
+                  browser_there((string_address) "ops/victim") && browser_there((string_address) "ops/victim-aside/mine");
+        check("browser: a folder swapped for a link to another place before the delete reaches it stops the delete there: the link is not gone into, and what it names is whole",
+              swapped);
+        browser_remove_in((string_address) "ops/victim");
+
+        // May not: a user who is not the folder's owner deletes nothing, and the job says the kernel's reason and the name.
+        files_model_reload(m);
+        browser_read(m, 64);
+        files_model_choose(m, browser_at(m, "kept"), FILES_CHOOSE_ONLY);
+        child = (bipolar)system_fork();
+        if (child == 0)
+        {
+                int answer = 2;
+
+                if ((bipolar)system_call_3(syscall(setresgid), 65534, 65534, 65534) >= 0 && (bipolar)system_call_3(syscall(setresuid), 65534, 65534, 65534) >= 0)
+                {
+                        files_delete_begin(m, &job);
+                        while (files_job_step(m, &job, 8))
+                                ;
+                        answer = job.state == FILES_JOB_FAILED && job.error < 0 && job.removed == 0 && string_equals(job.at, (string_address) "kept") ? 0 : 1;
+                }
+                system_call_1(syscall(exit_group), (positive)answer);
+        }
+        else if (child > 0)
+        {
+                b32 raw = 0;
+
+                system_wait4_retry(child, address_of raw, 0, null);
+                if ((raw & 0x7f) == 0 && (raw >> 8 & 0xff) == 2)
+                        log_direct(str("  browser: a delete by a user who may not: NOT RUN (this user cannot become another)\n"));
+                else
+                        check("browser: a delete by a user who may not remove from the folder removes nothing and stops with the kernel's reason at the name",
+                              (raw & 0x7f) == 0 && (raw >> 8 & 0xff) == 0 && browser_there((string_address) "ops/kept"));
+        }
+        else
+                log_direct(str("  browser: a delete by a user who may not: NOT RUN (no child could be started)\n"));
+
+        // Cancelled part way: what was reached is gone, what was not is there, and the job says how far it got.
+        browser_folder((string_address) "ops/hundred");
+        for (int at = 0; at < 100; at++)
+        {
+                name[13] = (p8)('0' + at / 100), name[14] = (p8)('0' + at / 10 % 10), name[15] = (p8)('0' + at % 10);
+                browser_file(name, 0, 0);
+        }
+        files_model_reload(m);
+        browser_read(m, 64);
+        files_model_choose(m, browser_at(m, "hundred"), FILES_CHOOSE_ONLY);
+        cancelled = files_delete_begin(m, &job) && files_job_step(m, &job, 31) && job.removed == 30; // the first step goes into the folder
+        files_job_cancel(&job);
+        cancelled = cancelled && job.state == FILES_JOB_CANCELLED && !files_job_step(m, &job, 100) && job.removed == 30 && job.depth == 0 &&
+                    browser_there((string_address) "ops/hundred");
+        {
+                p32 left = 0;
+
+                for (int at = 0; at < 100; at++)
+                {
+                        name[13] = (p8)('0' + at / 100), name[14] = (p8)('0' + at / 10 % 10), name[15] = (p8)('0' + at % 10);
+                        left += browser_there(name);
+                }
+                cancelled = cancelled && left == 70;
+        }
+        check("browser: a delete cancelled part way stops between two things: the thirty it reached are gone, the seventy it did not are there, and it says thirty", cancelled);
+
+        // Ten thousand and more: the folder of the reading rows, in steps.
+        browser_go(m, (string_address) "");
+        files_model_choose(m, browser_at(m, "many"), FILES_CHOOSE_ONLY);
+        many = files_delete_begin(m, &job);
+        for (steps = 1; files_job_step(m, &job, 256); steps++)
+                many = many && job.state == FILES_JOB_RUNNING;
+        many = many && job.state == FILES_JOB_DONE && job.removed == 12101 && steps >= 40 && !browser_there((string_address) "many");
+        check("browser: a folder of twelve thousand files is deleted in steps of at most the things a step is given, forty steps and more, and is gone", many);
+        files_job_end(&job);
+}
+
 // The model names nothing of the kit and nothing of a window: outside its comments, its source has none of their words.
 static fn browser_apart(void)
 {
@@ -117147,6 +117327,7 @@ b32 main(void)
         browser_typed(address_of model);
         browser_changes(address_of model);
         browser_many(address_of model);
+        browser_ops(address_of model);
         browser_apart();
         files_model_close(address_of model);
         browser_remove(browser_base);
