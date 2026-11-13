@@ -784,10 +784,13 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         int same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
                    (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
 
-        // Only a picture the client says is all changed is the buffer's: a partial damage is a change over what the window showed, which a
-        // client that reuses its buffers (Xwayland's root) does not keep whole in the buffer (the copy lays the damage over the window).
-        if (!picture->pixels || !picture->map || picture->blend || !picture->last || !(picture->full || !picture->damages) || x < 0 || y < 0 ||
-            width <= 0 || height <= 0)
+        // A buffer is the surface's whole picture at every commit, and the damage only where it differs from the last one (the protocol's
+        // word), so a commit with a part damaged is read in place like any other and that part alone is drawn again (the row's damage,
+        // compositor_wl_lent_damage). The one buffer not taken at that word is one the shim says may not be whole (fragile: an X window's,
+        // whose server draws on in what it committed): that one is read in place only when all of it is damaged, and copied otherwise.
+        if (!picture->pixels || !picture->map || picture->blend || !picture->last || x < 0 || y < 0 || width <= 0 || height <= 0)
+                return 0;
+        if (picture->fragile && !(picture->full || !picture->damages))
                 return 0;
         if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
                 return 0;
@@ -915,6 +918,42 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         return 0;
 }
 
+/*
+        What of a row's window a picture read in place changed, as the table says a program's damage: the box that holds the commit's
+        rectangles (the buffer's pixels, moved to the window's by the picture's place and cut to the window), or all of it (a width
+        of 0) for a whole picture, for more rectangles than the shim hands over, and for damage none of which is in the window.
+*/
+static void compositor_wl_lent_damage(struct windows *table, int row, const struct wayland_picture *picture, long width, long height)
+{
+        long x1 = width, y1 = height, x2 = 0, y2 = 0;
+
+        table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+        if (picture->full || picture->damages <= 0 || picture->damages > WAYLAND_DAMAGE)
+                return;
+        for (long at = 0; at < picture->damages; at++)
+        {
+                long left = picture->damage[at].x + picture->dest_x, top = picture->damage[at].y + picture->dest_y;
+                long right = left + picture->damage[at].width, bottom = top + picture->damage[at].height;
+
+                left = left < 0 ? 0 : left;
+                top = top < 0 ? 0 : top;
+                right = right > width ? width : right;
+                bottom = bottom > height ? height : bottom;
+                if (right <= left || bottom <= top)
+                        continue;
+                x1 = left < x1 ? left : x1;
+                y1 = top < y1 ? top : y1;
+                x2 = right > x2 ? right : x2;
+                y2 = bottom > y2 ? bottom : y2;
+        }
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        table->damage_x[row] = (int)x1;
+        table->damage_y[row] = (int)y1;
+        table->damage_width[row] = (int)(x2 - x1);
+        table->damage_height[row] = (int)(y2 - y1);
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -923,6 +962,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         long count = picture->full || !picture->damages ? 1 : picture->damages;
         unsigned int *to;
         unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
+        int was_lent;
 
         (void)context;
         if (row < 0 || row >= WINDOWS || !table)
@@ -937,15 +977,21 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
         // drawn whole from it. Its dma-buf's reads are bracketed as a copy's are (the writer waited for above), and ended here.
+        was_lent = compositor_lent(row);
         if (picture->pixels && picture->last && !compositor_wl.laying[row].open && compositor_wl_lend(row, picture, width, height))
         {
                 unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ: nothing is read here, the card and the processor read it later
 
                 if (picture->sync_fd >= 0)
                         compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                // A row that was the table's, or of another size, is drawn whole from the buffer; one that was read in place at this size
+                // is drawn again only where the commit says it changed.
+                if (!was_lent || width != (long)table->width[row] || height != (long)table->height[row])
+                        table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+                else
+                        compositor_wl_lent_damage(table, row, picture, width, height);
                 table->width[row] = (unsigned int)width;
                 table->height[row] = (unsigned int)height;
-                table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0; // the whole picture
                 table->client_in_place++;
                 __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
                 compositor_take(row);

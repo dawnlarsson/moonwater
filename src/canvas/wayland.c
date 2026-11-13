@@ -238,6 +238,10 @@ struct wayland_picture
         // (WAYLAND_PICTURE_LENT) names the whole of it, and is 0 and 0 for a picture of pixels that are not a client's buffer.
         const unsigned char *map;
         long map_bytes;
+        // Whether the buffer may not hold the window's whole picture outside the damage (1): the host then reads it in place only when
+        // all of it is damaged. 0 for a client held to the protocol, whose buffer is the surface's whole content at every commit and
+        // whose damage says only where it differs from the last, so a part damaged is read in place too and only that part is drawn again.
+        long fragile;
 };
 
 struct wayland_facts
@@ -1697,6 +1701,7 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
         none.blend = 0;
         none.last = 1;
         none.sync_fd = -1;
+        none.fragile = 0;
         wayland.host->row_picture(wayland.host->context, root->row, &none);
 }
 
@@ -1758,6 +1763,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         picture.row_height = wh;
         picture.blend = child != root && b->format == WLN_wl_shm_format_argb8888;
         picture.last = 0;
+        picture.fragile = 0;
         picture.sync_fd = c->pools[b->pool].dmabuf ? c->pools[b->pool].fd : -1;
         picture.damages = 0;
         picture.full = 1;
@@ -2502,6 +2508,10 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.sync_fd = p->dmabuf ? p->fd : -1;
         picture.map = (const unsigned char *)p->at;
         picture.map_bytes = p->size;
+        // An X window's buffer is its server's, which the compositor's own note has as not kept whole between commits (an X server
+        // that draws on in the pixmap it has committed): it is the one client not taken at the protocol's word, and is read in place
+        // only when all of it is damaged. Not seen here (no X server where this was written); left as it was found.
+        picture.fragile = s->xsurface != 0;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
         picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale120 != s->scale120 || !s->damages ||
                        s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;

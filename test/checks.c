@@ -177835,7 +177835,9 @@ static struct fake_host_state
         const char *pattern; // what the GPU says each time it is asked: N for not done, R for done; done once it has no more to say
         long hold_row, hold_mode, holds; // the window that holds the pointer and how
         long clock_still; // the clock does not move by itself (each now() is 16 ms on otherwise)
-        long lend, lends; // the host reads a whole window's picture where it is, as the compositor does (WAYLAND_PICTURE_LENT), and how many it has
+        long lend, lends; // the host reads a window's picture where it is, as the compositor does (WAYLAND_PICTURE_LENT), and how many it has
+        long lent_parts;  // of those, the ones with a part damaged, and the box of the last one's damage in the window
+        struct wayland_rect lent_box;
         int dmabuf_table_fd;
 } fake;
 
@@ -177986,10 +177988,17 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         }
         if (picture->last)
                 r->pictures++;
-        // The compositor's own rule (compositor_wl_lend): a whole picture that is the window's last, not laid over anything.
-        if (fake.lend && picture->pixels && picture->map && picture->last && !picture->blend && (picture->full || !picture->damages))
+        // The compositor's own rule (compositor_wl_lend): a picture that is the window's last, not laid over anything, whole or with a
+        // part damaged; one that may not be whole (fragile) only when all of it is damaged.
+        if (fake.lend && picture->pixels && picture->map && picture->last && !picture->blend &&
+            (picture->full || !picture->damages || !picture->fragile))
         {
                 fake.lends++;
+                if (!picture->full && picture->damages)
+                {
+                        fake.lent_parts++;
+                        fake.lent_box = picture->damage[0];
+                }
                 return WAYLAND_PICTURE_LENT;
         }
         return 0;
@@ -184552,10 +184561,34 @@ static void test_lent(void)
         wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
         wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 23L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(fake.lends == 3 && releases_of(c, second) == 1, "damage one row short of the buffer is a part: copied, and its buffer released at the commit (%ld, %ld)",
-                fake.lends, releases_of(c, second));
+        // A buffer is the surface's whole picture whatever part of it is damaged: read in place too, the damage handed over for the part to draw
+        // again, the buffer kept as the picture and the one it replaced released by the frame drawn. It was copied, and after a whole frame
+        // the whole window was copied first.
+        WLCHECK(fake.lends == 4 && fake.lent_parts == 1 && releases_of(c, second) == 0 && releases_of(c, s.buffer) == 0,
+                "a commit with a part of its buffer damaged is read in place, and its buffer is kept (%ld lent, %ld of a part, %ld released)", fake.lends,
+                fake.lent_parts, releases_of(c, second));
+        WLCHECK(fake.lent_box.x == 0 && fake.lent_box.y == 0 && fake.lent_box.width == 32 && fake.lent_box.height == 23,
+                "with the rectangle that changed, for that part alone to be drawn again (%ld %ld %ld %ld)", fake.lent_box.x, fake.lent_box.y,
+                fake.lent_box.width, fake.lent_box.height);
+        fake.copied = 0;
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 1, "and the buffer it replaced is released by the frame drawn (%ld)", releases_of(c, s.buffer));
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 3L, 4L, 5L, 6L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(fake.lends == 5 && fake.lent_parts == 2 && fake.lent_box.x == 3 && fake.lent_box.y == 4 && fake.lent_box.width == 5 && fake.lent_box.height == 6 &&
+                    releases_of(c, second) == 1,
+                "a small part after it, on the other buffer, is read in place as well, with no copy of the window between (%ld %ld)", fake.lends, fake.lent_parts);
+        // back to `second` as the picture, for the rows below
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
         wayland_presented(3000000000ul, 16666667ul, 3, 0ul);
         wlc_pump(c);
+        fake.lends = 3;
 
         // a window put away is in no frame: the buffer its picture replaced comes back at the next frame's time, drawn or not
         wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
@@ -184618,13 +184651,64 @@ static void test_lent(void)
                 at += 52;
         }
         pictures = fake.row[0].pictures;
-        wayland_feed(c->slot, run, at, 0, 0);
-        wlc_pump(c);
+        {
+                // A steady stream of commits asks the host for nothing: no block, no mapping, no descriptor, and no pixel is copied.
+                long allocs = fake.allocs, maps = fake.maps, unmaps = fake.unmaps, closed = fake.fds_closed, releases = fake.releases;
+                struct wayland_stats before, after;
+
+                wayland_stats_get(&before);
+                wayland_feed(c->slot, run, at, 0, 0);
+                wlc_pump(c);
+                wayland_drawn();
+                wayland_frame();
+                wayland_presented(9000000000ul, 16666667ul, 9, 0ul);
+                wlc_pump(c);
+                wayland_stats_get(&after);
+                WLCHECK(fake.allocs == allocs && fake.maps == maps && fake.unmaps == unmaps && fake.fds_closed == closed && fake.releases == releases &&
+                            before.objects == after.objects && before.pools == after.pools && before.buffers == after.buffers && before.fds == after.fds,
+                        "twenty commits and the frame that shows them allocate nothing: no block, mapping or descriptor is asked of the host, and no object is left (%ld %ld %ld)",
+                        fake.allocs - allocs, fake.maps - maps, after.objects - before.objects);
+        }
         WLCHECK(fake.row[0].pictures - pictures == 20 && !wayland_stalled(c->slot) && c->errors == 0,
                 "twenty whole pictures read in place in one read are all made: none was copied, and the budget is of copies (%ld, stalled %ld)",
                 fake.row[0].pictures - pictures, wayland_stalled(c->slot));
         fake.clock_still = 0;
         wlc_end(c);
+
+        // An X window's buffer is not taken at the protocol's word: a part damaged is copied, all of it damaged is read in place.
+        {
+                struct session x;
+                unsigned long surface, xwin, first, next;
+                long lends;
+
+                session_open(&x);
+                c = x.c;
+                surface = wlc_id(c, WLI_wl_surface, 6);
+                xwin = wlc_id(c, WLI_xwayland_surface_v1, 1);
+                wlc_send(c, x.compositor, WLQ_wl_compositor_create_surface, surface);
+                wlc_send(c, x.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
+                wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, 0x4242UL, 0UL);
+                wayland_xwindow_adopt(0x4242, 0, 0, 0, "x");
+                first = wl_buffer_of(&x, 32, 24, 0xff111111, WLN_wl_shm_format_xrgb8888);
+                next = wl_buffer_of(&x, 32, 24, 0xff222222, WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, surface, WLQ_wl_surface_attach, first, 0L, 0L);
+                wlc_send(c, surface, WLQ_wl_surface_commit);
+                lends = fake.lends;
+                fake.lent_parts = 0;
+                wlc_forget(c);
+                wlc_send(c, surface, WLQ_wl_surface_attach, next, 0L, 0L);
+                wlc_send(c, surface, WLQ_wl_surface_damage_buffer, 2L, 2L, 8L, 8L);
+                wlc_send(c, surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[0].used && fake.lends == lends && fake.lent_parts == 0 && releases_of(c, next) == 1 &&
+                            fake.row[0].pixels[3 * FAKE_W + 3] == 0xff222222 && fake.row[0].pixels[0] == 0xff111111,
+                        "an X window's commit with a part damaged is copied, that part alone, and its buffer released (%ld lent, %s)", fake.lends - lends,
+                        c->error_text);
+                wlc_send(c, surface, WLQ_wl_surface_attach, first, 0L, 0L);
+                wlc_send(c, surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.lends == lends + 1, "and one with all of it damaged is read in place (%ld)", fake.lends - lends);
+                wlc_end(c);
+        }
         leak_check("lent");
         wayland_stop();
 }

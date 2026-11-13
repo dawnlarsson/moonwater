@@ -662,6 +662,17 @@ if ! alive || [ "$(echo "$out" | grep -c '^ok')" != 4 ]; then
         row FAIL "the conformance client ran its four rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
 fi
 
+# A window drawn a part at a time from three buffers in turn (test/wayland_part.py): each commit's damage is read from the buffer where it is,
+# and the screen shows what a copy of the damage would; then the picture's file is cut under the compositor, which goes on.
+out=$(python3 -I "$(dirname "$0")/wayland_part.py" "$work/scan.img" 2>&1)
+echo "$out" | while read -r verdict rest; do
+        case $verdict in ok | FAIL) echo "$verdict $rest" ;; esac
+done
+failures=$((failures + $(echo "$out" | grep -c '^FAIL')))
+if ! alive || [ "$(echo "$out" | grep -c '^ok')" != 6 ]; then
+        row FAIL "the client that draws a part at a time ran its six rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
+fi
+
 # A pool on a file whose pages the client serves itself and never does (FUSE, test/wayland_held.py): the pool is refused, and the compositor
 # answers the next client. Mapped, its read of the picture waited on the client for as long as the client liked (MW-2026-195).
 out=$(python3 -I "$(dirname "$0")/wayland_held.py" 2>&1)
