@@ -1267,6 +1267,7 @@ scale:
 	.amdhsa_next_free_vgpr \vgprs
 	.amdhsa_next_free_sgpr \sgprs
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 .end_amdhsa_kernel
 .endm
 kernel copy, 8, 24

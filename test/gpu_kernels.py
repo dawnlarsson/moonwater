@@ -6,6 +6,17 @@
                                             same words, kernel by kernel
     python3 test/gpu_kernels.py --print ASM the arrays llvm-mc makes of ASM, in the form the
                                             build writes them
+    python3 test/gpu_kernels.py --probe     whether the llvm-mc at hand writes the words the build's
+                                            assembler is held to, where LLVM's versions differ: 0
+                                            when it does, 2 and why when it does not
+
+Where LLVM's versions differ. An instruction in the three-source encoding that takes two sources
+has a field for the third that the chip does not read: the build's assembler writes the constant 0
+there (0x80), as the clang that made the kernels in src/canvas/gpu.c did, and LLVM 18 to 21 write
+the register 0. An LLVM that writes anything but 0x80 cannot be compared word for word, and the
+probe says so; nothing is compared with it and nothing passes. (Forward progress, the first
+resource word's top bit, is clear by default before LLVM 21 and set from it: the kernels' blocks
+ask for it, so that is the same on all of them.)
 
 The kernels are src/canvas/gpu.asm (what ships) and test/gpu_stress.asm (every instruction in every
 operand form the build's assembler takes). Each kernel is its two resource words and then its code,
@@ -38,6 +49,43 @@ def build(asm):
     data = (work / 'k.so').read_bytes()
     shutil.rmtree(work)
     return data
+
+
+PROBE = '''.amdgcn_target "amdgcn-amd-amdhsa--gfx1036"
+.text
+.globl probe
+.p2align 8
+.type probe,@function
+probe:
+	v_pk_min_u16 v1, v2, v3
+	s_endpgm
+.size probe, .-probe
+.rodata
+.p2align 6
+.amdhsa_kernel probe
+	.amdhsa_next_free_vgpr 8
+	.amdhsa_next_free_sgpr 24
+	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
+.end_amdhsa_kernel
+'''
+
+
+def probe():
+    work = pathlib.Path(tempfile.mkdtemp())
+    (work / 'probe.asm').write_text(PROBE)
+    try:
+        words = kernels(build(work / 'probe.asm'))[0][1]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    version = subprocess.run([tool('llvm-mc'), '--version'], capture_output=True, text=True).stdout
+    version = (re.search(r'version (\S+)', version) or [None, 'of no version it says'])[1]
+    third = words[3] >> 18 & 0x1ff
+    if third != 0x80:
+        print('llvm-mc %s writes 0x%02x in the third source a two-source instruction does not have (v_pk_min_u16 v1, v2, v3 is %08x %08x), '
+              'the build\'s assembler the constant 0, 0x80: the kernels are not compared with this LLVM\'s' % (version, third, words[2], words[3]))
+        sys.exit(2)
+    print('llvm-mc %s writes the words the build\'s assembler is held to' % version)
 
 
 def sections(d):
@@ -91,6 +139,9 @@ def text(made):
 
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == '--probe':
+        probe()
+        return
     if len(sys.argv) == 3 and sys.argv[1] == '--print':
         sys.stdout.write(text(kernels(build(sys.argv[2]))))
         return

@@ -33,8 +33,11 @@
         resource words come from the .amdhsa_next_free_vgpr in its block (the
         rest of the block must say what this assembles for: wave64, the two
         workgroup ids, the kernarg pointer and the private segment buffer in
-        the user registers, no scratch), because those are the words the file
-        never varies.
+        the user registers, no scratch, forward progress), because those are
+        the words the file never varies. Forward progress is the first
+        resource word's top bit, which this always sets: an LLVM before 19
+        leaves it clear unless the block asks, and a later one sets it, so the
+        block has to ask for the two to agree whatever LLVM is at hand.
 */
 
 #define GPUASM_WORDS 32768
@@ -218,10 +221,11 @@ static const struct
         {".amdhsa_wavefront_size32", 0},
         {".amdhsa_next_free_vgpr", -1},
         {".amdhsa_next_free_sgpr", -1},
+        {".amdhsa_forward_progress", 1},
 };
 #define GPUASM_VGPRS 8
 #define GPUASM_SGPRS 9
-#define GPUASM_PROPERTIES 10
+#define GPUASM_PROPERTIES 11
 
 //      The float constants LLVM takes as inline codes 240 to 248 wherever a 32-bit
 //      operand may be a literal, an integer operand as much as a float one:

@@ -236006,6 +236006,7 @@ b32 main(void)
         ".amdhsa_user_sgpr_private_segment_buffer 1\n.amdhsa_user_sgpr_kernarg_segment_ptr 1\n"           \
         ".amdhsa_system_sgpr_workgroup_id_x 1\n.amdhsa_system_sgpr_workgroup_id_y 1\n"                    \
         ".amdhsa_next_free_vgpr " vgprs "\n.amdhsa_next_free_sgpr 24\n.amdhsa_wavefront_size32 0\n"       \
+        ".amdhsa_forward_progress 1\n"                                                                   \
         ".end_amdhsa_kernel\n"
 #define KERNEL(code, vgprs) HEAD code BLOCK(vgprs)
 
@@ -236142,7 +236143,7 @@ b32 main()
                 "bad.asm:4: a scalar register to load into 'vcc'");
         refused("an encoding named twice", KERNEL("\tv_cndmask_b32_e64_e64 v1, v2, v3, vcc\n", "1"),
                 "bad.asm:4: unknown instruction 'v_cndmask_b32_e64_e64'");
-        refused("a kernel defined twice", KERNEL("\ts_endpgm\n", "1") BLOCK("1"), "bad.asm:21: a kernel defined twice 'k'");
+        refused("a kernel defined twice", KERNEL("\ts_endpgm\n", "1") BLOCK("1"), "bad.asm:22: a kernel defined twice 'k'");
         refused("a kernel that is not a C name", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k.x\n",
                 "bad.asm:7: a kernel's name is a C name, not 'k.x'");
         refused("a directive it does not know", KERNEL("\t.bogus 1\n", "1"), "bad.asm:4: unknown directive '.bogus'");
@@ -236157,7 +236158,7 @@ b32 main()
                 "bad.asm:4: a block that is never closed, wanted '.endm'");
         refused("text after an .endm", HEAD ".macro one\n.endm[\n", "bad.asm:5: text after the close of a block: '['");
         refused("text after an .end_amdhsa_kernel", KERNEL("\ts_endpgm\n", "1") ".amdhsa_kernel z\n.end_amdhsa_kernel x\n",
-                "bad.asm:20: text after .end_amdhsa_kernel: 'x'");
+                "bad.asm:21: text after .end_amdhsa_kernel: 'x'");
         refused("an .endm with no .macro", HEAD ".endm\n", "bad.asm:4: a close with no open '.endm'");
         refused("a macro defined twice", HEAD ".macro a\n.endm\n.macro a\n.endm\n", "bad.asm:6: a macro defined twice 'a'");
         refused("a name given to no one", KERNEL("\ts_mov_b32 s1, \\x\n", "1"),
@@ -236166,7 +236167,7 @@ b32 main()
                 ".amdhsa_group_segment_fixed_size 0\n.amdhsa_private_segment_fixed_size 0\n.amdhsa_kernarg_size 64\n"
                 ".amdhsa_user_sgpr_private_segment_buffer 1\n.amdhsa_user_sgpr_kernarg_segment_ptr 1\n"
                 ".amdhsa_system_sgpr_workgroup_id_x 1\n.amdhsa_system_sgpr_workgroup_id_y 1\n"
-                ".amdhsa_next_free_vgpr 1\n.amdhsa_next_free_sgpr 24\n.amdhsa_wavefront_size32 0\n.end_amdhsa_kernel\n",
+                ".amdhsa_next_free_vgpr 1\n.amdhsa_next_free_sgpr 24\n.amdhsa_wavefront_size32 0\n.amdhsa_forward_progress 1\n.end_amdhsa_kernel\n",
                 "bad.asm:6: a kernel with no .size: 'k'");
         refused("a kernel with no label", ".amdgcn_target \"amdgcn-amd-amdhsa--gfx1036\"\n.text\n" BLOCK("1"),
                 "bad.asm:3: .size of a name with no label 'k'");
@@ -236179,6 +236180,17 @@ b32 main()
         refused("a property it does not assemble for", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k\n"
                 ".amdhsa_wavefront_size32 1\n",
                 "bad.asm:8: not the value this assembles for: '.amdhsa_wavefront_size32'");
+        // Forward progress is the first resource word's top bit, which every kernel is assembled with: a block that leaves it to the assembler's default
+        // (clear before LLVM 19, set from it) or asks for none is refused, so the words do not turn on the LLVM that is at hand.
+        refused("a block that does not ask for forward progress", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k\n"
+                ".amdhsa_group_segment_fixed_size 0\n.amdhsa_private_segment_fixed_size 0\n.amdhsa_kernarg_size 64\n"
+                ".amdhsa_user_sgpr_private_segment_buffer 1\n.amdhsa_user_sgpr_kernarg_segment_ptr 1\n"
+                ".amdhsa_system_sgpr_workgroup_id_x 1\n.amdhsa_system_sgpr_workgroup_id_y 1\n"
+                ".amdhsa_next_free_vgpr 1\n.amdhsa_next_free_sgpr 24\n.amdhsa_wavefront_size32 0\n.end_amdhsa_kernel\n",
+                "bad.asm:18: the kernel's block has no '.amdhsa_forward_progress'");
+        refused("a block that asks for no forward progress", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k\n"
+                ".amdhsa_forward_progress 0\n",
+                "bad.asm:8: not the value this assembles for: '.amdhsa_forward_progress'");
         refused("a property it has never heard of", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k\n.amdhsa_bogus 1\n",
                 "bad.asm:8: unknown directive '.amdhsa_bogus'");
         refused("a property given twice", HEAD "\ts_endpgm\n.size k, .-k\n.rodata\n.amdhsa_kernel k\n"

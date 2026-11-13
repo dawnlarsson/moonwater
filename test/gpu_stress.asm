@@ -3383,6 +3383,7 @@ macros:
 	.amdhsa_next_free_vgpr \vgprs
 	.amdhsa_next_free_sgpr \sgprs
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 .end_amdhsa_kernel
 .endm
 kernel salu, 1, 24
@@ -3520,6 +3521,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 127
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3532,6 +3534,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 128
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3544,6 +3547,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 129
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3556,6 +3560,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 192
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3568,6 +3573,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 255
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3580,6 +3586,7 @@ kernel size100, 100, 8
 	.amdhsa_next_free_sgpr 24
 	.amdhsa_next_free_vgpr 256
 	.amdhsa_wavefront_size32 0
+	.amdhsa_forward_progress 1
 	.amdhsa_system_sgpr_workgroup_id_y 1
 	.amdhsa_system_sgpr_workgroup_id_x 1
 	.amdhsa_user_sgpr_kernarg_segment_ptr 1
