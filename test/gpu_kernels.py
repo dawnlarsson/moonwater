@@ -18,7 +18,7 @@
 
 Where LLVM's versions differ. An instruction in the three-source encoding that takes two sources
 has a field for the third that the chip does not read: the build's assembler writes the constant 0
-there (0x80), as the clang that made the kernels in src/canvas/gpu.c did, and LLVM 18 to 21 write
+there (0x80), as the clang that made the kernels in src/canvas/gpu_compiled.inc did, and LLVM 18 to 21 write
 the register 0. An LLVM that writes anything but 0x80 cannot be compared word for word, and the
 probe says so; nothing is compared with it and nothing passes. (Forward progress, the first
 resource word's top bit, is clear by default before LLVM 21 and set from it: the kernels' blocks

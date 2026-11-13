@@ -125481,7 +125481,7 @@ static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fa
 static unsigned int gpu_fake_waits; // the waits answered as still running before the fence goes on to say what gpu_fake_idle or the card says: a job that ends within the late cap
 static int gpu_fake_errno;          // a wait the kernel refuses is answered as failed while it is set (the fence has an error)
 static unsigned int gpu_fake_wait_calls, gpu_fake_submits, gpu_fake_requests; // the waits asked, the submits made, and every request made of the kernel's DRM (GPU_CONTROL)
-#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
+#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_wait_asked(wait))
 // The fake card with no hardware under it: the submit is taken (its sequence number 1) without a call, and the kernel's log has a page fault in it while gpu_fake_fault is set.
 static int gpu_fake_card, gpu_fake_fault;
 #define GPU_LOG_FAKE(since, out) do { if (gpu_fake_fault) (out)->have_at = 1, (out)->at = 0x2000000100ull; } while (0)
@@ -125539,6 +125539,7 @@ static struct
         positive va[16];              // the last of them
         unsigned int closes, refused; // the handles closed, and the closes of a handle that was not there
         unsigned int contexts;
+        unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
         char unique[40];              // the display node's bus as GET_UNIQUE says it
         unsigned int unique_length;
 } gpu_kernel;
@@ -125614,6 +125615,12 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                         return -19;
                 if (words[0] == 1)
                         words[0] = 2 + ++gpu_kernel.contexts;
+                return 0;
+        case 0xc0206449u: // DRM_IOCTL_AMDGPU_WAIT_CS: ended by a signal while any are owed, then the job is done (status 0)
+                gpu_kernel.waits++;
+                if (gpu_kernel.interrupts)
+                        return gpu_kernel.interrupts--, -4;
+                longs[0] = 0;
                 return 0;
         case 0xc0106401u: // DRM_IOCTL_GET_UNIQUE
                 if (fd == GPU_KERNEL_FD)
@@ -235492,6 +235499,12 @@ static void gpu_import_rows(void)
         // 9. A wait the kernel refuses, with a new context to be had: the job is over, and the jobs after it have a context of their own.
         gpu.pending = 77, gpu.ctx = 1, gpu_fake_idle = 0, gpu_fake_errno = 1, gpu_lost = 0;
         check("gpu idle: a wait the kernel refuses ends the job, and the next jobs have a new context", gpu_idle() && gpu.pending == 0 && gpu.ctx != 1 && !gpu_lost);
+        // A wait a signal ended (EINTR, three times running) is asked again and is no failed wait: the job is done when the kernel says so, with the context
+        // it had (a failed wait makes a new one, and is the card's hang when the job's end was owed).
+        gpu.pending = 77, gpu.ctx = 1, gpu_fake_errno = 0, gpu_fake_idle = 0, gpu_fake_busy = 0, gpu_kernel.interrupts = 3, gpu_kernel.waits = 0, gpu_lost = 0;
+        check("gpu idle: a wait a signal ended is asked again, and the job is done with its context kept",
+              gpu_idle() && gpu.pending == 0 && gpu.ctx == 1 && !gpu_lost && gpu_kernel.waits == 4 && gpu_kernel.interrupts == 0);
+        gpu_fake_errno = 1;
         // 10. With no context to be had either (the descriptor answers nothing: the device is gone), the job can never be asked after: the card is lost, and
         // the compositor starts it again instead of holding its buffer for good. Every node is absent here, so the start finds no card and says so.
         gpu.pending = 77, gpu.ctx = 1, gpu_kernel.no_context = 1;
