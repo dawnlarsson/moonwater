@@ -440,8 +440,14 @@ static void gpu_route_probe(void)
 
 // Let go of the card: its buffer unmapped, its descriptor closed (the kernel frees the buffer, the context and the maps with it). After a start that failed,
 // or when the card lost its state (gpu_recover).
+static unsigned int *gpu_bin_stage;
+static positive gpu_bin_room;
+
 static void gpu_stop(void)
 {
+        if (gpu_bin_stage)
+                system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
+        gpu_bin_stage = 0, gpu_bin_room = 0;
         if (gpu.at)
                 system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
         if (gpu.fd >= 0)
@@ -1657,17 +1663,57 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (bins_at + 8ull * cw * ch > gpu.size)
                 return false;
-        memory_zero(tab, (positive)cw * ch * 8);
-        // The three steps of the bins are the library's (bins_count, bins_starts, bins_place: lib.c, in assembly on each machine): a record's squares counted,
-        // the counts made starts, and the record put in each square's list.
-        GPU_RECORDS(bins_count(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, 1 + (positive)m);)
-        at = (unsigned int)bins_starts(tab, (positive)cw * ch);
-        if (bins_at + 8ull * cw * ch + 32ull * at > gpu.size) // the lists must fit what the buffer has left
-                return false;
-        // A record goes into the list of each square it is in as it is, a box with its corners fitted to its sides (gpu_radii): fitted once, and the same words
-        // put in every list (they were fitted again in each square: two divisions a square for a box of a whole window).
-        GPU_RECORDS(memory_copy(record, q, 32 * (1 + (positive)m)); if (e) for (int j = 0; j <= m; j++) gpu_radii(record + 8 * j);
-                    bins_place(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, list, record, 1 + (positive)m);)
+        {
+                positive tab_bytes = (positive)cw * ch * 8, need;
+                int staged = 0;
+
+                if (tab_bytes > gpu_bin_room)
+                {
+                        positive want = tab_bytes < 262144 ? 262144 : ((tab_bytes + 4095) & ~(positive)4095);
+                        long p = system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
+
+                        if (!(p < 0 && p > -4096))
+                        {
+                                if (gpu_bin_stage)
+                                        system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
+                                gpu_bin_stage = (unsigned int *)p, gpu_bin_room = want;
+                        }
+                }
+                if (gpu_bin_stage && tab_bytes <= gpu_bin_room)
+                        tab = gpu_bin_stage, list = tab + 2 * cw * ch, staged = 1;
+                memory_zero(tab, tab_bytes);
+                // The three steps of the bins are the library's (bins_count, bins_starts, bins_place: lib.c, in assembly on each machine): a record's squares counted,
+                // the counts made starts, and the record put in each square's list.
+                GPU_RECORDS(bins_count(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, 1 + (positive)m);)
+                at = (unsigned int)bins_starts(tab, (positive)cw * ch);
+                need = tab_bytes + 32ull * at;
+                if (bins_at + need > gpu.size) // the lists must fit what the buffer has left
+                        return false;
+                if (staged && need > gpu_bin_room)
+                {
+                        positive want = (need + 4095) & ~(positive)4095;
+                        long p = system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
+
+                        if (!(p < 0 && p > -4096))
+                        {
+                                memory_copy_apart((void *)p, gpu_bin_stage, tab_bytes);
+                                system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
+                                gpu_bin_stage = (unsigned int *)p, gpu_bin_room = want;
+                                tab = gpu_bin_stage, list = tab + 2 * cw * ch;
+                        }
+                        else
+                        {
+                                tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at), list = tab + 2 * cw * ch, staged = 0;
+                                memory_copy_apart(tab, gpu_bin_stage, tab_bytes);
+                        }
+                }
+                // A record goes into the list of each square it is in as it is, a box with its corners fitted to its sides (gpu_radii): fitted once, and the same words
+                // put in every list (they were fitted again in each square: two divisions a square for a box of a whole window).
+                GPU_RECORDS(memory_copy(record, q, 32 * (1 + (positive)m)); if (e) for (int j = 0; j <= m; j++) gpu_radii(record + 8 * j);
+                            bins_place(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, list, record, 1 + (positive)m);)
+                if (staged)
+                        memory_copy_apart((p8 address_to)gpu.at + bins_at, tab, need);
+        }
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
         for (i = 0; i < n; i++)
                 if ((ops[8 * i] & 255) == 2)

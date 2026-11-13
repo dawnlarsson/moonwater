@@ -2121,6 +2121,19 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
 
                         if (square.x2 <= square.x1 || square.y2 <= square.y1)
                                 continue;
+                        {
+                                int occluded = 0;
+
+                                for (unsigned int p = 0; p < pieces; p++)
+                                        if (owner[p] > at && box[p][0] <= square.x1 && box[p][1] <= square.y1 &&
+                                            box[p][2] >= square.x2 && box[p][3] >= square.y2)
+                                        {
+                                                occluded = 1;
+                                                break;
+                                        }
+                                if (occluded)
+                                        continue;
+                        }
                         compositor_fill(&square, cx, cy, r, r, compositor_ground);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw_with(&square, &frames[each], radii[each]);
