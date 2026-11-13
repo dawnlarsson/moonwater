@@ -240437,8 +240437,145 @@ static void iss_rows_dismiss(void)
         check("dismiss: a new record after the dismissal is raised again as one record", k.count[0] == 1 && dz_worst(&board) == WINDOWS_ISSUE_ERROR);
 }
 
+/*
+        A window's identity (window.c's windows_app_id_set, windows_icon_set and their readers): what a setter takes is read back, what
+        it refuses leaves the row as it was, a picture of any size and shape is the icon's 32 by 32 with nothing read past a row's width
+        (the picture ends at a page that is not there), and a reader holds a row somebody else wrote to its bounds, its seqlock and a
+        premultiplied pixel.
+*/
+static unsigned int idn_picture[64 * 64], idn_icon[WINDOWS_ICON * WINDOWS_ICON];
+
+static void iss_rows_identity(void)
+{
+        char word[WINDOWS_APP_ID], longest[WINDOWS_APP_ID + 8];
+        unsigned int seq, wrong = 0, clear = 0, kept;
+        long mapped;
+
+        memory_zero(&iss_table, sizeof(iss_table));
+        check("identity: a row that has said nothing has no app_id and no icon",
+              windows_app_id_read(&iss_table, 3, word) == 0 && !word[0] && windows_icon_read(&iss_table, 3, idn_icon) == 0);
+        check("identity: an app_id set is read back whole", windows_app_id_set(&iss_table, 3, "org.mozilla.firefox") == 1 &&
+              windows_app_id_read(&iss_table, 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
+        check("identity: and it is that row's and no other's", windows_app_id_read(&iss_table, 2, word) == 0 && windows_app_id_read(&iss_table, 4, word) == 0);
+        for (unsigned int at = 0; at < sizeof(longest); at++)
+                longest[at] = 'a';
+        longest[WINDOWS_APP_ID - 1] = 0;
+        check("identity: the longest app_id, 63 bytes, is taken", windows_app_id_set(&iss_table, 5, longest) == 1 && windows_app_id_read(&iss_table, 5, word) == WINDOWS_APP_ID - 1);
+        longest[WINDOWS_APP_ID - 1] = 'a', longest[WINDOWS_APP_ID] = 0;
+        check("identity: one byte longer, no text, an empty one, a space, a control byte, a delete and a row past the table are refused, and the row is as it was",
+              windows_app_id_set(&iss_table, 3, longest) == 0 && windows_app_id_set(&iss_table, 3, null) == 0 && windows_app_id_set(&iss_table, 3, "") == 0 &&
+              windows_app_id_set(&iss_table, 3, "two words") == 0 && windows_app_id_set(&iss_table, 3, "bell\007") == 0 && windows_app_id_set(&iss_table, 3, "del\177") == 0 &&
+              windows_app_id_set(&iss_table, 3, "esc\033[31m") == 0 && windows_app_id_set(&iss_table, WINDOWS, "files") == 0 && windows_app_id_set(null, 0, "files") == 0 &&
+              windows_app_id_read(&iss_table, 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
+        check("identity: a shorter app_id set over a longer leaves none of the longer", windows_app_id_set(&iss_table, 3, "files") == 1 &&
+              windows_app_id_read(&iss_table, 3, word) == 5 && string_equals((string_address)word, (string_address) "files") && !iss_table.app_id[3][6] && !iss_table.app_id[3][18]);
+        // A row somebody else wrote: no null in its room, and bytes that would move a terminal's cursor.
+        for (unsigned int at = 0; at < WINDOWS_APP_ID; at++)
+                iss_table.app_id[7][at] = at % 5 == 0 ? '\033' : at % 7 == 0 ? ' ' : 'z';
+        seq = windows_app_id_read(&iss_table, 7, word);
+        for (unsigned int at = 0; at < WINDOWS_APP_ID - 1; at++)
+                wrong += word[at] != (at % 5 == 0 || at % 7 == 0 ? '?' : 'z');
+        check("identity: an app_id with no null in its room is read to its room and ended there, its control bytes and spaces made question marks",
+              seq == WINDOWS_APP_ID - 1 && !word[WINDOWS_APP_ID - 1] && !wrong && windows_app_id_read(&iss_table, WINDOWS, word) == 0 && !word[0]);
+
+        // A picture the icon's size is the icon; a pixel whose colour is over its alpha is held to it.
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                idn_picture[at] = 0xff000000u | at * 0x010203u;
+        idn_picture[5] = 0x40ff8020u;
+        check("identity: a picture is taken as an icon", windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1);
+        seq = windows_icon_read(&iss_table, 3, idn_icon);
+        wrong = 0;
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                wrong += at != 5 && idn_icon[at] != idn_picture[at];
+        check("identity: a picture 32 by 32 is read back pixel for pixel, its sequence even and not 0", seq && !(seq & 1u) && !wrong);
+        check("identity: a pixel whose colour is over its alpha is kept premultiplied, each colour no more than the alpha", idn_icon[5] == 0x40404020u);
+        check("identity: a second picture moves the sequence on", windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1 &&
+              windows_icon_read(&iss_table, 3, idn_icon) == seq + 2);
+
+        // Larger: each pixel of the icon is the mean of the two by two under it.
+        for (unsigned int y = 0; y < 64; y++)
+                for (unsigned int x = 0; x < 64; x++)
+                        idn_picture[y * 64 + x] = 0xff000000u | ((x & 1) ? 0x00640000u : 0x00c80000u) | ((y & 1) ? 0x0000000au : 0x00000014u) | (x / 2) << 8;
+        windows_icon_set(&iss_table, 3, idn_picture, 64, 64, 64);
+        windows_icon_read(&iss_table, 3, idn_icon);
+        wrong = 0;
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                wrong += idn_icon[at] != (0xff96000fu | (at % WINDOWS_ICON) << 8);
+        check("identity: a picture 64 by 64 is made 32 by 32, each pixel the mean of the four under it", !wrong);
+
+        // Wider than high: the longer side is the icon's, the shorter in the middle with clear above and below.
+        for (unsigned int at = 0; at < 64 * 16; at++)
+                idn_picture[at] = 0xff112233u;
+        windows_icon_set(&iss_table, 3, idn_picture, 64, 16, 64);
+        windows_icon_read(&iss_table, 3, idn_icon);
+        wrong = 0;
+        for (unsigned int y = 0; y < WINDOWS_ICON; y++)
+                for (unsigned int x = 0; x < WINDOWS_ICON; x++)
+                        wrong += idn_icon[y * WINDOWS_ICON + x] != (y >= 12 && y < 20 ? 0xff112233u : 0u), clear += !idn_icon[y * WINDOWS_ICON + x];
+        check("identity: a picture 64 by 16 is its 32 by 8 in the middle of the icon, clear above and below", !wrong && clear == 24 * WINDOWS_ICON);
+
+        // Smaller: one pixel is the whole icon.
+        idn_picture[0] = 0x80402010u;
+        windows_icon_set(&iss_table, 3, idn_picture, 1, 1, 1);
+        windows_icon_read(&iss_table, 3, idn_icon);
+        wrong = 0;
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                wrong += idn_icon[at] != 0x80402010u;
+        check("identity: a picture of one pixel is an icon of that pixel", !wrong);
+
+        // What is refused, and the row as it was after each.
+        kept = windows_icon_read(&iss_table, 3, idn_icon);
+        check("identity: no pixels, a side of 0, a side over 1024, rows shorter than the width and a row past the table are refused, and the icon is the one it was",
+              windows_icon_set(&iss_table, 3, null, 32, 32, 32) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 0, 32, 32) == 0 &&
+              windows_icon_set(&iss_table, 3, idn_picture, 32, 0, 32) == 0 && windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON_MOST + 1, 1, WINDOWS_ICON_MOST + 1) == 0 &&
+              windows_icon_set(&iss_table, 3, idn_picture, 1, WINDOWS_ICON_MOST + 1, 1) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 0x80000000u, 0x80000000u, 0x80000000u) == 0 &&
+              windows_icon_set(&iss_table, 3, idn_picture, 32, 32, 31) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 32, 32, 0) == 0 &&
+              windows_icon_set(&iss_table, WINDOWS, idn_picture, 32, 32, 32) == 0 && windows_icon_set(null, 3, idn_picture, 32, 32, 32) == 0 &&
+              windows_icon_read(&iss_table, 3, idn_icon) == kept && idn_icon[0] == 0x80402010u && idn_icon[1023] == 0x80402010u);
+
+        // The largest picture, and a stride wider than the width, each ending at a page that is not mapped: nothing past a row's width is read.
+        mapped = window_call(WINDOW_SYS_MMAP, 0, 5 * 4096, 3, 0x22, -1, 0);
+        if (mapped > 0 && window_call(WINDOW_SYS_MUNMAP, mapped + 4 * 4096, 4096, 0, 0, 0, 0) == 0)
+        {
+                unsigned int *idn_end = (unsigned int *)(mapped + 4 * 4096), *idn_across = idn_end - WINDOWS_ICON_MOST, *idn_apart = idn_end - (39 * 100 + 4);
+
+                for (unsigned int at = 0; at < 4 * 1024; at++)
+                        ((unsigned int *)mapped)[at] = 0xff000000u | at;
+                check("identity: a picture 1024 idn_across and one high that ends at the end of its page is taken", windows_icon_set(&iss_table, 6, idn_across, WINDOWS_ICON_MOST, 1, WINDOWS_ICON_MOST) == 1);
+                check("identity: so is one 1 idn_across and 1024 high", windows_icon_set(&iss_table, 6, idn_across, 1, WINDOWS_ICON_MOST, 1) == 1);
+                check("identity: a picture 4 wide and 40 high with rows 100 apart, whose last row ends at the end of its page, is taken: nothing past a row's width is read",
+                      windows_icon_set(&iss_table, 6, idn_apart, 4, 40, 100) == 1 && windows_icon_read(&iss_table, 6, idn_icon) != 0);
+        }
+        else
+                check("identity: a page to end a picture at is mapped", 0);
+
+        // The seqlock: a writer inside is no picture, a sequence at its end wraps past 0, and a row somebody else wrote is held premultiplied.
+        __atomic_store_n(&iss_table.icon_seq[3], kept | 1u, __ATOMIC_RELEASE);
+        check("identity: an icon a writer is in the middle of is no icon to a reader", windows_icon_read(&iss_table, 3, idn_icon) == 0);
+        __atomic_store_n(&iss_table.icon_seq[3], 0xfffffffeu, __ATOMIC_RELEASE);
+        idn_picture[0] = 0xff010203u;
+        check("identity: the sequence after the last even one is 2, never 0, which is no icon",
+              windows_icon_set(&iss_table, 3, idn_picture, 1, 1, 1) == 1 && iss_table.icon_seq[3] == 2 && windows_icon_read(&iss_table, 3, idn_icon) == 2);
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                iss_table.icon[9][at] = 0x10ffffffu;
+        iss_table.icon_seq[9] = 8;
+        windows_icon_read(&iss_table, 9, idn_icon);
+        wrong = 0;
+        for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                wrong += idn_icon[at] != 0x10101010u;
+        check("identity: an icon written straight into the row with colours over their alpha is read premultiplied", !wrong);
+        check("identity: a row past the table has no icon", windows_icon_read(&iss_table, WINDOWS, idn_icon) == 0 && windows_icon_read(null, 0, idn_icon) == 0);
+
+        // A row taken again is nobody yet.
+        windows_reset_row(&iss_table, 3);
+        check("identity: a row given to the next window has no app_id and no icon, and the rows beside it keep theirs",
+              windows_app_id_read(&iss_table, 3, word) == 0 && windows_icon_read(&iss_table, 3, idn_icon) == 0 && !iss_table.app_id[3][0] &&
+              windows_app_id_read(&iss_table, 5, word) == WINDOWS_APP_ID - 1 && windows_icon_read(&iss_table, 9, idn_icon) == 8);
+}
+
 b32 main(void)
 {
+        iss_rows_identity();
         iss_rows_dismiss();
         iss_rows_basic();
         iss_rows_full();

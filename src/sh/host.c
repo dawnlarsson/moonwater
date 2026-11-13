@@ -24315,6 +24315,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  window %p%s       %w at %b,%b, %px%p\n", (positive)row, row < 10 ? (string_address) " " : (string_address) "",
                          writer_terminal_name, title[0] ? (string_address)title : (string_address) "-", (bipolar)table->x[row],
                          (bipolar)table->y[row], (positive)table->width[row], (positive)table->height[row]);
+                //      Who it is, where it has said: its app_id (a program's word, read to its bounds and spelled) and whether it has an icon.
+                {
+                        char app_id[WINDOWS_APP_ID];
+
+                        if (windows_app_id_read(table, row, app_id))
+                                host_say(log, "    app           %w, %s\n", writer_terminal_name, (string_address)app_id,
+                                         __atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE) ? (string_address) "an icon" : (string_address) "no icon");
+                }
                 host_debug_body(table, row);
         }
         host_say(log, "  pointer         %s\n", table->pointer_plane ? (string_address) "on a plane of its own"

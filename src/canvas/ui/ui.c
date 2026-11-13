@@ -22775,6 +22775,8 @@ static int ui_app_run(struct ui_app address_to app)
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
+        // Who the window is, for its tab and its group in the taskbar: the program's name is its app_id ("settings", "files").
+        windows_app_id_set(table, row, (const char *)app->name);
         table->glass[row] = app->glass;
         ui_kit_table = table, ui_kit_row = row, ui_kit_shape = ui_kit_shape_sent = WINDOW_POINTER_ARROW;
         // No field of this program has the keys yet: a count left by the window that had this row is none of its (ui_field_focus).

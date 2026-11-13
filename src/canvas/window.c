@@ -633,6 +633,9 @@ struct windows_issue
 #define WINDOWS 32
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
+#define WINDOWS_APP_ID 64       // a window's app_id, its null with it
+#define WINDOWS_ICON 32         // a window's icon is this many pixels each way
+#define WINDOWS_ICON_MOST 1024u // the largest picture an icon is made from, each way
 // The screens one desktop spans, at most, and a screen's connector name with its null.
 #define WINDOWS_OUTPUTS 8
 #define WINDOWS_OUTPUT_NAME 16
@@ -1145,6 +1148,18 @@ struct windows
         // was asked again, and a program answers each ask once (windows_close_asked), so one that stayed for unsaved changes is not ended by
         // the ask it already answered the moment the changes are saved.
         unsigned int close_asks[WINDOWS];
+        /*
+                Who a window is, for the taskbar's tab (its icon, its group) and the launcher: app_id names the program (a kit program's is
+                its name, "settings"; a Wayland client's is its xdg_toplevel app_id, "org.mozilla.firefox"), WINDOWS_APP_ID bytes with a null
+                among them, and icon is its picture, WINDOWS_ICON by WINDOWS_ICON pixels of premultiplied 0xaarrggbb, whole only while icon_seq
+                is even and not 0 (0: the window has none; odd: a writer is in it). They are written by windows_app_id_set and
+                windows_icon_set and by nothing else of ours, by the row's program or by the compositor for a client it holds the row of, and
+                they are a program's words to whoever reads them: windows_app_id_read and windows_icon_read take a copy and hold it to its
+                bounds, a seqlock and a premultiplied pixel, whatever the row says.
+        */
+        char app_id[WINDOWS][WINDOWS_APP_ID];
+        unsigned int icon_seq[WINDOWS];
+        unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -3221,6 +3236,147 @@ static int windows_lists_fit(const struct windows *table, unsigned long size, un
 }
 
 /*
+        A window's identity (the table's app_id, icon_seq and icon). The setters are the only writers of ours and refuse what is not
+        one: a row past the table, an app_id that is empty, has a byte under a space or a delete in it, or does not fit with its
+        null; a picture with no pixels, a side of 0 or over WINDOWS_ICON_MOST, or rows shorter than its width. Nothing is written by
+        a refusal. The readers trust none of it, since any program that maps the table can write a row: an app_id is copied to its
+        room and ended there with what is not printable made a question mark, and an icon is copied between two reads of an even,
+        equal icon_seq (tried a few times, then none) with each colour held to its alpha, so what a reader holds is always a whole
+        premultiplied picture or no picture.
+*/
+
+// No app_id and no icon: what a row never taken has.
+static void windows_identity_clear(struct windows *table, unsigned int row)
+{
+        if (!table || row >= WINDOWS)
+                return;
+        for (unsigned int at = 0; at < WINDOWS_APP_ID; at++)
+                ((volatile char *)table->app_id[row])[at] = 0;
+        __atomic_store_n(&table->icon_seq[row], 0u, __ATOMIC_RELEASE);
+}
+
+// Row row's app_id is text. 1 when it was taken; 0, with the row as it was, for a row past the table, no text, an empty one, one too
+// long for its room, or one with a control byte or a space in it (an app_id is one word).
+static int windows_app_id_set(struct windows *table, unsigned int row, const char *text)
+{
+        unsigned int length = 0;
+
+        if (!table || row >= WINDOWS || !text)
+                return 0;
+        while (length < WINDOWS_APP_ID && text[length])
+        {
+                if ((unsigned char)text[length] <= ' ' || text[length] == 127)
+                        return 0;
+                length++;
+        }
+        if (!length || length >= WINDOWS_APP_ID)
+                return 0;
+        // The null first and the rest from the end, so a reader that copies while this writes never finds a longer word than either.
+        for (unsigned int at = WINDOWS_APP_ID; at-- > length;)
+                ((volatile char *)table->app_id[row])[at] = 0;
+        for (unsigned int at = length; at-- > 0;)
+                ((volatile char *)table->app_id[row])[at] = text[at];
+        return 1;
+}
+
+// Row row's app_id copied into into (WINDOWS_APP_ID bytes), ended with a null, a byte that is not printable made '?'. Answers its length, 0 for none.
+static unsigned int windows_app_id_read(const struct windows *table, unsigned int row, char *into)
+{
+        unsigned int length = 0;
+
+        into[0] = 0;
+        if (!table || row >= WINDOWS)
+                return 0;
+        for (; length < WINDOWS_APP_ID - 1; length++)
+        {
+                char byte = ((const volatile char *)table->app_id[row])[length];
+
+                if (!byte)
+                        break;
+                into[length] = (unsigned char)byte <= ' ' || byte == 127 ? '?' : byte;
+        }
+        into[length] = 0;
+        return length;
+}
+
+// A premultiplied pixel held to being one: each colour no more than its alpha.
+static inline unsigned int windows_icon_pixel(unsigned int pixel)
+{
+        unsigned int alpha = pixel >> 24, red = pixel >> 16 & 255, green = pixel >> 8 & 255, blue = pixel & 255;
+
+        red = red > alpha ? alpha : red, green = green > alpha ? alpha : green, blue = blue > alpha ? alpha : blue;
+        return alpha << 24 | red << 16 | green << 8 | blue;
+}
+
+/*
+        Row row's icon is the picture pixels: width by height of premultiplied 0xaarrggbb, stride pixels from one row to the next
+        (stride at least width; nothing past a row's width is read). It is made WINDOWS_ICON each way: the picture's longer side is
+        the icon's, the shorter is centred with clear either side, and each pixel of the icon is the mean of the pixels of the
+        picture under it (one of them where the picture is the smaller). 1 when it was taken and icon_seq moved on to say so; 0, and
+        nothing written, for a row past the table, no pixels, a side of 0 or over WINDOWS_ICON_MOST, or a stride under the width.
+*/
+static int windows_icon_set(struct windows *table, unsigned int row, const unsigned int *pixels, unsigned int width, unsigned int height,
+                            unsigned int stride)
+{
+        unsigned int side, left, top, seq;
+
+        if (!table || row >= WINDOWS || !pixels || !width || !height || width > WINDOWS_ICON_MOST || height > WINDOWS_ICON_MOST || stride < width)
+                return 0;
+        side = width > height ? width : height, left = (side - width) / 2, top = (side - height) / 2;
+        seq = __atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE) | 1u;
+        __atomic_store_n(&table->icon_seq[row], seq, __ATOMIC_RELEASE);
+        for (unsigned int y = 0; y < WINDOWS_ICON; y++)
+        {
+                // The rows and columns of the square the picture is in the middle of that this pixel of the icon covers: one at least.
+                unsigned int y0 = y * side / WINDOWS_ICON, y1 = (y + 1) * side / WINDOWS_ICON;
+
+                y1 = y1 > y0 ? y1 : y0 + 1;
+                for (unsigned int x = 0; x < WINDOWS_ICON; x++)
+                {
+                        unsigned int x0 = x * side / WINDOWS_ICON, x1 = (x + 1) * side / WINDOWS_ICON, sum[4] = {0, 0, 0, 0}, count;
+
+                        x1 = x1 > x0 ? x1 : x0 + 1, count = (x1 - x0) * (y1 - y0);
+                        for (unsigned int sy = y0; sy < y1; sy++)
+                                for (unsigned int sx = x0; sx < x1; sx++)
+                                        if (sx >= left && sx - left < width && sy >= top && sy - top < height)
+                                        {
+                                                unsigned int pixel = windows_icon_pixel(pixels[(unsigned long)(sy - top) * stride + (sx - left)]);
+
+                                                sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
+                                        }
+                        ((volatile unsigned int *)table->icon[row])[y * WINDOWS_ICON + x] =
+                            (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
+                }
+        }
+        // Even again, one on, and never 0, which is no icon.
+        __atomic_store_n(&table->icon_seq[row], seq + 1 ? seq + 1 : 2u, __ATOMIC_RELEASE);
+        return 1;
+}
+
+// Row row's icon copied into into (WINDOWS_ICON * WINDOWS_ICON pixels, each held premultiplied). Answers the icon_seq the copy is of,
+// which is even and not 0, or 0 with into untouched past what a torn copy left: the row has none, or a writer was in it at each of four tries.
+static unsigned int windows_icon_read(const struct windows *table, unsigned int row, unsigned int *into)
+{
+        if (!table || row >= WINDOWS)
+                return 0;
+        for (int tries = 0; tries < 4; tries++)
+        {
+                unsigned int seq = __atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE);
+
+                if (!seq)
+                        return 0;
+                if (seq & 1u)
+                        continue;
+                for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+                        into[at] = windows_icon_pixel(((const volatile unsigned int *)table->icon[row])[at]);
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                if (__atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE) == seq)
+                        return seq;
+        }
+        return 0;
+}
+
+/*
         Whether a header describes a table of size bytes that can be drawn through: the pixels where the layout puts
         them, every buffer a whole number of pages and all 2 * WINDOWS of them inside the mapping, and each row of a
         buffer stride pixels long with stride at least the output's width, the rows used fitting in the buffer. The
@@ -3285,6 +3441,8 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->least_width[row] = table->least_height[row] = 0;
         for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                 table->name[row][at] = 0;
+        // Who the window was is not who the next one in the row is: no app_id and no icon until it says its own.
+        windows_identity_clear(table, row);
         __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
         // A popup's parent and anchor were the menu's that last had the row: kept, the next window there was put at
         // the menu's anchor as a popup of its window, with no tab and never the keys. A watch of the clipboard too
