@@ -237157,6 +237157,82 @@ static void frame_dated_rows(void)
         }
 }
 
+/*
+        When a present is due (compositor_present_due): with no lead, no vblank's stamp, a stamp ahead of the clock or one a
+        period old, a period after the last present or at once, as it was; with a lead and a vblank inside the last period,
+        the lead before the vblank after it, at once when that has gone by, and never sooner than half a period after the last
+        present. And the lead a present is given, and the count of the ones that missed.
+*/
+static void present_due_rows(void)
+{
+        positive period = 16666667ull, v = 7000000000ull, lead = 3000000ull, last = v - period + 100000ull;
+        b32 same = true;
+
+        // With no lead the rule is the old one to the nanosecond, whatever the vblank says.
+        for (positive presented = v - 3 * period; presented <= v + period; presented += period / 7)
+                for (positive now = v - period; now <= v + 3 * period; now += period / 5)
+                {
+                        positive old = now - presented < period ? presented + period : now;
+
+                        same &= compositor_present_due(presented, period, v, 0, now) == old && compositor_present_due(presented, period, 0, lead, now) == old &&
+                                compositor_present_due(presented, period, now + 1, lead, now) == old &&
+                                compositor_present_due(presented, period, v, period, now) == old &&
+                                (now < v + period || compositor_present_due(presented, period, v, lead, now) == old);
+                }
+        check("present: with no lead, no vblank's stamp, a stamp ahead of the clock, a lead of a period, or a vblank a period old, it is due as it was", same);
+        check("present: the moment a flip lands, the next is due the lead before the vblank after it",
+              compositor_present_due(last, period, v, lead, v + 50000) == v + period - lead);
+        check("present: and still then a millisecond on", compositor_present_due(last, period, v, lead, v + 1000000) == v + period - lead);
+        check("present: at that time it is due now", compositor_present_due(last, period, v, lead, v + period - lead) == v + period - lead);
+        check("present: past it and before the vblank it is due at once, late as it is",
+              compositor_present_due(last, period, v, lead, v + period - 1000) == v + period - 1000);
+        check("present: a present made a moment ago holds the next for half a period, whatever the vblank says",
+              compositor_present_due(v + period - lead, period, v, lead, v + period - lead + 1000) == v + period - lead + period / 2);
+        check("present: a vblank a period old is no vblank to go by: a period after the last present",
+              compositor_present_due(v + period / 2, period, v, lead, v + period) == v + period / 2 + period);
+        {
+                // A steady run: each flip lands at its vblank, and each present is made the lead before the next one, a period apart.
+                positive presented = last, vblank = v, now = v + 30000;
+                b32 steady = true;
+
+                for (int frame = 0; frame < 500; frame++)
+                {
+                        positive due = compositor_present_due(presented, period, vblank, lead, now);
+
+                        steady &= due == vblank + period - lead;
+                        presented = due; // dated as made, as the loop dates a late one
+                        vblank += period;
+                        now = vblank + 30000;
+                }
+                check("present: five hundred frames are each made the lead before their vblank", steady);
+        }
+        check("present: the lead is the longest present lately, half as much again and a millisecond",
+              compositor_lead_of(2000000ull, 32) == 4000000ull && compositor_lead_of(0, 4) == COMPOSITOR_LEAD_SPARE);
+        check("present: and none until four presents have been timed", compositor_lead_of(2000000ull, 3) == 0);
+        {
+                positive was_period = compositor.period, was_when = compositor.flip_when;
+
+                compositor.period = period;
+                memory_zero(&compositor_late, sizeof(compositor_late));
+                compositor.flip_when = v;
+                compositor_late_begin(lead, v + period - lead);
+                check("present: a present made with a lead inside a vblank's period is for the vblank after it",
+                      compositor_late.aim == v + period && compositor_late.made == 1);
+                compositor_late_landed(v + period);
+                check("present: its flip landing at that vblank is no miss", compositor_late.missed == 0 && compositor_late.rest == 0 && compositor_late.aim == 0);
+                compositor_late_begin(lead, v + period - lead);
+                compositor_late_landed(v + 2 * period);
+                check("present: its flip landing a vblank later is one, and the presents rest from it",
+                      compositor_late.missed == 1 && compositor_late.rest == COMPOSITOR_LEAD_REST);
+                compositor_late_begin(0, v + period);
+                check("present: a present by the old rule is for no vblank, and is one of the rest", compositor_late.aim == 0 && compositor_late.rest == COMPOSITOR_LEAD_REST - 1);
+                compositor_late_landed(v + 9 * period);
+                check("present: and its flip, whenever it lands, is no miss", compositor_late.missed == 1);
+                memory_zero(&compositor_late, sizeof(compositor_late));
+                compositor.period = was_period, compositor.flip_when = was_when;
+        }
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -237173,6 +237249,7 @@ b32 main(void)
         flip_wait_rows();
         descriptor_rows();
         frame_dated_rows();
+        present_due_rows();
         close_ask_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);

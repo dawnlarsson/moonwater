@@ -7187,6 +7187,98 @@ static positive compositor_frame_dated(positive last, positive period, positive 
         return last && period && stamp >= due && stamp - due < period ? due : stamp;
 }
 
+/*
+        When the next present is due, and a present late in the period.
+
+        A frame's picture is the hand's as it was when the present began, and it is on the screen at the vblank after its flip
+        is issued. A present made the moment the last flip landed has the whole period to compose in and shows input a period
+        old, or older; one made as late as still makes the vblank shows input as old as its composing takes. So, where the
+        card says when its vblank was (the flip event's stamp) and that was within the last period, the next present is due
+        `lead` before the vblank after it, and at once when that time has gone by; `lead` is what a present has lately taken
+        and some to spare (compositor_present_lead). Never sooner than half a period after the last present, so presents
+        that flip nothing are not made over and over. With no lead, no stamp, a stamp ahead of the clock or one a period
+        old (a headless compositor, an idle desktop, a card that stamps nothing), the rule is the one there was: a period
+        after the last present, or at once when that has gone by.
+
+        It is asked for by the machine's owner (the file /run/moonwater/present-late, looked for at the start): what a card
+        and its driver make of a flip issued a millisecond or two before the vblank has been seen on no machine by the one
+        who wrote this, and a flip that misses its vblank is a frame a period late. A missed one (the flip's stamp half a
+        period or more past the vblank it was for) puts the next COMPOSITOR_LEAD_REST presents back on the old rule, and
+        both are counted and said as the compositor ends.
+*/
+#define COMPOSITOR_LEAD_FRAMES 32
+#define COMPOSITOR_LEAD_SPARE 1000000ull
+#define COMPOSITOR_LEAD_REST 120
+static struct
+{
+        int asked;              // /run/moonwater/present-late was there at the start
+        unsigned int rest;      // presents still to be made by the old rule, after a vblank was missed
+        positive aim;           // the vblank the last late present was for (0: it was not late)
+        positive made, missed;  // presents made late in the period, and those whose flip landed a vblank after its aim
+} compositor_late;
+
+static positive compositor_present_due(positive presented, positive period, positive vblank, positive lead, positive now)
+{
+        positive due = now - presented < period ? presented + period : now, late, least;
+
+        if (!lead || !period || lead >= period || !vblank || now < vblank || now - vblank >= period)
+                return due;
+        late = vblank + period - lead;
+        late = now > late ? now : late;
+        least = presented + period / 2;
+        return late > least ? late : least;
+}
+
+// What a present is given before its vblank: the longest of the last COMPOSITOR_LEAD_FRAMES presents, half as much again, and a
+// millisecond. 0 (the old rule) when it was not asked for, a missed vblank is being rested from, or fewer than four presents are timed.
+static positive compositor_lead_of(positive worst, unsigned int timed)
+{
+        return timed < 4 ? 0 : worst + worst / 2 + COMPOSITOR_LEAD_SPARE;
+}
+
+static positive compositor_present_lead(void)
+{
+        positive worst = 0;
+        unsigned int timed = 0;
+
+        if (!compositor_late.asked || compositor_late.rest || compositor.card < 0)
+                return 0;
+        for (unsigned int back = 1; back <= COMPOSITOR_LEAD_FRAMES && back <= compositor_records_kept; back++, timed++)
+        {
+                const struct compositor_record *record =
+                    &compositor_records[(compositor_records_at + COMPOSITOR_RECORD_SIZE - back) % COMPOSITOR_RECORD_SIZE];
+
+                worst = record->compose_ns > worst ? record->compose_ns : worst;
+        }
+        return compositor_lead_of(worst, timed);
+}
+
+// A present is about to be made at `stamp`: whether it is one late in its period, and the vblank it is for.
+static void compositor_late_begin(positive lead, positive stamp)
+{
+        positive vblank = compositor.flip_when;
+
+        if (compositor_late.rest)
+                compositor_late.rest--;
+        compositor_late.aim = 0;
+        if (lead && compositor.period && lead < compositor.period && vblank && stamp >= vblank && stamp - vblank < compositor.period)
+        {
+                compositor_late.aim = vblank + compositor.period;
+                compositor_late.made++;
+        }
+}
+
+// A flip landed at the vblank `when`: one that was for the vblank before is a frame late, and the presents rest from it.
+static void compositor_late_landed(positive when)
+{
+        if (compositor_late.aim && when > compositor_late.aim && when - compositor_late.aim >= compositor.period / 2)
+        {
+                compositor_late.missed++;
+                compositor_late.rest = COMPOSITOR_LEAD_REST;
+        }
+        compositor_late.aim = 0;
+}
+
 static positive compositor_flip_wait(positive now)
 {
         positive period = compositor.period ? compositor.period : 16666667ull, last = compositor.flip_issued + COMPOSITOR_FLIP_PERIODS * period;
@@ -7250,6 +7342,7 @@ static unsigned int compositor_card_events(const p8 *events, long got)
                                 compositor.flip_when = (positive)sec * 1000000000ull + (positive)usec * 1000ull;
                                 compositor.flip_seq = sequence;
                                 compositor.flip_stamped = 1;
+                                compositor_late_landed(compositor.flip_when);
                         }
                         compositor_flip_done();
                         compositor.flip_stamped = 0;
@@ -21039,6 +21132,14 @@ static b32 compositor_main()
         }
 
         compositor_keys_read();
+        // A present late in its period, where the machine's owner asks for it (compositor_present_due).
+        {
+                bipolar asked = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-late", FILE_READ | O_CLOEXEC);
+
+                compositor_late.asked = asked >= 0;
+                if (asked >= 0)
+                        system_close(asked);
+        }
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
         if (!headless && !compositor.layout_given)
@@ -21289,9 +21390,10 @@ static b32 compositor_main()
 
                         now = clock_monotonic_nanoseconds();
                         waiting = compositor_flip_wait(now);
-                        frame = waiting                                                 ? waiting // the flip's event wakes the loop
-                                : now - compositor.presented < compositor.period ? compositor.presented + compositor.period
-                                                                                 : now;
+                        // The flip's event wakes the loop; else the present is made when it is due (compositor_present_due).
+                        frame = waiting ? waiting
+                                        : compositor_present_due(compositor.presented, compositor.period, compositor.flip_when,
+                                                                 compositor_present_lead(), now);
                         until = !until || frame < until ? frame : until;
                 }
 #ifdef MOONWATER_GPU_C
@@ -21414,11 +21516,15 @@ static b32 compositor_main()
                 // of the frame has used the frame up.
                 if (compositor.damages)
                 {
-                        positive stamp = clock_monotonic_nanoseconds();
+                        positive stamp = clock_monotonic_nanoseconds(), lead = compositor_present_lead();
 
-                        if (stamp - compositor.presented >= compositor.period && !compositor_flip_wait(stamp))
+                        // Due by the rule the wait above was made with, so the loop never wakes for a present it then does not make.
+                        if (stamp >= compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, stamp) &&
+                            !compositor_flip_wait(stamp))
                         {
-                                compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, stamp);
+                                // A present late in its period is paced by the card's vblank and is dated as made; any other when it was due.
+                                compositor_late_begin(lead, stamp);
+                                compositor.presented = compositor_late.aim ? stamp : compositor_frame_dated(compositor.presented, compositor.period, stamp);
                                 compositor_present();
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
@@ -21461,6 +21567,9 @@ static b32 compositor_main()
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,
                       (positive)compositor.cursor.refused);
         string_format(log, "compositor: the processor was held %p times\n", (positive)(compositor.holds == ~0ul ? 0 : compositor.holds));
+        if (compositor_late.asked)
+                string_format(log, "compositor: %p presents were made late in their period, and %p of them missed the vblank they were for\n",
+                              compositor_late.made, compositor_late.missed);
         string_format(log, "compositor: glass blurred again %p pixels and composed again %p\n", compositor.blurred,
                       compositor.recomposed);
         for (unsigned int which = 0; which < 3; which++)
