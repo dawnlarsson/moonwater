@@ -40,13 +40,21 @@ files_changed	df4e	Δεν είναι αυτό που εμφανίστηκε: ο 
 files_chosen	7a7f	Επιλέχθηκαν %1$d από %2$d
 files_count	cab8	%d στοιχεία
 files_count_cut	f139	Τα πρώτα %d στοιχεία: ο φάκελος έχει περισσότερα
+files_delete_ask	807b	Διαγραφή %1$d: %2$s; Ξανά Delete το κάνει, Escape τα αφήνει
+files_delete_stopped	ef42	Σταμάτησε στο %2$s: %1$d διαγράφηκαν πριν
+files_deleted	8591	%d διαγράφηκαν
+files_deleting	a297	Διαγραφή: %d ως τώρα, Escape σταματά
 files_empty	751c	Αυτός ο φάκελος είναι κενός
 files_failed	c564	Δεν ήταν δυνατή η ανάγνωση του φακέλου
 files_forward	83ba	Εμπρός
 files_gone	b09c	Αυτός ο φάκελος δεν υπάρχει πια
 files_link	9abb	Ένας σύνδεσμος δεν ακολουθείται
+files_name_bad	467d	Αυτό δεν είναι όνομα
+files_name_taken	cbce	Το όνομα χρησιμοποιείται
+files_new_folder	d127	Νέος φάκελος
 files_not_folder	2663	Αυτό δεν είναι φάκελος
 files_reading	64a4	Ανάγνωση του φακέλου
+files_rename_hint	ad88	Νέο όνομα
 files_unreadable	986c	Δεν επιτρέπεται η ανάγνωση του φακέλου
 files_up	5940	Πάνω
 launcher_log_out	d8b5	Αποσύνδεση

@@ -7628,13 +7628,21 @@ LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again"
 LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
 LANGUAGE_ID(files_count, "%d items") \
 LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
+LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape leaves them") \
+LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
+LANGUAGE_ID(files_deleted, "%d deleted") \
+LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \
 LANGUAGE_ID(files_forward, "Forward") \
 LANGUAGE_ID(files_gone, "This folder is gone") \
 LANGUAGE_ID(files_link, "A link is not followed") \
+LANGUAGE_ID(files_name_bad, "That is not a name") \
+LANGUAGE_ID(files_name_taken, "That name is taken") \
+LANGUAGE_ID(files_new_folder, "New folder") \
 LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
+LANGUAGE_ID(files_rename_hint, "New name") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
 LANGUAGE_ID(launcher_log_out, "Log out") \

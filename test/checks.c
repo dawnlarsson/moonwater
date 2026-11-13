@@ -117251,6 +117251,67 @@ static fn browser_ops(struct files_model address_to m)
         files_job_end(&job);
 }
 
+/*
+        The window's own rules for a delete, with no window: Delete asks before anything goes, and the question says how many and the
+        first names of them as words from outside (a control byte in a name is its picture there too); nothing is removed by the
+        asking; Delete again, with the listing as it was asked of, begins the job; and a listing that changed since the question is
+        asked about again and removes nothing.
+*/
+static fn browser_asks(void)
+{
+        static const p8 hostile[] = "asks/b\nad";
+        long mapped = ui_map(sizeof(struct files_big));
+        struct files_model address_to m;
+        char names[256];
+        b32 said, asked, again, begun, clean = true;
+        p32 count;
+
+        if (mapped < 0 && mapped > -4096)
+        {
+                check("browser: the window's memory is mapped", false);
+                return;
+        }
+        files.big = (struct files_big address_to)mapped;
+        m = &files.big->model;
+        files_model_open(m);
+        browser_folder((string_address) "asks");
+        browser_file((string_address) "asks/a", 1, 0);
+        browser_file((string_address)hostile, 1, 0);
+        browser_file((string_address) "asks/c", 1, 0);
+        browser_file((string_address) "asks/d", 1, 0);
+        browser_file((string_address) "asks/e", 1, 0);
+        browser_file((string_address) "asks/kept", 1, 0);
+        browser_go(m, (string_address) "asks");
+        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
+        files_model_choose(m, 4, FILES_CHOOSE_RANGE);
+        count = files_ask_names(names, sizeof(names));
+        for (const char address_to at = names; *at; at++)
+                clean = clean && (unsigned char)*at >= 0x20;
+        said = count == 5 && clean && string_equals((string_address)names, (string_address) "a, b\xe2\x90\x8a" "ad, c +2");
+        check("browser: a delete's question says how many would go and the first three of their names as words from outside, with how many more after them", said);
+        files_delete();
+        asked = files.armed && files.big->job.state == FILES_JOB_IDLE && files.big->note[0] && browser_there((string_address) "asks/a") &&
+                string_equals((string_address)files.big->note, (string_address) "Delete 5: a, b\xe2\x90\x8a" "ad, c +2? Delete again does it, Escape leaves them");
+        check("browser: Delete asks first: the foot has the question, and nothing is removed by the asking", asked);
+        // The listing changes after the question (a reload counts its revision up): Delete asks again and removes nothing.
+        files_model_reload(m);
+        browser_read(m, 64);
+        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
+        files_delete();
+        again = files.armed && files.big->job.state == FILES_JOB_IDLE && browser_there((string_address) "asks/a") &&
+                string_equals((string_address)files.big->note, (string_address) "Delete 1: a? Delete again does it, Escape leaves them");
+        files_delete();
+        begun = !files.armed && files.big->job.state == FILES_JOB_RUNNING && files.big->job.count == 1;
+        while (files_job_step(m, &files.big->job, 4))
+                ;
+        begun = begun && files.big->job.state == FILES_JOB_DONE && files.big->job.removed == 1 && !browser_there((string_address) "asks/a") &&
+                browser_there((string_address) "asks/c") && browser_there((string_address) "asks/kept");
+        check("browser: a listing that changed since the question is asked about again, and Delete again on the listing asked of removes what was asked and no more",
+              again && begun);
+        files_job_end(&files.big->job);
+        files_model_close(m);
+}
+
 // The model names nothing of the kit and nothing of a window: outside its comments, its source has none of their words.
 static fn browser_apart(void)
 {
@@ -117328,6 +117389,7 @@ b32 main(void)
         browser_changes(address_of model);
         browser_many(address_of model);
         browser_ops(address_of model);
+        browser_asks();
         browser_apart();
         files_model_close(address_of model);
         browser_remove(browser_base);

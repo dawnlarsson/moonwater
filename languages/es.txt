@@ -40,13 +40,21 @@ files_changed	df4e	No es lo que se listó: la carpeta se lee de nuevo
 files_chosen	7a7f	%1$d de %2$d elegidos
 files_count	cab8	%d elementos
 files_count_cut	f139	Los primeros %d elementos: la carpeta tiene más
+files_delete_ask	807b	¿Eliminar %1$d: %2$s? Suprimir otra vez lo hace, Escape los deja
+files_delete_stopped	ef42	Detenido en %2$s: %1$d eliminados antes
+files_deleted	8591	%d eliminados
+files_deleting	a297	Eliminando: %d hasta ahora, Escape detiene
 files_empty	751c	Esta carpeta está vacía
 files_failed	c564	No se pudo leer esta carpeta
 files_forward	83ba	Adelante
 files_gone	b09c	Esta carpeta ya no está
 files_link	9abb	No se sigue un enlace
+files_name_bad	467d	Eso no es un nombre
+files_name_taken	cbce	Ese nombre ya existe
+files_new_folder	d127	Carpeta nueva
 files_not_folder	2663	Esto no es una carpeta
 files_reading	64a4	Leyendo la carpeta
+files_rename_hint	ad88	Nombre nuevo
 files_unreadable	986c	No se permite leer esta carpeta
 files_up	5940	Subir
 launcher_log_out	d8b5	Cerrar sesión

@@ -40,13 +40,21 @@ files_changed	df4e	It is not what was listed: the folder is read again
 files_chosen	7a7f	%1$d of %2$d chosen
 files_count	cab8	%d items
 files_count_cut	f139	The first %d items: the folder has more
+files_delete_ask	807b	Delete %1$d: %2$s? Delete again does it, Escape leaves them
+files_delete_stopped	ef42	Stopped at %2$s: %1$d deleted before it
+files_deleted	8591	%d deleted
+files_deleting	a297	Deleting: %d so far, Escape stops
 files_empty	751c	This folder is empty
 files_failed	c564	This folder could not be read
 files_forward	83ba	Forward
 files_gone	b09c	This folder is gone
 files_link	9abb	A link is not followed
+files_name_bad	467d	That is not a name
+files_name_taken	cbce	That name is taken
+files_new_folder	d127	New folder
 files_not_folder	2663	This is not a folder
 files_reading	64a4	Reading the folder
+files_rename_hint	ad88	New name
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
 launcher_log_out	d8b5	Log out

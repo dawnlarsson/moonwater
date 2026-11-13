@@ -40,13 +40,21 @@ files_changed	df4e	Это уже не то, что было в списке: п�
 files_chosen	7a7f	Выбрано %1$d из %2$d
 files_count	cab8	Объектов: %d
 files_count_cut	f139	Первые %d объектов: в папке есть ещё
+files_delete_ask	807b	Удалить %1$d: %2$s? Ещё раз Delete удаляет, Escape оставляет
+files_delete_stopped	ef42	Остановлено на %2$s: до этого удалено %1$d
+files_deleted	8591	Удалено: %d
+files_deleting	a297	Удаление: пока %d, Escape останавливает
 files_empty	751c	Эта папка пуста
 files_failed	c564	Не удалось прочитать эту папку
 files_forward	83ba	Вперёд
 files_gone	b09c	Этой папки больше нет
 files_link	9abb	Переход по ссылке не выполняется
+files_name_bad	467d	Это не имя
+files_name_taken	cbce	Это имя занято
+files_new_folder	d127	Новая папка
 files_not_folder	2663	Это не папка
 files_reading	64a4	Чтение папки
+files_rename_hint	ad88	Новое имя
 files_unreadable	986c	Эту папку нельзя читать
 files_up	5940	Вверх
 launcher_log_out	d8b5	Выйти

@@ -26,6 +26,13 @@
         too, because typing a name asks for what it names. A path that is no folder, may not be read or is not there says so in
         the foot, and the folder shown stays as it was.
 
+        Changing what is there. Delete asks first: the foot says how many would go and the first of their names, and only Delete
+        again does it (any other key or a press leaves them); the delete then runs between events as the reading does
+        (files_job_step), the foot counting, Escape stopping it, and the folder is read again when it ends. It is a real delete
+        (the model says why there is no trash). F2 puts the name of the entry the keys are on in the band's field, where Enter
+        gives it the new name and Escape leaves it; a name that is taken or is no name says so and nothing is renamed. Ctrl+Shift+N
+        makes a folder called New folder (New folder 2 and on while the name is taken) with the keys on it, ready for F2.
+
         Starts: files [PATH] [-f FONT] [-b BOLD]. With no path it shows HOME, or the root.
 */
 #ifndef MOONWATER_CANVAS_FILES
@@ -42,6 +49,11 @@
 #define FILES_KEY_H 35
 #define FILES_KEY_A 30
 #define FILES_KEY_L 38
+#define FILES_KEY_N 49
+#define FILES_KEY_F2 60
+#define FILES_EDIT_PATH 1            // files.editing: the band's field holds the path,
+#define FILES_EDIT_NAME 2            // or the new name of the entry at files.naming
+#define FILES_ASK_NAMES 3            // the names a delete's question says, of however many it would remove
 #define FILES_CRUMBS 48              // the folders of a path that are crumbs at most: a deeper path shows its last ones
 #define FILES_CRUMB_GAP 6            // logical pixels either side of the stroke between two crumbs
 
@@ -51,6 +63,8 @@ struct files_big
         struct files_model model;
         struct ui_list list;
         struct ui_view view;
+        struct files_job job;          // the delete under way, if one is
+        char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
 };
 
@@ -76,7 +90,10 @@ static struct
                 p16 from, to;    // its name is the path's bytes from..to, and the folder it goes to is the path's first `to` bytes (the root's: 1)
         } crumb[FILES_CRUMBS];
         int crumbs, crumb_hover; // how many are laid out (the last ones of a path too long for the band), and the one under the pointer, -1 none
-        b32 editing;             // the band is the field
+        int editing;             // the band is the field: FILES_EDIT_PATH or FILES_EDIT_NAME, 0 the crumbs
+        p32 naming;              // the place of the entry being named
+        b32 armed;               // Delete was pressed once: the foot asks, and Delete again does it
+        p32 armed_at;            // the model's revision the question was asked at: a listing that changed since is asked again
         struct ui_text field;    // the kit's text engine for it
         struct ui_control path;  // and the kit's bare field it is drawn in
         struct ui_popup menu;    // the field's own menu (copy, paste)
@@ -175,7 +192,11 @@ static fn files_status_text(void)
         positive room = sizeof(files.big->status);
 
         into[0] = 0;
-        if (files.said)
+        if (files.big->job.state == FILES_JOB_RUNNING)
+                language_format(into, room, WORDS(files_deleting), (int)files.big->job.removed);
+        else if (files.big->note[0])
+                string_copy_bounded((string_address)into, (string_address)files.big->note, room);
+        else if (files.said)
                 string_copy_bounded((string_address)into, (string_address)language_text(files.said), room);
         else if (m->state == FILES_READY && m->chosen_count > 1)
                 language_format(into, room, WORDS(files_chosen), (int)m->chosen_count, (int)m->shown.count);
@@ -329,6 +350,7 @@ static fn files_layout(void)
                 files.path.edit = files_field();
         }
         files.path.focused = files.editing && files.focused;
+        files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
         ui_row(.class = "pathbar")
         {
@@ -373,16 +395,131 @@ static fn files_show_cursor(void)
 
 static fn files_moved(void);
 
-// The band becomes the field, holding the whole path with the caret at its end; or the crumbs again.
-static fn files_edit(b32 on)
+// The band becomes the field: holding the whole path (FILES_EDIT_PATH), or the name of the entry the keys are on for a new one
+// (FILES_EDIT_NAME); or the crumbs again (0).
+static fn files_edit(int how)
 {
-        const p8 address_to path = files.big->model.path;
+        const struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
 
-        files.editing = on;
-        if (on)
-                ui_text_set(files_field(), path, string_length((string_address)path));
-        files.crumb_hover = -1, files.said = 0;
+        if (how == FILES_EDIT_NAME && !entry)
+                return;
+        files.editing = how;
+        files_field()->most = how == FILES_EDIT_NAME ? FILES_NAME - 1 : FILES_PATH - 1;
+        if (how == FILES_EDIT_PATH)
+                ui_text_set(files_field(), m->path, string_length((string_address)m->path));
+        else if (how == FILES_EDIT_NAME)
+                ui_text_set(files_field(), files_model_name(m, entry), entry->length), files.naming = m->cursor;
+        files.crumb_hover = -1, files.said = 0, files.armed = false, files.big->note[0] = 0;
         files.dirty = true;
+}
+
+// The names of what a delete would remove, the first FILES_ASK_NAMES of them as words from outside with a comma between, and how many
+// more there are after a plus: what the question shows of them. Answers how many there are in all.
+static p32 files_ask_names(char address_to into, positive room)
+{
+        const struct files_model address_to m = &files.big->model;
+        positive used = 0;
+        p32 count = 0;
+
+        into[0] = 0;
+        for (p32 place = 0; place < m->shown.count; place++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, place);
+
+                if (m->chosen_count ? !files_model_chosen(m, place) : place != m->cursor)
+                        continue;
+                if (count++ >= FILES_ASK_NAMES || used + 80 > room)
+                        continue;
+                if (used)
+                        into[used++] = ',', into[used++] = ' ';
+                used += ui_label_foreign(into + used, 64, files_model_name(m, entry), entry->length);
+        }
+        if (count > FILES_ASK_NAMES && used + 16 < room)
+        {
+                into[used++] = ' ', into[used++] = '+';
+                used += positive_into((p8 address_to)into + used, count - FILES_ASK_NAMES);
+                into[used] = 0;
+        }
+        return count;
+}
+
+// Delete: the first press asks, saying how many and which; the second, with the listing as it was asked of, begins the delete.
+static fn files_delete(void)
+{
+        struct files_model address_to m = &files.big->model;
+        char names[256];
+        p32 count = files_ask_names(names, sizeof(names));
+
+        files.said = 0;
+        if (!count || m->state != FILES_READY || files.big->job.state == FILES_JOB_RUNNING)
+                return;
+        if (files.armed && files.armed_at == m->revision)
+        {
+                files.armed = false, files.big->note[0] = 0;
+                if (!files_delete_begin(m, &files.big->job))
+                {
+                        // An entry was no longer the one listed: nothing was removed, and the folder is read again.
+                        files.said = LANGUAGE_files_changed;
+                        files_model_reload(m);
+                }
+                files.dirty = true;
+                return;
+        }
+        files.armed = true, files.armed_at = m->revision;
+        language_format(files.big->note, sizeof(files.big->note), WORDS(files_delete_ask), (int)count, names);
+        files.dirty = true;
+}
+
+// A folder made in the folder shown, called New folder, or New folder 2 and on while that is taken: the keys go to it when it is listed.
+static fn files_new_folder(void)
+{
+        struct files_model address_to m = &files.big->model;
+        static p8 name[FILES_NAME];
+        int did = FILES_DID_EXISTS;
+
+        for (int number = 1; number < 100 && did == FILES_DID_EXISTS; number++)
+        {
+                string_copy_bounded(name, (string_address)WORDS(files_new_folder), FILES_NAME - 8);
+                if (number > 1)
+                {
+                        positive used = string_length(name);
+
+                        name[used++] = ' ';
+                        name[used + positive_into(name + used, (positive)number)] = end;
+                }
+                did = files_model_make_folder(m, name);
+        }
+        files.big->note[0] = 0;
+        files.said = did == FILES_DID ? 0 : did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
+        if (did == FILES_DID)
+        {
+                files_model_reload(m);
+                string_copy_bounded(m->came, name, FILES_NAME);
+        }
+        files.dirty = true;
+}
+
+// Enter in the field while it holds a name: the entry is given it, and the keys stay on it. A name that is taken, or is no name, or an
+// entry that is no longer the one listed, says so and renames nothing; the field stays for the name to be put right.
+static fn files_name_go(void)
+{
+        struct files_model address_to m = &files.big->model;
+        static p8 typed[FILES_NAME];
+        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        int did;
+
+        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        did = files_model_rename(m, files.naming, typed);
+        if (did != FILES_DID)
+        {
+                files.said = did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
+                files.dirty = true;
+                return;
+        }
+        files_edit(0);
+        files_model_reload(m);
+        string_copy_bounded(m->came, typed, FILES_NAME);
 }
 
 // To the folder the field's text names, if it is one: the crumbs come back with it. One that is not says why in the foot, and the
@@ -393,11 +530,17 @@ static fn files_edit_go(void)
         positive length = ui_text_string(files_field(), typed, sizeof(typed));
         int came;
 
+        if (files.editing == FILES_EDIT_NAME)
+        {
+                files_name_go();
+                return;
+        }
+
         typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
         came = files_model_try(&files.big->model, typed);
         if (came == FILES_READING)
         {
-                files_edit(false);
+                files_edit(0);
                 files_moved();
                 return;
         }
@@ -454,7 +597,7 @@ static fn files_crumb_go(int which)
 // Another folder is shown: its rows from the top, nothing said of the folder before.
 static fn files_moved(void)
 {
-        files.editing = false, files.crumb_hover = -1;
+        files.editing = 0, files.crumb_hover = -1, files.armed = false, files.big->note[0] = 0;
         files.clicked = FILES_NO, files.said = 0;
         ui_scroll_set(&files.big->list.scroll, 0);
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
@@ -505,6 +648,30 @@ static b32 files_key(const struct window_event address_to event)
         bipolar by = 0;
 
         page = page < 1 ? 1 : page;
+        // Delete asks and Delete again does; Escape stops a delete under way; any other key leaves what was asked about.
+        if (key == UI_KEY_DELETE)
+        {
+                if (!(event->flags & WINDOW_KEY_REPEAT))
+                        files_delete();
+                return true;
+        }
+        if (key == UI_KEY_ESCAPE && files.big->job.state == FILES_JOB_RUNNING)
+        {
+                files_job_cancel(&files.big->job);
+                return true;
+        }
+        if (files.armed || files.big->note[0])
+                files.armed = false, files.big->note[0] = 0, files.dirty = true;
+        if (key == FILES_KEY_F2)
+        {
+                files_edit(FILES_EDIT_NAME);
+                return true;
+        }
+        if (control && shift && key == FILES_KEY_N)
+        {
+                files_new_folder();
+                return true;
+        }
         if (alt && (key == UI_KEY_LEFT || key == UI_KEY_RIGHT))
                 return files_act(key == UI_KEY_RIGHT);
         if ((alt && key == UI_KEY_UP) || key == UI_KEY_BACKSPACE)
@@ -586,7 +753,7 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 if (asks & (UI_TEXT_CANCEL | UI_TEXT_COMMIT))
                 {
-                        files_edit(false);
+                        files_edit(0);
                         if (event->type == WINDOW_EVENT_KEY)
                                 return true;
                         files_layout();
@@ -598,14 +765,14 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 else if (event->type == WINDOW_EVENT_KEY)
                 {
-                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT))
+                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) && files.editing == FILES_EDIT_PATH)
                                 files_edit_complete();
                         return true;
                 }
         }
         else if (event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) && event->a == FILES_KEY_L)
         {
-                files_edit(true);
+                files_edit(FILES_EDIT_PATH);
                 return true;
         }
         // The band's buttons first: a press on one, and the keys while they are on one (Shift+Tab gives them the keys).
@@ -633,6 +800,8 @@ static b32 files_event(const struct window_event address_to event)
                 break;
         case WINDOW_EVENT_BUTTON:
                 files.dirty = true;
+                if (down)
+                        files.armed = false, files.big->note[0] = 0; // a press leaves what Delete asked about
                 // The band: a press on a crumb goes to its folder, and one on the band's own ground opens the field.
                 if (down && event->a == UI_POINTER_LEFT && !files.editing && ui_kit.pointer_x >= files.crumbs_box.x &&
                     ui_kit.pointer_x < files.crumbs_box.x + files.crumbs_box.w && ui_kit.pointer_y >= files.crumbs_box.y &&
@@ -643,7 +812,7 @@ static b32 files_event(const struct window_event address_to event)
                         if (crumb >= 0)
                                 files_crumb_go(crumb);
                         else
-                                files_edit(true);
+                                files_edit(FILES_EDIT_PATH);
                         break;
                 }
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
@@ -729,6 +898,32 @@ static long files_tick(long timeout, long address_to other)
 
                 timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
                 files.dirty |= redraw;
+        }
+        // A delete under way: steps of it for a few milliseconds and back to the events; when it ends the foot says what it came to and
+        // the folder is read again.
+        if (files.big->job.state == FILES_JOB_RUNNING)
+        {
+                struct files_job address_to job = &files.big->job;
+                b64 began = (b64)ui_kit_clock();
+                b32 more = true;
+
+                while (more && (b64)ui_kit_clock() - began < FILES_TURN_NS)
+                        more = files_job_step(m, job, 16);
+                if (!more)
+                {
+                        char at[FILES_NAME * 3 + 4];
+
+                        ui_label_foreign(at, 96, job->at, string_length(job->at));
+                        if (job->state == FILES_JOB_FAILED)
+                                language_format(files.big->note, sizeof(files.big->note), WORDS(files_delete_stopped), (int)job->removed, at);
+                        else
+                                language_format(files.big->note, sizeof(files.big->note), WORDS(files_deleted), (int)job->removed);
+                        files_job_end(job);
+                        files_model_reload(m);
+                }
+                if (!more || now >= files.next_show)
+                        files.next_show = now + FILES_SHOW_NS, files.dirty = true;
+                return 1;
         }
         if (m->walking)
         {

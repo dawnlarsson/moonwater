@@ -40,13 +40,21 @@ files_changed	df4e	Це вже не те, що було у списку: тек�
 files_chosen	7a7f	Вибрано %1$d з %2$d
 files_count	cab8	Об'єктів: %d
 files_count_cut	f139	Перші %d об'єктів: у теці є ще
+files_delete_ask	807b	Видалити %1$d: %2$s? Ще раз Delete видаляє, Escape лишає
+files_delete_stopped	ef42	Зупинено на %2$s: до цього видалено %1$d
+files_deleted	8591	Видалено: %d
+files_deleting	a297	Видалення: поки %d, Escape зупиняє
 files_empty	751c	Ця тека порожня
 files_failed	c564	Не вдалося прочитати цю теку
 files_forward	83ba	Вперед
 files_gone	b09c	Цієї теки більше немає
 files_link	9abb	Перехід за посиланням не виконується
+files_name_bad	467d	Це не ім'я
+files_name_taken	cbce	Це ім'я зайняте
+files_new_folder	d127	Нова тека
 files_not_folder	2663	Це не тека
 files_reading	64a4	Читання теки
+files_rename_hint	ad88	Нове ім'я
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
 launcher_log_out	d8b5	Вийти

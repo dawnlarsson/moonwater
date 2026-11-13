@@ -40,13 +40,21 @@ files_changed	df4e	To nie to, co było na liście: folder jest czytany ponownie
 files_chosen	7a7f	Wybrano %1$d z %2$d
 files_count	cab8	Elementy: %d
 files_count_cut	f139	Pierwsze %d elementów: folder ma ich więcej
+files_delete_ask	807b	Usunąć %1$d: %2$s? Ponowne Delete usuwa, Escape zostawia
+files_delete_stopped	ef42	Zatrzymano na %2$s: wcześniej usunięto %1$d
+files_deleted	8591	Usunięto: %d
+files_deleting	a297	Usuwanie: dotąd %d, Escape zatrzymuje
 files_empty	751c	Ten folder jest pusty
 files_failed	c564	Nie udało się odczytać tego folderu
 files_forward	83ba	Dalej
 files_gone	b09c	Tego folderu już nie ma
 files_link	9abb	Dowiązanie nie jest śledzone
+files_name_bad	467d	To nie jest nazwa
+files_name_taken	cbce	Ta nazwa jest zajęta
+files_new_folder	d127	Nowy folder
 files_not_folder	2663	To nie jest folder
 files_reading	64a4	Czytanie folderu
+files_rename_hint	ad88	Nowa nazwa
 files_unreadable	986c	Tego folderu nie wolno czytać
 files_up	5940	W górę
 launcher_log_out	d8b5	Wyloguj

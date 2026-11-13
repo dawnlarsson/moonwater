@@ -41,13 +41,21 @@ files_changed	df4e	זה לא מה שהופיע ברשימה: התיקייה נק
 files_chosen	7a7f	נבחרו %1$d מתוך %2$d
 files_count	cab8	%d פריטים
 files_count_cut	f139	%d הפריטים הראשונים: בתיקייה יש עוד
+files_delete_ask	807b	למחוק %1$d: %2$s? Delete שוב מוחק, Escape משאיר
+files_delete_stopped	ef42	נעצר ב-%2$s: נמחקו %1$d לפניו
+files_deleted	8591	נמחקו %d
+files_deleting	a297	מוחק: %d עד כה, Escape עוצר
 files_empty	751c	התיקייה הזו ריקה
 files_failed	c564	לא ניתן היה לקרוא את התיקייה
 files_forward	83ba	קדימה
 files_gone	b09c	התיקייה הזו כבר לא קיימת
 files_link	9abb	לא עוקבים אחרי קישור
+files_name_bad	467d	זה לא שם
+files_name_taken	cbce	השם הזה תפוס
+files_new_folder	d127	תיקייה חדשה
 files_not_folder	2663	זו לא תיקייה
 files_reading	64a4	קורא את התיקייה
+files_rename_hint	ad88	שם חדש
 files_unreadable	986c	אין הרשאה לקרוא את התיקייה
 files_up	5940	למעלה
 launcher_log_out	d8b5	התנתקות

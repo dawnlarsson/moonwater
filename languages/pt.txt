@@ -40,13 +40,21 @@ files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
 files_chosen	7a7f	%1$d de %2$d escolhidos
 files_count	cab8	%d itens
 files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
+files_delete_ask	807b	Excluir %1$d: %2$s? Delete de novo exclui, Escape os mantém
+files_delete_stopped	ef42	Parou em %2$s: %1$d excluídos antes
+files_deleted	8591	%d excluídos
+files_deleting	a297	Excluindo: %d até agora, Escape para
 files_empty	751c	Esta pasta está vazia
 files_failed	c564	Não foi possível ler esta pasta
 files_forward	83ba	Avançar
 files_gone	b09c	Esta pasta não existe mais
 files_link	9abb	Um link não é seguido
+files_name_bad	467d	Isso não é um nome
+files_name_taken	cbce	Esse nome já existe
+files_new_folder	d127	Nova pasta
 files_not_folder	2663	Isto não é uma pasta
 files_reading	64a4	Lendo a pasta
+files_rename_hint	ad88	Novo nome
 files_unreadable	986c	Esta pasta não pode ser lida
 files_up	5940	Subir
 launcher_log_out	d8b5	Sair

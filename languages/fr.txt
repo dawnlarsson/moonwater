@@ -40,13 +40,21 @@ files_changed	df4e	Ce n'est plus ce qui était listé : le dossier est relu
 files_chosen	7a7f	%1$d sur %2$d choisis
 files_count	cab8	%d éléments
 files_count_cut	f139	Les %d premiers éléments : le dossier en a plus
+files_delete_ask	807b	Supprimer %1$d : %2$s ? Suppr à nouveau le fait, Escape les garde
+files_delete_stopped	ef42	Arrêté à %2$s : %1$d supprimés avant
+files_deleted	8591	%d supprimés
+files_deleting	a297	Suppression : %d pour l'instant, Escape arrête
 files_empty	751c	Ce dossier est vide
 files_failed	c564	Ce dossier n'a pas pu être lu
 files_forward	83ba	Suivant
 files_gone	b09c	Ce dossier n'existe plus
 files_link	9abb	Un lien n'est pas suivi
+files_name_bad	467d	Ce n'est pas un nom
+files_name_taken	cbce	Ce nom est déjà pris
+files_new_folder	d127	Nouveau dossier
 files_not_folder	2663	Ce n'est pas un dossier
 files_reading	64a4	Lecture du dossier
+files_rename_hint	ad88	Nouveau nom
 files_unreadable	986c	Ce dossier ne peut pas être lu
 files_up	5940	Monter
 launcher_log_out	d8b5	Se déconnecter

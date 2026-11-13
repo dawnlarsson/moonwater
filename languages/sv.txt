@@ -40,13 +40,21 @@ files_changed	df4e	Det är inte det som listades: mappen läses om
 files_chosen	7a7f	%1$d av %2$d valda
 files_count	cab8	%d objekt
 files_count_cut	f139	De första %d objekten: mappen har fler
+files_delete_ask	807b	Ta bort %1$d: %2$s? Delete igen gör det, Escape låter dem vara
+files_delete_stopped	ef42	Stannade vid %2$s: %1$d borttagna före
+files_deleted	8591	%d borttagna
+files_deleting	a297	Tar bort: %d hittills, Escape stoppar
 files_empty	751c	Den här mappen är tom
 files_failed	c564	Den här mappen kunde inte läsas
 files_forward	83ba	Framåt
 files_gone	b09c	Den här mappen är borta
 files_link	9abb	En länk följs inte
+files_name_bad	467d	Det är inget namn
+files_name_taken	cbce	Namnet är upptaget
+files_new_folder	d127	Ny mapp
 files_not_folder	2663	Det här är ingen mapp
 files_reading	64a4	Läser mappen
+files_rename_hint	ad88	Nytt namn
 files_unreadable	986c	Den här mappen får inte läsas
 files_up	5940	Upp
 launcher_log_out	d8b5	Logga ut

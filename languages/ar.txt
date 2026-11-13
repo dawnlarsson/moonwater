@@ -41,13 +41,21 @@ files_changed	df4e	ليس ما كان في القائمة: يُقرأ المجل
 files_chosen	7a7f	تم اختيار %1$d من %2$d
 files_count	cab8	%d عنصر
 files_count_cut	f139	أول %d عنصر: في المجلد المزيد
+files_delete_ask	807b	حذف %1$d: %2$s؟ Delete مرة أخرى يحذف، Escape يتركها
+files_delete_stopped	ef42	توقف عند %2$s: حُذف %1$d قبله
+files_deleted	8591	حُذف %d
+files_deleting	a297	جارٍ الحذف: %d حتى الآن، Escape يوقف
 files_empty	751c	هذا المجلد فارغ
 files_failed	c564	تعذرت قراءة هذا المجلد
 files_forward	83ba	تقدم
 files_gone	b09c	هذا المجلد لم يعد موجودا
 files_link	9abb	لا يُتبع الرابط
+files_name_bad	467d	هذا ليس اسما
+files_name_taken	cbce	هذا الاسم مستخدم
+files_new_folder	d127	مجلد جديد
 files_not_folder	2663	هذا ليس مجلدا
 files_reading	64a4	قراءة المجلد
+files_rename_hint	ad88	اسم جديد
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
 launcher_log_out	d8b5	تسجيل الخروج

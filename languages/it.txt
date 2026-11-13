@@ -40,13 +40,21 @@ files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
 files_chosen	7a7f	%1$d di %2$d scelti
 files_count	cab8	%d elementi
 files_count_cut	f139	I primi %d elementi: la cartella ne ha altri
+files_delete_ask	807b	Eliminare %1$d: %2$s? Di nuovo Canc lo fa, Escape li lascia
+files_delete_stopped	ef42	Fermato a %2$s: %1$d eliminati prima
+files_deleted	8591	%d eliminati
+files_deleting	a297	Eliminazione: %d finora, Escape ferma
 files_empty	751c	Questa cartella è vuota
 files_failed	c564	Impossibile leggere questa cartella
 files_forward	83ba	Avanti
 files_gone	b09c	Questa cartella non c'è più
 files_link	9abb	Un collegamento non viene seguito
+files_name_bad	467d	Questo non è un nome
+files_name_taken	cbce	Questo nome è già usato
+files_new_folder	d127	Nuova cartella
 files_not_folder	2663	Questa non è una cartella
 files_reading	64a4	Lettura della cartella
+files_rename_hint	ad88	Nuovo nome
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
 launcher_log_out	d8b5	Esci

@@ -40,13 +40,21 @@ files_changed	df4e	Listelenen bu değil: klasör yeniden okunuyor
 files_chosen	7a7f	%1$d / %2$d seçildi
 files_count	cab8	%d öğe
 files_count_cut	f139	İlk %d öğe: klasörde daha fazlası var
+files_delete_ask	807b	%1$d silinsin mi: %2$s? Yeniden Delete siler, Escape bırakır
+files_delete_stopped	ef42	%2$s üzerinde durdu: öncesinde %1$d silindi
+files_deleted	8591	%d silindi
+files_deleting	a297	Siliniyor: şimdiye dek %d, Escape durdurur
 files_empty	751c	Bu klasör boş
 files_failed	c564	Bu klasör okunamadı
 files_forward	83ba	İleri
 files_gone	b09c	Bu klasör artık yok
 files_link	9abb	Bağlantı izlenmez
+files_name_bad	467d	Bu bir ad değil
+files_name_taken	cbce	Bu ad kullanılıyor
+files_new_folder	d127	Yeni klasör
 files_not_folder	2663	Bu bir klasör değil
 files_reading	64a4	Klasör okunuyor
+files_rename_hint	ad88	Yeni ad
 files_unreadable	986c	Bu klasörü okuma izni yok
 files_up	5940	Yukarı
 launcher_log_out	d8b5	Oturumu kapat

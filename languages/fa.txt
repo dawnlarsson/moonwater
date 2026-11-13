@@ -41,13 +41,21 @@ files_changed	df4e	این همان چیزی نیست که فهرست شده بو
 files_chosen	7a7f	%1$d از %2$d انتخاب شد
 files_count	cab8	%d مورد
 files_count_cut	f139	%d مورد نخست: پوشه بیشتر دارد
+files_delete_ask	807b	حذف %1$d: %2$s؟ Delete دوباره حذف می‌کند، Escape نگه می‌دارد
+files_delete_stopped	ef42	در %2$s ایستاد: پیش از آن %1$d حذف شد
+files_deleted	8591	%d حذف شد
+files_deleting	a297	در حال حذف: تاکنون %d، Escape می‌ایستاند
 files_empty	751c	این پوشه خالی است
 files_failed	c564	خواندن این پوشه ممکن نشد
 files_forward	83ba	جلو
 files_gone	b09c	این پوشه دیگر نیست
 files_link	9abb	پیوند دنبال نمی‌شود
+files_name_bad	467d	این نام نیست
+files_name_taken	cbce	این نام گرفته شده است
+files_new_folder	d127	پوشه تازه
 files_not_folder	2663	این پوشه نیست
 files_reading	64a4	خواندن پوشه
+files_rename_hint	ad88	نام تازه
 files_unreadable	986c	خواندن این پوشه مجاز نیست
 files_up	5940	بالا
 launcher_log_out	d8b5	خروج

@@ -40,13 +40,21 @@ files_changed	df4e	Nicht mehr das Aufgelistete: der Ordner wird neu gelesen
 files_chosen	7a7f	%1$d von %2$d gewählt
 files_count	cab8	%d Einträge
 files_count_cut	f139	Die ersten %d Einträge: der Ordner hat mehr
+files_delete_ask	807b	%1$d löschen: %2$s? Nochmal Entf löscht, Escape lässt sie
+files_delete_stopped	ef42	Angehalten bei %2$s: %1$d davor gelöscht
+files_deleted	8591	%d gelöscht
+files_deleting	a297	Löschen: %d bisher, Escape hält an
 files_empty	751c	Dieser Ordner ist leer
 files_failed	c564	Dieser Ordner konnte nicht gelesen werden
 files_forward	83ba	Vor
 files_gone	b09c	Dieser Ordner ist weg
 files_link	9abb	Einer Verknüpfung wird nicht gefolgt
+files_name_bad	467d	Das ist kein Name
+files_name_taken	cbce	Der Name ist vergeben
+files_new_folder	d127	Neuer Ordner
 files_not_folder	2663	Das ist kein Ordner
 files_reading	64a4	Ordner wird gelesen
+files_rename_hint	ad88	Neuer Name
 files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
 files_up	5940	Nach oben
 launcher_log_out	d8b5	Abmelden
