@@ -562,6 +562,178 @@ static unsigned int gpu_raw(int fd, unsigned int request, void *a)
 #define gpu_call(dir, n, size, a) gpu_raw(gpu.fd, GPU_IO(dir, n, size), a)
 #define GPU_GEM_CLOSE 0x40086409u // DRM_IOW(0x09, struct drm_gem_close)
 
+/*
+        The card's driver, behind nine calls. Everything above them is any card's: the scene's records and their bins, the table of maps and of imports and
+        their addresses, the tick and the marks, the late, hung and lost job, the self-test, the prerequisites. Everything below them is one driver's requests
+        of the kernel and one chip's command words. A second driver, or a second chip of this one with other words, is a second struct gpu_backend and its
+        kernels; nothing above the calls names amdgpu. (The requests every DRM driver has are not behind them: the version, a handle closed, a dma-buf to a
+        handle and back.) Each call answers 0 or the kernel's errno unless it says otherwise.
+*/
+struct gpu_job
+{
+        const unsigned int *kernel; // the program's two resource words (the code follows them in the card's buffer)
+        positive code, arguments;   // the card's addresses of the code and of the arguments' block
+        unsigned int columns, rows; // the grid: columns of 64 pixels (a wave), rows of what the kernel takes a row to be
+};
+struct gpu_vm_fault
+{
+        positive addr;
+        unsigned int status, hub;
+};
+enum
+{
+        GPU_USER_READ,    // pages the card may only read, taken at once
+        GPU_USER_WRITTEN, // pages it may write, taken at once
+        GPU_USER_LATER    // pages it may write, taken when a job first names them (the probe's question of a range the kernel would not take at once)
+};
+struct gpu_backend
+{
+        const char *driver; // the DRM driver's name (DRM_IOCTL_VERSION)
+        // 1. the chip a descriptor is of: its family and device
+        unsigned int (*identify)(int fd, unsigned int *family, unsigned int *device);
+        // 2. the card's own buffer of size bytes, given the address va in the card's address space: its handle, and the offset its pages are mapped from
+        unsigned int (*buffer)(positive size, positive va, unsigned int *handle, p64 *offset);
+        // 3. a context for the jobs, and the one before it (0 for none) let go of
+        unsigned int (*context)(unsigned int *made, unsigned int before);
+        // 4. pages of the processor's as a buffer of the card's (userptr): its handle
+        unsigned int (*user)(positive from, positive bytes, unsigned int how, unsigned int *handle);
+        // 5. a buffer given an address, to read or to read and write, never to run; 6. and taken from it
+        unsigned int (*bind)(unsigned int handle, positive va, positive bytes, b32 written);
+        unsigned int (*unbind)(unsigned int handle, positive va, positive bytes);
+        // 7. a job: the kernel run over the grid, naming the count buffers it may touch besides the card's own. Its sequence, to wait for
+        unsigned int (*submit)(const struct gpu_job *job, p64 *handles, unsigned int count, positive *sequence);
+        // 8. a job waited for until a time (monotonic ns): 1 done, 0 still running, -1 the wait itself failed
+        int (*wait)(positive sequence, positive until);
+        // 9. the last page fault of the card's address space, zeros for none
+        unsigned int (*fault)(struct gpu_vm_fault *fault);
+};
+
+static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int *device)
+{
+        unsigned int who[16] = {0}, e;
+        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32}; // AMDGPU_INFO_DEV_INFO
+
+        e = gpu_raw(fd, GPU_IO(1u, 5, 32), ask);
+        *family = e ? 0 : who[4], *device = e ? 0 : who[0];
+        return e;
+}
+
+static unsigned int gpu_amd_buffer(positive size, positive at, unsigned int *handle, p64 *offset)
+{
+        p64 make[4] = {size, 4096, 2, 64}, map[1] = {0}, va[8] = {0, 1 | 14ull << 32, at, 0, size};
+        unsigned int e = gpu_call(3u, 0, 32, make); // GEM_CREATE, then GEM_MMAP for the offset, then GEM_VA: read, write and run
+
+        if (!e)
+                va[0] = map[0] = *handle = (unsigned int)make[0], e = gpu_call(3u, 1, 8, map);
+        if (!e)
+                *offset = map[0], e = gpu_call(1u, 8, 64, va);
+        return e;
+}
+
+static unsigned int gpu_amd_context(unsigned int *made, unsigned int before)
+{
+        unsigned int ctx[4] = {1, 0, 0, 0}, old[4] = {2, 0, before, 0}; // AMDGPU_CTX_OP_ALLOC_CTX, and FREE_CTX of the one before
+        unsigned int e = gpu_call(3u, 2, 16, ctx);
+
+        if (e)
+                return e;
+        if (before)
+                gpu_call(3u, 2, 16, old);
+        *made = ctx[0];
+        return 0;
+}
+
+// A map to read is registered read-only (AMDGPU_GEM_USERPTR_READONLY, 1, with the REGISTER and VALIDATE flags, 0xc): the pages of a client's pool are
+// mapped read-only by the compositor, and a writable registration of them is refused (EPERM). Without VALIDATE (0x8) the kernel takes the pages later.
+static unsigned int gpu_amd_user(positive from, positive bytes, unsigned int how, unsigned int *handle)
+{
+        p64 up[3] = {from, bytes, how == GPU_USER_READ ? 0xdull : how == GPU_USER_WRITTEN ? 0xcull : 0x8ull};
+        unsigned int e = gpu_call(3u, 0x11, 24, up);
+
+        *handle = e ? 0 : (unsigned int)(up[2] >> 32); // the kernel wrote the handle into the high half of up[2]
+        return e;
+}
+
+static unsigned int gpu_amd_bind(unsigned int handle, positive at, positive bytes, b32 written)
+{
+        p64 va[8] = {handle, 1 | (written ? 6ull : 2ull) << 32, at, 0, bytes};
+
+        return gpu_call(1u, 8, 64, va);
+}
+
+static unsigned int gpu_amd_unbind(unsigned int handle, positive at, positive bytes)
+{
+        p64 va[8] = {handle, 2, at, 0, bytes};
+
+        return gpu_call(1u, 8, 64, va);
+}
+
+static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned int named, positive *sequence)
+{
+        const positive code = job->code, args = job->arguments;
+        const unsigned int address_to k = job->kernel;
+        unsigned int ib[] = {
+            // The caches that hold what the last job read -- the scalar and the instruction caches and the vector ones, with the arguments and the lists of ops the processor
+            // rewrote since -- are emptied before the dispatch, as every driver does; a job that follows another read stale arguments one time in three without it.
+            GPU_PKT(0x58, 6), 0, 0xffffffffu, 0xffffff, 0, 0, 10, 1 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 14,
+            GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
+            // COMPUTE_STATIC_THREAD_MGMT_SE0, SE1, (COMPUTE_TMPRING_SIZE), SE2, SE3 (0x216 to 0x21a of the SH registers, gc_10_3_0_offset.h): every compute unit of every shader
+            // engine enabled, so that no value an earlier job left in them decides which units this one runs on. COMPUTE_PGM_RSRC3 (0x228) is 0, no shared vector registers,
+            // for the same reason.
+            GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 5), 0x216, 0xffffffffu, 0xffffffffu, 0x100, 0xffffffffu, 0xffffffffu,
+            GPU_PKT(0x76, 1), 0x228, 0,
+            GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
+            GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
+            GPU_PKT(0x15, 3), job->columns, job->rows, 1, 0x45};
+        _Static_assert(sizeof(ib) <= 512, "the packets end where the arguments begin (GPU_ARGS)");
+        // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
+        // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
+        p64 boin[3] = {0, named | 8ull << 32, (positive)bos}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
+            list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, named ? 2 : 1, (positive)list}; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
+        unsigned int error = 0;
+        b32 taken = false;
+
+        memory_copy(gpu.at, ib, sizeof(ib));
+        GPU_SUBMIT_FAKE(error, taken); // a check's fake submit answers an error before the call is made, or takes the job (the call is then not made)
+        if (taken)
+                cs[0] = 1; // the job's sequence number
+        else if (error == 0)
+                error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs);
+        *sequence = cs[0];
+        return error;
+}
+
+static int gpu_amd_wait(positive sequence, positive until)
+{
+        p64 wait[4] = {sequence, until, 1, (positive)gpu.ctx << 32}; // (the compute ring of the context)
+
+        if (!GPU_WAIT_CS(wait))
+                return -1;
+        return wait[0] ? 0 : 1;
+}
+
+// AMDGPU_INFO_GPUVM_FAULT (query 0x23, the driver's version 3.55 and later): the last page fault of this descriptor's address space, struct drm_amdgpu_info_gpuvm_fault
+// (the page's address, the fault register's status word, the hub: 0 the graphics hub, 1 and 2 the media hubs, the hub's index above the first byte). The kernel answers
+// zeros when no fault is kept, and EINVAL without the query.
+static unsigned int gpu_amd_fault(struct gpu_vm_fault *fault)
+{
+        p64 ask[4] = {(p64)fault, sizeof(*fault) | 0x23ull << 32};
+
+        return gpu_call(1u, 5, 32, ask);
+}
+
+static const struct gpu_backend gpu_amd = {"amdgpu",       gpu_amd_identify, gpu_amd_buffer, gpu_amd_context, gpu_amd_user,
+                                           gpu_amd_bind,   gpu_amd_unbind,   gpu_amd_submit, gpu_amd_wait,    gpu_amd_fault};
+static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver (one today)
+
+// A handle of the card's let go of (any DRM driver's request).
+static void gpu_close(unsigned int handle)
+{
+        p64 close[1] = {handle};
+
+        GPU_CONTROL(gpu.fd, GPU_GEM_CLOSE, close);
+}
+
 // The node's mode and owner, from statx (the mode is at 28 of its record, the owner at 20 on every architecture).
 static void gpu_req_stat(const char *path)
 {
@@ -577,19 +749,12 @@ static void gpu_req_stat(const char *path)
 
 // The probe's answer for userptr: an anonymous page taken for the card by the kernel's userptr (validated, so the kernel takes the pages at once), then let go.
 // 0 when it took it, else the errno.
-// The probe's answer for userptr: an anonymous page taken for the card by the kernel's userptr (validated, so the kernel takes the pages at once), then let go.
-// 0 when it took it, else the errno.
-static unsigned int gpu_userptr_error(positive at, positive flags)
+static unsigned int gpu_userptr_error(positive at, unsigned int how)
 {
-        p64 up[3] = {at, 4096, flags};
-        unsigned int e = gpu_call(3u, 0x11, 24, up);
+        unsigned int handle = 0, e = gpu_backend->user(at, 4096, how, &handle);
 
         if (e == 0)
-        {
-                p64 close[1] = {up[2] >> 32}; // the kernel wrote the handle into the high half of up[2]
-
-                gpu_raw(gpu.fd, GPU_GEM_CLOSE, close);
-        }
+                gpu_close(handle);
         return e;
 }
 
@@ -656,9 +821,7 @@ static void gpu_route_probe(void)
                 GPU_STEP_FAKE(GPU_REQ_PRIME, failed, e);
                 if (made >= 0)
                 {
-                        unsigned int close[2] = {(unsigned int)made, 0};
-
-                        gpu_raw(gpu.fd, GPU_GEM_CLOSE, close); // the handle, let go
+                        gpu_close((unsigned int)made); // the handle, let go
                 }
         }
         if (failed)
@@ -750,10 +913,9 @@ static int gpu_pick(char candidate[][32], unsigned int count, const char *displa
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
-        p64 make[4] = {size, 4096, 2, 64}, map[1] = {0}, va[8] = {0, 1 | 14ull << 32, GPU_VA, 0, size};
-        unsigned int ctx[4] = {1, 0, 0, 0}, who[16] = {0}, e = 0, open_error = 0;
+        p64 offset = 0;
+        unsigned int ctx = 0, family = 0, device = 0, e = 0, open_error = 0;
         char path[] = "/dev/dri/renderD128";
-        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
         int named = 0, amd = 0, amd_named = 0;
         unsigned int candidates = 0, candidate_node[GPU_NODES];
         char candidate_bus[GPU_NODES][32] = {{0}}; // (whole: the one picked is copied to the table every program reads, all 32 bytes of it)
@@ -796,21 +958,21 @@ static b32 gpu_start(positive bytes)
                 version = gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0;
                 if (!named) // the first node that opens is the one the table names when no amdgpu node is found
                         named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                if (!version || !string_equals((string_address)name, (string_address)"amdgpu"))
+                if (!version || !string_equals((string_address)name, (string_address)gpu_backend->driver))
                 {
                         system_close((int)fd);
                         continue;
                 }
                 // An amdgpu node: the first of them is the one the table names, whether or not its family is one the kernels are for.
-                family_error = gpu_raw((int)fd, GPU_IO(1u, 5, 32), ask);
+                family_error = gpu_backend->identify((int)fd, &family, &device);
                 if (!amd_named)
                 {
                         amd_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                        gpu_req.family = family_error ? 0 : (unsigned int)who[4], gpu_req.device = family_error ? 0 : (unsigned int)who[0];
+                        gpu_req.family = family, gpu_req.device = device;
                 }
                 amd = 1;
                 // The candidates are the amdgpu nodes of a family the kernels are for; the one on the display's own device is taken (gpu_pick), else the first.
-                if (!family_error && gpu_family_ok(who[4]) && candidates < GPU_NODES)
+                if (!family_error && gpu_family_ok(family) && candidates < GPU_NODES)
                         candidate_node[candidates] = node, gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
                 system_close((int)fd);
         }
@@ -820,9 +982,9 @@ static b32 gpu_start(positive bytes)
 
                 path[17] = (char)('0' + (28 + candidate_node[pick]) / 10), path[18] = (char)('0' + (28 + candidate_node[pick]) % 10);
                 gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
-                if (gpu.fd >= 0 && gpu_raw(gpu.fd, GPU_IO(1u, 5, 32), ask) == 0 && gpu_family_ok(who[4]))
+                if (gpu.fd >= 0 && gpu_backend->identify(gpu.fd, &family, &device) == 0 && gpu_family_ok(family))
                 {
-                        gpu.family = (unsigned int)who[4], gpu.device = (unsigned int)who[0];
+                        gpu.family = family, gpu.device = device;
                         memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.bus, candidate_bus[pick], sizeof(gpu_req.bus));
                         gpu_req.family = gpu.family, gpu_req.device = gpu.device;
                 }
@@ -842,23 +1004,19 @@ static b32 gpu_start(positive bytes)
                 {
                         long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
 
-                        e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, 0xc);
+                        e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, GPU_USER_WRITTEN);
                         if (!(page < 0 && page > -4096))
                                 system_call_2(syscall(munmap), (positive)page, 4096);
                         if (!gpu_req_step(GPU_REQ_USERPTR, e != 0, e))
                                 break;
                 }
                 // The buffer, its VM map and the compute context: all of the card's own memory.
-                e = gpu_call(3u, 0, 32, make);
+                e = gpu_backend->buffer(size, GPU_VA, &gpu.handle, &offset);
                 if (!e)
-                        va[0] = map[0] = gpu.handle = (unsigned int)make[0], e = gpu_call(3u, 1, 8, map);
-                if (!e)
-                        e = gpu_call(1u, 8, 64, va);
-                if (!e)
-                        e = gpu_call(3u, 2, 16, ctx);
+                        e = gpu_backend->context(&ctx, 0);
                 if (!e)
                 {
-                        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, map[0]);
+                        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, offset);
                         if (at < 0 && at > -4096)
                                 e = (unsigned int)-at & 255;
                         else
@@ -866,7 +1024,7 @@ static b32 gpu_start(positive bytes)
                 }
                 if (!gpu_req_step(GPU_REQ_CONTEXT, e != 0, e))
                         break;
-                gpu.ctx = ctx[0], gpu.size = size;
+                gpu.ctx = ctx, gpu.size = size;
                 for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
                 {
                         gpu_kernel_at[i] = here;
@@ -1017,11 +1175,9 @@ static b32 gpu_recover(void)
 // The map at i let go of, for the reason why: unmapped (its whole span), its buffer closed, the last map in its place.
 static void gpu_drop(unsigned int i, enum gpu_gone_why why)
 {
-        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].bytes}, close[1] = {gpu_maps[i].handle};
-
         gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, why, gpu_maps[i].written, gpu_maps[i].dma, 0, gpu_maps[i].listed);
-        gpu_io(1u, 8, 64, va);
-        GPU_CONTROL(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+        gpu_backend->unbind(gpu_maps[i].handle, gpu_maps[i].va, gpu_maps[i].bytes);
+        gpu_close(gpu_maps[i].handle);
         if (gpu_maps[i].dma && gpu_shared.pin)
                 gpu_shared.pin(gpu_maps[i].offset, 0);
         gpu_maps[i] = gpu_maps[--gpu_map_count];
@@ -1059,7 +1215,7 @@ static void gpu_say_kernel(void)
                 for (finish = text; *finish && *finish != '\n'; finish++)
                         ;
                 *finish = 0;
-                if (!string_find((string_address)text, (string_address) "amdgpu") && !string_find((string_address)text, (string_address) "drm"))
+                if (!string_find((string_address)text, (string_address)gpu_backend->driver) && !string_find((string_address)text, (string_address) "drm"))
                         continue;
                 string_copy_bounded((string_address)last[kept++ % 3], (string_address)text, sizeof(last[0]));
         }
@@ -1077,8 +1233,7 @@ static void gpu_say_kernel(void)
 static void gpu_map_refused(positive from)
 {
         static unsigned char *page;
-        unsigned int who[16] = {0};
-        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
+        unsigned int family, device;
 
         if (gpu_map_why == gpu_map_said)
                 return;
@@ -1090,8 +1245,8 @@ static void gpu_map_refused(positive from)
                 if (!(made < 0 && made > -4096))
                         page = (unsigned char *)made, page[0] = 1;
         }
-        gpu_map_probe = (gpu_io(1u, 5, 32, ask) ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, 0xc) : 255u) << 8 | gpu_userptr_error(from, 0xc) << 16 |
-                        gpu_userptr_error(from, 0x8) << 24;
+        gpu_map_probe = (gpu_backend->identify(gpu.fd, &family, &device) == 0 ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, GPU_USER_WRITTEN) : 255u) << 8 |
+                        gpu_userptr_error(from, GPU_USER_WRITTEN) << 16 | gpu_userptr_error(from, GPU_USER_LATER) << 24;
         gpu_say_kernel();
 }
 
@@ -1103,9 +1258,8 @@ static void gpu_map_refused(positive from)
 static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
 {
         positive base = (positive)gpu_shared.at;
-        p64 va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, at, 0, to - from}, close[1];
         long made;
-        unsigned int e;
+        unsigned int e, handle;
 
         if (gpu_shared.fd < 0 || !base || from < base || to > base + gpu_shared.bytes)
                 return gpu_map_why = 5, false;
@@ -1115,11 +1269,11 @@ static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
         made = gpu_dmabuf_in((int)made);
         if (made < 0)
                 return gpu_map_why = 7 | (unsigned int)-made << 8, false;
-        va[0] = close[0] = (p64)made;
-        if ((e = gpu_raw(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
-                return gpu_raw(gpu.fd, GPU_GEM_CLOSE, close), gpu_map_why = 8 | e << 8, false;
+        handle = (unsigned int)made;
+        if ((e = gpu_backend->bind(handle, at, to - from, written)) != 0)
+                return gpu_close(handle), gpu_map_why = 8 | e << 8, false;
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
-        gpu_maps[gpu_map_count].handle = (unsigned int)close[0], gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].bytes = to - from;
+        gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].bytes = to - from;
         gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - base;
         gpu_map_count++, gpu_maps_dma++;
         if (gpu_shared.pin)
@@ -1131,9 +1285,7 @@ static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
-        // A map to read is registered read-only (AMDGPU_GEM_USERPTR_READONLY, 1, with the REGISTER and VALIDATE flags, 0xc): the pages of a client's pool are
-        // mapped read-only by the compositor, and a writable registration of them is refused (EPERM).
-        p64 up[3] = {from, to - from, written ? 0xcull : 0xdull}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
+        unsigned int handle = 0, e;
         unsigned int old = 0;
         long taken = 0;
 
@@ -1169,15 +1321,14 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         // The userptr, unless the kernel has refused it before or the file says not to ask: then the table's pages go by the dma-buf route, and the rest are refused.
         if (!gpu_userptr_off && !gpu_userptr_gone)
         {
-                taken = -(long)gpu_raw(gpu.fd, GPU_IO(3u, 0x11, 24), up);
+                taken = -(long)gpu_backend->user(from, to - from, written ? GPU_USER_WRITTEN : GPU_USER_READ, &handle);
                 GPU_MAP_FAKE(taken);
                 if (taken == 0)
                 {
-                        va[0] = close[0] = up[2] >> 32, va[2] = at;
-                        if ((taken = GPU_CONTROL(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
-                                return GPU_CONTROL(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it
+                        if ((e = gpu_backend->bind(handle, at, to - from, written)) != 0)
+                                return gpu_close(handle), gpu_map_why = 4 | e << 8, false; // the buffer with it
                         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
-                        gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
+                        gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
                         gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0;
                         gpu_map_count++, gpu_maps_user++;
                         gpu_map_next = at + (to - from);
@@ -1294,13 +1445,13 @@ static positive gpu_import_again(unsigned int i, positive bytes)
 static positive gpu_import_at(unsigned int handle, positive bytes)
 {
         positive at = gpu.imports == 8 ? 0 : gpu_place((bytes + 4095) & ~4095ull);
-        p64 va[8] = {handle, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}, close[1] = {handle};
+        positive whole = (bytes + 4095) & ~4095ull;
 
-        if (!at || !gpu_io(1u, 8, 64, va))
-                return GPU_CONTROL(gpu.fd, GPU_GEM_CLOSE, close), 0;
-        gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
+        if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
+                return gpu_close(handle), 0;
+        gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
         gpu.imported[gpu.imports++] = handle;
-        gpu_map_next = at + va[4];
+        gpu_map_next = at + whole;
         return at;
 }
 
@@ -1368,8 +1519,6 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
         for (unsigned int i = 0; at && i < gpu.imports; i++)
                 if (gpu.imported_va[i] == at)
                 {
-                        p64 va[8] = {gpu.imported[i], 2, at, 0, gpu.imported_bytes[i]}, close[1] = {gpu.imported[i]};
-
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                         {
                                 gpu.imported_holds[i]--;
@@ -1381,8 +1530,8 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                                 return;
                         }
                         gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1, 0);
-                        gpu_io(1u, 8, 64, va);
-                        GPU_CONTROL(gpu.fd, GPU_GEM_CLOSE, close);
+                        gpu_backend->unbind(gpu.imported[i], at, gpu.imported_bytes[i]);
+                        gpu_close(gpu.imported[i]);
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
                         gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1];
                         gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imports--;
@@ -1418,14 +1567,13 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 */
 static b32 gpu_idle(void)
 {
-        p64 wait[4] = {gpu.pending, clock_monotonic_nanoseconds(), 1, (positive)gpu.ctx << 32};
-        unsigned int ctx[4] = {1, 0, 0, 0}, old[4] = {2, 0, gpu.ctx, 0}; // AMDGPU_CTX_OP_ALLOC_CTX, and FREE_CTX of the one before
+        int ended;
 
         if (!gpu.pending)
                 return true;
-        if (GPU_WAIT_CS(wait))
+        if ((ended = gpu_backend->wait(gpu.pending, clock_monotonic_nanoseconds())) >= 0)
         {
-                if (wait[0])
+                if (!ended)
                         return false; // still running
                 gpu_owed = 0, gpu_last_job = clock_monotonic_nanoseconds();
         }
@@ -1433,7 +1581,7 @@ static b32 gpu_idle(void)
         {
                 if (gpu_owed)
                         gpu_found = GPU_END_WAIT, gpu_owed = 0;
-                if (!gpu_io(3u, 2, 16, ctx))
+                if (gpu_backend->context(&gpu.ctx, gpu.ctx) != 0)
                 {
                         // No new context either: the descriptor answers neither the wait nor the context (the device is gone, or its reset left it dead), so the
                         // job can never be asked after again and the buffer would be held for good. The card is lost: the caller starts it again (gpu_recover closes
@@ -1441,7 +1589,6 @@ static b32 gpu_idle(void)
                         gpu_lost = 1;
                         return false;
                 }
-                gpu_io(3u, 2, 16, old), gpu.ctx = ctx[0];
         }
         gpu.pending = 0;
         return true;
@@ -1593,19 +1740,13 @@ static void gpu_fault_line(const char *text, struct gpu_fault_scan *out)
 // AMDGPU_INFO_GPUVM_FAULT (query 0x23, the driver's version 3.55 and later): the last page fault of this descriptor's address space, struct drm_amdgpu_info_gpuvm_fault
 // (the page's address, the fault register's status word, the hub: 0 the graphics hub, 1 and 2 the media hubs, the hub's index above the first byte). 0 when the kernel
 // answered, with have_query set unless no fault is kept (the kernel answers zeros then); else its errno (EINVAL on a kernel without the query).
-struct gpu_vm_fault
-{
-        positive addr;
-        unsigned int status, hub;
-};
 #ifndef GPU_FAULT_FAKE
 #define GPU_FAULT_FAKE(error, fault)
 #endif
 static unsigned int gpu_fault_query(struct gpu_fault_scan *out)
 {
         struct gpu_vm_fault fault = {0, 0, 0};
-        p64 ask[4] = {(p64)&fault, sizeof(fault) | 0x23ull << 32};
-        unsigned int e = gpu.fd >= 0 ? gpu_call(1u, 5, 32, ask) : 9; // EBADF
+        unsigned int e = gpu.fd >= 0 ? gpu_backend->fault(&fault) : 9; // EBADF
 
         GPU_FAULT_FAKE(e, &fault);
         if (e == 0 && (fault.addr || fault.status))
@@ -1706,18 +1847,17 @@ static void gpu_fault_note(b32 hang)
 // hang's two seconds), WAIT (the wait itself failed). A hang or a failed wait is read in the kernel's log at once (gpu_fault) and is the caller's to take.
 static b32 gpu_wait_job(positive cap)
 {
-        p64 wait[4];
-
         for (;;)
         {
                 positive until = gpu_job_began + cap;
+                int ended;
 
                 // One wait, to the cap: the kernel wakes it when the job ends, so a job is one request to wait for however long it runs (in slices of four
                 // milliseconds a job of 5.5 ms, the heaviest measured, was two).
-                wait[0] = gpu.pending, wait[1] = until, wait[2] = 1, wait[3] = (positive)gpu.ctx << 32;
-                if (!GPU_WAIT_CS(wait))
+                ended = gpu_backend->wait(gpu.pending, until);
+                if (ended < 0)
                         gpu_end = GPU_END_WAIT, gpu_last_error = 5; // EIO: the wait itself failed
-                else if (!wait[0])
+                else if (ended)
                         return true;
                 else if (clock_monotonic_nanoseconds() < until)
                         continue;
@@ -1798,33 +1938,15 @@ static b32 gpu_map_named(unsigned int i)
 // Run the kernel over the arguments' w by rows pixels; false if it did not finish (then gpu_idle holds the buffer until it has).
 static b32 gpu_run_job(void)
 {
-        const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), address_to k = gpu_kernels[which].words;
-        positive code = GPU_VA + gpu_kernel_at[which], args = GPU_VA + 512;
-        unsigned int ib[] = {
-            // The caches that hold what the last job read -- the scalar and the instruction caches and the vector ones, with the arguments and the lists of ops the processor
-            // rewrote since -- are emptied before the dispatch, as every driver does; a job that follows another read stale arguments one time in three without it.
-            GPU_PKT(0x58, 6), 0, 0xffffffffu, 0xffffff, 0, 0, 10, 1 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 14,
-            GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
-            // COMPUTE_STATIC_THREAD_MGMT_SE0, SE1, (COMPUTE_TMPRING_SIZE), SE2, SE3 (0x216 to 0x21a of the SH registers, gc_10_3_0_offset.h): every compute unit of every shader
-            // engine enabled, so that no value an earlier job left in them decides which units this one runs on. COMPUTE_PGM_RSRC3 (0x228) is 0, no shared vector registers,
-            // for the same reason.
-            GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 5), 0x216, 0xffffffffu, 0xffffffffu, 0x100, 0xffffffffu, 0xffffffffu,
-            GPU_PKT(0x76, 1), 0x228, 0,
-            GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
-            GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
-            GPU_PKT(0x15, 3), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows, 1, 0x45};
-        _Static_assert(sizeof(ib) <= 512, "the packets end where the arguments begin (GPU_ARGS)");
-        // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
-        // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
-        p64 bos[1 + 8 + GPU_MAPS], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
-            list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list};
+        const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op);
+        const struct gpu_job job = {gpu_kernels[which].words, GPU_VA + gpu_kernel_at[which], GPU_VA + 512, (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows};
+        p64 bos[1 + 8 + GPU_MAPS];
+        positive sequence = 0;
         unsigned int named, tries = 0, again = 0;
-        b32 taken;
 
         if (!gpu_idle())
                 return false;
         gpu_job_began = clock_monotonic_nanoseconds();
-        memory_copy(gpu.at, ib, sizeof(ib));
         if (!++gpu_submit_serial) // (counted from 1: 0 is a map no submit has named)
                 gpu_submit_serial++;
         for (;;)
@@ -1838,16 +1960,9 @@ static b32 gpu_run_job(void)
                 for (unsigned int i = 0; i < gpu_map_count; i++)
                         if (gpu_map_named(i))
                                 bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
-                boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 GPU_SUBMIT_SEEN(bos, named);
-                cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
-                gpu_last_error = 0, gpu_end = GPU_END_NONE;
-                taken = false;
-                GPU_SUBMIT_FAKE(gpu_last_error, taken); // a check's fake submit answers an error before the call is made, or takes the job (the call is then not made)
-                if (taken)
-                        cs[0] = 1; // the job's sequence number
-                else if (gpu_last_error == 0)
-                        gpu_last_error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs);
+                gpu_end = GPU_END_NONE;
+                gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
                 if (gpu_last_error == 0)
                         break;
                 // The card lost the context or its VM (ECANCELED after a reset, ENODEV, EINVAL): nothing this job can do again succeeds: the caller recovers (gpu_recover).
@@ -1872,7 +1987,7 @@ static b32 gpu_run_job(void)
                         return false;
                 }
         }
-        gpu.pending = cs[0];
+        gpu.pending = sequence;
         if (!gpu_wait_job(gpu_patient ? GPU_HANG_NS : GPU_LATE_NS))
                 return false;
         gpu.pending = 0;
