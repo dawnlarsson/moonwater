@@ -4582,6 +4582,9 @@ static struct
         unsigned int made[WINDOWS];     // the order the windows first showed in, which their tabs are in
         int x[WINDOWS], y[WINDOWS];
         unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
+        // How many times the row's window has been asked to go since it showed (compositor_close), never 0 once it has been: what
+        // carries the ask to a program that is told in a message is the count it has answered, not WINDOW_CLOSING, which stays.
+        unsigned char close_asks[WINDOWS];
         unsigned int picture_w[WINDOWS], picture_h[WINDOWS]; // as its program drew it
         unsigned int asking[WINDOWS];   // shown at a size asked of it, until a picture of that size comes
         unsigned int arranged[WINDOWS]; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
@@ -15304,6 +15307,7 @@ static void compositor_take(int row)
                 compositor.asking[row] = 0;
                 compositor.front[row] = front;
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
+                compositor.close_asks[row] = 0;
                 table->state[row] = compositor.state[row];
                 compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
                 compositor.edges[row] = 0;
@@ -15514,6 +15518,7 @@ static void compositor_leave(int row)
         }
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
+        compositor.close_asks[row] = 0;
         compositor.landing[row] = 0;
         compositor.glide[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
@@ -15845,12 +15850,22 @@ static void compositor_osk_setting_read(void)
         compositor_osk_sync();
 }
 
-// A window asked to go: by its close button, Alt-F4, or a middle press on its tab. What happens next is the program's.
+/*
+        A window asked to go: by its close button, Alt-F4, or a middle press on its tab. What happens next is the program's, and
+        it may be to stay (unsaved changes, and Cancel): so each ask of a window is an ask of its own, counted in close_asks, and
+        a program that is told by a message is told again. WINDOW_CLOSING alone said it, a bit that is set and stays, so the
+        message went once and a window that had stayed could not be closed by its button again. A popup is asked once: it is
+        dismissed, not asked, and every press outside it while it is on its way out comes here.
+*/
 static void compositor_close(int row)
 {
         if (row < 0 || !compositor.showing[row])
                 return;
+        if (compositor_popup_parent[row] >= 0 && (compositor.state[row] & WINDOW_CLOSING))
+                return;
 
+        if (!++compositor.close_asks[row])
+                compositor.close_asks[row] = 1;
         compositor.state[row] |= WINDOW_CLOSING;
         compositor.table->state[row] = compositor.state[row];
         compositor.woken |= 1u << row;

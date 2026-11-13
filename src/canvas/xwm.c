@@ -26,7 +26,8 @@
         window is configured to the output's size at the origin, and the shim's row for it is arranged to cover the screen.
         A WL_SURFACE_SERIAL client message gives the window its X11 serial; the shim's surface that set the same serial
         (xwayland_surface_v1) names its row (wayland_serial_row), which is looked for on each pass until the shim has it.
-        When the compositor asks a window to go (WINDOW_CLOSING on its row), the window manager sends it WM_DELETE_WINDOW.
+        When the compositor asks a window to go (WINDOW_CLOSING on its row), the window manager sends it WM_DELETE_WINDOW, once for
+        each time it is asked (compositor.close_asks).
 
         WHAT IT KEEPS
 
@@ -90,7 +91,6 @@
 #define COMPOSITOR_XWM_OVERRIDE 2u
 #define COMPOSITOR_XWM_FULLSCREEN 4u
 #define COMPOSITOR_XWM_SERIAL 8u
-#define COMPOSITOR_XWM_DELETE_SENT 16u
 #define COMPOSITOR_XWM_NET_TITLE 32u          // the title is _NET_WM_NAME's, which WM_NAME does not replace
 #define COMPOSITOR_XWM_ADOPTED 64u            // the shim has the window's surface and has been told what the window is
 #define COMPOSITOR_XWM_PROTO_KNOWN 128u       // WM_PROTOCOLS has been read
@@ -111,6 +111,7 @@ struct compositor_xwm_window
         unsigned long long serial;     // the X11 serial its WL_SURFACE_SERIAL gave, when COMPOSITOR_XWM_SERIAL is set
         int row;                       // the shim's row for the window, -1 until the shim has one
         unsigned int protocols;        // COMPOSITOR_XWM_PROTO_* from WM_PROTOCOLS
+        unsigned char closes;          // the asks to close of its row that it has been told of (compositor.close_asks)
         unsigned int transient;        // the window it is transient for (WM_TRANSIENT_FOR), 0 for none
         int x, y;                      // the X window's place and size, as the server last said (CreateNotify, ConfigureNotify)
         unsigned int width, height;
@@ -597,7 +598,20 @@ static void compositor_xwm_forget(unsigned int id)
 static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
 {
         w->row = -1;
-        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_DELETE_SENT | COMPOSITOR_XWM_RAISED);
+        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED);
+        w->closes = 0;
+}
+
+/*
+        Whether the window is owed an ask to close: its row has been asked more times than the window was told. Each ask of the
+        compositor's is told once (a WM_DELETE_WINDOW, or the unmap of a popup), so a program that answered the first with a
+        question and stayed is asked by the next press of its button. It was one bit, set at the first and cleared only when the
+        mapping ended. The WM_PROTOCOLS reply is waited for first: the ask is owed until then.
+*/
+static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
+{
+        return w->row >= 0 && w->row < WINDOWS && (compositor.state[w->row] & WINDOW_CLOSING) && w->closes != compositor.close_asks[w->row] &&
+               ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
 }
 
 static void compositor_xwm_resolve(struct compositor_xwm_window *w)
@@ -1262,14 +1276,11 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 compositor_xwm_resolve(w);
                 if (w->row < 0 || w->row >= WINDOWS)
                         continue;
-                // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW (once), and is
-                // destroyed when it said it does not take it.
-                // A window that is asked to go is asked by WM_DELETE_WINDOW when its WM_PROTOCOLS lists it, and is destroyed when it
-                // does not (ICCCM 4.2.8.1). The WM_PROTOCOLS reply is waited for first: the close is asked of again until then.
-                if ((compositor.state[w->row] & WINDOW_CLOSING) && !(w->state & COMPOSITOR_XWM_DELETE_SENT) &&
-                    ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN)))
+                // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW (once for each
+                // ask, compositor_xwm_close_owed) when its WM_PROTOCOLS lists it, and is destroyed when it does not (ICCCM 4.2.8.1).
+                if (compositor_xwm_close_owed(w))
                 {
-                        w->state |= COMPOSITOR_XWM_DELETE_SENT;
+                        w->closes = compositor.close_asks[w->row];
                         if (w->state & COMPOSITOR_XWM_POPUPISH)
                                 compositor_xwm_window_op(XWM_OP_UNMAP_WINDOW, w->id);
                         else if (w->protocols & COMPOSITOR_XWM_PROTO_DELETE)

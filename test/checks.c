@@ -232953,6 +232953,46 @@ static void gpu_late_rows(void)
         compositor.scanout = kept_scanout, compositor.scanout_pitch = kept_pitch, compositor.scanout_bytes = kept_bytes;
 }
 
+// A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
+// answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
+static void close_ask_rows(void)
+{
+        static struct windows table;
+        struct windows *kept = compositor.table;
+        struct compositor_xwm_window w = {.id = 9, .row = 3, .state = COMPOSITOR_XWM_PROTO_KNOWN, .protocols = COMPOSITOR_XWM_PROTO_DELETE};
+        int parent = compositor_popup_parent[3];
+        unsigned int woken = compositor.woken;
+
+        compositor.table = &table;
+        compositor.showing[3] = 1, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = -1;
+        check("close: a window nobody asked to go is owed no ask", !compositor_xwm_close_owed(&w));
+        compositor_close(3);
+        check("close: a window asked to go is said to be closing, in the table too, and is owed the ask",
+              (compositor.state[3] & WINDOW_CLOSING) && (table.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
+        w.closes = compositor.close_asks[3];
+        check("close: once told it is owed nothing while it stays", !compositor_xwm_close_owed(&w));
+        compositor_close(3);
+        check("close: asked again it is owed the ask again", compositor.close_asks[3] == 2 && compositor_xwm_close_owed(&w));
+        w.closes = compositor.close_asks[3];
+        w.state &= ~COMPOSITOR_XWM_PROTO_KNOWN;
+        compositor_close(3);
+        check("close: an ask waits for the window's protocols to be known", !compositor_xwm_close_owed(&w));
+        w.state |= COMPOSITOR_XWM_PROTO_KNOWN;
+        check("close: and is owed when they are", compositor_xwm_close_owed(&w));
+        compositor.close_asks[3] = 255, w.closes = 255;
+        compositor_close(3);
+        check("close: the count of asks never comes back to none", compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
+        compositor_xwm_unmapped(&w);
+        check("close: a mapping that ended is owed nothing, and its next is told from the first ask", w.row == -1 && !w.closes && !compositor_xwm_close_owed(&w));
+        // A popup is dismissed once: a press outside it while it goes is not another ask.
+        compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = 2;
+        compositor_close(3);
+        compositor_close(3);
+        check("close: a popup is asked to go once", (compositor.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1);
+        compositor.showing[3] = 0, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = parent;
+        compositor.woken = woken, compositor.table = kept;
+}
+
 // A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
 // it composed nothing and used up its period. No flip in flight, or one past the deadline (a screen that is off never answers), is no wait.
 static void flip_wait_rows(void)
@@ -232988,6 +233028,7 @@ b32 main(void)
         gpu_flight_rows();
         gpu_late_rows();
         flip_wait_rows();
+        close_ask_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;
