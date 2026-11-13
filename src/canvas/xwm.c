@@ -586,6 +586,20 @@ static void compositor_xwm_forget(unsigned int id)
         title changes, and asked again on each pass until the shim has the window's surface, whichever of the two (the serial from the
         X side, the surface from the Wayland side) comes first. The shim's answer is the window's row, once it has one.
 */
+/*
+        A window's mapping ended: its surface is gone or is another one. What belonged to that mapping goes with it -- the row the shim
+        gave it, that the shim was told of it, that it was asked to close and that it was raised over its parent once -- so the next
+        mapping starts as the first did. They were kept for the life of the X window, which outlives its mappings (a window hidden to
+        a tray, a dialog a program keeps): the row was then another program's window, which a close, a _NET_WM_STATE message and the
+        transient raise of the hidden window acted on, a window shown again under another row never had the focus or a close, and one
+        that had been asked to close once was never asked again.
+*/
+static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
+{
+        w->row = -1;
+        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_DELETE_SENT | COMPOSITOR_XWM_RAISED);
+}
+
 static void compositor_xwm_resolve(struct compositor_xwm_window *w)
 {
         long row;
@@ -805,7 +819,11 @@ static void compositor_xwm_event(const struct xwm_event *e)
         case XWM_EV_UNMAP_NOTIFY:
                 w = compositor_xwm_find(e->window, 0);
                 if (w)
-                        w->state &= ~COMPOSITOR_XWM_MAPPED;
+                {
+                        // The surface the serial named went with the mapping (Xwayland destroys it): the next one says its own.
+                        w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL);
+                        compositor_xwm_unmapped(w);
+                }
                 break;
         case XWM_EV_DESTROY_NOTIFY:
                 compositor_xwm_forget(e->window);
@@ -816,6 +834,9 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         w = compositor_xwm_find(e->window, 1);
                         if (!w)
                                 break;
+                        // Another serial is another surface, and so another mapping, whether or not its unmap was heard first.
+                        if (!(w->state & COMPOSITOR_XWM_SERIAL) || w->serial != (((unsigned long long)e->data[1] << 32) | e->data[0]))
+                                compositor_xwm_unmapped(w);
                         w->serial = ((unsigned long long)e->data[1] << 32) | e->data[0];
                         w->state |= COMPOSITOR_XWM_SERIAL;
                         compositor_xwm_resolve(w);
@@ -1235,6 +1256,9 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
 
                 if (!w->id)
                         continue;
+                // The row is the serial's surface's, asked each pass and not remembered: a row whose surface went is not this window's.
+                if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || wayland_serial_row(w->serial) != w->row))
+                        compositor_xwm_unmapped(w);
                 compositor_xwm_resolve(w);
                 if (w->row < 0 || w->row >= WINDOWS)
                         continue;
