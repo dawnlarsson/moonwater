@@ -7629,6 +7629,22 @@ gate_gpu_kernels()
         "$work/gpuasm-check"
 }
 
+#       What a newer compiler refuses and this one only warns of. The lanes build with -w, under which gcc 13 says nothing
+#       of a function of one type handed where another is asked for, an integer made a pointer, or a function used with no
+#       declaration, and gcc 14 and later stop at each: a tree that built here did not build on the next machine (the file
+#       browser's sort compare stopped sh build.sh there). The shell and the build tool, which includes it, are read once
+#       with those four as errors and no -w, and nothing is written.
+gate_types()
+{
+        gate_types_flags="-fsyntax-only -O2 -Werror=incompatible-pointer-types -Werror=int-conversion"
+        gate_types_flags="$gate_types_flags -Werror=implicit-function-declaration -Werror=implicit-int"
+        for gate_types_source in programs/shell.c src/build/build.c; do
+                # shellcheck disable=SC2086
+                gate_types_found=$(gcc $gate_types_flags -DCONFIG_MOONWATER_WAYLAND "$gate_types_source" 2>&1 | grep ': error:' | head -5)
+                [ -z "$gate_types_found" ] || { echo "$gate_types_source: $gate_types_found"; return 1; }
+        done
+}
+
 #       The comparison with LLVM is a row of its own, so that a machine it cannot be made on says NOT RUN for it and
 #       not a pass for the kernels' row: no llvm-mc or ld.lld, or an LLVM that writes other words than the assembler
 #       is held to where LLVM's versions differ (test/gpu_kernels.py --probe says which, and why).
@@ -7673,6 +7689,7 @@ lane_gate()
         job hard gate_row gpu-kit gate_gpu_kit
         job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
+        job hard gate_row types gate_types
         job hard gate_row gpu-kernels gate_gpu_kernels
         job maybe gate_row gpu-kernels-llvm gate_gpu_kernels_llvm
         job maybe gate_row gpu-kernels-chips gate_gpu_kernels_chips
