@@ -13896,7 +13896,7 @@ static bool radio_wifi_restored(bipolar wifi)
         return host_lock_owner(RADIO_KEEPER_PATH) || radio_join_waiting();
 }
 
-static fn radio_restore(void)
+static fn radio_restore_now(void)
 {
         bipolar wifi = radio_kept(NET_WIFI_POWER);
         bipolar bluetooth = radio_kept(NET_BLUETOOTH_POWER);
@@ -13921,6 +13921,37 @@ static fn radio_restore(void)
                 its idle wait had grown to thirty seconds by the time bowl
                 asked for a lease. */
         radio_net_wake();
+}
+
+/*
+        The radios as they were kept. A take restores them where it stands
+        (`moonwater boot`, which nothing waits behind but the console's
+        shell). The machine process restores them in a child: a saved
+        network's join is the radio lock taken, a scan and a handshake,
+        seconds of it, and it stood in front of the machine script's
+        moonwater_init and of every event the kernel had queued, canvas on
+        first among them, so the desktop of a machine with a saved network
+        started when its Wi-Fi had. The child is the loop's radio_child: the
+        pass reaps it (radio_reap) and forks no join of its own while it
+        runs (radio_wifi_keep), and a join that boot's own restore is still
+        making is waited for by the child, on the lock, and not by the loop.
+        What follows in host_restore_session does not wait for the radios:
+        the device policy is in force sooner than it was, and the script's
+        moonwater_init can no longer assume the saved network was tried.
+        With no child to be had the restore is made here, as it was.
+*/
+static fn radio_restore(void)
+{
+        bipolar child = host_machine_self && radio_child <= 0 ? system_fork() : -1;
+
+        if (child > 0)
+        {
+                radio_child = child;
+                return;
+        }
+        radio_restore_now();
+        if (!child)
+                system_call_1(syscall(exit), 0);
 }
 
 static fn radio_recover(void)

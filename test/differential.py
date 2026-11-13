@@ -53738,7 +53738,12 @@ def harness_machine_reap(argv):
     first = host.index("static bipolar radio_child;")
     body = host[first:host.index("static fn radio_wifi_keep(void)", first)]
     recover = host[host.index("static fn radio_recover(void)\n{"):host.index("/* What a verb says it did")]
+    # The radios' restore, which the machine process makes in a child (radio_restore): the body it runs is a stub's here.
+    restore_at = host.index("static fn radio_restore(void)\n{")
+    restore = host[restore_at:host.index("static fn radio_recover(void)\n{", restore_at)]
     source = r"""
+#include <fcntl.h>
+#include <time.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -53782,7 +53787,11 @@ static long radio_kept(string_address path)
 static int radio_wifi_wanted(long power) { return power != 0; }
 static void radio_wifi_keep(void) { kept++; }
 static bipolar radio_rfkill(int type, int block) { unblocked++; return 0; }
-""" + body + recover + r"""
+static int host_machine_self;
+#define system_fork() ((bipolar)fork())
+#define system_call_1(number, status) _exit((int)(status))
+static void radio_restore_now(void) { usleep(600000); close(open("restored", O_WRONLY | O_CREAT, 0600)); }
+""" + body + restore + recover + r"""
 int main(void)
 {
         int status = 0, passed = 0;
@@ -53809,8 +53818,30 @@ int main(void)
         wifi_power = 0;
         radio_recover();
         passed += !kept && copied == 1 && !unblocked;
-        printf("machine reap %d/5\n", passed);
-        return passed != 5;
+        /* The machine process's restore of the radios is a child's: it comes back at once with the join still to
+           make, the pass reaps it when it ends, and anyone else's restore is made where it stands. */
+        {
+                struct timespec began, ended;
+                long took;
+
+                unlink("restored");
+                host_machine_self = 1;
+                clock_gettime(CLOCK_MONOTONIC, &began);
+                radio_restore();
+                clock_gettime(CLOCK_MONOTONIC, &ended);
+                took = (ended.tv_sec - began.tv_sec) * 1000 + (ended.tv_nsec - began.tv_nsec) / 1000000;
+                passed += took < 300 && radio_child > 0 && access("restored", F_OK) != 0;
+                usleep(1200000);
+                radio_reap();
+                passed += radio_child == 0 && access("restored", F_OK) == 0;
+                unlink("restored");
+                host_machine_self = 0;
+                radio_restore();
+                passed += radio_child == 0 && access("restored", F_OK) == 0;
+                unlink("restored");
+        }
+        printf("machine reap %d/8\n", passed);
+        return passed != 8;
 }
 """
     with tempfile.TemporaryDirectory(prefix="machine-reap-") as work:
@@ -53821,12 +53852,12 @@ int main(void)
                                capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-2000:])
-            write_tally("machine-reap", 0, 5)
+            write_tally("machine-reap", 0, 8)
             return 1
-        ran = subprocess.run([str(Path(work) / "reap")], capture_output=True, text=True)
+        ran = subprocess.run([str(Path(work) / "reap")], capture_output=True, text=True, cwd=work)
         print(ran.stdout, end="")
-        found = re.search(r"(\d)/5", ran.stdout)
-        write_tally("machine-reap", int(found.group(1)) if found else 0, 5)
+        found = re.search(r"(\d)/8", ran.stdout)
+        write_tally("machine-reap", int(found.group(1)) if found else 0, 8)
         return ran.returncode
 
 
