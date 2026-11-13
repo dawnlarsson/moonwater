@@ -220,7 +220,7 @@ moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
 moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
-moonwater desktop start|stop           begin the chosen desktop now, or end its session
+moonwater desktop start|stop|rest      begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is
 moonwater help [VERB]                  these commands, or the page of one
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them

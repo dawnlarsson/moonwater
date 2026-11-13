@@ -19864,7 +19864,8 @@ case $1 in
 desktop)
         case $2 in
         "") echo "desktop $(cat "$STUB/desktop")" ;;
-        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
+        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas"; echo off > "$STUB/desktop" ;;
+        rest) echo rest >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
         esac ;;
 canvas)
         case $2 in
@@ -20042,19 +20043,22 @@ run_driver
 report "a second start keeps the one supervisor" "$(grep '^same=' "$STUB/out")" "same=1"
 report "and starts one compositor" "$(grep '^starts=' "$STUB/out")" "starts=1"
 
-# H: four quick deaths with Canvas on: the supervisor gives up, asks for the text console once, and no pid file is left.
+# H: four quick deaths with Canvas on: the supervisor gives up, asks for the text console once and for this start alone
+# (desktop rest, which keeps nothing: it said desktop off, and every later boot was the text console), and no pid file is left.
 begin giveup-quick
 printf '0\n0\n0\n0\n' > "$STUB/lives"
 cat > "$STUB/driver.sh" <<'EOF'
 . "$STUB/main.sed.sh"
 desktop_start
 wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
-echo "off=$(grep -c off "$STUB/calls")"
+echo "off=$(grep -c rest "$STUB/calls")"
+echo "kept=$(cat "$STUB/desktop") off=$(grep -c off "$STUB/calls")"
 echo "said=$(grep -c 'ended 4 times in a row' "$STUB/kmsg")"
 echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
 EOF
 run_driver
 report "a give-up turns Canvas off once, for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
+report "a give-up is for this start: the choice kept is still the desktop" "$(grep '^kept=' "$STUB/out")" "kept=on off=0"
 report "a give-up says so in the log" "$(grep '^said=' "$STUB/out")" "said=1"
 report "a give-up leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
 
@@ -20068,13 +20072,15 @@ desktop_start
 echo "rc=$?"
 echo "nofont=$(grep -c 'no font to draw with' "$STUB/kmsg")"
 echo "starts=$(wc -l < "$STUB/starts")"
-echo "off=$(grep -c off "$STUB/calls")"
+echo "off=$(grep -c rest "$STUB/calls")"
+echo "kept=$(cat "$STUB/desktop") off=$(grep -c off "$STUB/calls")"
 EOF
 run_driver
 report "no font: desktop_start refuses" "$(grep '^rc=' "$STUB/out")" "rc=1"
 report "no font: the log names the missing font" "$(grep '^nofont=' "$STUB/out")" "nofont=1"
 report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
 report "no font: Canvas is turned off for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
+report "no font: and the choice kept is still the desktop, for a start that has one" "$(grep '^kept=' "$STUB/out")" "kept=on off=0"
 
 # J: moonwater.desktop=none keeps the compositor out of the way, and so does a desktop choice that is
 # not the compositor's; neither is a failure and neither turns Canvas off (desktop boot carries out the choice).

@@ -352,8 +352,10 @@ function desktop_supervise {
     # Canvas turned off is why it ended, which is no failure.
     desktop_on || break
     if [ $desktop_fails -ge 4 ]; then
-      echo "desktop: the compositor ended $desktop_fails times in a row; the desktop is turned off, for the text console; moonwater desktop on starts it again" > /dev/kmsg
-      moonwater desktop off
+      # Until the next boot, and not kept: desktop off is the person's word for every start, and four bad starts of one boot
+      # are not that.
+      echo "desktop: the compositor ended $desktop_fails times in a row; the desktop is turned off until the next start, for the text console; moonwater desktop on starts it again" > /dev/kmsg
+      moonwater desktop rest
       break
     fi
     case $desktop_fails in
@@ -380,8 +382,8 @@ function desktop_start {
   desktop_font
   if [ -z "$desktop_face" ]; then
     desktop_named
-    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and no mono face is under /usr/share/fonts; the desktop is turned off, for the text console; moonwater desktop on starts it again" > /dev/kmsg
-    moonwater desktop off
+    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and no mono face is under /usr/share/fonts; the desktop is turned off until the next start, for the text console; moonwater desktop on starts it again" > /dev/kmsg
+    moonwater desktop rest
     return 1
   fi
   if [ -s /run/moonwater/supervisor.pid ] && kill -0 $(cat /run/moonwater/supervisor.pid) 2> /dev/null; then

@@ -142075,7 +142075,7 @@ static fn check_settings(string_address regular, string_address bold)
 "  clipboard watch [primary]         a line each time something is copied, the text escaped (root)\n"
 "  debug                             what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel\n"
 "  desktop [on|off|PROFILE]          the desktop, now and at every start; off leaves the text console [on]\n"
-"  desktop start|stop                begin the chosen desktop now, or end its session\n"
+"  desktop start|stop|rest           begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is\n"
 "  help [VERB]                       these commands, or the page of one\n"
 "  latency [reset]                   what the input handlers cost a report, and who has the display\n"
 "  notices [clear]                   the errors and warnings of the kernel the desktop has (root): clear dismisses them\n"

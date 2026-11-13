@@ -50054,6 +50054,8 @@ while True:
                   say("desktop") + say("desktop on") + "echo \"@@kept $(cat /root/desktop)\"\n" +
                   "printf '#!/bin/sh\\nexit 0\\n' > /bowls/bin/desktop\n" + say("desktop desktop") +
                   "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop rest") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  "rm -f /root/desktop\n" + say("desktop rest") + "echo \"@@kept $(cat /root/desktop 2> /dev/null || echo none)\"\n" +
                   "".join(say(f"keyboard {layout}") + say("keyboard xkb") for layout in ("uk", "sv", "nb", "de", "us")) +
                   "rm -f /root/desktop /bowls/bin/desktop\n")
         lines, finished = session(script)
@@ -50079,6 +50081,12 @@ while True:
               "a profile that is installed is chosen, and on puts the default back", repr(kept))
         check(kept[4:5] == ["canvas"] and seen.get("desktop desktop", {}).get("status") is not None,
               "a script that is not a profile's is not one", repr(kept))
+        #       desktop rest is off for this start alone: the supervisor's word when the
+        #       compositor will not stay up, which was desktop off and kept for every boot.
+        check(seen.get("desktop rest", {}).get("status") == 0 and kept[5:7] == ["canvas", "none"] and
+              any("until the next start" in line for line in seen["desktop rest"]["out"]),
+              "desktop rest keeps nothing: the choice is as it was, and none is made where there was none",
+              repr((seen.get("desktop rest"), kept)))
         names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
         check(names == ["gb", "se", "no", "de", "us"],
               "keyboard xkb says the layout in XKB's name", repr(names))

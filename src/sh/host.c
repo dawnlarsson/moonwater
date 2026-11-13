@@ -949,6 +949,30 @@ static bipolar host_held = -1;
 static positive host_held_count;
 
 /*
+        What a command that was killed left mounted, taken down by the next
+        one to have the lock. The places a command mounts a partition at to
+        look at it or write it (the medium, the system partition, a stick,
+        a look) are its own for as long as it holds the lock, and nothing is
+        mounted at one between commands: so whatever is found there when the
+        lock is taken is a leftover, of a command ended by a signal between
+        its mount and its unmount. It stayed for the rest of the session, and
+        a partition mounted read-only there could not be mounted to be
+        written, so an update, a rollback and every save of a setting to the
+        disk failed with "busy", the settings going on in the session alone.
+        A mount in use is not taken down (no MNT_DETACH), and the place the
+        data partition is kept at for the session is not one of these.
+*/
+static fn host_leftovers_sweep(void)
+{
+        static const string_address places[] = {HOST_MEDIUM, HOST_SYSTEM, HOST_STICK, HOST_LOOK};
+
+        for (positive at = 0; at < array_count(places); at++)
+                for (positive deep = 0; deep < 8; deep++)
+                        if (system_call_2(syscall(umount2), (positive)places[at], 0) < 0)
+                                break;
+}
+
+/*
         A command that cannot have the lock sleeps in the kernel's flock until
         the holder lets go, for HOST_LOCK_WAIT_NS at most (host_lock_take).
 */
@@ -993,6 +1017,8 @@ static bool host_acquire(void)
         }
         host_held = handle;
         host_held_count = 1;
+        if (handle >= 0)
+                host_leftovers_sweep();
         return true;
 }
 
@@ -3623,16 +3649,32 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         //      Said yes to, in the words of the command: nothing is asked.
         //      Otherwise the name is typed, which is how a person at a
         //      terminal is sure of which disk this is.
+        //      No partition is mounted while the answer is waited for: a
+        //      command ended at the question (Ctrl-C) left the medium mounted
+        //      for the rest of the session. The image is found again after
+        //      the answer, and looked at again, as it was the first time.
         if (!said_yes)
         {
+                host_unmount(HOST_MEDIUM);
                 host_say(log, host_label "Type %s to go on: ", name);
 
                 if (host_read_line(answer, sizeof(answer)) < 0 ||
                     !string_equals(answer, name))
                 {
                         system_close(handle);
-                        host_unmount(HOST_MEDIUM);
                         host_say(log, host_label "nothing written\n");
+                        return 1;
+                }
+                if (!host_medium_find(address_of search, running, name))
+                {
+                        system_close(handle);
+                        return host_refuse("this session's image is no longer on a disk "
+                                           "here, so nothing was written to %s\n", name);
+                }
+                if (!host_medium_whole())
+                {
+                        system_close(handle);
+                        host_unmount(HOST_MEDIUM);
                         return 1;
                 }
         }
@@ -24795,7 +24837,10 @@ static b32 desktop_status(void)
         return 0;
 }
 
-/* moonwater desktop [on|off|PROFILE|start|stop]: the choice kept and put in force now. */
+/* moonwater desktop [on|off|PROFILE|start|stop|rest]: the choice kept and put in force now. rest is off put in force and
+   not kept: the text console until the next start or `desktop on`, for a desktop that would not stay up on this boot. The
+   machine script's supervisor said `desktop off` after four quick ends of the compositor, which is kept, so one bad boot (a
+   card that came up late, a full disk) left every later one on the text console until somebody typed `desktop on`. */
 static b32 host_desktop(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
@@ -24811,6 +24856,12 @@ static b32 host_desktop(string_address address_to arguments, positive count)
                 return desktop_start(false);
         }
         return_if(string_equals(word, "stop"), desktop_stop());
+        if (string_equals(word, "rest"))
+        {
+                host_need_root();
+                host_say(log, host_label "desktop off until the next start; moonwater desktop on starts it again\n");
+                return desktop_put("off", false);
+        }
 
         host_need_root();
         kept = string_equals(word, "on") ? (string_address) "canvas" : word;
@@ -26254,7 +26305,7 @@ static const host_row host_rows[] = {
     {null, "canvas record [SECONDS]", "record the presents of the compositor for SECONDS (1 to 10, 3 by default)", 'b'},
     {null, "canvas record report", "the report of the presents: the paths, flips, late and held presents", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
-    {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
+    {null, "desktop start|stop|rest", "begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is", 'b'},
     {null, "keyboard start", "exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard", 'b'},
     {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
     {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
@@ -27109,49 +27160,67 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
                 return 1;
 
         //      Looked at again where it is to be read from: the stick can have
-        //      been changed, or another put in its place, since.
-        if (!host_stick_let(stick->disk))
-                return host_refuse("%s is held by the device policy, so it is not read\n",
-                                   stick->disk);
-        mounted = host_mount(stick->name, HOST_MEDIUM, "vfat", HOST_READ_ONLY);
-        if (mounted < 0)
-                return host_fail(stick->name, mounted);
-
-        failed = 0;
-        fit = host_join(source, sizeof(source), HOST_MEDIUM, stick->file)
-                  ? host_image_fit(source, build, sizeof(build), address_of machine)
-                  : HOST_FIT_NONE;
-        if (fit)
-                failed = host_refuse("%s carries an image this machine cannot start, so "
-                                     "nothing was written: %s\n", stick->name,
-                                     host_fit_said(fit, machine));
-        else if (!string_equals(build, stick->build))
-                failed = host_refuse("what %s carries changed while it was looked at; "
-                                     "nothing written\n", stick->name);
-        else
-                failed = host_stick_digest(source, address_of summed);
-
-        if (failed)
+        //      been changed, or another put in its place, since. And once more
+        //      after the question, which is asked with nothing mounted: a
+        //      command ended at it (Ctrl-C) left the stick mounted for the
+        //      rest of the session, and the stick can have been changed while
+        //      the answer was waited for.
+        for (positive look = 0; look < 2; look++)
         {
+                if (!host_stick_let(stick->disk))
+                        return host_refuse("%s is held by the device policy, so it is not read\n",
+                                           stick->disk);
+                mounted = host_mount(stick->name, HOST_MEDIUM, "vfat", HOST_READ_ONLY);
+                if (mounted < 0)
+                        return host_fail(stick->name, mounted);
+
+                failed = 0;
+                summed = false;
+                fit = host_join(source, sizeof(source), HOST_MEDIUM, stick->file)
+                          ? host_image_fit(source, build, sizeof(build), address_of machine)
+                          : HOST_FIT_NONE;
+                if (fit)
+                        failed = host_refuse("%s carries an image this machine cannot start, so "
+                                             "nothing was written: %s\n", stick->name,
+                                             host_fit_said(fit, machine));
+                else if (!string_equals(build, stick->build))
+                        failed = host_refuse("what %s carries changed while it was looked at; "
+                                             "nothing written\n", stick->name);
+                else
+                        failed = host_stick_digest(source, address_of summed);
+
+                if (failed)
+                {
+                        host_unmount(HOST_MEDIUM);
+                        return 1;
+                }
+                if (look || said_yes)
+                        break;
+
                 host_unmount(HOST_MEDIUM);
-                return 1;
+                host_say(log, host_label "%s has %s\n", install->disk,
+                         install->readable ? (string_address)install->build
+                                           : (string_address) "an image whose build cannot be read");
+                host_say(log, host_label "%s carries %s: %s%s\n", stick->name,
+                         install->readable ? host_build_named(build, install->build)
+                                           : (string_address) "a build",
+                         build, summed ? ", and its bytes are the sum beside it" : "");
+
+                (void)string_join(question, sizeof(question), "Writing it over ", install->disk,
+                                  " keeps the data there, and the build it has as the one to go "
+                                  "back to.");
+                if (!host_said_yes(false, (string_address)question))
+                        return 1;
         }
-
-        host_say(log, host_label "%s has %s\n", install->disk,
-                 install->readable ? (string_address)install->build
-                                   : (string_address) "an image whose build cannot be read");
-        host_say(log, host_label "%s carries %s: %s%s\n", stick->name,
-                 install->readable ? host_build_named(build, install->build)
-                                   : (string_address) "a build",
-                 build, summed ? ", and its bytes are the sum beside it" : "");
-
-        (void)string_join(question, sizeof(question), "Writing it over ", install->disk,
-                          " keeps the data there, and the build it has as the one to go "
-                          "back to.");
-        if (!host_said_yes(said_yes, (string_address)question))
+        if (said_yes)
         {
-                host_unmount(HOST_MEDIUM);
-                return 1;
+                host_say(log, host_label "%s has %s\n", install->disk,
+                         install->readable ? (string_address)install->build
+                                           : (string_address) "an image whose build cannot be read");
+                host_say(log, host_label "%s carries %s: %s%s\n", stick->name,
+                         install->readable ? host_build_named(build, install->build)
+                                           : (string_address) "a build",
+                         build, summed ? ", and its bytes are the sum beside it" : "");
         }
 
         mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
@@ -27226,6 +27295,7 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
         host_settings disk;
         p8 path[HOST_PATH_ROOM];
         p8 back[HOST_BUILD_ROOM];
+        p8 asked[HOST_BUILD_ROOM];
         p16 machine;
         bool carried;
         bipolar mounted;
@@ -27241,6 +27311,7 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                 return host_fail(install->system, mounted);
 
         failed = 0;
+        asked[0] = end;
         fit = host_join(path, sizeof(path), HOST_SYSTEM, HOST_KEPT_IMAGE)
                   ? host_image_fit(path, back, sizeof(back), address_of machine)
                   : HOST_FIT_NONE;
@@ -27262,9 +27333,29 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                                            : (string_address) "an image whose build cannot "
                                                               "be read");
                 host_say(log, host_label "and keeps %s from before\n", back);
-                if (!host_said_yes(said_yes, "Starting that one again keeps the data, and "
-                                             "the build it has now as the one to go back to."))
-                        failed = 1;
+                //      The question is asked with nothing mounted: a command
+                //      ended at it (Ctrl-C) left the system partition mounted
+                //      to be written for the rest of the session. After the
+                //      answer it is mounted again, and the build it keeps is
+                //      the one the question was about or nothing is written.
+                if (!said_yes)
+                {
+                        string_copy(asked, back);
+                        host_unmount(HOST_SYSTEM);
+                        if (!host_said_yes(false, "Starting that one again keeps the data, and "
+                                                  "the build it has now as the one to go back to."))
+                                return 1;
+                        if (!host_install_refresh(install))
+                                return host_refuse("%s is no longer here\n", install->disk);
+                        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+                        if (mounted < 0)
+                                return host_fail(install->system, mounted);
+                        if (host_image_fit(path, back, sizeof(back), address_of machine) ||
+                            !string_equals(back, asked))
+                                failed = host_refuse("the build %s keeps from before changed while "
+                                                     "the answer was waited for; nothing written\n",
+                                                     install->disk);
+                }
         }
 
         if (!failed)
