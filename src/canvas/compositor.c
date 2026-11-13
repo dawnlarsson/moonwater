@@ -4505,6 +4505,7 @@ static struct
         unsigned int input_count;
 
         int watch;           // inotify on /dev/input, -1 when there is none
+        int probe_owed;      // the first take read the kernel's lists without a look (compositor_space_first): the loop looks, once
         int uevents;         // the kernel's uevents (compositor_uevents_read), -1 when there is no socket for them
         unsigned long devices; // the evdev numbers that are open
         int device_number[COMPOSITOR_INPUTS];
@@ -10038,6 +10039,17 @@ static void compositor_connected_blank(struct compositor_connected *found, unsig
         found->hz_count[n] = 0;
 }
 
+/*
+        Whether a connector is asked for what the kernel already has of it, and not made to look. GETCONNECTOR with no room
+        for modes is the kernel's cue to probe the connector, which on a real screen is its EDID read again over the wire,
+        tens of milliseconds a screen, and Canvas read it a moment before the compositor was started. So the first take of
+        a card (compositor_space_first) asks with room, which the kernel answers from its list without looking, and owes a
+        look (probe_owed), which the loop makes once its first frame of its own is drawn (compositor_space_retake): a list
+        that was stale is put right then, a frame or two after the first, and when the list has no screen at all, or the
+        take it gives fails, the same take is made again at once by looking. Every other read looks, as it did.
+*/
+static int compositor_list_kept;
+
 static b32 compositor_connected_read(struct compositor_connected *found)
 {
         struct compositor_card_res resources = {0};
@@ -10069,20 +10081,30 @@ static b32 compositor_connected_read(struct compositor_connected *found)
         {
                 struct compositor_connector probe = {.connector_id = connectors[at]};
                 struct compositor_mode modes[128];
-                unsigned int encoders[8], n = found->count, asked_modes, asked_encoders;
+                unsigned int encoders[8], n = found->count, asked_modes = 128, asked_encoders = 8;
                 int listed;
 
+                if (compositor_list_kept)
+                {
+                        // Room for the lists in the one call: the kernel answers from what it has, and looks at nothing.
+                        probe.mode_count = asked_modes, probe.encoder_count = asked_encoders;
+                        probe.modes = (unsigned long)modes;
+                        probe.encoders = (unsigned long)encoders;
+                }
                 if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0 ||
                     probe.connection != 1 || !probe.mode_count)
                         continue;
-                // The kernel copies a list only when it fits what was asked for, and says how long it is either way.
-                asked_modes = probe.mode_count = probe.mode_count > 128 ? 128 : probe.mode_count;
-                asked_encoders = probe.encoder_count = probe.encoder_count > 8 ? 8 : probe.encoder_count;
-                probe.modes = (unsigned long)modes;
-                probe.encoders = (unsigned long)encoders;
-                probe.prop_count = 0;
-                if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0)
-                        continue;
+                if (!compositor_list_kept)
+                {
+                        // The kernel copies a list only when it fits what was asked for, and says how long it is either way.
+                        asked_modes = probe.mode_count = probe.mode_count > 128 ? 128 : probe.mode_count;
+                        asked_encoders = probe.encoder_count = probe.encoder_count > 8 ? 8 : probe.encoder_count;
+                        probe.modes = (unsigned long)modes;
+                        probe.encoders = (unsigned long)encoders;
+                        probe.prop_count = 0;
+                        if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0)
+                                continue;
+                }
                 listed = probe.mode_count && probe.mode_count <= asked_modes;
                 probe.encoder_count = probe.encoder_count <= asked_encoders ? probe.encoder_count : 0;
 
@@ -10862,6 +10884,22 @@ static b32 compositor_space_take(int first)
         return 0;
 }
 
+// The first take of a card: from the kernel's own lists, a look owed; by looking, at once, when those give no screen or no take.
+static b32 compositor_space_first(void)
+{
+        b32 status;
+
+        compositor_list_kept = 1;
+        status = compositor_space_take(1);
+        compositor_list_kept = 0;
+        if (status >= 0)
+        {
+                compositor.probe_owed = 1;
+                return status;
+        }
+        return compositor_space_take(1);
+}
+
 /*
         The card. DRM gives its cards minors with no promise that the first is 0 or that they are contiguous, and the
         display is not always card0: a firmware framebuffer's driver (simpledrm, efidrm) takes the first minor and goes
@@ -10921,7 +10959,7 @@ static b32 compositor_card_try(unsigned int minor, int firmware)
         else if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
                 status = -COMPOSITOR_EBUSY;
         else
-                status = compositor_space_take(1);
+                status = compositor_space_first();
         if (status < 0)
         {
                 system_close(compositor.card);
@@ -20818,11 +20856,19 @@ static b32 compositor_main()
                 // the X window manager's (its listener and its connection, compositor_xwm_poll), which this count left out: with every input,
                 // every client stalled on a dma-buf and a flip in flight the list was two entries past its end.
                 struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32 + 2]; // 6: one more, the doors' threads
+                static unsigned int turns;
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
                 positive now = 0, until = 0;
                 b32 idle_turn = 0;
                 long awaited, wait[2];
 
+                // The look at the screens the first take owes (compositor_space_first), once the loop has made its first turn and
+                // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card.
+                if (compositor.probe_owed && turns++)
+                {
+                        compositor.probe_owed = 0;
+                        compositor_space_retake();
+                }
                 wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
                 wanted[count++] = (struct compositor_poll){compositor.watch, COMPOSITOR_POLLIN, 0};
                 inputs = count;

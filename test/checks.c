@@ -125511,6 +125511,9 @@ static struct
         // connected screen, the ones another program is the master of and the firmware's; the minor that is open now (fd
         // is its descriptor, a copy of base, the memfd), each minor's last descriptor, and the minors opened, in order.
         unsigned long nodes, dark, busy, firmware;
+        // What the kernel does when a connector is asked with no room for its modes: it looks. looks counts those calls;
+        // unlooked is a card whose connectors the kernel has never looked at, which are of no known state until it does.
+        unsigned int looks, unlooked;
         unsigned int minor, opened[160], opens;
         int base, node[64];
         // The crtc's sets in the order they came, 0 for one that turned it off and 1 for one that turned it on (set_count of them, the first 32 kept).
@@ -125592,6 +125595,15 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                 struct compositor_connector address_to c = (struct compositor_connector address_to)argument;
                 unsigned int id = c->connector_id;
                 int connected = id == CARD_FAKE_CONNECTOR + (card_fake.ghost ? 1u : 0u) && !(card_fake.dark >> card_fake.minor & 1);
+
+                if (!c->mode_count)
+                        card_fake.looks++, card_fake.unlooked = 0;
+                else if (card_fake.unlooked)
+                {
+                        c->mode_count = c->encoder_count = c->prop_count = 0;
+                        c->encoder_id = 0, c->connection = 3; // unknown
+                        return 0;
+                }
 
                 if (card_fake.asked_count < 64)
                         card_fake.asked[card_fake.asked_count++] = id;
@@ -134931,6 +134943,22 @@ static void check_compositor_card_walk(void)
     card_walk_begin(0, 0, 0, 0);
     status = compositor_cards_walk();
     check("card walk: no card at all is no such card, and every minor was asked once", status == -COMPOSITOR_ENOENT && card_fake.opens == 64);
+    card_walk_end();
+
+    // The first take asks the kernel for what it has and makes it look at nothing; the look is owed, and a take after it looks.
+    card_walk_begin(1ul << 0, 0, 0, 0);
+    status = compositor_cards_walk();
+    check("first take: a card the kernel has the lists of is taken with no connector made to look, and the look is owed",
+          status == 0 && compositor.outputs == 1 && compositor.width == 1024 && card_fake.looks == 0 && compositor.probe_owed == 1);
+    status = compositor_space_take(0);
+    check("first take: the take after it looks at the connectors", status == 0 && card_fake.looks >= 1 && compositor.outputs == 1);
+    card_walk_end();
+
+    card_walk_begin(1ul << 0, 0, 0, 0);
+    card_fake.unlooked = 1;
+    status = compositor_cards_walk();
+    check("first take: a card the kernel has never looked at is taken by looking, at once, and no look is owed",
+          status == 0 && compositor.outputs == 1 && card_fake.looks >= 1 && !compositor.probe_owed);
     card_walk_end();
 }
 
