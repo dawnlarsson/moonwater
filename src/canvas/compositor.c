@@ -7156,8 +7156,10 @@ static positive compositor_flip_wait(positive now)
         A flip whose event never comes is taken as landed. The wait above ends after four periods, but the flip stayed pending for good: a present that
         finds one pending draws nothing, and a retake of the screens waits for it too, so one event the card lost (the driver's "flip_done timed out")
         was a screen that took input and drew nothing until the session ended. Past a second, sixty periods of a 60 Hz screen, no flip is still coming:
-        it is let go of as its event would have let go of it, and the whole space is drawn again. A card that had not finished refuses the next flip,
-        which is tried again a second on.
+        it is let go of as its event would have let go of it, and the whole space is drawn again. A card that had not finished refuses the next flip
+        (EBUSY): the frame is then composed again a period on, never sooner (the loop presents once a period), and the third refusal in a row sets the
+        crtc with a mode set (compositor_present), so a card that stays busy costs a compose a period and no more. The event of the flip given up on,
+        if it comes after all, is not the next flip's (compositor_card_events).
 */
 #define COMPOSITOR_FLIP_LOST 1000000000ull
 static int compositor_flip_lost(positive now)
@@ -20141,7 +20143,8 @@ static void compositor_table_outputs(void)
 /*
         The window lists' mode, the only writer of the table's list_mode: on makes the compositor render the lists its windows publish, off
         makes every window paint its own frames. themed counts up, as a theme change does, and each window that has a program is woken,
-        so each repaints in the mode it is in now. Nothing calls it with 1 yet (the renderer, compositor_gpu_list_render, is not there).
+        so each repaints in the mode it is in now. compositor_gpu_lists_sync calls it (on while the lists go to the card, whose renderer is
+        compositor_gpu_list_render), and the table's making with 0.
 */
 static void compositor_lists_set(int on)
 {

@@ -4048,7 +4048,7 @@ static long windows_take(struct window_row *own)
 {
         long spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
         long file = spark >= 0 ? window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0) : -2;
-        long size, mapped, probe;
+        long size, mapped, probe, failed = 0;
         unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
         struct windows *table;
         unsigned long pixels, buffer;
@@ -4091,42 +4091,48 @@ static long windows_take(struct window_row *own)
         own->output_height = height;
         own->closes = 0;
 
-        for (own->row = 0; own->row < WINDOWS; own->row++)
+        /*
+                The first free row whose door opens. A row whose door does not open (the compositor could not open it again after
+                the program before closed it, or is doing so at this moment) is given back and the next free row tried: the lowest
+                free row is the one every program takes first, so one door that would not open was every new window refused for
+                the rest of the session, with thirty-one rows free. With no row left the answer is the last door's (no compositor
+                reads any of them: ENXIO), or that the table is full.
+        */
+        for (unsigned int from = 0;; from = own->row + 1)
         {
-                unsigned int none = 0;
+                for (own->row = from; own->row < WINDOWS; own->row++)
+                {
+                        unsigned int none = 0;
 
-                if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL,
-                                                __ATOMIC_RELAXED))
+                        if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL,
+                                                        __ATOMIC_RELAXED))
+                                break;
+                }
+
+                if (own->row >= WINDOWS)
+                {
+                        window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
+                        return failed ? failed : -28; // ENOSPC
+                }
+                windows_reset_row(table, own->row);
+                windows_place_take(table, own->row);
+                windows_asked_take(table, own->row, program_environment_list());
+
+                windows_door_name(name, own->row, 0);
+                probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);
+                own->door = probe >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_BOTH, 0, 0, 0) : probe;
+                if (probe >= 0)
+                        window_call(WINDOW_SYS_CLOSE, probe, 0, 0, 0, 0, 0);
+                windows_door_name(name, own->row, 1);
+                own->wake = own->door >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_READ, 0, 0, 0) : -1;
+                if (own->door >= 0 && own->wake >= 0)
                         break;
-        }
 
-        if (own->row == WINDOWS)
-        {
-                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                return -28; // ENOSPC
-        }
-        windows_reset_row(table, own->row);
-        windows_place_take(table, own->row);
-        windows_asked_take(table, own->row, program_environment_list());
-
-        windows_door_name(name, own->row, 0);
-        probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);
-        own->door = probe >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_BOTH, 0, 0, 0) : probe;
-        if (probe >= 0)
-                window_call(WINDOW_SYS_CLOSE, probe, 0, 0, 0, 0, 0);
-        windows_door_name(name, own->row, 1);
-        own->wake = own->door >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_READ, 0, 0, 0) : -1;
-
-        if (own->door < 0 || own->wake < 0)
-        {
-                long failed = own->door < 0 ? own->door : own->wake;
-
+                failed = own->door < 0 ? own->door : own->wake;
                 // No compositor to empty the row: it is emptied here.
                 if (own->door >= 0)
                         window_call(WINDOW_SYS_CLOSE, own->door, 0, 0, 0, 0, 0);
                 __atomic_store_n(&table->pid[own->row], 0, __ATOMIC_RELEASE);
-                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                return failed;
         }
 
         windows_drain(own->wake);

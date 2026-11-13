@@ -747,6 +747,24 @@ case $extra in
         fi ;;
 esac
 
+# A row whose door does not open costs that row and no other window (windows_take): the first row's door is put out of the compositor's
+# reach (a FIFO of the same name that nothing reads, as a door the compositor could not open again is), and a program of the table's own
+# (the shell's surface) still opens its window, in the next row. It took the first free row, found no door and gave up: every new window
+# of the session was refused, with thirty-one rows free. The last row before the compositor ends, since the row stays out of use.
+ln -sf "$compositor" "$work/bin/surface"
+rm -f /run/moonwater/window.0
+mkfifo -m 600 /run/moonwater/window.0
+"$work/bin/surface" -s 3 -w 200 -h 100 > "$work/surface-door.log" 2>&1 &
+door_client=$!
+sleep 1
+if kill -0 "$door_client" 2> /dev/null && alive; then
+        row ok "a window opens in the next row when the first free row's door does not open"
+else
+        row FAIL "a window opens in the next row when the first free row's door does not open" "$(head -2 "$work/surface-door.log")"
+fi
+kill "$door_client" 2> /dev/null
+wait "$door_client" 2> /dev/null
+
 # The compositor ends when asked, and takes its socket with it.
 stop
 if [ ! -S /run/moonwater/wayland-0 ]; then
