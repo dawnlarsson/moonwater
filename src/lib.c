@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        498 routines (472 public, 26 local), 487 of them on all three and 11 local to one.
+        500 routines (474 public, 26 local), 489 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -318,6 +318,7 @@
           memory_offsets_of_either       public  yes     yes     yes
           memory_offsets_outside         public  yes     yes     yes
           memory_offsets_range_x64       local   yes     --      --
+          memory_over_cover_u32_rect     public  yes     yes     yes
           memory_over_tone_u32           public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
@@ -354,6 +355,7 @@
           memory_translate_u32_rect      public  yes     yes     yes
           memory_transpose_rect_core     local   yes     yes     yes
           memory_transpose_u32           public  yes     yes     yes
+          memory_transpose_u8            public  yes     yes     yes
           memory_unique_lines__room_64   public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
@@ -14411,6 +14413,47 @@ __asm__(
     "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
     "90: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
+
+    ASM_FUNC(memory_over_cover_u32_rect)
+    "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    "shl $2, %rsi\n"
+    "mov 8(%rsp), %eax\n   and $0xffffff, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
+    "pxor %xmm7, %xmm7\n   punpcklbw %xmm7, %xmm8\n"
+    "" ASM_RODATA_PUSH "\n   .p2align 4\n"
+    "" ASM_LABEL(oc_words255) ": .long 0x00ff00ff, 0x00ff00ff, 0x00ff00ff, 0x00ff00ff\n"
+    "" ASM_LABEL(oc_words128) ": .long 0x00800080, 0x00800080, 0x00800080, 0x00800080\n"
+    "" ASM_LABEL(oc_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n.popsection\n"
+    "movdqa " ASM_LABEL(oc_words255) "(%rip), %xmm6\n   movdqa " ASM_LABEL(oc_words128) "(%rip), %xmm5\n   movdqa " ASM_LABEL(oc_alpha) "(%rip), %xmm9\n"
+    "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "cmp $4, %rax\n   jb 80f\n"
+    "40: movd (%rdx), %xmm0\n   movdqu (%rdi), %xmm1\n"
+    "punpcklbw %xmm7, %xmm0\n   movdqa %xmm0, %xmm2\n   psrlw $7, %xmm2\n   paddw %xmm0, %xmm2\n"
+    "punpcklwd %xmm2, %xmm2\n   movdqa %xmm2, %xmm3\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
+    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   psrlw $8, %xmm4\n"
+    "movdqa %xmm8, %xmm10\n   pmullw %xmm3, %xmm10\n   psrlw $8, %xmm10\n"
+    "packuswb %xmm10, %xmm4\n"
+    "punpcklwd %xmm0, %xmm0\n   movdqa %xmm0, %xmm2\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm0, %xmm0\n"
+    "packuswb %xmm0, %xmm2\n   movdqa %xmm2, %xmm3\n   pand %xmm9, %xmm3\n   por %xmm3, %xmm4\n"
+    "movdqa %xmm6, %xmm3\n   movdqa %xmm2, %xmm10\n   pandn %xmm6, %xmm10\n"
+    "movdqa %xmm1, %xmm11\n   punpcklbw %xmm7, %xmm11\n   punpckhbw %xmm7, %xmm1\n"
+    "movdqa %xmm10, %xmm2\n   punpcklbw %xmm7, %xmm2\n   punpckhbw %xmm7, %xmm10\n"
+    "pmullw %xmm2, %xmm11\n   paddw %xmm5, %xmm11\n   movdqa %xmm11, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm11\n   psrlw $8, %xmm11\n"
+    "pmullw %xmm10, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm1, %xmm11\n   paddusb %xmm11, %xmm4\n   movdqu %xmm4, (%rdi)\n"
+    "add $16, %rdi\n   add $4, %rdx\n   sub $4, %rax\n   cmp $4, %rax\n   jae 40b\n"
+    "80: test %rax, %rax\n   jz 89f\n   push %rbx\n"
+    "81: movzbl (%rdx), %ebx\n   test %ebx, %ebx\n   jz 84f\n"
+    "movd %ebx, %xmm0\n   pshuflw $0, %xmm0, %xmm0\n   movdqa %xmm0, %xmm2\n   psrlw $7, %xmm2\n   paddw %xmm0, %xmm2\n"
+    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   psrlw $8, %xmm4\n   packuswb %xmm7, %xmm4\n"
+    "shl $24, %ebx\n   movd %ebx, %xmm3\n   por %xmm3, %xmm4\n"
+    "movdqa %xmm6, %xmm10\n   psubw %xmm0, %xmm10\n"
+    "movd (%rdi), %xmm1\n   punpcklbw %xmm7, %xmm1\n   pmullw %xmm10, %xmm1\n   paddw %xmm5, %xmm1\n"
+    "movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm7, %xmm1\n   paddusb %xmm1, %xmm4\n   movd %xmm4, (%rdi)\n"
+    "84: add $4, %rdi\n   inc %rdx\n   dec %rax\n   jnz 81b\n   pop %rbx\n"
+    "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
+    "90: " ASM_RET
+    ASM_END(memory_over_cover_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -16548,6 +16591,15 @@ __asm__(
     "45: pop %r15\n   pop %r14\n   pop %r12\n   pop %rbx\n" ASM_RET
     "50: shl $2, %rsi\n   shl $2, %rcx\n   shl $2, %r8\n   jmp memory_transpose_rect_core\n"
     ASM_END(memory_transpose_u32)
+
+    ASM_FUNC(memory_transpose_u8)
+    // rdi=into, rsi=into_pitch, rdx=from, rcx=from_column, r8=from_row, r9=rows, 8(%rsp)=cols
+    "mov 8(%rsp), %r10\n   test %r9, %r9\n   jz 9f\n   test %r10, %r10\n   jz 9f\n"
+    "1: mov %rdi, %rax\n   mov %rdx, %r11\n   push %r10\n"
+    "2: movzbl (%r11), %r10d\n   movb %r10b, (%rax)\n   add %rcx, %r11\n   inc %rax\n   decq (%rsp)\n   jnz 2b\n"
+    "pop %r10\n   add %rsi, %rdi\n   add %r8, %rdx\n   dec %r9\n   jnz 1b\n"
+    "9: " ASM_RET
+    ASM_END(memory_transpose_u8)
 
     //
     //       memory_transpose_rect_core -- the scalar rectangle memory_transpose_u32 leaves at its edges: rdi into,
@@ -26252,6 +26304,45 @@ __asm__(
     "3: add x0, x0, x1\n   add x2, x2, x3\n   sub x5, x5, #1\n   cbnz x5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
+
+    ASM_FUNC(memory_over_cover_u32_rect)
+    "cbz x4, 9f\n   cbz x5, 9f\n"
+    "lsl x1, x1, #2\n   and w6, w6, #0xffffff\n   dup v28.4s, w6\n"
+    "uxtl v27.8h, v28.8b\n"
+    "movi v31.8h, #128\n   movi v30.4s, #0xff, lsl #24\n"
+    "mov x9, #0x0000\n   movk x9, #0x0101, lsl #32\n   movk x9, #0x0101, lsl #48\n"
+    "mov x10, #0x0202\n   movk x10, #0x0202, lsl #16\n   movk x10, #0x0303, lsl #32\n   movk x10, #0x0303, lsl #48\n"
+    "ins v29.d[0], x9\n   ins v29.d[1], x10\n"
+    "0: mov x11, x0\n   mov x12, x2\n   mov x13, x4\n"
+    "1: cmp x13, #4\n   b.lo 2f\n"
+    "ldr s0, [x12], #4\n   ld1 {v1.16b}, [x11]\n"
+    "tbl v2.16b, {v0.16b}, v29.16b\n   ushr v3.16b, v2.16b, #7\n"
+    "uxtl v4.8h, v2.8b\n   uxtl2 v5.8h, v2.16b\n"
+    "uxtl v6.8h, v3.8b\n   uxtl2 v7.8h, v3.16b\n"
+    "add v4.8h, v4.8h, v6.8h\n   add v5.8h, v5.8h, v7.8h\n"
+    "mul v4.8h, v4.8h, v27.8h\n   shrn v4.8b, v4.8h, #8\n"
+    "mul v5.8h, v5.8h, v27.8h\n   shrn2 v4.16b, v5.8h, #8\n"
+    "and v6.16b, v2.16b, v30.16b\n   orr v4.16b, v4.16b, v6.16b\n"
+    "mvn v2.16b, v2.16b\n"
+    "umull v5.8h, v1.8b, v2.8b\n   umull2 v6.8h, v1.16b, v2.16b\n"
+    "add v5.8h, v5.8h, v31.8h\n   add v6.8h, v6.8h, v31.8h\n"
+    "usra v5.8h, v5.8h, #8\n   usra v6.8h, v6.8h, #8\n"
+    "shrn v7.8b, v5.8h, #8\n   shrn2 v7.16b, v6.8h, #8\n"
+    "uqadd v4.16b, v4.16b, v7.16b\n   st1 {v4.16b}, [x11], #16\n"
+    "sub x13, x13, #4\n   b 1b\n"
+    "2: cbz x13, 3f\n"
+    "ldrb w9, [x12], #1\n   cbz w9, 21f\n"
+    "fmov s0, w9\n   tbl v2.16b, {v0.16b}, v29.16b\n   ushr v3.16b, v2.16b, #7\n"
+    "uxtl v4.8h, v2.8b\n   uxtl v6.8h, v3.8b\n   add v4.8h, v4.8h, v6.8h\n"
+    "mul v4.8h, v4.8h, v27.8h\n   shrn v4.8b, v4.8h, #8\n"
+    "and v6.16b, v2.16b, v30.16b\n   orr v4.16b, v4.16b, v6.16b\n"
+    "ld1 {v1.s}[0], [x11]\n   mvn v2.16b, v2.16b\n"
+    "umull v5.8h, v1.8b, v2.8b\n   add v5.8h, v5.8h, v31.8h\n   usra v5.8h, v5.8h, #8\n   shrn v7.8b, v5.8h, #8\n"
+    "uqadd v4.16b, v4.16b, v7.16b\n   st1 {v4.s}[0], [x11]\n"
+    "21: add x11, x11, #4\n   sub x13, x13, #1\n   b 2b\n"
+    "3: add x0, x0, x1\n   add x2, x2, x3\n   sub x5, x5, #1\n   cbnz x5, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_cover_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -27267,6 +27358,89 @@ __asm__(
     "ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #96\n" ASM_RET
     "50: lsl x1, x1, #2\n   lsl x3, x3, #2\n   lsl x4, x4, #2\n   b memory_transpose_rect_core\n"
     ASM_END(memory_transpose_u32)
+
+    ASM_FUNC(memory_transpose_u8)
+    // x0=into, x1=into_pitch, x2=from, x3=from_column, x4=from_row, x5=rows, x6=cols
+    "cbz x5, 9f\n   cbz x6, 9f\n"
+    "cmp x5, #8\n   b.lo 5f\n   cmp x6, #8\n   b.lo 5f\n"
+    "cmp x4, #1\n   b.eq 10f\n   cmp x4, #-1\n   b.ne 5f\n"
+    "10:\n"
+    "lsr x9, x5, #3\n   lsr x10, x6, #3\n   lsl x11, x1, #3\n"
+    "mov x13, x0\n   mov x14, x2\n"
+    "cmp x4, #1\n   b.eq 20f\n"
+    "11:\n"
+    "mov x15, x13\n   sub x16, x14, #7\n   mov x17, x10\n"
+    "12:\n"
+    "add x7, x16, x3\n   ld1 {v0.8b}, [x16]\n   ld1 {v1.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v2.8b}, [x16]\n   ld1 {v3.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v4.8b}, [x16]\n   ld1 {v5.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v6.8b}, [x16]\n   ld1 {v7.8b}, [x7]\n"
+    "add x16, x7, x3\n"
+    "rev64 v0.8b, v0.8b\n   rev64 v1.8b, v1.8b\n   rev64 v2.8b, v2.8b\n   rev64 v3.8b, v3.8b\n"
+    "rev64 v4.8b, v4.8b\n   rev64 v5.8b, v5.8b\n   rev64 v6.8b, v6.8b\n   rev64 v7.8b, v7.8b\n"
+    "trn1 v16.8b, v0.8b, v1.8b\n   trn2 v17.8b, v0.8b, v1.8b\n"
+    "trn1 v18.8b, v2.8b, v3.8b\n   trn2 v19.8b, v2.8b, v3.8b\n"
+    "trn1 v20.8b, v4.8b, v5.8b\n   trn2 v21.8b, v4.8b, v5.8b\n"
+    "trn1 v22.8b, v6.8b, v7.8b\n   trn2 v23.8b, v6.8b, v7.8b\n"
+    "trn1 v0.4h, v16.4h, v18.4h\n   trn2 v2.4h, v16.4h, v18.4h\n"
+    "trn1 v1.4h, v17.4h, v19.4h\n   trn2 v3.4h, v17.4h, v19.4h\n"
+    "trn1 v4.4h, v20.4h, v22.4h\n   trn2 v6.4h, v20.4h, v22.4h\n"
+    "trn1 v5.4h, v21.4h, v23.4h\n   trn2 v7.4h, v21.4h, v23.4h\n"
+    "trn1 v16.2s, v0.2s, v4.2s\n   trn2 v20.2s, v0.2s, v4.2s\n"
+    "trn1 v17.2s, v1.2s, v5.2s\n   trn2 v21.2s, v1.2s, v5.2s\n"
+    "trn1 v18.2s, v2.2s, v6.2s\n   trn2 v22.2s, v2.2s, v6.2s\n"
+    "trn1 v19.2s, v3.2s, v7.2s\n   trn2 v23.2s, v3.2s, v7.2s\n"
+    "add x7, x15, x1\n   st1 {v16.8b}, [x15]\n   st1 {v17.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v18.8b}, [x7]\n   add x7, x7, x1\n   st1 {v19.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v20.8b}, [x7]\n   add x7, x7, x1\n   st1 {v21.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v22.8b}, [x7]\n   add x7, x7, x1\n   st1 {v23.8b}, [x7]\n"
+    "add x15, x15, #8\n   subs x17, x17, #1\n   b.ne 12b\n"
+    "add x13, x13, x11\n   sub x14, x14, #8\n   subs x9, x9, #1\n   b.ne 11b\n"
+    "b 30f\n"
+    "20:\n"
+    "mov x15, x13\n   mov x16, x14\n   mov x17, x10\n"
+    "22:\n"
+    "add x7, x16, x3\n   ld1 {v0.8b}, [x16]\n   ld1 {v1.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v2.8b}, [x16]\n   ld1 {v3.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v4.8b}, [x16]\n   ld1 {v5.8b}, [x7]\n"
+    "add x16, x7, x3\n   add x7, x16, x3\n   ld1 {v6.8b}, [x16]\n   ld1 {v7.8b}, [x7]\n"
+    "add x16, x7, x3\n"
+    "trn1 v16.8b, v0.8b, v1.8b\n   trn2 v17.8b, v0.8b, v1.8b\n"
+    "trn1 v18.8b, v2.8b, v3.8b\n   trn2 v19.8b, v2.8b, v3.8b\n"
+    "trn1 v20.8b, v4.8b, v5.8b\n   trn2 v21.8b, v4.8b, v5.8b\n"
+    "trn1 v22.8b, v6.8b, v7.8b\n   trn2 v23.8b, v6.8b, v7.8b\n"
+    "trn1 v0.4h, v16.4h, v18.4h\n   trn2 v2.4h, v16.4h, v18.4h\n"
+    "trn1 v1.4h, v17.4h, v19.4h\n   trn2 v3.4h, v17.4h, v19.4h\n"
+    "trn1 v4.4h, v20.4h, v22.4h\n   trn2 v6.4h, v20.4h, v22.4h\n"
+    "trn1 v5.4h, v21.4h, v23.4h\n   trn2 v7.4h, v21.4h, v23.4h\n"
+    "trn1 v16.2s, v0.2s, v4.2s\n   trn2 v20.2s, v0.2s, v4.2s\n"
+    "trn1 v17.2s, v1.2s, v5.2s\n   trn2 v21.2s, v1.2s, v5.2s\n"
+    "trn1 v18.2s, v2.2s, v6.2s\n   trn2 v22.2s, v2.2s, v6.2s\n"
+    "trn1 v19.2s, v3.2s, v7.2s\n   trn2 v23.2s, v3.2s, v7.2s\n"
+    "add x7, x15, x1\n   st1 {v16.8b}, [x15]\n   st1 {v17.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v18.8b}, [x7]\n   add x7, x7, x1\n   st1 {v19.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v20.8b}, [x7]\n   add x7, x7, x1\n   st1 {v21.8b}, [x7]\n"
+    "add x7, x7, x1\n   st1 {v22.8b}, [x7]\n   add x7, x7, x1\n   st1 {v23.8b}, [x7]\n"
+    "add x15, x15, #8\n   subs x17, x17, #1\n   b.ne 22b\n"
+    "add x13, x13, x11\n   add x14, x14, #8\n   subs x9, x9, #1\n   b.ne 20b\n"
+    "30:\n"
+    "and x9, x5, #7\n   cbz x9, 35f\n"
+    "31:\n"
+    "mov x15, x13\n   mov x16, x14\n   mov x17, x6\n"
+    "32:\n"
+    "ldrb w7, [x16]\n   strb w7, [x15], #1\n   add x16, x16, x3\n   subs x17, x17, #1\n   b.ne 32b\n"
+    "add x13, x13, x1\n   add x14, x14, x4\n   subs x9, x9, #1\n   b.ne 31b\n"
+    "35:\n"
+    "and x9, x6, #7\n   cbz x9, 9f\n"
+    "and x10, x6, #~7\n   add x0, x0, x10\n   madd x2, x10, x3, x2\n"
+    "and x5, x5, #~7\n   mov x6, x9\n   cbz x5, 9f\n"
+    "5:\n"
+    "mov x15, x0\n   mov x16, x2\n   mov x17, x6\n"
+    "6:\n"
+    "ldrb w7, [x16]\n   strb w7, [x15], #1\n   add x16, x16, x3\n   subs x17, x17, #1\n   b.ne 6b\n"
+    "add x0, x0, x1\n   add x2, x2, x4\n   subs x5, x5, #1\n   b.ne 5b\n"
+    "9: " ASM_RET
+    ASM_END(memory_transpose_u8)
 
     //
     //       memory_transpose_rect_core -- the scalar rectangle at the edges: x0 into, x1 into_pitch in bytes, x2 from,
@@ -36427,6 +36601,36 @@ __asm__(
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_add_sat_u8_rect)
+
+    ASM_FUNC(memory_over_cover_u32_rect)
+    "beqz a4, 9f\n   beqz a5, 9f\n"
+    "addi sp, sp, -16\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n"
+    "slli a1, a1, 2\n   li t6, 0xffffff\n   and a6, a6, t6\n   li a7, 255\n"
+    "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
+    "1: lbu t3, 0(t1)\n   beqz t3, 5f\n"
+    "srli t4, t3, 7\n   add t4, t3, t4\n"
+    "andi t5, a6, 255\n   mul t5, t5, t4\n   srli t5, t5, 8\n"
+    "srli t6, a6, 8\n   andi t6, t6, 255\n   mul t6, t6, t4\n   srli t6, t6, 8\n   slli t6, t6, 8\n   or t5, t5, t6\n"
+    "srli t6, a6, 16\n   andi t6, t6, 255\n   mul t6, t6, t4\n   srli t6, t6, 8\n   slli t6, t6, 16\n   or t5, t5, t6\n"
+    "slli t6, t3, 24\n   or t5, t5, t6\n"
+    "lwu t4, 0(t0)\n   sub t3, a7, t3\n"
+    "andi t6, t4, 255\n   mul t6, t6, t3\n   addi t6, t6, 127\n   divu t6, t6, a7\n"
+    "andi s0, t5, 255\n   add t6, t6, s0\n   ble t6, a7, 2f\n   mv t6, a7\n"
+    "2: mv s1, t6\n"
+    "srli t6, t4, 8\n   andi t6, t6, 255\n   mul t6, t6, t3\n   addi t6, t6, 127\n   divu t6, t6, a7\n"
+    "srli s0, t5, 8\n   andi s0, s0, 255\n   add t6, t6, s0\n   ble t6, a7, 3f\n   mv t6, a7\n"
+    "3: slli t6, t6, 8\n   or s1, s1, t6\n"
+    "srli t6, t4, 16\n   andi t6, t6, 255\n   mul t6, t6, t3\n   addi t6, t6, 127\n   divu t6, t6, a7\n"
+    "srli s0, t5, 16\n   andi s0, s0, 255\n   add t6, t6, s0\n   ble t6, a7, 4f\n   mv t6, a7\n"
+    "4: slli t6, t6, 16\n   or s1, s1, t6\n"
+    "srli t6, t4, 24\n   mul t6, t6, t3\n   addi t6, t6, 127\n   divu t6, t6, a7\n"
+    "srli s0, t5, 24\n   add t6, t6, s0\n   ble t6, a7, 41f\n   mv t6, a7\n"
+    "41: slli t6, t6, 24\n   or s1, s1, t6\n   sw s1, 0(t0)\n"
+    "5: addi t0, t0, 4\n   addi t1, t1, 1\n   addi t2, t2, -1\n   bnez t2, 1b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   addi sp, sp, 16\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_cover_u32_rect)
 #endif
 
 #ifndef KERNEL_MODE
@@ -37811,6 +38015,14 @@ __asm__(
     ASM_FUNC(memory_transpose_u32)
     "slli a1, a1, 2\n   slli a3, a3, 2\n   slli a4, a4, 2\n   j memory_transpose_rect_core\n"
     ASM_END(memory_transpose_u32)
+
+    ASM_FUNC(memory_transpose_u8)
+    "beqz a5, 9f\n   beqz a6, 9f\n   mv t1, a0\n   mv t2, a2\n"
+    "1: mv t3, t1\n   mv t4, t2\n   mv t5, a6\n"
+    "2: lbu t6, 0(t4)\n   sb t6, 0(t3)\n   add t4, t4, a3\n   addi t3, t3, 1\n   addi t5, t5, -1\n   bnez t5, 2b\n"
+    "add t1, t1, a1\n   add t2, t2, a4\n   addi a5, a5, -1\n   bnez a5, 1b\n"
+    "9: " ASM_RET
+    ASM_END(memory_transpose_u8)
 
     //
     //       memory_transpose_rect_core -- the rectangle, with the strides in bytes: a0 into, a1 into_pitch in bytes, a2 from,
@@ -54160,6 +54372,10 @@ fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 add
 // into_stride and from_stride bytes apart. Zero width or height touches nothing.
 fn memory_add_sat_u8_rect(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
                           positive width, positive height);
+// height rows of width 8-bit coverage bytes of cover (cover_stride bytes apart): each pixel of into
+// (into_stride words apart) becomes ui_over(ui_tone(ink, cover), pixel). Zero width or height touches nothing.
+fn memory_over_cover_u32_rect(p32 address_to into, positive into_stride, const p8 address_to cover, positive cover_stride,
+                              positive width, positive height, p32 ink);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
@@ -54196,6 +54412,11 @@ fn memory_runs_u32(p8 address_to rows, const p32 address_to from, positive from_
 // rectangle is read or written, and a zero rows or cols touches nothing.
 fn memory_transpose_u32(p32 address_to into, positive into_pitch, const p32 address_to from, long from_column, long from_row,
                         positive rows, positive cols);
+// The byte rectangle transposed: into[r * into_pitch + c] = from[c * from_column + r * from_row] for every row r of
+// rows and column c of cols, from the element at column 0, row 0. from_row is +1 or -1, from_column any signed step
+// in bytes. Nothing outside the rectangle is read or written, and a zero rows or cols touches nothing.
+fn memory_transpose_u8(p8 address_to into, positive into_pitch, const p8 address_to from, long from_column, long from_row,
+                       positive rows, positive cols);
 // A picture from_width by from_height (from_stride words a row) drawn nearest neighbour into a width by height
 // rectangle, of which the visible_width by visible_height part at left, top is written: into points at its top left
 // word, into_stride words a row. A pixel is the picture's at the source position of its centre, which steps in 24-bit

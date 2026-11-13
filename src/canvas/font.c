@@ -9419,14 +9419,14 @@ static fn font_blend_turned(font_engine address_to e, const font_target address_
 
                 if (top >= target->height || top + rows <= 0)
                         continue;
-                for (b32 k = 0; k < rows; k++)
-                {
-                        const p8 address_to column = glyph.coverage + (positive)(right ? from + k : from + rows - 1 - k);
-                        p8 address_to row = e->strip + (positive)k * (positive)glyph.height;
-
-                        for (b32 r = 0; r < glyph.height; r++)
-                                row[right ? glyph.height - 1 - r : r] = column[(positive)r * glyph.stride];
-                }
+                if (right)
+                        memory_transpose_u8(e->strip, (positive)glyph.height,
+                                            glyph.coverage + (long)(glyph.height - 1) * (long)glyph.stride + from,
+                                            -(long)glyph.stride, 1, (positive)rows, (positive)glyph.height);
+                else
+                        memory_transpose_u8(e->strip, (positive)glyph.height,
+                                            glyph.coverage + from + (rows - 1),
+                                            (long)glyph.stride, -1, (positive)rows, (positive)glyph.height);
                 font_blend(e, target, left, top, (font_bitmap){e->strip, (positive)glyph.height, 0, 0, glyph.height, rows},
                            colour, background, strength);
         }

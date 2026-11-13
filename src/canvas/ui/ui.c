@@ -9534,15 +9534,9 @@ static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, con
                 ui_scene_touch(scene, scene->ox + left, scene->oy + top, scene->ox + right, scene->oy + bottom);
                 return;
         }
-        for (int row = top; row < bottom; row++)
-        {
-                unsigned int address_to pixels = ui->pixels + (unsigned long)row * ui->pitch;
-                const unsigned char address_to covers = cover + (long)(row - y) * pitch - x;
-
-                for (int column = left; column < right; column++)
-                        if (covers[column])
-                                pixels[column] = ui_over(ui_tone(ink, covers[column]), pixels[column]);
-        }
+        memory_over_cover_u32_rect(ui->pixels + (unsigned long)top * ui->pitch + (unsigned long)left, ui->pitch,
+                                   cover + (long)(top - y) * pitch + (left - x), (positive)pitch,
+                                   (positive)(right - left), (positive)(bottom - top), ink);
 }
 
 // The place of a key's copy in the pool, when the frame has one (the lookup ui_scene_copy makes first, without copying): false when it has none.
