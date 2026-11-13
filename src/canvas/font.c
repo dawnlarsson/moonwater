@@ -12094,58 +12094,16 @@ fn font_plan_paint(const font_cell_plan_t address_to plan, const font_target add
 //      writes after, or in the strip row's padding past the last cell. A
 //      blank or a glyph that hangs out of its cell is the cell's zeros with
 //      what of the glyph is inside.
-typedef p8 font_v16 __attribute__((vector_size(16)));
-
 /*
         Sixteen bytes a row, rows of them: the strip's copy of a whole cell's coverage, its tail in the next cell's place
-        (which that cell writes after). On x86-64 it is one out-of-line body, two rows a pass with the loop's counter
-        and both pointers in registers; the C is the body everywhere else and the reference the check compares with.
-        The reads and writes are exactly those of the loop below, so the bytes are the same for every row count.
+        (which that cell writes after). It is memory_copy_strip_16 in lib.c, one body on each machine, where it was a
+        body here for x86-64 and the compiler's loop of 16-byte loads and stores on the other two.
 */
-#if X64 && !defined(FONT_STRIP_C)
-#define FONT_STRIP_ASM 1
-extern void font_strip16_body(p8 address_to into, positive stride, const p8 address_to source, positive source_stride,
-                              positive rows) __asm__("font_strip16_body") __attribute__((visibility("hidden")));
-
 static inline fn font_strip16(p8 address_to into, positive stride, const p8 address_to source, positive source_stride,
                               positive rows)
 {
-        font_strip16_body(into, stride, source, source_stride, rows);
+        memory_copy_strip_16(into, stride, source, source_stride, rows);
 }
-
-asm(".pushsection .text\n"
-    ".balign 16\n"
-    ".local font_strip16_body\n"
-    ".type font_strip16_body, " ASM_TYPE "\n"
-    "font_strip16_body:\n" ASM_ENDBR
-    /*
-            rdi into, rsi the strip's stride, rdx source, rcx the bitmap's stride, r8 rows. Four rows a pass, the strides
-            doubled once up front, then two, then one: an unaligned 16-byte load and store a row. Two rows a pass measured
-            1.28 times the loop's time on x86-64, four rows 0.76 to 0.95 (the loop is GCC's, the same stores).
-    */
-    "cmp $4, %r8\n   jb 5f\n"
-    "    lea (%rcx,%rcx), %r9\n   lea (%rcx,%rcx,2), %r10\n   lea (%rsi,%rsi), %r11\n   lea (%rsi,%rsi,2), %rax\n"
-    "6:  movdqu (%rdx), %xmm0\n   movdqu (%rdx,%rcx), %xmm1\n   movdqu (%rdx,%r9), %xmm2\n   movdqu (%rdx,%r10), %xmm3\n"
-    "    movups %xmm0, (%rdi)\n   movups %xmm1, (%rdi,%rsi)\n   movups %xmm2, (%rdi,%r11)\n   movups %xmm3, (%rdi,%rax)\n"
-    "    lea (%rdx,%r9,2), %rdx\n   lea (%rdi,%r11,2), %rdi\n"
-    "    sub $4, %r8\n   cmp $4, %r8\n   jae 6b\n"
-    "5:  cmp $2, %r8\n   jb 3f\n"
-    "    movdqu (%rdx), %xmm0\n   movdqu (%rdx,%rcx), %xmm1\n"
-    "    movups %xmm0, (%rdi)\n   movups %xmm1, (%rdi,%rsi)\n"
-    "    lea (%rdx,%rcx,2), %rdx\n   lea (%rdi,%rsi,2), %rdi\n   sub $2, %r8\n"
-    "3:  test %r8, %r8\n   jz 4f\n"
-    "    movdqu (%rdx), %xmm0\n   movups %xmm0, (%rdi)\n"
-    "4:  " ASM_RET
-    ".size font_strip16_body, .-font_strip16_body\n"
-    ".popsection\n");
-#else
-static inline fn font_strip16(p8 address_to into, positive stride, const p8 address_to source, positive source_stride,
-                              positive rows)
-{
-        for (positive r = 0; r < rows; r++, into += stride, source += source_stride)
-                memory_store_unaligned(font_v16, into, memory_load_unaligned(font_v16, source));
-}
-#endif
 
 static inline fn font_lay_cell(p8 address_to into, positive stride, const font_bitmap address_to box, b32 dx,
                                b32 dy, b32 width, b32 height, b32 from, b32 rows, const p8 address_to limit)

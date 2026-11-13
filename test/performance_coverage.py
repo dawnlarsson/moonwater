@@ -429,6 +429,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_saturate', 'memory_saturate_u32',
 cover('direct_benchmark', 'test/checks.c#BENCH_sum_swap', 'memory_sum_swap_u32',
       'paired timing against the word loop compositor_glass_pass ran over the glass sums of a row of blocks, over runs '
       'of one, three, twelve, sixty and three hundred blocks, with SSE2, NEON, and V and the scalar body on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_copy_strip', 'memory_copy_strip_16',
+      'paired timing against the loop of 16-byte loads and stores font_strip16 was on arm64 and riscv64, a cell\'s '
+      'coverage laid into a strip over one, two, four, eight, twenty and forty rows at the odd addresses a cell width '
+      'gives, with SSE2, NEON, and V, doublewords and bytes on riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_invert', 'memory_invert_u32',
       'paired timing against the word loop compositor_frost ran for the complement of a row, over runs of one, three, '
       'twelve, sixty and three hundred words, with SSE2, NEON, and V and the scalar body on riscv64')

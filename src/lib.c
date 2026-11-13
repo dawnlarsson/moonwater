@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        494 routines (468 public, 26 local), 483 of them on all three and 11 local to one.
+        495 routines (469 public, 26 local), 484 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -257,6 +257,7 @@
           memory_copy_rect_stream_u32    public  yes     yes     yes
           memory_copy_rect_u32           public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
+          memory_copy_strip_16           public  yes     yes     yes
           memory_copy_until              public  yes     yes     yes
           memory_count                   public  yes     yes     yes
           memory_count_records_with_prepared public  yes     yes     yes
@@ -14502,6 +14503,36 @@ __asm__(
     ASM_END(memory_invert_u32)
 
     //
+    //       memory_copy_strip_16 -- rdi into, rsi into_stride in bytes, rdx from, rcx from_stride in bytes, r8 rows:
+    //       rows rows of sixteen bytes, each read whole from from and stored at into, the next row from_stride and
+    //       into_stride bytes on. It is the copy a text run's strip makes of a cell's coverage (src/canvas/font.c,
+    //       font_lay_cell): a cell is up to sixteen bytes wide, so its row is one unaligned word whose tail lands in
+    //       the next cell's place, which that cell writes after. Four rows a pass with both strides doubled and
+    //       tripled once, then two, then one; every load of a pass is before its stores, and the stores are in row
+    //       order, so rows of into nearer than sixteen bytes end as a row at a time leaves them. The two buffers
+    //       are apart. No row is zero rows: nothing is read or written. SSE2 is the baseline's, and a row is one
+    //       register of it, so there is no wider body to choose and no feature byte is read.
+    //
+    //       This was font_strip16_body, a body in font.c for x86-64 alone with the compiler's loop on the other two:
+    //       four rows a pass measured 0.76 to 0.95 of that loop's time, and two rows 1.28.
+    //
+    ASM_FUNC(memory_copy_strip_16)
+    "cmp $4, %r8\n   jb 5f\n"
+    "    lea (%rcx,%rcx), %r9\n   lea (%rcx,%rcx,2), %r10\n   lea (%rsi,%rsi), %r11\n   lea (%rsi,%rsi,2), %rax\n"
+    "6:  movdqu (%rdx), %xmm0\n   movdqu (%rdx,%rcx), %xmm1\n   movdqu (%rdx,%r9), %xmm2\n   movdqu (%rdx,%r10), %xmm3\n"
+    "    movups %xmm0, (%rdi)\n   movups %xmm1, (%rdi,%rsi)\n   movups %xmm2, (%rdi,%r11)\n   movups %xmm3, (%rdi,%rax)\n"
+    "    lea (%rdx,%r9,2), %rdx\n   lea (%rdi,%r11,2), %rdi\n"
+    "    sub $4, %r8\n   cmp $4, %r8\n   jae 6b\n"
+    "5:  cmp $2, %r8\n   jb 3f\n"
+    "    movdqu (%rdx), %xmm0\n   movdqu (%rdx,%rcx), %xmm1\n"
+    "    movups %xmm0, (%rdi)\n   movups %xmm1, (%rdi,%rsi)\n"
+    "    lea (%rdx,%rcx,2), %rdx\n   lea (%rdi,%rsi,2), %rdi\n   sub $2, %r8\n"
+    "3:  test %r8, %r8\n   jz 4f\n"
+    "    movdqu (%rdx), %xmm0\n   movups %xmm0, (%rdi)\n"
+    "4:  " ASM_RET
+    ASM_END(memory_copy_strip_16)
+
+    //
     //       memory_tint_u32 -- rdi into, rsi from, rdx count, rcx toward (a
     //       colour's three bytes), r8 amount, r9 cap, and floor on the stack:
     //       each pixel of from is mixed toward toward by amount of 256 (the
@@ -26195,6 +26226,21 @@ __asm__(
     ASM_END(memory_invert_u32)
 
     //
+    //       memory_copy_strip_16: x0 into, x1 into_stride in bytes, x2 from, x3 from_stride in bytes, x4 rows:
+    //       rows rows of sixteen bytes, as on x86-64, which carries the contract. Two rows a pass, each a 128-bit
+    //       load and store at any alignment (q0 and q1, caller-saved), both loads before the stores; then one.
+    //
+    ASM_FUNC(memory_copy_strip_16)
+    "cmp x4, #2\n   b.lo 3f\n"
+    "1:  ldr q0, [x2]\n   ldr q1, [x2, x3]\n   add x2, x2, x3, lsl #1\n"
+    "str q0, [x0]\n   str q1, [x0, x1]\n   add x0, x0, x1, lsl #1\n"
+    "sub x4, x4, #2\n   cmp x4, #2\n   b.hs 1b\n"
+    "3:  cbz x4, 9f\n"
+    "ldr q0, [x2]\n   str q0, [x0]\n"
+    "9:  " ASM_RET
+    ASM_END(memory_copy_strip_16)
+
+    //
     //       memory_tint_u32: x0 into, x1 from, x2 count, x3 toward, x4 amount,
     //       x5 cap, x6 floor: the x86_64 block's steps (the contract is there)
     //       four pixels a turn in v registers, the constants splat once, and
@@ -36321,6 +36367,55 @@ __asm__(
     "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -2\n   bnez a2, 3b\n"
     "9:  " ASM_RET
     ASM_END(memory_invert_u32)
+
+    //
+    //       memory_copy_strip_16: a0 into, a1 into_stride in bytes, a2 from, a3 from_stride in bytes, a4 rows:
+    //       rows rows of sixteen bytes, as on x86-64, which carries the contract. With V a row is one vle8 and one
+    //       vse8 of sixteen bytes (a vector register holds sixteen at the least V allows), at any alignment.
+    //       Without it a strip whose two addresses and two strides are all doubleword aligned is two loads and two
+    //       stores a row, two rows a pass; in any other strip a row whose two addresses are aligned is that, and any
+    //       other row sixteen byte loads and stores, four loaded before four are stored: the floor has no load of a
+    //       word that is not aligned, and the strip's cells start wherever the cell width puts them. Counted under
+    //       qemu-user, a call of twenty rows 512 and 496 bytes apart (2026-11-13; the loop of 16-byte loads and stores
+    //       GCC 13 made of the C this was is 157 aligned and 1788 not): V 143, doublewords 170, bytes 807.
+    //
+    ASM_FUNC(memory_copy_strip_16)
+    "beqz a4, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  V is asked lazily, as the other riscv bodies ask it: 0 unasked, 1 absent, 2 present. The detect keeps a0-a4.
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 6f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n"
+#endif
+    "6:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   bne t3, t4, 1f\n"
+    ".option push\n   .option arch, +v\n"
+    "vsetivli zero, 16, e8, m1, ta, ma\n"
+    "5:  vle8.v v8, (a2)\n   vse8.v v8, (a0)\n   add a2, a2, a3\n   add a0, a0, a1\n   addi a4, a4, -1\n   bnez a4, 5b\n"
+    ".option pop\n" ASM_RET
+    //  Both addresses and both strides doubleword aligned: every row is, and two rows are a pass with nothing asked of them.
+    "1:  or t0, a0, a2\n   or t1, a1, a3\n   or t0, t0, t1\n   andi t0, t0, 7\n   bnez t0, 3f\n"
+    "li t5, 2\n   bltu a4, t5, 8f\n"
+    "7:  ld t0, 0(a2)\n   ld t1, 8(a2)\n   add t4, a2, a3\n   ld t2, 0(t4)\n   ld t3, 8(t4)\n   add a2, t4, a3\n"
+    "sd t0, 0(a0)\n   sd t1, 8(a0)\n   add t4, a0, a1\n   sd t2, 0(t4)\n   sd t3, 8(t4)\n   add a0, t4, a1\n"
+    "addi a4, a4, -2\n   bgeu a4, t5, 7b\n"
+    "beqz a4, 9f\n"
+    "8:  ld t0, 0(a2)\n   ld t1, 8(a2)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n"
+    "9:  " ASM_RET
+    //  Any other strip: each row asked whether its two addresses are aligned, and copied by doublewords or by bytes.
+    "3:  or t0, a0, a2\n   andi t0, t0, 7\n   bnez t0, 2f\n"
+    "ld t0, 0(a2)\n   ld t1, 8(a2)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n"
+    "add a2, a2, a3\n   add a0, a0, a1\n   addi a4, a4, -1\n   bnez a4, 3b\n"
+    ASM_RET
+    "2:  lbu t0, 0(a2)\n   lbu t1, 1(a2)\n   lbu t2, 2(a2)\n   lbu t3, 3(a2)\n"
+    "sb t0, 0(a0)\n   sb t1, 1(a0)\n   sb t2, 2(a0)\n   sb t3, 3(a0)\n"
+    "lbu t0, 4(a2)\n   lbu t1, 5(a2)\n   lbu t2, 6(a2)\n   lbu t3, 7(a2)\n"
+    "sb t0, 4(a0)\n   sb t1, 5(a0)\n   sb t2, 6(a0)\n   sb t3, 7(a0)\n"
+    "lbu t0, 8(a2)\n   lbu t1, 9(a2)\n   lbu t2, 10(a2)\n   lbu t3, 11(a2)\n"
+    "sb t0, 8(a0)\n   sb t1, 9(a0)\n   sb t2, 10(a0)\n   sb t3, 11(a0)\n"
+    "lbu t0, 12(a2)\n   lbu t1, 13(a2)\n   lbu t2, 14(a2)\n   lbu t3, 15(a2)\n"
+    "sb t0, 12(a0)\n   sb t1, 13(a0)\n   sb t2, 14(a0)\n   sb t3, 15(a0)\n"
+    "add a2, a2, a3\n   add a0, a0, a1\n   addi a4, a4, -1\n   bnez a4, 3b\n"
+    ASM_RET
+    ASM_END(memory_copy_strip_16)
 
     //
     //       memory_tint_u32: a0 into, a1 from, a2 count, a3 toward, a4
@@ -53859,6 +53954,14 @@ fn memory_sum_swap_u32(p64 address_to sums, p32 address_to old, const p32 addres
 // count words: each into word is the complement of the word of from (into and from the same, or apart, never partly
 // over each other). The compositor's frosted backdrop is complemented in place and copied out complemented.
 fn memory_invert_u32(p32 address_to into, const p32 address_to from, positive count);
+// rows rows of sixteen bytes, each read whole from from and then stored at into, the next row from_stride and
+// into_stride bytes after it: the copy of a cell's coverage into a text run's strip, where a cell up to sixteen bytes
+// wide is one word a row and the word's tail is the next cell's to write over. The rows are stored in order, so rows
+// of into less than sixteen bytes apart end as a row at a time leaves them; into and from are apart. Exactly sixteen
+// bytes a row are read and written at any alignment, nothing before the first row or past the last one's sixteenth
+// byte, and zero rows touch nothing.
+fn memory_copy_strip_16(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
+                        positive rows);
 // count pixels of from, each mixed toward toward (0 or 0xffffff, per channel) by amount of 256, then with its brightest
 // channel capped at cap (every channel scaled down by cap over it) or else its dimmest raised to floor (every channel
 // taken toward 255 by the same proportion); the window's tint. Integer only; exact for every pixel and every cap and

@@ -17402,6 +17402,96 @@ static fn span_byte_block(p8 address_to at, positive size, p8 fill, p8 around,
 }
 
 /*
+        memory_copy_strip_16 against the loop it is, a row at a time and sixteen bytes a row: no row to nine, and the
+        counts round sixteen, thirty-two and forty (so the four-row pass, the pair after it and the last row are each met
+        with every remainder), strides of the destination from none (every row on the first) through ones nearer
+        than a row to a strip's, strides of the source from none to an atlas's, every alignment of each address against
+        an aligned other and a few with both odd, the bytes random. Each case is placed twice in pages with a guard at
+        both ends, with the first row's first byte the page's first and with the last row's last byte its last, for the
+        source and for the destination, so a byte read or written before the first row or past the last one's sixteenth
+        is a fault; and the destination is compared with the loop's over the whole page, so a byte written between the
+        rows or beside them fails. On riscv64 with V, then with V walked down to the doubleword and byte bodies.
+*/
+static fn copy_strip_16_reference(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
+                                  positive rows)
+{
+        for (positive r = 0; r < rows; r++)
+                for (positive k = 0; k < 16; k++)
+                        into[r * into_stride + k] = from[r * from_stride + k];
+}
+
+fn check_copy_strip_16()
+{
+        static const positive counts[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 40};
+        static const positive into_strides[] = {0, 1, 7, 8, 15, 16, 17, 24, 32, 40, 96};
+        static const positive from_strides[] = {0, 1, 8, 16, 17, 24, 64, 80};
+        static p8 want[4096];
+        p8 address_to from_pages = guard_pages("memory_copy_strip_16");
+        p8 address_to into_pages = guard_pages("memory_copy_strip_16's rows");
+        p64 seed = 0x9e3779b97f4a7c15ull;
+        positive tiers = 1;
+
+        if (!from_pages || !into_pages)
+                return;
+        p8 address_to source = from_pages + 4096, address_to made = into_pages + 4096;
+#if RISCV64
+        p8 vector_asked;
+
+        memory_copy_strip_16(made, 16, source, 16, 1);
+        vector_asked = cpu_has_vector;
+        tiers = 2;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+                p8 rows_same = true, around = true;
+#if RISCV64
+                if (tier == 0 && vector_asked != 2)
+                        continue;
+                cpu_has_vector = tier == 0 ? vector_asked : 1;
+#endif
+                for (positive c = 0; c < array_count(counts); c++)
+                        for (positive i = 0; i < array_count(into_strides); i++)
+                                for (positive f = 0; f < array_count(from_strides); f++)
+                                        for (positive pair = 0; pair < 36; pair++)
+                                                for (positive place = 0; place < 2; place++)
+                                                {
+                                                        positive rows = counts[c], into_stride = into_strides[i], from_stride = from_strides[f];
+                                                        positive a = pair < 16 ? pair : pair < 32 ? 0 : (pair - 32) * 4 + 1;
+                                                        positive b = pair < 16 ? 0 : pair < 32 ? pair - 16 : (pair - 32) * 2 + 3;
+                                                        positive from_span = rows ? (rows - 1) * from_stride + 16 : 0;
+                                                        positive into_span = rows ? (rows - 1) * into_stride + 16 : 0;
+                                                        // Up against the front guard: no residue, the first byte the page's first. Against the back one:
+                                                        // the last byte the page's last, and the residue is what that leaves.
+                                                        positive from_at = place ? 4096 - from_span : a;
+                                                        positive into_at = place ? 4096 - into_span : b;
+
+                                                        if (from_at + from_span > 4096 || into_at + into_span > 4096)
+                                                                continue;
+                                                        for (positive k = 0; k < 4096; k += 8)
+                                                        {
+                                                                XORSHIFT64(seed);
+                                                                memory_copy(source + k, &seed, 8);
+                                                        }
+                                                        memory_fill(made, (p8)(0x5a + c + pair), 4096);
+                                                        memory_fill(want, (p8)(0x5a + c + pair), 4096);
+                                                        copy_strip_16_reference(want + into_at, into_stride, source + from_at, from_stride, rows);
+                                                        memory_copy_strip_16(made + into_at, into_stride, source + from_at, from_stride, rows);
+                                                        if (memory_compare(made + into_at, want + into_at, into_span) != 0)
+                                                                rows_same = false;
+                                                        if (memory_compare(made, want, 4096) != 0)
+                                                                around = false;
+                                                }
+                same("memory_copy_strip_16", tier ? "rows are the loop's, the narrow bodies" : "rows are the loop's", rows_same, 1);
+                same("memory_copy_strip_16", tier ? "nothing beside the rows is written, the narrow bodies" : "nothing beside the rows is written", around, 1);
+        }
+#if RISCV64
+        cpu_has_vector = vector_asked;
+#endif
+        memory_free(from_pages, 3 * 4096);
+        memory_free(into_pages, 3 * 4096);
+}
+
+/*
         Every size to 300 and every residue of sixty four at the start, the
         block once flush against a guard page before it and once with its end
         flush against one after it, so at a residue of zero a read one byte
@@ -31905,6 +31995,7 @@ b32 main()
         check_nth_widths();
         check_offsets_of_either();
         check_span_byte();
+        check_copy_strip_16();
         check_dirty_arguments();
         check_offsets_range();
         check_offsets_range_pages();
@@ -215754,6 +215845,69 @@ b32 main()
         return 0;
 }
 #endif /* BENCH_invert */
+
+#ifdef BENCH_copy_strip
+/* memory_copy_strip_16 against the loop font_strip16 was everywhere but x86-64 (a 16-byte load and store a row, the
+   compiler's): a cell's coverage laid into a text run's strip, one row to forty, the strip's stride and an atlas's,
+   the addresses at the odd places a cell width puts them. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+typedef p8 strip_word __attribute__((vector_size(16)));
+static p8 strip_from[64 * 512 + 64], strip_into[64 * 512 + 64];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static void former_strip(p8 address_to into, positive stride, const p8 address_to source,
+                                                            positive source_stride, positive rows)
+{
+        for (positive r = 0; r < rows; r++, into += stride, source += source_stride)
+                memory_store_unaligned(strip_word, into, memory_load_unaligned(strip_word, source));
+}
+
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive rows, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const p8 address_to from = strip_from + 3 + round % 8;
+                p8 address_to into = strip_into + 5 + (round % 8) * 9;
+
+                if (assembly)
+                        memory_copy_strip_16(into, 496, from, 512, rows);
+                else
+                        former_strip(into, 496, from, 512, rows);
+        }
+        sink = strip_into[5];
+        return get_cpu_time() - start;
+}
+
+b32 main()
+{
+        static const positive rows[] = {1, 2, 4, 8, 20, 40};
+        static const string_address names[] = {"one row", "two rows", "four rows", "eight rows", "twenty rows", "forty rows"};
+
+        for (positive at = 0; at < sizeof(strip_from); at++)
+                strip_from[at] = (p8)(at * 131);
+        for (positive at = 0; at < sizeof(rows) / sizeof(rows[0]); at++)
+        {
+                positive ratios[TRIES];
+                positive rounds = 4000000 / (rows[at] + 4) + 1;
+
+                BENCH_PAIRED_RUNS(ratios, former, assembly, rows[at], rounds);
+                string_format(log, "memory_copy_strip_16 %s: paired median ASM/C %p.", names[at], ratios[TRIES / 2] / 100);
+                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                log("%\n", 2);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_copy_strip */
 
 #ifdef BENCH_tint
 /* memory_tint_u32 against the C the compositor's glass tone was: a row of boosted pixels tinted toward the light side
