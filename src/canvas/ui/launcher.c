@@ -920,7 +920,12 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
         }
         else if (entry->kind == LAUNCHER_PROGRAM)
         {
-                string_copy_bounded((string_address)into, (string_address)launcher_name(entry->index), room);
+                // A name of PATH is a file's name, which whoever can write a folder of PATH chose: it is written as words from outside
+                // (ui_label_foreign), so a control byte in it is seen and a mark that turns its letters round does nothing. What is
+                // started is the name as it is (launcher_run); only the row's words are made safe.
+                const char address_to name = launcher_name(entry->index);
+
+                ui_label_foreign(into, room, (const p8 address_to)name, string_length((string_address)name));
                 *note = launcher.dirs[launcher.from[entry->index]];
         }
         else

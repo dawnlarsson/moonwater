@@ -169885,6 +169885,26 @@ static fn check_field_hands(string_address regular)
                                               (ui_role(UI_PRIMARY) & 0xffffffu));
                         }
                 }
+                // A name of PATH with an escape and an override in it: the row's words have a picture and a mark where they stood, and no
+                // byte of either, while the name the row starts is the file's own.
+                {
+                        static char hostile[LAUNCHER_NAME] = "ls\x1b[2Jx\xe2\x80\xaeod.exe";
+                        char was[LAUNCHER_NAME], shown[LAUNCHER_TEXT + 8];
+                        const char address_to note = null;
+                        struct launcher_entry entry = {0};
+                        b32 clean = true;
+
+                        string_copy_bounded((string_address)was, (string_address)launcher_name(0), sizeof(was));
+                        string_copy_bounded((string_address)launcher_name(0), (string_address)hostile, LAUNCHER_NAME);
+                        entry.kind = LAUNCHER_PROGRAM, entry.index = 0;
+                        launcher_label(&entry, shown, sizeof(shown), &note);
+                        for (const char address_to at = shown; *at; at++)
+                                clean = clean && (unsigned char)*at >= 0x20 && *at != 0x7f;
+                        check("launcher: a name of PATH is written as words from outside: an escape in it is its picture and an override a replacement mark, and the name itself is as the file has it",
+                              clean && string_equals((string_address)shown, (string_address) "ls\xe2\x90\x9b[2Jx\xef\xbf\xbdod.exe") &&
+                                  string_equals((string_address)launcher_name(0), (string_address)hostile));
+                        string_copy_bounded((string_address)launcher_name(0), (string_address)was, LAUNCHER_NAME);
+                }
                 // The rows run from one edge of the bar to the other, as the settings window's rows run to its window's: the lit row's fill
                 // is at the bar's first and last pixel and in the margin beside the list's box, the row under it is not lit there, the
                 // margin is the row's to hover and press, and the words are still in from the margin (the list's own box).
