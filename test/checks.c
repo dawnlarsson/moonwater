@@ -167894,6 +167894,30 @@ static fn check_field_hands(string_address regular)
                                               (ui_role(UI_PRIMARY) & 0xffffffu));
                         }
                 }
+                // The rows run from one edge of the bar to the other, as the settings window's rows run to its window's: the lit row's fill
+                // is at the bar's first and last pixel and in the margin beside the list's box, the row under it is not lit there, the
+                // margin is the row's to hover and press, and the words are still in from the margin (the list's own box).
+                {
+                        const unsigned int address_to shown = (const unsigned int address_to)pixels;
+                        int lit_y, dim_y, last = launcher.width - 1, in = launcher.list.x;
+                        unsigned int lit;
+
+                        launcher_type_text("ls");
+                        launcher_draw((unsigned int address_to)pixels);
+                        launcher.list.focus = launcher.list.id[0];
+                        launcher_draw((unsigned int address_to)pixels);
+                        lit_y = ui_list_row_y(&launcher.list, 0) + 3, dim_y = ui_list_row_y(&launcher.list, 1) + 3;
+                        lit = shown[(positive)lit_y * launcher.ui.pitch + (positive)in + 1];
+                        check("launcher: the lit row reaches both edges of the bar, as a settings row reaches its window's, and the row under it is not lit there",
+                              launcher.entries >= 2 && in > 0 && lit != shown[(positive)dim_y * launcher.ui.pitch + (positive)in + 1] &&
+                                  shown[(positive)lit_y * launcher.ui.pitch] == lit && shown[(positive)lit_y * launcher.ui.pitch + (positive)last] == lit &&
+                                  shown[(positive)lit_y * launcher.ui.pitch + (positive)in - 1] == lit &&
+                                  shown[(positive)dim_y * launcher.ui.pitch] != lit && shown[(positive)dim_y * launcher.ui.pitch + (positive)last] != lit);
+                        check("launcher: the bar's margin beside a row is the row's to hover and press, and the words stay in from the margin",
+                              ui_list_hit(&launcher.ui, &launcher.list, 0, lit_y) == launcher.list.id[0] &&
+                                  ui_list_hit(&launcher.ui, &launcher.list, last, dim_y) == launcher.list.id[1] && launcher.list.x == launcher.list_box.x &&
+                                  launcher.list.x >= ui_px(&launcher.ui, UI_PAD) && launcher.list.w <= launcher.width - 2 * ui_px(&launcher.ui, UI_PAD));
+                }
                 // A row runs on its release, where its press went down: a press shows the row pressed and runs nothing, a
                 // press slid off the row shows none and a release off it runs nothing, and a release on the row runs it.
                 {

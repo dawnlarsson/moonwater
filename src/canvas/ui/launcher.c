@@ -830,6 +830,10 @@ static fn launcher_layout(void)
         // the field; a list longer than the window scrolls (the wheel, and the keys reveal).
         launcher_build(launcher.height);
         ui_list_place(ui, &launcher.list, launcher.list_box.x, launcher.list_box.y, launcher.list_box.w, launcher.list_box.h);
+        // A row runs from one edge of the bar to the other, as a row of the settings window runs to its window's (the list's row_x and
+        // row_w, which the page sets there): the lit row, the hover and the press reach both sides, and the words stay in from the
+        // margin, where the list's own box is.
+        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;
         ui_list_layout(ui, &launcher.list);
 }
 
