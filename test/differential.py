@@ -46766,7 +46766,7 @@ def harness_moonwater_cli(argv):
                 "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "setup install /dev/", "bios reboot",
                 "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
                 "latency", "latency sideways", "latency reset extra", "canvas background 112233",
-                "canvas modes preferred",
+                "canvas modes preferred", "splash", "splash off", "splash default", "splash a b", "splash /nowhere.ppm",
                 "canvas cursor size 200", "canvas cursor look dark", "canvas cursor shake off",
                 "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
                 "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
@@ -46800,6 +46800,13 @@ def harness_moonwater_cli(argv):
                 "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
                 "latency reset extra": (2, ""),
                 "canvas modes preferred": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                #       The boot splash: a bare reading is anybody's and names the firmware's own logo, a word is judged
+                #       before root is asked for, and a file that is no picture is refused for what it is, to anybody.
+                "splash": (0, "the firmware's own logo is not set"),
+                "splash off": (1, "setting the splash needs root (CAP_SYS_ADMIN)"),
+                "splash default": (1, "setting the splash needs root (CAP_SYS_ADMIN)"),
+                "splash a b": (2, ""),
+                "splash /nowhere.ppm": (1, "splash: /nowhere.ppm is not a usable picture"),
                 "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor size 200": (1, "needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
@@ -46939,7 +46946,12 @@ def harness_moonwater_cli(argv):
         #       asked or showed it, 1 it refused or failed in words, 2 it was not
         #       a command and printed its usage. A signal, a hang or any other
         #       number is a bug, and so is a vector that moves between classes.
+        #       The boot splash, as root in the sandbox, where no disk has this session's image: the reading says there
+        #       is nowhere to keep one, a word that would write is refused with nothing written, and a file is judged first.
+        walk += ["splash", "splash off", "splash default", "splash /nowhere.ppm", "splash /etc", "splash off extra"]
         walk_classes = {}
+        walk_classes.update({"splash": 0, "splash off": 1, "splash default": 1, "splash /nowhere.ppm": 1, "splash /etc": 1,
+                             "splash off extra": 2})
         for vector in [
             '',
             'status',

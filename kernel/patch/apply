@@ -815,6 +815,58 @@ EOF
 esac
 
 #
+#       The boot splash, which is the sixth kind of edit: a file of ours put
+#       among the stub's own, and one call to it.
+#
+#       kernel/patch/splash-stub.c is the whole of it and says what it does:
+#       it reads \EFI\moonwater\splash.ppm from the volume the image was
+#       loaded from and draws it with the firmware's Graphics Output Protocol,
+#       and every way that can go wrong is no picture and the boot going on.
+#       It is copied in rather than linked because the stub is built from its
+#       own directory with its own flags and its objects renamed, and it
+#       includes the parser from kernel/moonwater, which the loop at the foot
+#       of this file points at src/moonwater.
+#
+#       The call is placed where each stub first has what it needs: on x86
+#       before the kernel is decompressed, so the picture is up for the second
+#       that takes, and on arm64 and riscv64 once the display is found. A mode
+#       asked for on the command line (video=efifb:...) is set after it on x86
+#       and takes the picture with it; no profile here asks for one.
+#
+splash_stub=linux/drivers/firmware/efi/libstub/moonwater-splash.c
+[ -f kernel/patch/splash-stub.c ] || die "splash: no kernel/patch/splash-stub.c"
+if ! cmp -s kernel/patch/splash-stub.c "$splash_stub"; then
+        sudo cp kernel/patch/splash-stub.c "$splash_stub" ||
+                die "splash: copying the stub's file to $splash_stub"
+        echo "  splash: libstub gains moonwater-splash.c"
+fi
+
+printf 'lib-y%s+= moonwater-splash.o\n' "$tab$tab$tab$tab" > "$settings_work/splash-object"
+settings_insert linux/drivers/firmware/efi/libstub/Makefile "moonwater-splash.o" \
+        'lib-$(CONFIG_EFI_GENERIC_STUB)' before "$settings_work/splash-object" splash
+
+printf 'void efi_moonwater_splash(efi_handle_t handle);\n' > "$settings_work/splash-proto"
+settings_insert linux/drivers/firmware/efi/libstub/efistub.h "efi_moonwater_splash(" \
+        "efi_status_t efi_random_get_seed(void);" after "$settings_work/splash-proto" splash
+
+case "$(key_one arch)" in
+x86_64 | amd64 | x64)
+        printf '%sefi_moonwater_splash(handle);\n\n' "$tab" > "$settings_work/splash-call"
+        settings_insert linux/drivers/firmware/efi/libstub/x86-stub.c \
+                "efi_moonwater_splash(handle);" \
+                "${tab}status = efi_decompress_kernel(&kernel_entry, boot_params);" before \
+                "$settings_work/splash-call" splash
+        ;;
+arm64 | aarch64 | riscv64 | riscv)
+        printf '\n%sefi_moonwater_splash(handle);\n' "$tab" > "$settings_work/splash-call"
+        settings_insert linux/drivers/firmware/efi/libstub/efi-stub.c \
+                "${tab}efi_moonwater_splash(handle);" \
+                "${tab}dpy = setup_primary_display();" after \
+                "$settings_work/splash-call" splash
+        ;;
+esac
+
+#
 #       WHERE A NEW PROCESS STARTS
 #
 #       A command is a process made and gone in a few dozen microseconds,

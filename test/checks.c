@@ -112251,6 +112251,445 @@ static fn update_cuts(void)
 }
 
 
+/*
+        The boot splash (src/moonwater/splash.c, and its half of src/sh/host.c): what a file of a picture
+        is, where one goes on a screen and how the firmware is handed it, which is the code the loader
+        runs too (kernel/patch/splash-stub.c includes the same file); and what moonwater splash and an
+        install write, on a system partition that is a directory: the file by its steps, nothing beside
+        it, an update and a rollback that leave it, and the firmware's maker read from hostile words.
+*/
+static p8 splash_check_file[SPLASH_FILE_MOST + 2];
+static p8 splash_check_other[SPLASH_FILE_MOST + 2];
+
+// A picture of width by height as a file at into, no two pixels near each other alike: its length.
+static positive splash_check_make(p8 address_to into, unsigned int width, unsigned int height)
+{
+        positive head = splash_header(into, width, height);
+
+        for (positive at = 0; at < (positive)width * height; at++)
+        {
+                into[head + at * 3] = (p8)(at * 5 + 1);
+                into[head + at * 3 + 1] = (p8)(at * 3 + 2);
+                into[head + at * 3 + 2] = (p8)(at * 7 + 3);
+        }
+        return head + (positive)width * height * 3;
+}
+
+// Whether bytes are refused, and for the reason said.
+static bool splash_check_refused(const p8 address_to bytes, positive length, string_address why)
+{
+        struct splash_image image;
+        const char address_to reason = splash_parse(bytes, length, address_of image);
+
+        return reason && string_equals((string_address)reason, why);
+}
+
+static bool splash_check_text(p8 address_to into, string_address header, positive pixels, string_address why)
+{
+        positive head = string_length(header);
+
+        memory_copy_apart(into, header, head);
+        memory_fill(into + head, 0x40, pixels);
+        return why ? splash_check_refused(into, head + pixels, why) : !splash_parse(into, head + pixels, address_of(struct splash_image){0});
+}
+
+static fn splash_format(void)
+{
+        static const struct
+        {
+                string_address header;
+                positive pixels;
+                string_address why;
+        } refused[] = {
+            {"P5\n3 2\n255\n", 18, "not a binary PPM (P6) image"},
+            {"P", 0, "not a binary PPM (P6) image"},
+            {"", 0, "not a binary PPM (P6) image"},
+            {"P6\n3 2\n", 0, "the header is cut short or has no number in it"},
+            {"P6\n3 x\n255\n", 18, "the header is cut short or has no number in it"},
+            {"P6\n3 2 # 255\n", 18, "the header is cut short or has no number in it"},
+            {"P6\n70000 2\n255\n", 18, "the header is cut short or has no number in it"},
+            {"P6\n99999999999999999999999 2\n255\n", 18, "the header is cut short or has no number in it"},
+            {"P6\n0 2\n255\n", 0, "the size is not 1 to 1024 pixels a side"},
+            {"P6\n3 0\n255\n", 0, "the size is not 1 to 1024 pixels a side"},
+            {"P6\n1025 1\n255\n", 3075, "the size is not 1 to 1024 pixels a side"},
+            {"P6\n1 1025\n255\n", 3075, "the size is not 1 to 1024 pixels a side"},
+            {"P6\n3 2\n254\n", 18, "the maximum value is not 255"},
+            {"P6\n3 2\n65535\n", 36, "the maximum value is not 255"},
+            {"P6\n3 2\n255", 0, "the pixels do not follow the header"},
+            {"P6\n3 2\n255x", 18, "the pixels do not follow the header"},
+            {"P6\n3 2\n255\n", 17, "the pixels are not exactly width x height x 3 bytes"},
+            {"P6\n3 2\n255\n", 19, "the pixels are not exactly width x height x 3 bytes"},
+            {"P6\n3 2\n255\n", 0, "the pixels are not exactly width x height x 3 bytes"},
+            {"P6\n1024 1024\n255\n", 18, "the pixels are not exactly width x height x 3 bytes"},
+        };
+        struct splash_image image;
+        struct splash_place place;
+        positive length = splash_check_make(splash_check_file, 3, 2);
+        positive head = length - 18;
+        positive state = 0x9e3779b97f4a7c15ull;
+        bool held = true;
+        p8 pixels[8];
+
+        check("a picture's file is its header and its pixels, and reads back as its size and where they lie",
+              head == 11 && !memory_compare(splash_check_file, "P6\n3 2\n255\n", 11) &&
+                  !splash_parse(splash_check_file, length, address_of image) && image.width == 3 &&
+                  image.height == 2 && image.rgb == splash_check_file + head);
+        check("white space and comments between the numbers of a header are read past",
+              splash_check_text(splash_check_other, "P6 # made by hand\n\t3\r\n# two rows\n2 255\n", 18, null) &&
+                  splash_check_text(splash_check_other, "P6\n003 02\n255\t", 18, null));
+
+        for (positive at = 0; at < array_count(refused); at++)
+                held &= splash_check_text(splash_check_other, refused[at].header, refused[at].pixels, refused[at].why);
+        check("a file of another kind, a header cut short or too large a number, a side that is nought or over 1024, "
+              "another maximum, pixels that do not follow and a byte too few or too many are each refused for what they are",
+              held);
+
+        held = splash_check_refused(splash_check_file, length + 1, "the pixels are not exactly width x height x 3 bytes");
+        for (positive cut = 0; cut < length; cut++)
+                held &= splash_parse(splash_check_file, cut, address_of image) != null;
+        check("every shorter length of a picture's file is refused, and one byte longer", held);
+
+        length = splash_check_make(splash_check_other, 1024, 341);
+        check("the largest picture a mebibyte holds is taken, and one row more is refused before a byte of it is read",
+              length == 16 + 1024 * 341 * 3 && length <= SPLASH_FILE_MOST &&
+                  !splash_parse(splash_check_other, length, address_of image) && image.width == 1024 && image.height == 341 &&
+                  splash_check_refused(splash_check_other, SPLASH_FILE_MOST + 1, "it is larger than 1 MiB") &&
+                  splash_check_refused((const p8 address_to)8, SPLASH_FILE_MOST + 1, "it is larger than 1 MiB"));
+
+        //      A header made wrong at random, at a random length: what parses lies inside the bytes it was given, to the end.
+        held = true;
+        for (positive round = 0; round < 20000; round++)
+        {
+                positive given;
+
+                length = splash_check_make(splash_check_file, 3, 2);
+                for (positive change = 0; change < 3; change++)
+                {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        splash_check_file[state % 12] = "0123456789 \n\t#P6x\0\377"[(state >> 8) % 19];
+                }
+                given = (state >> 20) % (length + 3);
+                if (!splash_parse(splash_check_file, given, address_of image))
+                        held &= image.width && image.height && image.rgb > splash_check_file &&
+                                image.rgb + (positive)image.width * image.height * 3 == splash_check_file + given;
+        }
+        check("of 20000 headers made wrong at random, each one that parses names pixels that end where its bytes do", held);
+
+        check("the header written for the largest size fits the room kept for it",
+              splash_header(splash_check_file, 1024, 1024) == 17 && SPLASH_HEADER_MOST >= 17 &&
+                  !memory_compare(splash_check_file, "P6\n1024 1024\n255\n", 17));
+
+        image.width = 200;
+        image.height = 100;
+        splash_place(address_of image, 1280, 800, address_of place);
+        held = place.x == 540 && place.y == 350 && place.width == 200 && place.height == 100 && !place.source_x && !place.source_y;
+        splash_place(address_of image, 200, 100, address_of place);
+        held &= !place.x && !place.y && place.width == 200 && place.height == 100 && !place.source_x && !place.source_y;
+        check("a picture smaller than the screen is drawn whole in the middle of it, and one its size fills it", held);
+
+        image.width = 700;
+        image.height = 490;
+        splash_place(address_of image, 640, 480, address_of place);
+        held = !place.x && !place.y && place.width == 640 && place.height == 480 && place.source_x == 30 && place.source_y == 5;
+        image.width = 1024;
+        image.height = 10;
+        splash_place(address_of image, 800, 600, address_of place);
+        held &= !place.x && place.y == 295 && place.width == 800 && place.height == 10 && place.source_x == 112 && !place.source_y;
+        splash_place(address_of image, 0, 0, address_of place);
+        held &= !place.width && !place.height;
+        check("one larger than the screen is cut evenly at both sides, never past its own edge, and a screen of no pixels takes none",
+              held);
+
+        length = splash_check_make(splash_check_file, 2, 1);
+        memory_fill(pixels, 0xee, sizeof(pixels));
+        held = !splash_parse(splash_check_file, length, address_of image);
+        splash_pixels(address_of image, pixels);
+        check("the firmware is handed each pixel as blue, green, red and a nought",
+              held && pixels[0] == image.rgb[2] && pixels[1] == image.rgb[1] && pixels[2] == image.rgb[0] && !pixels[3] &&
+                  pixels[4] == image.rgb[5] && pixels[5] == image.rgb[4] && pixels[6] == image.rgb[3] && !pixels[7] &&
+                  image.rgb[0] != image.rgb[2]);
+}
+
+static bool splash_check_put(string_address leaf, const p8 address_to bytes, positive length)
+{
+        p8 path[HOST_PATH_ROOM];
+        bipolar handle = system_open_at_mode(AT_FDCWD, update_at(path, sizeof(path), leaf),
+                                             FILE_READ_WRITE | FILE_CREATE | FILE_TRUNCATE | O_CLOEXEC, 0644);
+        bool written;
+
+        if (handle < 0)
+                return false;
+        written = !length || storage_write(handle, (p8 address_to)bytes, length, 0) == (bipolar)length;
+        system_close(handle);
+        return written;
+}
+
+static bool splash_check_is(string_address leaf, const p8 address_to bytes, positive length)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        return host_splash_file_is(update_at(path, sizeof(path), leaf), bytes, length);
+}
+
+static fn splash_check_remove(string_address leaf, bool directory)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        system_remove_at(AT_FDCWD, update_at(path, sizeof(path), leaf), directory ? AT_REMOVEDIR : 0);
+}
+
+static fn splash_files(void)
+{
+        static p8 esp[HOST_PATH_ROOM];
+        static p8 stick[HOST_PATH_ROOM];
+        struct splash_image image;
+        string_address reason = null;
+        host_splash_want want;
+        host_place place;
+        p8 path[HOST_PATH_ROOM];
+        positive length;
+        positive made;
+        bool held;
+
+        update_at(esp, sizeof(esp), "/esp");
+        update_at(stick, sizeof(stick), "/stick");
+        system_make_directory_at(AT_FDCWD, update_at(path, sizeof(path), "/stick" SPLASH_DIRECTORY), 0755);
+
+        //      A person's file: a header of its own, with a comment, and the pixels of the 3 by 2 the format rows made.
+        made = splash_check_make(splash_check_file, 3, 2);
+        memory_copy_apart(splash_check_other, "P6 # mine\n0003\t2\n\n255\n", 22);
+        memory_copy_apart(splash_check_other + 22, splash_check_file + 11, 18);
+        held = splash_check_put("/person.ppm", splash_check_other, 40);
+        length = host_splash_take(update_at(path, sizeof(path), "/person.ppm"), address_of image, address_of reason);
+        check("a person's picture is kept as the header this writes and the pixels that were checked, never the header it came with",
+              held && length == made && !reason && !memory_compare(host_splash_bytes, splash_check_file, made) &&
+                  image.width == 3 && image.height == 2 && image.rgb == host_splash_bytes + 11);
+
+        held = splash_check_put("/person.ppm", splash_check_other, 41);
+        length = host_splash_take(update_at(path, sizeof(path), "/person.ppm"), address_of image, address_of reason);
+        held &= !length && reason && string_equals(reason, "the pixels are not exactly width x height x 3 bytes");
+        memory_fill(splash_check_other + 40, 0, SPLASH_FILE_MOST + 1 - 40);
+        held &= splash_check_put("/person.ppm", splash_check_other, SPLASH_FILE_MOST + 1);
+        length = host_splash_take(update_at(path, sizeof(path), "/person.ppm"), address_of image, address_of reason);
+        held &= !length && reason && string_equals(reason, "it is larger than 1 MiB");
+        splash_check_remove("/person.ppm", false);
+        length = host_splash_take(update_at(path, sizeof(path), "/person.ppm"), address_of image, address_of reason);
+        held &= !length && reason && reason[0];
+        length = host_splash_take((string_address)esp, address_of image, address_of reason);
+        held &= !length && reason && reason[0];
+        check("one a byte too long, one over a mebibyte, one that is not there and a directory are each no picture, with the reason",
+              held);
+
+        length = host_splash_default();
+        check("the built-in picture is a file of its own size that checks, grey and not blank",
+              length == 15 + SPLASH_MARK_W * SPLASH_MARK_H * 3 && !splash_parse(host_splash_bytes, length, address_of image) &&
+                  image.width == SPLASH_MARK_W && image.height == SPLASH_MARK_H);
+        held = true;
+        made = 0;
+        for (positive at = 0; at < (positive)SPLASH_MARK_W * SPLASH_MARK_H; at++)
+        {
+                const p8 address_to pixel = image.rgb + at * 3;
+
+                held &= pixel[0] == pixel[1] && pixel[1] == pixel[2] && !(pixel[0] % 85);
+                made += pixel[0] != 0;
+        }
+        check("and every pixel of it is one of four greys, some of them lit and most of them black",
+              held && made > 1000 && made < (positive)SPLASH_MARK_W * SPLASH_MARK_H / 2);
+
+        //      The steps of a write, on a partition that is a directory.
+        made = splash_check_make(splash_check_file, 40, 30);
+        check("a picture is written to its name on the system partition, and nothing is left beside it",
+              !host_splash_place((string_address)esp, splash_check_file, made) && splash_check_is("/esp" SPLASH_FILE, splash_check_file, made) &&
+                  update_gone("/esp" SPLASH_FILE_NEXT));
+        length = splash_check_make(splash_check_other, 7, 9);
+        held = splash_check_put("/esp" SPLASH_FILE_NEXT, splash_check_file, 4000);
+        check("another over it replaces it whole, and what a cut write left beside it is removed and not kept",
+              held && !host_splash_place((string_address)esp, splash_check_other, length) &&
+                  splash_check_is("/esp" SPLASH_FILE, splash_check_other, length) && update_gone("/esp" SPLASH_FILE_NEXT));
+
+        want.bytes = splash_check_other;
+        want.length = length;
+        held = host_splash_landed((string_address)esp, address_of want);
+        want.length = length - 1;
+        held &= !host_splash_landed((string_address)esp, address_of want);
+        want.bytes = splash_check_file;
+        want.length = length;
+        held &= !host_splash_landed((string_address)esp, address_of want);
+        want.bytes = null;
+        held &= !host_splash_landed((string_address)esp, address_of want);
+        check("what is read back is the picture written to the byte: one shorter, another and none are each not it", held);
+
+        check("a picture is not written where there is no partition, or with no bytes or over a mebibyte of them",
+              host_splash_place(update_at(path, sizeof(path), "/nowhere"), splash_check_file, made) &&
+                  host_splash_place((string_address)esp, splash_check_file, 0) &&
+                  host_splash_place((string_address)esp, splash_check_file, SPLASH_FILE_MOST + 1) &&
+                  splash_check_is("/esp" SPLASH_FILE, splash_check_other, length) && update_gone("/esp" SPLASH_FILE_NEXT));
+
+        //      An update and a rollback are the image's steps, and the picture is none of their files.
+        held = update_ready() && !host_splash_place((string_address)esp, splash_check_file, made);
+        check("an update from a stick leaves the picture the partition had, byte for byte",
+              held && update_open(address_of place, false, (string_address)update_new) &&
+                  !host_place_written(address_of place, false) && update_boots() == 1 &&
+                  splash_check_is("/esp" SPLASH_FILE, splash_check_file, made));
+        check("and a rollback does",
+              update_open(address_of place, true, (string_address)update_old) && !host_place_written(address_of place, true) &&
+                  update_boots() == 0 && splash_check_is("/esp" SPLASH_FILE, splash_check_file, made));
+        held = splash_check_put("/esp" SPLASH_FILE_NEXT, splash_check_other, 5000);
+        check("what a cut write of a picture left is removed by the next write of an image, before anything is copied",
+              held && update_open(address_of place, false, (string_address)update_new) &&
+                  !host_place_step(address_of place, HOST_PLACE_JUDGE) && !host_place_step(address_of place, HOST_PLACE_CLEAR) &&
+                  update_gone("/esp" SPLASH_FILE_NEXT) && splash_check_is("/esp" SPLASH_FILE, splash_check_file, made));
+
+        held = splash_check_put("/esp" SPLASH_FILE_NEXT, splash_check_other, 5000);
+        want.bytes = null;
+        want.length = 0;
+        check("off removes the picture and what was left beside it, reads back as none, and off again is no error",
+              held && !host_splash_clear((string_address)esp) && update_gone("/esp" SPLASH_FILE) &&
+                  update_gone("/esp" SPLASH_FILE_NEXT) && host_splash_landed((string_address)esp, address_of want) &&
+                  !host_splash_clear((string_address)esp));
+
+        //      An install: the picture of the medium it is made from when that checks, else the built-in one.
+        made = splash_check_make(splash_check_file, 12, 5);
+        held = splash_check_put("/stick" SPLASH_FILE, splash_check_file, made);
+        length = 0;
+        host_splash_install((string_address)stick, (string_address)esp, "disk0", address_of length);
+        check("an install gives the disk the picture of the session it is made from",
+              held && length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_file, made) &&
+                  update_gone("/esp" SPLASH_FILE_NEXT));
+        splash_check_remove("/stick" SPLASH_FILE, false);
+        host_splash_install((string_address)stick, (string_address)esp, "disk0", address_of length);
+        made = host_splash_default();
+        memory_copy_apart(splash_check_other, host_splash_bytes, made);
+        check("and the built-in one when that session keeps none", length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_other, made));
+        held = splash_check_put("/stick" SPLASH_FILE, splash_check_file, 9);
+        host_splash_clear((string_address)esp);
+        host_splash_install((string_address)stick, (string_address)esp, "disk0", address_of length);
+        check("and the built-in one when what that session keeps does not check",
+              held && length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_other, made));
+        length = 7;
+        host_splash_install((string_address)stick, update_at(path, sizeof(path), "/nowhere"), "disk0", address_of length);
+        check("an install that cannot write a picture says so and has none to read back", !length);
+
+        splash_check_remove("/stick" SPLASH_FILE, false);
+        splash_check_remove("/stick" SPLASH_DIRECTORY, true);
+        splash_check_remove("/esp" SPLASH_FILE, false);
+        update_clear();
+}
+
+static fn splash_firmware(void)
+{
+        static const string_address known[] = {"LENOVO", "Lenovo", "HP", "Hewlett-Packard", "Dell Inc.", "ASUSTeK COMPUTER INC.", "Framework"};
+        static const string_address unknown[] = {"", "QEMU", "len", "Le novo", "?LENOVO", "System manufacturer"};
+        p8 vendor[HOST_SPLASH_VENDOR + 1];
+        p8 path[HOST_PATH_ROOM];
+        bool held = true;
+
+        for (positive at = 0; at < array_count(known); at++)
+                held &= host_splash_firmware_why(known[at]) != null;
+        for (positive at = 0; at < array_count(unknown); at++)
+                held &= host_splash_firmware_why(unknown[at]) == null;
+        check("the makers whose firmware is known are told by how their name starts, in any case, and no other name is one of them", held);
+
+        held = splash_check_put("/vendor", (const p8 address_to) "LENOVO  \nsecond line\n", 21);
+        host_splash_vendor(update_at(path, sizeof(path), "/vendor"), vendor);
+        held &= string_equals((string_address)vendor, "LENOVO");
+        held &= splash_check_put("/vendor", (const p8 address_to) "A\x1b[31m\x07\xc3\xa5%s\x7f" "B\rC", 15);
+        host_splash_vendor(update_at(path, sizeof(path), "/vendor"), vendor);
+        held &= string_equals((string_address)vendor, "A?[31m???%s?B");
+        memory_fill(splash_check_other, 'x', 4096);
+        held &= splash_check_put("/vendor", splash_check_other, 4096);
+        host_splash_vendor(update_at(path, sizeof(path), "/vendor"), vendor);
+        held &= string_length((string_address)vendor) == HOST_SPLASH_VENDOR;
+        splash_check_remove("/vendor", false);
+        host_splash_vendor(update_at(path, sizeof(path), "/vendor"), vendor);
+        held &= !vendor[0];
+        check("the maker's name is DMI's first line with its controls and bytes that are not ASCII made question marks, cut at 48 bytes, "
+              "and empty when there is none",
+              held);
+}
+
+// Whether the file at path, a source of this tree, has needle in it: 1, 0, or -1 when it cannot be read from here.
+static b32 splash_check_source(string_address path, string_address needle)
+{
+        static p8 chunk[65536 + 256];
+        positive want = string_length(needle);
+        positive kept = 0;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        b32 found = 0;
+
+        if (handle < 0)
+                return -1;
+        for (;;)
+        {
+                bipolar got = system_read_once(handle, chunk + kept, 65536);
+                positive have;
+
+                if (got <= 0)
+                        break;
+                have = kept + (positive)got;
+                for (positive at = 0; !found && at + want <= have; at++)
+                        found = !memory_compare(chunk + at, needle, want);
+                kept = have < want - 1 ? have : want - 1;
+                memory_copy(chunk, chunk + have - kept, kept);
+        }
+        system_close(handle);
+        return found;
+}
+
+/*
+        The sources the rows above cannot reach by calling them, read from the tree the check runs in (the repository's
+        root) and not run where they are not: the loader's file opens the name the shell writes, the kernel's patch puts
+        that file among the stub's and calls it, and the compositor has no splash of its own left.
+*/
+static fn splash_sources(void)
+{
+        static const p8 file[] = SPLASH_FILE;
+        p8 name[2 * sizeof(file) + 8] = "L\"";
+        positive at = 2;
+
+        for (positive each = 0; each + 1 < sizeof(file); each++)
+        {
+                if (file[each] == '/')
+                {
+                        name[at++] = '\\';
+                        name[at++] = '\\';
+                }
+                else
+                        name[at++] = file[each];
+        }
+        name[at++] = '"';
+        name[at] = end;
+
+        if (splash_check_source("kernel/patch/splash-stub.c", "efi_moonwater_splash") < 0 ||
+            splash_check_source("src/canvas/compositor.c", "compositor") < 0)
+        {
+                string_format(log, "  boot splash sources: NOT RUN -- the tree's sources are not where this runs\n");
+                return;
+        }
+        check("the loader opens the file the shell writes, by the same name",
+              splash_check_source("kernel/patch/splash-stub.c", (string_address)name) == 1 &&
+                  splash_check_source("kernel/patch/splash-stub.c", "kernel/moonwater/splash.c") == 1);
+        check("the kernel's patch puts the loader's file among the stub's objects and calls it on each machine",
+              splash_check_source("kernel/patch/apply", "moonwater-splash.o") == 1 &&
+                  splash_check_source("kernel/patch/apply", "efi_moonwater_splash(handle);") == 1 &&
+                  splash_check_source("kernel/patch/apply", "efi_decompress_kernel(&kernel_entry, boot_params);") == 1 &&
+                  splash_check_source("kernel/patch/apply", "dpy = setup_primary_display();") == 1);
+        check("the compositor draws no splash of its own: no word of one is left in it or in the settings table",
+              splash_check_source("src/canvas/compositor.c", "splash") == 0 &&
+                  splash_check_source("src/canvas/compositor.c", "Splash") == 0 &&
+                  splash_check_source("src/sh/registry.c", "splash") == 0 && splash_check_source("src/sh/registry.c", "Splash") == 0);
+}
+
+static fn splash_scenes(void)
+{
+        splash_format();
+        splash_files();
+        splash_firmware();
+        splash_sources();
+}
+
 static fn update_scenes(void)
 {
         string_copy(update_root, "/tmp/moonwater-update-check-");
@@ -112264,6 +112703,7 @@ static fn update_scenes(void)
         update_digests();
         update_places();
         update_cuts();
+        splash_scenes();
 
         update_clear();
         update_directories(true);

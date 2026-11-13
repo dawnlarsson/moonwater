@@ -346,11 +346,6 @@ static const struct settings_row settings_rows[] = {
                       .standard = "16", .unit = "MiB", .low = 1, .high = 16,
                       .usage = "canvas clipboard limit [MIB|default]",
                       .help = "the most one copy may be, 1 to 16 MiB [16]"),
-    //  The splash: the picture on the desktop's background while the desktop loads. Its verb is host.c's (host_splash), which
-    //  keeps the copy; this row says what is kept, and no key changes it here. It stays in the Canvas group, so it has no header.
-    {null, "Splash", SETTINGS_INFO, 0, SETTINGS_LINE, {"splash"}, "", null, {null}, null, 0,
-     .usage = "splash [FILE|default|off]",
-     .help = "the picture Canvas shows while the desktop loads: a binary PPM of at most 1 MiB, the built-in one, or off"},
     //  The Display group: the map above these rows (settings.c) shows the screens; the rows are for the screen chosen on it.
     //  The rotation and refresh are the table's, and each change is `canvas display NAME ...` run with the screen's name.
     {"Display", "Screen", SETTINGS_CHOICE, 0, 0, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,

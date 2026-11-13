@@ -407,6 +407,27 @@ attacker gets its invariants here once there is a lane that proves them.
   rollback` starts again by the same written-beside, synced, read-back and
   renamed steps; a build that does not start at all is got past by the
   firmware starting `previous.efi` from its boot menu or shell, or by a stick.
+  One more file is written to the system partition, and only by `moonwater
+  splash` and `setup install`: `\EFI\moonwater\splash.ppm`, the picture the
+  image's EFI stub draws before the kernel starts (`host_splash_place`,
+  kernel/patch/splash-stub.c). It is root's to write, it is a binary PPM of at
+  most 1 MiB and 1024 pixels a side that was parsed whole first
+  (`splash_parse`, src/moonwater/splash.c), what is written is a header this
+  wrote and the checked pixels and never a person's bytes as they came, and it
+  goes by the image's steps (beside its name, synced, read back, renamed,
+  read back from the disk unmounted). The stub reads it through the firmware's
+  file protocol from the volume the image came from, checks it with the same
+  parser before a pixel is drawn, and is silent about a file that is missing,
+  cut short, too long or of another shape: such a file is no picture and the
+  machine starts as it does without one. So whoever can write that partition
+  can put a picture on the screen at start and nothing more; they could write
+  the image itself already. An update and a rollback do not touch it. **No
+  firmware variable is written and nothing is flashed:** the firmware's own
+  logo, the one shown before any loader runs, is left as it is on every
+  machine, and no file is written to a maker's logo directory (the one such
+  route there is, Lenovo's `\EFI\Lenovo\Logo`, is only read when two
+  undocumented variables of that firmware are set, which Moonwater does not
+  do).
 - **OUT-D3, unprivileged user namespaces stay as the kernel has them:** bowls
   need them, no tool here creates one otherwise, and `user.max_user_namespaces`
   0 would take them from the test harnesses on the same kernel; a kiosk tier

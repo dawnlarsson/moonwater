@@ -248,6 +248,7 @@ moonwater setup update [DISK]          write this build over an install, keeping
 moonwater setup update usb [DISK] [yes]  write the build a stick carries over an install, keeping its data and the build it had
 moonwater setup use [DISK]             run this build with the data of an install
 moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater splash [FILE|default|off]    the picture the loader draws before the kernel starts, kept on the system partition: a binary PPM of at most 1 MiB, the built-in one, or off
 moonwater status                       this session as one page
 moonwater window                       the windows on the desktop: name, pid, place, size, title
 moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
@@ -340,6 +341,17 @@ until then: only the kernel command line `usbcore.authorized_default=2`, which
 USB has settled, and a /root it takes later with no policy of its own; a lock that cannot
 be written to /root, or finds a policy there it cannot read (which it does not write over), is in
 force from /run until the machine restarts, and `device` says why.
+
+`moonwater splash FILE` sets the picture a machine shows while it starts: a binary PPM (P6) of
+at most 1 MiB and 1024 pixels a side, kept as `\EFI\moonwater\splash.ppm` on the system
+partition, which Moonwater's loader draws in the middle of a black screen before the kernel
+starts and which stays until the desktop draws over it. `moonwater splash default` is the
+built-in picture, `moonwater splash off` none, and bare it says what is kept. `setup install`
+gives the disk the picture of the session it is made from, or the built-in one; an update and
+a rollback leave the picture a disk has. A file that is damaged is never drawn, and the machine
+starts as it does without one. The firmware's own logo, the one a machine shows before any
+loader runs, is not changed on any machine: no firmware offers a way to set it that is a file
+alone, and Moonwater writes no firmware variable and flashes nothing.
 
 An installed machine takes a newer build from a stick without starting it. `sh build.sh
 --usb-update DIR` copies the image onto the FAT stick mounted at DIR as

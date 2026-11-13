@@ -67,7 +67,8 @@
 
 #include "../moonwater/moonwater.c"
 #include "../audio/state.c" // the sound server's page, which bare `moonwater audio` reads
-#include "../canvas/splash.c" // the picture Canvas shows while the desktop loads: its parser, which moonwater splash checks a copy with
+#include "../moonwater/splash.c" // the boot splash: its file, and the parser the loader checks it with too
+#include "splash_mark.c"         // and the built-in picture an install writes
 
 //      What this file says as log and log_error is said through plain_out and
 //      plain_err (file.c): colour only to a terminal, names shown and not obeyed.
@@ -2068,6 +2069,8 @@ static fn host_image_discard(string_address system)
                 system_remove_at(AT_FDCWD, path, 0);
         if (host_join(path, sizeof(path), system, HOST_KEPT_IMAGE_NEXT))
                 system_remove_at(AT_FDCWD, path, 0);
+        if (host_join(path, sizeof(path), system, SPLASH_FILE_NEXT))
+                system_remove_at(AT_FDCWD, path, 0);
 }
 
 /*
@@ -2429,6 +2432,251 @@ static b32 host_place_image(string_address name, string_address system,
                                    "that was written\n", name);
 
         return 0;
+}
+
+// The boot splash -----------------------------------------------
+
+/*
+        The picture Moonwater's loader draws before the kernel starts (src/moonwater/splash.c says what a
+        file of one is, kernel/patch/splash-stub.c draws it): a file beside the images on the system
+        partition, SPLASH_FILE, written here and nowhere else.
+
+        It is written as the loader is: to a file beside it, synced and read back, and renamed over it, so
+        a machine that loses power at any step finds the picture it had or the new one, whole. What a cut
+        left beside it is removed before the next write, of a picture or of an image, and never opened.
+        And it cannot stop a machine starting whatever becomes of it: the loader draws a file that checks
+        and is silent about one that does not, and nothing else reads it.
+
+        What is written is never a person's bytes as they came: the header is splash_header's and the
+        pixels are the ones splash_parse checked, so the file the firmware's file system hands the loader
+        is one this wrote.
+
+        An update and a rollback replace the loader and the image kept behind it and nothing else on the
+        partition, so the picture a disk had is the picture it has. An install writes one to the partition
+        it has just made: the picture of the session it is made from, which is how one set on a live stick
+        is still set on the disk it installed, or the built-in one (splash_mark.c) when that session has
+        none.
+
+        The firmware's own logo, the one a machine shows before any loader runs, is not this and is not
+        written: host_splash_firmware says why for the firmware it finds.
+*/
+static p8 host_splash_bytes[SPLASH_FILE_MOST + 1]; // a picture as its file: the header and the pixels
+static p8 host_splash_seen[SPLASH_FILE_MOST + 1];  // one read back, to hold against it
+
+// The file at path read whole into into: its count, or the negative reason, -2 when it is larger than the most.
+static bipolar host_splash_read(string_address path, p8 address_to into)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        positive length = 0;
+
+        if (handle < 0)
+                return handle;
+        while (length <= SPLASH_FILE_MOST)
+        {
+                bipolar got = system_read_once(handle, into + length, SPLASH_FILE_MOST + 1 - length);
+
+                if (got < 0)
+                {
+                        system_close(handle);
+                        return got;
+                }
+                if (!got)
+                        break;
+                length += (positive)got;
+        }
+        system_close(handle);
+        return length > SPLASH_FILE_MOST ? -2 : (bipolar)length;
+}
+
+/*
+        The picture at path as the file this writes, in host_splash_bytes: its length, with image the
+        picture in it, or 0 with why it is not a usable one in reason. The header a file came with is not
+        kept: splash_header's is never longer than one that parsed, so the pixels only move down.
+*/
+static positive host_splash_take(string_address path, struct splash_image address_to image,
+                                 string_address address_to reason)
+{
+        p8 header[SPLASH_HEADER_MOST];
+        bipolar length = host_splash_read(path, host_splash_bytes);
+        positive pixels;
+        positive head;
+
+        address_to reason = length == -2  ? (string_address) "it is larger than 1 MiB"
+                            : length < 0 ? file_reason(length)
+                                         : (string_address)splash_parse(host_splash_bytes, (unsigned long)length, image);
+        if (address_to reason)
+                return 0;
+
+        pixels = (positive)image->width * image->height * 3;
+        head = splash_header(header, image->width, image->height);
+        memory_copy(host_splash_bytes + head, (p8 address_to)image->rgb, pixels);
+        memory_copy(host_splash_bytes, header, head);
+        image->rgb = host_splash_bytes + head;
+        return head + pixels;
+}
+
+// The built-in picture as the file this writes, in host_splash_bytes: its length.
+static positive host_splash_default(void)
+{
+        positive head = splash_header(host_splash_bytes, SPLASH_MARK_W, SPLASH_MARK_H);
+
+        for (positive at = 0; at < SPLASH_MARK_W * SPLASH_MARK_H; at++)
+        {
+                p8 grey = (p8)(((splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u);
+
+                host_splash_bytes[head + at * 3] = grey;
+                host_splash_bytes[head + at * 3 + 1] = grey;
+                host_splash_bytes[head + at * 3 + 2] = grey;
+        }
+        return head + SPLASH_MARK_W * SPLASH_MARK_H * 3;
+}
+
+// Whether the file at path is these bytes and no more, as the disk has them: its pages are dropped before it is read.
+static bool host_splash_file_is(string_address path, const p8 address_to bytes, positive length)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar seen;
+
+        if (handle < 0)
+                return false;
+        (void)system_call_4(syscall(fadvise64), (positive)handle, 0, 0, HOST_FADVISE_DONTNEED);
+        system_close(handle);
+
+        seen = host_splash_read(path, host_splash_seen);
+        return seen == (bipolar)length && !memory_compare(host_splash_seen, bytes, length);
+}
+
+/*
+        A picture onto a system partition mounted at system, a step at a time: what a cut write left is
+        removed, the picture is written beside its name and synced, read back, and renamed over the name,
+        and the partition is synced. 0, or the step that failed said, with nothing left beside the name.
+*/
+static b32 host_splash_place(string_address system, const p8 address_to bytes, positive length)
+{
+        static const string_address directories[] = {"/EFI", SPLASH_DIRECTORY};
+        p8 path[HOST_PATH_ROOM];
+        p8 next[HOST_PATH_ROOM];
+        bipolar handle;
+        bipolar failed;
+
+        if (!length || length > SPLASH_FILE_MOST || !host_join(path, sizeof(path), system, SPLASH_FILE) ||
+            !host_join(next, sizeof(next), system, SPLASH_FILE_NEXT))
+                return host_refuse("splash: %s: path too long\n", system);
+
+        for (positive at = 0; at < array_count(directories); at++)
+        {
+                p8 directory[HOST_PATH_ROOM];
+
+                if (host_join(directory, sizeof(directory), system, directories[at]))
+                        system_make_directory_at(AT_FDCWD, directory, 0755);
+        }
+
+        system_remove_at(AT_FDCWD, next, 0);
+        handle = system_open_at_mode(AT_FDCWD, next, FILE_WRITE | O_CLOEXEC, 0644);
+        return_if(handle < 0, host_fail(next, handle));
+
+        failed = storage_write(handle, (p8 address_to)bytes, length, 0) == (bipolar)length
+                     ? system_call_1(syscall(fsync), (positive)handle)
+                     : -ERROR_INPUT_OUTPUT;
+        system_close(handle);
+        if (failed >= 0 && !host_splash_file_is(next, bytes, length))
+                failed = -ERROR_INPUT_OUTPUT;
+        if (failed >= 0)
+                failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
+        if (failed < 0)
+        {
+                system_remove_at(AT_FDCWD, next, 0);
+                return host_fail(path, failed);
+        }
+
+        host_place_sync(system);
+        return 0;
+}
+
+// No picture on a system partition mounted at system: the file and what a cut write left beside it removed, and the partition synced.
+static b32 host_splash_clear(string_address system)
+{
+        p8 path[HOST_PATH_ROOM];
+        bipolar gone = 0;
+
+        if (host_join(path, sizeof(path), system, SPLASH_FILE_NEXT))
+                system_remove_at(AT_FDCWD, path, 0);
+        if (host_join(path, sizeof(path), system, SPLASH_FILE))
+                gone = system_remove_at(AT_FDCWD, path, 0);
+        return_if(gone < 0 && gone != -ERROR_NO_ENTRY, host_fail(path, gone));
+
+        host_place_sync(system);
+        return 0;
+}
+
+typedef struct
+{
+        const p8 address_to bytes; // the picture that was written; null when it was taken away
+        positive length;
+} host_splash_want;
+
+// What a write of the picture left, as the disk has it (host_on_disk): the bytes written, or no file at all.
+static bool host_splash_landed(string_address system, address_any opaque)
+{
+        host_splash_want address_to want = (host_splash_want address_to)opaque;
+        p8 path[HOST_PATH_ROOM];
+
+        if (!host_join(path, sizeof(path), system, SPLASH_FILE))
+                return false;
+        if (want->bytes)
+                return host_splash_file_is(path, want->bytes, want->length);
+        return system_access_at(AT_FDCWD, path, 0) == -ERROR_NO_ENTRY;
+}
+
+/*
+        The picture an install gives the partition it has made, mounted at system: the one the session's
+        medium keeps (mounted at medium) when that checks, else the built-in one. It is in host_splash_bytes
+        afterwards, its length in length for the check of the disk that follows (host_splash_installed), and 0
+        there when it could not be written. An install is never failed for its picture: what went wrong is
+        said, and the disk starts without one.
+*/
+static fn host_splash_install(string_address medium, string_address system, string_address disk,
+                              positive address_to length)
+{
+        struct splash_image image;
+        string_address reason = null;
+        p8 path[HOST_PATH_ROOM];
+        positive own = host_join(path, sizeof(path), medium, SPLASH_FILE)
+                           ? host_splash_take(path, address_of image, address_of reason)
+                           : 0;
+
+        address_to length = own ? own : host_splash_default();
+        if (host_splash_place(system, host_splash_bytes, address_to length))
+        {
+                address_to length = 0;
+                host_say(log_error, host_label "%s starts with no boot splash\n", disk);
+                return;
+        }
+        if (own)
+                host_say(log, host_label "%s shows this session's boot splash, %p x %p, before the kernel starts\n",
+                         disk, (positive)image.width, (positive)image.height);
+        else
+                host_say(log, host_label "%s shows Moonwater's boot splash before the kernel starts\n", disk);
+}
+
+// Whether the picture an install wrote is on the disk as written, the partition name read again from a mount of its own.
+static fn host_splash_installed(string_address name, positive length)
+{
+        host_splash_want want = {host_splash_bytes, length};
+        bool landed;
+
+        if (!length)
+                return;
+        if (host_mount(name, HOST_SYSTEM, "vfat", HOST_READ_ONLY) < 0)
+        {
+                host_say(log_error, host_label "%s could not be mounted again to read its boot splash back\n", name);
+                return;
+        }
+        landed = host_splash_landed(HOST_SYSTEM, address_of want);
+        host_unmount(HOST_SYSTEM);
+        if (!landed)
+                host_say(log_error, host_label "the boot splash on %s did not read back as written; the loader "
+                                               "draws it only if it checks\n", name);
 }
 
 // Keeping data --------------------------------------------------
@@ -3550,6 +3798,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 set on a live stick is still set on the disk it installed. */
         host_settings carry;
         bool carried;
+        positive splash = 0;
 
         host_settings_session(address_of carry);
         carry.generation++;
@@ -3836,6 +4085,8 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         host_say(log, host_label "writing this build to %s, from %s\n",
                  target.system, search.name);
 
+        //      The picture first, while both partitions are mounted: the image is the last thing an install writes.
+        host_splash_install(HOST_MEDIUM, HOST_SYSTEM, name, address_of splash);
         failed = host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE)
                      ? host_place_image(target.system, HOST_SYSTEM, path, running,
                                         address_of carry, address_of carried)
@@ -3847,6 +4098,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 host_install_abandon(address_of target);
                 return 1;
         }
+        host_splash_installed(target.system, splash);
 
         host_say(log, carried ? host_label "%s starts with this session's settings\n"
                               : host_label "this build's image has no place for "
@@ -22091,89 +22343,219 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
 }
 
 /*
-        moonwater splash [FILE|default|off]: the picture Canvas shows on the desktop's background while the desktop loads
-        (compositor.c draws it). FILE is a binary PPM (P6) of at most SPLASH_FILE_MOST bytes and SPLASH_SIDE_MOST pixels a side,
-        and the copy kept is SPLASH_PATH_IMAGE; default takes that copy away, so the built-in picture is shown; off keeps the
-        word off in SPLASH_PATH_STATE. Canvas reads what is kept when it starts, so a change shows the next time it does.
-        Bare, the verb says what is kept, and a copy that does not parse is said so.
+        moonwater splash [FILE|default|off]: the picture Moonwater's loader draws before the kernel starts (the core of it,
+        and what an install does with it, is by the image's own steps above: host_splash_place). FILE is a binary PPM (P6)
+        of at most SPLASH_FILE_MOST bytes and SPLASH_SIDE_MOST pixels a side; default is the built-in picture; off takes the
+        picture away. The word is judged first, a file read and checked whole, and then root is asked for. What is written
+        is written to the system partition this session started from, the one whose image is this session's, found as the
+        settings find it; a session started from no disk here has nowhere to keep one, and is told so. Bare, the verb says
+        what that partition keeps and whether the loader draws it, and what the firmware's own logo is and why it is not set.
 */
-static p8 host_splash_bytes[SPLASH_FILE_MOST + 1];
 
-// Whether SPLASH_PATH_STATE keeps off, its word cut at a space or line end as Canvas cuts it.
-static int host_splash_off(void)
+/*
+        The firmware's own logo, which a machine shows from power on until a loader draws, and which Moonwater does not
+        set. UEFI has no variable for it: the firmware publishes the one it drew (the ACPI BGRT table) and takes no other.
+        What each maker offers besides is its own, and none of it is a file on the system partition alone:
+
+            Lenovo       its firmware looks for \EFI\Lenovo\Logo\mylogo_WxH.bmp, .jpg or .gif on the system partition, but
+                         only when a variable of its own, LBLDESP, says a logo was set, and draws the file only when the
+                         CRC-32 of its start is the one in another, LBLDVC. Neither is documented by Lenovo; what is known
+                         of them is from people who took the firmware apart (Binarly's LogoFAIL advisory, BRLY-2023-006),
+                         and machines have been left unable to start by a logo set this way. The route Lenovo does
+                         document is a logo given to its firmware updater, which is a flash.
+            HP           commercial notebooks of 2008 to 2012 read \Hewlett-Packard\Logo\HPlogo.jpg from a partition of
+                         their own, HP_TOOLS, with the Custom Logo setting turned on in the firmware; later ones keep the
+                         logo in the firmware, set by HP's own program.
+            Dell         a logo is put in by a firmware update, by Dell or with its switch for it.
+            ASUS         MyLogo writes the picture into the firmware image, which is then flashed.
+            Framework    no way is offered.
+
+        So nothing is written for any of them: a firmware variable that is wrong can leave a machine that does not start,
+        and a flash is never Moonwater's to make. The maker is read from DMI, whose strings are the firmware's and so are
+        whatever somebody put there: at most HOST_SPLASH_VENDOR bytes are kept, cut at the first line end, and a byte that
+        is not printable ASCII is a question mark.
+*/
+#define HOST_SPLASH_VENDOR 48
+#define HOST_SPLASH_DMI "/sys/class/dmi/id/sys_vendor"
+
+static const struct
 {
-        char word[16] = {0};
-        bipolar handle = system_open_at(AT_FDCWD, SPLASH_PATH_STATE, FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
-        bipolar got = 0;
-        positive at = 0;
+        string_address vendor; // what the maker's name starts with, in small letters
+        string_address why;    // why a file cannot set its logo
+} host_splash_firmwares[] = {
+    {"lenovo", "reads a logo file only when two variables of its own (LBLDESP, LBLDVC) say so and hold its sum, and Moonwater writes no firmware variable"},
+    {"hp", "takes a logo from a partition or a program of its own, on the models that take one at all"},
+    {"hewlett", "takes a logo from a partition or a program of its own, on the models that take one at all"},
+    {"dell", "changes its logo only with a firmware update"},
+    {"asus", "keeps its logo in the firmware image, which only a flash changes"},
+    {"framework", "offers no way to change its logo"},
+};
 
-        if (handle < 0)
-                return 0;
-        got = system_read_once(handle, word, sizeof(word) - 1);
-        system_close(handle);
-        while (at < (positive)(got > 0 ? got : 0) && word[at] != '\n' && word[at] != ' ' && word[at] != '\r')
-                at++;
-        word[at] = 0;
-        return string_equals(word, "off");
-}
-
-// The file at path read whole into host_splash_bytes: its count, or the negative reason, -2 when it is larger than the most.
-static bipolar host_splash_read(string_address path)
+// The maker of this machine as DMI names it, made plain, in room for HOST_SPLASH_VENDOR + 1 bytes: empty when it names none.
+static fn host_splash_vendor(string_address path, p8 address_to into)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        p8 bytes[HOST_SPLASH_VENDOR + 1];
+        bipolar got = file_slurp_once_at(AT_FDCWD, path, bytes, sizeof(bytes));
         positive length = 0;
 
-        if (handle < 0)
-                return handle;
-        while (length <= SPLASH_FILE_MOST)
-        {
-                bipolar got = system_read_once(handle, host_splash_bytes + length, SPLASH_FILE_MOST + 1 - length);
-
-                if (got < 0)
-                {
-                        system_close(handle);
-                        return got;
-                }
-                if (!got)
-                        break;
-                length += (positive)got;
-        }
-        system_close(handle);
-        return length > SPLASH_FILE_MOST ? -2 : (bipolar)length;
+        for (positive at = 0; got > 0 && at < (positive)got && bytes[at] != '\n' && bytes[at] != '\r' && bytes[at]; at++)
+                into[length++] = bytes[at] >= 0x20 && bytes[at] < 0x7f ? bytes[at] : '?';
+        while (length && into[length - 1] == ' ')
+                length--;
+        into[length] = end;
 }
 
-// What is kept, said in a line: off, the built-in picture, or the copy's size. A copy that does not parse is said so, and is 1.
+// Why a file cannot set the logo of a firmware whose maker is vendor: null for a maker this knows nothing of.
+static string_address host_splash_firmware_why(string_address vendor)
+{
+        for (positive at = 0; at < array_count(host_splash_firmwares); at++)
+        {
+                string_address prefix = host_splash_firmwares[at].vendor;
+                positive same = 0;
+
+                while (prefix[same] && (vendor[same] | 0x20) == prefix[same])
+                        same++;
+                if (!prefix[same])
+                        return host_splash_firmwares[at].why;
+        }
+        return null;
+}
+
+// The line of the firmware's own logo, which every status ends with.
+static fn host_splash_firmware(void)
+{
+        p8 vendor[HOST_SPLASH_VENDOR + 1];
+        string_address why;
+
+        host_splash_vendor(HOST_SPLASH_DMI, vendor);
+        why = host_splash_firmware_why((string_address)vendor);
+        if (why)
+                host_say(log, host_label "splash: the firmware's own logo is not set: %s firmware %s; it shows until the loader runs\n",
+                         vendor, why);
+        else
+                host_say(log, host_label "splash: the firmware's own logo is not set: no way to set one from a file is known for %s firmware; "
+                                         "it shows until the loader runs\n", vendor[0] ? (string_address)vendor : (string_address) "this");
+}
+
+// The system partition this session started from, its name into name: null, or why there is none to write to.
+static string_address host_splash_partition(p8 address_to name)
+{
+        static host_settings session;
+        static host_settings_search search;
+        p8 running[HOST_BUILD_ROOM];
+        p8 current[HOST_NAME_ROOM];
+
+        memory_zero(address_of search, sizeof(search));
+        if (!host_running_build(running, sizeof(running)))
+                return "moonwater cannot read its own build";
+
+        host_settings_session(address_of session);
+        search.build = running;
+        search.session = address_of session;
+        storage_each_device(host_settings_visit, address_of search);
+        if (search.count > 1)
+                return "more than one disk here has the image this session started from";
+        if (!search.count)
+                return "no disk here has the image this session started from";
+        //      The name was found a moment ago, and a disk comes and goes.
+        if (search.partuuid[0] && (!host_partition_uuid_resolve(search.partuuid, current) ||
+                                   !string_equals(current, search.name)))
+                return "the disk this session started from is no longer the partition it was found as";
+
+        string_copy(name, search.name);
+        return null;
+}
+
+//      moonwater splash, bare: what the system partition keeps, and the firmware's own logo.
 static b32 host_splash_status(void)
 {
         struct splash_image image;
+        p8 name[HOST_NAME_ROOM];
+        p8 path[HOST_PATH_ROOM];
+        string_address why;
         bipolar length;
-        const char *reason = 0;
+        b32 failed = 0;
 
-        if (host_splash_off())
+        if (!bowl_is_root())
         {
-                host_say(log, host_label "splash: off, Canvas shows no picture while the desktop loads\n");
+                host_say(log, host_label "splash: the picture is kept on the system partition, which root reads\n");
+                host_splash_firmware();
                 return 0;
         }
-        length = host_splash_read(SPLASH_PATH_IMAGE);
-        if (length == -ENOENT)
-        {
-                host_say(log, host_label "splash: built-in picture, Canvas shows it while the desktop loads\n");
-                return 0;
-        }
-        if (length == -2)
-                reason = "it is larger than 1 MiB";
-        else if (length < 0)
-                reason = file_reason(length);
-        else
-                reason = splash_parse(host_splash_bytes, (unsigned long)length, &image);
-        if (reason)
-        {
-                host_say(log_error, host_label "splash: %s does not parse (%s), so Canvas shows the built-in picture\n",
-                         SPLASH_PATH_IMAGE, reason);
+        if (!host_acquire())
                 return 1;
+
+        why = host_splash_partition(name);
+        if (why)
+                host_say(log, host_label "splash: none, and nowhere to keep one: %s\n", why);
+        else if (!host_join(path, sizeof(path), HOST_LOOK, SPLASH_FILE) ||
+                 host_mount(name, HOST_LOOK, "vfat", HOST_READ_ONLY) < 0)
+                failed = host_refuse("splash: %s could not be mounted to read its picture\n", name);
+        else
+        {
+                length = host_splash_read(path, host_splash_bytes);
+                host_unmount(HOST_LOOK);
+                why = length == -2  ? (string_address) "it is larger than 1 MiB"
+                      : length < 0 ? file_reason(length)
+                                   : (string_address)splash_parse(host_splash_bytes, (unsigned long)length, address_of image);
+                if (length == -ERROR_NO_ENTRY)
+                        host_say(log, host_label "splash: off; %s keeps no picture, so the loader draws nothing\n", name);
+                else if (why)
+                        host_say(log_error, host_label "splash: the picture on %s is not drawn, as if there were none: %s\n",
+                                 name, why);
+                else
+                        host_say(log, host_label "splash: %p x %p picture on %s; Moonwater's loader draws it before the kernel starts\n",
+                                 (positive)image.width, (positive)image.height, name);
         }
-        host_say(log, host_label "splash: %p x %p picture from %s, Canvas shows it while the desktop loads\n",
-                 (positive)image.width, (positive)image.height, SPLASH_PATH_IMAGE);
+        host_release();
+
+        host_splash_firmware();
+        return failed;
+}
+
+/*
+        The picture in host_splash_bytes, length bytes of it, onto the system partition this session started from, or with
+        no length the picture there taken away: the partition is mounted for the write, the steps are host_splash_place's
+        or host_splash_clear's, and what they left is read back from the disk itself, the partition let go of first, as an
+        image's is.
+*/
+static b32 host_splash_set(positive length)
+{
+        host_splash_want want = {length ? host_splash_bytes : null, length};
+        p8 name[HOST_NAME_ROOM];
+        string_address why;
+        bipolar mounted;
+        b32 failed;
+
+        if (!host_acquire())
+                return 1;
+
+        why = host_splash_partition(name);
+        if (why)
+        {
+                host_release();
+                return host_refuse("splash: %s, so nothing was written\n", why);
+        }
+
+        mounted = host_mount(name, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+        if (mounted < 0)
+        {
+                host_release();
+                return host_fail(name, mounted);
+        }
+
+        failed = length ? host_splash_place(HOST_SYSTEM, host_splash_bytes, length) : host_splash_clear(HOST_SYSTEM);
+        if (failed)
+                host_unmount(HOST_SYSTEM);
+        else if (!host_on_disk(name, HOST_SYSTEM, host_splash_landed, address_of want))
+                failed = host_refuse("splash: %s did not read back from the disk as written\n", name);
+        host_release();
+        return_if(failed, 1);
+
+        if (length)
+                host_say(log, host_label "splash: kept on %s; Moonwater's loader draws it from the next start\n", name);
+        else
+                host_say(log, host_label "splash: off; %s keeps no picture, and the loader draws nothing from the next start\n", name);
         return 0;
 }
 
@@ -22181,50 +22563,25 @@ static b32 host_splash_status(void)
 static b32 host_splash(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
-        bipolar length;
         struct splash_image image;
-        const char *reason;
+        string_address reason = null;
+        positive length = 0;
 
         return_if(count > 3, host_usage());
         if (!word)
                 return host_splash_status();
-        //      Root is asked before anything is kept, as moonwater canvas modes asks it.
+        //      The word first: a file is read and checked whole before anybody is asked who they are.
+        if (string_equals(word, "default"))
+                length = host_splash_default();
+        else if (!string_equals(word, "off"))
+        {
+                length = host_splash_take(word, address_of image, address_of reason);
+                if (!length)
+                        return host_refuse("splash: %s is not a usable picture: %s\n", word, reason);
+        }
         if (!bowl_is_root())
                 return host_refuse("setting the splash needs root (CAP_SYS_ADMIN)\n");
-        if (string_equals(word, "default"))
-        {
-                bipolar gone = system_remove_at(AT_FDCWD, SPLASH_PATH_IMAGE, 0);
-
-                return_if(gone < 0 && gone != -ENOENT, host_fail("splash", gone));
-                gone = system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
-                return_if(gone < 0 && gone != -ENOENT, host_fail("splash", gone));
-                host_say(log, host_label "splash: built-in picture kept; Canvas shows it the next time it starts\n");
-                return 0;
-        }
-        if (string_equals(word, "off"))
-        {
-                if (host_save("splash", SPLASH_PATH_STATE, "off"))
-                        return 1;
-                host_say(log, host_label "splash: off kept; Canvas shows no picture the next time it starts\n");
-                return 0;
-        }
-        length = host_splash_read(word);
-        if (length == -2)
-                return host_refuse("splash: %s is larger than 1 MiB\n", word);
-        if (length < 0)
-                return host_refuse("splash: %s cannot be read: %s\n", word, file_reason(length));
-        reason = splash_parse(host_splash_bytes, (unsigned long)length, &image);
-        if (reason)
-                return host_refuse("splash: %s is not a usable picture: %s\n", word, reason);
-        //      The copy is published whole, as the settings are, and the word that said off is taken away so it is shown.
-        length = host_write_file(SPLASH_PATH_IMAGE, host_splash_bytes, (positive)length, 0644, true);
-        if (length < 0)
-                return host_fail("splash", length);
-        length = system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
-        return_if(length < 0 && length != -ENOENT, host_fail("splash", length));
-        host_say(log, host_label "splash: %p x %p picture kept from %s; Canvas shows it the next time it starts\n",
-                 (positive)image.width, (positive)image.height, word);
-        return 0;
+        return host_splash_set(length);
 }
 
 /*
@@ -26331,6 +26688,7 @@ static const host_row host_rows[] = {
     {null, "@battery", null, 'r'},
     {"sleep hibernate", "sleep | hibernate", "suspend to RAM or to disk", 'b'},
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
+    {null, "splash [FILE|default|off]", "the picture the loader draws before the kernel starts, kept on the system partition: a binary PPM of at most 1 MiB, the built-in one, or off", 'b'},
     {null, "@wired", null, 'r'},
     {null, "@wifi", null, 'r'},
     {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network, joined once wifi is on; asks for", 'b'},
