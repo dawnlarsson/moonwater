@@ -45,7 +45,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 | | |
 |---|---|
-| Status | Fixed, 2026-11-12, `5e9bf33` |
+| Status | Fixed, 2026-11-12, `6d94ffa` |
 | Class | Stale pointer after a mapping moves (use after unmap); denial of the whole session |
 | Attacker | 1 or 8: any program that can open `/run/moonwater/wayland-0`, which is mode 0666, a bowl's programs included |
 | Reachable | src/canvas/wayland_host.c `compositor_wl_remap`, from `wl_shm_pool.resize` (src/canvas/wayland.c) |
