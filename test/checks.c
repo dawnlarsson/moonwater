@@ -107432,6 +107432,149 @@ static fn storage_test_link_state(void)
         check("and cuts again when the hold-off ends", net_news_may_cut(104));
         net_news_holdoff_until = 0;
 
+        /* The seconds a link was given are kept across cuts: three exchanges
+           cut at four seconds are the twelve, and the link is then silent
+           and passed over, where each cut began the twelve again and the
+           link behind it was never asked. */
+        memory_fill(net_quiet, 0, sizeof net_quiet);
+        check("a link nothing is known of is given the whole wait",
+              net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS &&
+                  !net_quiet_waiting(31, 100) && !net_quiet_due_in(100));
+        net_quiet_cut(31, 4, 104);
+        check("a cut exchange leaves the rest of the wait, and the link not yet silent",
+              net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS - 4 &&
+                  !net_quiet_waiting(31, 104) && !net_quiet_due_in(104));
+        net_quiet_cut(31, 4, 108);
+        check("a second cut leaves less", net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS - 8);
+        net_quiet_cut(31, 4, 112);
+        check("cuts that add up to the wait leave the link silent",
+              net_quiet_waiting(31, 112) &&
+                  net_quiet_waiting(31, 112 + NET_QUIET_FIRST_SECONDS - 1) &&
+                  !net_quiet_waiting(31, 112 + NET_QUIET_FIRST_SECONDS) &&
+                  net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS);
+        {
+                netlink_search walk = {.skip_count = 1, .skip = {7}};
+
+                check("a silent link is passed over by the walk, after the skips it had",
+                      net_quiet_skip(address_of walk, 113) == 1 &&
+                          walk.skip_count == 2 && walk.skip[0] == 7 &&
+                          walk.skip[1] == 31);
+                walk.skip_count = 0;
+                check("and is not once it is due",
+                      net_quiet_skip(address_of walk, 112 + NET_QUIET_FIRST_SECONDS) == 0 &&
+                          walk.skip_count == 0);
+        }
+        /* A silent link is asked again while another holds the lease: the
+           watcher's wait ends when it is due, and each silence doubles the
+           gap up to the most. It was asked once and never again. */
+        check("the watcher's wait ends when the silent link is due",
+              net_quiet_due_in(112) == NET_QUIET_FIRST_SECONDS &&
+                  net_quiet_due_in(141) == 1 && net_quiet_due_in(500) == 1);
+        net_quiet_silent(31, 120);
+        check("silence before it was due changes nothing",
+              net_quiet_due_in(112) == NET_QUIET_FIRST_SECONDS);
+        {
+                positive now = 112 + NET_QUIET_FIRST_SECONDS;
+                positive gap = NET_QUIET_FIRST_SECONDS;
+                bool doubled = true;
+                bool capped;
+
+                for (positive turn = 0; turn < 4; turn++)
+                {
+                        net_quiet_silent(31, now);
+                        gap *= 2;
+                        doubled = doubled && net_quiet_due_in(now) == gap;
+                        now += gap;
+                }
+                check("silence when it was due doubles the gap", doubled && gap == 480);
+                net_quiet_silent(31, now);
+                capped = net_quiet_due_in(now) == NET_QUIET_MOST_SECONDS;
+                now += NET_QUIET_MOST_SECONDS;
+                net_quiet_silent(31, now);
+                check("to ten minutes and no further",
+                      capped && net_quiet_due_in(now) == NET_QUIET_MOST_SECONDS);
+                net_quiet_passed(now + 5);
+                check("a link not yet due is left alone by a pass that did not reach it",
+                      net_quiet_due_in(now + 5) == NET_QUIET_MOST_SECONDS - 5);
+                net_quiet_passed(now + NET_QUIET_MOST_SECONDS + 3);
+                check("and one that was due is due a gap later, not at once for good",
+                      net_quiet_due_in(now + NET_QUIET_MOST_SECONDS + 3) ==
+                          NET_QUIET_MOST_SECONDS);
+        }
+        net_quiet_cut(31, 5, 9000);
+        memory_fill(address_of held, 0, sizeof held);
+        held.index = 11;
+        check("a carrier change on the silent link ends its schedule but not the seconds waited",
+              net_link_news(31, IFF_RUNNING, address_of held) &&
+                  !net_quiet_due_in(9000) && !net_quiet_waiting(31, 9000) &&
+                  net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS - 5);
+        net_quiet_answered(31);
+        check("an answer ends both", net_quiet_budget(31) == NET_DHCP_WATCH_SECONDS &&
+                                         !net_quiet_of(31, false));
+        for (p32 index = 40; index < 40 + NET_QUIET_LINKS + 1; index++)
+                net_quiet_silent(index, 1000 + index);
+        check("one link more than is kept takes the place of the one due soonest",
+              !net_quiet_of(40, false) && net_quiet_of(41, false) &&
+                  net_quiet_of(40 + NET_QUIET_LINKS, false));
+        memory_fill(net_quiet, 0, sizeof net_quiet);
+        netlink_forget(address_of net_states);
+        memory_fill(address_of held, 0, sizeof held);
+
+        /* A burst of link news is read whole and answered with one pass:
+           three datagrams waiting are three links' news taken by one call
+           that owes one pass, where a call took one and ran a pass for it. */
+        {
+                b32 pair[2];
+                netlink_buffer message = {0};
+
+                if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                                  (positive)pair) != 0)
+                        log_direct(str("storage_io: link news burst NOT RUN -- no socket pair\n"));
+                else
+                {
+                        struct { netlink_header header; netlink_link link; } news = {
+                            .header = {.length = NETLINK_HEADER + sizeof(netlink_link),
+                                       .type = RTM_NEWLINK}};
+                        p8 left;
+
+                        for (p32 index = 21; index < 24; index++)
+                        {
+                                news.link.index = index;
+                                (void)socket_send(pair[1], address_of news,
+                                                  sizeof news, 0, null, 0);
+                        }
+                        net_exchange_cut = true;
+                        check("a burst of link news is taken whole and owes one pass",
+                              net_watch_drain(pair[0], address_of message,
+                                              address_of held) == 1 &&
+                                  net_states.used == 3 * sizeof(net_state) &&
+                                  socket_receive(pair[0], address_of left, 1,
+                                                 MSG_DONTWAIT, null, null) < 0);
+                        news.link.index = 21;
+                        (void)socket_send(pair[1], address_of news, sizeof news, 0,
+                                          null, 0);
+                        check("news that changes nothing owes none",
+                              net_watch_drain(pair[0], address_of message,
+                                              address_of held) == 0);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        netlink_forget(address_of message);
+                }
+        }
+        /* A pass answers whatever cut the last exchange: the cut is not
+           owed a second pass after news that was acted on. A pass on no
+           routing socket is a pass all the same. */
+        net_exchange_cut = true;
+        check("a pass leaves no cut exchange owed another",
+              net_reconfigure((b32)-1, address_of held) != 0 && !net_exchange_cut);
+        netlink_forget(address_of net_states);
+        memory_fill(address_of held, 0, sizeof held);
+        held.index = 11;
+        held.lease.address = 0x0a000102;
+        held.lease.mask = 0xffffff00;
+        held.lease.router = 0x0a000101;
+        held.lost = true;
+
         dhcp_lease same = held.lease;
         dhcp_lease changed = held.lease;
         check("the held address includes interface, host and prefix",

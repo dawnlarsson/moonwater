@@ -2010,7 +2010,9 @@ static COLD bipolar net_exchange_wait(bipolar answer,
 }
 
 /* What the child is asked to do: discover, renew with the server that gave
-   the lease, rebind with any, or decline or release the lease it names. */
+   the lease, rebind with any, or decline or release the lease it names.
+   `wait` is a renewal's own wait, and for the watcher's discovery the
+   seconds the link is given to answer (NET_DHCP_WATCH_SECONDS when zero). */
 #define NET_DHCP_DISCOVER 0
 #define NET_DHCP_RENEW 1
 #define NET_DHCP_REBIND 2
@@ -2065,7 +2067,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (network_deadline_begin(address_of deadline,
                                    renew ? wait + 5
                                    : giving ? 5
-                                   : watching ? NET_DHCP_WATCH_SECONDS
+                                   : watching ? (wait ? wait
+                                                      : NET_DHCP_WATCH_SECONDS)
                                               : 180, 0))
                 for (;;)
                 {
@@ -2235,6 +2238,180 @@ static COLD fn net_decline_hold(p32 index)
                                    NET_DECLINE_HOLDOFF_SECONDS, 0)
                 ? index
                 : 0;
+}
+
+/*
+        What the watcher remembers of a link that said nothing.
+
+        A link is given NET_DHCP_WATCH_SECONDS to answer, and the seconds
+        count whether or not they came in one piece: an exchange the link
+        news or the wake pipe cut adds what it waited to `waited`, and the
+        next exchange on that link is given only the rest. They were thrown
+        away, each cut began the twelve again and a cut may come every
+        NET_NEWS_HOLDOFF_SECONDS, so while news kept coming a wired port
+        with carrier and no server was asked for good and the wifi behind
+        it never (measured in a network namespace: news every eight
+        seconds, 37 exchanges on the port 4.01 s apart in 145 s, none on
+        the link whose server was answering).
+
+        A link that has been given its twelve seconds is silent until
+        `until`: the walk asks the others first, and while another link
+        holds a lease it is not asked at all before then. It was asked once
+        and never again, so a cable into a port that forwards after thirty
+        seconds of spanning tree, or whose server came up a minute late,
+        stayed unused for as long as the wifi kept its lease. It is asked
+        again NET_QUIET_FIRST_SECONDS after it fell silent and then at
+        twice the gap each time, NET_QUIET_MOST_SECONDS at most. A carrier
+        change on the link ends the schedule (the link is asked at once, as
+        news), but not the seconds already waited, or a port whose carrier
+        flaps would keep its place ahead of every other link; an answer
+        ends both.
+*/
+#define NET_QUIET_LINKS 8
+#define NET_QUIET_FIRST_SECONDS 30
+#define NET_QUIET_MOST_SECONDS 600
+
+typedef struct
+{
+        p32 index;
+        //      Seconds of the twelve already waited, in exchanges that
+        //      were cut.
+        positive waited;
+        //      The gap before it is asked again, 0 when it is not silent.
+        positive step;
+        positive until;
+} net_quiet_link;
+
+static net_quiet_link net_quiet[NET_QUIET_LINKS];
+
+static COLD net_quiet_link address_to net_quiet_of(p32 index, bool make)
+{
+        net_quiet_link address_to spare = null;
+
+        for (positive at = 0; at < NET_QUIET_LINKS; at++)
+        {
+                if (index && net_quiet[at].index == index)
+                        return net_quiet + at;
+                //      A free slot, or else the one asked again soonest.
+                if (!spare || (spare->index && (!net_quiet[at].index ||
+                                                net_quiet[at].until < spare->until)))
+                        spare = net_quiet + at;
+        }
+        if (!make || !index)
+                return null;
+        memory_fill(spare, 0, sizeof address_to spare);
+        spare->index = index;
+        return spare;
+}
+
+//      The seconds a link is given to answer now.
+static COLD positive net_quiet_budget(p32 index)
+{
+        net_quiet_link address_to link = net_quiet_of(index, false);
+
+        return link && link->waited < NET_DHCP_WATCH_SECONDS
+                   ? NET_DHCP_WATCH_SECONDS - link->waited
+                   : NET_DHCP_WATCH_SECONDS;
+}
+
+//      Whether the link is passed over at `now`.
+static COLD bool net_quiet_waiting(p32 index, positive now)
+{
+        net_quiet_link address_to link = net_quiet_of(index, false);
+
+        return link && link->step && now < link->until;
+}
+
+//      The link was given its seconds and said nothing. The gap doubles
+//      only when the ask was the schedule's own: a pass with no lease
+//      anywhere asks every link, due or not.
+static COLD fn net_quiet_silent(p32 index, positive now)
+{
+        net_quiet_link address_to link = net_quiet_of(index, true);
+
+        if (!link)
+                return;
+        link->waited = 0;
+        if (link->step && now < link->until)
+                return;
+        link->step = !link->step ? NET_QUIET_FIRST_SECONDS
+                     : link->step > NET_QUIET_MOST_SECONDS / 2
+                         ? NET_QUIET_MOST_SECONDS
+                         : link->step * 2;
+        link->until = now + link->step;
+}
+
+//      An exchange on the link was cut after `seconds` of nothing.
+static COLD fn net_quiet_cut(p32 index, positive seconds, positive now)
+{
+        net_quiet_link address_to link = net_quiet_of(index, true);
+
+        if (!link)
+                return;
+        link->waited += seconds ? seconds : 1;
+        if (link->waited >= NET_DHCP_WATCH_SECONDS)
+                net_quiet_silent(index, now);
+}
+
+static COLD fn net_quiet_answered(p32 index)
+{
+        net_quiet_link address_to link = net_quiet_of(index, false);
+
+        if (link)
+                link->index = 0;
+}
+
+static COLD fn net_quiet_carrier(p32 index)
+{
+        net_quiet_link address_to link = net_quiet_of(index, false);
+
+        if (link)
+                link->step = link->until = 0;
+}
+
+//      The seconds until a silent link is asked again, at least one, and
+//      0 when no link is silent.
+static COLD positive net_quiet_due_in(positive now)
+{
+        positive least = 0;
+
+        for (positive at = 0; at < NET_QUIET_LINKS; at++)
+        {
+                positive left;
+
+                if (!net_quiet[at].index || !net_quiet[at].step)
+                        continue;
+                left = now < net_quiet[at].until ? net_quiet[at].until - now : 1;
+                if (!least || left < least)
+                        least = left;
+        }
+        return least;
+}
+
+//      After a pass: a link still due was not one the walk reached (the
+//      lease is on a better link, or the link has no carrier), and is due
+//      again a gap later, or the watcher's wait would end at once for good.
+static COLD fn net_quiet_passed(positive now)
+{
+        for (positive at = 0; at < NET_QUIET_LINKS; at++)
+                if (net_quiet[at].index && net_quiet[at].step &&
+                    now >= net_quiet[at].until)
+                        net_quiet[at].until = now + net_quiet[at].step;
+}
+
+//      The silent links not yet due, added to a walk's skip list: how many.
+static COLD positive net_quiet_skip(netlink_search address_to search, positive now)
+{
+        positive added = 0;
+
+        for (positive at = 0; at < NET_QUIET_LINKS && search->skip_count < 8; at++)
+                if (net_quiet[at].index &&
+                    net_quiet_waiting(net_quiet[at].index, now))
+                {
+                        search->skip[search->skip_count++] = net_quiet[at].index;
+                        added++;
+                }
+        return added;
 }
 
 /* RFC 5227-style probes before installing a newly leased address.  DHCP is
@@ -2425,6 +2602,12 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         dhcp_lease lease = {0};
         bipolar status;
         positive tried;
+        //      The skips that are not this pass's own, the links this pass
+        //      asked, and how many silent links it is passing over.
+        positive fixed;
+        p32 asked[8];
+        positive asked_count = 0;
+        positive passed_over = 0;
 
         memory_fill(address_of search, 0, sizeof search);
         search.skip_loopback = true;
@@ -2432,6 +2615,9 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         search.skip_wired = net_wired_off();
         search.shunned = NET_BLUETOOTH_SHARE_BRIDGE;
         radio_links_unleased(address_of search);
+        fixed = search.skip_count;
+        if (held)
+                passed_over = net_quiet_skip(address_of search, net_seconds());
 
         /*
                 The best link first, and when it stays silent the next one.
@@ -2441,13 +2627,27 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 the wifi that had joined was never asked while the port kept
                 its place. Only the watcher does it (held is its state); `ip
                 auto` asks the one link, as it always has. Each failed link is
-                added to the skip list for the rest of this pass, and the
-                next pass starts over with all of them.
+                added to the skip list for the rest of this pass. The next
+                pass starts with the links that are not known to be silent
+                (net_quiet), and comes to the silent ones only when no link
+                holds a lease and the others have been asked.
         */
         for (tried = 0;; tried++)
         {
                 if (netlink_link_find(handle, address_of search) < 0)
+                {
+                        if (passed_over && !(held->index && !held->lost))
+                        {
+                                passed_over = 0;
+                                search.skip_count = (p8)fixed;
+                                for (positive at = 0; at < asked_count &&
+                                                      search.skip_count < 8; at++)
+                                        search.skip[search.skip_count++] = asked[at];
+                                tried--;
+                                continue;
+                        }
                         return tried ? 1 : net_ip_refused("no interface to configure");
+                }
 
                 if (held && held->index == search.index && !held->lost)
                         return 0;
@@ -2481,8 +2681,21 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 string_format(net_out, "ip: asking for a lease\n");
                 net_flush();
 
-                status = net_dhcp_apart(search.name, search.hardware,
-                                        address_of lease, NET_DHCP_DISCOVER, 0);
+                {
+                        positive began = net_seconds();
+
+                        status = net_dhcp_apart(search.name, search.hardware,
+                                                address_of lease, NET_DHCP_DISCOVER,
+                                                held ? net_quiet_budget(search.index)
+                                                     : 0);
+                        if (held && status == NET_DHCP_INTERRUPTED)
+                                net_quiet_cut(search.index, net_seconds() - began,
+                                              net_seconds());
+                        else if (held && status == NET_DHCP_TIMED_OUT)
+                                net_quiet_silent(search.index, net_seconds());
+                        else if (held && (status == DHCP_OK || status == DHCP_REFUSED))
+                                net_quiet_answered(search.index);
+                }
 
                 if (status == NET_DHCP_INTERRUPTED)
                         return 1;
@@ -2493,6 +2706,8 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                                       writer_terminal_quoted_name, search.name);
                         net_flush();
                         search.skip[search.skip_count++] = search.index;
+                        if (asked_count < 8)
+                                asked[asked_count++] = search.index;
                         continue;
                 }
                 if (status == NET_DHCP_TIMED_OUT)
@@ -2550,8 +2765,12 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         return 0;
 }
 
+//      Whatever cut the last exchange has its pass in this one: a cut that
+//      an acted piece of news answered was still owed one, and a second pass
+//      ran straight after the first.
 static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
 {
+        net_exchange_cut = false;
         if (held && held->lost)
         {
                 bipolar status = net_holding_release(handle, held);
@@ -2675,6 +2894,7 @@ static COLD bool net_link_news(p32 index, p32 flags, net_holding address_to held
                 net_states.used += sizeof(net_state);
         }
         entry->flags = flags;
+        net_quiet_carrier(index);
 
         if (held && held->index == index && !(flags & IFF_RUNNING) &&
             !net_link_carrier_kept(held))
@@ -2691,6 +2911,7 @@ static COLD bool net_link_removed(p32 index, net_holding address_to held)
         /* Forget the carrier snapshot as well as the lease.  Interface
            indexes may be reused, and retaining the deleted device's flags
            could suppress the replacement device's first event. */
+        net_quiet_answered(index);
         if (state)
         {
                 net_states.used -= sizeof(net_state);
@@ -2780,13 +3001,19 @@ static COLD fn net_wake_drain(b32 handle)
         }
 }
 
-/* One datagram of link news, acted on: 1 when it reconfigured, 0 when
-   nothing in it mattered, negative when the socket failed for good. News
-   that came faster than it was read is dropped by the kernel with ENOBUFS,
-   which is not the end of the socket: what it would have said is asked
-   instead. Every carrier snapshot is forgotten, so each link's next news
-   counts, the held link is asked whether it kept its carrier since the
-   lease, and the best link is picked again. */
+/* The link news that is waiting, all of it, and then one pass: 1 when it
+   reconfigured, 0 when nothing in it mattered, negative when the socket
+   failed for good. One datagram was read and a pass run for every record in
+   it that mattered, so a burst (a dock's links appearing, a radio's scan)
+   was as many exchanges begun and cut as it had datagrams, each of them
+   NET_NEWS_HOLDOFF_SECONDS long. News that came faster than it was read is
+   dropped by the kernel with ENOBUFS, which is not the end of the socket:
+   what it would have said is asked instead. Every carrier snapshot is
+   forgotten, so each link's next news counts, no link is taken as silent,
+   the held link is asked whether it kept its carrier since the lease, and
+   the best link is picked again. */
+#define NET_NEWS_BURST 256
+
 typedef struct
 {
         net_holding address_to held;
@@ -2799,36 +3026,56 @@ static COLD bool net_watch_event_take(netlink_header address_to header,
         net_event_turn address_to turn = (net_event_turn address_to)context;
 
         if (net_link_event(header, turn->held))
-        {
                 turn->acted = 1;
-                net_reconfigure_fresh(turn->held);
-        }
         return true;
+}
+
+//      1 when a pass is owed, 0 when none is, negative for a dead socket.
+static COLD bipolar net_watch_drain(b32 events, netlink_buffer address_to message,
+                                    net_holding address_to held)
+{
+        net_event_turn turn = {.held = held};
+
+        for (positive taken = 0; taken < NET_NEWS_BURST; taken++)
+        {
+                system_poll_descriptor more = {events, SYSTEM_POLL_READ, 0};
+                timespec none = {0, 0};
+                bipolar got = netlink_receive(events, message, null);
+
+                /* Interrupted or vanished readiness leaves no event to act
+                   on. The caller recomputes the lease deadline before
+                   waiting again. */
+                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
+                        break;
+                if (got == -ENOBUFS)
+                {
+                        netlink_forget(address_of net_states);
+                        memory_fill(net_quiet, 0, sizeof net_quiet);
+                        if (held->index && !held->lost &&
+                            !net_link_carrier_kept(held))
+                                held->lost = true;
+                        turn.acted = 1;
+                }
+                else if (got < 0)
+                        return got;
+                else
+                        netlink_each(message, net_watch_event_take,
+                                     address_of turn);
+                if (system_poll_wait(address_of more, 1, address_of none, null) <= 0 ||
+                    !(more.returned & SYSTEM_POLL_READ))
+                        break;
+        }
+        return turn.acted;
 }
 
 static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to message,
                                      net_holding address_to held)
 {
-        bipolar got = netlink_receive(events, message, null);
-        net_event_turn turn = {.held = held};
+        bipolar acted = net_watch_drain(events, message, held);
 
-        /* Interrupted or vanished readiness leaves no event to act on. The
-           caller recomputes the lease deadline before waiting again. */
-        if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
-                return 0;
-        if (got == -ENOBUFS)
-        {
-                netlink_forget(address_of net_states);
-                if (held->index && !held->lost && !net_link_carrier_kept(held))
-                        held->lost = true;
+        if (acted > 0)
                 net_reconfigure_fresh(held);
-                return 1;
-        }
-        if (got < 0)
-                return got;
-
-        netlink_each(message, net_watch_event_take, address_of turn);
-        return turn.acted;
+        return acted;
 }
 
 /*
@@ -3052,6 +3299,7 @@ static COLD b32 net_watch(void)
         net_events_watch = events;
         net_exchange_cut = false;
         net_news_holdoff_until = 0;
+        memory_fill(net_quiet, 0, sizeof net_quiet);
 
         //      Configure whatever is already plugged in before waiting for
         //      anything to change, or a machine that boots with its cable in
@@ -3083,6 +3331,9 @@ static COLD b32 net_watch(void)
 
                         positive declined = 0;
                         bool looking = false;
+                        //      The wait ends for a silent link that is
+                        //      asked again while another holds the lease.
+                        bool asking = false;
 
                         if (held.index && held.lease.seconds)
                         {
@@ -3099,6 +3350,17 @@ static COLD b32 net_watch(void)
                                 {
                                         due = NET_RESUME_LOOK_SECONDS;
                                         looking = true;
+                                }
+                                {
+                                        positive quiet =
+                                            net_quiet_due_in(net_seconds());
+
+                                        if (quiet && quiet <= due)
+                                        {
+                                                due = quiet;
+                                                looking = false;
+                                                asking = true;
+                                        }
                                 }
                         }
                         else
@@ -3182,6 +3444,21 @@ static COLD b32 net_watch(void)
 
                                 if (looking)
                                         continue;
+
+                                /* The better link that was silent: the walk
+                                   asks it and comes back to the lease that
+                                   is held when it says nothing again. */
+                                if (asking)
+                                {
+                                        net_reconfigure_fresh(address_of held);
+                                        //      A pass that was cut has not
+                                        //      passed anything: it goes on
+                                        //      when what cut it is read,
+                                        //      with the link's seconds kept.
+                                        if (!net_exchange_cut)
+                                                net_quiet_passed(net_seconds());
+                                        continue;
+                                }
 
                                 if (!held.index || !held.lease.seconds)
                                 {
