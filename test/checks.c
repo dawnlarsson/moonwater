@@ -125311,7 +125311,8 @@ static string_address address_to bowl_environment(string_address address_to inhe
 static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fake_busy is set, every job waited for is answered as still running (nothing on the card is held); gpu_fake_idle answers done
 static unsigned int gpu_fake_waits; // the waits answered as still running before the fence goes on to say what gpu_fake_idle or the card says: a job that ends within the late cap
 static int gpu_fake_errno;          // a wait the kernel refuses is answered as failed while it is set (the fence has an error)
-#define GPU_WAIT_CS(wait) (gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
+static unsigned int gpu_fake_wait_calls, gpu_fake_submits, gpu_fake_requests; // the waits asked, the submits made, and every request made of the kernel's DRM (GPU_CONTROL)
+#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
 // The fake card with no hardware under it: the submit is taken (its sequence number 1) without a call, and the kernel's log has a page fault in it while gpu_fake_fault is set.
 static int gpu_fake_card, gpu_fake_fault;
 #define GPU_LOG_FAKE(since, out) do { if (gpu_fake_fault) (out)->have_at = 1, (out)->at = 0x2000000100ull; } while (0)
@@ -125327,7 +125328,7 @@ static long gpu_fake_userptr;
 static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 // The words of the IB of the last job submitted (gpu_run_job's ib, which is in scope where this is expanded), kept before any answer is made: a check reads the packets a job sent.
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
-#define GPU_SUBMIT_FAKE(error, taken) do { gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true; } while (0)
+#define GPU_SUBMIT_FAKE(error, taken) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 // The buffers the last submit named (gpu_run_job's bos, seen before the call is made or answered): the rows ask whether a map's handle is in the list.
 static p64 gpu_seen_bos[1 + 8 + 256];
@@ -125392,6 +125393,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         unsigned int *words = (unsigned int *)a;
         p64 *longs = (p64 *)a;
 
+        gpu_fake_requests++;
         if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD))
         {
                 if (gpu_fake_card && fd < 0 && request == 0xc0106442u && !gpu_kernel.no_context) // DRM_IOCTL_AMDGPU_CTX
@@ -234890,6 +234892,103 @@ static void gpu_import_rows(void)
         gpu_lost = kept_lost, gpu_userptr_off = kept_off, gpu_userptr_gone = kept_gone, gpu_map_why = kept_why, compositor_gpu = kept_on;
 }
 
+#define GPU_BENCH_HASH 899857414u
+#define GPU_BENCH_ENTRIES 6799u
+/*
+        The processor's share of a frame the card draws, with no card (the fake card: the buffer is memory, the submit is taken, the fence answers done): a
+        desktop's scene of 85 records on 1920 by 1080 (a ground, twelve windows of 900 by 650, each a picture, a rounded box with one change of cover and
+        four runs of text) is binned and submitted by gpu_scene, whole and for a damage of one 64-pixel square, and timed; what one present asks of the kernel
+        is counted (the submit and the wait: nothing else), and what it writes for the card (the packets, the arguments, the bins and their lists) is held to
+        the hash it had before the path was made lighter, so that lighter is the same bytes.
+*/
+static unsigned int gpu_bench_buffer[(24 << 20) / 4];
+
+static unsigned int gpu_bench_hash(const void *bytes, positive count, unsigned int hash)
+{
+        const p8 address_to at = (const p8 address_to)bytes;
+
+        for (positive i = 0; i < count; i++)
+                hash = (hash ^ at[i]) * 16777619u;
+        return hash;
+}
+
+static void gpu_bench_rows(void)
+{
+        enum { BW = 1920, BH = 1080, WINS = 12, ROUNDS = 2000, MAPS = 200 };
+        unsigned char kept_gpu[sizeof(gpu)];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, n = 0, hash, entries = 0;
+        positive ops_at = GPU_DATA, bins_at = GPU_DATA + (1 << 20), d_at = GPU_VA_MAPS, began, whole, small, looked;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_bench_buffer + ops_at);
+        unsigned int address_to tab = (unsigned int address_to)((p8 address_to)gpu_bench_buffer + bins_at);
+        static unsigned char kept_maps[sizeof(gpu_maps)];
+        b32 drew = true;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_maps, gpu_maps, sizeof(gpu_maps));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_bench_buffer, gpu.size = sizeof(gpu_bench_buffer), gpu.imports = 0, gpu.pending = 0;
+        gpu_owed = 0, gpu_found = GPU_END_NONE, gpu_fake_card = 1, gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_tick = 100;
+        // The maps a desktop holds: 200 of them, the scanout's the last made (the one a present looks up).
+        for (unsigned int i = 0; i < MAPS; i++)
+        {
+                gpu_maps[i].from = 0x100000000ull + (positive)i * 0x1000000, gpu_maps[i].to = gpu_maps[i].from + 0x800000, gpu_maps[i].va = GPU_VA_MAPS + (positive)i * 0x1000000;
+                gpu_maps[i].bytes = 0x800000, gpu_maps[i].handle = 20 + i, gpu_maps[i].used = gpu_tick, gpu_maps[i].written = i == MAPS - 1, gpu_maps[i].dma = 0;
+                gpu_maps[i].handed = 0, gpu_maps[i].listed = 0, gpu_maps[i].offset = 0;
+        }
+        gpu_map_count = MAPS;
+#define GPU_BENCH_OP(a, b, c, d, e, f, g, h) (ops[8 * n] = (a), ops[8 * n + 1] = (unsigned int)(b), ops[8 * n + 2] = (unsigned int)(c), ops[8 * n + 3] = (unsigned int)(d), \
+                                              ops[8 * n + 4] = (unsigned int)(e), ops[8 * n + 5] = (f), ops[8 * n + 6] = (g), ops[8 * n + 7] = (h), n++)
+        GPU_BENCH_OP(0, 0, 0, BW, BH, 0xff203040u, 0, 0);
+        for (int k = 0; k < WINS; k++)
+        {
+                int x = 40 + k * 80, y = 20 + k * 34;
+
+                GPU_BENCH_OP(4, x, y, x + 900, y + 650, (unsigned int)(GPU_VA_MAPS + (positive)k * 0x1000000), (unsigned int)((GPU_VA_MAPS + (positive)k * 0x1000000) >> 32), 900);
+                GPU_BENCH_OP(2 | 1 << 8, x * 256, y * 256, (x + 900) * 256, (y + 650) * 256, 0xc0ffffffu, 12 * 256, 12 * 256);
+                GPU_BENCH_OP(8, x * 256 + 256, y * 256 + 256, (x + 899) * 256, (y + 649) * 256, 0, 11 * 256, 11 * 256);
+                for (int t = 0; t < 4; t++)
+                        GPU_BENCH_OP(3 | 200 << 8, x + 20, y + 8 + t * 24, x + 220, y + 28 + t * 24, 0xffe0e0e0u, 255, 4096 * (unsigned int)(k * 4 + t));
+        }
+#undef GPU_BENCH_OP
+        // One present: what it asks of the kernel, and the bytes it leaves for the card.
+        gpu_fake_submits = gpu_fake_wait_calls = gpu_fake_requests = 0;
+        drew = gpu_va_written((const void *)(gpu_maps[MAPS - 1].from + 64), 4096) != 0 && gpu_scene(ops_at, n, bins_at, d_at, BW, BW, BH, 0, 0, BW, BH);
+        check("gpu bench: the scene of 85 records is drawn by the fake card", drew && n == 85);
+        check("gpu bench: one present asks the kernel for one submit and one wait, and nothing else", gpu_fake_submits == 1 && gpu_fake_wait_calls == 1 && gpu_fake_requests == 0);
+        for (unsigned int c = 0; c < ((BW + 63) >> 6) * ((BH + 63) >> 6); c++)
+                entries += tab[2 * c + 1];
+        hash = gpu_bench_hash(gpu_fake_ib, 4u * gpu_fake_ib_words, 2166136261u);
+        hash = gpu_bench_hash(GPU_ARGS, sizeof(struct gpu_args), hash);
+        hash = gpu_bench_hash(tab, 8ull * ((BW + 63) >> 6) * ((BH + 63) >> 6) + 32ull * entries, hash);
+        check("gpu bench: the packets, the arguments, the bins and their lists are the bytes they were before the path was made lighter", hash == GPU_BENCH_HASH && entries == GPU_BENCH_ENTRIES);
+        if (hash != GPU_BENCH_HASH || entries != GPU_BENCH_ENTRIES)
+                string_format(log, "  gpu bench: the hash is %p over %p list entries and %p packet words\n", (positive)hash, (positive)entries, (positive)gpu_fake_ib_words);
+        // Each is the best of twenty batches: the machine's other work is in the others.
+        whole = small = looked = ~0ull;
+        for (int batch = 0; batch < 20; batch++)
+        {
+                positive took;
+
+                began = clock_monotonic_nanoseconds();
+                for (int r = 0; r < ROUNDS / 20; r++)
+                        drew &= gpu_scene(ops_at, n, bins_at, d_at, BW, BW, BH, 0, 0, BW, BH);
+                took = (clock_monotonic_nanoseconds() - began) / (ROUNDS / 20), whole = took < whole ? took : whole;
+                began = clock_monotonic_nanoseconds();
+                for (int r = 0; r < ROUNDS / 20; r++)
+                        drew &= gpu_scene(ops_at, n, bins_at, d_at, BW, BW, BH, 960, 540, 1024, 604);
+                took = (clock_monotonic_nanoseconds() - began) / (ROUNDS / 20), small = took < small ? took : small;
+                began = clock_monotonic_nanoseconds();
+                for (int r = 0; r < ROUNDS * 5; r++)
+                        drew &= gpu_va_bytes((const void *)(gpu_maps[r % 4 ? MAPS - 1 : MAPS - 2].from + 64), 4096) != 0;
+                took = (clock_monotonic_nanoseconds() - began) * 100 / (ROUNDS * 5), looked = took < looked ? took : looked;
+        }
+        check("gpu bench: every timed present was drawn", drew);
+        string_format(log, "  gpu bench: the processor's share of a present of 85 records on 1920 by 1080 is %p ns whole (%p list entries) and %p ns for a 64-pixel damage; a map found among 200 in %p hundredths of a ns\n",
+                      (positive)whole, (positive)entries, (positive)small, (positive)looked);
+
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_handed_clear();
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(gpu_maps, kept_maps, sizeof(gpu_maps));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE;
+}
+
 static unsigned int gpu_late_buffer[(4 << 20) / 4]; // the fake card's buffer (gpu_late_rows): the ops, the tables and the bins of a 64 by 4 scene
 static unsigned int gpu_late_screen[64 * 4];        // and its scanout
 
@@ -234940,7 +235039,7 @@ static void gpu_late_rows(void)
         // 1. A job the fence ends within the cap: the wait goes on in slices, three of them answered running, and the job is done: nothing pending, no end.
         memory_copy(ops, q, 32);
         gpu_fake_waits = 3;
-        check("gpu late: a job the fence ends within the late cap is waited for in slices and done", gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) &&
+        check("gpu late: a job the fence ends within the late cap is asked after again while it runs, and done", gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) &&
               !gpu.pending && gpu_end == GPU_END_NONE && gpu_fake_waits == 0 && !gpu_owed);
 
         // 2. A job still running at the cap: given up on as late with the job pending; the present is the processor's, and nothing is cooled, counted or restarted.
@@ -235121,6 +235220,7 @@ b32 main(void)
         gpu_flight_rows();
         gpu_import_rows();
         gpu_late_rows();
+        gpu_bench_rows();
         flip_wait_rows();
         frame_dated_rows();
         close_ask_rows();

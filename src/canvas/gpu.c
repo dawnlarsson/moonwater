@@ -512,7 +512,6 @@ static enum gpu_end gpu_found; // the end of a late job that gpu_idle came on af
 static b32 gpu_owed;           // a late job is pending and its end is not yet said to the caller
 static positive gpu_fault_poll; // when the kernel's log is next looked at for a page fault of the late job (monotonic ns)
 static b32 gpu_patient;        // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first
-#define GPU_SLICE_NS 4000000ull      // a wait is asked in slices of this length
 #define GPU_LATE_NS 16000000ull      // a job not done this long after it was submitted is late: a tick (the heaviest whole-screen job measured, 8K, is 5.5 ms)
 #define GPU_HANG_NS 2000000000ull    // and one not done this long after is hung. The kernel's own timeout for a job is amdgpu.lockup_timeout, which at v6.12 is sixty
                                      // seconds for the compute ring this uses: until it ends the job nothing here ends it, the buffer stays the job's (gpu_idle), and the
@@ -1176,13 +1175,16 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         return gpu_map_dmabuf(from, to, at, written);
 }
 
+// (The map found last is looked at first: a present asks for the same few pictures over and over, and the table is up to 256 maps looked at in order. The
+// place kept is only where the looking starts: the map there is held to the pointer as any other is, so a table that has moved under it costs a look, not an answer.)
+static unsigned int gpu_map_last;
 static positive gpu_va_bytes(const void *pointer, positive bytes)
 {
-        for (unsigned int i = 0; i < gpu_map_count; i++)
+        for (unsigned int k = 0, i = gpu_map_last < gpu_map_count ? gpu_map_last : 0; k < gpu_map_count; k++, i = i + 1 < gpu_map_count ? i + 1 : 0)
                 if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick, gpu_maps[i].handed = 1;
-                        gpu_map_hits++;
+                        gpu_map_hits++, gpu_map_last = i;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
                 }
         gpu_map_misses++;
@@ -1679,7 +1681,7 @@ static void gpu_fault_note(b32 hang)
         gpu_fault_text(&s);
 }
 
-// The job in gpu.pending waited for, in slices of GPU_SLICE_NS, until it is done or cap has passed since it was submitted (gpu_job_began). True when it is done.
+// The job in gpu.pending waited for, in one wait that ends when the job does, until it is done or cap has passed since it was submitted (gpu_job_began). True when it is done.
 // Otherwise gpu_end says how it was given up on: LATE (the cap was a tick: the job stays pending and its end is owed, gpu_late_end says it), HUNG (the cap was the
 // hang's two seconds), WAIT (the wait itself failed). A hang or a failed wait is read in the kernel's log at once (gpu_fault) and is the caller's to take.
 static b32 gpu_wait_job(positive cap)
@@ -1688,9 +1690,11 @@ static b32 gpu_wait_job(positive cap)
 
         for (;;)
         {
-                positive now = clock_monotonic_nanoseconds(), until = gpu_job_began + cap;
+                positive until = gpu_job_began + cap;
 
-                wait[0] = gpu.pending, wait[1] = until < now + GPU_SLICE_NS ? until : now + GPU_SLICE_NS, wait[2] = 1, wait[3] = (positive)gpu.ctx << 32;
+                // One wait, to the cap: the kernel wakes it when the job ends, so a job is one request to wait for however long it runs (in slices of four
+                // milliseconds a job of 5.5 ms, the heaviest measured, was two).
+                wait[0] = gpu.pending, wait[1] = until, wait[2] = 1, wait[3] = (positive)gpu.ctx << 32;
                 if (!GPU_WAIT_CS(wait))
                         gpu_end = GPU_END_WAIT, gpu_last_error = 5; // EIO: the wait itself failed
                 else if (!wait[0])
@@ -1887,15 +1891,17 @@ static void gpu_radii(unsigned int address_to r)
 // the box in 256ths as ui_kit_fill takes it (an anti-aliased rounded box). Only the damage rectangle dx0 dy0 dx1 dy1 is drawn by the kernel by hand
 // (the whole picture by the others), each pixel in it from the ops alone when the first op holds it: the scene is its own background., drawn into the w by h
 // pixels at d_at (pitch in pixels) and each pixel written once. The ops are binned into 64-pixel squares at bins_at: two words a square, then the lists of ops.
-#define GPU_SQUARES(body) for (i = 0; i < n; i++) { unsigned int address_to q = ops + 8 * i; int e = (q[0] & 255) == 2, m = e ? (int)(q[0] >> 8 & 15) : 0, x0 = e ? (int)q[1] >> 8 : (int)q[1], y0 = e ? (int)q[2] >> 8 : (int)q[2], \
-        x1 = e ? ((int)q[3] + 255) >> 8 : (int)q[3], y1 = e ? ((int)q[4] + 255) >> 8 : (int)q[4], tx, ty; \
+// Each record of the scene with the squares it has any pixel of the damage in (tx0 to tx1 and ty0 to ty1, the last ones counted in): e is a box (its place in
+// 256ths), m how many changes of cover follow it, which are its own and are passed over.
+#define GPU_RECORDS(body) for (i = 0; i < n; i++) { unsigned int address_to q = ops + 8 * i; int e = (q[0] & 255) == 2, m = e ? (int)(q[0] >> 8 & 15) : 0, x0 = e ? (int)q[1] >> 8 : (int)q[1], y0 = e ? (int)q[2] >> 8 : (int)q[2], \
+        x1 = e ? ((int)q[3] + 255) >> 8 : (int)q[3], y1 = e ? ((int)q[4] + 255) >> 8 : (int)q[4]; \
         x0 = x0 < (int)dx0 ? (int)dx0 : x0, y0 = y0 < (int)dy0 ? (int)dy0 : y0, x1 = x1 > (int)dx1 ? (int)dx1 : x1, y1 = y1 > (int)dy1 ? (int)dy1 : y1; \
-        if (x0 < x1 && y0 < y1) for (ty = y0 >> 6; ty <= (y1 - 1) >> 6; ty++) for (tx = x0 >> 6; tx <= (x1 - 1) >> 6; tx++) { c = ty * cw + tx; body } i += m; }
+        if (x0 < x1 && y0 < y1) { unsigned int tx0 = (unsigned int)x0 >> 6, ty0 = (unsigned int)y0 >> 6, tx1 = (unsigned int)(x1 - 1) >> 6, ty1 = (unsigned int)(y1 - 1) >> 6; body } i += m; }
 static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
                      unsigned int dy0, unsigned int dx1, unsigned int dy1)
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);
-        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, i, c, address_to list = tab + 2 * cw * ch;
+        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, i, c, address_to list = tab + 2 * cw * ch, record[16 * 8];
         struct gpu_args address_to a = GPU_ARGS;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE; // this call's answer: a hang of its job is 62 here, and an older job's is not read as its own
@@ -1909,12 +1915,16 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         if (bins_at + 8ull * cw * ch > gpu.size)
                 return false;
         memory_zero(tab, (positive)cw * ch * 8);
-        GPU_SQUARES(tab[2 * c + 1] += 1 + m;)
+        GPU_RECORDS(for (unsigned int ty = ty0; ty <= ty1; ty++) for (unsigned int tx = tx0; tx <= tx1; tx++) tab[2 * (ty * cw + tx) + 1] += 1 + (unsigned int)m;)
         for (c = 0; c < cw * ch; c++)
                 tab[2 * c] = at, at += tab[2 * c + 1], tab[2 * c + 1] = 0;
         if (bins_at + 8ull * cw * ch + 32ull * at > gpu.size) // the lists must fit what the buffer has left
                 return false;
-        GPU_SQUARES(unsigned int address_to r = list + 8 * (tab[2 * c] + tab[2 * c + 1]); int j; tab[2 * c + 1] += 1 + m; memory_copy(r, q, 32 * (1 + m)); if (e) for (j = 0; j <= m; j++) gpu_radii(r + 8 * j);)
+        // A record goes into the list of each square it is in as it is, a box with its corners fitted to its sides (gpu_radii): fitted once, and the same words
+        // put in every list (they were fitted again in each square: two divisions a square for a box of a whole window).
+        GPU_RECORDS(memory_copy(record, q, 32 * (1 + (positive)m)); if (e) for (int j = 0; j <= m; j++) gpu_radii(record + 8 * j);
+                    for (unsigned int ty = ty0; ty <= ty1; ty++) for (unsigned int tx = tx0; tx <= tx1; tx++) {
+                            c = ty * cw + tx; memory_copy(list + 8 * (tab[2 * c] + tab[2 * c + 1]), record, 32 * (1 + (positive)m)); tab[2 * c + 1] += 1 + (unsigned int)m; })
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
         for (i = 0; i < n; i++)
                 if ((ops[8 * i] & 255) == 2)
