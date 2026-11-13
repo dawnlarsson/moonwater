@@ -154559,14 +154559,51 @@ static fn check_kit_focus(void)
                 ui_list_draw(&ui, &rows);
                 top = bounds_span(&ui, &rows, 1, &height);
                 lit = ui_kit_lit(&ui) & 0xffffffu;
+                // (The surface is light here: the row's first three pixels are its edge, ui_list_row_edge, and the rest is the fill.)
                 row_bare = lit != ground && height > 12;
                 for (int y = top; y < top + height && row_bare; y++)
-                        row_bare = focus_at(pixels, 100, y) == lit && focus_at(pixels, 102, y) == lit && focus_at(pixels, 103, y) == lit &&
+                        row_bare = focus_at(pixels, 103, y) == lit && focus_at(pixels, 104, y) == lit && focus_at(pixels, 105, y) == lit &&
                                    focus_at(pixels, 399, y) == lit && focus_at(pixels, 397, y) == lit && focus_at(pixels, 396, y) == lit;
-                for (int x = 100; x < 400 && row_bare; x++)
+                for (int x = 103; x < 400 && row_bare; x++)
                         row_bare = focus_at(pixels, x, top) == lit && focus_at(pixels, x, top + 2) == lit && focus_at(pixels, x, top + 3) == lit &&
                                    focus_at(pixels, x, top + height - 1) == lit && focus_at(pixels, x, top + height - 3) == lit;
                 check("kit focus: a list's row the keys are on is lit from edge to edge and has no ring, with the hand on the keys: the fill says where they are", row_bare);
+                // The edge: on a light surface, with the hand on the keys, the row's first three pixels are the focus ink, 3 to 1 from the
+                // surface and from the lit row, down its whole height; a press takes it away and leaves the row lit; a window read from
+                // the right has it at the row's right; and a dark surface has none, with the keys or without.
+                {
+                        unsigned int edge = ui_kit_focus_ink(&ui) & 0xffffffu, dark_ground, dark_lit;
+                        b32 edged = ui_contrast(edge, ground) >= 300 && ui_contrast(edge, lit) >= 300, unedged, turned, dark;
+
+                        for (int y = top; y < top + height && edged; y++)
+                                edged = focus_at(pixels, 100, y) == edge && focus_at(pixels, 101, y) == edge && focus_at(pixels, 102, y) == edge;
+                        ui_kit.keyed = 0;
+                        for (int at = 0; at < 400 * 200; at++)
+                                pixels[at] = 0xff000000u | ground;
+                        ui_list_draw(&ui, &rows);
+                        unedged = focus_at(pixels, 100, top + 5) == lit && focus_at(pixels, 102, top + 5) == lit && focus_at(pixels, 200, top + 2) == lit;
+                        ui_kit.keyed = 1, ui_kit.rtl = 1;
+                        for (int at = 0; at < 400 * 200; at++)
+                                pixels[at] = 0xff000000u | ground;
+                        ui_list_draw(&ui, &rows);
+                        turned = focus_at(pixels, 399, top + 5) == edge && focus_at(pixels, 397, top + 5) == edge && focus_at(pixels, 396, top + 5) == lit &&
+                                 focus_at(pixels, 100, top + 5) == lit;
+                        ui_kit.rtl = 0;
+                        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+                        dark_ground = ui_role(UI_SURFACE) & 0xffffffu, dark_lit = ui_kit_lit(&ui) & 0xffffffu;
+                        for (int at = 0; at < 400 * 200; at++)
+                                pixels[at] = 0xff000000u | dark_ground;
+                        ui_list_draw(&ui, &rows);
+                        dark = !ui_kit_light(&ui) && dark_lit != dark_ground;
+                        for (int y = top; y < top + height && dark; y++)
+                                dark = focus_at(pixels, 100, y) == dark_lit && focus_at(pixels, 101, y) == dark_lit && focus_at(pixels, 102, y) == dark_lit &&
+                                       focus_at(pixels, 399, y) == dark_lit;
+                        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+                        check("kit focus: on a light surface the row the keys are on has an edge three pixels wide in the focus ink, 3:1 from the surface and from the lit row, while the hand is on the keys",
+                              edged);
+                        check("kit focus: a press takes the edge away and leaves the row lit, a window read from the right has it at the row's right, and a dark surface has none",
+                              unedged && turned && dark);
+                }
 
                 for (int at = 0; at < 400 * 200; at++)
                         pixels[at] = 0xff000000u | ground;

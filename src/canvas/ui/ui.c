@@ -20648,6 +20648,23 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 }
 
 /*
+        The edge of the row the keys are on, in the light theme: a strip UI_LIST_EDGE logical pixels wide down the side the row is read
+        from (its left, or its right in a window read from the right), in the focus ring's ink, which stands 3 to 1 from the surface and
+        from the lit row's white (ui_kit_focus_ink). It is there for the reason the ring is on a button: a lit row on a light surface is
+        white on near white, the lightest a fill can be and still too faint to find from across a desk. It is the keys' alone, as the
+        ring is (ui_kit.keyed): a click or a touch leaves a lit row and no edge. It is a mark at the row's side and not a tint of the
+        row, so the row still reads as lit and not as chosen. A dark surface has none: its lit row is 1.3 to 1 and more from its ground.
+*/
+#define UI_LIST_EDGE 3
+static fn ui_list_row_edge(struct ui address_to ui, int across, int across_w, int y, int height)
+{
+        int wide = ui_dev(ui, UI_LIST_EDGE) < 1 ? 1 : ui_dev(ui, UI_LIST_EDGE), x = ui_rtl() ? across + across_w - wide : across;
+        struct ui_box box = {x * 256, y * 256, (x + wide) * 256, (y + height) * 256, 0, 0};
+
+        ui_kit_fill(ui, &box, ui_kit_focus_ink(ui), null);
+}
+
+/*
         A row at its place, y its top: the row the keys are on, the whole row lit, square (the fill is the keys' mark:
         a row has no ring), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
@@ -20661,7 +20678,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
         int across, across_w, baseline, size = ui_dev(ui, 4);
         // Whether any of its rows may be written, with room for a run's rows round its line.
-        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
+        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4)), edged = false;
 
         ui_list_describe(l, id, &row);
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
@@ -20676,6 +20693,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
                 // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring).
+                // On a light surface the fill is white on a ground that is nearly white (1.07 to 1, and no fill lighter than white is
+                // there to be had), so while the hand is on the keys the row also has an edge (ui_list_row_edge), drawn last.
+                edged = l->keys && ui_kit.keyed && !ui->glass && ui_kit_light(ui);
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
                 // its quiet words are the ink too, which stands out from the well (ui_glass_well).
                 if (ui->glass && !row.tall)
@@ -20748,6 +20768,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_list_drive(ui, &row, seen, strong, quiet);
         else if (row.kind == UI_ROW_SHARE)
                 ui_list_share(ui, &row, seen, strong, quiet);
+        // The edge last, over the row's hover and press: the keys' mark on a light surface.
+        if (edged)
+                ui_list_row_edge(ui, across, across_w, y, height);
 }
 
 // Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which

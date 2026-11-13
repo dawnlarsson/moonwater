@@ -187,6 +187,10 @@ M = [
     (U, "a row far from the places is not revealed", "        if (l->virtual && l->focus >= 0 && l->focus < l->total)\n        {\n                // The row is where its number puts it", "        if (0)\n        {\n                // The row is where its number puts it"),
     (U, "a virtual list's places do not follow the scroll", "        first = at_rest / row - UI_LIST_MARGIN;\n", "        first = 0;\n"),
     (U, "a point on a virtual list is a place, not a row", "                return inside >= 0 && inside / row < l->total ? inside / row : -1;", "                return inside >= 0 && inside / row < l->count ? inside / row : -1;"),
+    (U, "a click leaves the light row's edge", "                edged = l->keys && ui_kit.keyed && !ui->glass && ui_kit_light(ui);", "                edged = l->keys && !ui->glass && ui_kit_light(ui);"),
+    (U, "a dark row has the edge too", "                edged = l->keys && ui_kit.keyed && !ui->glass && ui_kit_light(ui);", "                edged = l->keys && ui_kit.keyed && !ui->glass;"),
+    (U, "the edge is not turned for a window read from the right", "x = ui_rtl() ? across + across_w - wide : across;", "x = across;"),
+    (L, "a name of PATH is drawn as its bytes are", "                ui_label_foreign(into, room, (const p8 address_to)name, string_length((string_address)name));", "                string_copy_bounded((string_address)into, (string_address)name, room);"),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
     # ---- a mouse drags a list unless a person turned it off ----
