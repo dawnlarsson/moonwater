@@ -2890,7 +2890,14 @@ static void compositor_wl_flip_presented(void)
                 return;
         compositor_wl.presenting_waiting = 0;
         if (compositor.flip_stamped && compositor.flip_when)
+        {
+                // The count is the card's while it gives one, and the shim's own goes on from it: a frame answered by the clock after
+                // one the card stamped (an idle tick, a flip whose stamp did not come) has a count above it, where the two counted
+                // apart and a client saw the count go back.
+                if ((unsigned long)compositor.flip_seq >= compositor_wl.presents)
+                        compositor_wl.presents = (unsigned long)compositor.flip_seq + 1;
                 wayland_presented((unsigned long)compositor.flip_when, (unsigned long)compositor.period, compositor.flip_seq, 7);
+        }
         else
                 wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++, 0);
         compositor_wl_flush_all();
