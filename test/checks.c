@@ -179653,8 +179653,6 @@ static void fake_row_do(void *context, int row, long what, long a, long b)
                 r->states &= ~(long)WAYLAND_STATE_FULLSCREEN;
         if (what == WAYLAND_DO_MINIMIZE)
                 r->states |= WAYLAND_STATE_SUSPENDED;
-        if (what == WAYLAND_DO_CLOSE_HEARD)
-                r->closing = 0;
 }
 
 static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
@@ -180510,8 +180508,12 @@ static void test_configure(void)
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1, "a close asked is said once");
         // The client kept its window (it asked the person, who said no): the close button pressed again is a new ask, and is said again.
-        WLCHECK(!fake.row[0].closing, "and the host is told it was heard, so the row's ask is over");
-        fake.row[0].closing = 1;
+        WLCHECK(fake.row[0].closing == 1, "and the count of asks is the host's: the shim changes nothing of the row");
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1, "an ask that was said is not said again while the host counts no other");
+        fake.row[0].closing = 2;
+        wayland_row_wake(0);
         wayland_row_wake(0);
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 2, "a close asked again of a window that stayed is said again (%ld)",
@@ -180529,7 +180531,9 @@ static void test_configure(void)
                 wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
                 wlc_send(c, s.surface, WLQ_wl_surface_commit);
                 wlc_forget(c);
-                fake.row[0].closing = 1;
+                // The window before was told of two asks, and this one has been asked as many times: the count told is a window's, not
+                // its surface's, so this is an ask the client has not heard.
+                fake.row[0].closing = 2;
                 wayland_row_wake(0);
                 wlc_pump(c);
                 WLCHECK(c->errors == 0 && fake.row[0].used && wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1,
@@ -235129,24 +235133,43 @@ static void gpu_late_rows(void)
 
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
+// The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
+// row's facts, and the X window manager reads the compositor's own. A kit program read the bit, on every pass: an editor that stayed for unsaved changes left the
+// moment they were saved.
 static void close_ask_rows(void)
 {
         static struct windows table;
         struct windows *kept = compositor.table;
         struct compositor_xwm_window w = {.id = 9, .row = 3, .state = COMPOSITOR_XWM_PROTO_KNOWN, .protocols = COMPOSITOR_XWM_PROTO_DELETE};
+        struct window_row own = {.table = &table, .row = 3};
+        struct wayland_facts facts;
         int parent = compositor_popup_parent[3];
         unsigned int woken = compositor.woken;
 
         compositor.table = &table;
         compositor.showing[3] = 1, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = -1;
+        table.close_asks[3] = 0;
         check("close: a window nobody asked to go is owed no ask", !compositor_xwm_close_owed(&w));
+        check("close: and its program hears none", !windows_close_asked(&own));
+        check("close: nor does its Wayland client", compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 0);
         compositor_close(3);
         check("close: a window asked to go is said to be closing, in the table too, and is owed the ask",
               (compositor.state[3] & WINDOW_CLOSING) && (table.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
+        check("close: the table says how many times it was asked", table.close_asks[3] == 1);
+        check("close: its program hears the ask once, however often it looks", windows_close_asked(&own) && !windows_close_asked(&own) && !windows_close_asked(&own));
+        check("close: its Wayland client is given the count, and the bit stays the compositor's",
+              compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 1 && (compositor.state[3] & WINDOW_CLOSING));
         w.closes = compositor.close_asks[3];
         check("close: once told it is owed nothing while it stays", !compositor_xwm_close_owed(&w));
         compositor_close(3);
         check("close: asked again it is owed the ask again", compositor.close_asks[3] == 2 && compositor_xwm_close_owed(&w));
+        check("close: its program hears the second ask, once", table.close_asks[3] == 2 && windows_close_asked(&own) && !windows_close_asked(&own));
+        check("close: and its Wayland client's count is one more", compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 2);
+        // A program cannot ask itself to go, or another, by the table: the compositor's count is its own.
+        table.close_asks[3] = 77;
+        check("close: a count written into the table is not the compositor's", compositor.close_asks[3] == 2 && !compositor_xwm_close_owed(&(struct compositor_xwm_window){.row = 3, .closes = 2, .state = COMPOSITOR_XWM_PROTO_KNOWN}) &&
+                                                                               compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 2);
+        table.close_asks[3] = 2, own.closes = 2;
         w.closes = compositor.close_asks[3];
         w.state &= ~COMPOSITOR_XWM_PROTO_KNOWN;
         compositor_close(3);
@@ -235154,8 +235177,17 @@ static void close_ask_rows(void)
         w.state |= COMPOSITOR_XWM_PROTO_KNOWN;
         check("close: and is owed when they are", compositor_xwm_close_owed(&w));
         compositor.close_asks[3] = 255, w.closes = 255;
+        table.close_asks[3] = 255, own.closes = 255;
         compositor_close(3);
         check("close: the count of asks never comes back to none", compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
+        check("close: and the ask past the count's end is heard by the program", table.close_asks[3] == 1 && windows_close_asked(&own) && !windows_close_asked(&own));
+        // The row let go of and shown again is another window: it has been asked nothing, and its first ask is heard.
+        compositor_close_count(3, 0);
+        check("close: a row whose count went back to none has been asked nothing", table.close_asks[3] == 0 && !windows_close_asked(&own) && own.closes == 0);
+        compositor.state[3] = 0;
+        compositor_close(3);
+        check("close: and the next window in it hears its first ask", windows_close_asked(&own) && !windows_close_asked(&own));
+        compositor.close_asks[3] = 1, w.closes = 0;
         compositor_xwm_unmapped(&w);
         check("close: a mapping that ended is owed nothing, and its next is told from the first ask", w.row == -1 && !w.closes && !compositor_xwm_close_owed(&w));
         {
@@ -235172,8 +235204,9 @@ static void close_ask_rows(void)
         compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = 2;
         compositor_close(3);
         compositor_close(3);
-        check("close: a popup is asked to go once", (compositor.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1);
+        check("close: a popup is asked to go once", (compositor.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && table.close_asks[3] == 1);
         compositor.showing[3] = 0, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = parent;
+        table.close_asks[3] = 0;
         compositor.woken = woken, compositor.table = kept;
 }
 

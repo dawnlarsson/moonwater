@@ -174,7 +174,6 @@ struct wayland_rect
 #define WAYLAND_DO_PINCH_WANT 11 // the window takes the pinch gesture (1) rather than Ctrl and a wheel (0): a client asked for a pinch object
 #define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
 #define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
-#define WAYLAND_DO_CLOSE_HEARD 14 // the window's client was sent the close the compositor asked (xdg_toplevel.close): that ask is over, and the next one is a new one
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -252,7 +251,7 @@ struct wayland_facts
 {
         long width, height; // what the compositor asks of the window, 0 for the client's own choice
         long states;        // WAYLAND_STATE_*
-        long closing;       // the compositor asked the window to go
+        long closing;       // how many times the compositor has asked the window to go (0: never; never 0 again once asked): each ask is said once
         long x, y;          // where the window is
         long scale;         // the percent the screen it is mostly on is drawn at (0 for the host that does not say: 100)
 };
@@ -342,7 +341,6 @@ struct wayland_object
 #define WAYLAND_SURFACE_CONFIGURED 2u // the client acknowledged a configure
 #define WAYLAND_SURFACE_SENT 4u       // the initial configure was sent
 #define WAYLAND_SURFACE_MAPPED 8u     // a buffer is shown
-#define WAYLAND_SURFACE_CLOSED 16u    // the compositor asked the popup to go, and said so (popup_done, once for the popup's window)
 
 struct wayland_surface
 {
@@ -421,6 +419,7 @@ struct wayland_surface
         // An X11 window's surface (xwayland_shell_v1): whether an xwayland_surface_v1 has it, and the serial its set_serial gave.
         // A zwp_xwayland_keyboard_grab_v1 holds the keys as a shortcuts inhibitor does (xgrab).
         unsigned char xsurface, xserial_set, xgrab;
+        long closes; // the asks to go of its window that its client has been told of (wayland_facts.closing): 0 with a new window
         unsigned long long xserial;
         // The window manager's word on it (wayland_xwindow_adopt): xadopted once it has said what the X window is, xpopup for an
         // override-redirect window at (xx, xy) of the output, xdead once its window manager is gone (never shown again), and xwait,
@@ -1445,8 +1444,9 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
                 wayland_let_go(c, gone - 1);
         wayland.rows--;
         s->row = -1;
-        // What was said of that window (a popup's done) was said of it alone: the surface's next window is asked to go anew.
-        s->flags &= ~(unsigned)(WAYLAND_SURFACE_MAPPED | WAYLAND_SURFACE_CLOSED);
+        // What was said of that window (a close, a popup's done) was said of it alone: the surface's next window is asked to go anew.
+        s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
+        s->closes = 0;
         wayland_constraints_update();
         (void)c;
 }
@@ -7257,12 +7257,14 @@ WAYLAND_API void wayland_scales_sweep(void)
 }
 
 /*
-        A window's row knocked: what the compositor says of it now, against what its client was told. A close asked of a
-        toplevel is said (xdg_toplevel.close) and the host is told it was heard (WAYLAND_DO_CLOSE_HEARD), so the ask is over: what
-        the client does with it is the client's (it may ask the person and keep the window), and the next press of the close
-        button is a new ask, said again. A popup asked to go is said so once (popup_done: it is dismissed, and stays so until
-        its window is gone). A size or a state that changed is a new configure, which a client with too many unacknowledged
-        waits for.
+        A window's row knocked: what the compositor says of it now, against what its client was told. The host counts the asks
+        to go of a window (facts.closing) and the surface keeps the count its client was told of: an ask it has not been told of
+        is said (xdg_toplevel.close) and is then told, so what the client does with it is the client's (it may ask the person
+        and keep the window), and the next press of the close button is one more in the host's count, said again. The count is
+        the host's alone to change: the shim took the ask off the row itself once (a call that cleared the host's closing), which
+        was a second way of saying an ask was over beside the count. A popup is asked to go once by the host, and is said so
+        once (popup_done: it is dismissed, and stays so until its window is gone). A size or a state that changed is a new
+        configure, which a client with too many unacknowledged waits for.
 */
 WAYLAND_API void wayland_row_wake(long row)
 {
@@ -7277,7 +7279,7 @@ WAYLAND_API void wayland_row_wake(long row)
         s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
         if (!s || !s->live || s->row != row || wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
                 return;
-        if (facts.closing && !(s->flags & WAYLAND_SURFACE_CLOSED))
+        if (facts.closing && facts.closing != s->closes)
         {
                 struct wayland_event e;
                 int popup = s->role == WAYLAND_ROLE_POPUP;
@@ -7288,12 +7290,8 @@ WAYLAND_API void wayland_row_wake(long row)
                         e = wayland_begin(c, s->role_id, popup ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
                         wayland_end(&e);
                 }
-                // A toplevel that was told: the ask is taken off the row. A popup, and a window with no toplevel to tell (an X
-                // window, which its window manager asks), keeps the row's ask and is not looked at for it again.
-                if (slot >= 0 && !popup)
-                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_CLOSE_HEARD, 0, 0);
-                else
-                        s->flags |= WAYLAND_SURFACE_CLOSED;
+                // This ask is told, or has nobody here to tell (an X window, which its window manager asks): it is not looked at again.
+                s->closes = facts.closing;
                 return;
         }
         // The compositor's own word on the state is the last word too: a window it took out of fullscreen (or out of maximized) is not

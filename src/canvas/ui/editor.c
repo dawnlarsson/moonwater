@@ -518,7 +518,8 @@ static fn editor_save_asked(void)
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
 }
 
-// The window asked to go (its close box, Alt+F4): held while a file in it has changes, which it says, and gone once none has.
+// The window asked to go (its close box, Alt+F4), once for each ask: held while a file in it has changes, which it says, and gone
+// at an ask that finds none. An ask it stayed at is over: saving the file afterwards does not end the editor, the next ask does.
 static void editor_closing(void)
 {
         for (int at = 0; at < editor.count; at++)

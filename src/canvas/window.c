@@ -1140,6 +1140,11 @@ struct windows
         // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
         // WINDOW_MIN_HEIGHT holds for every window whatever it says.
         unsigned int least_width[WINDOWS], least_height[WINDOWS];
+        // The compositor's: how many times the window in the row has been asked to go (its close button, Alt-F4, a middle press on its tab), 0
+        // for never and never 0 again once asked. WINDOW_CLOSING in state says only that it has been asked, and stays; this is what says it
+        // was asked again, and a program answers each ask once (windows_close_asked), so one that stayed for unsaved changes is not ended by
+        // the ask it already answered the moment the changes are saved.
+        unsigned int close_asks[WINDOWS];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -2725,6 +2730,7 @@ struct window_row
         unsigned long bytes;
         unsigned long buffer;
         unsigned int stride, output_width, output_height;
+        unsigned int closes; // the asks to go the program has answered (windows_close_asked), of the table's close_asks
 };
 
 // Row row's buffer which, through the program's copy of the header: the one it draws into and gives back.
@@ -3242,6 +3248,8 @@ static int windows_fits(unsigned long size, unsigned long pixels, unsigned long 
 static void windows_reset_row(struct windows *table, unsigned int row)
 {
         table->state[row] = 0;
+        // The asks to go were of the window that had the row.
+        __atomic_store_n(&table->close_asks[row], 0u, __ATOMIC_RELEASE);
         table->x[row] = table->y[row] = 0;
         table->width[row] = table->height[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
@@ -4081,6 +4089,7 @@ static long windows_take(struct window_row *own)
         own->stride = stride;
         own->output_width = width;
         own->output_height = height;
+        own->closes = 0;
 
         for (own->row = 0; own->row < WINDOWS; own->row++)
         {
@@ -4123,6 +4132,23 @@ static long windows_take(struct window_row *own)
         windows_drain(own->wake);
         __atomic_store_n(&table->pid[own->row], pid, __ATOMIC_RELEASE);
         return 0;
+}
+
+/*
+        Whether the window has been asked to go since this last said so: true once for each ask the compositor counts in the row
+        (close_asks), so a program that answers an ask by staying (an editor with unsaved changes) hears the next press of its
+        close button as a new ask and hears nothing between the two. WINDOW_CLOSING was read instead, a bit that is set at the
+        first ask and stays: a program that stayed was asked again on every pass of its loop, and left by itself the moment the
+        reason it stayed was gone. A row whose count went back to none (the compositor let it go) has been asked nothing.
+*/
+static int windows_close_asked(struct window_row *own)
+{
+        unsigned int asks = __atomic_load_n(&own->table->close_asks[own->row], __ATOMIC_ACQUIRE);
+
+        if (asks == own->closes)
+                return 0;
+        own->closes = asks;
+        return asks != 0;
 }
 
 // Something for the compositor to look at.

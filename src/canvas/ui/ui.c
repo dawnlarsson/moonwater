@@ -22329,7 +22329,7 @@ struct ui_app
         void (*close)(void);            // before the window is left
         // Added for the terminal, which is an app on this loop. Each is optional, and none set is the loop above.
         void (*pass)(void);             // runs at the top of each pass, before the events
-        void (*closing)(void);          // the window is closing: runs each pass, and the loop goes on; unset, the loop ends
+        void (*closing)(void);          // the window was asked to go: runs once for each ask, and the loop goes on; unset, the loop ends
         b32 (*done)(void);              // checked after tick: true ends the loop before the wait
         b32 own_faces;                  // the app opens its engine and loads its faces in open; the runner loads neither
         // The kit: its controls moved this frame, in rows top to bottom (all of it while the theme turns); the app
@@ -22558,7 +22558,7 @@ static int ui_app_run(struct ui_app address_to app)
                                 timeout = 16666667;
                 }
 
-                if (table->state[row] & WINDOW_CLOSING)
+                if (windows_close_asked(app->own))
                 {
                         if (app->closing)
                                 app->closing();

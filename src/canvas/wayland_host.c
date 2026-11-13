@@ -1230,12 +1230,6 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_CLOSE:
                 compositor_close(row);
                 break;
-        case WAYLAND_DO_CLOSE_HEARD:
-                // The window's client was sent the close: the row's ask is over, so the close button's next press (compositor_close) is a
-                // new one and is sent again. Left set, a program that answered "unsaved changes" with a cancel could never be asked again.
-                compositor.state[row] &= ~WINDOW_CLOSING;
-                compositor.table->state[row] = compositor.state[row];
-                break;
         case WAYLAND_DO_FOCUS:
                 compositor_raise(row);
                 compositor_focus(row);
@@ -1301,7 +1295,8 @@ static int compositor_wl_row_facts(void *context, int row, struct wayland_facts 
         if (compositor.state[row] & WINDOW_MINIMIZED)
                 states |= WAYLAND_STATE_SUSPENDED;
         facts->states = states;
-        facts->closing = (compositor.state[row] & WINDOW_CLOSING) != 0;
+        // The count of asks, which is the compositor's own and no program's to write (compositor_close): the shim says each one once.
+        facts->closing = (compositor.state[row] & WINDOW_CLOSING) ? (long)compositor.close_asks[row] : 0;
         facts->x = compositor.x[row];
         facts->y = compositor.y[row];
         facts->scale = compositor_row_scale(row);

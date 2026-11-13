@@ -85,6 +85,7 @@ bit WINDOWS_DISPLAY_X	what is wrong with one display record as it is read; bad i
 bit WINDOWS_DISPLAY_Y	what is wrong with one display record as it is read; bad is assigned 0 first
 bit WINDOW_CELL_SELECTED	a cell's attributes, written with the cell each time it is drawn
 bit WINDOW_CELL_WIDE	a cell's attributes, written with the cell each time it is drawn
+bit WINDOW_CLOSING	the window has been asked to go, for the life of its showing: a row's state is assigned whole when its window first shows and 0 when it is let go (compositor_take, compositor_let_go); the asks are counted beside it (close_asks), and the count is what a program, the shim and the X window manager answer
 bit WINDOW_NO_TAB	wayland_host.c (another hand's): a property of the row's window, cleared with the row
 bit WINDOW_PLACE_SCREEN	what one placement asks, on the placement's own record
 bit WINDOW_PLACE_SIZE	what one placement asks, on the placement's own record
@@ -92,6 +93,7 @@ field src/canvas/font.c:ready	a face set that has been read: true for its life
 field src/canvas/font.c:started	an edge of an outline being walked, in a table zeroed for each glyph
 field src/canvas/ui/editor.c:dirty	cleared by the kit through the app's pointer (ui.c, *app->dirty), not in this file
 field src/canvas/ui/editor.c:leaving	the editor's end: the process exits on it
+field src/canvas/ui/files.c:dirty	cleared by the kit through the app's pointer (ui.c, *app->dirty), not in this file
 field src/canvas/ui/identify.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
 field src/canvas/ui/launcher.c:asked_beside	an option of the command line (-a), for the process
 field src/canvas/ui/launcher.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file

@@ -3595,8 +3595,9 @@ static void terminal_on_size(unsigned int width, unsigned int height)
         terminal.dirty = true;
 }
 
-// The window is closing: the shell is hung up on, once, and the loop goes on until the shell has gone. A log has no
-// shell, so it is over. A staying window is over as well.
+// The window was asked to go (once for each ask, ui_app.closing): the shell is hung up on, once, and the loop goes on until the
+// shell has gone. A log has no shell, so it is over. A staying window is over as well, and so is one whose shell had gone in the
+// same pass: the X sent its end too, so it does not stay for a key (an ask is heard once, and no later pass would end it).
 static void terminal_on_closing(void)
 {
         if (terminal.phase == TERMINAL_STAYING)
@@ -3610,6 +3611,8 @@ static void terminal_on_closing(void)
                 terminal.gone = true;
         else if (!terminal.gone)
                 term_hang_up(terminal.child, &terminal.hung);
+        else
+                terminal.hung = true;
 }
 
 /*

@@ -4584,7 +4584,9 @@ static struct
         int x[WINDOWS], y[WINDOWS];
         unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
         // How many times the row's window has been asked to go since it showed (compositor_close), never 0 once it has been: what
-        // carries the ask to a program that is told in a message is the count it has answered, not WINDOW_CLOSING, which stays.
+        // carries the ask to a program is the count it has answered, not WINDOW_CLOSING, which stays. The table's close_asks is this
+        // count said to the row's program (compositor_close_count is the one writer of both); the X window manager and the Wayland
+        // shim read this one, which no program can write.
         unsigned char close_asks[WINDOWS];
         unsigned int picture_w[WINDOWS], picture_h[WINDOWS]; // as its program drew it
         unsigned int asking[WINDOWS];   // shown at a size asked of it, until a picture of that size comes
@@ -4839,6 +4841,14 @@ static struct
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
 } compositor;
+
+// The count of a row's asks to go, kept and said: the compositor's own (close_asks) and the table's, which the row's program reads.
+static void compositor_close_count(int row, unsigned int asks)
+{
+        compositor.close_asks[row] = (unsigned char)asks;
+        if (compositor.table)
+                __atomic_store_n(&compositor.table->close_asks[row], (unsigned int)compositor.close_asks[row], __ATOMIC_RELEASE);
+}
 
 // The fingers' marks (the touch section, below): whether any is drawn or fading, drawing them, and their masks.
 static int compositor_spots_any(int fading);
@@ -14827,7 +14837,7 @@ static void compositor_take(int row)
                 compositor.asking[row] = 0;
                 compositor.front[row] = front;
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
-                compositor.close_asks[row] = 0;
+                compositor_close_count(row, 0);
                 table->state[row] = compositor.state[row];
                 compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
                 compositor.edges[row] = 0;
@@ -15038,7 +15048,7 @@ static void compositor_leave(int row)
         }
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
-        compositor.close_asks[row] = 0;
+        compositor_close_count(row, 0);
         compositor.landing[row] = 0;
         compositor.glide[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
@@ -15373,9 +15383,12 @@ static void compositor_osk_setting_read(void)
 /*
         A window asked to go: by its close button, Alt-F4, or a middle press on its tab. What happens next is the program's, and
         it may be to stay (unsaved changes, and Cancel): so each ask of a window is an ask of its own, counted in close_asks, and
-        a program that is told by a message is told again. WINDOW_CLOSING alone said it, a bit that is set and stays, so the
-        message went once and a window that had stayed could not be closed by its button again. A popup is asked once: it is
-        dismissed, not asked, and every press outside it while it is on its way out comes here.
+        every program hears each ask once, whatever tells it: a kit program reads the count in its row of the table
+        (windows_close_asked), the X window manager and the Wayland shim keep the count each window was told of
+        (compositor_xwm_close_owed, wayland_row_wake) and send a message when it is behind. WINDOW_CLOSING alone said it, a bit
+        that is set and stays, so a message went once and a window that had stayed could not be closed by its button again, and a
+        kit program read the bit on every pass, so one that had stayed left the moment its reason to stay was gone. A popup is
+        asked once: it is dismissed, not asked, and every press outside it while it is on its way out comes here.
 */
 static void compositor_close(int row)
 {
@@ -15384,8 +15397,7 @@ static void compositor_close(int row)
         if (compositor_popup_parent[row] >= 0 && (compositor.state[row] & WINDOW_CLOSING))
                 return;
 
-        if (!++compositor.close_asks[row])
-                compositor.close_asks[row] = 1;
+        compositor_close_count(row, compositor.close_asks[row] == 255 ? 1u : compositor.close_asks[row] + 1u);
         compositor.state[row] |= WINDOW_CLOSING;
         compositor.table->state[row] = compositor.state[row];
         compositor.woken |= 1u << row;
