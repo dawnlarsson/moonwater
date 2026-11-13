@@ -1184,6 +1184,12 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_CLOSE:
                 compositor_close(row);
                 break;
+        case WAYLAND_DO_CLOSE_HEARD:
+                // The window's client was sent the close: the row's ask is over, so the close button's next press (compositor_close) is a
+                // new one and is sent again. Left set, a program that answered "unsaved changes" with a cancel could never be asked again.
+                compositor.state[row] &= ~WINDOW_CLOSING;
+                compositor.table->state[row] = compositor.state[row];
+                break;
         case WAYLAND_DO_FOCUS:
                 compositor_raise(row);
                 compositor_focus(row);
@@ -2671,6 +2677,7 @@ static void compositor_wl_frame(void)
 {
         if (!compositor_wl.started)
                 return;
+        wayland_drawn();
         wayland_frame();
         compositor_wl_flush_all();
 }

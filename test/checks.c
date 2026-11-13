@@ -177586,6 +177586,7 @@ static struct fake_host_state
         const char *pattern; // what the GPU says each time it is asked: N for not done, R for done; done once it has no more to say
         long hold_row, hold_mode, holds; // the window that holds the pointer and how
         long clock_still; // the clock does not move by itself (each now() is 16 ms on otherwise)
+        long lend, lends; // the host reads a whole window's picture where it is, as the compositor does (WAYLAND_PICTURE_LENT), and how many it has
         int dmabuf_table_fd;
 } fake;
 
@@ -177736,6 +177737,12 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         }
         if (picture->last)
                 r->pictures++;
+        // The compositor's own rule (compositor_wl_lend): a whole picture that is the window's last, not laid over anything.
+        if (fake.lend && picture->pixels && picture->map && picture->last && !picture->blend && (picture->full || !picture->damages))
+        {
+                fake.lends++;
+                return WAYLAND_PICTURE_LENT;
+        }
         return 0;
 }
 
@@ -177768,6 +177775,8 @@ static void fake_row_do(void *context, int row, long what, long a, long b)
                 r->states &= ~(long)WAYLAND_STATE_FULLSCREEN;
         if (what == WAYLAND_DO_MINIMIZE)
                 r->states |= WAYLAND_STATE_SUSPENDED;
+        if (what == WAYLAND_DO_CLOSE_HEARD)
+                r->closing = 0;
 }
 
 static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
@@ -178622,6 +178631,32 @@ static void test_configure(void)
         wayland_row_wake(0);
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1, "a close asked is said once");
+        // The client kept its window (it asked the person, who said no): the close button pressed again is a new ask, and is said again.
+        WLCHECK(!fake.row[0].closing, "and the host is told it was heard, so the row's ask is over");
+        fake.row[0].closing = 1;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 2, "a close asked again of a window that stayed is said again (%ld)",
+                wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close));
+        // And of the window the surface shows after a null buffer took the first away.
+        {
+                struct wl_event_seen *again;
+
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                wlc_forget(c);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                again = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+                wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, again ? (long)again->u[0] : 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                wlc_forget(c);
+                fake.row[0].closing = 1;
+                wayland_row_wake(0);
+                wlc_pump(c);
+                WLCHECK(c->errors == 0 && fake.row[0].used && wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1,
+                        "and of the window it shows again after a null buffer (%ld)", wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close));
+        }
         wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
         WLCHECK(c->errors == 0 && !fake.row[0].used, "the toplevel's destroy takes the window");
         wlc_end(c);
@@ -184179,10 +184214,254 @@ static void test_subsurface_count(void)
         wayland_stop();
 }
 
+/*
+        A window's commit whose damage is all outside its buffer: no rectangle of it is left, and the picture is taken whole, as a commit
+        with no damage is. The subsurface over the window is laid on it again; it was not, where what was remembered as copied was a
+        rectangle read from the stack, and the subsurface was gone until the window's next whole commit.
+*/
+static void test_damage_outside(void)
+{
+        struct tree t;
+        struct wlc *c;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        for (int round = 0; round < 4; round++)
+        {
+                unsigned long over;
+
+                tree_open(&t, 1);
+                c = t.s.c;
+                over = wl_buffer_of(&t.s, 32, 24, 0xff808080, WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, over, 0L, 0L);
+                if (round & 1)
+                        wlc_send(c, t.s.surface, WLQ_wl_surface_damage, 5000L + round, 7000L, 16L, 16L);
+                else
+                        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, -900L, -900L, 10L + round, 10L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00 && fake.row[0].pixels[11 * FAKE_W + 11] == 0xff00ff00 &&
+                            fake.row[0].pixels[4 * FAKE_W + 4] == 0xff00ff00,
+                        "damage all outside the buffer: the subsurface is still laid over the window (round %d: %08x %08x)", round,
+                        fake.row[0].pixels[5 * FAKE_W + 5], fake.row[0].pixels[11 * FAKE_W + 11]);
+                WLCHECK(fake.row[0].pixels[20 * FAKE_W + 20] == 0xff808080 && fake.row[0].pixels[0] == 0xff808080,
+                        "and the window's picture is the buffer it attached, whole (%08x)", fake.row[0].pixels[20 * FAKE_W + 20]);
+                WLCHECK(wayland.client[c->slot]->surfaces[0].shown_full == 1, "and what was copied is remembered as the whole of it");
+                wlc_end(c);
+        }
+        leak_check("damage outside");
+        wayland_stop();
+}
+
+/*
+        A host that reads a window's whole picture where the client keeps it (the compositor's compositor_wl_lend): which commits are whole,
+        when the buffer a lent picture replaced is the client's again, and what a lent picture costs the client's budget.
+*/
+static void test_lent(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long second;
+        unsigned char run[20 * 52];
+        long at = 0, pictures;
+
+        wl_reset();
+        fake.lend = 1;
+        fake.screen.width = 64;
+        fake.screen.height = 48;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff101010);
+        c = s.c;
+        second = wl_buffer_of(&s, 32, 24, 0xff202020, WLN_wl_shm_format_xrgb8888);
+        WLCHECK(fake.lends == 1 && releases_of(c, s.buffer) == 0, "a window's first picture is read where it is, and its buffer is kept (%ld lent, %ld released)",
+                fake.lends, releases_of(c, s.buffer));
+        // damage that is the whole buffer, in buffer and in surface coordinates, and past its edges: whole
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.lends == 2, "a commit whose damage is the whole buffer is a whole picture, read where it is and not copied (%ld)", fake.lends);
+        WLCHECK(releases_of(c, s.buffer) == 0 && releases_of(c, second) == 0, "the buffer it replaced is not released before a frame shows the new one");
+        wayland_presented_idle(1000000000ul, 16666667ul, 1);
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 0, "nor by a frame's time in which nothing was drawn");
+        // The frame drawn releases it, before the frame's callbacks and before its flip lands: a client with two buffers has one to draw in.
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 1 && releases_of(c, second) == 0, "the frame drawn releases it, before its flip has landed (%ld)",
+                releases_of(c, s.buffer));
+        wayland_presented(1000000000ul, 16666667ul, 1, 0ul);
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 1 && releases_of(c, second) == 0, "once (%ld)", releases_of(c, s.buffer));
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage, -5L, -5L, 0x7fffffffL, 0x7fffffffL);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.lends == 3, "damage of everything, as toolkits say it (a rectangle past every edge), is whole too (%ld)", fake.lends);
+        wayland_presented(2000000000ul, 16666667ul, 2, 0ul);
+        wlc_pump(c);
+        // damage of a part is not whole: copied, and the buffer released by the commit
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 23L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.lends == 3 && releases_of(c, second) == 1, "damage one row short of the buffer is a part: copied, and its buffer released at the commit (%ld, %ld)",
+                fake.lends, releases_of(c, second));
+        wayland_presented(3000000000ul, 16666667ul, 3, 0ul);
+        wlc_pump(c);
+
+        // a window put away is in no frame: the buffer its picture replaced comes back at the next frame's time, drawn or not
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_presented(4000000000ul, 16666667ul, 4, 0ul);
+        wlc_pump(c);
+        fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.lends == 5 && releases_of(c, s.buffer) == 0, "a window put away that draws: its new picture is lent, the one before is held (%ld)", fake.lends);
+        WLCHECK(wayland_frame_wanted(), "and a frame's time is asked for, to let it go in");
+        wayland_presented_idle(5000000000ul, 16666667ul, 5);
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 1, "which releases it though the window is in no frame: a client with two buffers has one again (%ld)",
+                releases_of(c, s.buffer));
+        WLCHECK(!wayland_frame_wanted(), "and no more frames are asked for the window put away");
+        fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
+
+        // a dma-buf may be the buffer the card shows until the flip lands: the one a lent picture replaced waits for the frame presented
+        {
+                unsigned long one = dmabuf_buffer(&s, 32, 24, 0xff000000u, DRM_XRGB8888), two = dmabuf_buffer(&s, 32, 24, 0xff400000u, DRM_XRGB8888);
+
+                dmabuf_commit(&s, one, 32, 24);
+                wayland_drawn();
+                wayland_presented(6000000000ul, 16666667ul, 6, 0ul);
+                wlc_forget(c);
+                dmabuf_commit(&s, two, 32, 24);
+                wayland_drawn();
+                wlc_pump(c);
+                WLCHECK(c->errors == 0 && fake.lends >= 7 && releases_of(c, one) == 0, "a dma-buf a lent picture replaced is not released by the frame drawn (%ld, %s)",
+                        releases_of(c, one), c->error_text);
+                wayland_presented(7000000000ul, 16666667ul, 7, 0ul);
+                wlc_pump(c);
+                WLCHECK(releases_of(c, one) == 1, "the frame presented releases it (%ld)", releases_of(c, one));
+                dmabuf_commit(&s, s.buffer, 32, 24);
+                wayland_drawn();
+                wayland_presented(8000000000ul, 16666667ul, 8, 0ul);
+                wlc_pump(c);
+        }
+
+        // a lent picture is not copied and costs the budget nothing: twenty whole commits in one read are twenty pictures
+        fake.clock_still = 1;
+        fake.now += WAYLAND_BUDGET_MS;
+        for (int k = 0; k < 20; k++)
+        {
+                wlc_put(run + at, s.surface);
+                wlc_put(run + at + 4, WLQ_wl_surface_attach | 20UL << 16);
+                wlc_put(run + at + 8, k & 1 ? second : s.buffer);
+                wlc_put(run + at + 12, 0);
+                wlc_put(run + at + 16, 0);
+                wlc_put(run + at + 20, s.surface);
+                wlc_put(run + at + 24, WLQ_wl_surface_damage_buffer | 24UL << 16);
+                wlc_put(run + at + 28, 0);
+                wlc_put(run + at + 32, 0);
+                wlc_put(run + at + 36, 32);
+                wlc_put(run + at + 40, 24);
+                wlc_put(run + at + 44, s.surface);
+                wlc_put(run + at + 48, WLQ_wl_surface_commit | 8UL << 16);
+                at += 52;
+        }
+        pictures = fake.row[0].pictures;
+        wayland_feed(c->slot, run, at, 0, 0);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - pictures == 20 && !wayland_stalled(c->slot) && c->errors == 0,
+                "twenty whole pictures read in place in one read are all made: none was copied, and the budget is of copies (%ld, stalled %ld)",
+                fake.row[0].pictures - pictures, wayland_stalled(c->slot));
+        fake.clock_still = 0;
+        wlc_end(c);
+        leak_check("lent");
+        wayland_stop();
+}
+
+/*
+        A toplevel is told the states its version has: tiled from version 2, suspended from 6. A client that bound xdg_wm_base below that
+        is not sent the numbers. And a buffer destroyed between its attach and the commit is an attach unmade, not the client's end.
+*/
+static void test_versions(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long old_base, surface, xdg, toplevel, buffer, next;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        old_base = wl_global(c, s.registry, WLI_xdg_wm_base, 1);
+        buffer = wl_buffer_of(&s, 32, 24, 0xff334455, WLN_wl_shm_format_xrgb8888);
+        surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface);
+        xdg = wlc_id(c, WLI_xdg_surface, 1);
+        wlc_send(c, old_base, WLQ_xdg_wm_base_get_xdg_surface, xdg, surface);
+        toplevel = wlc_id(c, WLI_xdg_toplevel, 1);
+        wlc_send(c, xdg, WLQ_xdg_surface_get_toplevel, toplevel);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        wlc_forget(c);
+        fake.row[0].states = WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_ACTIVATED | WAYLAND_STATE_SUSPENDED | WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_TOP;
+        fake.row[0].width_asked = 640;
+        fake.row[0].height_asked = 480;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[2] == 8 && c->malformed == 0, "a toplevel of version 1 is told maximized and activated, and neither tiled nor suspended (%lu bytes of states)",
+                e ? e->u[2] : 0);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        wlc_send(c, xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+        wlc_end(c);
+
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_forget(c);
+        fake.row[0].states = WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_ACTIVATED | WAYLAND_STATE_SUSPENDED | WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_TOP;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[2] == 20, "a toplevel of version 6 is told all five (%lu bytes of states)", e ? e->u[2] : 0);
+        fake.row[0].states = 0;
+
+        // a buffer destroyed after its attach and before the commit
+        buffer = wl_buffer_of(&s, 32, 24, 0xffabcdef, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, buffer, WLQ_wl_buffer_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].used && fake.row[0].pixels[0] == 0xff000000,
+                "a buffer destroyed between its attach and the commit is an attach unmade: the window shows what it showed, and the client lives (%s)",
+                c->error_text);
+        // and the id, made a buffer again, is not attached for having been named before
+        next = wl_buffer_of(&s, 32, 24, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, next, 0L, 0L);
+        wlc_send(c, next, WLQ_wl_buffer_destroy);
+        c->next = next; // the client's next buffer has the id the destroyed one had, as libwayland gives ids out again
+        c->next -= 1;   // (wl_buffer_of makes its pool first)
+        next = wl_buffer_of(&s, 32, 24, 0xffff0000, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[0] == 0xff000000,
+                "a buffer made with the id of one destroyed while attached is not shown unasked (%08x, %s)", fake.row[0].pixels[0], c->error_text);
+        wlc_end(c);
+        leak_check("versions");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
 
+        test_damage_outside();
+        test_lent();
+        test_versions();
         test_popup_place();
         test_flow();
         test_configure();

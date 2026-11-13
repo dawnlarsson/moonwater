@@ -170,6 +170,7 @@ struct wayland_rect
 #define WAYLAND_DO_PINCH_WANT 11 // the window takes the pinch gesture (1) rather than Ctrl and a wheel (0): a client asked for a pinch object
 #define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
 #define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
+#define WAYLAND_DO_CLOSE_HEARD 14 // the window's client was sent the close the compositor asked (xdg_toplevel.close): that ask is over, and the next one is a new one
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -333,7 +334,7 @@ struct wayland_object
 #define WAYLAND_SURFACE_CONFIGURED 2u // the client acknowledged a configure
 #define WAYLAND_SURFACE_SENT 4u       // the initial configure was sent
 #define WAYLAND_SURFACE_MAPPED 8u     // a buffer is shown
-#define WAYLAND_SURFACE_CLOSED 16u    // the compositor asked the window to go, and said so
+#define WAYLAND_SURFACE_CLOSED 16u    // the compositor asked the popup to go, and said so (popup_done, once for the popup's window)
 
 struct wayland_surface
 {
@@ -1308,8 +1309,18 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                 wayland.host->row_facts(wayland.host->context, s->row, &facts);
         if (s->role == WAYLAND_ROLE_TOPLEVEL)
         {
-                long all = facts.states;
+                long all = facts.states, version;
 
+                slot = wayland_find(c, s->role_id, WLI_xdg_toplevel);
+                if (slot < 0)
+                        return;
+                // A state is said to a toplevel whose version has it: the tiled ones are from version 2 and suspended from 6, and a
+                // client bound below that was never told what the number means (the protocol forbids sending it one).
+                version = c->objects[slot].version;
+                if (version < 2)
+                        all &= ~(long)(WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_RIGHT | WAYLAND_STATE_TILED_TOP | WAYLAND_STATE_TILED_BOTTOM);
+                if (version < 6)
+                        all &= ~(long)WAYLAND_STATE_SUSPENDED;
                 if (all & WAYLAND_STATE_MAXIMIZED)
                         states[count++] = WLN_xdg_toplevel_state_maximized;
                 if (all & WAYLAND_STATE_FULLSCREEN)
@@ -1328,9 +1339,6 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         states[count++] = WLN_xdg_toplevel_state_tiled_bottom;
                 if (all & WAYLAND_STATE_SUSPENDED)
                         states[count++] = WLN_xdg_toplevel_state_suspended;
-                slot = wayland_find(c, s->role_id, WLI_xdg_toplevel);
-                if (slot < 0)
-                        return;
                 if (initial && wayland.screens)
                 {
                         const struct wayland_screen *own = &wayland.screen[wayland_screen_at(facts.x, facts.y)];
@@ -1408,7 +1416,8 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
                 wayland_let_go(c, gone - 1);
         wayland.rows--;
         s->row = -1;
-        s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
+        // What was said of that window (a popup's done) was said of it alone: the surface's next window is asked to go anew.
+        s->flags &= ~(unsigned)(WAYLAND_SURFACE_MAPPED | WAYLAND_SURFACE_CLOSED);
         wayland_constraints_update();
         (void)c;
 }
@@ -2431,7 +2440,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 {
         struct wayland_pool *p = &c->pools[b->pool];
         struct wayland_picture picture;
-        int first = s->row < 0;
+        int first = s->row < 0, lent = 0;
         long wx, wy, ww, wh, status;
 
         if (first)
@@ -2516,14 +2525,26 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                         continue;
                 r.width = x2 - r.x;
                 r.height = y2 - r.y;
+                // A rectangle that is the whole buffer says the whole picture changed, as no damage at all does: the picture is whole,
+                // which a host may read where it is (WAYLAND_PICTURE_LENT) and not copy. A client that draws every frame whole and
+                // says so (a video, a game, a browser that scrolls) was copied every frame for having said it.
+                if (!r.x && !r.y && r.width == b->width && r.height == b->height)
+                        picture.full = 1;
                 picture.damage[picture.damages++] = r;
         }
+        // Damage that is all outside the buffer leaves no rectangle: the picture is taken whole, as a commit with no damage is. A host is
+        // never handed a picture that is neither whole nor has a rectangle (it reads that as the whole buffer, and so copies it), and
+        // what is remembered as copied (shown_full, shown_rect) is what was: the subsurfaces are laid over all of it again.
+        if (!picture.full && !picture.damages)
+                picture.full = 1;
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
         // A picture the host reads in place keeps its buffer: it is the surface's lent buffer, and the one it replaced is let go of when
         // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.
         if (status == WAYLAND_PICTURE_LENT)
         {
                 unsigned short now = (unsigned short)((b - c->buffers) + 1);
+
+                lent = 1;
 
                 if (s->lent != now)
                 {
@@ -2548,8 +2569,12 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 s->lent_gone = s->lent;
                 s->lent = 0;
         }
-        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
-        for (long at = 0; !picture.full && at < picture.damages; at++)
+        // The budget is of pixels copied at the commit (WAYLAND_BUDGET_*): a picture read where it is copied none, and costs none. Counted
+        // all the same, a window the size of the screen drawn at more than twice in sixteen milliseconds (a 144 Hz screen) had every
+        // third commit, and all its client sent after it, held to the next window of time.
+        if (!lent)
+                c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
+        for (long at = 0; !lent && !picture.full && at < picture.damages; at++)
                 c->budget_used += picture.damage[at].width * picture.damage[at].height;
         if (status < 0)
                 return wayland_fail(c, self->id, WAYLAND_IMPLEMENTATION, "the window refused the picture");
@@ -2973,6 +2998,20 @@ static int wayland_buffer_request(struct wayland_client *c, struct wayland_objec
 {
         struct wayland_buffer *b = &c->buffers[self->link];
 
+        // A surface whose pending state names the buffer (attached, or cached by a synchronized subsurface, and not committed yet) has
+        // that attach unmade: its commit shows what it showed. The protocol lets a client destroy a buffer at any time; the commit was a
+        // protocol error that ended the client, and the id, given to the client's next buffer, was that buffer attached unasked.
+        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        {
+                struct wayland_surface *s = &c->surfaces[at];
+
+                if (!s->live)
+                        continue;
+                if (s->attach_made && s->attached == self->id)
+                        s->attach_made = 0, s->attached = 0;
+                if (s->cached == self->id)
+                        s->cached = 0;
+        }
         // A surface that still names the buffer finds it gone at its commit; one that holds it as its picture goes on showing it,
         // and the record is freed when it lets go.
         if (b->held > 0)
@@ -7189,9 +7228,12 @@ WAYLAND_API void wayland_scales_sweep(void)
 }
 
 /*
-        A window's row knocked: what the compositor says of it now, against what its client was told. A close asked is
-        said once (the toplevel's close, a popup's done); a size or a state that changed is a new configure, which a
-        client with too many unacknowledged waits for.
+        A window's row knocked: what the compositor says of it now, against what its client was told. A close asked of a
+        toplevel is said (xdg_toplevel.close) and the host is told it was heard (WAYLAND_DO_CLOSE_HEARD), so the ask is over: what
+        the client does with it is the client's (it may ask the person and keep the window), and the next press of the close
+        button is a new ask, said again. A popup asked to go is said so once (popup_done: it is dismissed, and stays so until
+        its window is gone). A size or a state that changed is a new configure, which a client with too many unacknowledged
+        waits for.
 */
 WAYLAND_API void wayland_row_wake(long row)
 {
@@ -7209,14 +7251,20 @@ WAYLAND_API void wayland_row_wake(long row)
         if (facts.closing && !(s->flags & WAYLAND_SURFACE_CLOSED))
         {
                 struct wayland_event e;
+                int popup = s->role == WAYLAND_ROLE_POPUP;
 
-                s->flags |= WAYLAND_SURFACE_CLOSED;
-                slot = wayland_find(c, s->role_id, s->role == WAYLAND_ROLE_POPUP ? WLI_xdg_popup : WLI_xdg_toplevel);
+                slot = wayland_find(c, s->role_id, popup ? WLI_xdg_popup : WLI_xdg_toplevel);
                 if (slot >= 0)
                 {
-                        e = wayland_begin(c, s->role_id, s->role == WAYLAND_ROLE_POPUP ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
+                        e = wayland_begin(c, s->role_id, popup ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
                         wayland_end(&e);
                 }
+                // A toplevel that was told: the ask is taken off the row. A popup, and a window with no toplevel to tell (an X
+                // window, which its window manager asks), keeps the row's ask and is not looked at for it again.
+                if (slot >= 0 && !popup)
+                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_CLOSE_HEARD, 0, 0);
+                else
+                        s->flags |= WAYLAND_SURFACE_CLOSED;
                 return;
         }
         // The compositor's own word on the state is the last word too: a window it took out of fullscreen (or out of maximized) is not
@@ -7318,7 +7366,18 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                 if (!s || !s->live)
                         continue;
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                {
+                        // A window put away is in no frame, so none will show the picture that replaced its lent buffer: the buffer is the
+                        // client's again at the first frame's time after the commit, drawn or not (what read it before the commit is done
+                        // by then). Kept for a frame that never comes, a client with two buffers that draws while it is put away had
+                        // neither: one is the picture, and the other was never released.
+                        if (s->lent_gone)
+                        {
+                                wayland_let_go(c, s->lent_gone - 1);
+                                s->lent_gone = 0;
+                        }
                         continue;
+                }
                 // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
                 if (drawn && s->lent_gone)
                 {
@@ -7329,6 +7388,31 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
+        }
+}
+
+/*
+        A frame was drawn (composed; its flip may still be on its way): every window shown is in it with the picture it has now, so the
+        buffer a lent picture replaced is read by nothing any more and is the client's again, here, before the frame callbacks the same
+        frame answers (the host calls this, then wayland_frame). A buffer in a pool, that is: one of a dma-buf may be the very buffer the
+        card shows until the flip lands, and waits for wayland_presented. Released at the flip instead, a client with two buffers was
+        told the frame was done while both were still the compositor's, and one that draws only when a buffer is free drew no more.
+*/
+WAYLAND_API void wayland_drawn(void)
+{
+        for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
+        {
+                struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
+                struct wayland_facts facts;
+
+                if (!s || !s->live || !s->lent_gone || c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf)
+                        continue;
+                // A window put away is in no frame: its buffer goes at a frame's time all the same (wayland_presented_rows).
+                if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                        continue;
+                wayland_let_go(c, s->lent_gone - 1);
+                s->lent_gone = 0;
         }
 }
 
@@ -7389,6 +7473,10 @@ WAYLAND_API long wayland_frame_wanted(void)
                 struct wayland_facts facts;
                 int waits;
 
+                // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows).
+                if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].lent_gone &&
+                    wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                        return 1;
                 if (!c || (!c->waiting && !c->presenting_surfaces))
                         continue;
                 waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies != 0;

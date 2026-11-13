@@ -558,6 +558,27 @@ if [ -n "$input" ]; then
         start
 fi
 
+# A window asked to close and kept, three times (Alt-F4 written to an input FIFO, test/wayland_close.py): its client is sent the close each
+# time. The row's ask was never taken off it, so a program that answered the first with a cancel could not be closed by the window's button again.
+stop
+rm -f "$work/close.fifo"
+mkfifo "$work/close.fifo"
+close_extra=$extra
+extra="$extra -i $work/close.fifo -l us"
+if start; then
+        out=$(MOONWATER_ASKED=1 python3 -I "$(dirname "$0")/wayland_close.py" "$work/close.fifo" 2>&1)
+        if alive && [ "$out" = "asked 1 1 1" ]; then
+                row ok "a window asked to close three times and kept is sent xdg_toplevel.close three times"
+        else
+                row FAIL "a window asked to close three times and kept is sent xdg_toplevel.close three times" "$out $(tail -3 "$work/compositor.log")"
+        fi
+else
+        row FAIL "the compositor starts for the close rows" "$(tail -3 "$work/compositor.log")"
+fi
+extra=$close_extra
+stop
+start
+
 # The screen's scale changed while clients run, end to end (they follow it as toolkits do: wl_output, xdg-output, the fractional
 # scale and the viewporter, and as a client that knows whole scales only).
 "$client" -S -n 1 -s -q > /dev/null 2>&1
@@ -628,6 +649,17 @@ if alive && [ "$out" = kept ]; then
         row ok "hostile damage (negative, past the buffer, huge, overlapping) is clipped: the client is kept and the compositor goes on"
 else
         row FAIL "hostile damage (negative, past the buffer, huge, overlapping) is clipped" "$out $(tail -3 "$work/compositor.log")"
+fi
+
+# What the protocol lets a client do that the shim got wrong (test/wayland_conform.py): a buffer destroyed between its attach and the commit,
+# damage wholly outside the buffer of a window with a subsurface, and a client of two buffers that is given them back, shown and put away.
+out=$(python3 -I "$(dirname "$0")/wayland_conform.py" "$work/scan.img" 2>&1)
+echo "$out" | while read -r verdict rest; do
+        case $verdict in ok | FAIL) echo "$verdict $rest" ;; esac
+done
+failures=$((failures + $(echo "$out" | grep -c '^FAIL')))
+if ! alive || [ "$(echo "$out" | grep -c '^ok')" != 4 ]; then
+        row FAIL "the conformance client ran its four rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
 fi
 
 # A pool on a file whose pages the client serves itself and never does (FUSE, test/wayland_held.py): the pool is refused, and the compositor
