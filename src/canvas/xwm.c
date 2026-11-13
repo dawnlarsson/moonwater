@@ -562,6 +562,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         free->serial = 0;
         free->row = -1;
         free->protocols = 0;
+        free->closes = 0;
         free->transient = 0;
         free->x = free->y = 0;
         free->width = free->height = 0;

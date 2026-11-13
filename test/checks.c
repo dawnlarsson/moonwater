@@ -233659,6 +233659,16 @@ static void close_ask_rows(void)
         check("close: the count of asks never comes back to none", compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
         compositor_xwm_unmapped(&w);
         check("close: a mapping that ended is owed nothing, and its next is told from the first ask", w.row == -1 && !w.closes && !compositor_xwm_close_owed(&w));
+        {
+                struct compositor_xwm_window *first = compositor_xwm_find(0x7700001u, 1), *next;
+
+                if (first)
+                        first->closes = 3;
+                compositor_xwm_forget(0x7700001u);
+                next = compositor_xwm_find(0x7700002u, 1);
+                check("close: a record given to another X window has been told of no ask", first && next == first && !next->closes);
+                compositor_xwm_forget(0x7700002u);
+        }
         // A popup is dismissed once: a press outside it while it goes is not another ask.
         compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = 2;
         compositor_close(3);
