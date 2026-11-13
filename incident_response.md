@@ -45,7 +45,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 | | |
 |---|---|
-| Status | Fixed, 2026-11-13, `PENDING` |
+| Status | Fixed, 2026-11-13, `93dab6d` |
 | Class | Unbounded wait on a peer inside the main loop (a page fault another process answers); denial of the whole session, and of its end |
 | Attacker | 1 or 8: any program that can open `/run/moonwater/wayland-0` and can mount or reach a FUSE filesystem (a user namespace is enough), or hand over a file of a network filesystem |
 | Reachable | src/canvas/wayland_host.c `compositor_wl_map`, from `wl_shm.create_pool` (src/canvas/wayland.c); `compositor_wl_dmabuf_map` by the same reasoning |
