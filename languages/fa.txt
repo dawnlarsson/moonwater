@@ -377,7 +377,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Smooth mouse wheel	0dab	چرخ ماوس نرم
 =Sound	9a34	صدا
 =Sound server	84bf	کارساز صدا
-=Splash	e986	صفحه آغاز
 =Start the desktop	be4c	اجرای رومیزی
 =System	84bc	سیستم
 =System notices	fa89	اعلان‌های سیستم

@@ -377,7 +377,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Smooth mouse wheel	0dab	عجلة الماوس السلسة
 =Sound	9a34	الصوت
 =Sound server	84bf	خادم الصوت
-=Splash	e986	شاشة البدء
 =Start the desktop	be4c	تشغيل سطح المكتب
 =System	84bc	النظام
 =System notices	fa89	إشعارات النظام

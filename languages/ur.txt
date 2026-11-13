@@ -377,7 +377,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Smooth mouse wheel	0dab	ہموار ماؤس وہیل
 =Sound	9a34	آواز
 =Sound server	84bf	آواز کا سرور
-=Splash	e986	آغاز کی اسکرین
 =Start the desktop	be4c	ڈیسک ٹاپ شروع کریں
 =System	84bc	سسٹم
 =System notices	fa89	سسٹم اطلاعات

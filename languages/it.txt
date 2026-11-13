@@ -376,7 +376,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Smooth mouse wheel	0dab	Rotellina del mouse fluida
 =Sound	9a34	Audio
 =Sound server	84bf	Server audio
-=Splash	e986	Schermata di avvio
 =Start the desktop	be4c	Avvia il desktop
 =System	84bc	Sistema
 =System notices	fa89	Avvisi di sistema

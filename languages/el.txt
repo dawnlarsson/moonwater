@@ -376,7 +376,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Smooth mouse wheel	0dab	Ομαλός τροχός ποντικιού
 =Sound	9a34	Ήχος
 =Sound server	84bf	Διακομιστής ήχου
-=Splash	e986	Οθόνη εκκίνησης
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
 =System	84bc	Σύστημα
 =System notices	fa89	Ειδοποιήσεις συστήματος

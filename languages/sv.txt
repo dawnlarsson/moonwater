@@ -376,7 +376,6 @@ ui_field_full	fe02	mer ryms inte
 =Smooth mouse wheel	0dab	Mjukt mushjul
 =Sound	9a34	Ljud
 =Sound server	84bf	Ljudserver
-=Splash	e986	Startbild
 =Start the desktop	be4c	Starta skrivbordet
 =System	84bc	System
 =System notices	fa89	Systemmeddelanden

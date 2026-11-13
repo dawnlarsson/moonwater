@@ -376,7 +376,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Smooth mouse wheel	0dab	Düzgün fare tekerleği
 =Sound	9a34	Ses
 =Sound server	84bf	Ses sunucusu
-=Splash	e986	Açılış ekranı
 =Start the desktop	be4c	Masaüstünü başlat
 =System	84bc	Sistem
 =System notices	fa89	Sistem bildirimleri
