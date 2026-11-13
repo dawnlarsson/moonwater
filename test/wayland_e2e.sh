@@ -664,7 +664,21 @@ fi
 
 # A window drawn a part at a time from three buffers in turn (test/wayland_part.py): each commit's damage is read from the buffer where it is,
 # and the screen shows what a copy of the damage would; then the picture's file is cut under the compositor, which goes on.
+ln -sf "$compositor" "$work/bin/moonwater"
+frames_of()
+{
+        "$work/bin/moonwater" debug 2> /dev/null | sed -n 's/.*client frames *\([0-9]*\) read in place, \([0-9]*\) copied.*/\1 \2/p'
+}
+set -- $(frames_of)
+part_in_place=${1:-0}
+part_copied=${2:-0}
 out=$(python3 -I "$(dirname "$0")/wayland_part.py" "$work/scan.img" 2>&1)
+set -- $(frames_of)
+if [ "${2:-x}" = "$part_copied" ] && [ $((${1:-0} - part_in_place)) -ge 6 ]; then
+        row ok "none of its commits was copied into the row's table: each was read in place (moonwater debug counts them)"
+else
+        row FAIL "none of its commits was copied into the row's table" "read in place $part_in_place then ${1:-none}, copied $part_copied then ${2:-none}"
+fi
 echo "$out" | while read -r verdict rest; do
         case $verdict in ok | FAIL) echo "$verdict $rest" ;; esac
 done
@@ -684,11 +698,13 @@ refused) if alive; then row ok "a pool on a file the client serves itself (FUSE)
 esac
 
 # A window whose damage is a rectangle the card copies (over its threshold): the card's copy into the picture is the processor's, byte for byte, and
-# moonwater debug says the card copied rectangles (not the processor).
+# moonwater debug says the card copied rectangles (not the processor). The window has a subsurface (-u): a window of one surface is read where its
+# client keeps it, damage and all, and nothing of it is copied by anyone; one with a subsurface is still laid into the row's picture, its root's damage
+# by the card.
 case $extra in
 *-G*)
         ln -sf "$compositor" "$work/bin/moonwater"
-        "$client" -D -K -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
+        "$client" -D -K -u -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
         held=$!
         sleep 2
         cp "$work/scan.img" "$work/card-damage.img"
@@ -698,7 +714,7 @@ case $extra in
         stop
         extra=
         if start; then
-                "$client" -D -K -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
+                "$client" -D -K -u -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
                 held=$!
                 sleep 2
                 cp "$work/scan.img" "$work/processor-damage.img"
