@@ -6627,8 +6627,14 @@ lane_wayland()
                 wayland_warn="-std=gnu11 -O2 -Wall -Wextra -Werror"
                 wayland_row "engine-$wayland_cc" $wayland_cc $wayland_warn -DCONFIG_MOONWATER_WAYLAND \
                         -c src/canvas/wayland.c -o "$work/wayland.o"
-                wayland_row "checks-$wayland_cc" sh -c "$wayland_cc $wayland_warn -Wno-comment -D_GNU_SOURCE \
-                        -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c -o '$work/check-$wayland_cc' && \
+                # The engine reads a head, looks an id up and cuts a commit's damage with the library's routines (src/lib.c: wire_message,
+                # wire_slot, rects_clip and the rest), so the checks are linked with the library, built by the same compiler with no entry
+                # of its own (STANDARD_NO_ENTRY, as the libdiff lane builds it).
+                # clang's own assembler does not take the library's tables (their sizes are asked of the assembler); the system's does.
+                case $wayland_cc in *clang*) wayland_as=-fno-integrated-as ;; *) wayland_as= ;; esac
+                wayland_row "checks-$wayland_cc" sh -c "$wayland_cc -O2 -w $wayland_as -DSTANDARD_NO_ENTRY -c src/lib.c -o '$work/lib-$wayland_cc.o' && \
+                        $wayland_cc $wayland_warn -Wno-comment -D_GNU_SOURCE \
+                        -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c '$work/lib-$wayland_cc.o' -o '$work/check-$wayland_cc' && \
                         '$work/check-$wayland_cc'"
                 # The X11 wire codec the window manager of Xwayland speaks (xwm_wire.c): built alone, then its checks.
                 wayland_row "xwm-engine-$wayland_cc" $wayland_cc $wayland_warn -c src/canvas/xwm_wire.c -o "$work/xwm_wire.o"

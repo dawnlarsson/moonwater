@@ -15393,6 +15393,196 @@ fn check_automaton()
 }
 
 /*
+        wire_message, wire_slot and rects_clip against the C they stand for
+        (the Wayland shim's own, src/canvas/wayland.c, as it read a head,
+        looked an id up and cut a commit's damage before they were these).
+
+        wire_message: every count of bytes there from none to twelve and a
+        few more, every size a head can say at and one either side of each
+        bound (eight, the most, a multiple of four, what is there), four
+        bounds, the bytes ending at a page that cannot be read (a head read
+        before eight bytes are there, or a byte past the eighth, faults) and
+        the head's two words ending at a page that cannot be written.
+        wire_slot: an index that ends at a page that cannot be read, every
+        cell of it, the first past it and far past. rects_clip: rectangles
+        on, across and off every edge, empty, negative and the whole, in
+        lists that end at a page that cannot be written, cut where they lie.
+*/
+static positive reference_wire_message(const p8 address_to bytes, positive size, positive most, p32 address_to head)
+{
+        positive said;
+
+        if (size < 8)
+                return 0;
+        said = (positive)bytes[6] | (positive)bytes[7] << 8;
+        if (said < 8 || said > most || (said & 3))
+                return ~(positive)0;
+        if (said > size)
+                return 0;
+        head[0] = (p32)bytes[0] | (p32)bytes[1] << 8 | (p32)bytes[2] << 16 | (p32)bytes[3] << 24;
+        head[1] = (p32)bytes[4] | (p32)bytes[5] << 8;
+        return said;
+}
+
+static bipolar reference_wire_slot(const p16 address_to index, positive count, positive at)
+{
+        return at < count ? (bipolar)index[at] - 1 : -1;
+}
+
+static positive reference_rects_clip(b64 address_to rects, positive count, positive width, positive height)
+{
+        positive kept = 0, whole = 0;
+
+        for (positive at = 0; at < count; at++)
+        {
+                b64 x = rects[at * 4], y = rects[at * 4 + 1], x2 = x + rects[at * 4 + 2], y2 = y + rects[at * 4 + 3];
+
+                x2 = x2 > (b64)width ? (b64)width : x2;
+                y2 = y2 > (b64)height ? (b64)height : y2;
+                x = x < 0 ? 0 : x;
+                y = y < 0 ? 0 : y;
+                if (x2 <= x || y2 <= y)
+                        continue;
+                rects[kept * 4] = x;
+                rects[kept * 4 + 1] = y;
+                rects[kept * 4 + 2] = x2 - x;
+                rects[kept * 4 + 3] = y2 - y;
+                whole |= !x && !y && x2 == (b64)width && y2 == (b64)height;
+                kept++;
+        }
+        return kept | whole << 63;
+}
+
+fn check_wire()
+{
+        static const positive mosts[] = {8, 12, 4096, 65535};
+        static const positive saids[] = {0, 1, 4, 7, 8, 9, 10, 11, 12, 13, 15, 16, 20, 4092, 4095, 4096, 4097, 4100, 65532, 65535};
+        static const positive theres[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 20, 4092, 4095, 4096};
+        static const positive counts[] = {0, 1, 2, 3, 7, 8, 64, 2048};
+        static const b64 edges[] = {-1000000000, -65, -1, 0, 1, 31, 32, 33, 63, 64, 65, 1000000000};
+        p8 address_to pages = memory(3 * 4096);
+        p8 address_to heads = memory(2 * 4096);
+        p8 address_to cells = memory(3 * 4096);
+        p8 address_to lists = memory(3 * 4096);
+        p8 mapped = (bipolar)(positive)pages > 0 && (bipolar)(positive)heads > 0 && (bipolar)(positive)cells > 0 && (bipolar)(positive)lists > 0;
+        p64 seed = 0x2545f4914f6cdd1dull;
+        positive agreed = 1, heads_agreed = 1, sizes = 0, refused = 0, waited = 0, runs = 0;
+
+        same("wire_message", "guard mappings", mapped, 1);
+        if (!mapped)
+                return;
+        p8 protected = system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(heads + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(cells + 8192), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(lists + 8192), 4096, 0) == 0;
+        same("wire_message", "guard pages protected", protected, 1);
+        if (!protected)
+                return;
+        p32 address_to head = (p32 address_to)(heads + 4096 - 8);
+
+#define WIRE_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
+        for (positive m = 0; m < array_count(mosts); m++)
+                for (positive t = 0; t < array_count(theres); t++)
+                        for (positive s = 0; s < array_count(saids); s++)
+                                for (positive odd = 0; odd < 4; odd++)
+                                {
+                                        //  The bytes end at the guard; odd moves the whole of them off a word's boundary, with what is there one less.
+                                        positive there = theres[t] > odd ? theres[t] - odd : 0, said = saids[s];
+                                        p8 address_to bytes = pages + 8192 - there;
+                                        p32 want_head[2] = {0x5a5a5a5a, 0xa5a5a5a5};
+
+                                        for (positive at = 0; at < there; at++)
+                                                bytes[at] = (p8)WIRE_NEXT();
+                                        if (there >= 8)
+                                                bytes[6] = (p8)said, bytes[7] = (p8)(said >> 8);
+                                        head[0] = 0x5a5a5a5a, head[1] = 0xa5a5a5a5;
+                                        positive want = reference_wire_message(bytes, there, mosts[m], want_head);
+                                        positive got = (wire_message)(bytes, there, mosts[m], head);
+
+                                        agreed &= got == want;
+                                        heads_agreed &= head[0] == want_head[0] && head[1] == want_head[1];
+                                        runs++;
+                                        sizes += want != 0 && want != ~(positive)0;
+                                        refused += want == ~(positive)0;
+                                        waited += want == 0;
+                                }
+        same("wire_message", "the size, none yet, or no such size, every count there and every size said", agreed, 1);
+        same("wire_message", "the head is the object and the opcode when a size is answered, and untouched when not", heads_agreed, 1);
+        //  The lists reach all three answers, or the rows above prove nothing.
+        same("wire_message", "sizes answered, sizes refused and heads waited for", sizes > 200 && refused > 500 && waited > 500, 1);
+        same("wire_message", "heads compared", runs > 6000, 1);
+        head[0] = 1, head[1] = 2;
+        same("wire_message", "seven bytes there reads none of them", (wire_message)(pages + 8192, 7, 4096, head), 0);
+        same("wire_message", "and writes no head", head[0] == 1 && head[1] == 2, 1);
+
+        {
+                positive slots = 1, kept = 1;
+
+                for (positive c = 0; c < array_count(counts); c++)
+                {
+                        positive count = counts[c];
+                        p16 address_to index = (p16 address_to)(cells + 8192 - count * 2);
+
+                        for (positive at = 0; at < count; at++)
+                                index[at] = (p16)(WIRE_NEXT() % 5 == 0 ? 0 : WIRE_NEXT());
+                        if (count > 2)
+                                index[0] = 0, index[count - 1] = 65535, index[1] = 1;
+                        for (positive at = 0; at < count + 3; at++)
+                                slots &= (wire_slot)(index, count, at) == reference_wire_slot(index, count, at);
+                        slots &= (wire_slot)(index, count, ~(positive)0) == -1 && (wire_slot)(index, count, (positive)1 << 63) == -1 &&
+                                 (wire_slot)(index, count, (positive)1 << 32) == -1;
+                        if (count > 2)
+                                kept &= (wire_slot)(index, count, 0) == -1 && (wire_slot)(index, count, count - 1) == 65534 && (wire_slot)(index, count, 1) == 0;
+                }
+                same("wire_slot", "the cell less one, and -1 for every cell past the index, which is not read", slots, 1);
+                same("wire_slot", "an empty cell is -1, a full one its slot", kept, 1);
+        }
+
+        {
+                static b64 want[64 * 4];
+                positive cut = 1, wholes = 0, drops = 0, lists_run = 0;
+
+                for (positive round = 0; round < 6000; round++)
+                {
+                        positive count = round < 8 ? round : WIRE_NEXT() % 9, width = round & 1 ? 64 : 1 + WIRE_NEXT() % 100, height = round & 2 ? 32 : 1 + WIRE_NEXT() % 100;
+                        b64 address_to rects = (b64 address_to)(lists + 8192 - count * 32);
+
+                        for (positive at = 0; at < count; at++)
+                        {
+                                positive kind = WIRE_NEXT() % 8;
+
+                                rects[at * 4] = edges[WIRE_NEXT() % array_count(edges)];
+                                rects[at * 4 + 1] = edges[WIRE_NEXT() % array_count(edges)];
+                                rects[at * 4 + 2] = kind == 0 ? 0 : kind == 1 ? -5 : kind == 2 ? 1000000000 : (b64)(WIRE_NEXT() % 130);
+                                rects[at * 4 + 3] = kind == 3 ? 0 : kind == 4 ? -1 : kind == 2 ? 1000000000 : (b64)(WIRE_NEXT() % 130);
+                                if (kind == 5) // the whole picture, to the pixel
+                                        rects[at * 4] = rects[at * 4 + 1] = 0, rects[at * 4 + 2] = (b64)width, rects[at * 4 + 3] = (b64)height;
+                                if (kind == 6) // one short of it
+                                        rects[at * 4] = rects[at * 4 + 1] = 0, rects[at * 4 + 2] = (b64)width - 1, rects[at * 4 + 3] = (b64)height;
+                        }
+                        memory_copy(want, rects, count * 32);
+                        positive wanted = reference_rects_clip(want, count, width, height);
+                        positive got = (rects_clip)(rects, count, width, height);
+                        positive kept = wanted & ~((positive)1 << 63);
+
+                        cut &= got == wanted && (!kept || !memory_compare(want, rects, kept * 32));
+                        wholes += wanted >> 63;
+                        drops += kept < count;
+                        lists_run++;
+                }
+                same("rects_clip", "the kept rectangles, their count and whether one is the whole picture", cut, 1);
+                same("rects_clip", "lists with a whole one and lists with one dropped", wholes > 300 && drops > 300, 1);
+                same("rects_clip", "lists cut", lists_run, 6000);
+                same("rects_clip", "no rectangles keeps none of a list that cannot be read", (rects_clip)((b64 address_to)(lists + 8192), 0, 10, 10), 0);
+        }
+#undef WIRE_NEXT
+        memory_free(pages, 3 * 4096);
+        memory_free(heads, 2 * 4096);
+        memory_free(cells, 3 * 4096);
+        memory_free(lists, 3 * 4096);
+}
+
+/*
         Call the assembly entry even for compile-time small sizes. Disjoint
         maps cover every byte value and noninjective maps; aliased maps retain
         the original four-byte load-all-then-store-all contract. On x86_64
@@ -30875,6 +31065,7 @@ b32 main()
         check_reverse();
         check_translate();
         check_automaton();
+        check_wire();
         check_cells_from_ascii();
         check_unicode_width();
         check_unicode_case();
@@ -179185,7 +179376,10 @@ int main(void) {
         compositor, in one process. Every request is built from the table the shim reads, and every event the shim sends
         is read back by the table's event signatures, so a malformed event is a failed check wherever it appears.
 
-            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c
+            cc -O2 -DSTANDARD_NO_ENTRY -c src/lib.c -o lib.o
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c lib.o
+
+        The library is linked beside it: the engine's head, id and damage routines are src/lib.c's.
 */
 #include <errno.h>
 #include <fcntl.h>

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        480 routines (454 public, 26 local), 469 of them on all three and 11 local to one.
+        483 routines (457 public, 26 local), 472 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -408,6 +408,7 @@
           program_environment            public  yes     yes     yes
           program_environment_list       public  yes     yes     yes
           program_initial_identity       public  yes     yes     yes
+          rects_clip                     public  yes     yes     yes
           resample_polyphase2_f32        public  yes     yes     yes
           resample_polyphase2_f32_rows   public  yes     yes     yes
           rmsnorm_backward_f32           public  yes     yes     yes
@@ -525,6 +526,8 @@
           unicode_width                  public  yes     yes     yes
           wait_status_code               public  yes     yes     yes
           wait_status_code_base          public  yes     yes     yes
+          wire_message                   public  yes     yes     yes
+          wire_slot                      public  yes     yes     yes
           working_directory_get          public  yes     yes     yes
           working_directory_set          public  yes     yes     yes
           writer_field                   public  yes     yes     yes
@@ -13745,6 +13748,52 @@ __asm__(
     "cmp %rdx, %rax\n   jae 2f\n   cmp %r9, %r10\n   jb 1b\n"
     "2:  mov %ax, (%rcx)\n   mov %r10, %rax\n" ASM_RET
     ASM_END(automaton_scan)
+
+    //
+    //       wire_message: rdi the bytes, rsi how many, rdx the most a message
+    //       may be, rcx the two words of the head. The size is the sixteen
+    //       bits at byte 6, and is looked at before anything is stored: 0 in
+    //       rax while fewer than eight bytes are there or the message is not
+    //       all there, all ones for a size no message has, else the size,
+    //       with the object and the opcode stored.
+    //
+    ASM_FUNC(wire_message)
+    "xor %eax, %eax\n   cmp $8, %rsi\n   jb 9f\n   movzwl 6(%rdi), %r8d\n   mov $-1, %rax\n   cmp $8, %r8\n   jb 9f\n"
+    "cmp %rdx, %r8\n   ja 9f\n   test $3, %r8b\n   jnz 9f\n   xor %eax, %eax\n   cmp %rsi, %r8\n   ja 9f\n"
+    "mov (%rdi), %eax\n   mov %eax, (%rcx)\n   movzwl 4(%rdi), %eax\n   mov %eax, 4(%rcx)\n   mov %r8, %rax\n"
+    "9:  " ASM_RET
+    ASM_END(wire_message)
+
+    //
+    //       wire_slot: rdi the index, rsi how many cells it has, rdx the
+    //       cell. The cell less one, so an empty cell is -1, which a cell
+    //       past the index is too, with nothing read.
+    //
+    ASM_FUNC(wire_slot)
+    "mov $-1, %rax\n   cmp %rsi, %rdx\n   jae 9f\n   movzwl (%rdi,%rdx,2), %eax\n   sub $1, %rax\n"
+    "9:  " ASM_RET
+    ASM_END(wire_slot)
+
+    //
+    //       rects_clip: rdi the rectangles (and where the kept ones are
+    //       written), rsi how many, rdx the width, rcx the height; r8 reads,
+    //       r9 counts the kept, r10 is whether one was the whole. An axis at
+    //       a time in rax (the start) and r11 (the end, then the extent),
+    //       stored once it is known not to be empty: the kept rectangle's
+    //       place is never past the one being read, and an axis stored is
+    //       not the other axis read after it.
+    //
+    ASM_FUNC(rects_clip)
+    "shl $5, %rsi\n   add %rdi, %rsi\n   mov %rdi, %r8\n   xor %r9d, %r9d\n   xor %r10d, %r10d\n   cmp %rsi, %r8\n   jae 9f\n"
+    "1:  mov (%r8), %rax\n   mov 16(%r8), %r11\n   add %rax, %r11\n   cmp %rdx, %r11\n   cmovg %rdx, %r11\n   test %rax, %rax\n   jns 2f\n   xor %eax, %eax\n"
+    "2:  sub %rax, %r11\n   jle 8f\n   mov %rax, (%rdi)\n   mov %r11, 16(%rdi)\n"
+    "mov 8(%r8), %rax\n   mov 24(%r8), %r11\n   add %rax, %r11\n   cmp %rcx, %r11\n   cmovg %rcx, %r11\n   test %rax, %rax\n   jns 3f\n   xor %eax, %eax\n"
+    "3:  sub %rax, %r11\n   jle 8f\n   mov %rax, 8(%rdi)\n   mov %r11, 24(%rdi)\n"
+    "or (%rdi), %rax\n   jnz 7f\n   cmp %rdx, 16(%rdi)\n   jne 7f\n   cmp %rcx, %r11\n   jne 7f\n   mov $1, %r10d\n"
+    "7:  add $32, %rdi\n   add $1, %r9\n"
+    "8:  add $32, %r8\n   cmp %rsi, %r8\n   jb 1b\n"
+    "9:  shl $63, %r10\n   mov %r9, %rax\n   or %r10, %rax\n" ASM_RET
+    ASM_END(rects_clip)
 #undef TRX_X64_LOOP
 #undef TRY_X64_LOOP
 #undef TRY_X64_ROW
@@ -25495,6 +25544,35 @@ __asm__(
     "2:  strh w8, [x3]\n   mov x0, x9\n" ASM_RET
     ASM_END(automaton_scan)
 
+    //       wire_message, wire_slot and rects_clip: the x86_64 block has the
+    //       reasons. wire_message: x0 the bytes, x1 how many, x2 the most, x3
+    //       the head; w9 the size. wire_slot: x0 the index, x1 its cells, x2
+    //       the cell. rects_clip: x0 the rectangles, x1 how many, x2 the
+    //       width, x3 the height; x8 reads, x11 writes, x9 counts, x10 is
+    //       whether one was the whole, x12 to x15 the rectangle.
+    ASM_FUNC(wire_message)
+    "mov x8, x0\n   mov x0, #0\n   cmp x1, #8\n   b.lo 9f\n   ldrh w9, [x8, #6]\n   mov x0, #-1\n   cmp x9, #8\n   b.lo 9f\n"
+    "cmp x9, x2\n   b.hi 9f\n   tst x9, #3\n   b.ne 9f\n   mov x0, #0\n   cmp x9, x1\n   b.hi 9f\n"
+    "ldr w10, [x8]\n   str w10, [x3]\n   ldrh w10, [x8, #4]\n   str w10, [x3, #4]\n   mov x0, x9\n"
+    "9:  " ASM_RET
+    ASM_END(wire_message)
+
+    ASM_FUNC(wire_slot)
+    "mov x8, x0\n   mov x0, #-1\n   cmp x2, x1\n   b.hs 9f\n   ldrh w0, [x8, x2, lsl #1]\n   sub x0, x0, #1\n"
+    "9:  " ASM_RET
+    ASM_END(wire_slot)
+
+    ASM_FUNC(rects_clip)
+    "add x1, x0, x1, lsl #5\n   mov x8, x0\n   mov x11, x0\n   mov x9, #0\n   mov x10, #0\n   cmp x8, x1\n   b.hs 9f\n"
+    "1:  ldp x12, x13, [x8]\n   ldp x14, x15, [x8, #16]\n   add x14, x12, x14\n   cmp x14, x2\n   csel x14, x14, x2, lt\n"
+    "cmp x12, #0\n   csel x12, x12, xzr, gt\n   subs x14, x14, x12\n   b.le 8f\n"
+    "add x15, x13, x15\n   cmp x15, x3\n   csel x15, x15, x3, lt\n   cmp x13, #0\n   csel x13, x13, xzr, gt\n   subs x15, x15, x13\n   b.le 8f\n"
+    "stp x12, x13, [x11]\n   stp x14, x15, [x11, #16]\n   orr x16, x12, x13\n   cbnz x16, 7f\n   cmp x14, x2\n   b.ne 7f\n   cmp x15, x3\n   b.ne 7f\n   mov x10, #1\n"
+    "7:  add x11, x11, #32\n   add x9, x9, #1\n"
+    "8:  add x8, x8, #32\n   cmp x8, x1\n   b.lo 1b\n"
+    "9:  orr x0, x9, x10, lsl #63\n" ASM_RET
+    ASM_END(rects_clip)
+
 #ifndef KERNEL_MODE
     //       memory_average_ahead: urhadd is the whole of the work, 64 bytes
     //       a turn in four registers by ldp and stp, sixteen at a time after
@@ -35396,6 +35474,41 @@ __asm__(
     "lhu t0, 0(t2)\n   addi t1, t1, 1\n   bgeu t0, a2, 2f\n   bltu t1, a5, 1b\n"
     "2:  sh t0, 0(a3)\n   mv a0, t1\n" ASM_RET
     ASM_END(automaton_scan)
+
+    //       wire_message, wire_slot and rects_clip: the x86_64 block has the
+    //       reasons. wire_message: a0 the bytes, a1 how many, a2 the most, a3
+    //       the head; t2 the size. The bytes are at any address, and a load
+    //       wider than a byte from an odd one may trap here, so the head is
+    //       read a byte at a time. wire_slot: a0 the index, a1 its cells, a2
+    //       the cell. rects_clip: a0 the rectangles, a1 how many, a2 the
+    //       width, a3 the height; t0 reads, t1 writes, t2 counts, t3 is
+    //       whether one was the whole, t4 t6 t5 a4 the rectangle.
+    ASM_FUNC(wire_message)
+    "mv t0, a0\n   li a0, 0\n   li t1, 8\n   bltu a1, t1, 9f\n   lbu t2, 6(t0)\n   lbu t3, 7(t0)\n   slli t3, t3, 8\n   or t2, t2, t3\n"
+    "li a0, -1\n   bltu t2, t1, 9f\n   bltu a2, t2, 9f\n   andi t3, t2, 3\n   bnez t3, 9f\n   li a0, 0\n   bltu a1, t2, 9f\n"
+    "lbu t3, 0(t0)\n   lbu t4, 1(t0)\n   slli t4, t4, 8\n   or t3, t3, t4\n   lbu t4, 2(t0)\n   slli t4, t4, 16\n   or t3, t3, t4\n"
+    "lbu t4, 3(t0)\n   slli t4, t4, 24\n   or t3, t3, t4\n   sw t3, 0(a3)\n"
+    "lbu t3, 4(t0)\n   lbu t4, 5(t0)\n   slli t4, t4, 8\n   or t3, t3, t4\n   sw t3, 4(a3)\n   mv a0, t2\n"
+    "9:  " ASM_RET
+    ASM_END(wire_message)
+
+    ASM_FUNC(wire_slot)
+    "mv t0, a0\n   li a0, -1\n   bgeu a2, a1, 9f\n   slli a2, a2, 1\n   add t0, t0, a2\n   lhu a0, 0(t0)\n   addi a0, a0, -1\n"
+    "9:  " ASM_RET
+    ASM_END(wire_slot)
+
+    ASM_FUNC(rects_clip)
+    "slli a1, a1, 5\n   add a1, a0, a1\n   mv t0, a0\n   mv t1, a0\n   li t2, 0\n   li t3, 0\n   bgeu t0, a1, 9f\n"
+    "1:  ld t4, 0(t0)\n   ld t5, 16(t0)\n   add t5, t4, t5\n   bge a2, t5, 2f\n   mv t5, a2\n"
+    "2:  bgez t4, 3f\n   li t4, 0\n"
+    "3:  sub t5, t5, t4\n   blez t5, 8f\n   ld t6, 8(t0)\n   ld a4, 24(t0)\n   add a4, t6, a4\n   bge a3, a4, 4f\n   mv a4, a3\n"
+    "4:  bgez t6, 5f\n   li t6, 0\n"
+    "5:  sub a4, a4, t6\n   blez a4, 8f\n   sd t4, 0(t1)\n   sd t6, 8(t1)\n   sd t5, 16(t1)\n   sd a4, 24(t1)\n"
+    "or a5, t4, t6\n   bnez a5, 7f\n   bne t5, a2, 7f\n   bne a4, a3, 7f\n   li t3, 1\n"
+    "7:  addi t1, t1, 32\n   addi t2, t2, 1\n"
+    "8:  addi t0, t0, 32\n   bltu t0, a1, 1b\n"
+    "9:  slli t3, t3, 63\n   or a0, t2, t3\n" ASM_RET
+    ASM_END(rects_clip)
 
 #ifndef KERNEL_MODE
     //       memory_average_ahead: with V, as many bytes as eight registers
@@ -52997,6 +53110,43 @@ address_any memory_translate(address_any block, positive size,
 PURE positive automaton_step(const p16 address_to moves, positive state, positive event);
 positive automaton_scan(const p16 address_to moves, const p8 address_to classes, positive stop,
                       p16 address_to state, const p8 address_to bytes, positive size);
+/*
+        The wire of a protocol whose messages are words of thirty-two
+        bits, least byte first, behind a head of two: the object the
+        message is for, and the message's size in bytes in the high half
+        of the second with its opcode in the low (Wayland's). The bytes
+        are a peer's and are believed in nothing.
+
+        wire_message looks at the message that begins at `bytes`, of
+        which `size` bytes have come. It answers 0 while fewer than
+        eight have (there is no head yet) or the head's size is more
+        than have come (the rest is still to come); all ones for a size
+        no message has, which is below eight, above `most` or not a
+        multiple of four, asked before whether it has all come; and
+        otherwise the message's size, with the object in head[0] and the
+        opcode in head[1]. `head` is written only then. Nothing is read
+        when fewer than eight bytes are there, and never more than the
+        first eight.
+
+        wire_slot is the cell `at` of an index of `count` sixteen-bit
+        cells, less one: a cell holds a slot's number and one, so an
+        empty cell (0) is -1, and so is a cell past the index, of which
+        nothing is read.
+
+        rects_clip cuts `count` rectangles to a picture of `width` by
+        `height`. A rectangle is four signed 64-bit words: x, y, width,
+        height. Each is cut to the picture; one with nothing left in it
+        is dropped, and the kept ones are written from the front of
+        `rects` in their order. It answers how many were kept, with the
+        top bit set when one of them is the whole picture (0, 0, width,
+        height after the cut). What lies in `rects` past the kept ones
+        is not to be read. The numbers are the caller's to bound: x +
+        width and y + height of a rectangle do not overflow, and the
+        picture's width and height are below 2^62.
+*/
+positive wire_message(const p8 address_to bytes, positive size, positive most, p32 address_to head);
+PURE bipolar wire_slot(const p16 address_to index, positive count, positive at);
+positive rects_clip(b64 address_to rects, positive count, positive width, positive height);
 #ifndef KERNEL_MODE
 // height rows of width bytes, from_stride bytes apart, made 32-bit words
 // through table into rows into_stride words apart: into[r][i] is

@@ -658,6 +658,19 @@ static struct
 
 /* ---- the wire ---- */
 
+/*
+        What this file asks of the library (src/lib.c), which is the machine's own instructions on each of the three machines and not
+        C: the head of a message read and checked (wire_message), an id looked up in an index (wire_slot), and a commit's damage cut
+        to its buffer (rects_clip). Their contracts are at their declarations there, and the verify lane holds each to the C this
+        file had in its place. The compositor is built with the library in front of this file; built alone (the engine's own row,
+        and the checks, which link the library beside it), the routines are declared here, in the plain types theirs are.
+*/
+#ifndef STANDARD_MODERN_C
+unsigned long long wire_message(const unsigned char *bytes, unsigned long long size, unsigned long long most, unsigned int *head);
+long long wire_slot(const unsigned short *index, unsigned long long count, unsigned long long at);
+unsigned long long rects_clip(long long *rects, unsigned long long count, unsigned long long width, unsigned long long height);
+#endif
+
 static inline unsigned long wayland_get(const unsigned char *at)
 {
         return (unsigned long)at[0] | (unsigned long)at[1] << 8 | (unsigned long)at[2] << 16 | (unsigned long)at[3] << 24;
@@ -780,11 +793,11 @@ static int wayland_fail(struct wayland_client *c, unsigned long object, unsigned
 
 static long wayland_slot_of(struct wayland_client *c, unsigned long id)
 {
-        if (id >= 1 && id < WAYLAND_IDS)
-                return (long)c->index[id] - 1;
-        if (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < WAYLAND_SERVER_IDS)
-                return (long)c->server_index[id - WAYLAND_SERVER_BASE] - 1;
-        return -1;
+        // A client's ids from 1, in its index; the server's from WAYLAND_SERVER_BASE, in theirs; anything else is in neither (an id
+        // below the server's base is, less the base, far past the index's end).
+        if (id < WAYLAND_IDS)
+                return id ? (long)wire_slot(c->index, WAYLAND_IDS, id) : -1;
+        return (long)wire_slot(c->server_index, WAYLAND_SERVER_IDS, id - WAYLAND_SERVER_BASE);
 }
 
 static long wayland_object_new(struct wayland_client *c, unsigned long id, long iface, long version)
@@ -2533,27 +2546,21 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         s->window_w = ww;
         s->window_h = wh;
         s->need_full = 0;
-        for (long at = 0; at < s->damages && !picture.full; at++)
+        if (!picture.full)
         {
-                struct wayland_rect r = s->damage[at];
-                long x2, y2;
+                unsigned long long kept;
 
-                if (!s->damage_kind[at])
-                        r = wayland_cover(r, scale120);
-                x2 = wayland_min(r.x + r.width, b->width);
-                y2 = wayland_min(r.y + r.height, b->height);
-                r.x = wayland_max(r.x, 0);
-                r.y = wayland_max(r.y, 0);
-                if (x2 <= r.x || y2 <= r.y)
-                        continue;
-                r.width = x2 - r.x;
-                r.height = y2 - r.y;
-                // A rectangle that is the whole buffer says the whole picture changed, as no damage at all does: the picture is whole,
-                // which a host may read where it is (WAYLAND_PICTURE_LENT) and not copy. A client that draws every frame whole and
-                // says so (a video, a game, a browser that scrolls) was copied every frame for having said it.
-                if (!r.x && !r.y && r.width == b->width && r.height == b->height)
+                // The commit's rectangles in the buffer's pixels (one in the surface's units is the pixels that cover it), cut to the
+                // buffer by the library: one with nothing left is dropped. A rectangle that is the whole buffer says the whole picture
+                // changed, as no damage at all does (rects_clip's top bit): the picture is whole, which a host may read where it is
+                // (WAYLAND_PICTURE_LENT) and not copy. A client that draws every frame whole and says so (a video, a game, a browser
+                // that scrolls) was copied every frame for having said it.
+                for (long at = 0; at < s->damages; at++)
+                        picture.damage[at] = s->damage_kind[at] ? s->damage[at] : wayland_cover(s->damage[at], scale120);
+                kept = rects_clip((long long *)picture.damage, (unsigned long long)s->damages, (unsigned long long)b->width, (unsigned long long)b->height);
+                picture.damages = (long)(kept << 1 >> 1);
+                if (kept >> 63)
                         picture.full = 1;
-                picture.damage[picture.damages++] = r;
         }
         // Damage that is all outside the buffer leaves no rectangle: the picture is taken whole, as a commit with no damage is. A host is
         // never handed a picture that is neither whole nor has a rectangle (it reads that as the whole buffer, and so copies it), and
@@ -6566,10 +6573,9 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
         return WAYLAND_OK;
 }
 
-static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size)
+static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
 {
-        unsigned long id = wayland_get(message);
-        long op = (long)(wayland_get(message + 4) & 0xffffUL), slot = wayland_slot_of(c, id), n;
+        long slot = wayland_slot_of(c, id), n;
         const struct wl_interface_info *info;
         const struct wl_message *msg;
         struct wayland_object *o;
@@ -6958,6 +6964,7 @@ static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, lo
         while (length > 0 && !c->dead && !c->stalled)
         {
                 long size, take;
+                unsigned int head[2];
 
                 if (c->in_length)
                 {
@@ -6970,17 +6977,17 @@ static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, lo
                         length -= take;
                         if (c->in_length < 8)
                                 continue;
-                        size = (long)(wayland_get(c->in + 4) >> 16);
-                        if (size < 8 || size > WAYLAND_MESSAGE || (size & 3))
+                        size = (long)wire_message(c->in, (unsigned long long)c->in_length, WAYLAND_MESSAGE, head);
+                        if (size < 0)
                         {
                                 c->in_length = 0;
                                 status = wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "a message of an impossible size");
                                 break;
                         }
-                        if (c->in_length < size)
+                        if (!size)
                                 continue;
                         c->in_length = 0;
-                        status = wayland_dispatch(c, c->in, size);
+                        status = wayland_dispatch(c, c->in, size, head[0], (long)head[1]);
                         if (status == WAYLAND_STALL)
                         {
                                 wayland_stall(c, c->in, size, bytes, length);
@@ -6988,25 +6995,21 @@ static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, lo
                         }
                         continue;
                 }
-                if (length < 8)
-                {
-                        wayland_copy(c->in, bytes, length);
-                        c->in_length = length;
-                        break;
-                }
-                size = (long)(wayland_get(bytes + 4) >> 16);
-                if (size < 8 || size > WAYLAND_MESSAGE || (size & 3))
+                // The head read and checked by the library (wire_message): a size no message has is the client's end, and no size yet
+                // (fewer than eight bytes, or a message that has not all come) is kept for the rest.
+                size = (long)wire_message(bytes, (unsigned long long)length, WAYLAND_MESSAGE, head);
+                if (size < 0)
                 {
                         status = wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "a message of an impossible size");
                         break;
                 }
-                if (size > length)
+                if (!size)
                 {
                         wayland_copy(c->in, bytes, length);
                         c->in_length = length;
                         break;
                 }
-                status = wayland_dispatch(c, bytes, size);
+                status = wayland_dispatch(c, bytes, size, head[0], (long)head[1]);
                 if (status == WAYLAND_STALL)
                 {
                         wayland_stall(c, bytes, 0, bytes, length);
