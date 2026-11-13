@@ -15277,7 +15277,7 @@ fn check_reverse()
 }
 
 /*
-        machine_step and machine_scan against the loop they stand for.
+        automaton_step and automaton_scan against the loop they stand for.
 
         Machines of every row width and row count in the lists, their cells
         and classes drawn at random within what a table may hold, started in
@@ -15288,7 +15288,7 @@ fn check_reverse()
         the count, or a state stored wider than it is, faults. The tables are
         compared afterwards: neither routine writes one.
 */
-static positive reference_machine_scan(const p16 address_to moves, const p8 address_to classes,
+static positive reference_automaton_scan(const p16 address_to moves, const p8 address_to classes,
                                        positive stop, p16 address_to state,
                                        const p8 address_to bytes, positive size)
 {
@@ -15300,7 +15300,7 @@ static positive reference_machine_scan(const p16 address_to moves, const p8 addr
         return at;
 }
 
-fn check_machine()
+fn check_automaton()
 {
         static const positive widths[] = {1, 2, 3, 5, 8, 16, 31, 64};
         static const positive rows[] = {1, 2, 4, 9, 33, 255};
@@ -15313,33 +15313,33 @@ fn check_machine()
         p64 seed = 0x9e3779b97f4a7c15ull;
         positive agreed = 1, kept = 1, stepped = 1, runs = 0, stops = 0, ends = 0;
 
-        same("machine_scan", "guard mappings", mapped, 1);
+        same("automaton_scan", "guard mappings", mapped, 1);
         if (!mapped)
                 return;
         p8 protected =
             system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)(states + 4096), 4096, 0) == 0;
-        same("machine_scan", "guard pages protected", protected, 1);
+        same("automaton_scan", "guard pages protected", protected, 1);
         if (!protected)
                 return;
         p16 address_to state = (p16 address_to)(states + 4096 - 2);
 
-#define MACHINE_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
+#define AUTOMATON_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
         for (positive w = 0; w < array_count(widths); w++)
                 for (positive r = 0; r < array_count(rows); r++)
                 {
                         positive width = widths[w], count = rows[r], cells = width * count;
 
                         for (positive at = 0; at < cells; at++)
-                                moves[at] = (p16)(MACHINE_NEXT() % count * width);
+                                moves[at] = (p16)(AUTOMATON_NEXT() % count * width);
                         for (positive at = 0; at < 256; at++)
-                                classes[at] = (p8)(MACHINE_NEXT() % width);
+                                classes[at] = (p8)(AUTOMATON_NEXT() % width);
                         memory_copy(moves_kept, moves, cells * sizeof(moves[0]));
                         memory_copy(classes_kept, classes, 256);
 
                         for (positive from = 0; from < count; from += count > 40 ? 17 : 1)
                                 for (positive event = 0; event < width; event++)
-                                        stepped &= (machine_step)(moves, from * width, event) ==
+                                        stepped &= (automaton_step)(moves, from * width, event) ==
                                                    moves[from * width + event];
 
                         for (positive s = 0; s < array_count(sizes); s++)
@@ -15348,18 +15348,18 @@ fn check_machine()
                                 p8 address_to bytes = pages + 8192 - size;
 
                                 for (positive at = 0; at < size; at++)
-                                        bytes[at] = (p8)MACHINE_NEXT();
+                                        bytes[at] = (p8)AUTOMATON_NEXT();
                                 for (positive from = 0; from < count; from += count > 40 ? 29 : 1)
                                         for (positive edge = 0; edge <= count + 1; edge += count > 40 ? 23 : 1)
                                         {
                                                 //  count + 1 rows: a stop nothing reaches.
                                                 positive stop = edge > count ? 65536 : edge * width;
                                                 p16 want_state = (p16)(from * width);
-                                                positive want = reference_machine_scan(
+                                                positive want = reference_automaton_scan(
                                                     moves, classes, stop, address_of want_state, bytes, size);
 
                                                 address_to state = (p16)(from * width);
-                                                positive got = (machine_scan)(moves, classes, stop, state, bytes, size);
+                                                positive got = (automaton_scan)(moves, classes, stop, state, bytes, size);
 
                                                 agreed &= got == want && address_to state == want_state;
                                                 runs++;
@@ -15370,24 +15370,24 @@ fn check_machine()
                         kept &= !memory_compare(moves_kept, moves, cells * sizeof(moves[0])) &&
                                 !memory_compare(classes_kept, classes, 256);
                 }
-#undef MACHINE_NEXT
+#undef AUTOMATON_NEXT
 
-        same("machine_step", "the cell at the state and the event, every row width", stepped, 1);
-        same("machine_scan", "bytes taken and the state left, every stop and start", agreed, 1);
-        same("machine_scan", "the tables are as they were", kept, 1);
+        same("automaton_step", "the cell at the state and the event, every row width", stepped, 1);
+        same("automaton_scan", "bytes taken and the state left, every stop and start", agreed, 1);
+        same("automaton_scan", "the tables are as they were", kept, 1);
         //  The lists reach both ways a run ends, or the row above proves nothing.
-        same("machine_scan", "runs that stopped early and runs that took every byte", stops > 1000 && ends > 1000, 1);
-        same("machine_scan", "runs compared", runs > 20000, 1);
+        same("automaton_scan", "runs that stopped early and runs that took every byte", stops > 1000 && ends > 1000, 1);
+        same("automaton_scan", "runs compared", runs > 20000, 1);
 
         //  Nothing is read when there is nothing to do: no bytes, or a machine already stopped.
         address_to state = 3;
-        same("machine_scan", "no bytes takes none from pointers that cannot be read",
-             (machine_scan)((const p16 address_to)(pages + 8192), pages + 8192, 65536, state, pages + 8192, 0), 0);
-        same("machine_scan", "and leaves the state", address_to state, 3);
+        same("automaton_scan", "no bytes takes none from pointers that cannot be read",
+             (automaton_scan)((const p16 address_to)(pages + 8192), pages + 8192, 65536, state, pages + 8192, 0), 0);
+        same("automaton_scan", "and leaves the state", address_to state, 3);
         address_to state = 9;
-        same("machine_scan", "a machine at its stop takes none and reads no table",
-             (machine_scan)((const p16 address_to)(pages + 8192), pages + 8192, 9, state, pages, 4096), 0);
-        same("machine_scan", "and leaves that state", address_to state, 9);
+        same("automaton_scan", "a machine at its stop takes none and reads no table",
+             (automaton_scan)((const p16 address_to)(pages + 8192), pages + 8192, 9, state, pages, 4096), 0);
+        same("automaton_scan", "and leaves that state", address_to state, 9);
         memory_free(pages, 3 * 4096);
         memory_free(states, 2 * 4096);
 }
@@ -30874,7 +30874,7 @@ b32 main()
         check_frob();
         check_reverse();
         check_translate();
-        check_machine();
+        check_automaton();
         check_cells_from_ascii();
         check_unicode_width();
         check_unicode_case();

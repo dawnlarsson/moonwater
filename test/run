@@ -14756,6 +14756,8 @@ if [ "$(uname -s)" = Darwin ]; then
         kit_harness python3 test/differential.py --harness macos_read_retry
 fi
 kit_harness python3 test/function_audit.py --check
+#       A result used at nearly every call may not be dropped at a new one: handled, or said to be meant with (void).
+kit_harness python3 test/dropped_results.py --check
 kit_harness build_tool switches check
 kit_harness python3 test/differential.py --harness floodlight
 kit_harness python3 test/differential.py --harness surface_coreutils_gap

@@ -3075,7 +3075,8 @@ static fn host_question(string_address disk)
                 //      says why this one did not ask.
                 host_say(log, host_label "%s is no longer here, so there is nothing to ask "
                                          "about\n", disk);
-                system_rename_at(AT_FDCWD, HOST_QUESTION_TAKEN, AT_FDCWD, HOST_QUESTION, 0);
+                //      Put back if it can be; the file is in /run, and one that will not go back is asked by moonwater setup.
+                (void)system_rename_at(AT_FDCWD, HOST_QUESTION_TAKEN, AT_FDCWD, HOST_QUESTION, 0);
                 return;
         }
 
@@ -3124,7 +3125,7 @@ static fn host_question(string_address disk)
                 }
         }
 
-        system_rename_at(AT_FDCWD, HOST_QUESTION_TAKEN, AT_FDCWD, HOST_QUESTION, 0);
+        (void)system_rename_at(AT_FDCWD, HOST_QUESTION_TAKEN, AT_FDCWD, HOST_QUESTION, 0);
 }
 
 /*
@@ -9281,7 +9282,8 @@ static COLD bool wifi_sae_budget(const p8 address_to bssid)
         memory_copy(list[0].bssid, bssid, 6);
         list[0].at = now;
         host_state_ready();
-        host_write_file(RADIO_SAE_PATH, (p8 address_to)list, kept * sizeof(list[0]), 0600, false);
+        //      Kept if it can be: with no file the exchanges are counted an exchange at a time (SECURITY.md, Open).
+        (void)host_write_file(RADIO_SAE_PATH, (p8 address_to)list, kept * sizeof(list[0]), 0600, false);
         return true;
 }
 
@@ -11380,7 +11382,7 @@ static fn radio_scan_note(p8 address_to ssid, positive ssid_length)
                                 lines++;
                         }
         host_state_ready();
-        host_write_file(RADIO_SCAN_PATH, text, used, 0644, false);
+        (void)host_write_file(RADIO_SCAN_PATH, text, used, 0644, false);
 }
 
 /* The kernel's list of what the air holds, each access point to visit. */
@@ -11695,7 +11697,7 @@ static COLD fn radio_avoid_add(p8 address_to bssid)
                 if (memory_compare(list[at].bssid, bssid, 6))
                         list[kept++] = list[at];
         host_state_ready();
-        host_write_file(RADIO_AVOID_PATH, (p8 address_to)list, kept * sizeof(radio_avoid),
+        (void)host_write_file(RADIO_AVOID_PATH, (p8 address_to)list, kept * sizeof(radio_avoid),
                         0600, false);
 }
 
@@ -12172,7 +12174,7 @@ static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid
                         if (joined)
                         {
                                 host_state_ready();
-                                host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644,
+                                (void)host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644,
                                                 false);
                         }
                         (void)system_write_all((positive)told, address_of status, sizeof(status));
@@ -12491,7 +12493,7 @@ static fn radio_last_set(string_address ssid, bipolar failed)
         radio_line(text + used, sizeof(text) - used, number, (string_address) "\n", null, null,
                    null);
         host_state_ready();
-        host_write_file(RADIO_LAST_PATH, text, string_length(text), 0644, false);
+        (void)host_write_file(RADIO_LAST_PATH, text, string_length(text), 0644, false);
 }
 
 /* Milliseconds the machine's own pass leaves the network that failed this

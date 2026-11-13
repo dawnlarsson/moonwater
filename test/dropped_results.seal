@@ -1,0 +1,4 @@
+# Results dropped where they are almost always used (python3 test/dropped_results.py):
+# the tree may not have more than this, and the aim is none.
+dropped 94
+functions 15
