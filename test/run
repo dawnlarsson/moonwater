@@ -19816,7 +19816,27 @@ make_stub()
 #!/bin/sh
 echo "compositor $*" >> "$STUB/args"
 echo "$$" >> "$STUB/starts"
+# -u N is the descriptor the session reads the compositor's word on: a line, and the descriptor closed, when it is up.
+up=
+while [ $# -gt 0 ]; do
+        [ "$1" = -u ] && up=$2
+        shift
+done
+[ -n "$up" ] && [ -p "/proc/$$/fd/$up" ] && echo "$up" > "$STUB/handed"
+say_up()
+{
+        [ -n "$up" ] && eval "echo up >&$up; exec $up>&-"
+        up=
+}
+# late: up after six seconds, with its table, and then there until it is ended.
+if [ -e "$STUB/late" ]; then
+        sleep 6
+        : > "$STUB/run/moonwater/windows"
+        say_up
+        while :; do sleep 0.05; done
+fi
 if [ -e "$STUB/slow" ]; then
+        say_up
         trap 'sleep 1; echo gone > "$STUB/gone"; exit 0' TERM
         while :; do sleep 0.05; done
 fi
@@ -19979,6 +19999,30 @@ EOF
 run_driver
 report "no table is said, not that the compositor is up" "$(grep '^notable=' "$STUB/out")" "notable=1"
 report "a compositor that dies at once is seen at once" "$(grep '^quick=' "$STUB/out")" "quick=1"
+
+# E2: the session waits for the compositor's word that it is up, on a FIFO the compositor is handed the writing end
+# of, and for as long as that takes: a compositor that is up after six seconds (one that waited for a screen) has its
+# terminal then, and not at five seconds with no table, which is where the look for the table's name gave up.
+begin late
+touch "$STUB/late"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 5.5
+echo "early=$(grep -c '^terminal ' "$STUB/args")"
+echo "handed=$([ -s "$STUB/handed" ] && echo yes || echo no)"
+sleep 2
+echo "after=$(grep -c '^terminal ' "$STUB/args")"
+echo "notable=$(grep -c 'made no window table' "$STUB/kmsg")"
+echo "fifo=$([ -e "$STUB/run/moonwater/compositor.up" ] && echo left || echo gone)"
+desktop_stop
+EOF
+run_driver
+report "the compositor is handed a FIFO's writing end to say it is up on" "$(grep '^handed=' "$STUB/out")" "handed=yes"
+report "nothing is started on a compositor that has not said it is up" "$(grep '^early=' "$STUB/out")" "early=0"
+report "the terminal is started when it says so, however late" "$(grep '^after=' "$STUB/out")" "after=1"
+report "and it is not said to have made no table" "$(grep '^notable=' "$STUB/out")" "notable=0"
+report "the FIFO is gone once the word is read" "$(grep '^fifo=' "$STUB/out")" "fifo=gone"
 
 # F: a second start while a supervisor lives starts nothing.
 begin second

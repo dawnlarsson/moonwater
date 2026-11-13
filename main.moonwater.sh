@@ -195,10 +195,16 @@ function desktop_asked {
   (MOONWATER_ASKED=1; export MOONWATER_ASKED; "$@")
 }
 
+# Until a file is there or the program that makes it is gone, five seconds at most: looked for every two thousandths
+# of a second for the first tenth, where a program that starts well has made it, and every twentieth after.
 function desktop_wait_for {
   desktop_wait=0
-  until [ -e "$1" ] || ! kill -0 $2 2> /dev/null || [ $desktop_wait -ge 100 ]; do
-    sleep 0.05
+  until [ -e "$1" ] || ! kill -0 $2 2> /dev/null || [ $desktop_wait -ge 148 ]; do
+    if [ $desktop_wait -lt 50 ]; then
+      sleep 0.002
+    else
+      sleep 0.05
+    fi
     desktop_wait=$((desktop_wait + 1))
   done
 }
@@ -289,13 +295,26 @@ function desktop_keys_answer {
 }
 
 # One compositor and what it carries, until the compositor ends.
+#
+# The compositor says when its table and sockets are made, down a FIFO it is handed the writing end of (-u 9, after the font the lanes look for), and the
+# session waits for that line and for nothing else: the read ends the moment the line is written, and at once with the
+# end of the file if the compositor ends first, since the compositor's is the only writing end left (this shell's is
+# closed once its reading end is open, which is why the reading end is opened second). There is no time limit: a
+# compositor with no screen connected waits for one, and the programs below can only run once it has its table.
 function desktop_session {
-  rm -f /run/moonwater/windows
+  rm -f /run/moonwater/windows /run/moonwater/compositor.up
   desktop_font
   desktop_keys_list
-  setsid /compositor ${desktop_text:+-f "$desktop_text"} &
+  mkfifo -m 600 /run/moonwater/compositor.up
+  exec 9<> /run/moonwater/compositor.up
+  setsid /compositor ${desktop_text:+-f "$desktop_text"} -u 9 &
   desktop_compositor=$!
   echo $desktop_compositor > /run/moonwater/compositor.pid
+  exec 8< /run/moonwater/compositor.up 9>&-
+  read -r desktop_word <&8
+  exec 8<&-
+  rm -f /run/moonwater/compositor.up
+  # Nothing to wait for when the line came or the compositor ended; the wait there was, if the FIFO could not be made.
   desktop_wait_for /run/moonwater/windows $desktop_compositor
   [ -e /run/moonwater/windows ] || echo "desktop: the compositor (pid $desktop_compositor) made no window table" > /dev/kmsg
   : > /run/moonwater/desktop.kids
