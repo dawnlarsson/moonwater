@@ -15967,6 +15967,444 @@ fn check_wire_arguments()
 }
 
 /*
+        evdev_decode, pointer_gain, pointer_scale, rects_point and ring_post
+        against the C they stand for (the compositor's own, as
+        src/canvas/compositor.c read a device's records, took a movement's
+        gain and its pixels, looked for the window under a point and put an
+        event in a program's ring before they were these).
+
+        evdev_decode: every count of bytes from none to five records and
+        twenty-three more, every room from none to six, the bytes ending at a
+        page that cannot be read and the records at one that cannot be
+        written, the seconds and microseconds any 64 bits. pointer_gain:
+        counts and intervals at and either side of every bound, any 64 bits,
+        and movements at every speed of the curve. pointer_scale: the same of
+        the counts, the gain and the remainder, the remainder ending at a
+        page that cannot be written and, for no counts, in one that cannot be
+        read. rects_point: lists of rectangles on, round and far from the
+        point, in every order, the columns and the order ending at pages that
+        cannot be read. ring_post: every count of unread records at and
+        either side of none, the cells and past them, heads and tails that
+        wrap, the cells ending at pages that cannot be written and the tail
+        in one that can only be read.
+*/
+static positive reference_evdev_decode(const p8 address_to bytes, positive size, p64 address_to records, positive room)
+{
+        positive count = 0;
+
+        for (; size >= 24 && count < room; size -= 24, bytes += 24, count++)
+        {
+                p64 seconds, microseconds, rest;
+
+                memory_copy(address_of seconds, bytes, 8);
+                memory_copy(address_of microseconds, bytes + 8, 8);
+                memory_copy(address_of rest, bytes + 16, 8);
+                records[count * 2] = seconds * 1000000000ull + microseconds * 1000ull;
+                records[count * 2 + 1] = rest;
+        }
+        return count;
+}
+
+static positive reference_pointer_gain(bipolar dx, bipolar dy, positive interval)
+{
+        positive value = (positive)dx * (positive)dx + (positive)dy * (positive)dy, root = 0, bit = (positive)1 << 62, speed;
+
+        if (interval < 1000000)
+                interval = 1000000;
+        while (bit > value)
+                bit >>= 2;
+        for (; bit; bit >>= 2)
+                if (value >= root + bit)
+                {
+                        value -= root + bit;
+                        root = (root >> 1) + bit;
+                }
+                else
+                        root >>= 1;
+        speed = root * 1000000 / interval;
+        if (speed <= 1)
+                return 1024;
+        if (speed >= 8)
+                return 2560;
+        return 1024 + 1536 * (speed - 1) / 7;
+}
+
+static bipolar reference_pointer_scale(bipolar delta, b32 address_to remainder, positive gain)
+{
+        bipolar scaled, whole;
+
+        if (!delta)
+                return 0;
+        scaled = (bipolar)((positive)delta * gain + (positive)(bipolar)*remainder);
+        //      Toward zero, as C divides; the least number has no negation, and is divided as it is.
+        whole = scaled / 1024;
+        *remainder = (b32)(scaled - whole * 1024);
+        return whole > 2147483647 ? 2147483647 : whole < -2147483647 ? -2147483647 : whole;
+}
+
+static bipolar reference_rects_point(const address_any address_to columns, const p8 address_to order, positive count, bipolar x, bipolar y,
+                                     positive grow)
+{
+        const b32 address_to xs = columns[0], address_to ys = columns[1];
+        const p32 address_to widths = columns[2], address_to heights = columns[3];
+
+        for (positive at = count; at--;)
+        {
+                positive row = order[at];
+
+                if ((positive)x - (positive)(bipolar)xs[row] + grow < (positive)widths[row] + grow + grow &&
+                    (positive)y - (positive)(bipolar)ys[row] + grow < (positive)heights[row] + grow + grow)
+                        return (bipolar)at;
+        }
+        return -1;
+}
+
+static positive reference_ring_post(const address_any address_to ring, positive cells, const p64 address_to record, positive replace)
+{
+        p16 address_to types = ring[0], address_to flags = ring[1];
+        b32 address_to first = ring[2], address_to second = ring[3];
+        p64 address_to stamps = ring[4];
+        p32 address_to head_at = ring[5];
+        const p32 address_to tail_at = ring[6];
+        p32 head = *head_at, used = head - *tail_at, at = (head - 1) & (p32)(cells - 1);
+        p16 type = (p16)record[2];
+
+        if (!(replace && used && used <= cells && types[at] == type))
+        {
+                if (used >= cells)
+                        return 0;
+                at = head & (p32)(cells - 1);
+        }
+        else
+                head--;
+        types[at] = type;
+        flags[at] = (p16)(record[2] >> 16);
+        first[at] = (b32)(p32)record[1];
+        second[at] = (b32)(p32)(record[1] >> 32);
+        stamps[at] = record[0];
+        *head_at = head + 1;
+        return 1;
+}
+
+fn check_hand()
+{
+        static const p64 words[] = {0,
+                                    1,
+                                    2,
+                                    3,
+                                    7,
+                                    8,
+                                    9,
+                                    100,
+                                    1023,
+                                    1024,
+                                    1025,
+                                    2560,
+                                    46340,
+                                    46341,
+                                    65535,
+                                    999999,
+                                    1000000,
+                                    1000001,
+                                    2000000,
+                                    7999999,
+                                    8000000,
+                                    16777216,
+                                    1000000000,
+                                    0x7fffffff,
+                                    0x80000000,
+                                    0xffffffff,
+                                    0x100000000,
+                                    0xb504f333,
+                                    0xb504f334,
+                                    0x4000000000000000,
+                                    0x7fffffffffffffff,
+                                    0x8000000000000000,
+                                    0xffffffff00000000,
+                                    0xffffffff80000000,
+                                    0xffffffffffff0000,
+                                    0xfffffffffffffc00,
+                                    0xfffffffffffffbff,
+                                    0xfffffffffffffff8,
+                                    0xfffffffffffffffe,
+                                    0xffffffffffffffff};
+        p8 address_to raw = memory(3 * 4096);
+        p8 address_to out = memory(3 * 4096);
+        p8 address_to cols = memory(10 * 4096);
+        p8 address_to rings = memory(14 * 4096);
+        p8 mapped = (bipolar)(positive)raw > 0 && (bipolar)(positive)out > 0 && (bipolar)(positive)cols > 0 && (bipolar)(positive)rings > 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        same("evdev_decode", "guard mappings", mapped, 1);
+        if (!mapped)
+                return;
+        p8 protected = system_call_3(syscall(mprotect), (positive)(raw + 8192), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(out + 8192), 4096, 0) == 0;
+
+        //      The columns and the order: five stretches of a page, each before a page that cannot be read.
+        for (positive at = 0; at < 5; at++)
+                protected &= system_call_3(syscall(mprotect), (positive)(cols + at * 8192 + 4096), 4096, 0) == 0;
+        //      The ring: its five columns and its head each before a page that cannot be written or read, and its tail in a page
+        //      that can only be read (made so once it is set, each round).
+        for (positive at = 0; at < 6; at++)
+                protected &= system_call_3(syscall(mprotect), (positive)(rings + at * 8192 + 4096), 4096, 0) == 0;
+        same("evdev_decode", "guard pages protected", protected, 1);
+        if (!protected)
+                return;
+
+#define HAND_NEXT() (seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17, seed)
+        {
+                static p64 want[2 * 8];
+                positive agreed = 1, kept = 1, runs = 0, cut = 0, full = 0;
+
+                for (positive size = 0; size <= 24 * 5 + 23; size++)
+                        for (positive room = 0; room <= 6; room++)
+                        {
+                                //  The bytes end at the guard, at an address of eight (the size's own remainder of eight is left before them);
+                                //  the records end at theirs.
+                                p8 address_to bytes = raw + 8192 - ((size + 7) & ~(positive)7);
+                                p64 address_to records = (p64 address_to)(out + 8192 - room * 16);
+                                p64 address_to before = records - 2;
+
+                                for (positive at = 0; at < size; at++)
+                                        bytes[at] = (p8)HAND_NEXT();
+                                //  Some stamps a device would say, among the ones nobody would.
+                                if (size >= 24 && (HAND_NEXT() & 1))
+                                {
+                                        p64 seconds = HAND_NEXT() % 4000000, microseconds = HAND_NEXT() % 1000000;
+
+                                        memory_copy(bytes, address_of seconds, 8);
+                                        memory_copy(bytes + 8, address_of microseconds, 8);
+                                }
+                                before[0] = 0x1111111111111111ull, before[1] = 0x2222222222222222ull;
+                                positive wanted = reference_evdev_decode(bytes, size, want, room);
+                                positive got = (evdev_decode)(bytes, size, records, room);
+
+                                agreed &= got == wanted && (!wanted || !memory_compare(want, records, wanted * 16));
+                                kept &= before[0] == 0x1111111111111111ull && before[1] == 0x2222222222222222ull;
+                                runs++;
+                                cut += size % 24 != 0 && wanted == size / 24;
+                                full += wanted == room && size / 24 > room;
+                        }
+                same("evdev_decode", "the records, every count of bytes and every room", agreed, 1);
+                same("evdev_decode", "nothing is written before the records", kept, 1);
+                //  The lists reach a cut record and a room that is full, or the rows above prove nothing.
+                same("evdev_decode", "runs with bytes past the last whole record, and runs the room ended", cut > 500 && full > 100, 1);
+                same("evdev_decode", "runs", runs, (24 * 5 + 24) * 7);
+                same("evdev_decode", "no bytes are no records, with nothing read or written", (evdev_decode)(raw + 8192, 0, (p64 address_to)(out + 8192), 9), 0);
+                same("evdev_decode", "twenty-three bytes are none either", (evdev_decode)(raw + 8192 - 24, 23, (p64 address_to)(out + 8192), 9), 0);
+                same("evdev_decode", "and no room takes none", (evdev_decode)(raw + 8192 - 48, 48, (p64 address_to)(out + 8192), 0), 0);
+        }
+
+        {
+                positive agreed = 1, runs = 0, seen[8] = {0};
+
+                for (positive a = 0; a < array_count(words); a++)
+                        for (positive b = 0; b < array_count(words); b++)
+                                for (positive c = 0; c < array_count(words); c++)
+                                {
+                                        positive wanted = reference_pointer_gain((bipolar)words[a], (bipolar)words[b], words[c]);
+
+                                        agreed &= (pointer_gain)((bipolar)words[a], (bipolar)words[b], words[c]) == wanted;
+                                        runs++;
+                                }
+                //  A hand's movements: a few counts in a part of a millisecond to a few of them, which is where the curve is.
+                for (positive round = 0; round < 300000; round++)
+                {
+                        bipolar dx = (bipolar)(HAND_NEXT() % 61) - 30, dy = (bipolar)(HAND_NEXT() % 61) - 30;
+                        positive interval = round & 1 ? 200000 + HAND_NEXT() % 20000000 : HAND_NEXT() % 3 * 500000 + HAND_NEXT() % 9 * 1000000;
+                        positive wanted = reference_pointer_gain(dx, dy, interval);
+
+                        agreed &= (pointer_gain)(dx, dy, interval) == wanted;
+                        seen[wanted == 1024 ? 0 : wanted >= 2560 ? 7 : (wanted - 1024 + 219) * 7 / 1536] += 1;
+                        runs++;
+                }
+                same("pointer_gain", "the gain, every bound of the counts and the interval and three hundred thousand movements", agreed, 1);
+                //  Every step of the curve is reached, each many times.
+                same("pointer_gain", "movements at every speed of the curve",
+                     seen[0] > 1000 && seen[1] > 1000 && seen[2] > 1000 && seen[3] > 1000 && seen[4] > 1000 && seen[5] > 1000 && seen[6] > 1000 && seen[7] > 1000, 1);
+                same("pointer_gain", "movements compared", runs > 360000, 1);
+                same("pointer_gain", "slow is one to one", (pointer_gain)(1, 0, 8000000), 1024);
+                same("pointer_gain", "fast is the ceiling", (pointer_gain)(30, 40, 1000000), 2560);
+                same("pointer_gain", "three and four counts in a millisecond are a speed of five", (pointer_gain)(3, -4, 1000000), 1024 + 1536 * 4 / 7);
+                same("pointer_gain", "no time is a millisecond, and not a division by nothing", (pointer_gain)(2, 0, 0), 1024 + 1536 * 1 / 7);
+        }
+
+        {
+                static const b32 remainders[] = {0, 1, -1, 511, -511, 1023, -1023, 1024, -1024, 2147483647, -2147483647, -2147483647 - 1};
+                b32 address_to remainder = (b32 address_to)(out + 8192 - 4);
+                positive agreed = 1, left = 1, runs = 0, held = 0, negative = 0;
+
+                for (positive a = 0; a < array_count(words); a++)
+                        for (positive b = 0; b < array_count(words); b++)
+                                for (positive c = 0; c < array_count(remainders); c++)
+                                {
+                                        b32 want_remainder = remainders[c];
+                                        bipolar wanted = reference_pointer_scale((bipolar)words[a], address_of want_remainder, words[b]);
+
+                                        *remainder = remainders[c];
+                                        bipolar got = (pointer_scale)((bipolar)words[a], remainder, words[b]);
+
+                                        agreed &= got == wanted;
+                                        left &= *remainder == want_remainder;
+                                        runs++;
+                                        held += wanted == 2147483647 || wanted == -2147483647;
+                                }
+                //  A hand's: a few counts either way, the gains of the curve and of a sensitivity, the remainder the last movement left.
+                *remainder = 0;
+                {
+                        b32 want_remainder = 0;
+
+                        for (positive round = 0; round < 300000; round++)
+                        {
+                                bipolar delta = (bipolar)(HAND_NEXT() % 41) - 20;
+                                positive gain = round & 1 ? 1024 + HAND_NEXT() % 1537 : HAND_NEXT() % 13000;
+                                bipolar wanted = reference_pointer_scale(delta, address_of want_remainder, gain);
+
+                                agreed &= (pointer_scale)(delta, remainder, gain) == wanted;
+                                left &= *remainder == want_remainder;
+                                negative += want_remainder < 0;
+                                runs++;
+                        }
+                }
+                same("pointer_scale", "the pixels, every bound of the counts, the gain and the remainder and three hundred thousand movements", agreed, 1);
+                same("pointer_scale", "the remainder kept for the next movement", left, 1);
+                same("pointer_scale", "answers held to the most a place is, and remainders below nothing", held > 1000 && negative > 1000, 1);
+                same("pointer_scale", "movements compared", runs > 310000, 1);
+                same("pointer_scale", "no counts is no pixels, with the remainder not looked at", (positive)(pointer_scale)(0, (b32 address_to)(out + 8192), 2560), 0);
+                *remainder = 1000;
+                same("pointer_scale", "a count at one and a half with a thousand left over is two pixels", (positive)(pointer_scale)(1, remainder, 1536), 2);
+                same("pointer_scale", "and 488 are left", (positive)*remainder, 488);
+                *remainder = 0;
+                same("pointer_scale", "a count back at two and a half is two pixels back, toward nothing", (positive)(pointer_scale)(-1, remainder, 2560), (positive)-2);
+                same("pointer_scale", "and 512 back are left", (positive)*remainder, (positive)(bipolar)-512);
+        }
+
+        {
+                static const bipolar places[] = {-2147483647 - 1, -16777216, -1000, -46, -45, -7, -6, -1, 0, 1, 5, 6, 7, 44, 45, 46, 99, 100, 101, 145, 146, 1000, 16777216, 2147483647};
+                static const positive grows[] = {0, 1, 6, 45, 1000, 0x7fffffff, 0x10000000000, 0x7fffffffffffffff, 0xffffffffffffffff};
+                positive agreed = 1, runs = 0, hits = 0, misses = 0, under = 0;
+
+                for (positive round = 0; round < 40000; round++)
+                {
+                        //  Thirty-two rectangles at the most, as a desktop has windows; the columns end at their guards, and so does the order.
+                        positive rows = 1 + HAND_NEXT() % 32, count = round < 40 ? round % 4 : HAND_NEXT() % 40;
+                        b32 address_to xs = (b32 address_to)(cols + 4096 - rows * 4), address_to ys = (b32 address_to)(cols + 8192 + 4096 - rows * 4);
+                        p32 address_to widths = (p32 address_to)(cols + 2 * 8192 + 4096 - rows * 4), address_to heights = (p32 address_to)(cols + 3 * 8192 + 4096 - rows * 4);
+                        p8 address_to order = cols + 4 * 8192 + 4096 - count;
+                        const address_any columns[4] = {xs, ys, widths, heights};
+                        positive grow = round % 5 == 0 ? grows[HAND_NEXT() % array_count(grows)] : round % 5 == 1 ? 6 : 0;
+                        bipolar x, y;
+
+                        for (positive at = 0; at < rows; at++)
+                        {
+                                positive kind = HAND_NEXT() % 8;
+
+                                xs[at] = kind == 0 ? (b32)places[HAND_NEXT() % array_count(places)] : (b32)(HAND_NEXT() % 300) - 100;
+                                ys[at] = kind == 1 ? (b32)places[HAND_NEXT() % array_count(places)] : (b32)(HAND_NEXT() % 300) - 100;
+                                widths[at] = kind == 2 ? 0 : kind == 3 ? 0xffffffffu : kind == 4 ? 0x80000000u : (p32)(HAND_NEXT() % 200);
+                                heights[at] = kind == 5 ? 0 : kind == 3 ? 0xffffffffu : kind == 6 ? 1 : (p32)(HAND_NEXT() % 200);
+                        }
+                        for (positive at = 0; at < count; at++)
+                                order[at] = (p8)(HAND_NEXT() % rows);
+                        //  The point: on a corner of a rectangle, a pixel or the growth either side of one, or anywhere.
+                        if (round % 3)
+                        {
+                                positive row = HAND_NEXT() % rows, corner = HAND_NEXT() % 4;
+                                bipolar off = (bipolar)(HAND_NEXT() % 5) - 2 + (HAND_NEXT() % 3 == 0 ? (HAND_NEXT() & 1 ? (bipolar)grow : -(bipolar)grow) : 0);
+
+                                x = (bipolar)xs[row] + (corner & 1 ? (bipolar)widths[row] : 0) + off;
+                                y = (bipolar)ys[row] + (corner & 2 ? (bipolar)heights[row] : 0) + (bipolar)(HAND_NEXT() % 5) - 2;
+                        }
+                        else
+                                x = places[HAND_NEXT() % array_count(places)], y = places[HAND_NEXT() % array_count(places)];
+                        if (round % 97 == 0)
+                                x = (bipolar)words[HAND_NEXT() % array_count(words)], y = (bipolar)words[HAND_NEXT() % array_count(words)];
+
+                        bipolar wanted = reference_rects_point(columns, order, count, x, y, grow);
+
+                        agreed &= (rects_point)(columns, order, count, x, y, grow) == wanted;
+                        runs++;
+                        hits += wanted >= 0;
+                        misses += wanted < 0 && count > 0;
+                        under += wanted >= 0 && (positive)wanted + 1 < count;
+                }
+                same("rects_point", "the last entry whose rectangle holds the point, forty thousand lists", agreed, 1);
+                //  Found, not found, and found under entries that did not hold it: or the row above proves nothing.
+                same("rects_point", "lists with the point in one, in none, and in one under others", hits > 3000 && misses > 3000 && under > 1000, 1);
+                same("rects_point", "lists compared", runs, 40000);
+                {
+                        const address_any nowhere[4] = {cols + 4096, cols + 8192 + 4096, cols + 2 * 8192 + 4096, cols + 3 * 8192 + 4096};
+
+                        same("rects_point", "no entries is none, with no column and no order read",
+                             (positive)(rects_point)(nowhere, cols + 4 * 8192 + 4096, 0, 5, 5, 6), (positive)-1);
+                }
+        }
+
+        {
+                static const positive sizes[] = {1, 2, 4, 64, 256};
+                static p16 want_types[256], want_flags[256];
+                static b32 want_first[256], want_second[256];
+                static p64 want_stamps[256];
+                positive agreed = 1, cells_agreed = 1, runs = 0, posted = 0, over = 0, refused = 0;
+                p32 address_to tail_at = (p32 address_to)(rings + 12 * 4096);
+                p64 address_to record = (p64 address_to)(raw + 8192 - 24);
+
+                for (positive round = 0; round < 60000; round++)
+                {
+                        positive cells = sizes[HAND_NEXT() % array_count(sizes)], replace = HAND_NEXT() % 3 == 0 ? 0 : HAND_NEXT() % 3 == 0 ? HAND_NEXT() : 1;
+                        p16 address_to types = (p16 address_to)(rings + 4096 - cells * 2), address_to flags = (p16 address_to)(rings + 8192 + 4096 - cells * 2);
+                        b32 address_to first = (b32 address_to)(rings + 2 * 8192 + 4096 - cells * 4), address_to second = (b32 address_to)(rings + 3 * 8192 + 4096 - cells * 4);
+                        p64 address_to stamps = (p64 address_to)(rings + 4 * 8192 + 4096 - cells * 8);
+                        p32 address_to head_at = (p32 address_to)(rings + 5 * 8192 + 4096 - 4);
+                        const address_any ring[7] = {types, flags, first, second, stamps, head_at, tail_at};
+                        p32 want_head, kind = (p32)(HAND_NEXT() % 12), used, head = round % 7 == 0 ? (p32)(HAND_NEXT() % 3) - 1 : (p32)HAND_NEXT(), tail;
+                        const address_any want_ring[7] = {want_types, want_flags, want_first, want_second, want_stamps, address_of want_head, tail_at};
+
+                        used = kind == 0 ? 0 : kind == 1 ? 1 : kind == 2 ? (p32)cells - 1 : kind == 3 ? (p32)cells : kind == 4 ? (p32)cells + 1 :
+                               kind == 5 ? 0x80000000u : kind == 6 ? 0xffffffffu : kind == 7 ? (p32)HAND_NEXT() : (p32)(HAND_NEXT() % (cells + 1));
+                        tail = head - used;
+                        for (positive at = 0; at < cells; at++)
+                        {
+                                types[at] = (p16)(HAND_NEXT() % 3), flags[at] = (p16)HAND_NEXT();
+                                first[at] = (b32)HAND_NEXT(), second[at] = (b32)HAND_NEXT(), stamps[at] = HAND_NEXT();
+                        }
+                        memory_copy(want_types, types, cells * 2), memory_copy(want_flags, flags, cells * 2);
+                        memory_copy(want_first, first, cells * 4), memory_copy(want_second, second, cells * 4), memory_copy(want_stamps, stamps, cells * 8);
+                        *head_at = want_head = head;
+                        //  The tail is the reader's: it is set, and then its page can only be read while the routine runs.
+                        system_call_3(syscall(mprotect), (positive)(rings + 12 * 4096), 4096, 3);
+                        *tail_at = tail;
+                        system_call_3(syscall(mprotect), (positive)(rings + 12 * 4096), 4096, 1);
+                        record[0] = HAND_NEXT(), record[1] = HAND_NEXT(), record[2] = HAND_NEXT() % 3 | HAND_NEXT() << 16;
+
+                        positive wanted = reference_ring_post(want_ring, cells, record, replace);
+                        positive got = (ring_post)(ring, cells, record, replace);
+
+                        agreed &= got == wanted && *head_at == want_head;
+                        cells_agreed &= !memory_compare(want_types, types, cells * 2) && !memory_compare(want_flags, flags, cells * 2) &&
+                                        !memory_compare(want_first, first, cells * 4) && !memory_compare(want_second, second, cells * 4) &&
+                                        !memory_compare(want_stamps, stamps, cells * 8);
+                        runs++;
+                        posted += wanted && want_head != head;
+                        over += wanted && want_head == head;
+                        refused += !wanted;
+                }
+                system_call_3(syscall(mprotect), (positive)(rings + 12 * 4096), 4096, 3);
+                same("ring_post", "whether the record is in the ring, and the head, sixty thousand rings", agreed, 1);
+                same("ring_post", "every cell of the ring is the record's or as it was", cells_agreed, 1);
+                //  Put after the last, written over the last, and refused: or the rows above prove nothing.
+                same("ring_post", "records put in, records written over the last and records refused", posted > 5000 && over > 3000 && refused > 5000, 1);
+                same("ring_post", "rings compared", runs, 60000);
+        }
+#undef HAND_NEXT
+        memory_free(raw, 3 * 4096);
+        memory_free(out, 3 * 4096);
+        memory_free(cols, 10 * 4096);
+        memory_free(rings, 14 * 4096);
+}
+
+/*
         Call the assembly entry even for compile-time small sizes. Disjoint
         maps cover every byte value and noninjective maps; aliased maps retain
         the original four-byte load-all-then-store-all contract. On x86_64
@@ -31455,6 +31893,7 @@ b32 main()
         check_automaton();
         check_bins();
         check_wire();
+        check_hand();
         check_wire_arguments();
         check_cells_from_ascii();
         check_unicode_width();

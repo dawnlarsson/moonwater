@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        489 routines (463 public, 26 local), 478 of them on all three and 11 local to one.
+        494 routines (468 public, 26 local), 483 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -155,6 +155,7 @@
           deflate_tokens_count           public  yes     yes     yes
           deflate_tokens_encode          public  yes     yes     yes
           deflate_tokens_encode_bmi2     local   yes     --      --
+          evdev_decode                   public  yes     yes     yes
           exit                           public  yes     yes     yes
           f32_pair_clip                  public  yes     yes     yes
           f32_pair_clip_2_3              public  yes     yes     yes
@@ -387,6 +388,8 @@
           path_tail_copy                 public  yes     yes     yes
           pcm_pack24                     public  yes     yes     yes
           pcm_widen                      public  yes     yes     yes
+          pointer_gain                   public  yes     yes     yes
+          pointer_scale                  public  yes     yes     yes
           positive_digits                public  yes     yes     yes
           positive_digits_core           local   yes     yes     yes
           positive_divide_wide           public  yes     yes     yes
@@ -413,8 +416,10 @@
           program_environment_list       public  yes     yes     yes
           program_initial_identity       public  yes     yes     yes
           rects_clip                     public  yes     yes     yes
+          rects_point                    public  yes     yes     yes
           resample_polyphase2_f32        public  yes     yes     yes
           resample_polyphase2_f32_rows   public  yes     yes     yes
+          ring_post                      public  yes     yes     yes
           rmsnorm_backward_f32           public  yes     yes     yes
           rmsnorm_forward_f32            public  yes     yes     yes
           sha1_blocks                    public  yes     yes     yes
@@ -13812,6 +13817,100 @@ __asm__(
     ASM_END(hash_fnv_u32)
 
     //
+    //       A hand's reports on their way to a program (the declarations
+    //       have what each answers). evdev_decode: rdi the bytes, rsi how
+    //       many, rdx the records, rcx room for how many; a record is the
+    //       stamp and the eight bytes of type, code and value as they lie.
+    //       How many there are is asked once (the bytes over twenty-four,
+    //       which is the high half of their product with two thirds of
+    //       2^64, shifted by four; no more than the room), and the loop
+    //       counts them down: rdx the count, r10 the records.
+    //
+    ASM_FUNC(evdev_decode)
+    "mov %rdx, %r10\n   movabs $0xaaaaaaaaaaaaaaab, %rax\n   mul %rsi\n   shr $4, %rdx\n   cmp %rcx, %rdx\n   cmova %rcx, %rdx\n   mov %rdx, %rax\n   test %rdx, %rdx\n   jz 9f\n"
+    "1:  imulq $1000000000, (%rdi), %r8\n   imulq $1000, 8(%rdi), %r9\n   add %r9, %r8\n   mov %r8, (%r10)\n"
+    "mov 16(%rdi), %r8\n   mov %r8, 8(%r10)\n   add $24, %rdi\n   add $16, %r10\n   sub $1, %rdx\n   jnz 1b\n"
+    "9:  " ASM_RET
+    ASM_END(evdev_decode)
+
+    //
+    //       pointer_gain: rdi and rsi the counts of a movement, rdx the
+    //       nanoseconds it took. The distance is the root of the sum of the
+    //       squares, a bit at a time from the highest even bit that is not
+    //       above it, which bsr finds (r8 the bit, rax the root so far, rdi
+    //       what is left); the speed its counts in a millisecond; the gain
+    //       the curve's at that speed, its seventh a multiply by 37450 and a
+    //       shift of 18, which is exact below 43690 and is asked of 9216 at
+    //       the most.
+    //
+    ASM_FUNC(pointer_gain)
+    "imul %rdi, %rdi\n   imul %rsi, %rsi\n   add %rsi, %rdi\n   mov $1000000, %r10d\n   cmp %r10, %rdx\n   cmovb %r10, %rdx\n"
+    "xor %eax, %eax\n   test %rdi, %rdi\n   jz 4f\n   bsr %rdi, %rcx\n   and $62, %ecx\n   mov $1, %r8d\n   shl %cl, %r8\n"
+    "2:  lea (%rax,%r8), %r9\n   shr $1, %rax\n   cmp %r9, %rdi\n   jb 3f\n   sub %r9, %rdi\n   add %r8, %rax\n"
+    "3:  shr $2, %r8\n   jnz 2b\n"
+    "4:  imul %r10, %rax\n   mov %rdx, %r8\n   xor %edx, %edx\n   div %r8\n"
+    "mov $1024, %ecx\n   cmp $1, %rax\n   jbe 5f\n   mov $2560, %ecx\n   cmp $8, %rax\n   jae 5f\n"
+    "sub $1, %eax\n   imul $1536, %eax, %eax\n   imul $37450, %eax, %eax\n   shr $18, %eax\n   lea 1024(%rax), %ecx\n"
+    "5:  mov %ecx, %eax\n" ASM_RET
+    ASM_END(pointer_gain)
+
+    //
+    //       pointer_scale: rdi the counts, rsi the remainder, rdx the gain.
+    //       No counts is 0 with the remainder not looked at. The quotient by
+    //       1024 toward zero is a shift once 1023 is added to a negative
+    //       number; what is left of the number is the remainder.
+    //
+    ASM_FUNC(pointer_scale)
+    "xor %eax, %eax\n   test %rdi, %rdi\n   jz 9f\n   mov %rdi, %rax\n   imul %rdx, %rax\n   movslq (%rsi), %rcx\n   add %rcx, %rax\n"
+    "mov %rax, %rcx\n   sar $63, %rcx\n   and $1023, %ecx\n   add %rax, %rcx\n   sar $10, %rcx\n"
+    "mov %rcx, %r8\n   shl $10, %r8\n   sub %r8, %rax\n   mov %eax, (%rsi)\n"
+    "mov $2147483647, %eax\n   cmp %rax, %rcx\n   cmovg %rax, %rcx\n   neg %rax\n   cmp %rax, %rcx\n   cmovl %rax, %rcx\n   mov %rcx, %rax\n"
+    "9:  " ASM_RET
+    ASM_END(pointer_scale)
+
+    //
+    //       rects_point: rdi the four columns, rsi the order, rdx how many of
+    //       it, rcx and r8 the point, r9 how far a rectangle is grown. The
+    //       point and the growth are added once, so a rectangle holds the
+    //       point on an axis when the point's offset from its start, as a
+    //       number with no sign, is below its extent and twice the growth:
+    //       one compare an axis. The order is read from its last entry.
+    //
+    ASM_FUNC(rects_point)
+    "add %r9, %rcx\n   add %r9, %r8\n   add %r9, %r9\n"
+    "1:  sub $1, %rdx\n   jb 8f\n   movzbl (%rsi,%rdx), %eax\n"
+    "mov (%rdi), %r10\n   movslq (%r10,%rax,4), %r10\n   mov %rcx, %r11\n   sub %r10, %r11\n"
+    "mov 16(%rdi), %r10\n   mov (%r10,%rax,4), %r10d\n   add %r9, %r10\n   cmp %r10, %r11\n   jae 1b\n"
+    "mov 8(%rdi), %r10\n   movslq (%r10,%rax,4), %r10\n   mov %r8, %r11\n   sub %r10, %r11\n"
+    "mov 24(%rdi), %r10\n   mov (%r10,%rax,4), %r10d\n   add %r9, %r10\n   cmp %r10, %r11\n   jae 1b\n"
+    "mov %rdx, %rax\n" ASM_RET
+    "8:  mov $-1, %rax\n" ASM_RET
+    ASM_END(rects_point)
+
+    //
+    //       ring_post: rdi the ring's seven addresses, rsi its cells, rdx
+    //       the record, rcx whether an unread last record of the record's
+    //       type is written over. r8d the head, r10 the unread, r11 the
+    //       mask, rax the cell, ecx whether the head moves on. The head is
+    //       stored last, after the cell is whole.
+    //
+    ASM_FUNC(ring_post)
+    "mov 40(%rdi), %r9\n   mov (%r9), %r8d\n   mov 48(%rdi), %r9\n   mov (%r9), %r9d\n   mov %r8d, %r10d\n   sub %r9d, %r10d\n   lea -1(%rsi), %r11\n"
+    "test %rcx, %rcx\n   jz 2f\n   test %r10d, %r10d\n   jz 2f\n   cmp %rsi, %r10\n   ja 2f\n"
+    "lea -1(%r8), %eax\n   and %r11d, %eax\n   mov (%rdi), %r9\n   movzwl (%r9,%rax,2), %r9d\n   movzwl 16(%rdx), %ecx\n   cmp %ecx, %r9d\n   jne 2f\n"
+    "xor %ecx, %ecx\n   jmp 5f\n"
+    "2:  xor %eax, %eax\n   cmp %rsi, %r10\n   jae 9f\n   mov %r8d, %eax\n   and %r11d, %eax\n   mov $1, %ecx\n"
+    "5:  mov (%rdi), %r9\n   movzwl 16(%rdx), %r10d\n   mov %r10w, (%r9,%rax,2)\n"
+    "mov 8(%rdi), %r9\n   movzwl 18(%rdx), %r10d\n   mov %r10w, (%r9,%rax,2)\n"
+    "mov 16(%rdi), %r9\n   mov 8(%rdx), %r10d\n   mov %r10d, (%r9,%rax,4)\n"
+    "mov 24(%rdi), %r9\n   mov 12(%rdx), %r10d\n   mov %r10d, (%r9,%rax,4)\n"
+    "mov 32(%rdi), %r9\n   mov (%rdx), %r10\n   mov %r10, (%r9,%rax,8)\n"
+    "test %ecx, %ecx\n   jz 6f\n   mov 40(%rdi), %r9\n   add $1, %r8d\n   mov %r8d, (%r9)\n"
+    "6:  mov $1, %eax\n"
+    "9:  " ASM_RET
+    ASM_END(ring_post)
+
+    //
     //       wire_message: rdi the bytes, rsi how many, rdx the most a message
     //       may be, rcx the two words of the head. The size is the sixteen
     //       bits at byte 6, and is looked at before anything is stored: 0 in
@@ -25682,6 +25781,67 @@ __asm__(
     "2:  mov w0, w2\n" ASM_RET
     ASM_END(hash_fnv_u32)
 
+    //       evdev_decode, pointer_gain, pointer_scale, rects_point and
+    //       ring_post: the x86_64 block has the reasons. evdev_decode: x8
+    //       the bytes, x1 how many records, x2 the records. pointer_gain:
+    //       x0 what is left of the sum, x8 the root, x10 the bit, which clz
+    //       finds, x9 a million. pointer_scale: x8 the number, x9 its quotient.
+    //       rects_point: x8 to x11 the columns, x12 the row. ring_post: w9
+    //       the head and x8 where it is, x10 the unread, x11 the mask, x12
+    //       the cell, x15 whether the head moves on; the tail is read with
+    //       ldar and the head stored with stlr, as the C's acquire and
+    //       release were.
+    ASM_FUNC(evdev_decode)
+    "mov x8, x0\n   mov x9, #0xaaab\n   movk x9, #0xaaaa, lsl #16\n   movk x9, #0xaaaa, lsl #32\n   movk x9, #0xaaaa, lsl #48\n"
+    "umulh x9, x1, x9\n   lsr x9, x9, #4\n   cmp x9, x3\n   csel x0, x9, x3, lo\n   cbz x0, 9f\n   mov x1, x0\n"
+    "mov x9, #0xca00\n   movk x9, #0x3b9a, lsl #16\n   mov x10, #1000\n"
+    "1:  ldp x11, x12, [x8]\n   mul x11, x11, x9\n   madd x11, x12, x10, x11\n   ldr x12, [x8, #16]\n   stp x11, x12, [x2], #16\n"
+    "add x8, x8, #24\n   subs x1, x1, #1\n   b.ne 1b\n"
+    "9:  " ASM_RET
+    ASM_END(evdev_decode)
+
+    ASM_FUNC(pointer_gain)
+    "mul x0, x0, x0\n   madd x0, x1, x1, x0\n   mov x9, #0x4240\n   movk x9, #0xf, lsl #16\n   cmp x2, x9\n   csel x2, x2, x9, hs\n"
+    "mov x8, #0\n   cbz x0, 4f\n   clz x11, x0\n   mov x10, #63\n   sub x11, x10, x11\n   and x11, x11, #62\n   mov x10, #1\n   lsl x10, x10, x11\n"
+    "2:  add x11, x8, x10\n   lsr x8, x8, #1\n   cmp x0, x11\n   b.lo 3f\n   sub x0, x0, x11\n   add x8, x8, x10\n"
+    "3:  lsr x10, x10, #2\n   cbnz x10, 2b\n"
+    "4:  mul x8, x8, x9\n   udiv x8, x8, x2\n   mov x0, #1024\n   cmp x8, #1\n   b.ls 9f\n   mov x0, #2560\n   cmp x8, #8\n   b.hs 9f\n"
+    "sub x8, x8, #1\n   mov x11, #1536\n   mul x8, x8, x11\n   mov x11, #37450\n   mul x8, x8, x11\n   lsr x8, x8, #18\n   add x0, x8, #1024\n"
+    "9:  " ASM_RET
+    ASM_END(pointer_gain)
+
+    ASM_FUNC(pointer_scale)
+    "cbz x0, 9f\n   mul x8, x0, x2\n   ldrsw x9, [x1]\n   add x8, x8, x9\n"
+    "asr x9, x8, #63\n   and x9, x9, #1023\n   add x9, x8, x9\n   asr x9, x9, #10\n   sub x8, x8, x9, lsl #10\n   str w8, [x1]\n"
+    "mov w10, #0x7fffffff\n   cmp x9, x10\n   csel x9, x9, x10, lt\n   neg x10, x10\n   cmp x9, x10\n   csel x0, x9, x10, gt\n"
+    "9:  " ASM_RET
+    ASM_END(pointer_scale)
+
+    ASM_FUNC(rects_point)
+    "ldp x8, x9, [x0]\n   ldp x10, x11, [x0, #16]\n   add x3, x3, x5\n   add x4, x4, x5\n   lsl x5, x5, #1\n"
+    "1:  cbz x2, 8f\n   sub x2, x2, #1\n   ldrb w12, [x1, x2]\n"
+    "ldrsw x13, [x8, x12, lsl #2]\n   sub x13, x3, x13\n   ldr w14, [x10, x12, lsl #2]\n   add x14, x14, x5\n   cmp x13, x14\n   b.hs 1b\n"
+    "ldrsw x13, [x9, x12, lsl #2]\n   sub x13, x4, x13\n   ldr w14, [x11, x12, lsl #2]\n   add x14, x14, x5\n   cmp x13, x14\n   b.hs 1b\n"
+    "mov x0, x2\n" ASM_RET
+    "8:  mov x0, #-1\n" ASM_RET
+    ASM_END(rects_point)
+
+    ASM_FUNC(ring_post)
+    "ldr x8, [x0, #40]\n   ldr w9, [x8]\n   ldr x10, [x0, #48]\n   ldar w10, [x10]\n   sub w10, w9, w10\n   sub x11, x1, #1\n"
+    "cbz x3, 2f\n   cbz w10, 2f\n   cmp x10, x1\n   b.hi 2f\n"
+    "sub w12, w9, #1\n   and x12, x12, x11\n   ldr x13, [x0]\n   ldrh w13, [x13, x12, lsl #1]\n   ldrh w14, [x2, #16]\n   cmp w13, w14\n   b.ne 2f\n"
+    "mov x15, #0\n   b 5f\n"
+    "2:  cmp x10, x1\n   b.hs 8f\n   and x12, x9, x11\n   mov x15, #1\n"
+    "5:  ldr x13, [x0]\n   ldrh w14, [x2, #16]\n   strh w14, [x13, x12, lsl #1]\n"
+    "ldr x13, [x0, #8]\n   ldrh w14, [x2, #18]\n   strh w14, [x13, x12, lsl #1]\n"
+    "ldr x13, [x0, #16]\n   ldr w14, [x2, #8]\n   str w14, [x13, x12, lsl #2]\n"
+    "ldr x13, [x0, #24]\n   ldr w14, [x2, #12]\n   str w14, [x13, x12, lsl #2]\n"
+    "ldr x13, [x0, #32]\n   ldr x14, [x2]\n   str x14, [x13, x12, lsl #3]\n"
+    "cbz x15, 6f\n   add w9, w9, #1\n   stlr w9, [x8]\n"
+    "6:  mov x0, #1\n" ASM_RET
+    "8:  mov x0, #0\n" ASM_RET
+    ASM_END(ring_post)
+
     //       wire_message, wire_slot and rects_clip: the x86_64 block has the
     //       reasons. wire_message: x0 the bytes, x1 how many, x2 the most, x3
     //       the head; w9 the size. wire_slot: x0 the index, x1 its cells, x2
@@ -35680,6 +35840,72 @@ __asm__(
     "1:  lw t1, 0(a0)\n   xor a2, a2, t1\n   mulw a2, a2, t0\n   addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 1b\n"
     "2:  slli a0, a2, 32\n   srli a0, a0, 32\n" ASM_RET
     ASM_END(hash_fnv_u32)
+
+    //       evdev_decode, pointer_gain, pointer_scale, rects_point and
+    //       ring_post: the x86_64 block has the reasons. evdev_decode: t0
+    //       the bytes, which are at an address of eight (the declaration
+    //       asks it), a1 how many records, a2 the records. pointer_gain:
+    //       a0 what is left of the sum, t1 the root, t2 the bit, looked for
+    //       from bit 14 or 30 when the sum is below 2^16 or 2^32 (there is
+    //       no count of leading zeros at this floor), t0 a million.
+    //       pointer_scale: t0 the number, t1 its quotient.
+    //       rects_point: t0 to t3 the columns, t4 the row times four.
+    //       ring_post: t1 the head and t0 where it is, t2 the unread, t3 the
+    //       mask, t4 the cell, a4 whether the head moves on; a fence after
+    //       the tail is read and before the head is stored, as the C's
+    //       acquire and release were.
+    ASM_FUNC(evdev_decode)
+    "mv t0, a0\n   li t1, 0xaaaaaaaaaaaaaaab\n   mulhu t1, a1, t1\n   srli a0, t1, 4\n   bgeu a3, a0, 1f\n   mv a0, a3\n"
+    "1:  beqz a0, 9f\n   mv a1, a0\n   li t1, 1000000000\n   li t2, 1000\n"
+    "2:  ld t4, 0(t0)\n   ld t5, 8(t0)\n   mul t4, t4, t1\n   mul t5, t5, t2\n   add t4, t4, t5\n   sd t4, 0(a2)\n   ld t5, 16(t0)\n   sd t5, 8(a2)\n"
+    "addi t0, t0, 24\n   addi a2, a2, 16\n   addi a1, a1, -1\n   bnez a1, 2b\n"
+    "9:  " ASM_RET
+    ASM_END(evdev_decode)
+
+    ASM_FUNC(pointer_gain)
+    "mul a0, a0, a0\n   mul a1, a1, a1\n   add a0, a0, a1\n   li t0, 1000000\n   bgeu a2, t0, 1f\n   mv a2, t0\n"
+    "1:  li t1, 0\n   li t2, 1\n   slli t2, t2, 62\n   srli t3, a0, 32\n   bnez t3, 2f\n   srli t2, t2, 32\n   srli t3, a0, 16\n   bnez t3, 2f\n   srli t2, t2, 16\n"
+    "2:  bgeu a0, t2, 3f\n   srli t2, t2, 2\n   bnez t2, 2b\n   j 6f\n"
+    "3:  add t3, t1, t2\n   srli t1, t1, 1\n   bltu a0, t3, 4f\n   sub a0, a0, t3\n   add t1, t1, t2\n"
+    "4:  srli t2, t2, 2\n   bnez t2, 3b\n"
+    "6:  mul t1, t1, t0\n   divu t1, t1, a2\n   li a0, 1024\n   li t3, 1\n   bgeu t3, t1, 9f\n   li a0, 2560\n   li t3, 8\n   bgeu t1, t3, 9f\n"
+    "addi t1, t1, -1\n   li t3, 1536\n   mul t1, t1, t3\n   li t3, 37450\n   mul t1, t1, t3\n   srli t1, t1, 18\n   addi a0, t1, 1024\n"
+    "9:  " ASM_RET
+    ASM_END(pointer_gain)
+
+    ASM_FUNC(pointer_scale)
+    "beqz a0, 9f\n   mul t0, a0, a2\n   lw t1, 0(a1)\n   add t0, t0, t1\n"
+    "srai t1, t0, 63\n   andi t1, t1, 1023\n   add t1, t0, t1\n   srai t1, t1, 10\n   slli t2, t1, 10\n   sub t0, t0, t2\n   sw t0, 0(a1)\n"
+    "li t2, 2147483647\n   bge t2, t1, 1f\n   mv t1, t2\n"
+    "1:  neg t2, t2\n   bge t1, t2, 2f\n   mv t1, t2\n"
+    "2:  mv a0, t1\n"
+    "9:  " ASM_RET
+    ASM_END(pointer_scale)
+
+    ASM_FUNC(rects_point)
+    "ld t0, 0(a0)\n   ld t1, 8(a0)\n   ld t2, 16(a0)\n   ld t3, 24(a0)\n   add a3, a3, a5\n   add a4, a4, a5\n   slli a5, a5, 1\n"
+    "1:  beqz a2, 8f\n   addi a2, a2, -1\n   add t4, a1, a2\n   lbu t4, 0(t4)\n   slli t4, t4, 2\n"
+    "add t5, t0, t4\n   lw t5, 0(t5)\n   sub t5, a3, t5\n   add t6, t2, t4\n   lwu t6, 0(t6)\n   add t6, t6, a5\n   bgeu t5, t6, 1b\n"
+    "add t5, t1, t4\n   lw t5, 0(t5)\n   sub t5, a4, t5\n   add t6, t3, t4\n   lwu t6, 0(t6)\n   add t6, t6, a5\n   bgeu t5, t6, 1b\n"
+    "mv a0, a2\n" ASM_RET
+    "8:  li a0, -1\n" ASM_RET
+    ASM_END(rects_point)
+
+    ASM_FUNC(ring_post)
+    "ld t0, 40(a0)\n   lwu t1, 0(t0)\n   ld t2, 48(a0)\n   lwu t2, 0(t2)\n   fence r, rw\n   subw t2, t1, t2\n   slli t2, t2, 32\n   srli t2, t2, 32\n   addi t3, a1, -1\n"
+    "beqz a3, 2f\n   beqz t2, 2f\n   bltu a1, t2, 2f\n"
+    "addiw t4, t1, -1\n   and t4, t4, t3\n   ld t5, 0(a0)\n   slli t6, t4, 1\n   add t5, t5, t6\n   lhu t5, 0(t5)\n   lhu t6, 16(a2)\n   bne t5, t6, 2f\n"
+    "li a4, 0\n   j 5f\n"
+    "2:  bgeu t2, a1, 8f\n   and t4, t1, t3\n   li a4, 1\n"
+    "5:  slli t5, t4, 1\n   ld t6, 0(a0)\n   add t6, t6, t5\n   lhu a5, 16(a2)\n   sh a5, 0(t6)\n"
+    "ld t6, 8(a0)\n   add t6, t6, t5\n   lhu a5, 18(a2)\n   sh a5, 0(t6)\n"
+    "slli t5, t4, 2\n   ld t6, 16(a0)\n   add t6, t6, t5\n   lw a5, 8(a2)\n   sw a5, 0(t6)\n"
+    "ld t6, 24(a0)\n   add t6, t6, t5\n   lw a5, 12(a2)\n   sw a5, 0(t6)\n"
+    "slli t5, t4, 3\n   ld t6, 32(a0)\n   add t6, t6, t5\n   ld a5, 0(a2)\n   sd a5, 0(t6)\n"
+    "beqz a4, 6f\n   addiw t1, t1, 1\n   fence rw, w\n   sw t1, 0(t0)\n"
+    "6:  li a0, 1\n" ASM_RET
+    "8:  li a0, 0\n" ASM_RET
+    ASM_END(ring_post)
 
     //       wire_message, wire_slot and rects_clip: the x86_64 block has the
     //       reasons. wire_message: a0 the bytes, a1 how many, a2 the most, a3
@@ -53394,6 +53620,72 @@ fn bins_count(p32 address_to cells, positive pitch, positive columns, positive r
 fn bins_place(p32 address_to cells, positive pitch, positive columns, positive rows, p32 address_to lists,
               const p32 address_to records, positive count);
 PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive hash);
+/*
+        A hand's reports on their way to a program: what a device says
+        decoded, a movement's gain and its pixels, the rectangle a point
+        is in, and an event put in a program's ring. The numbers are a
+        device's and a program's, and are believed in nothing: a count,
+        a place, a stamp, a head or a tail may be any value, the
+        arithmetic is of 64-bit words that wrap, and only what is said
+        here is read or written. The sizes and the addresses are the
+        caller's.
+
+        evdev_decode takes the whole records of `size` bytes at `bytes`,
+        which is at an address of eight: a record is three 64-bit words
+        as Linux's evdev gives them to a 64-bit program (the seconds, the
+        microseconds, and the type, the code and the value in sixteen,
+        sixteen and thirty-two bits). For each, two words are written at
+        `records`: the stamp in nanoseconds (the seconds times a thousand
+        million and the microseconds times a thousand), and the third word
+        as it lay. No more than `room` records are written; bytes past
+        the last whole record are not read. It answers how many were
+        written.
+
+        pointer_gain is the gain, in 1024ths, of a movement of `dx` and
+        `dy` counts made in `interval` nanoseconds: the distance is the
+        whole root of dx * dx + dy * dy, the speed the distance times a
+        million over the interval (one below a million is a million),
+        rounded down, in counts a millisecond; the gain is 1024 at a
+        speed of one or less, 2560 at eight or more, and between them
+        1024 + 1536 * (speed - 1) / 7, rounded down.
+
+        pointer_scale turns `delta` counts into pixels by `gain`: the
+        number is delta * gain + *remainder, its quotient by 1024 toward
+        zero is answered, held to 2147483647 either way, and what the
+        quotient left of the number is kept in *remainder for the next
+        movement. No counts is 0, and the remainder is neither read nor
+        written.
+
+        rects_point is the last entry of `order` whose rectangle holds
+        the point `x`, `y`, or -1 for none; what is answered is the
+        entry's place in `order`, not what it names. `columns` is four
+        addresses, of the rectangles' x and y (signed, 32 bits) and their
+        widths and heights (unsigned, 32 bits); an entry of `order` is a
+        byte that names a rectangle by its place in the columns, and only
+        the rectangles named are read. A rectangle is grown by `grow` on
+        every side, and holds a point from its first pixel to the one
+        before its end.
+
+        ring_post puts a record in a ring a program reads. `ring` is
+        seven addresses: of the cells' types and flags (16 bits each),
+        their two numbers (32 bits each) and their stamps (64 bits), of
+        the head, which this alone writes, and of the tail, which the
+        reader writes and this only reads (32 bits each, counted without
+        end and wrapping). `cells` is a power of two, 2^31 at the most. `record` is three
+        words: the stamp, the two numbers (the first in the low half),
+        and the type with the flags in the sixteen bits above it. With
+        `replace`, a last record that is unread and of the record's type
+        is written over and the head stays. Otherwise the record goes in
+        the cell after it and the head moves on, stored after the cell is
+        whole and in release order; a ring with `cells` or more unread,
+        which a reader's tail can say whatever is true, takes nothing. It
+        answers whether the record is in the ring.
+*/
+positive evdev_decode(const p8 address_to bytes, positive size, p64 address_to records, positive room);
+PURE positive pointer_gain(bipolar dx, bipolar dy, positive interval);
+bipolar pointer_scale(bipolar delta, b32 address_to remainder, positive gain);
+PURE bipolar rects_point(const address_any address_to columns, const p8 address_to order, positive count, bipolar x, bipolar y, positive grow);
+positive ring_post(const address_any address_to ring, positive cells, const p64 address_to record, positive replace);
 /*
         The wire of a protocol whose messages are words of thirty-two
         bits, least byte first, behind a head of two: the object the
