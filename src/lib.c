@@ -14466,7 +14466,7 @@ __asm__(
     "packuswb %xmm10, %xmm4\n"
     "punpcklwd %xmm0, %xmm0\n   movdqa %xmm0, %xmm2\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm0, %xmm0\n"
     "packuswb %xmm0, %xmm2\n   movdqa %xmm2, %xmm3\n   pand %xmm9, %xmm3\n   por %xmm3, %xmm4\n"
-    "movdqa %xmm6, %xmm3\n   movdqa %xmm2, %xmm10\n   pandn %xmm6, %xmm10\n"
+    "pcmpeqd %xmm10, %xmm10\n   pxor %xmm2, %xmm10\n"
     "movdqa %xmm1, %xmm11\n   punpcklbw %xmm7, %xmm11\n   punpckhbw %xmm7, %xmm1\n"
     "movdqa %xmm10, %xmm2\n   punpcklbw %xmm7, %xmm2\n   punpckhbw %xmm7, %xmm10\n"
     "pmullw %xmm2, %xmm11\n   paddw %xmm5, %xmm11\n   movdqa %xmm11, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm11\n   psrlw $8, %xmm11\n"
