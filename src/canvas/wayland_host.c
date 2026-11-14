@@ -24,7 +24,7 @@
 #define COMPOSITOR_WL_BACKLOG 16
 #define COMPOSITOR_WL_PER_USER 8
 #define COMPOSITOR_WL_READ 16384        // one read; a client gets at most COMPOSITOR_WL_READS of them a pass
-#define COMPOSITOR_WL_READS 4
+#define COMPOSITOR_WL_READS 32
 #define COMPOSITOR_WL_ACCEPTS 4
 #define COMPOSITOR_POLLOUT 4
 #define COMPOSITOR_POLLERR 8
@@ -1004,11 +1004,7 @@ static void compositor_wl_lent_sync(int start)
         unsigned long end_sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
 
         if (start)
-        {
-                if (compositor_wl.lent_synced)
-                        return;
                 compositor_wl.lent_synced = 1;
-        }
         else
         {
                 if (!compositor_wl.lent_synced)
@@ -1025,8 +1021,7 @@ static void compositor_wl_lent_sync(int start)
                                 // A present that draws none of the window (a pointer's move, a clock's tick elsewhere) reads none of its buffer: no poll,
                                 // two timers and two ioctls a window a present, and no wait for a client's card to finish what it is drawing. The box is
                                 // taken COMPOSITOR_WL_SYNC_REACH wider than the window, since the glass is composed from what is round the damage.
-                                compositor_wl.lent[row].synced = 0;
-                                if (!compositor_wl_row_damaged(row))
+                                if (compositor_wl.lent[row].synced || !compositor_wl_row_damaged(row))
                                         continue;
                                 compositor_wl.lent[row].synced =
                                         compositor_wl_dmabuf_ready(client, (int)compositor_wl.lent[row].fd) &&
@@ -2612,7 +2607,6 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
                 compositor_wl_dmabuf_add_pair(info, base_formats[i], 0);
         for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
                 compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
-        compositor_wl_query_plane_modifiers(info);
         info->tranches = 1;
         info->tranche[0].device = info->device;
         info->tranche[0].flags = compositor.card >= 0 && compositor.primary ? 1 : 0;
@@ -2941,16 +2935,11 @@ static const struct wayland_syncobj_host compositor_wl_syncobj = {
 static int compositor_wl_dmabuf_ready(long client, int fd)
 {
         struct compositor_poll watch = {fd, COMPOSITOR_POLLIN, 0};
-        positive now = clock_monotonic_nanoseconds(), wait[2] = {0, 0};
+        positive wait[2] = {0, 0};
 
-        if (client < 0 || client >= WAYLAND_CLIENTS || now >= compositor_wl.slow_until[client])
-                wait[1] = COMPOSITOR_WL_DMABUF_WAIT_NS;
+        (void)client;
         compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
-        if (watch.returned & COMPOSITOR_POLLIN)
-                return 1;
-        if (client >= 0 && client < WAYLAND_CLIENTS)
-                compositor_wl.slow_until[client] = now + COMPOSITOR_WL_DMABUF_SLOW_NS;
-        return 0;
+        return (watch.returned & COMPOSITOR_POLLIN) != 0;
 }
 
 /*

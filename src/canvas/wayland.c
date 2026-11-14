@@ -4961,7 +4961,8 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
         struct wayland_surface *root, *s = 0;
         long time, slots[WAYLAND_SEATS], count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
 
-        if (!wayland.host || row != wayland.pointer_row || !(root = wayland_row_surface(row, &c)))
+        if (!wayland.host || row != wayland.pointer_row || (wayland.hold_mode == 1 && row == wayland.hold_row) ||
+            !(root = wayland_row_surface(row, &c)))
                 return;
         // A motion that crosses from one surface of the window to another is a leave and an enter first.
         wayland_pointer_to_at(row, x, y, &s, &sx, &sy);

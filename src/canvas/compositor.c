@@ -9356,18 +9356,12 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
                 return g->why;
         {
-                int aligned = !(g->width & 3) && !((compositor.scanout_pitch / 4) & 3) && !(out & 15);
-
                 for (unsigned int at = 0; at < rects; at++)
                 {
-                        b32 ok = (at > 0 && aligned)
-                                     ? gpu_scene_more(COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
-                                                      (unsigned int)compositor.height, (unsigned int)rect[at][0], (unsigned int)rect[at][1],
-                                                      (unsigned int)rect[at][2], (unsigned int)rect[at][3])
-                                     : gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
-                                                 (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
-                                                 (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
-                                                 (unsigned int)rect[at][3]);
+                        b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
+                                           (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                           (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
+                                           (unsigned int)rect[at][3]);
                         if (!ok)
                         {
                                 if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
@@ -18686,7 +18680,8 @@ static void compositor_button(unsigned int code, int down)
                 return;
 
         compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
-        compositor_pointer_to(under);
+        if (!compositor_wl_hold_counts(0, 0, 0))
+                compositor_pointer_to(under);
         compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
         if (code - COMPOSITOR_BTN_LEFT < 8)
         {
