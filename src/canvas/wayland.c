@@ -1508,11 +1508,27 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         wayland_end(&e);
                 }
                 wayland_decoration_send(c, s);
-                e = wayland_begin(c, c->objects[slot].id, WLE_xdg_toplevel_configure);
-                wayland_word(&e, (unsigned long)(ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0));
-                wayland_word(&e, (unsigned long)(ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0));
-                wayland_words(&e, states, count);
-                wayland_end(&e);
+                {
+                        long cw = ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0;
+                        long ch = ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0;
+
+                        if (cw > 0 && ch > 0 && !(facts.states & WAYLAND_STATE_FULLSCREEN))
+                        {
+                                if (s->max_width > 0 && cw > s->max_width)
+                                        cw = s->max_width;
+                                if (s->max_height > 0 && ch > s->max_height)
+                                        ch = s->max_height;
+                                if (s->min_width > 0 && cw < s->min_width)
+                                        cw = s->min_width;
+                                if (s->min_height > 0 && ch < s->min_height)
+                                        ch = s->min_height;
+                        }
+                        e = wayland_begin(c, c->objects[slot].id, WLE_xdg_toplevel_configure);
+                        wayland_word(&e, (unsigned long)cw);
+                        wayland_word(&e, (unsigned long)ch);
+                        wayland_words(&e, states, count);
+                        wayland_end(&e);
+                }
                 s->told_width = facts.width;
                 s->told_height = facts.height;
                 s->told_states = facts.states;
