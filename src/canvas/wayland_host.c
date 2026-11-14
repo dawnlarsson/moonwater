@@ -1253,7 +1253,8 @@ static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *pic
 
 static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src, long count, unsigned int fourcc, int blend)
 {
-        if (!blend)
+        if (!blend || fourcc == COMPOSITOR_WL_FOURCC_XRGB8888 || fourcc == WAYLAND_FOURCC_XBGR8888 ||
+            fourcc == WAYLAND_FOURCC_XRGB2101010 || fourcc == WAYLAND_FOURCC_XBGR2101010)
         {
                 switch (fourcc)
                 {
@@ -1274,6 +1275,11 @@ static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src
                                 dst[i] = compositor_wl_convert_pixel(src[i], fourcc);
                         return;
                 }
+        }
+        if (fourcc == COMPOSITOR_WL_FOURCC_ARGB8888)
+        {
+                memory_over_u32_rect(dst, (positive)count, src, (positive)count, (positive)count, 1);
+                return;
         }
         for (long i = 0; i < count; i++)
                 dst[i] = compositor_wl_over(compositor_wl_convert_pixel(src[i], fourcc), dst[i]);
@@ -1309,9 +1315,9 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         (void)probe;
         if (compositor_wl_cut(picture->pixels))
                 return -1;
-        // Fast path for unscaled, untransformed 32-bit surfaces (e.g. ABGR8888 / XBGR8888 / modifier-tagged linear buffers):
+        // Fast path for unscaled, untransformed 32-bit surfaces (including y_invert, ABGR8888, XBGR8888, modifier-tagged linear buffers):
         // clip to the commit's damage rectangles and read write-combined dma-buf rows with streaming loads into L1 before swizzling.
-        if (fourcc != WAYLAND_FOURCC_NV12 && !(picture->transform & 7) && !picture->y_invert &&
+        if (fourcc != WAYLAND_FOURCC_NV12 && !(picture->transform & 7) &&
             sx256 == 0 && sy256 == 0 && sw256 == tw * 256 && sh256 == th * 256 && tw == bw && th == bh)
         {
                 long count = picture->full || !picture->damages ? 1 : picture->damages;
@@ -1348,21 +1354,29 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                         {
                                 long w = right - left, h = bottom - top;
                                 unsigned long src_pitch = (unsigned long)picture->stride / 4;
-                                const unsigned int *src_base = (const unsigned int *)(picture->pixels + (unsigned long)top * (unsigned long)picture->stride) + left;
+                                const unsigned int *src_pixels = (const unsigned int *)picture->pixels;
                                 unsigned int *dst_base = to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left);
 
                                 if (picture->sync_fd >= 0 && w <= 4096)
                                 {
                                         for (long ry = 0; ry < h; ry++)
                                         {
-                                                memory_copy_rect_stream_u32(row_buf, (positive)w, src_base + (unsigned long)ry * src_pitch, src_pitch, (positive)w, 1);
+                                                long sy = picture->y_invert ? (bh - 1 - (top + ry)) : (top + ry);
+                                                const unsigned int *src_row = src_pixels + (unsigned long)sy * src_pitch + (unsigned long)left;
+
+                                                memory_copy_rect_stream_u32(row_buf, (positive)w, src_row, src_pitch, (positive)w, 1);
                                                 compositor_wl_convert_row(dst_base + (unsigned long)ry * pitch, row_buf, w, fourcc, picture->blend);
                                         }
                                 }
                                 else
                                 {
                                         for (long ry = 0; ry < h; ry++)
-                                                compositor_wl_convert_row(dst_base + (unsigned long)ry * pitch, src_base + (unsigned long)ry * src_pitch, w, fourcc, picture->blend);
+                                        {
+                                                long sy = picture->y_invert ? (bh - 1 - (top + ry)) : (top + ry);
+                                                const unsigned int *src_row = src_pixels + (unsigned long)sy * src_pitch + (unsigned long)left;
+
+                                                compositor_wl_convert_row(dst_base + (unsigned long)ry * pitch, src_row, w, fourcc, picture->blend);
+                                        }
                                 }
                         }
                         compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
