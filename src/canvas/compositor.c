@@ -8507,8 +8507,6 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.table->glass[row] || frame->blend)
                 return *why = 5, -1;
-        if (compositor_lent(row))
-                return *why = 18, -1; // its picture is the client's buffer, read in place: no table picture to scan out
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
         // the card, after it has drawn the pictures), so none is shown straight.
@@ -8538,7 +8536,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         // The card asked last: whether it has an overlay, then the window's framebuffer.
         if (!compositor_overlay_ready())
                 return *why = 10, -1;
-        return compositor_window_fb(row, compositor.front[row]) ? row : (*why = 11, -1);
+        return (compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
 }
 
 // The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.
@@ -10175,17 +10173,24 @@ static void compositor_present_frames(void)
         }
         if (plane >= 0)
         {
-                unsigned int which = compositor.front[plane], fb = compositor_window_fb(plane, which);
+                int lent = compositor_lent(plane);
+                unsigned int which = compositor.front[plane];
+                unsigned int fb = lent ? compositor_lent_fb(plane) : compositor_window_fb(plane, which);
                 int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]};
 
                 if (compositor.flip_pending)
                         return;
-                if (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed))
+                if (!fb || (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed)))
                 {
-                        // Refused: off the overlay for good, and the window composed whole from now.
-                        compositor_unscanned(12);
-                        compositor.overlay_state = -1;
-                        compositor_overlay_off();
+                        if (lent)
+                                compositor_lent_fb_fail(plane);
+                        else
+                        {
+                                // Refused: off the overlay for good, and the window composed whole from now.
+                                compositor_unscanned(12);
+                                compositor.overlay_state = -1;
+                                compositor_overlay_off();
+                        }
                         compositor.plane_row = compositor.direct_row = -1;
                         compositor_damage(planed[0], planed[1], planed[2] - planed[0], planed[3] - planed[1]);
                 }

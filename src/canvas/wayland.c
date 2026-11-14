@@ -151,7 +151,7 @@
         of one connection are made in the order they came.
 */
 #define WAYLAND_BUDGET_MS 16
-#define WAYLAND_BUDGET_SCREENS 2
+#define WAYLAND_BUDGET_SCREENS 8
 
 struct wayland_rect
 {
@@ -171,7 +171,7 @@ struct wayland_rect
         into it and tells the compositor the picture is new, row_title gives the tab's text, and row_do asks it
         for something (WAYLAND_DO_*). row_facts reads what the compositor says of the window.
 */
-#define WAYLAND_XWAIT_MS 300      // a commit of an X window waits this long for its window manager to say what the window is
+#define WAYLAND_XWAIT_MS 30       // a commit of an X window waits this long for its window manager to say what the window is
 #define WAYLAND_KIND_TOPLEVEL 1
 #define WAYLAND_KIND_POPUP 2
 
@@ -8886,7 +8886,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
         card shows until the flip lands, and waits for wayland_presented. Released at the flip instead, a client with two buffers was
         told the frame was done while both were still the compositor's, and one that draws only when a buffer is free drew no more.
 */
-WAYLAND_API void wayland_drawn(void)
+static void wayland_drawn_rows(int dmabuf_busy_row)
 {
         for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
         {
@@ -8894,7 +8894,9 @@ WAYLAND_API void wayland_drawn(void)
                 struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
                 struct wayland_facts facts;
 
-                if (!s || !s->live || !s->lent_gone || c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf)
+                if (!s || !s->live || !s->lent_gone)
+                        continue;
+                if (c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf && (dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row))
                         continue;
                 // A window put away is in no frame: its buffer goes at a frame's time all the same (wayland_presented_rows).
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
@@ -8902,6 +8904,16 @@ WAYLAND_API void wayland_drawn(void)
                 wayland_let_go(c, s->lent_gone - 1);
                 s->lent_gone = 0;
         }
+}
+
+WAYLAND_API void wayland_drawn(void)
+{
+        wayland_drawn_rows(-2);
+}
+
+WAYLAND_API void wayland_drawn_composed(int busy_row)
+{
+        wayland_drawn_rows(busy_row);
 }
 
 /*

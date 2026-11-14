@@ -3970,9 +3970,12 @@ static void compositor_wl_wake(void)
 /* A frame was drawn: the callbacks that waited for it are answered, and sent. */
 static void compositor_wl_frame(void)
 {
+        int busy_row;
+
         if (!compositor_wl.started)
                 return;
-        wayland_drawn();
+        busy_row = compositor.direct_row >= 0 ? compositor.direct_row : compositor.plane_row;
+        wayland_drawn_composed(busy_row);
         wayland_frame();
         compositor_wl_flush_all();
 }
