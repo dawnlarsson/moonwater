@@ -39,7 +39,7 @@
 #define COMPOSITOR_WL_PULL 1
 #define COMPOSITOR_WL_PUSH 2
 #define COMPOSITOR_WL_DMABUF_SYNC 0x40086200u         // DMA_BUF_IOCTL_SYNC
-#define COMPOSITOR_WL_DMABUF_WAIT_NS 30000000ull      // how long a dma-buf's writer is waited for
+#define COMPOSITOR_WL_DMABUF_WAIT_NS 2000000ull       // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
 #define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
 #define COMPOSITOR_WL_FOURCC_ARGB8888 0x34325241u
 #define COMPOSITOR_WL_FOURCC_XRGB8888 0x34325258u
@@ -1177,42 +1177,19 @@ static inline unsigned int compositor_wl_clamp8(long v)
         return v < 0 ? 0u : v > 255 ? 255u : (unsigned int)v;
 }
 
-static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *picture, const unsigned char *uv_base, unsigned long uv_stride,
-                                               long bx, long by)
+static inline unsigned int compositor_wl_resolve_fourcc(const struct wayland_picture *picture)
 {
-        unsigned int fourcc = picture->fourcc;
-        unsigned long stride = (unsigned long)picture->stride;
-        unsigned int v, r, g, b, a;
+        if (picture->fourcc)
+                return picture->fourcc;
+        return picture->format == WLN_wl_shm_format_argb8888   ? COMPOSITOR_WL_FOURCC_ARGB8888
+               : picture->format == WLN_wl_shm_format_xrgb8888 ? COMPOSITOR_WL_FOURCC_XRGB8888
+                                                               : (unsigned int)picture->format;
+}
 
-        if (!fourcc)
-                fourcc = picture->format == WLN_wl_shm_format_argb8888   ? COMPOSITOR_WL_FOURCC_ARGB8888
-                         : picture->format == WLN_wl_shm_format_xrgb8888 ? COMPOSITOR_WL_FOURCC_XRGB8888
-                                                                         : (unsigned int)picture->format;
-        if (picture->y_invert)
-                by = (picture->height - 1) - by;
-        if (fourcc == WAYLAND_FOURCC_NV12)
-        {
-                long yv = (long)picture->pixels[(unsigned long)by * stride + (unsigned long)bx];
-                long u = 128, vr = 128, c, d, e;
+static inline unsigned int compositor_wl_convert_pixel(unsigned int v, unsigned int fourcc)
+{
+        unsigned int r, g, b, a;
 
-                if (uv_base && uv_stride > 0)
-                {
-                        const unsigned char *uv = uv_base + (unsigned long)(by / 2) * uv_stride + (unsigned long)(bx & ~1L);
-
-                        u = (long)uv[0];
-                        vr = (long)uv[1];
-                }
-                c = yv - 16;
-                if (c < 0)
-                        c = 0;
-                d = u - 128;
-                e = vr - 128;
-                r = compositor_wl_clamp8((298 * c + 409 * e + 128) >> 8);
-                g = compositor_wl_clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
-                b = compositor_wl_clamp8((298 * c + 516 * d + 128) >> 8);
-                return 0xff000000u | (r << 16) | (g << 8) | b;
-        }
-        v = *(const unsigned int *)(picture->pixels + (unsigned long)by * stride + (unsigned long)bx * 4);
         switch (fourcc)
         {
         case WAYLAND_FOURCC_ABGR8888:
@@ -1240,6 +1217,68 @@ static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *pic
         }
 }
 
+static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *picture, unsigned int fourcc,
+                                               const unsigned char *uv_base, unsigned long uv_stride,
+                                               long bx, long by)
+{
+        unsigned long stride = (unsigned long)picture->stride;
+
+        if (picture->y_invert)
+                by = (picture->height - 1) - by;
+        if (fourcc == WAYLAND_FOURCC_NV12)
+        {
+                long yv = (long)picture->pixels[(unsigned long)by * stride + (unsigned long)bx];
+                long u = 128, vr = 128, c, d, e;
+                unsigned int r, g, b;
+
+                if (uv_base && uv_stride > 0)
+                {
+                        const unsigned char *uv = uv_base + (unsigned long)(by / 2) * uv_stride + (unsigned long)(bx & ~1L);
+
+                        u = (long)uv[0];
+                        vr = (long)uv[1];
+                }
+                c = yv - 16;
+                if (c < 0)
+                        c = 0;
+                d = u - 128;
+                e = vr - 128;
+                r = compositor_wl_clamp8((298 * c + 409 * e + 128) >> 8);
+                g = compositor_wl_clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
+                b = compositor_wl_clamp8((298 * c + 516 * d + 128) >> 8);
+                return 0xff000000u | (r << 16) | (g << 8) | b;
+        }
+        return compositor_wl_convert_pixel(*(const unsigned int *)(picture->pixels + (unsigned long)by * stride + (unsigned long)bx * 4), fourcc);
+}
+
+static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src, long count, unsigned int fourcc, int blend)
+{
+        if (!blend)
+        {
+                switch (fourcc)
+                {
+                case COMPOSITOR_WL_FOURCC_ARGB8888:
+                        memory_copy_apart(dst, src, (positive)count * 4);
+                        return;
+                case COMPOSITOR_WL_FOURCC_XRGB8888:
+                        memory_or_u32(dst, src, (positive)count, 0xff000000u);
+                        return;
+                case WAYLAND_FOURCC_ABGR8888:
+                        memory_swizzle_rb_u32(dst, src, (positive)count, 0u);
+                        return;
+                case WAYLAND_FOURCC_XBGR8888:
+                        memory_swizzle_rb_u32(dst, src, (positive)count, 0xff000000u);
+                        return;
+                default:
+                        for (long i = 0; i < count; i++)
+                                dst[i] = compositor_wl_convert_pixel(src[i], fourcc);
+                        return;
+                }
+        }
+        for (long i = 0; i < count; i++)
+                dst[i] = compositor_wl_over(compositor_wl_convert_pixel(src[i], fourcc), dst[i]);
+}
+
 static int compositor_wl_blit_xform(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
                                     long width, long height)
 {
@@ -1256,6 +1295,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         long ox1 = dx0 < 0 ? -dx0 : 0, oy1 = dy0 < 0 ? -dy0 : 0;
         long ox2 = dx0 + tw > width ? width - dx0 : tw;
         long oy2 = dy0 + th > height ? height - dy0 : th;
+        unsigned int fourcc = compositor_wl_resolve_fourcc(picture);
         const unsigned char *uv_base = 0;
         unsigned long uv_stride = picture->plane_stride[1];
         long uv_map_got = 0;
@@ -1269,7 +1309,83 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         (void)probe;
         if (compositor_wl_cut(picture->pixels))
                 return -1;
-        if (picture->fourcc == WAYLAND_FOURCC_NV12)
+        // Fast path for unscaled, untransformed 32-bit surfaces (e.g. ABGR8888 / XBGR8888 / modifier-tagged linear buffers):
+        // clip to the commit's damage rectangles and read write-combined dma-buf rows with streaming loads into L1 before swizzling.
+        if (fourcc != WAYLAND_FOURCC_NV12 && !(picture->transform & 7) && !picture->y_invert &&
+            sx256 == 0 && sy256 == 0 && sw256 == tw * 256 && sh256 == th * 256 && tw == bw && th == bh)
+        {
+                long count = picture->full || !picture->damages ? 1 : picture->damages;
+                unsigned int row_buf[4096];
+
+                if (count > WAYLAND_DAMAGE)
+                        count = WAYLAND_DAMAGE;
+                for (long at = 0; at < count; at++)
+                {
+                        long left = 0, top = 0, right = bw, bottom = bh;
+                        long x = dx0, y = dy0;
+
+                        if (!picture->full && picture->damages)
+                        {
+                                left = picture->damage[at].x;
+                                top = picture->damage[at].y;
+                                right = left + picture->damage[at].width;
+                                bottom = top + picture->damage[at].height;
+                        }
+                        left = left < 0 ? 0 : left;
+                        top = top < 0 ? 0 : top;
+                        right = right > bw ? bw : right;
+                        bottom = bottom > bh ? bh : bottom;
+                        if (x + left < 0)
+                                left = -x;
+                        if (y + top < 0)
+                                top = -y;
+                        if (x + right > width)
+                                right = width - x;
+                        if (y + bottom > height)
+                                bottom = height - y;
+                        if (right <= left || bottom <= top)
+                                continue;
+                        {
+                                long w = right - left, h = bottom - top;
+                                unsigned long src_pitch = (unsigned long)picture->stride / 4;
+                                const unsigned int *src_base = (const unsigned int *)(picture->pixels + (unsigned long)top * (unsigned long)picture->stride) + left;
+                                unsigned int *dst_base = to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left);
+
+                                if (picture->sync_fd >= 0 && w <= 4096)
+                                {
+                                        for (long ry = 0; ry < h; ry++)
+                                        {
+                                                memory_copy_rect_stream_u32(row_buf, (positive)w, src_base + (unsigned long)ry * src_pitch, src_pitch, (positive)w, 1);
+                                                compositor_wl_convert_row(dst_base + (unsigned long)ry * pitch, row_buf, w, fourcc, picture->blend);
+                                        }
+                                }
+                                else
+                                {
+                                        for (long ry = 0; ry < h; ry++)
+                                                compositor_wl_convert_row(dst_base + (unsigned long)ry * pitch, src_base + (unsigned long)ry * src_pitch, w, fourcc, picture->blend);
+                                }
+                        }
+                        compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
+                }
+                if (compositor_wl_cut(picture->pixels))
+                        return -1;
+                return 1;
+        }
+        // Scaled ARGB8888 without transform/y_invert/crop/blend: route directly to lib.c's SIMD/asm memory_resample_u32_rect.
+        if (fourcc == COMPOSITOR_WL_FOURCC_ARGB8888 && !(picture->transform & 7) && !picture->y_invert && !picture->blend &&
+            sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256 && picture->sync_fd < 0)
+        {
+                memory_resample_u32_rect(to + (unsigned long)(dy0 + oy1) * pitch + (unsigned long)(dx0 + ox1), pitch,
+                                         (positive)(ox2 - ox1), (positive)(oy2 - oy1),
+                                         (const unsigned int *)picture->pixels, (positive)picture->stride / 4,
+                                         (positive)bw, (positive)bh, (positive)tw, (positive)th,
+                                         (positive)ox1, (positive)oy1);
+                if (compositor_wl_cut(picture->pixels))
+                        return -1;
+                compositor_wl_laid(row, dx0 + ox1, dy0 + oy1, dx0 + ox2, dy0 + oy2);
+                return 1;
+        }
+        if (fourcc == WAYLAND_FOURCC_NV12)
         {
                 uv_map_size = picture->plane_offset[1] + uv_stride * (unsigned long)((bh + 1) / 2);
                 if (picture->plane_fd[1] >= 0 && picture->plane_fd[1] != picture->sync_fd)
@@ -1295,62 +1411,79 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                         }
                 }
         }
-        for (long oy = oy1; oy < oy2; oy++)
         {
-                unsigned int *dst = to + (unsigned long)(dy0 + oy) * pitch + (unsigned long)dx0;
-                long ty = (sy256 + ((oy * 2 + 1) * sh256) / (2 * th)) >> 8;
+                long tx_buf[4096];
+                int have_tx_buf = ox2 <= 4096;
 
-                if (ty < 0)
-                        ty = 0;
-                else if (ty >= bh_t)
-                        ty = bh_t - 1;
-                for (long ox = ox1; ox < ox2; ox++)
-                {
-                        long tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
-                        long bx, by;
-                        unsigned int px;
-
-                        if (tx < 0)
-                                tx = 0;
-                        else if (tx >= bw_t)
-                                tx = bw_t - 1;
-                        switch (picture->transform & 7)
+                if (have_tx_buf)
+                        for (long ox = ox1; ox < ox2; ox++)
                         {
-                        case 1:
-                                bx = bw - 1 - ty;
-                                by = tx;
-                                break;
-                        case 2:
-                                bx = bw - 1 - tx;
-                                by = bh - 1 - ty;
-                                break;
-                        case 3:
-                                bx = ty;
-                                by = bh - 1 - tx;
-                                break;
-                        case 4:
-                                bx = bw - 1 - tx;
-                                by = ty;
-                                break;
-                        case 5:
-                                bx = bw - 1 - ty;
-                                by = bh - 1 - tx;
-                                break;
-                        case 6:
-                                bx = tx;
-                                by = bh - 1 - ty;
-                                break;
-                        case 7:
-                                bx = ty;
-                                by = tx;
-                                break;
-                        default:
-                                bx = tx;
-                                by = ty;
-                                break;
+                                long tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
+
+                                tx_buf[ox] = tx < 0 ? 0 : tx >= bw_t ? bw_t - 1 : tx;
                         }
-                        px = compositor_wl_decode_pixel(picture, uv_base, uv_stride, bx, by);
-                        dst[ox] = picture->blend ? compositor_wl_over(px, dst[ox]) : px;
+                for (long oy = oy1; oy < oy2; oy++)
+                {
+                        unsigned int *dst = to + (unsigned long)(dy0 + oy) * pitch + (unsigned long)dx0;
+                        long ty = (sy256 + ((oy * 2 + 1) * sh256) / (2 * th)) >> 8;
+
+                        if (ty < 0)
+                                ty = 0;
+                        else if (ty >= bh_t)
+                                ty = bh_t - 1;
+                        for (long ox = ox1; ox < ox2; ox++)
+                        {
+                                long tx, bx, by;
+                                unsigned int px;
+
+                                if (have_tx_buf)
+                                        tx = tx_buf[ox];
+                                else
+                                {
+                                        tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
+                                        if (tx < 0)
+                                                tx = 0;
+                                        else if (tx >= bw_t)
+                                                tx = bw_t - 1;
+                                }
+                                switch (picture->transform & 7)
+                                {
+                                case 1:
+                                        bx = bw - 1 - ty;
+                                        by = tx;
+                                        break;
+                                case 2:
+                                        bx = bw - 1 - tx;
+                                        by = bh - 1 - ty;
+                                        break;
+                                case 3:
+                                        bx = ty;
+                                        by = bh - 1 - tx;
+                                        break;
+                                case 4:
+                                        bx = bw - 1 - tx;
+                                        by = ty;
+                                        break;
+                                case 5:
+                                        bx = bw - 1 - ty;
+                                        by = bh - 1 - tx;
+                                        break;
+                                case 6:
+                                        bx = tx;
+                                        by = bh - 1 - ty;
+                                        break;
+                                case 7:
+                                        bx = ty;
+                                        by = tx;
+                                        break;
+                                default:
+                                        bx = tx;
+                                        by = ty;
+                                        break;
+                                }
+                                px = compositor_wl_decode_pixel(picture, fourcc, uv_base, uv_stride, bx, by);
+                                dst[ox] = picture->blend ? compositor_wl_over(px, dst[ox]) : px;
+                        }
                 }
         }
         if (uv_map_got)
@@ -1379,24 +1512,16 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         {
                 if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
                         return 1;
-                if (picture->pixels)
-                {
-                        if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
-                                return 1;
-                        sync_started = 1;
-                }
         }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
         if (has_content && !compositor_wl.laying[row].open)
                 compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
-        // drawn whole from it. Its dma-buf's reads are bracketed as a copy's are (the writer waited for above), and ended here.
+        // drawn whole from it.
         was_lent = compositor_lent(row);
         if (picture->pixels && picture->last && !compositor_wl.laying[row].open && compositor_wl_lend(row, picture, width, height))
         {
-                if (sync_started)
-                        compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
                 // A row that was the table's, or of another size, is drawn whole from the buffer; one that was read in place at this size
                 // is drawn again only where the commit says it changed.
                 if (!was_lent || width != (long)table->width[row] || height != (long)table->height[row])
@@ -1451,7 +1576,18 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
 
                 if (picture->pixels && compositor_wl_needs_xform(picture, width, height))
                 {
-                        int xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
+                        int xst;
+
+                        if (picture->sync_fd >= 0 && !sync_started)
+                        {
+                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                {
+                                        compositor_wl.laying[row].open = 0;
+                                        return 1;
+                                }
+                                sync_started = 1;
+                        }
+                        xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
 
                         if (sync_started)
                                 compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
@@ -1510,14 +1646,35 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         continue;
                                 }
                                 if (picture->blend)
+                                {
+                                        if (picture->sync_fd >= 0 && !sync_started)
+                                        {
+                                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                                {
+                                                        compositor_wl.laying[row].open = 0;
+                                                        return 1;
+                                                }
+                                                sync_started = 1;
+                                        }
                                         memory_over_u32_rect(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                              (const unsigned int *)(picture->pixels + top * picture->stride) + left,
                                                              (unsigned long)picture->stride / 4,
                                                              (unsigned long)(right - left), (unsigned long)(bottom - top));
-                                else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, card_wanted))
+                                }
+                                else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top,
+                                                                 card_wanted && (right - left) * (bottom - top) >= 32768))
                                         table->client_rects_card++;
                                 else if (picture->sync_fd >= 0)
                                 {
+                                        if (!sync_started)
+                                        {
+                                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                                {
+                                                        compositor_wl.laying[row].open = 0;
+                                                        return 1;
+                                                }
+                                                sync_started = 1;
+                                        }
                                         table->client_rects_cpu++;
                                         // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
                                         memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,

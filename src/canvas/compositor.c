@@ -413,15 +413,9 @@ static void compositor_blit_blend(const struct compositor_target *t, int x, int 
 
         if (x2 <= x1 || y2 <= y1)
                 return;
-        for (int py = y1; py < y2; py++)
-        {
-                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
-                const unsigned int *from = source + (unsigned long)(py - y) * pitch + (unsigned long)(x1 - x);
-                int count = x2 - x1;
-
-                for (int k = 0; k < count; k++)
-                        into[k] = compositor_over_pixel(into[k], from[k]);
-        }
+        memory_over_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                             source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
+                             (positive)(x2 - x1), (positive)(y2 - y1));
 }
 
 // Whether two run rows hold the same runs.

@@ -1209,10 +1209,24 @@ static inline long wayland_surface_index(struct wayland_client *c, const struct 
 
 static inline void wayland_zero(void *dst, unsigned long bytes)
 {
+#ifdef LIBRARY_THREAD_RUNTIME
+        memory_zero(dst, bytes);
+#else
         unsigned char *p = (unsigned char *)dst;
 
+        if (bytes >= 8 && (((unsigned long)p) & 7) == 0)
+        {
+                unsigned long *w = (unsigned long *)p;
+                unsigned long words = bytes >> 3;
+
+                for (unsigned long at = 0; at < words; at++)
+                        w[at] = 0;
+                p += words << 3;
+                bytes &= 7;
+        }
         for (unsigned long at = 0; at < bytes; at++)
                 p[at] = 0;
+#endif
 }
 
 static void wayland_timeline_unref(struct wayland_client *c, long idx)

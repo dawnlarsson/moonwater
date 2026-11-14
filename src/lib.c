@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        504 routines (478 public, 26 local), 493 of them on all three and 11 local to one.
+        506 routines (480 public, 26 local), 495 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -319,6 +319,7 @@
           memory_offsets_of_either       public  yes     yes     yes
           memory_offsets_outside         public  yes     yes     yes
           memory_offsets_range_x64       local   yes     --      --
+          memory_or_u32                  public  yes     yes     yes
           memory_over_cover_u32_rect     public  yes     yes     yes
           memory_over_tone_u32           public  yes     yes     yes
           memory_over_u32_rect           public  yes     yes     yes
@@ -347,6 +348,7 @@
           memory_sum_bytes               public  yes     yes     yes
           memory_sum_swap_u32            public  yes     yes     yes
           memory_sweep_coverage          public  yes     yes     yes
+          memory_swizzle_rb_u32          public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_clean              public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
@@ -14741,6 +14743,60 @@ __asm__(
     ASM_END(memory_invert_u32)
 
     //
+    //       memory_or_u32 -- rdi into, rsi from, rdx count, ecx mask: each word of
+    //       into is (from[i] | mask) (into may be from).
+    //
+    ASM_FUNC(memory_or_u32)
+    "test %rdx, %rdx\n   jz 9f\n   cmp $4, %rdx\n   jae 10f\n"
+    "xor %eax, %eax\n"
+    "5:  mov (%rsi, %rax, 4), %r8d\n   or %ecx, %r8d\n   mov %r8d, (%rdi, %rax, 4)\n   inc %rax\n   cmp %rax, %rdx\n   jne 5b\n"
+    "9:  " ASM_RET
+    "10: movd %ecx, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "cmp $16, %rdx\n   jb 2f\n"
+    "1:  movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
+    "por %xmm7, %xmm0\n   por %xmm7, %xmm1\n   por %xmm7, %xmm2\n   por %xmm7, %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
+    "add $64, %rsi\n   add $64, %rdi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae 1b\n"
+    "2:  cmp $4, %rdx\n   jb 4f\n"
+    "3:  movdqu (%rsi), %xmm0\n   por %xmm7, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rsi\n   add $16, %rdi\n   sub $4, %rdx\n   cmp $4, %rdx\n   jae 3b\n"
+    "4:  test %rdx, %rdx\n   jz 9b\n"
+    "xor %eax, %eax\n   jmp 5b\n"
+    ASM_END(memory_or_u32)
+
+    //
+    //       memory_swizzle_rb_u32 -- rdi into, rsi from, rdx count, ecx or_mask:
+    //       swaps bytes 0 and 2 of each 32-bit word of from and ORs or_mask
+    //       (into may be from).
+    //
+    ASM_FUNC(memory_swizzle_rb_u32)
+    "test %rdx, %rdx\n   jz 9f\n   cmp $4, %rdx\n   jae 10f\n"
+    "xor %eax, %eax\n"
+    "5:  mov (%rsi, %rax, 4), %r8d\n   mov %r8d, %r9d\n   mov %r8d, %r10d\n"
+    "and $0xff00ff00, %r8d\n   and $0xff, %r9d\n   shl $16, %r9d\n   shr $16, %r10d\n   and $0xff, %r10d\n"
+    "or %r9d, %r8d\n   or %r10d, %r8d\n   or %ecx, %r8d\n   mov %r8d, (%rdi, %rax, 4)\n"
+    "inc %rax\n   cmp %rax, %rdx\n   jne 5b\n"
+    "9:  " ASM_RET
+    "10: movd %ecx, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "mov $0xff00ff00, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x00ff00ff, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n"
+    "cmp $8, %rdx\n   jb 2f\n"
+    "1:  movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   movdqa %xmm1, %xmm3\n"
+    "pand %xmm6, %xmm0\n   pand %xmm6, %xmm1\n   pand %xmm5, %xmm2\n   pand %xmm5, %xmm3\n"
+    "movdqa %xmm2, %xmm4\n   pslld $16, %xmm2\n   psrld $16, %xmm4\n   por %xmm4, %xmm2\n   por %xmm2, %xmm0\n   por %xmm7, %xmm0\n"
+    "movdqa %xmm3, %xmm4\n   pslld $16, %xmm3\n   psrld $16, %xmm4\n   por %xmm4, %xmm3\n   por %xmm3, %xmm1\n   por %xmm7, %xmm1\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n"
+    "add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae 1b\n"
+    "2:  cmp $4, %rdx\n   jb 4f\n"
+    "3:  movdqu (%rsi), %xmm0\n   movdqa %xmm0, %xmm2\n   pand %xmm6, %xmm0\n   pand %xmm5, %xmm2\n"
+    "movdqa %xmm2, %xmm4\n   pslld $16, %xmm2\n   psrld $16, %xmm4\n   por %xmm4, %xmm2\n   por %xmm2, %xmm0\n   por %xmm7, %xmm0\n"
+    "movdqu %xmm0, (%rdi)\n   add $16, %rsi\n   add $16, %rdi\n   sub $4, %rdx\n"
+    "4:  test %rdx, %rdx\n   jz 9b\n"
+    "xor %eax, %eax\n   jmp 5b\n"
+    ASM_END(memory_swizzle_rb_u32)
+
+    //
     //       memory_copy_strip_16 -- rdi into, rsi into_stride in bytes, rdx from, rcx from_stride in bytes, r8 rows:
     //       rows rows of sixteen bytes, each read whole from from and stored at into, the next row from_stride and
     //       into_stride bytes on. It is the copy a text run's strip makes of a cell's coverage (src/canvas/font.c,
@@ -26661,6 +26717,52 @@ __asm__(
     ASM_END(memory_invert_u32)
 
     //
+    //       memory_or_u32: x0 into, x1 from, x2 count, w3 mask (see x86-64).
+    //
+    ASM_FUNC(memory_or_u32)
+    "cbz x2, 9f\n   cmp x2, #4\n   b.hs 10f\n"
+    "7:  ldr w4, [x1], #4\n   orr w4, w4, w3\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    "10: dup v16.4s, w3\n   cmp x2, #32\n   b.hs 1f\n"
+    "2:  cmp x2, #8\n   b.lo 4f\n"
+    "8:  ld1 {v0.4s, v1.4s}, [x1], #32\n   orr v0.16b, v0.16b, v16.16b\n   orr v1.16b, v1.16b, v16.16b\n"
+    "st1 {v0.4s, v1.4s}, [x0], #32\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 8b\n"
+    "4:  tbz x2, #2, 5f\n"
+    "ld1 {v0.4s}, [x1], #16\n   orr v0.16b, v0.16b, v16.16b\n   st1 {v0.4s}, [x0], #16\n   sub x2, x2, #4\n"
+    "5:  cbz x2, 9b\n   b 7b\n"
+    "1:  ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64\n   ld1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x1], #64\n"
+    "orr v0.16b, v0.16b, v16.16b\n   orr v1.16b, v1.16b, v16.16b\n   orr v2.16b, v2.16b, v16.16b\n   orr v3.16b, v3.16b, v16.16b\n"
+    "orr v4.16b, v4.16b, v16.16b\n   orr v5.16b, v5.16b, v16.16b\n   orr v6.16b, v6.16b, v16.16b\n   orr v7.16b, v7.16b, v16.16b\n"
+    "st1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x0], #64\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n"
+    "sub x2, x2, #32\n   cmp x2, #32\n   b.hs 1b\n"
+    "b 2b\n"
+    ASM_END(memory_or_u32)
+
+    //
+    //       memory_swizzle_rb_u32: x0 into, x1 from, x2 count, w3 or_mask (see x86-64).
+    //
+    ASM_FUNC(memory_swizzle_rb_u32)
+    "cbz x2, 9f\n   cmp x2, #4\n   b.hs 10f\n"
+    "7:  ldr w4, [x1], #4\n   and w5, w4, #0xff00ff00\n   and w6, w4, #0xff\n   ubfx w4, w4, #16, #8\n"
+    "orr w5, w5, w6, lsl #16\n   orr w5, w5, w4\n   orr w5, w5, w3\n   str w5, [x0], #4\n   subs x2, x2, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    "10: dup v16.4s, w3\n   mov w4, #0xff00ff00\n   dup v17.4s, w4\n   mov w4, #0x00ff00ff\n   dup v18.4s, w4\n"
+    "cmp x2, #8\n   b.lo 4f\n"
+    "8:  ld1 {v0.4s, v1.4s}, [x1], #32\n"
+    "and v4.16b, v0.16b, v18.16b\n   and v0.16b, v0.16b, v17.16b\n   shl v5.4s, v4.4s, #16\n   ushr v4.4s, v4.4s, #16\n"
+    "orr v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v4.16b\n   orr v0.16b, v0.16b, v16.16b\n"
+    "and v6.16b, v1.16b, v18.16b\n   and v1.16b, v1.16b, v17.16b\n   shl v7.4s, v6.4s, #16\n   ushr v6.4s, v6.4s, #16\n"
+    "orr v1.16b, v1.16b, v7.16b\n   orr v1.16b, v1.16b, v6.16b\n   orr v1.16b, v1.16b, v16.16b\n"
+    "st1 {v0.4s, v1.4s}, [x0], #32\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 8b\n"
+    "4:  tbz x2, #2, 5f\n"
+    "ld1 {v0.4s}, [x1], #16\n"
+    "and v4.16b, v0.16b, v18.16b\n   and v0.16b, v0.16b, v17.16b\n   shl v5.4s, v4.4s, #16\n   ushr v4.4s, v4.4s, #16\n"
+    "orr v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v4.16b\n   orr v0.16b, v0.16b, v16.16b\n"
+    "st1 {v0.4s}, [x0], #16\n   sub x2, x2, #4\n"
+    "5:  cbz x2, 9b\n   b 7b\n"
+    ASM_END(memory_swizzle_rb_u32)
+
+    //
     //       memory_copy_strip_16: x0 into, x1 into_stride in bytes, x2 from, x3 from_stride in bytes, x4 rows:
     //       rows rows of sixteen bytes, as on x86-64, which carries the contract. Two rows a pass, each a 128-bit
     //       load and store at any alignment (q0 and q1, caller-saved), both loads before the stores; then one.
@@ -37007,6 +37109,38 @@ __asm__(
     "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -2\n   bnez a2, 3b\n"
     "9:  " ASM_RET
     ASM_END(memory_invert_u32)
+
+    //
+    //       memory_or_u32: a0 into, a1 from, a2 count, a3 mask (see x86-64).
+    //
+    ASM_FUNC(memory_or_u32)
+    "li t4, 4\n   bltu a2, t4, 1f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 6f\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a3, 16(sp)\n   call cpu_vector_detect\n   ld a3, 16(sp)\n   ld ra, 24(sp)\n   addi sp, sp, 32\n"
+#endif
+    "6:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   bne t3, t4, 1f\n"
+    ".option push\n   .option arch, +v\n"
+    "5:  vsetvli t0, a2, e32, m8, ta, ma\n   vle32.v v8, (a1)\n   vor.vx v8, v8, a3\n   vse32.v v8, (a0)\n"
+    "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 5b\n"
+    ".option pop\n" ASM_RET
+    "1:  beqz a2, 9f\n"
+    "3:  lwu t0, 0(a1)\n   or t0, t0, a3\n   sw t0, 0(a0)\n"
+    "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   bnez a2, 3b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_or_u32)
+
+    //
+    //       memory_swizzle_rb_u32: a0 into, a1 from, a2 count, a3 or_mask (see x86-64).
+    //
+    ASM_FUNC(memory_swizzle_rb_u32)
+    "beqz a2, 9f\n"
+    "li t3, 0xff00ff00\n   li t4, 0xff\n"
+    "3:  lwu t0, 0(a1)\n   and t1, t0, t3\n   and t2, t0, t4\n   slli t2, t2, 16\n"
+    "srli t5, t0, 16\n   and t5, t5, t4\n   or t1, t1, t2\n   or t1, t1, t5\n   or t1, t1, a3\n"
+    "sw t1, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   bnez a2, 3b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_swizzle_rb_u32)
 
     //
     //       memory_copy_strip_16: a0 into, a1 into_stride in bytes, a2 from, a3 from_stride in bytes, a4 rows:
@@ -54602,6 +54736,10 @@ fn memory_sum_swap_u32(p64 address_to sums, p32 address_to old, const p32 addres
 // count words: each into word is the complement of the word of from (into and from the same, or apart, never partly
 // over each other). The compositor's frosted backdrop is complemented in place and copied out complemented.
 fn memory_invert_u32(p32 address_to into, const p32 address_to from, positive count);
+// count 32-bit words: each into word is (from[i] | mask) (into and from the same, or apart).
+fn memory_or_u32(p32 address_to into, const p32 address_to from, positive count, p32 mask);
+// count 32-bit words: swaps bytes 0 and 2 (R and B) of each word of from and ORs or_mask (into and from the same, or apart).
+fn memory_swizzle_rb_u32(p32 address_to into, const p32 address_to from, positive count, p32 or_mask);
 // rows rows of sixteen bytes, each read whole from from and then stored at into, the next row from_stride and
 // into_stride bytes after it: the copy of a cell's coverage into a text run's strip, where a cell up to sixteen bytes
 // wide is one word a row and the word's tail is the next cell's to write over. The rows are stored in order, so rows
