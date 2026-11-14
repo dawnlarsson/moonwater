@@ -16213,7 +16213,7 @@ case $tier in
 reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
 default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
 workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
-hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=65530 want_uinput=none want_event=600:0 ;;
+hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=1048576 want_uinput=none want_event=600:0 ;;
 locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff want_max=65530 want_uinput=none want_event=600:0 ;;
 esac
 

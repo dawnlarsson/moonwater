@@ -303,6 +303,8 @@ struct compositor_frame
         const struct compositor_run_row *runs;
         // The card's address of the first pixel, for a picture the card reads by an import of a client's dma-buf (0 for one its pages map).
         positive gpu_base;
+        // A client's premultiplied ARGB8888 picture that is not opaque: blended over what lies under it (op 11 on the card).
+        int blend;
 };
 
 /*
@@ -363,6 +365,63 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
         memory_copy_rect_u32(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
                              source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
                              (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
+}
+
+// Premultiplied ARGB8888 source-over (matching the GPU kernel's op 11: src + dst * (255 - src_a) / 255, saturating each channel at 255).
+static inline unsigned int compositor_over_pixel(unsigned int dst, unsigned int src)
+{
+        unsigned int a = src >> 24, inv;
+        unsigned int trb, tga, drb, dga, rb, ga, b, g, r, oa;
+
+        if (a == 255u)
+                return src;
+        if (!a)
+                return dst;
+        inv = 255u - a;
+        trb = src & 0x00ff00ffu, tga = (src >> 8) & 0x00ff00ffu;
+        drb = (dst & 0x00ff00ffu) * inv + 0x007f007fu;
+        dga = ((dst >> 8) & 0x00ff00ffu) * inv + 0x007f007fu;
+        rb = trb + (((drb + 0x00010001u + ((drb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu);
+        ga = tga + (((dga + 0x00010001u + ((dga >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu);
+        b = rb & 0x1ffu, r = (rb >> 16) & 0x1ffu, g = ga & 0x1ffu, oa = (ga >> 16) & 0x1ffu;
+        b = b > 255u ? 255u : b, g = g > 255u ? 255u : g, r = r > 255u ? 255u : r, oa = oa > 255u ? 255u : oa;
+        return b | (g << 8) | (r << 16) | (oa << 24);
+}
+
+static inline unsigned int compositor_over_weighted(unsigned int dst, unsigned int src, unsigned int weight)
+{
+        unsigned int rb, ga;
+
+        if (!weight || !(src >> 24))
+                return dst;
+        if (weight >= 255u)
+                return compositor_over_pixel(dst, src);
+        rb = (src & 0x00ff00ffu) * weight + 0x007f007fu;
+        ga = ((src >> 8) & 0x00ff00ffu) * weight + 0x007f007fu;
+        rb = ((rb + 0x00010001u + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+        ga = (ga + 0x00010001u + ((ga >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
+        return compositor_over_pixel(dst, rb | ga);
+}
+
+static void compositor_blit_blend(const struct compositor_target *t, int x, int y, int width,
+                                  int height, const unsigned int *source, unsigned long pitch)
+{
+        int x1 = x > t->x1 ? x : t->x1;
+        int y1 = y > t->y1 ? y : t->y1;
+        int x2 = x + width < t->x2 ? x + width : t->x2;
+        int y2 = y + height < t->y2 ? y + height : t->y2;
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        for (int py = y1; py < y2; py++)
+        {
+                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                const unsigned int *from = source + (unsigned long)(py - y) * pitch + (unsigned long)(x1 - x);
+                int count = x2 - x1;
+
+                for (int k = 0; k < count; k++)
+                        into[k] = compositor_over_pixel(into[k], from[k]);
+        }
 }
 
 // Whether two run rows hold the same runs.
@@ -774,6 +833,25 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                 }
 }
 
+static void compositor_blit_scaled_blend(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        int x = frame->x, y = frame->y, width = frame->width, height = frame->height;
+        int x1 = x > t->x1 ? x : t->x1;
+        int y1 = y > t->y1 ? y : t->y1;
+        int x2 = x + width < t->x2 ? x + width : t->x2;
+        int y2 = y + height < t->y2 ? y + height : t->y2;
+
+        if (x2 <= x1 || y2 <= y1 || width <= 0 || height <= 0)
+                return;
+        for (int py = y1; py < y2; py++)
+        {
+                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                for (int px = x1; px < x2; px++)
+                        into[px - x1] = compositor_over_pixel(into[px - x1], compositor_picture_at(frame, px - x, py - y));
+        }
+}
+
 // What is inside a frame's line, through the target's clip: a window's pixels, or one of the panel's tabs.
 static void compositor_contents(const struct compositor_target *t, const struct compositor_frame *frame)
 {
@@ -782,6 +860,13 @@ static void compositor_contents(const struct compositor_target *t, const struct 
                 return;
         if (frame->builtin)
                 compositor_fill(t, frame->x, frame->y, frame->width, frame->height, taskbar_tab_ink(((int)(frame->slot)), ((unsigned int)(compositor_panel_mark(frame)))));
+        else if (frame->blend)
+        {
+                if (compositor_scaled(frame))
+                        compositor_blit_scaled_blend(t, frame);
+                else
+                        compositor_blit_blend(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
+        }
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
                                        frame->source_w, frame->source_h);
@@ -1057,7 +1142,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                         compositor_contents(&part, frame);
                         continue;
                 }
-                if (frame->builtin || !compositor_scaled(frame))
+                if (frame->builtin || (!compositor_scaled(frame) && !frame->blend))
                 {
                         compositor_corner_rows(t, frame, corner, r, b, edge, tab);
                         continue;
@@ -1084,7 +1169,10 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
 
                                         if (!b)
                                                 in = cover;
-                                        pixel = in == 255 ? ink : in ? compositor_mix(pixel, ink, in) : pixel;
+                                        if (frame->blend)
+                                                pixel = compositor_over_weighted(pixel, ink, in);
+                                        else
+                                                pixel = in == 255 ? ink : in ? compositor_mix(pixel, ink, in) : pixel;
                                 }
                                 *at = pixel;
                         }
@@ -1167,27 +1255,36 @@ struct compositor_gscene
         struct
         {
                 int r, b, corner, content;
+                unsigned long tag; // what else the bytes depend on (a chip's kind and cover), 0 for the shapes the key says all of
                 unsigned int at;
         } table[COMPOSITOR_GPU_TABLES];
 };
 static struct compositor_gscene compositor_gscene;
 
-// The pool's table for a key (a size of bytes): its place from the buffer's start and, when it is new, where to fill it; none when the pool is full.
-static unsigned int compositor_gpu_slot(int r, int b, int corner, int content, unsigned int size, unsigned char **fill)
+// The pool's table for a key and a tag (a size of bytes): its place from the buffer's start and, when it is new, where to fill it; none when the pool is full.
+static unsigned int compositor_gpu_slot_tag(int r, int b, int corner, int content, unsigned long tag, unsigned int size, unsigned char **fill)
 {
         struct compositor_gscene *g = &compositor_gscene;
+        unsigned int rounded = (size + 15) & ~15u;
 
         *fill = 0;
         for (unsigned int k = 0; k < g->kept; k++)
-                if (g->table[k].r == r && g->table[k].b == b && g->table[k].corner == corner && g->table[k].content == content)
+                if (g->table[k].r == r && g->table[k].b == b && g->table[k].corner == corner && g->table[k].content == content && g->table[k].tag == tag)
                         return g->table[k].at;
-        if (g->kept == COMPOSITOR_GPU_TABLES || g->tables_used + size > g->tables_size)
+        if (g->kept == COMPOSITOR_GPU_TABLES || rounded < size || g->tables_used > g->tables_size || rounded > g->tables_size - g->tables_used)
                 return 0;
         *fill = g->tables + g->tables_used;
         g->table[g->kept].r = r, g->table[g->kept].b = b, g->table[g->kept].corner = corner, g->table[g->kept].content = content;
+        g->table[g->kept].tag = tag;
         g->table[g->kept++].at = g->tables_at + g->tables_used;
-        g->tables_used += (size + 15) & ~15u;
+        g->tables_used += rounded;
         return g->table[g->kept - 1].at;
+}
+
+// The pool's table for a key whose bytes the key says all of.
+static unsigned int compositor_gpu_slot(int r, int b, int corner, int content, unsigned int size, unsigned char **fill)
+{
+        return compositor_gpu_slot_tag(r, b, corner, content, 0, size, fill);
 }
 
 // The cover table of a corner's square (r by r bytes, rows from the square's top): the line's outside (content 0), or the picture's inside it (content 1), as
@@ -1255,7 +1352,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         {
                 positive at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
 
-                if (kind == 4)
+                if (kind == 4 || kind == 11)
                         op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = (unsigned int)frame->pitch;
                 else
                         op[0] |= (unsigned int)frame->pitch << 16, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32);
@@ -1266,7 +1363,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
 }
 
 // The close button and the minimise button over a window's pixels (compositor_close_draw, compositor_minimize_draw): the X's strokes mix the glyph ink over
-// the window's pixels and the dash is a fill of it, nothing round either. False when the button is not wholly in the picture (the processor draws it cut).
+// the window's pixels and the dash is a fill of it, nothing round either. A button not wholly in the picture is cut to it, as the processor draws it.
 static b32 compositor_gpu_buttons(const struct compositor_frame *f)
 {
         int bx, by, side, mx, my, in = COMPOSITOR_MINIMIZE_IN * f->scale / 100, half = compositor_px1(f->scale);
@@ -1279,7 +1376,8 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
                 return false;
         }
-        if (bx < 0 || by < 0 || bx + side > (int)compositor_gscene.width || by + side > (int)compositor_gscene.height || side > 255 || f->pitch > 65535)
+        // A button past the picture's edge is cut by compositor_gpu_rect, which moves the cover table's start with the cut, as the processor draws it cut.
+        if (side <= 0 || side > 255 || f->pitch > 65535)
         {
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
                 return false;
@@ -1349,7 +1447,7 @@ static b32 compositor_gpu_lit_over(const struct compositor_frame *f, int ox, int
         return true;
 }
 
-// What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
+// What is inside a frame's line, in a rectangle of it: the picture's pixels copied (or blended when non-opaque), or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
         if (!f->builtin && !f->pixels) // no picture: nothing inside the line (compositor_contents)
@@ -1357,7 +1455,7 @@ static void compositor_gpu_contents(const struct compositor_frame *f, unsigned i
         if (f->builtin)
                 compositor_gpu_rect(0, x0, y0, x1, y1, tab, 0, 0, 0);
         else
-                compositor_gpu_rect(4, x0, y0, x1, y1, 0, f, 0, 0);
+                compositor_gpu_rect(f->blend ? 11 : 4, x0, y0, x1, y1, 0, f, 0, 0);
 }
 
 // A frame as compositor_draw_with draws it (a window with a picture at its own size, or a tab of the panel, and nothing over it): false if it is not one, or the pools are full.
@@ -1380,9 +1478,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
-        // A round corner's contents read a picture; a frame with none and a round corner that reaches its contents has nothing to read here (the
-        // processor reads no picture for it either): it is refused, not read at address 0.
-        if (!f->builtin && !f->pixels && ri > 0)
+        if (f->blend && ri > 0 && (f->square & 15) != 15)
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (b)
         {
@@ -1407,22 +1503,32 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         {
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
                 int sx1 = cx > x ? cx : x, sx2 = cx + r < x + w ? cx + r : x + w, sy1 = cy > y ? cy : y, sy2 = cy + r < y + h ? cy + r : y + h;
+                int picture = f->builtin || f->pixels != 0;
                 unsigned int edge_table, content_table, edge = compositor_corner_lit(f, corner) && f->lit ? f->lit_ink : f->edge;
 
                 if (f->square & (1 << corner))
                 {
-                        if (b)
+                        if (b && picture)
                                 compositor_gpu_rect(0, cx, cy, cx + r, cy + r, edge, 0, 0, 0);
+                        else if (b)
+                        {
+                                int top = corner & 2 ? oy + oh - b : oy, left = corner & 1 ? ox + ow - b : ox;
+
+                                compositor_gpu_rect(0, cx, top, cx + r, top + b, edge, 0, 0, 0);
+                                compositor_gpu_rect(0, left, cy, left + b, cy + r, edge, 0, 0, 0);
+                        }
                         compositor_gpu_contents(f, tab, sx1, sy1, sx2, sy2);
                         continue;
                 }
-                edge_table = b ? compositor_gpu_table(r, b, corner, 0) : 0;
-                content_table = ri ? compositor_gpu_table(r, b, corner, 1) : 0;
-                if ((b && !edge_table) || (ri && !content_table))
+                // A frame with no picture draws only the ring of its line (content 2, the outside less the inside); one with a picture fills the outer
+                // square with the line (content 0) and mixes the picture over the inner corner (content 1).
+                edge_table = b ? compositor_gpu_table(r, b, corner, picture ? 0 : 2) : 0;
+                content_table = picture && ri ? compositor_gpu_table(r, b, corner, 1) : 0;
+                if ((b && !edge_table) || (picture && ri && !content_table))
                         return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                 if (b)
                         compositor_gpu_rect(5, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
-                if (ri && sx2 > sx1 && sy2 > sy1)
+                if (picture && ri && sx2 > sx1 && sy2 > sy1)
                         compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
         if (b && f->lit && f->lit_w > b && !compositor_gpu_lit_over(f, ox, oy, ow, oh, r))
@@ -1441,7 +1547,8 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         struct compositor_gscene *g = &compositor_gscene;
 
         g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
-        if (g->kept > COMPOSITOR_GPU_TABLES / 2) // the tables of the last scenes let go when the pool is half full: a scene is under that
+        // The tables of the last scenes let go when the pool is half full, by count or by bytes: a scene is under that, so it never finds the pool shut.
+        if (g->kept > COMPOSITOR_GPU_TABLES / 2 || g->tables_used > g->tables_size / 2)
                 g->kept = 0, g->tables_used = 0;
         g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
         compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
@@ -1645,24 +1752,23 @@ struct compositor_shape
         const unsigned char *outer, *outer_right, *inner, *inner_right;
 };
 
-static unsigned int compositor_shape_cover(const struct compositor_shape *s, int px, int my, int corner)
+static void compositor_shape_covers(const struct compositor_shape *s, int px, int my, unsigned int *ce, unsigned int *cf)
 {
         int ri = s->r - s->line, right = px >= s->x + s->w - s->r, col = right ? px - (s->x + s->w - s->r) : px - s->x;
-        unsigned int outer, inner = 0;
+        unsigned int outer = (right ? s->outer_right : s->outer)[my * s->r + col], inner = 0;
         int iy = my - s->line, ix = right ? col : col - s->line;
 
-        if (!corner)
-                return s->edge >> 24;
-        outer = (right ? s->outer_right : s->outer)[my * s->r + col];
         if (ri > 0 && iy >= 0 && iy < ri && ix >= 0 && ix < ri)
                 inner = (right ? s->inner_right : s->inner)[iy * ri + ix];
         inner = inner > outer ? outer : inner;
-        return ((outer - inner) * (s->edge >> 24) + inner * (s->fill >> 24) + 127) / 255;
+        *ce = ((outer - inner) * (s->edge >> 24) + 127) / 255;
+        *cf = (inner * (s->fill >> 24) + 127) / 255;
 }
 
 // The columns [a, b) of row py of a shaped tint, at in the cell's pixels being column a.
 static unsigned long compositor_shape_row(const struct compositor_shape *s, unsigned int *at, int a, int b, int py,
-                                          const unsigned int *colour, const unsigned char *fill_cover, const unsigned char *edge_cover)
+                                          const unsigned int *colour, const unsigned char *fill_cover,
+                                          const unsigned int *edge_colour, const unsigned char *edge_cover)
 {
         int top = py - s->y, bottom = s->y + s->h - 1 - py, my = top < bottom ? top : bottom, corner = my < s->r;
         int zone = corner ? s->r : s->line, middle_to = s->x + s->w - zone;
@@ -1674,12 +1780,25 @@ static unsigned long compositor_shape_row(const struct compositor_shape *s, unsi
                 {
                         int to = middle_to < b ? middle_to : b;
 
-                        compositor_mix_run(at + (px - a), to - px, edge_row ? s->edge : s->fill, colour,
+                        compositor_mix_run(at + (px - a), to - px, edge_row ? s->edge : s->fill, edge_row ? edge_colour : colour,
                                            edge_row ? edge_cover : fill_cover);
                         px = to - 1;
                         continue;
                 }
-                at[px - a] = compositor_mix(at[px - a], s->fill & 0xffffffu, compositor_shape_cover(s, px, my, corner));
+                if (!corner)
+                {
+                        at[px - a] = compositor_mix(at[px - a], s->edge & 0xffffffu, s->edge >> 24);
+                        continue;
+                }
+                {
+                        unsigned int ce, cf;
+
+                        compositor_shape_covers(s, px, my, &ce, &cf);
+                        if (ce)
+                                at[px - a] = compositor_mix(at[px - a], s->edge & 0xffffffu, ce);
+                        if (cf)
+                                at[px - a] = compositor_mix(at[px - a], s->fill & 0xffffffu, cf);
+                }
         }
         return (unsigned long)(b > a ? b - a : 0);
 }
@@ -1690,7 +1809,7 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
 {
         const struct compositor_frame *owner = under && from < count && !frames[from].builtin ? &frames[from] : 0;
         struct compositor_target cell;
-        unsigned int colour[COMPOSITOR_TINT_RUN];
+        unsigned int colour[COMPOSITOR_TINT_RUN], edge_colour[COMPOSITOR_TINT_RUN];
         unsigned char cover[COMPOSITOR_TINT_RUN], edge_cover[COMPOSITOR_TINT_RUN];
         unsigned long made = 0;
         int line = 0, ri = 0;
@@ -1711,6 +1830,7 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
         if (radius || edge_line)
         {
                 shape.r = radius, shape.line = edge_line;
+                memory_fill_u32(edge_colour, COMPOSITOR_TINT_RUN, edge & 0xffffffu);
                 memory_fill(edge_cover, (int)(edge >> 24), COMPOSITOR_TINT_RUN);
                 if (radius)
                 {
@@ -1751,9 +1871,9 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
                 if (shape.r || shape.line)
                 {
                         if (lo > cell.x1)
-                                made += compositor_shape_row(&shape, at, cell.x1, lo, py, colour, cover, edge_cover);
+                                made += compositor_shape_row(&shape, at, cell.x1, lo, py, colour, cover, edge_colour, edge_cover);
                         if (hi < cell.x2)
-                                made += compositor_shape_row(&shape, at + (hi - cell.x1), hi, cell.x2, py, colour, cover, edge_cover);
+                                made += compositor_shape_row(&shape, at + (hi - cell.x1), hi, cell.x2, py, colour, cover, edge_colour, edge_cover);
                         continue;
                 }
                 if (lo > cell.x1)
@@ -1820,11 +1940,11 @@ static b32 compositor_gpu_const_rect(int x0, int y0, int x1, int y1, unsigned in
 }
 
 // The cover of one corner square of a round shape (compositor_shape_cover, read the way the processor reads it in the square's own corner): r by r bytes,
-// rows from the square's top, the corner 0 top left, 1 top right, 2 bottom left, 3 bottom right; its place from the buffer's start, 0 for none.
-static unsigned int compositor_gpu_shape(int r, int line, int fa, int ea, int corner)
+// rows from the square's top, the corner 0 top left, 1 top right, 2 bottom left, 3 bottom right; part 0 = outer edge ring, part 1 = inner fill; its place from the buffer's start, 0 for none.
+static unsigned int compositor_gpu_shape(int r, int line, int alpha, int corner, int part)
 {
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(r, line, 8 + corner, fa | ea << 8, (unsigned int)(r * r), &table);
+        unsigned int at = compositor_gpu_slot(r, line, (part ? 24 : 8) + corner, alpha, (unsigned int)(r * r), &table);
         struct compositor_shape s;
         int right = corner & 1, down = (corner & 2) != 0;
 
@@ -1833,7 +1953,7 @@ static unsigned int compositor_gpu_shape(int r, int line, int fa, int ea, int co
         // A square of its own, as the shape's corner: its outer mask (mirrored on the right) and its inner one where the line leaves one.
         memory_zero(&s, sizeof(s));
         s.x = 0, s.y = 0, s.w = 2 * r, s.h = 2 * r, s.r = r, s.line = line;
-        s.fill = (unsigned int)fa << 24, s.edge = (unsigned int)ea << 24;
+        s.fill = part ? (unsigned int)alpha << 24 : 0, s.edge = part ? 0 : (unsigned int)alpha << 24;
         s.outer = compositor_corner_mask(r), s.outer_right = compositor_corner_mirror(r);
         if (r - line > 0)
                 s.inner = compositor_corner_mask(r - line), s.inner_right = compositor_corner_mirror(r - line);
@@ -1841,17 +1961,19 @@ static unsigned int compositor_gpu_shape(int r, int line, int fa, int ea, int co
                 for (int col = 0; col < r; col++)
                 {
                         int my = down ? r - 1 - row : row, px = right ? r + col : col;
+                        unsigned int ce, cf;
 
-                        table[row * r + col] = (unsigned char)compositor_shape_cover(&s, px, my, 1);
+                        compositor_shape_covers(&s, px, my, &ce, &cf);
+                        table[row * r + col] = (unsigned char)(part ? cf : ce);
                 }
         return at;
 }
 
 /*
         A tint as compositor_tint draws it over the whole scene, with nothing of it left out (a snap preview lifted into a frame of its own, whose window is
-        drawn again over it, or a shared edge's mark), as records. The clamps are compositor_tint's. A round tint's four corner squares are records with their covers' tables. Each run of rows that are alike
+        drawn again over it, or a shared edge's mark), as records. The clamps are compositor_tint's. A round tint's four corner squares are records with their covers' tables (edge ring then inner fill). Each run of rows that are alike
         (round corner rows, the edge's rows, the rest) is one record for the middle of the run, mixed with the ink (the edge's on the edge rows), and, on the
-        rows past the corners, the line's two sides mixed with the fill at the edge's alpha, as compositor_shape_row does it. A flat tint is the middle alone.
+        rows past the corners, the line's two sides mixed with the edge's ink, as compositor_shape_row does it. A flat tint is the middle alone.
 */
 static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, int edge_line, unsigned int edge)
 {
@@ -1872,18 +1994,28 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
                 for (int corner = 0; corner < 4; corner++)
                 {
                         int cx = corner & 1 ? x + w - r : x, cy = corner & 2 ? y + h - r : y;
-                        unsigned int at = compositor_gpu_shape(r, line, fa, ea, corner);
 
-                        if (!at)
-                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
-                        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, fill, 0, at, r);
+                        if (line > 0 && ea > 0)
+                        {
+                                unsigned int at = compositor_gpu_shape(r, line, ea, corner, 0);
+
+                                if (!at)
+                                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                                compositor_gpu_rect(5, cx, cy, cx + r, cy + r, ring, 0, at, r);
+                        }
+                        if (r - line > 0 && fa > 0)
+                        {
+                                unsigned int at = compositor_gpu_shape(r, line, fa, corner, 1);
+
+                                if (!at)
+                                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                                compositor_gpu_rect(5, cx, cy, cx + r, cy + r, fill, 0, at, r);
+                        }
                 }
         for (int py = y; py < y + h;)
         {
                 int top = py - y, bottom = y + h - 1 - py, my = top < bottom ? top : bottom, corner = my < r, edge_row = my < line, stop = py + 1;
-                // The middle of an edge row is compositor_shape_row's run of the edge's cover in the colour array, which compositor_tint filled with the FILL's
-                // colour: the edge's own colour only where the edge's alpha is none or all (compositor_mix_run's per-pixel case reads the ink itself).
-                unsigned int colour = edge_row && (ea == 0 || ea >= 255) ? ring : fill;
+                unsigned int colour = edge_row ? ring : fill;
                 int alpha = edge_row ? ea : fa, from = corner ? x + r : x + line, to = corner ? x + w - r : x + w - line;
 
                 // the run of rows alike: the same corner and the same edge row
@@ -1903,8 +2035,8 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
                 {
                         int left_to = x + line < x + w ? x + line : x + w, right_from = x + w - line > left_to ? x + w - line : left_to;
 
-                        if (!compositor_gpu_const_rect(x, py, left_to, stop, fill, (unsigned int)ea) ||
-                            !compositor_gpu_const_rect(right_from, py, x + w, stop, fill, (unsigned int)ea))
+                        if (!compositor_gpu_const_rect(x, py, left_to, stop, ring, (unsigned int)ea) ||
+                            !compositor_gpu_const_rect(right_from, py, x + w, stop, ring, (unsigned int)ea))
                                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                 }
                 py = stop;
@@ -2039,6 +2171,16 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         const int (*box)[4] = plan->box;
         const unsigned char *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
+
+        for (unsigned int at = 0; at < count; at++)
+                if (frames[at].blend)
+                {
+                        compositor_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1, compositor_ground);
+                        for (unsigned int each = 0; each < count; each++)
+                                compositor_draw_with(t, &frames[each], radii[each]);
+                        compositor_preview_draw(t, frames, count, radii);
+                        return;
+                }
 
         edge[edges++] = t->y1;
         for (unsigned int k = 0; k < plan->edges; k++)
@@ -3486,15 +3628,27 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
 
         if (memory_compare(&last, p, sizeof(last)))
                 last = *p, count++;
-        at[0] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
-        at[1] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
-        if (!at[0] || !at[1])
         {
-                compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
-                return false;
+                unsigned int kept = compositor_gscene.kept, used = compositor_gscene.tables_used;
+
+                at[0] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
+                at[1] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
+                if (!at[0] || !at[1])
+                {
+                        compositor_gscene.kept = kept, compositor_gscene.tables_used = used;
+                        compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
+                        return false;
+                }
         }
-        for (int row = 0; table[0] && table[1] && row < span; row++)
-                compositor_pointer_row(p, row, span, hot_x, hot_y, table[0] + row * span, table[1] + row * span);
+        if (table[0] || table[1])
+        {
+                unsigned char scratch[256];
+
+                for (int row = 0; row < span; row++)
+                        compositor_pointer_row(p, row, span, hot_x, hot_y,
+                                               table[0] ? table[0] + row * span : scratch,
+                                               table[1] ? table[1] + row * span : scratch);
+        }
         compositor_gpu_rect(5, left, top, left + span, top + span, fill, 0, at[0], span);
         compositor_gpu_rect(5, left, top, left + span, top + span, edge, 0, at[1], span);
         return true;
@@ -4559,7 +4713,7 @@ static struct
         unsigned int *overlay_pixels[2];
         unsigned long overlay_pitch, overlay_bytes; // pitch in words
         unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, flip_buffer;
-        unsigned int taken_held[WINDOWS], held_rows, dropping, patched[WINDOWS][2];
+        unsigned int taken_held[WINDOWS], held_rows, dropping, reclaim, patched[WINDOWS][2];
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
         unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
         unsigned int *under[2];
@@ -5574,6 +5728,7 @@ static void compositor_preview_keep(void)
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch);
 static positive compositor_lent_va(int row);
 static int compositor_lent(int row);
+static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
 static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
 static void compositor_wl_lent_sync(int start);
@@ -5589,6 +5744,11 @@ static positive compositor_lent_va(int row)
         return 0;
 }
 static int compositor_lent(int row)
+{
+        (void)row;
+        return 0;
+}
+static int compositor_wl_row_blend(int row)
 {
         (void)row;
         return 0;
@@ -5689,7 +5849,7 @@ static void compositor_learn_band(address_any context, positive index)
 // Whether a frame is a window's own picture at its own size, composed as it is in the table's buffer, and large enough to count.
 static int compositor_runs_eligible(int row, const struct compositor_frame *frame)
 {
-        return !frame->builtin && frame->pixels && frame->pixels == compositor_pixels(row) && !compositor_scaled(frame) && !compositor_lent(row) &&
+        return !frame->builtin && !frame->blend && frame->pixels && frame->pixels == compositor_pixels(row) && !compositor_scaled(frame) && !compositor_lent(row) &&
                frame->width >= 64 && frame->width <= COMPOSITOR_RUNS_WIDTH && frame->height >= 16 &&
                (unsigned long)frame->width * (unsigned long)frame->height * 4 >= PARALLEL_MINIMUM_BYTES;
 }
@@ -5821,6 +5981,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            row == compositor.focus ? compositor_line_lit() : compositor_line_unlit()};
         if (compositor_lent_pixels(row, &lent_pitch))
                 frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row);
+        frame->blend = compositor_wl_row_blend(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
         // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
@@ -6877,6 +7038,8 @@ struct compositor_fb2
 // The card's pins of the table's picture pages (gpu.c's dma-buf route): a count a row, and the row's pinned flag stays set while one is held, so the program that
 // owns the row gives back no page the card may read. offset is the pages' place in the table's memfd; the pins of other rows are not counted.
 static unsigned int compositor_gpu_pins[WINDOWS];
+static int compositor_shows_row(int row);
+static void compositor_row_reclaim(int row);
 static void compositor_gpu_pin(positive offset, b32 on)
 {
         positive buffers;
@@ -6891,7 +7054,11 @@ static void compositor_gpu_pin(positive offset, b32 on)
                 compositor_gpu_pins[row]++;
         else if (compositor_gpu_pins[row])
                 compositor_gpu_pins[row]--;
-        __atomic_store_n(&compositor.table->pinned[row], compositor_gpu_pins[row] ? 1u : 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.table->pinned[row],
+                         compositor_gpu_pins[row] || compositor_shows_row(row) || (compositor.dropping & (1u << row)) ? 1u : 0u,
+                         __ATOMIC_RELEASE);
+        if (!compositor_gpu_pins[row])
+                compositor_row_reclaim((int)row);
 }
 
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
@@ -6972,6 +7139,19 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         return fb.fb_id;
 }
 
+static void compositor_row_reclaim(int row)
+{
+        if (!(compositor.reclaim & (1u << row)))
+                return;
+        if (compositor.showing[row] || (compositor.dropping & (1u << row)) || compositor_gpu_pins[row])
+                return;
+        compositor.reclaim &= ~(1u << row);
+        if (!compositor.table || __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE))
+                return;
+        compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + (positive)row * 2 * compositor.buffer,
+                        2 * compositor.buffer, 9, 0, 0, 0);
+}
+
 // A row's framebuffers gone, when the card is not showing one of them.
 static void compositor_window_fb_drop(int row)
 {
@@ -6985,7 +7165,9 @@ static void compositor_window_fb_drop(int row)
                         compositor.scan_fb[row][which] = compositor.scan_handle[row][which] = 0;
                 }
         compositor.patched[row][0] = compositor.patched[row][1] = 0;
-        __atomic_store_n(&compositor.table->pinned[row], compositor_gpu_pins[row] ? 1u : 0u, __ATOMIC_RELEASE); // the card's pins hold it too
+        __atomic_store_n(&compositor.table->pinned[row],
+                         compositor_gpu_pins[row] || (compositor.dropping & (1u << row)) ? 1u : 0u,
+                         __ATOMIC_RELEASE); // the card's pins hold it too
 }
 
 static int compositor_shows_row(int row)
@@ -7151,6 +7333,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
+static int compositor_wl_dmabuf_missing(void);
 #endif
 
 static void compositor_flip_done(void)
@@ -7171,8 +7354,9 @@ static void compositor_flip_done(void)
         for (int row = 0; row < WINDOWS; row++)
                 if ((compositor.dropping & (1u << row)) && !compositor_shows_row(row))
                 {
-                        compositor_window_fb_drop(row);
                         compositor.dropping &= ~(1u << row);
+                        compositor_window_fb_drop(row);
+                        compositor_row_reclaim(row);
                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
@@ -7388,10 +7572,8 @@ static unsigned int *compositor_buffer(int row, unsigned int which)
 }
 
 // What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
-static void compositor_direct_unpatch(void)
+static void compositor_direct_unpatch_at(int row, unsigned int which)
 {
-        int row = compositor.direct_row;
-        unsigned int which = row >= 0 ? compositor.front[row] : 0;
         const int *rect = compositor.under_rect[which];
         unsigned int *pixels;
 
@@ -7408,6 +7590,38 @@ static void compositor_direct_unpatch(void)
         compositor.patched[row][which] = 0;
 }
 
+static void compositor_direct_unpatch(void)
+{
+        if (compositor.direct_row >= 0)
+                compositor_direct_unpatch_at(compositor.direct_row, compositor.front[compositor.direct_row] & 1u);
+}
+
+static unsigned int *compositor_direct_stage;
+static positive compositor_direct_stage_bytes;
+
+static unsigned int *compositor_direct_stage_ready(void)
+{
+        positive need = (positive)compositor_stride() * (positive)compositor.height * 4;
+
+        if (!need)
+                return 0;
+        if (compositor_direct_stage && compositor_direct_stage_bytes >= need)
+                return compositor_direct_stage;
+        if (compositor_direct_stage)
+        {
+                compositor_call(syscall(munmap), (positive)compositor_direct_stage, compositor_direct_stage_bytes, 0, 0, 0, 0);
+                compositor_direct_stage = 0, compositor_direct_stage_bytes = 0;
+        }
+        {
+                long mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
+
+                if (mapped < 0 && mapped > -4096)
+                        return 0;
+                compositor_direct_stage = (unsigned int *)mapped, compositor_direct_stage_bytes = need;
+        }
+        return compositor_direct_stage;
+}
+
 // The tabs written over a row's buffer, what they covered kept, and the program told the rectangle.
 static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned int count, int rect[4]);
 
@@ -7415,11 +7629,16 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
 {
         int rect[4];
         unsigned int *pixels = compositor_buffer(row, which);
+        unsigned long stride = (unsigned long)compositor_stride();
         struct windows *table = compositor.table;
 
         compositor_runs_forget(row);
         if (!compositor_tabs_rect(tabs, count, rect))
+        {
+                if (compositor.patched[row][which])
+                        compositor_direct_unpatch_at(row, which);
                 return;
+        }
 
         if (!compositor.under[which])
         {
@@ -7430,15 +7649,55 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                         return;
                 compositor.under[which] = (unsigned int *)mapped;
         }
+        // When updating tabs on an already-patched live on-screen buffer, stage the clean client pixels + new tabs off-screen
+        // and write only finished pixels so the scanout never shows an unpatched frame.
+        if (compositor.patched[row][which])
+        {
+                unsigned int *stage = compositor_direct_stage_ready();
+
+                if (stage)
+                {
+                        const int *old = compositor.under_rect[which];
+                        int u[4] = {old[0] < rect[0] ? old[0] : rect[0], old[1] < rect[1] ? old[1] : rect[1],
+                                    old[2] > rect[2] ? old[2] : rect[2], old[3] > rect[3] ? old[3] : rect[3]};
+
+                        memory_copy_rect_u32(stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                             pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                             (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
+                        memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
+                                             compositor.under[which], (unsigned long)(old[2] - old[0]),
+                                             (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
+                        memory_copy_rect_u32(compositor.under[which], (unsigned long)(rect[2] - rect[0]),
+                                             stage + (unsigned long)rect[1] * stride + (unsigned long)rect[0], stride,
+                                             (unsigned long)(rect[2] - rect[0]), (unsigned long)(rect[3] - rect[1]));
+                        memory_copy(compositor.under_rect[which], rect, sizeof(rect));
+                        {
+                                struct compositor_target target = {stage, stride, compositor.width, compositor.height,
+                                                                   rect[0], rect[1], rect[2], rect[3]};
+
+                                for (unsigned int at = 0; at < count; at++)
+                                        compositor_draw(&target, &tabs[at]);
+                        }
+                        memory_copy_rect_u32(pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                             stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                             (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
+                        table->spoiled_x[row][which] = rect[0];
+                        table->spoiled_y[row][which] = rect[1];
+                        table->spoiled_width[row][which] = rect[2] - rect[0];
+                        __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
+                        return;
+                }
+                compositor_direct_unpatch_at(row, which);
+        }
         memory_copy_rect_u32(compositor.under[which],
                              (unsigned long)(rect[2] - rect[0]),
-                             pixels + (unsigned long)rect[1] * (unsigned long)compositor_stride() + (unsigned long)rect[0],
-                             (unsigned long)compositor_stride(),
+                             pixels + (unsigned long)rect[1] * stride + (unsigned long)rect[0],
+                             stride,
                              (unsigned long)(rect[2] - rect[0]),
                              (unsigned long)(rect[3] - rect[1]));
         memory_copy(compositor.under_rect[which], rect, sizeof(rect));
 
-        struct compositor_target target = {pixels, (unsigned long)compositor_stride(), compositor.width, compositor.height,
+        struct compositor_target target = {pixels, stride, compositor.width, compositor.height,
                                            rect[0], rect[1], rect[2], rect[3]};
 
         for (unsigned int at = 0; at < count; at++)
@@ -7463,8 +7722,10 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
-        if (compositor_lent(row))
-                return -1; // its picture is the client's buffer, not the table's that a plane would show
+        if (compositor_lent(row) || frames[windows - 1].blend)
+                return -1; // its picture is the client's buffer or non-opaque, not an opaque table buffer that a plane would show
+        if (__atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+                return -1;
         if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
@@ -7482,15 +7743,14 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
 
         if (!fb)
                 return 0;
+        if (compositor.on_screen != fb && compositor.flip_pending)
+                return 1;
         compositor_direct_patch(row, which, tabs, count);
         if (compositor.on_screen != fb)
         {
-                // The card is still on its way to the last one: this is shown once it is there.
-                if (compositor.flip_pending)
-                        return 1;
                 if (!compositor_flip(fb, row, which))
                 {
-                        compositor_direct_unpatch();
+                        compositor_direct_unpatch_at(row, which);
                         compositor.direct_refused = 1;
                         compositor.table->refused = 5;
                         return 0;
@@ -8186,7 +8446,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         row = rows[windows - 1];
         const struct compositor_frame *frame = &frames[windows - 1];
 
-        if (compositor.table->glass[row])
+        if (compositor.table->glass[row] || frame->blend)
                 return *why = 5, -1;
         if (compositor_lent(row))
                 return *why = 18, -1; // its picture is the client's buffer, read in place: no table picture to scan out
@@ -8366,8 +8626,8 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor);
 // gpu: the scene was composed by the GPU into the scanout (there is no mirror of it then), and the GPU turns it.
 static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips, int gpu)
 {
-        const unsigned int *scene = !gpu && compositor.changed > 0 && compositor.mirror ? compositor.mirror : compositor.scanout;
-        unsigned long pitch = !gpu && compositor.changed > 0 && compositor.mirror ? compositor.mirror_pitch : compositor.scanout_pitch / 4;
+        const unsigned int *scene = !gpu && !compositor.mirror_stale && compositor.changed > 0 && compositor.mirror ? compositor.mirror : compositor.scanout;
+        unsigned long pitch = !gpu && !compositor.mirror_stale && compositor.changed > 0 && compositor.mirror ? compositor.mirror_pitch : compositor.scanout_pitch / 4;
 
         for (unsigned int at = 0; at < compositor.outputs && clips; at++)
         {
@@ -8634,7 +8894,7 @@ static void compositor_gpu_job_failed(void)
 {
         b64 now = clock_monotonic_nanoseconds();
 
-        if (gpu_end == GPU_END_LATE)
+        if (gpu_end == GPU_END_LATE || gpu_end == GPU_END_OVERFLOW)
                 return;
         if (gpu_end != GPU_END_HUNG && gpu_end != GPU_END_WAIT)
         {
@@ -8672,10 +8932,10 @@ static void compositor_gpu_late_check(void)
                 compositor_gpu_job_failed();
 }
 
-// Why a job the card did not finish is the present's loss: it was late (a job that may still run: busy), or it hung or was refused.
+// Why a job the card did not finish is the present's loss: it was late (a job that may still run: busy), overflowed the bin pool, or hung/was refused.
 static enum compositor_gpu_why compositor_gpu_job_why(void)
 {
-        return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : COMPOSITOR_GPU_WHY_HANG;
+        return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : gpu_end == GPU_END_OVERFLOW ? COMPOSITOR_GPU_WHY_POOL : COMPOSITOR_GPU_WHY_HANG;
 }
 
 // The scanout's address for the GPU, made when the scanout is new.
@@ -8811,11 +9071,16 @@ static b32 compositor_gpu_spots(void)
                         const unsigned char *cover = c->cover + (unsigned long)layer * cells;
                         unsigned char *table = 0;
                         unsigned int at, ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
+                        unsigned long tag = 14695981039346656037ull ^ (unsigned long)c->kind;
 
+                        for (unsigned long i = 0; i < cells; i++)
+                                tag = (tag ^ cover[i]) * 1099511628211ull;
+                        if (!tag)
+                                tag = 1;
                         if (g->count + 8 > g->room - 400)
                                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
-                        at = compositor_gpu_slot(c->w, c->h, 20 + layer + (c->kind == COMPOSITOR_CHIP_HINT ? 2 : 0), (int)c->alpha,
-                                                 (unsigned int)cells, &table);
+                        at = compositor_gpu_slot_tag(c->w, c->h, 20 + layer + (c->kind == COMPOSITOR_CHIP_HINT ? 2 : 0), (int)c->alpha,
+                                                     tag, (unsigned int)cells, &table);
                         if (!at)
                                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                         // A table kept from an earlier present has this key's coverage already (the key is the size, the layer and the alpha).
@@ -8843,6 +9108,7 @@ static struct
 {
         unsigned int *memory;
         positive bytes;
+        int fd;
 } compositor_gpu_scaled_pool[COMPOSITOR_GPU_SCALED];
 
 static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count)
@@ -8874,22 +9140,48 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 if (compositor_gpu_scaled_pool[used].bytes < bytes)
                 {
                         positive grown = (bytes + (1ull << 20) - 1) & ~((1ull << 20) - 1);
-                        long mapped;
+                        long memfd, mapped;
 
                         if (compositor_gpu_scaled_pool[used].memory)
                         {
                                 // The card's maps of these pages are let go of first: an address the new pages take would otherwise be read as the old map's.
                                 gpu_forget(compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes);
+                                gpu_unregister_memfd(compositor_gpu_scaled_pool[used].memory);
                                 compositor_call(syscall(munmap), (positive)compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes, 0, 0, 0, 0);
                         }
-                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0;
-                        mapped = compositor_call(syscall(mmap), 0, grown, 3, 0x22, (positive)-1, 0);
-                        if (mapped < 0 && mapped > -4096)
-                                return COMPOSITOR_GPU_WHY_SCALED;
-                        compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
+                        if (compositor_gpu_scaled_pool[used].fd > 0)
+                                system_close(compositor_gpu_scaled_pool[used].fd - 1);
+                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0, compositor_gpu_scaled_pool[used].fd = 0;
+                        memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-scaled", 1 | 2, 0, 0, 0, 0);
+                        if (memfd >= 0 && system_truncate_handle((int)memfd, grown) == 0 &&
+                            compositor_call(syscall(fcntl), (positive)memfd, 1033, 2, 0, 0, 0) == 0)
+                        {
+                                mapped = compositor_call(syscall(mmap), 0, grown, 3, 1, (positive)memfd, 0);
+                                if (mapped < 0 && mapped > -4096)
+                                {
+                                        system_close((int)memfd);
+                                        return COMPOSITOR_GPU_WHY_SCALED;
+                                }
+                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
+                                compositor_gpu_scaled_pool[used].fd = (int)memfd + 1;
+                                gpu_register_memfd((int)memfd, compositor_gpu_scaled_pool[used].memory, grown, 0);
+                        }
+                        else
+                        {
+                                if (memfd >= 0)
+                                        system_close((int)memfd);
+                                mapped = compositor_call(syscall(mmap), 0, grown, 3, 0x22, (positive)-1, 0);
+                                if (mapped < 0 && mapped > -4096)
+                                        return COMPOSITOR_GPU_WHY_SCALED;
+                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
+                        }
                 }
                 if (!gpu_map_written(compositor_gpu_scaled_pool[used].memory, bytes) || !(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)))
+                {
+                        if (gpu_lost)
+                                compositor_gpu_recover();
                         return COMPOSITOR_GPU_WHY_PICTURE;
+                }
                 // memory_resample_u32_rect's walk (its C is resample_reference): the position of the first column is half a cell in, and it steps by the floored step
                 // in 24 bit fractions. A frame drawn whole starts at 0, 0, so these are the columns and rows of the whole frame; the processor's walk of a part of
                 // it (a damage rectangle, a frame partly off the output) starts its position at the part's, which can differ from this by a source cell here and there.
@@ -8904,12 +9196,15 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 }
                 if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, 7, (unsigned int)f->width, (unsigned int)f->height))
                 {
+                        if (gpu_lost)
+                                compositor_gpu_recover();
                         compositor_gpu_job_failed();
                         return compositor_gpu_job_why();
                 }
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
                 compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)f->width;
+                compositor_gpu_scaled_copy[k].gpu_base = 0;
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
                 used++;
         }
@@ -8919,7 +9214,9 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
         struct compositor_gscene *g = &compositor_gscene;
-        int x1 = compositor.width, y1 = compositor.height, x2 = 0, y2 = 0;
+        int rect[COMPOSITOR_DAMAGE][4];
+        unsigned int rects = 0;
+        b32 any_nonempty = false;
         positive out;
 
         if (!compositor_gpu)
@@ -8944,9 +9241,46 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
         // maps of the pictures and let none go, and once all were held the GPU drew nothing again.
         gpu_trim();
+        g->width = (unsigned int)(compositor.width & ~3), g->height = (unsigned int)compositor.height; // the card's columns: a multiple of 4
+        for (unsigned int at = 0; at < compositor.damages; at++)
+        {
+                const int *d = compositor.damage[at];
+                int rx1 = d[0] < 0 ? 0 : d[0], ry1 = d[1] < 0 ? 0 : d[1];
+                int rx2 = d[2] > compositor.width ? compositor.width : d[2], ry2 = d[3] > compositor.height ? compositor.height : d[3];
+
+                if (rx2 <= rx1 || ry2 <= ry1)
+                        continue;
+                any_nonempty = true;
+                if (rx2 > (int)g->width)
+                        rx2 = (int)g->width;
+                if (rx2 <= rx1)
+                        continue;
+                // Keep disjoint sparse damages separate instead of expanding two distant spots into a full-screen box, coalescing only adjacent/overlapping ones.
+                for (unsigned int j = 0; j < rects; j++)
+                {
+                        int ux1 = rect[j][0] < rx1 ? rect[j][0] : rx1, uy1 = rect[j][1] < ry1 ? rect[j][1] : ry1;
+                        int ux2 = rect[j][2] > rx2 ? rect[j][2] : rx2, uy2 = rect[j][3] > ry2 ? rect[j][3] : ry2;
+                        long a_j = (long)(rect[j][2] - rect[j][0]) * (rect[j][3] - rect[j][1]);
+                        long a_r = (long)(rx2 - rx1) * (ry2 - ry1);
+                        long a_u = (long)(ux2 - ux1) * (uy2 - uy1);
+
+                        if (a_u <= a_j + a_r + 4096)
+                        {
+                                rect[j][0] = ux1, rect[j][1] = uy1, rect[j][2] = ux2, rect[j][3] = uy2;
+                                rx2 = rx1;
+                                break;
+                        }
+                }
+                if (rx2 > rx1 && rects < COMPOSITOR_DAMAGE)
+                        rect[rects][0] = rx1, rect[rects][1] = ry1, rect[rects][2] = rx2, rect[rects][3] = ry2, rects++;
+        }
+        if (!any_nonempty)
+                return COMPOSITOR_GPU_WHY_OTHER;
+        // The card draws the columns below g->width; a damage wholly past them is the processor's strip alone (compositor_present_frames), and drawn.
+        if (!rects)
+                return COMPOSITOR_GPU_WHY_DRAWN;
         if (!(out = compositor_gpu_output()))
                 return COMPOSITOR_GPU_WHY_OUTPUT;
-        g->width = (unsigned int)(compositor.width & ~3), g->height = (unsigned int)compositor.height; // the card's columns: a multiple of 4
         {
                 enum compositor_gpu_why scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
 
@@ -8962,29 +9296,18 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return g->why;
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
                 return g->why;
-        for (unsigned int at = 0; at < compositor.damages; at++)
-        {
-                const int *d = compositor.damage[at];
-
-                x1 = d[0] < x1 ? d[0] : x1, y1 = d[1] < y1 ? d[1] : y1, x2 = d[2] > x2 ? d[2] : x2, y2 = d[3] > y2 ? d[3] : y2;
-        }
-        if (x2 <= x1 || y2 <= y1)
-                return COMPOSITOR_GPU_WHY_OTHER;
-        // The card draws the columns below g->width; a damage wholly past them is the processor's strip alone (compositor_present), and drawn.
-        if (x2 > (int)g->width)
-                x2 = (int)g->width;
-        if (x2 <= x1)
-                return COMPOSITOR_GPU_WHY_DRAWN;
-        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
-                       (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
-        {
-                if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
-                        compositor_gpu_recover();
-                // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
-                // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
-                compositor_gpu_job_failed();
-                return compositor_gpu_job_why();
-        }
+        for (unsigned int at = 0; at < rects; at++)
+                if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
+                               (unsigned int)compositor.height, (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
+                               (unsigned int)rect[at][3]))
+                {
+                        if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
+                                compositor_gpu_recover();
+                        // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
+                        // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
+                        compositor_gpu_job_failed();
+                        return compositor_gpu_job_why();
+                }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
         compositor_gpu_state.failures = 0;
@@ -9156,7 +9479,14 @@ static void compositor_gpu_restart_check(void)
 // the next look is due: the first one five seconds after the card was found missing, then (compositor_gpu_late_due) every five seconds for a minute and every minute.
 static positive compositor_gpu_late_at(positive now)
 {
-        if (!compositor_gpu || compositor_gpu_state.up || !compositor_gpu_state.dead || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_NO_CARD)
+        b32 gpu_want = compositor_gpu && !compositor_gpu_state.up && compositor_gpu_state.dead &&
+                       compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD;
+#ifdef CONFIG_MOONWATER_WAYLAND
+        b32 wl_want = compositor_wl_dmabuf_missing() != 0;
+#else
+        b32 wl_want = false;
+#endif
+        if (!gpu_want && !wl_want)
         {
                 compositor_gpu_state.late_first = compositor_gpu_state.late_next = 0;
                 return 0;
@@ -9171,9 +9501,13 @@ static void compositor_gpu_late_tick(positive now)
 {
         if (!compositor_gpu_late_at(now) || !compositor_gpu_late_due(now, &compositor_gpu_state.late_first, &compositor_gpu_state.late_next))
                 return;
-        compositor_gpu_state.dead = 0;
-        if (compositor_gpu_up())
-                compositor_gpu_lists_sync();
+        if (compositor_gpu && !compositor_gpu_state.up && compositor_gpu_state.dead &&
+            compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD)
+        {
+                compositor_gpu_state.dead = 0;
+                if (compositor_gpu_up())
+                        compositor_gpu_lists_sync();
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_dmabuf_refresh();
 #endif
@@ -9262,7 +9596,7 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
                 }
                 else if (kind == 3)
                 {
-                        positive pitch = w[0] >> 8, bytes_from, bytes_to;
+                        positive pitch = w[0] >> 8, bytes_from;
                         int x0 = (int)w[1], y0 = (int)w[2], x1 = (int)w[3], y1 = (int)w[4];
 
                         if (!text_room || pitch < 3 || pitch > 3500 || x0 < 0 || y0 < 0 || x1 > width || y1 > height)
@@ -9272,8 +9606,9 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
                         if (n >= room || (positive)(x1 - x0) + 2 > pitch)
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         // The bitmap's bytes, a row above and below the rows and a byte past either end: all of them cover bytes.
-                        bytes_from = (positive)w[7] - pitch - 1, bytes_to = (positive)w[7] + (positive)(y1 - y0) * pitch + (positive)(x1 - x0) + 1;
-                        if (w[7] < pitch + 1 || bytes_from < cover_at || bytes_to > cover_at + cover_used)
+                        bytes_from = (positive)w[7] - pitch - 1;
+                        if (w[7] < pitch + 1 || bytes_from < cover_at || (positive)w[7] > cover_at + cover_used ||
+                            (positive)(y1 - y0) * pitch + (positive)(x1 - x0) + 1 > cover_at + cover_used - (positive)w[7])
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         to[8 * n] = 3u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
                         to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = (w[6] & 0xffffu) | slot << 16, to[8 * n + 7] = w[7];
@@ -9291,8 +9626,9 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
                         if (x0 >= x1 || y0 >= y1)
                                 continue;
                         cols = (positive)(x1 - x0), rows = (positive)(y1 - y0);
-                        if (n >= room || pitch < cols || pitch > 3500 || (table & 3) || table < cover_at || table + 1024 > cover_at + cover_used || at < cover_at ||
-                            at + (rows - 1) * pitch + cols > cover_at + cover_used)
+                        if (n >= room || pitch < cols || pitch > 3500 || (table & 3) || table < cover_at || table > cover_at + cover_used ||
+                            1024 > cover_at + cover_used - table || at < cover_at || at > cover_at + cover_used ||
+                            (rows - 1) * pitch + cols > cover_at + cover_used - at)
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         to[8 * n] = 10u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
                         to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = slot << 16, to[8 * n + 7] = w[7];
@@ -9351,8 +9687,13 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
 
                         room = room > last ? last : room;
                         room = room < cover_to ? cover_to : room;
+                        gpu_forget((const void *)cover_from, room - cover_from);
                         if (!gpu_map((const void *)cover_from, room - cover_from) || !(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
+                        {
+                                if (gpu_lost)
+                                        compositor_gpu_recover();
                                 return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
+                        }
                 }
                 bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
         }
@@ -9360,11 +9701,19 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         if (!(picture_va = gpu_va_written(picture, bytes)))
         {
                 if (!gpu_map_written(picture, bytes) || !(picture_va = gpu_va_written(picture, bytes)))
+                {
+                        if (gpu_lost)
+                                compositor_gpu_recover();
                         return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
+                }
         }
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0, (unsigned int)y0,
                        (unsigned int)x1, (unsigned int)y1))
         {
+                if (gpu.pending)
+                        gpu_finish();
+                if (gpu_lost)
+                        compositor_gpu_recover();
                 compositor_gpu_job_failed();
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
@@ -9394,12 +9743,14 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
 
         if (!compositor_gpu_state.up || !compositor_gpu_state.out || compositor.card < 0 || !gpu_idle()) // a job given up on may read the import it lets go of
                 return 0;
+        if ((degrees != 90 && degrees != 180 && degrees != 270) || !pw || !ph || pw > 16384 || ph > 16384 || (pw & 3) || (turn->pitch & 15) || turn->pitch / 4 < pw)
+                return 0;
         if (compositor_gpu_state.turn_key[at] != turn->handle || !compositor_gpu_state.turn_va[at])
         {
                 gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT);
                 compositor_gpu_state.turn_va[at] = gpu_import(compositor.card, turn->handle, turn->bytes), compositor_gpu_state.turn_key[at] = turn->handle;
         }
-        if (!compositor_gpu_state.turn_va[at] || (degrees != 90 && degrees != 180 && degrees != 270))
+        if (!compositor_gpu_state.turn_va[at])
                 return 0;
         if (degrees == 90)
                 stepx = -pitch, stepy = 1, first = origin + ((long)lh - 1) * pitch;
@@ -9413,7 +9764,17 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         op[0] = 7u | (unsigned int)(stepx + 0x800000) << 8, op[1] = op[2] = 0, op[3] = pw, op[4] = ph;
         op[5] = (unsigned int)from, op[6] = (unsigned int)(from >> 32), op[7] = (unsigned int)stepy;
         windows_rotate_panel(lw, lh, degrees, x0, y0, x1, y1, panel);
-        return gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, to, (unsigned int)(turn->pitch / 4), pw, ph, panel[0], panel[1], panel[2], panel[3]);
+        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, to, (unsigned int)(turn->pitch / 4), pw, ph, panel[0], panel[1], panel[2], panel[3]))
+        {
+                if (gpu.pending)
+                        gpu_finish();
+                if (gpu_lost)
+                        compositor_gpu_recover();
+                compositor_gpu_job_failed();
+                return 0;
+        }
+        compositor_gpu_state.failures = 0;
+        return 1;
 }
 #endif
 
@@ -9560,7 +9921,7 @@ static void compositor_present_frames(void)
         unsigned int count = 0, windows;
         int tinted;
 
-        if (!compositor.damages)
+        if (!compositor.damages || compositor.flip_pending)
                 return;
         compositor_bands_follow();
 
@@ -9582,8 +9943,17 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows); // the window pictures of this present, for the record's frames
         // The snap preview leaves its window's frame for one of its own, after the tabs, that is drawn under the window and over the windows under it.
         tinted = compositor_preview_lift(frames, windows, &preview);
-        // A window the card shows straight has what the tabs covered put back, so the glass is made from the window.
-        compositor_direct_unpatch();
+        int turning = compositor_turning();
+        int direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
+        int stay_live_direct = direct >= 0 && direct == compositor.direct_row && !compositor_overlay_ready() &&
+                               compositor.patched[direct][compositor.front[direct] & 1u] &&
+                               compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
+                               compositor.under[compositor.front[direct] & 1u];
+
+        // A window the card shows straight has what the tabs covered put back, so the glass is made from the window,
+        // unless we are staying on the same patched live on-screen framebuffer.
+        if (!stay_live_direct)
+                compositor_direct_unpatch();
         compositor_glass_pass(frames, rows, windows);
         // After the glass, which puts a glass window's own composed picture in its frame: that one has no runs.
         compositor_runs_note(frames, rows, windows);
@@ -9593,6 +9963,7 @@ static void compositor_present_frames(void)
         // Each band in turn, with whether all are stale read once: the first one drawn says they are not.
         {
                 int stale = taskbar_stale(), bands = compositor_bands();
+                const unsigned int *saved_direct_pixels = 0;
 
                 for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
                 {
@@ -9604,8 +9975,30 @@ static void compositor_present_frames(void)
                         if (!redo && view.pixels)
                                 redo = taskbar_meets(&view, compositor.damage, compositor.damages);
                         if (redo)
+                        {
+                                if (stay_live_direct && !saved_direct_pixels && windows)
+                                {
+                                        unsigned int which = compositor.front[direct] & 1u;
+                                        unsigned int *stage = compositor_direct_stage_ready();
+
+                                        if (stage)
+                                        {
+                                                unsigned long stride = (unsigned long)compositor_stride();
+                                                const int *old = compositor.under_rect[which];
+
+                                                saved_direct_pixels = frames[windows - 1].pixels;
+                                                memory_copy(stage, saved_direct_pixels, stride * (unsigned long)compositor.height * 4);
+                                                memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
+                                                                     compositor.under[which], (unsigned long)(old[2] - old[0]),
+                                                                     (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
+                                                frames[windows - 1].pixels = stage;
+                                        }
+                                }
                                 compositor_band_draw(frames, windows, redo);
+                        }
                 }
+                if (saved_direct_pixels && windows)
+                        frames[windows - 1].pixels = saved_direct_pixels;
                 for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
                 {
                         compositor_band_frame(&band);
@@ -9647,9 +10040,6 @@ static void compositor_present_frames(void)
 
         // A window that fills the output alone is shown straight from its buffer, and nothing is composed.
         // A turned screen is composed and shown from its buffer, never straight from a window's: no direct scanout.
-        int turning = compositor_turning();
-        int direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
-
         if (turning)
                 compositor_unscanned(15);
 
@@ -9766,14 +10156,27 @@ static void compositor_present_frames(void)
                 compositor_close_ready(&frames[at]);
         }
 #ifdef MOONWATER_GPU_C
-        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3);
+        int gpu_drawn = compositor_gpu_present(frames, count), gpu_composed = gpu_drawn && !(compositor.width & 3);
 
-        if (gpu)
+        if (gpu_drawn)
                 compositor_wl_count_card(rows, windows); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
-        int apart = !gpu && !flip_own && compositor_changed_ready();
+        else if (gpu.pending && !gpu_finish())
+        {
+                if (gpu_lost)
+                        compositor_gpu_recover();
+                compositor_gpu_job_failed();
+        }
+        int apart = !gpu_drawn && !flip_own && compositor_changed_ready();
 #else
         int apart = !flip_own && compositor_changed_ready(), gpu_composed = 0;
 #endif
+        if (!compositor.mirror_bytes && compositor.changed > 0)
+        {
+                compositor.mirror = compositor.scanout;
+                compositor.mirror_pitch = compositor.scanout_pitch / 4;
+        }
+        if (!apart && compositor.mirror_bytes)
+                compositor.mirror_stale = 1;
         struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
         unsigned int clips = 0;
 
@@ -9788,7 +10191,7 @@ static void compositor_present_frames(void)
 #ifdef MOONWATER_GPU_C
                 // The GPU drew the damage's columns below a multiple of 4 (compositor_gpu_draw), with the fingers' marks and the pointer over them, as records.
                 // The columns past it are the processor's, with those over them; nothing of the scene or the pointer is drawn twice.
-                if (gpu)
+                if (gpu_drawn)
                 {
                         struct compositor_target strip = target;
 
@@ -9830,7 +10233,17 @@ static void compositor_present_frames(void)
                 }
                 clips++;
         }
-        compositor.mirror_stale = 0;
+        if (apart)
+        {
+                int full = 0;
+
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                        if (compositor.damage[at][0] <= 0 && compositor.damage[at][1] <= 0 &&
+                            compositor.damage[at][2] >= compositor.width && compositor.damage[at][3] >= compositor.height)
+                                full = 1;
+                if (full || !compositor.mirror_bytes)
+                        compositor.mirror_stale = 0;
+        }
         compositor_runs_learn(frames, rows, windows);
 
         // The buffer composed into is whole now; the one the screen does not show misses this present's own damage, not the stale composed
@@ -15135,12 +15548,30 @@ static void compositor_take(int row)
         if (frame == compositor.seen[row])
                 return;
 
+        compositor.reclaim &= ~(1u << row);
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
         height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
         // A window's list (window_list_of) is drawn into its picture here, before the picture is shown, or refused; the damage it sets stands.
-        if (compositor_lists_take(row, width, height, damage))
-                front = 0, table->buffer_index[row] = 0;
+        unsigned int refused_before = __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE);
+        int listed = compositor_lists_take(row, width, height, damage);
+        b32 list_refused = !listed && __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE) != refused_before;
+
+        if (listed)
+        {
+                front = 0;
+                __atomic_store_n(&table->buffer_index[row], 0u, __ATOMIC_RELEASE);
+        }
+        else if (list_refused)
+        {
+                if (compositor.showing[row])
+                {
+                        front = compositor.front[row] & 1u;
+                        width = compositor.picture_w[row];
+                        height = compositor.picture_h[row];
+                        __atomic_store_n(&table->buffer_index[row], front, __ATOMIC_RELEASE);
+                }
+        }
         // A window the card shows straight is told the picture was taken once the card has let go of the buffer
         // it showed before, at the flip's event; any other at once.
         if (row == compositor.direct_row)
@@ -15151,6 +15582,13 @@ static void compositor_take(int row)
         else
                 __atomic_store_n(&table->shown[row], frame, __ATOMIC_RELEASE);
         compositor.woken |= 1u << row;
+
+        if (list_refused)
+        {
+                if (compositor.showing[row] && (compositor.held_rows & (1u << row)) && compositor_visible(row))
+                        compositor_damage(compositor.x[row], compositor.y[row], 1, 1);
+                return;
+        }
 
         // A picture of nothing shows nothing.
         if (!width || !height)
@@ -15427,7 +15865,7 @@ static void compositor_leave(int row)
                 compositor_window_fb_drop(row);
         // Pinned for a framebuffer the card refused, which was never made: no drop above would let go of it.
         else
-                __atomic_store_n(&table->pinned[row], 0u, __ATOMIC_RELEASE);
+                __atomic_store_n(&table->pinned[row], compositor_gpu_pins[row] ? 1u : 0u, __ATOMIC_RELEASE);
         table->spoiled_height[row][0] = table->spoiled_height[row][1] = 0;
         table->ground[row] = 0;
         table->hover_off[row] = 0;
@@ -15440,9 +15878,12 @@ static void compositor_leave(int row)
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
 
-        // MADV_REMOVE: the pages of its two buffers.
-        compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + row * 2 * compositor.buffer,
-                        2 * compositor.buffer, 9, 0, 0, 0);
+        // MADV_REMOVE: the pages of its two buffers, deferred while the card still shows or pins the row's pages.
+        if ((compositor.dropping & (1u << row)) || compositor_gpu_pins[row])
+                compositor.reclaim |= 1u << row;
+        else
+                compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + row * 2 * compositor.buffer,
+                                2 * compositor.buffer, 9, 0, 0, 0);
 
         compositor.osk_pan[row] = 0;
         compositor.osk_height[row] = 0;
@@ -21062,6 +21503,11 @@ static int compositor_descriptor_crowded(long descriptor)
 // The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
 #include "wayland.c"
 #include "wayland_host.c"
+
+static int compositor_wl_dmabuf_missing(void)
+{
+        return compositor_wl.started && !compositor_wl.render;
+}
 #endif
 
 /*

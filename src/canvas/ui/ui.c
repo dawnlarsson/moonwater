@@ -9594,7 +9594,7 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
 // The glyph of a cell plan, recorded for the GPU (op 10): its coverage copied into the pool once per frame and its tones (ui_scene_copy), then
 // the translate of the box. False when the frame has no room for it (scene->lost is set). The caller checks the room for the op.
 static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background, p64 cover_key,
-                              b32 ox, b32 oy)
+                              p32 cover_gen, b32 ox, b32 oy)
 {
         static p8 rows[256 * 256];
         unsigned long tones_at = 0, cover_at = 0;
@@ -9617,11 +9617,11 @@ static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_
         }
         //      The coverage's rows are gathered only when the frame does not hold it yet: a glyph is found again by its key, and the
         //      gather was a copy per row for every cell.
-        if (!ui_scene_find(scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, &cover_at))
+        if (!ui_scene_find(scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, cover_gen, &cover_at))
         {
                 for (b32 r = 0; r < h; r++)
                         memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
-                if (!ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
+                if (!ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, cover_gen, rows,
                                    (unsigned long)w * (unsigned long)h, &cover_at))
                 {
                         scene->lost = UI_LOST_POOL;
@@ -9660,7 +9660,7 @@ static void ui_scene_wide(struct ui address_to ui, const font_face address_to co
                 return;
         if (plan.left < plan.right && plan.top < plan.bottom)
                 ui_scene_record(scene, ox + plan.left, oy + plan.top, ox + plan.right, oy + plan.bottom, plan.ground, true);
-        ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ox, oy);
+        ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy);
 }
 
 static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, const p32 address_to codes,
@@ -9690,7 +9690,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 }
                 if (!plan.translate)
                         continue;
-                if (!ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ox, oy))
+                if (!ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy))
                         return;
         }
 }
@@ -9715,7 +9715,7 @@ static void ui_scene_cluster(struct ui address_to ui, const font_cell_plan_t add
                 return;
         }
         ui_scene_record(scene, ox + plan->left, oy + plan->top, ox + plan->right, oy + plan->bottom, plan->ground, true);
-        ui_scene_translate(scene, plan, colour, background, (p64)(unsigned long)scene->ops + scene->count, ox, oy);
+        ui_scene_translate(scene, plan, colour, background, (p64)(unsigned long)scene->ops + scene->count, 0, ox, oy);
 }
 
 // The code points of a cluster (up to eight), from its bytes: false when a code point does not decode or there are more.
@@ -22528,12 +22528,15 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, struct window_row 
 {
         struct windows address_to table = own->table;
         unsigned int row = own->row;
-        int slot = b->shown < 0 ? 0 : 1 - b->shown, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
+        int slot, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
         int spoiled_top = 0, spoiled_bottom = 0, top, bottom;
         b32 whole;
 
         if (b->shown >= 0 && !windows_ready(own))
                 return false;
+        if (b->shown >= 0)
+                b->shown = (int)(__atomic_load_n(&table->buffer_index[row], __ATOMIC_ACQUIRE) & 1u);
+        slot = b->shown < 0 ? 0 : 1 - b->shown;
         // A pull is on show in the body that moved last (an event gave it one: the frame is not yet drawn), or the frame before stretched: the processor's.
         ui_stretch_last = ui_stretch_now || ui_body_pulled(&ui_body_last);
         ui_stretch_now = false;
@@ -22678,10 +22681,13 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
 {
         struct windows address_to table = own->table;
         unsigned int row = own->row;
-        int slot = *shown < 0 ? 0 : 1 - *shown;
+        int slot;
 
         if (*shown >= 0 && !windows_ready(own))
                 return false;
+        if (*shown >= 0)
+                *shown = (int)(__atomic_load_n(&table->buffer_index[row], __ATOMIC_ACQUIRE) & 1u);
+        slot = *shown < 0 ? 0 : 1 - *shown;
         if (ui_list_wanted(own) && ui_list_frame_begin())
         {
                 draw(windows_buffer(table, row, (unsigned int)slot));

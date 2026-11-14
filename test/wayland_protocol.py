@@ -18,6 +18,7 @@ The output is checked in; the check regenerates it wherever the XML is and
 fails if the file differs, so a protocol update is a deliberate commit.
 """
 import argparse
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -116,7 +117,180 @@ CONFIG = [
     ("protocols", "unstable/text-input/text-input-unstable-v3.xml", [
         "zwp_text_input_manager_v3", "zwp_text_input_v3",
     ]),
+    ("protocols", "staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml", [
+        "wp_linux_drm_syncobj_manager_v1", "wp_linux_drm_syncobj_timeline_v1", "wp_linux_drm_syncobj_surface_v1",
+    ]),
+    ("inline", "wayland-drm.xml", [
+        "wl_drm",
+    ]),
 ]
+
+
+INLINE_XML = {
+    "staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml": """<protocol name="linux_drm_syncobj_v1">
+  <interface name="wp_linux_drm_syncobj_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <enum name="error">
+      <entry name="surface_exists" value="0"/>
+      <entry name="invalid_timeline" value="1"/>
+    </enum>
+    <request name="get_surface">
+      <arg name="id" type="new_id" interface="wp_linux_drm_syncobj_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <request name="import_timeline">
+      <arg name="id" type="new_id" interface="wp_linux_drm_syncobj_timeline_v1"/>
+      <arg name="fd" type="fd"/>
+    </request>
+  </interface>
+  <interface name="wp_linux_drm_syncobj_timeline_v1" version="1">
+    <request name="destroy" type="destructor"/>
+  </interface>
+  <interface name="wp_linux_drm_syncobj_surface_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <enum name="error">
+      <entry name="no_surface" value="1"/>
+      <entry name="unsupported_buffer" value="2"/>
+      <entry name="no_buffer" value="3"/>
+      <entry name="no_acquire_point" value="4"/>
+      <entry name="no_release_point" value="5"/>
+      <entry name="conflicting_points" value="6"/>
+    </enum>
+    <request name="set_acquire_point">
+      <arg name="timeline" type="object" interface="wp_linux_drm_syncobj_timeline_v1"/>
+      <arg name="point_hi" type="uint"/>
+      <arg name="point_lo" type="uint"/>
+    </request>
+    <request name="set_release_point">
+      <arg name="timeline" type="object" interface="wp_linux_drm_syncobj_timeline_v1"/>
+      <arg name="point_hi" type="uint"/>
+      <arg name="point_lo" type="uint"/>
+    </request>
+  </interface>
+</protocol>""",
+    "wayland-drm.xml": """<protocol name="drm">
+  <interface name="wl_drm" version="2">
+    <enum name="error">
+      <entry name="authenticate_fail" value="0"/>
+      <entry name="invalid_format" value="1"/>
+      <entry name="invalid_name" value="2"/>
+    </enum>
+    <enum name="format">
+      <entry name="c8" value="0x20203843"/>
+      <entry name="rgb332" value="0x38424752"/>
+      <entry name="bgr233" value="0x38524742"/>
+      <entry name="xrgb4444" value="0x32315258"/>
+      <entry name="xbgr4444" value="0x32314258"/>
+      <entry name="rgbx4444" value="0x32315852"/>
+      <entry name="bgrx4444" value="0x32315842"/>
+      <entry name="argb4444" value="0x32315241"/>
+      <entry name="abgr4444" value="0x32314241"/>
+      <entry name="rgba4444" value="0x32314152"/>
+      <entry name="bgra4444" value="0x32314142"/>
+      <entry name="xrgb1555" value="0x35315258"/>
+      <entry name="xbgr1555" value="0x35314258"/>
+      <entry name="rgbx5551" value="0x35315852"/>
+      <entry name="bgrx5551" value="0x35315842"/>
+      <entry name="argb1555" value="0x35315241"/>
+      <entry name="abgr1555" value="0x35314241"/>
+      <entry name="rgba5551" value="0x35314152"/>
+      <entry name="bgra5551" value="0x35314142"/>
+      <entry name="rgb565" value="0x36314752"/>
+      <entry name="bgr565" value="0x36314742"/>
+      <entry name="rgb888" value="0x34324752"/>
+      <entry name="bgr888" value="0x34324742"/>
+      <entry name="xrgb8888" value="0x34325258"/>
+      <entry name="xbgr8888" value="0x34324258"/>
+      <entry name="rgbx8888" value="0x34325852"/>
+      <entry name="bgrx8888" value="0x34325842"/>
+      <entry name="argb8888" value="0x34325241"/>
+      <entry name="abgr8888" value="0x34324241"/>
+      <entry name="rgba8888" value="0x34324152"/>
+      <entry name="bgra8888" value="0x34324142"/>
+      <entry name="xrgb2101010" value="0x30335258"/>
+      <entry name="xbgr2101010" value="0x30334258"/>
+      <entry name="rgbx1010102" value="0x30335852"/>
+      <entry name="bgrx1010102" value="0x30335842"/>
+      <entry name="argb2101010" value="0x30335241"/>
+      <entry name="abgr2101010" value="0x30334241"/>
+      <entry name="rgba1010102" value="0x30334152"/>
+      <entry name="bgra1010102" value="0x30334142"/>
+      <entry name="yuyv" value="0x56595559"/>
+      <entry name="yvyu" value="0x55595659"/>
+      <entry name="uyvy" value="0x59565955"/>
+      <entry name="vyuy" value="0x59555956"/>
+      <entry name="ayuv" value="0x56555941"/>
+      <entry name="xyuv8888" value="0x56555958"/>
+      <entry name="nv12" value="0x3231564e"/>
+      <entry name="nv21" value="0x3132564e"/>
+      <entry name="nv16" value="0x3631564e"/>
+      <entry name="nv61" value="0x3136564e"/>
+      <entry name="yuv410" value="0x39565559"/>
+      <entry name="yvu410" value="0x39555659"/>
+      <entry name="yuv411" value="0x31315559"/>
+      <entry name="yvu411" value="0x31315659"/>
+      <entry name="yuv420" value="0x32315559"/>
+      <entry name="yvu420" value="0x32315659"/>
+      <entry name="yuv422" value="0x36315559"/>
+      <entry name="yvu422" value="0x36315659"/>
+      <entry name="yuv444" value="0x34325559"/>
+      <entry name="yvu444" value="0x34325659"/>
+      <entry name="abgr16f" value="0x48344241"/>
+      <entry name="xbgr16f" value="0x48344258"/>
+    </enum>
+    <request name="authenticate">
+      <arg name="id" type="uint"/>
+    </request>
+    <request name="create_buffer">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="uint"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="stride" type="uint"/>
+      <arg name="format" type="uint"/>
+    </request>
+    <request name="create_planar_buffer">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="uint"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint"/>
+      <arg name="offset0" type="int"/>
+      <arg name="stride0" type="int"/>
+      <arg name="offset1" type="int"/>
+      <arg name="stride1" type="int"/>
+      <arg name="offset2" type="int"/>
+      <arg name="stride2" type="int"/>
+    </request>
+    <event name="device">
+      <arg name="name" type="string"/>
+    </event>
+    <event name="format">
+      <arg name="format" type="uint"/>
+    </event>
+    <event name="authenticated"/>
+    <enum name="capability" since="2">
+      <entry name="prime" value="1"/>
+    </enum>
+    <event name="capabilities">
+      <arg name="value" type="uint"/>
+    </event>
+    <request name="create_prime_buffer" since="2">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="fd"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint"/>
+      <arg name="offset0" type="int"/>
+      <arg name="stride0" type="int"/>
+      <arg name="offset1" type="int"/>
+      <arg name="stride1" type="int"/>
+      <arg name="offset2" type="int"/>
+      <arg name="stride2" type="int"/>
+    </request>
+  </interface>
+</protocol>""",
+}
 
 
 # The pixel formats the shim reads (wl_shm.format): the two every client has, and the byte-swapped pair.
@@ -144,7 +318,13 @@ def generate(wayland_root, protocols_root):
     interfaces = []  # (name, element)
     for root, path, wanted in CONFIG:
         base = wayland_root if root == "wayland" else protocols_root
-        tree = ET.parse("%s/%s" % (base, path)).getroot()
+        full = "%s/%s" % (base, path) if root != "inline" else None
+        if full and os.path.exists(full):
+            tree = ET.parse(full).getroot()
+        elif path in INLINE_XML:
+            tree = ET.fromstring(INLINE_XML[path])
+        else:
+            tree = ET.parse(full).getroot()
         found = {i.get("name"): i for i in tree.findall("interface")}
         for name in wanted:
             if name not in found:

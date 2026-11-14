@@ -87,6 +87,10 @@ enum {
         WLI_zwp_xwayland_keyboard_grab_v1,
         WLI_zwp_text_input_manager_v3,
         WLI_zwp_text_input_v3,
+        WLI_wp_linux_drm_syncobj_manager_v1,
+        WLI_wp_linux_drm_syncobj_timeline_v1,
+        WLI_wp_linux_drm_syncobj_surface_v1,
+        WLI_wl_drm,
         WLI_COUNT
 };
 
@@ -174,6 +178,10 @@ enum {
 #define WLV_zwp_xwayland_keyboard_grab_v1 1
 #define WLV_zwp_text_input_manager_v3 2
 #define WLV_zwp_text_input_v3 2
+#define WLV_wp_linux_drm_syncobj_manager_v1 1
+#define WLV_wp_linux_drm_syncobj_timeline_v1 1
+#define WLV_wp_linux_drm_syncobj_surface_v1 1
+#define WLV_wl_drm 2
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -804,6 +812,94 @@ enum {
 #define WLN_zwp_text_input_v3_preedit_hint_suffix 5
 #define WLN_zwp_text_input_v3_preedit_hint_spelling_error 6
 #define WLN_zwp_text_input_v3_preedit_hint_compose_error 7
+#define WLQ_wp_linux_drm_syncobj_manager_v1_destroy 0
+#define WLQ_wp_linux_drm_syncobj_manager_v1_get_surface 1
+#define WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline 2
+#define WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists 0
+#define WLN_wp_linux_drm_syncobj_manager_v1_error_invalid_timeline 1
+#define WLQ_wp_linux_drm_syncobj_timeline_v1_destroy 0
+#define WLQ_wp_linux_drm_syncobj_surface_v1_destroy 0
+#define WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point 1
+#define WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point 2
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_no_surface 1
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_unsupported_buffer 2
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_no_buffer 3
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_no_acquire_point 4
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_no_release_point 5
+#define WLN_wp_linux_drm_syncobj_surface_v1_error_conflicting_points 6
+#define WLQ_wl_drm_authenticate 0
+#define WLQ_wl_drm_create_buffer 1
+#define WLQ_wl_drm_create_planar_buffer 2
+#define WLQ_wl_drm_create_prime_buffer 3
+#define WLE_wl_drm_device 0
+#define WLE_wl_drm_format 1
+#define WLE_wl_drm_authenticated 2
+#define WLE_wl_drm_capabilities 3
+#define WLN_wl_drm_error_authenticate_fail 0
+#define WLN_wl_drm_error_invalid_format 1
+#define WLN_wl_drm_error_invalid_name 2
+#define WLN_wl_drm_format_c8 0x20203843
+#define WLN_wl_drm_format_rgb332 0x38424752
+#define WLN_wl_drm_format_bgr233 0x38524742
+#define WLN_wl_drm_format_xrgb4444 0x32315258
+#define WLN_wl_drm_format_xbgr4444 0x32314258
+#define WLN_wl_drm_format_rgbx4444 0x32315852
+#define WLN_wl_drm_format_bgrx4444 0x32315842
+#define WLN_wl_drm_format_argb4444 0x32315241
+#define WLN_wl_drm_format_abgr4444 0x32314241
+#define WLN_wl_drm_format_rgba4444 0x32314152
+#define WLN_wl_drm_format_bgra4444 0x32314142
+#define WLN_wl_drm_format_xrgb1555 0x35315258
+#define WLN_wl_drm_format_xbgr1555 0x35314258
+#define WLN_wl_drm_format_rgbx5551 0x35315852
+#define WLN_wl_drm_format_bgrx5551 0x35315842
+#define WLN_wl_drm_format_argb1555 0x35315241
+#define WLN_wl_drm_format_abgr1555 0x35314241
+#define WLN_wl_drm_format_rgba5551 0x35314152
+#define WLN_wl_drm_format_bgra5551 0x35314142
+#define WLN_wl_drm_format_rgb565 0x36314752
+#define WLN_wl_drm_format_bgr565 0x36314742
+#define WLN_wl_drm_format_rgb888 0x34324752
+#define WLN_wl_drm_format_bgr888 0x34324742
+#define WLN_wl_drm_format_xrgb8888 0x34325258
+#define WLN_wl_drm_format_xbgr8888 0x34324258
+#define WLN_wl_drm_format_rgbx8888 0x34325852
+#define WLN_wl_drm_format_bgrx8888 0x34325842
+#define WLN_wl_drm_format_argb8888 0x34325241
+#define WLN_wl_drm_format_abgr8888 0x34324241
+#define WLN_wl_drm_format_rgba8888 0x34324152
+#define WLN_wl_drm_format_bgra8888 0x34324142
+#define WLN_wl_drm_format_xrgb2101010 0x30335258
+#define WLN_wl_drm_format_xbgr2101010 0x30334258
+#define WLN_wl_drm_format_rgbx1010102 0x30335852
+#define WLN_wl_drm_format_bgrx1010102 0x30335842
+#define WLN_wl_drm_format_argb2101010 0x30335241
+#define WLN_wl_drm_format_abgr2101010 0x30334241
+#define WLN_wl_drm_format_rgba1010102 0x30334152
+#define WLN_wl_drm_format_bgra1010102 0x30334142
+#define WLN_wl_drm_format_yuyv 0x56595559
+#define WLN_wl_drm_format_yvyu 0x55595659
+#define WLN_wl_drm_format_uyvy 0x59565955
+#define WLN_wl_drm_format_vyuy 0x59555956
+#define WLN_wl_drm_format_ayuv 0x56555941
+#define WLN_wl_drm_format_xyuv8888 0x56555958
+#define WLN_wl_drm_format_nv12 0x3231564e
+#define WLN_wl_drm_format_nv21 0x3132564e
+#define WLN_wl_drm_format_nv16 0x3631564e
+#define WLN_wl_drm_format_nv61 0x3136564e
+#define WLN_wl_drm_format_yuv410 0x39565559
+#define WLN_wl_drm_format_yvu410 0x39555659
+#define WLN_wl_drm_format_yuv411 0x31315559
+#define WLN_wl_drm_format_yvu411 0x31315659
+#define WLN_wl_drm_format_yuv420 0x32315559
+#define WLN_wl_drm_format_yvu420 0x32315659
+#define WLN_wl_drm_format_yuv422 0x36315559
+#define WLN_wl_drm_format_yvu422 0x36315659
+#define WLN_wl_drm_format_yuv444 0x34325559
+#define WLN_wl_drm_format_yvu444 0x34325659
+#define WLN_wl_drm_format_abgr16f 0x48344241
+#define WLN_wl_drm_format_xbgr16f 0x48344258
+#define WLN_wl_drm_capability_prime 1
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1175,6 +1271,21 @@ static const unsigned char wl_e_zwp_text_input_v3_done[] = {'u', 0, 0, 0};
 static const unsigned char wl_e_zwp_text_input_v3_action[] = {'u', 0, 'u', 0, 0, 0};
 static const unsigned char wl_e_zwp_text_input_v3_language[] = {'s', 0, 0, 0};
 static const unsigned char wl_e_zwp_text_input_v3_preedit_hint[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_manager_v1_get_surface[] = {'n', WLI_wp_linux_drm_syncobj_surface_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_manager_v1_import_timeline[] = {'n', WLI_wp_linux_drm_syncobj_timeline_v1, 'h', 0, 0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_timeline_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_surface_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_surface_v1_set_acquire_point[] = {'o', WLI_wp_linux_drm_syncobj_timeline_v1, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_wp_linux_drm_syncobj_surface_v1_set_release_point[] = {'o', WLI_wp_linux_drm_syncobj_timeline_v1, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_wl_drm_authenticate[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_wl_drm_create_buffer[] = {'n', WLI_wl_buffer, 'u', 0, 'i', 0, 'i', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_wl_drm_create_planar_buffer[] = {'n', WLI_wl_buffer, 'u', 0, 'i', 0, 'i', 0, 'u', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_q_wl_drm_create_prime_buffer[] = {'n', WLI_wl_buffer, 'h', 0, 'i', 0, 'i', 0, 'u', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_e_wl_drm_device[] = {'s', 0, 0, 0};
+static const unsigned char wl_e_wl_drm_format[] = {'u', 0, 0, 0};
+static const unsigned char wl_e_wl_drm_authenticated[] = {0, 0};
+static const unsigned char wl_e_wl_drm_capabilities[] = {'u', 0, 0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1770,6 +1881,31 @@ static const struct wl_message wl_events_zwp_text_input_v3[] = {
         {2, 0, wl_e_zwp_text_input_v3_language},
         {2, 0, wl_e_zwp_text_input_v3_preedit_hint},
 };
+static const struct wl_message wl_requests_wp_linux_drm_syncobj_manager_v1[] = {
+        {1, 1, wl_q_wp_linux_drm_syncobj_manager_v1_destroy},
+        {1, 0, wl_q_wp_linux_drm_syncobj_manager_v1_get_surface},
+        {1, 0, wl_q_wp_linux_drm_syncobj_manager_v1_import_timeline},
+};
+static const struct wl_message wl_requests_wp_linux_drm_syncobj_timeline_v1[] = {
+        {1, 1, wl_q_wp_linux_drm_syncobj_timeline_v1_destroy},
+};
+static const struct wl_message wl_requests_wp_linux_drm_syncobj_surface_v1[] = {
+        {1, 1, wl_q_wp_linux_drm_syncobj_surface_v1_destroy},
+        {1, 0, wl_q_wp_linux_drm_syncobj_surface_v1_set_acquire_point},
+        {1, 0, wl_q_wp_linux_drm_syncobj_surface_v1_set_release_point},
+};
+static const struct wl_message wl_requests_wl_drm[] = {
+        {1, 0, wl_q_wl_drm_authenticate},
+        {1, 0, wl_q_wl_drm_create_buffer},
+        {1, 0, wl_q_wl_drm_create_planar_buffer},
+        {2, 0, wl_q_wl_drm_create_prime_buffer},
+};
+static const struct wl_message wl_events_wl_drm[] = {
+        {1, 0, wl_e_wl_drm_device},
+        {1, 0, wl_e_wl_drm_format},
+        {1, 0, wl_e_wl_drm_authenticated},
+        {1, 0, wl_e_wl_drm_capabilities},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1856,4 +1992,8 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_zwp_xwayland_keyboard_grab_v1] = {"zwp_xwayland_keyboard_grab_v1", 1, 1, 0, wl_requests_zwp_xwayland_keyboard_grab_v1, 0},
         [WLI_zwp_text_input_manager_v3] = {"zwp_text_input_manager_v3", 2, 2, 0, wl_requests_zwp_text_input_manager_v3, 0},
         [WLI_zwp_text_input_v3] = {"zwp_text_input_v3", 2, 11, 9, wl_requests_zwp_text_input_v3, wl_events_zwp_text_input_v3},
+        [WLI_wp_linux_drm_syncobj_manager_v1] = {"wp_linux_drm_syncobj_manager_v1", 1, 3, 0, wl_requests_wp_linux_drm_syncobj_manager_v1, 0},
+        [WLI_wp_linux_drm_syncobj_timeline_v1] = {"wp_linux_drm_syncobj_timeline_v1", 1, 1, 0, wl_requests_wp_linux_drm_syncobj_timeline_v1, 0},
+        [WLI_wp_linux_drm_syncobj_surface_v1] = {"wp_linux_drm_syncobj_surface_v1", 1, 3, 0, wl_requests_wp_linux_drm_syncobj_surface_v1, 0},
+        [WLI_wl_drm] = {"wl_drm", 2, 4, 4, wl_requests_wl_drm, wl_events_wl_drm},
 };

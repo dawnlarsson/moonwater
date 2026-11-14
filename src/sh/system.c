@@ -300,7 +300,47 @@ static COLD fn system_input_group(void)
         /tmp/.X11-unix owned by user instead of root.
 */
 #ifndef SHELL_NO_CANVAS
+#define SYSTEM_VIDEO_GID 44
 #define SYSTEM_RENDER_GID 105
+
+static COLD fn system_device_grant(string_address path, positive gid)
+{
+        p8 held[256];
+
+        if (system_stat_at(AT_FDCWD, path, 0, 0x001, held) < 0)
+                return;
+        if ((held[0] & 0x01) != 0 &&
+            (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) ==
+                0040000)
+                return;
+        system_change_owner_at(AT_FDCWD, path, 0, gid, 0);
+        system_change_mode_at(AT_FDCWD, path, 0660);
+}
+
+static COLD fn system_directory_grant(string_address dir,
+                                      string_address prefix, positive gid)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 path[256];
+        positive prefix_len = prefix ? string_length(prefix) : 0;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, dir))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                string_address name = entry->d_name;
+
+                if (file_is_dot(name))
+                        continue;
+                if (prefix_len &&
+                    string_compare_max(name, prefix, prefix_len))
+                        continue;
+                if (path_join(path, sizeof(path), dir, name))
+                        system_device_grant(path, gid);
+        }
+        file_walk_close(address_of walk);
+}
 
 static COLD fn system_render_group(void)
 {
@@ -318,6 +358,21 @@ static COLD fn system_render_group(void)
                 system_change_owner_at(AT_FDCWD, path, 0, SYSTEM_RENDER_GID, 0);
                 system_change_mode_at(AT_FDCWD, path, 0660);
         }
+        for (positive number = 0; number < 64; number++)
+        {
+                positive at = sizeof("/dev/dri/card") - 1;
+
+                memory_copy(path, "/dev/dri/card", at);
+                at += positive_into_string(path + at, number);
+                path[at] = end;
+                if (system_access_at(AT_FDCWD, path, 0) < 0)
+                        continue;
+                system_change_owner_at(AT_FDCWD, path, 0, SYSTEM_VIDEO_GID, 0);
+                system_change_mode_at(AT_FDCWD, path, 0660);
+        }
+        system_device_grant("/dev/kfd", SYSTEM_RENDER_GID);
+        system_directory_grant("/dev/dma_heap", null, SYSTEM_RENDER_GID);
+        system_directory_grant("/dev", "nvidia", SYSTEM_RENDER_GID);
 }
 
 static COLD fn system_x11_directory(void)
@@ -405,7 +460,7 @@ static fn link_dev_fd()
         bowls need them. The reference tier (STRICT_REFERENCE) writes
         nothing of these: the kernel's own values are what it is for. The
         desktop's max_map_count is written below, on every tier that is not
-        hardened or locked, reference included.
+        locked, reference and hardened included.
 */
 #if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || MOONWATER_STRICT_NET >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
 static COLD fn system_sysctl(string_address path, string_address value)
@@ -500,7 +555,7 @@ static COLD fn system_kernel_defaults(void)
         compatibility layer map more than that; Steam documents 1048576. The
         limit caps a count and reserves nothing, so a process that maps no
         more than before costs nothing. It is written on the desktop image at
-        the two levels below the hardened tier, which runs no games and keeps
+        every level below the locked tier, which runs no games and keeps
         the kernel's number. The server and console images have no Canvas
         and keep it too.
 
@@ -509,16 +564,51 @@ static COLD fn system_kernel_defaults(void)
         makes udmabuf's at boot. The tier lane reads the uinput mode back, so
         a change to it is a red row and not a silent one.
 */
-#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
+#define SYSTEM_RLIMIT_NOFILE 7
+#define SYSTEM_RLIMIT_MEMLOCK 8
+#define SYSTEM_NOFILE_TARGET ((p64)524288)
+#define SYSTEM_MEMLOCK_TARGET ((p64)64 * 1024 * 1024)
+
+static COLD fn system_raise_rlimit(positive resource, p64 target)
+{
+        p64 lim[2] = {target, target};
+
+        if (system_call_4(syscall(prlimit64), 0, resource, 0, (positive)lim) < 0)
+        {
+                (void)system_call_4(syscall(prlimit64), 0, resource,
+                                    (positive)lim, 0);
+                return;
+        }
+        if (lim[0] >= target)
+                return;
+
+        p64 want[2] = {target, lim[1] < target ? target : lim[1]};
+        if (system_call_4(syscall(prlimit64), 0, resource, (positive)want, 0) <
+                0 &&
+            lim[0] < lim[1])
+        {
+                lim[0] = lim[1] < target ? lim[1] : target;
+                (void)system_call_4(syscall(prlimit64), 0, resource,
+                                    (positive)lim, 0);
+        }
+}
+
+static COLD fn system_resource_limits(void)
+{
+        system_raise_rlimit(SYSTEM_RLIMIT_NOFILE, SYSTEM_NOFILE_TARGET);
+#if MOONWATER_STRICT_HOST < STRICT_LOCKED
+        system_raise_rlimit(SYSTEM_RLIMIT_MEMLOCK, SYSTEM_MEMLOCK_TARGET);
 #endif
+}
 
 static DEAD_END b32 system_init()
 {
         system_call(syscall(setsid));
+        system_resource_limits();
 #if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
         system_kernel_defaults();
 #endif
-#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
+#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
         system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
 #endif
         mount_devpts();

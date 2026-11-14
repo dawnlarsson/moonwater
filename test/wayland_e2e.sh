@@ -184,6 +184,28 @@ PY
         *"frames 30"*) row ok "a client of dma-bufs draws thirty frames, each when the last is released" ;;
         *) row FAIL "a client of dma-bufs draws thirty frames, each when the last is released" "$out" ;;
         esac
+        out=$("$client" -b -B -n 5 -w 120 -h 80 2>&1)
+        case $out in
+        *"frames 5"*) row ok "a client of ABGR8888 dma-bufs draws five frames" ;;
+        *) row FAIL "a client of ABGR8888 dma-bufs draws five frames" "$out" ;;
+        esac
+        out=$("$client" -b -Y -n 5 -w 120 -h 80 2>&1)
+        case $out in
+        *"frames 5"*) row ok "a client of y-inverted dma-bufs draws five frames" ;;
+        *) row FAIL "a client of y-inverted dma-bufs draws five frames" "$out" ;;
+        esac
+fi
+
+# wl_shm ABGR8888 and wp_viewporter source-rect crop & destination scale.
+out=$("$client" -B -n 5 -w 120 -h 80 2>&1)
+case $out in
+*"frames 5"*) row ok "a client of wl_shm ABGR8888 draws five frames" ;;
+*) row FAIL "a client of wl_shm ABGR8888 draws five frames" "$out" ;;
+esac
+if "$client" -V -n 5 -w 120 -h 80 > "$work/crop.out" 2>&1; then
+        row ok "a client using wp_viewporter crop and scale draws five frames"
+else
+        row FAIL "a client using wp_viewporter crop and scale draws five frames" "$(cat "$work/crop.out")"
 fi
 
 # Damage only: the same picture comes of drawing a rectangle at a time.

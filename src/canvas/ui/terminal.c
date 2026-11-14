@@ -1454,7 +1454,10 @@ static int terminal_next(void)
         if (terminal.shown < 0)
                 return 0;
         if (windows_ready(&terminal.own))
+        {
+                terminal.shown = (int)(__atomic_load_n(&terminal.own.table->buffer_index[terminal.own.row], __ATOMIC_ACQUIRE) & 1u);
                 return 1 - terminal.shown;
+        }
         return terminal.forced ? terminal.shown : -1;
 }
 

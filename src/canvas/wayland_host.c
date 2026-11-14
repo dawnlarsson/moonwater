@@ -92,13 +92,31 @@ static struct
                 int finished, cancel;
         } transfer[COMPOSITOR_WL_TRANSFERS];
         int wake;                       // the eventfd a transfer's thread knocks on when it has ended
+#define COMPOSITOR_WL_SYNCOBJS 128
         int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
-        int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
+        int dmabuf_table;               // the file of format and modifier pairs the feedback names, rebuilt when changed
+        long dmabuf_table_size;
+        long dmabuf_entry_count;
+        struct
+        {
+                unsigned int format;
+                unsigned long modifier;
+        } dmabuf_entries[WAYLAND_DMABUF_ENTRIES];
         unsigned char cursor_asked[WINDOWS]; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
+        unsigned char row_blend[WINDOWS];    // 1 when the row's current surface has non-opaque alpha
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
         positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
         unsigned long render;           // the render node clients allocate on (a dev_t), 0 when there is none
+        int render_hw;
+        int syncobj_ok;
+        int syncobj_drm_fd;
+        char render_path[64];
+        struct
+        {
+                int used;
+                unsigned int handle;
+        } syncobj[COMPOSITOR_WL_SYNCOBJS];
         positive slow_until[WAYLAND_CLIENTS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
         struct
@@ -116,18 +134,22 @@ static struct
                 long width, height;
                 positive va, import;
                 const unsigned char *map;
-                long fd;
+                long fd, size;
+                unsigned long dev, ino;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
+                int synced;
         } lent[WINDOWS];
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
         // when the buffer changes or the row closes.
         struct
         {
                 const unsigned char *map;
+                long fd, size;
+                unsigned long dev, ino;
                 positive va;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
         } source[WINDOWS];
-} compositor_wl = {.listen = -1, .wake = -1, .lent = {{0}}};
+} compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
 
 /*
         A card address of a client's dma-buf (its import's), kept with the card's epoch the import was made in: 0 once the card has been let go of since
@@ -473,10 +495,35 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         return (void *)got;
 }
 
+static void compositor_wl_unlend(int row);
+
+static void compositor_wl_source_drop(int row)
+{
+        if (row < 0 || row >= WINDOWS)
+                return;
+        if (compositor_wl.source[row].va && compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
+                gpu_release_import(compositor_wl.source[row].va);
+        compositor_wl.source[row].va = 0;
+        compositor_wl.source[row].map = 0;
+        compositor_wl.source[row].fd = -1;
+        compositor_wl.source[row].size = 0;
+        compositor_wl.source[row].dev = 0;
+        compositor_wl.source[row].ino = 0;
+}
+
 static void compositor_wl_unmap(void *context, void *at, long size)
 {
         (void)context;
+        if (!at || at == WAYLAND_DMABUF_UNMAPPED)
+                return;
         gpu_forget(at, (positive)size);
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                if (compositor_wl.source[row].map == (const unsigned char *)at)
+                        compositor_wl_source_drop(row);
+                if (compositor_lent(row) && compositor_wl.lent[row].map == (const unsigned char *)at)
+                        compositor_wl_unlend(row);
+        }
         for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
                 if (compositor_wl.map[slot].at == (unsigned long)at)
                 {
@@ -490,6 +537,16 @@ static void compositor_wl_unmap(void *context, void *at, long size)
 static void compositor_wl_close(void *context, long fd)
 {
         (void)context;
+        if (fd >= 0)
+        {
+                for (int row = 0; row < WINDOWS; row++)
+                {
+                        if (compositor_wl.source[row].va && compositor_wl.source[row].fd == fd)
+                                compositor_wl_source_drop(row);
+                        if (compositor_lent(row) && compositor_wl.lent[row].fd == fd)
+                                compositor_wl_unlend(row);
+                }
+        }
         system_close((int)fd);
 }
 
@@ -617,23 +674,26 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         return -1;
 }
 
-static void compositor_wl_unlend(int row);
-
 static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
         // The cursor the client asked for is its own: a program that takes the row next has none asked (the kit's shape shows).
         if (row >= 0 && row < WINDOWS)
-                compositor_wl.laying[row].open = 0, compositor_wl.cursor_asked[row] = 0, compositor_wl_unlend(row);
-        if (row >= 0 && row < WINDOWS && compositor_wl.source[row].va)
         {
-                if (compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
-                        gpu_release_import(compositor_wl.source[row].va);
-                compositor_wl.source[row].va = 0, compositor_wl.source[row].map = 0;
+                compositor_wl.laying[row].open = 0;
+                compositor_wl.cursor_asked[row] = 0;
+                compositor_wl.row_blend[row] = 0;
+                compositor_wl_unlend(row);
+                compositor_wl_source_drop(row);
         }
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
+}
+
+static __attribute__((unused)) int compositor_wl_row_blend(int row)
+{
+        return row >= 0 && row < WINDOWS ? (int)compositor_wl.row_blend[row] : 0;
 }
 
 /*
@@ -798,15 +858,71 @@ static void compositor_wl_settle(int row)
                 compositor_wl_seed(row, compositor.front[row]);
 }
 
+static int compositor_wl_dmabuf_ready(long client, int fd);
+static int compositor_wl_sync_start(long client, int fd);
+
+static void compositor_wl_fd_ident(long fd, unsigned long *dev, unsigned long *ino)
+{
+        unsigned char info[256];
+
+        *dev = 0;
+        *ino = 0;
+        if (fd < 0)
+                return;
+        memory_zero(info, sizeof info);
+        // AT_EMPTY_PATH (0x1000), STATX_BASIC_STATS (0x7ff): stx_ino at 32 (u64), stx_dev_major at 136 (u32), stx_dev_minor at 140 (u32).
+        if (compositor_call(syscall(statx), (positive)fd, (positive)"", 0x1000, 0x7ff, (positive)info, 0) < 0)
+                return;
+        *ino = *(unsigned long *)(info + 32);
+        *dev = (((unsigned long)*(unsigned int *)(info + 136)) << 32) | *(unsigned int *)(info + 140);
+}
+
+static int compositor_wl_needs_xform(const struct wayland_picture *picture, long width, long height)
+{
+        unsigned int fourcc = picture->fourcc;
+
+        if (fourcc && fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888)
+                return 1;
+        if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888)
+                return 1;
+        if (picture->transform || picture->y_invert || picture->plane_count > 1)
+                return 1;
+        if (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID)
+                return 1;
+        if (picture->src_width > 0 &&
+            (picture->src_x != 0 || picture->src_y != 0 || picture->src_width != picture->width * 256 ||
+             picture->src_height != picture->height * 256))
+                return 1;
+        if (picture->dst_width > 0 &&
+            (picture->dst_width != width || picture->dst_height != height || picture->width != width || picture->height != height))
+                return 1;
+        return 0;
+}
+
 // The dma-buf reads of the pictures shown in place are bracketed for a present: started before the frames are built and ended after (the
 // kernel's sync, which is what makes a processor read of a dma-buf coherent on the architectures that need it).
 static void compositor_wl_lent_sync(int start)
 {
-        unsigned long sync = start ? 1 : 5; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, then END
+        unsigned long end_sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
 
         for (int row = 0; row < WINDOWS; row++)
                 if (compositor_lent(row) && compositor_wl.lent[row].fd >= 0)
-                        compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                {
+                        if (start)
+                        {
+                                long client = wayland_row_owner(row);
+
+                                compositor_wl.lent[row].synced =
+                                        compositor_wl_dmabuf_ready(client, (int)compositor_wl.lent[row].fd) &&
+                                        compositor_wl_sync_start(client, (int)compositor_wl.lent[row].fd);
+                        }
+                        else if (compositor_wl.lent[row].synced)
+                        {
+                                compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC,
+                                                (positive)&end_sync, 0, 0, 0);
+                                compositor_wl.lent[row].synced = 0;
+                        }
+                }
 }
 
 // A present the card drew: counted once when it read a client's picture in place.
@@ -826,17 +942,18 @@ static void compositor_wl_count_card(const unsigned char *rows, unsigned int win
 static int compositor_wl_lend(int row, const struct wayland_picture *picture, long width, long height)
 {
         long x = -picture->dest_x, y = -picture->dest_y;
-        unsigned long stride = (unsigned long)picture->stride;
+        unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0;
         const unsigned char *at;
         positive va = 0, import = 0;
-        int same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
-                   (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
+        int same;
 
         // A buffer is the surface's whole picture at every commit, and the damage only where it differs from the last one (the protocol's
         // word), so a commit with a part damaged is read in place like any other and that part alone is drawn again (the row's damage,
         // compositor_wl_lent_damage). The one buffer not taken at that word is one the shim says may not be whole (fragile: an X window's,
         // whose server draws on in what it committed): that one is read in place only when all of it is damaged, and copied otherwise.
         if (!picture->pixels || !picture->map || picture->blend || !picture->last || x < 0 || y < 0 || width <= 0 || height <= 0)
+                return 0;
+        if (compositor_wl_needs_xform(picture, width, height))
                 return 0;
         if (picture->fragile && !(picture->full || !picture->damages))
                 return 0;
@@ -856,6 +973,11 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         }
         if (compositor_wl_cut(picture->pixels))
                 return 0;
+        if (picture->sync_fd >= 0)
+                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
+               compositor_wl.lent[row].size == picture->map_bytes && compositor_wl.lent[row].dev == dev && compositor_wl.lent[row].ino == ino &&
+               (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
         if (picture->sync_fd >= 0)
         {
                 if (!gpu_ready())
@@ -877,6 +999,10 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         compositor_wl.lent[row].epoch = gpu_epoch;
         compositor_wl.lent[row].map = picture->map;
         compositor_wl.lent[row].fd = picture->sync_fd;
+        compositor_wl.lent[row].size = picture->map_bytes;
+        compositor_wl.lent[row].dev = dev;
+        compositor_wl.lent[row].ino = ino;
+        compositor_wl.lent[row].synced = 0;
         return 1;
 }
 
@@ -910,21 +1036,28 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                                    long dx, long dy, long sx, long sy, long w, long h, int wanted)
 {
         unsigned long stride = (unsigned long)picture->stride, extent, span;
-        const unsigned char *src;
+        const unsigned char *src = 0;
         positive src_va, dst_va;
         volatile unsigned int probe;
 
-        if (!wanted || !gpu_ready() || picture->blend || !picture->pixels || !picture->map || picture->map_bytes <= 0 || w <= 0 || h <= 0 || !gpu_idle())
+        if (!wanted || !gpu_ready() || picture->blend || w <= 0 || h <= 0 || !gpu_idle())
                 return 0;
-        src = picture->pixels + (unsigned long)sy * stride + (unsigned long)sx * 4;
+        if (compositor_wl_needs_xform(picture, picture->row_width, picture->row_height))
+                return 0;
+        if (picture->sync_fd < 0 && (!picture->pixels || !picture->map || picture->map_bytes <= 0))
+                return 0;
         extent = 4 * ((stride / 4) * (unsigned long)(h - 1) + (unsigned long)w);
-        // The rectangle's first and last pixels are read first: a pool cut under the read raises the SIGBUS the handler answers (zeros), here, so the
-        // card is not given the pages of a file that is gone.
-        probe = *(const volatile unsigned int *)src;
-        probe += *(const volatile unsigned int *)(src + extent - 4);
-        (void)probe;
-        if (compositor_wl_cut(picture->pixels))
-                return 0;
+        if (picture->pixels && picture->map)
+        {
+                src = picture->pixels + (unsigned long)sy * stride + (unsigned long)sx * 4;
+                // The rectangle's first and last pixels are read first: a pool cut under the read raises the SIGBUS the handler answers (zeros), here, so the
+                // card is not given the pages of a file that is gone.
+                probe = *(const volatile unsigned int *)src;
+                probe += *(const volatile unsigned int *)(src + extent - 4);
+                (void)probe;
+                if (compositor_wl_cut(picture->pixels))
+                        return 0;
+        }
         if (picture->sync_fd < 0)
         {
                 // The card maps the picture's own pages (from the page of its first byte to the end of the page of its last), not the pool's: every
@@ -938,17 +1071,31 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         }
         else
         {
-                if (compositor_wl.source[row].map != picture->map || !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
+                unsigned long dev = 0, ino = 0;
+                long need_bytes = picture->map_bytes > 0 ? picture->map_bytes
+                                                         : (long)picture->plane_offset[0] + (long)picture->height * (long)stride;
+
+                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+                if (compositor_wl.source[row].map != picture->map || compositor_wl.source[row].fd != picture->sync_fd ||
+                    compositor_wl.source[row].size != need_bytes || compositor_wl.source[row].dev != dev ||
+                    compositor_wl.source[row].ino != ino ||
+                    !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
                 {
-                        if (compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
-                                gpu_release_import(compositor_wl.source[row].va);
-                        compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                        compositor_wl_source_drop(row);
+                        compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
                         compositor_wl.source[row].epoch = gpu_epoch;
-                        compositor_wl.source[row].map = compositor_wl.source[row].va ? picture->map : 0;
                         if (!compositor_wl.source[row].va)
                                 return 0;
+                        compositor_wl.source[row].map = picture->map;
+                        compositor_wl.source[row].fd = picture->sync_fd;
+                        compositor_wl.source[row].size = need_bytes;
+                        compositor_wl.source[row].dev = dev;
+                        compositor_wl.source[row].ino = ino;
                 }
-                src_va = compositor_wl.source[row].va + (positive)(src - picture->map);
+                if (picture->pixels && picture->map)
+                        src_va = compositor_wl.source[row].va + (positive)(src - picture->map);
+                else
+                        src_va = compositor_wl.source[row].va + (positive)picture->plane_offset[0] + (positive)sy * stride + (positive)sx * 4;
         }
         dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va && gpu_map_written(to, compositor.buffer))
@@ -957,9 +1104,11 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 return 0;
         if (gpu_blit(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h))
                 return 1;
-        // A copy that hung is the card's hang as a present's is (compositor_gpu_job_failed): without it every damage copy would wait on the card; a late one is
-        // only the processor's copy (the job stays pending, and the next copies find the card busy).
+        // A copy that hung is the card's hang as a present's is (compositor_gpu_job_failed); if it merely timed out late (GPU_END_LATE), wait for completion
+        // (gpu_finish) so the processor fallback never races an in-flight GPU write to `to`.
 #ifdef MOONWATER_GPU_C
+        if (gpu_end == GPU_END_LATE && gpu_finish())
+                return 1;
         if (gpu_end != GPU_END_NONE)
                 compositor_gpu_job_failed();
 #endif
@@ -1004,6 +1153,195 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
         table->damage_height[row] = (int)(y2 - y1);
 }
 
+static inline unsigned int compositor_wl_clamp8(long v)
+{
+        return v < 0 ? 0u : v > 255 ? 255u : (unsigned int)v;
+}
+
+static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *picture, const unsigned char *uv_base, unsigned long uv_stride,
+                                               long bx, long by)
+{
+        unsigned int fourcc = picture->fourcc;
+        unsigned long stride = (unsigned long)picture->stride;
+        unsigned int v, r, g, b, a;
+
+        if (!fourcc)
+                fourcc = picture->format == WLN_wl_shm_format_argb8888   ? COMPOSITOR_WL_FOURCC_ARGB8888
+                         : picture->format == WLN_wl_shm_format_xrgb8888 ? COMPOSITOR_WL_FOURCC_XRGB8888
+                                                                         : (unsigned int)picture->format;
+        if (picture->y_invert)
+                by = (picture->height - 1) - by;
+        if (fourcc == WAYLAND_FOURCC_NV12)
+        {
+                long yv = (long)picture->pixels[(unsigned long)by * stride + (unsigned long)bx];
+                long u = 128, vr = 128, c, d, e;
+
+                if (uv_base && uv_stride > 0)
+                {
+                        const unsigned char *uv = uv_base + (unsigned long)(by / 2) * uv_stride + (unsigned long)(bx & ~1L);
+
+                        u = (long)uv[0];
+                        vr = (long)uv[1];
+                }
+                c = yv - 16;
+                if (c < 0)
+                        c = 0;
+                d = u - 128;
+                e = vr - 128;
+                r = compositor_wl_clamp8((298 * c + 409 * e + 128) >> 8);
+                g = compositor_wl_clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
+                b = compositor_wl_clamp8((298 * c + 516 * d + 128) >> 8);
+                return 0xff000000u | (r << 16) | (g << 8) | b;
+        }
+        v = *(const unsigned int *)(picture->pixels + (unsigned long)by * stride + (unsigned long)bx * 4);
+        switch (fourcc)
+        {
+        case WAYLAND_FOURCC_ABGR8888:
+                return (v & 0xff00ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+        case WAYLAND_FOURCC_XBGR8888:
+                return 0xff000000u | (v & 0x0000ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+        case WAYLAND_FOURCC_ARGB2101010:
+        case WAYLAND_FOURCC_XRGB2101010:
+                r = (v >> 22) & 0xffu;
+                g = (v >> 12) & 0xffu;
+                b = (v >> 2) & 0xffu;
+                a = fourcc == WAYLAND_FOURCC_XRGB2101010 ? 0xffu : ((v >> 30) * 85u);
+                return (a << 24) | (r << 16) | (g << 8) | b;
+        case WAYLAND_FOURCC_ABGR2101010:
+        case WAYLAND_FOURCC_XBGR2101010:
+                b = (v >> 22) & 0xffu;
+                g = (v >> 12) & 0xffu;
+                r = (v >> 2) & 0xffu;
+                a = fourcc == WAYLAND_FOURCC_XBGR2101010 ? 0xffu : ((v >> 30) * 85u);
+                return (a << 24) | (r << 16) | (g << 8) | b;
+        case COMPOSITOR_WL_FOURCC_XRGB8888:
+                return v | 0xff000000u;
+        default:
+                return v;
+        }
+}
+
+static int compositor_wl_blit_xform(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
+                                    long width, long height)
+{
+        long bw = picture->width, bh = picture->height;
+        long bw_t = (picture->transform & 1) ? bh : bw;
+        long bh_t = (picture->transform & 1) ? bw : bh;
+        long tw = picture->dst_width > 0 ? picture->dst_width : bw_t;
+        long th = picture->dst_height > 0 ? picture->dst_height : bh_t;
+        long sx256 = picture->src_width > 0 ? picture->src_x : 0;
+        long sy256 = picture->src_width > 0 ? picture->src_y : 0;
+        long sw256 = picture->src_width > 0 ? picture->src_width : bw_t * 256;
+        long sh256 = picture->src_width > 0 ? picture->src_height : bh_t * 256;
+        long dx0 = picture->dest_x, dy0 = picture->dest_y;
+        long ox1 = dx0 < 0 ? -dx0 : 0, oy1 = dy0 < 0 ? -dy0 : 0;
+        long ox2 = dx0 + tw > width ? width - dx0 : tw;
+        long oy2 = dy0 + th > height ? height - dy0 : th;
+        const unsigned char *uv_base = 0;
+        unsigned long uv_stride = picture->plane_stride[1];
+        long uv_map_got = 0;
+        unsigned long uv_map_size = 0;
+        volatile unsigned char probe;
+
+        if (!picture->pixels || bw <= 0 || bh <= 0 || tw <= 0 || th <= 0 || ox2 <= ox1 || oy2 <= oy1)
+                return 0;
+        probe = picture->pixels[0];
+        probe = (unsigned char)(probe + picture->pixels[(unsigned long)(bh - 1) * (unsigned long)picture->stride]);
+        (void)probe;
+        if (compositor_wl_cut(picture->pixels))
+                return -1;
+        if (picture->fourcc == WAYLAND_FOURCC_NV12)
+        {
+                uv_map_size = picture->plane_offset[1] + uv_stride * (unsigned long)((bh + 1) / 2);
+                if (picture->plane_fd[1] >= 0 && picture->plane_fd[1] != picture->sync_fd)
+                {
+                        long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->plane_fd[1], 0);
+
+                        if (got >= 0 || got <= -4096)
+                        {
+                                uv_map_got = got;
+                                uv_base = (const unsigned char *)got + picture->plane_offset[1];
+                        }
+                }
+                else if (picture->map && (unsigned long)picture->map_bytes >= uv_map_size)
+                        uv_base = picture->map + picture->plane_offset[1];
+                else if (picture->sync_fd >= 0)
+                {
+                        long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->sync_fd, 0);
+
+                        if (got >= 0 || got <= -4096)
+                        {
+                                uv_map_got = got;
+                                uv_base = (const unsigned char *)got + picture->plane_offset[1];
+                        }
+                }
+        }
+        for (long oy = oy1; oy < oy2; oy++)
+        {
+                unsigned int *dst = to + (unsigned long)(dy0 + oy) * pitch + (unsigned long)dx0;
+                long ty = (sy256 + ((oy * 2 + 1) * sh256) / (2 * th)) >> 8;
+
+                if (ty < 0)
+                        ty = 0;
+                else if (ty >= bh_t)
+                        ty = bh_t - 1;
+                for (long ox = ox1; ox < ox2; ox++)
+                {
+                        long tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
+                        long bx, by;
+                        unsigned int px;
+
+                        if (tx < 0)
+                                tx = 0;
+                        else if (tx >= bw_t)
+                                tx = bw_t - 1;
+                        switch (picture->transform & 7)
+                        {
+                        case 1:
+                                bx = bw - 1 - ty;
+                                by = tx;
+                                break;
+                        case 2:
+                                bx = bw - 1 - tx;
+                                by = bh - 1 - ty;
+                                break;
+                        case 3:
+                                bx = ty;
+                                by = bh - 1 - tx;
+                                break;
+                        case 4:
+                                bx = bw - 1 - tx;
+                                by = ty;
+                                break;
+                        case 5:
+                                bx = bw - 1 - ty;
+                                by = bh - 1 - tx;
+                                break;
+                        case 6:
+                                bx = tx;
+                                by = bh - 1 - ty;
+                                break;
+                        case 7:
+                                bx = ty;
+                                by = tx;
+                                break;
+                        default:
+                                bx = tx;
+                                by = ty;
+                                break;
+                        }
+                        px = compositor_wl_decode_pixel(picture, uv_base, uv_stride, bx, by);
+                        dst[ox] = picture->blend ? compositor_wl_over(px, dst[ox]) : px;
+                }
+        }
+        if (uv_map_got)
+                compositor_call(syscall(munmap), (positive)uv_map_got, (positive)uv_map_size, 0, 0, 0, 0);
+        if (compositor_wl_cut(picture->pixels))
+                return -1;
+        compositor_wl_laid(row, dx0 + ox1, dy0 + oy1, dx0 + ox2, dy0 + oy2);
+        return 1;
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -1011,28 +1349,34 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         long width = picture->row_width, height = picture->row_height;
         long count = picture->full || !picture->damages ? 1 : picture->damages;
         unsigned int *to;
-        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
-        int was_lent;
+        unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+        int was_lent, sync_started = 0;
+        int has_content = picture->pixels != 0 || picture->sync_fd >= 0;
 
         (void)context;
         if (row < 0 || row >= WINDOWS || !table)
                 return -1;
-        if (picture->sync_fd >= 0 && picture->pixels)
+        if (picture->sync_fd >= 0)
         {
-                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd) ||
-                    !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
                         return 1;
+                if (picture->pixels)
+                {
+                        if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                return 1;
+                        sync_started = 1;
+                }
         }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
+        if (has_content && !compositor_wl.laying[row].open)
+                compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
         // drawn whole from it. Its dma-buf's reads are bracketed as a copy's are (the writer waited for above), and ended here.
         was_lent = compositor_lent(row);
         if (picture->pixels && picture->last && !compositor_wl.laying[row].open && compositor_wl_lend(row, picture, width, height))
         {
-                unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ: nothing is read here, the card and the processor read it later
-
-                if (picture->sync_fd >= 0)
+                if (sync_started)
                         compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
                 // A row that was the table's, or of another size, is drawn whole from the buffer; one that was read in place at this size
                 // is drawn again only where the commit says it changed.
@@ -1054,7 +1398,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
                 int pinned = compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row);
-                int covers = picture->pixels && !picture->blend && !picture->dest_x && !picture->dest_y && picture->width >= width &&
+                int covers = has_content && !picture->blend && !picture->dest_x && !picture->dest_y && picture->width >= width &&
                              picture->height >= height && (picture->full || !picture->damages);
 
                 compositor_wl.laying[row].open = 1;
@@ -1081,80 +1425,104 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 }
         }
         to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer);
-        if (picture->pixels)
+        if (has_content)
         {
                 long summed = 0;
                 int card_wanted;
 
-                if (count > WAYLAND_DAMAGE)
-                        count = WAYLAND_DAMAGE;
-                // The commit's damage, summed: the card copies all of it or none (COMPOSITOR_WL_CARD_COPY_PIXELS)
-                for (long at = 0; at < count; at++)
-                        summed += picture->full || !picture->damages ? (long)picture->width * (long)picture->height
-                                                                   : (long)picture->damage[at].width * (long)picture->damage[at].height;
-                card_wanted = summed >= COMPOSITOR_WL_CARD_COPY_PIXELS;
-                for (long at = 0; at < count; at++)
+                if (picture->pixels && compositor_wl_needs_xform(picture, width, height))
                 {
-                        long left = 0, top = 0, right = picture->width, bottom = picture->height;
-                        long x = picture->dest_x, y = picture->dest_y;
+                        int xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
 
-                        if (!picture->full && picture->damages)
+                        if (sync_started)
+                                compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                        if (xst < 0)
                         {
-                                left = picture->damage[at].x;
-                                top = picture->damage[at].y;
-                                right = left + picture->damage[at].width;
-                                bottom = top + picture->damage[at].height;
+                                compositor_wl.laying[row].open = 0;
+                                return -1;
                         }
-                        // Within the buffer, then within the window, with the source moving as the place does.
-                        left = left < 0 ? 0 : left;
-                        top = top < 0 ? 0 : top;
-                        right = right > picture->width ? picture->width : right;
-                        bottom = bottom > picture->height ? picture->height : bottom;
-                        if (x + left < 0)
-                                left = -x;
-                        if (y + top < 0)
-                                top = -y;
-                        if (x + right > width)
-                                right = width - x;
-                        if (y + bottom > height)
-                                bottom = height - y;
-                        if (right <= left || bottom <= top)
-                                continue;
-                        if (picture->blend)
-                                memory_over_u32_rect(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
-                                                     (const unsigned int *)(picture->pixels + top * picture->stride) + left,
-                                                     (unsigned long)picture->stride / 4,
-                                                     (unsigned long)(right - left), (unsigned long)(bottom - top));
-                        else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, card_wanted))
-                                table->client_rects_card++;
-                        else if (picture->sync_fd >= 0)
-                        {
+                        if (xst > 0)
                                 table->client_rects_cpu++;
-                                // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
-                                memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
-                                                            (const unsigned int *)(picture->pixels + top * picture->stride) + left,
-                                                            (unsigned long)picture->stride / 4, (unsigned long)(right - left),
-                                                            (unsigned long)(bottom - top));
-                        }
-                        else
+                }
+                else
+                {
+                        if (count > WAYLAND_DAMAGE)
+                                count = WAYLAND_DAMAGE;
+                        // The commit's damage, summed: the card copies all of it or none (COMPOSITOR_WL_CARD_COPY_PIXELS)
+                        for (long at = 0; at < count; at++)
+                                summed += picture->full || !picture->damages ? (long)picture->width * (long)picture->height
+                                                                             : (long)picture->damage[at].width * (long)picture->damage[at].height;
+                        card_wanted = !picture->pixels || summed >= COMPOSITOR_WL_CARD_COPY_PIXELS;
+                        for (long at = 0; at < count; at++)
                         {
-                                table->client_rects_cpu++;
-                                memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
-                                                     (const unsigned int *)(picture->pixels + top * picture->stride) + left,
-                                                     (unsigned long)picture->stride / 4, (unsigned long)(right - left),
-                                                     (unsigned long)(bottom - top));
+                                long left = 0, top = 0, right = picture->width, bottom = picture->height;
+                                long x = picture->dest_x, y = picture->dest_y;
+
+                                if (!picture->full && picture->damages)
+                                {
+                                        left = picture->damage[at].x;
+                                        top = picture->damage[at].y;
+                                        right = left + picture->damage[at].width;
+                                        bottom = top + picture->damage[at].height;
+                                }
+                                // Within the buffer, then within the window, with the source moving as the place does.
+                                left = left < 0 ? 0 : left;
+                                top = top < 0 ? 0 : top;
+                                right = right > picture->width ? picture->width : right;
+                                bottom = bottom > picture->height ? picture->height : bottom;
+                                if (x + left < 0)
+                                        left = -x;
+                                if (y + top < 0)
+                                        top = -y;
+                                if (x + right > width)
+                                        right = width - x;
+                                if (y + bottom > height)
+                                        bottom = height - y;
+                                if (right <= left || bottom <= top)
+                                        continue;
+                                if (!picture->pixels)
+                                {
+                                        if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left,
+                                                                    bottom - top, 1))
+                                        {
+                                                table->client_rects_card++;
+                                                compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
+                                        }
+                                        continue;
+                                }
+                                if (picture->blend)
+                                        memory_over_u32_rect(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                             (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                             (unsigned long)picture->stride / 4,
+                                                             (unsigned long)(right - left), (unsigned long)(bottom - top));
+                                else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, card_wanted))
+                                        table->client_rects_card++;
+                                else if (picture->sync_fd >= 0)
+                                {
+                                        table->client_rects_cpu++;
+                                        // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
+                                        memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                                    (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                                    (unsigned long)picture->stride / 4, (unsigned long)(right - left),
+                                                                    (unsigned long)(bottom - top));
+                                }
+                                else
+                                {
+                                        table->client_rects_cpu++;
+                                        memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                             (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                             (unsigned long)picture->stride / 4, (unsigned long)(right - left),
+                                                             (unsigned long)(bottom - top));
+                                }
+                                compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
                         }
-                        compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
-                }
-                if (picture->sync_fd >= 0)
-                {
-                        sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
-                        compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-                }
-                if (compositor_wl_cut(picture->pixels))
-                {
-                        compositor_wl.laying[row].open = 0;
-                        return -1;
+                        if (sync_started)
+                                compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                        if (picture->pixels && compositor_wl_cut(picture->pixels))
+                        {
+                                compositor_wl.laying[row].open = 0;
+                                return -1;
+                        }
                 }
         }
         if (!picture->last)
@@ -1618,36 +1986,126 @@ static char *compositor_wl_text(char *at, const char *text)
 
 // Lets clients in the render group (105, matching src/bowl.c's BOWL_GROUP_RENDER) open the render node for Vulkan and EGL.
 #define COMPOSITOR_WL_RENDER_GID 105
+#define COMPOSITOR_WL_DRM_VERSION 0xc0406400UL
+#define COMPOSITOR_WL_DRM_GET_CAP 0xc010640cUL
+#define COMPOSITOR_WL_VIRTGPU_GETPARAM 0xc0106443UL
+#define COMPOSITOR_WL_SYNCOBJ_DESTROY 0xc00864bfUL
+#define COMPOSITOR_WL_SYNCOBJ_FD_TO_HANDLE 0xc01064c2UL
+#define COMPOSITOR_WL_SYNCOBJ_TIMELINE_WAIT 0xc03064caUL
+#define COMPOSITOR_WL_SYNCOBJ_TIMELINE_SIGNAL 0xc01864cdUL
 
-static unsigned long compositor_wl_render_probe(const char *path)
+static int compositor_wl_str_eq(const char *a, const char *b)
+{
+        while (*a && *b && *a == *b)
+                a++, b++;
+        return *a == 0 && *b == 0;
+}
+
+/*
+        Probes a DRM render node: sets group ownership (105) and mode (0660), classifies hardware/virgl vs software/vgem/vkms
+        via DRM_IOCTL_VERSION (+ VIRTGPU_PARAM_3D_FEATURES), and checks DRM_CAP_SYNCOBJ_TIMELINE (0x14).
+        Returns 0 for non-existent nodes, 1 for software/vgem/vkms fallback, 2 for hardware/3D-capable render nodes.
+*/
+static int compositor_wl_render_classify(const char *path, unsigned long *out_dev, int *out_syncobj, int *out_fd)
 {
         unsigned long device = compositor_wl_node(path);
+        long fd;
+        char name[32];
+        struct
+        {
+                int major, minor, patch;
+                unsigned long name_len;
+                char *name;
+                unsigned long date_len;
+                char *date;
+                unsigned long desc_len;
+                char *desc;
+        } ver;
+        unsigned long cap[2] = {0x14, 0}; // DRM_CAP_SYNCOBJ_TIMELINE
+        int rank = 1;
 
-        if (device && device != compositor_wl.render)
+        *out_dev = device;
+        *out_syncobj = 0;
+        *out_fd = -1;
+        if (!device)
+                return 0;
+        if (device != compositor_wl.render)
         {
                 compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, COMPOSITOR_WL_RENDER_GID, 0, 0);
                 compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)path, 0660, 0, 0, 0);
         }
-        return device;
+        // O_RDWR | O_CLOEXEC
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80002, 0, 0, 0);
+        if (fd < 0)
+                return 1;
+        memory_zero(name, sizeof name);
+        memory_zero(&ver, sizeof ver);
+        ver.name_len = sizeof name - 1;
+        ver.name = name;
+        if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DRM_VERSION, (positive)&ver, 0, 0, 0) == 0)
+        {
+                name[sizeof name - 1] = 0;
+                if (compositor_wl_str_eq(name, "vgem") || compositor_wl_str_eq(name, "vkms"))
+                        rank = 1;
+                else if (compositor_wl_str_eq(name, "virtio_gpu"))
+                {
+                        unsigned long val = 0;
+                        unsigned long param[2] = {1, (unsigned long)&val}; // VIRTGPU_PARAM_3D_FEATURES
+
+                        if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_VIRTGPU_GETPARAM, (positive)param, 0, 0, 0) == 0 && val)
+                                rank = 2;
+                        else
+                                rank = 2; // virtio_gpu prime/dumb render node is still preferred over vgem
+                }
+                else
+                        rank = 2;
+        }
+        if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DRM_GET_CAP, (positive)cap, 0, 0, 0) == 0 && cap[1])
+        {
+                *out_syncobj = 1;
+                *out_fd = (int)fd;
+        }
+        else
+                system_close((int)fd);
+        return rank;
+}
+
+static void compositor_wl_render_adopt(const char *path, unsigned long dev, int hw, int syncobj, int fd)
+{
+        char *dst = compositor_wl.render_path;
+
+        for (unsigned long i = 0; i < sizeof compositor_wl.render_path - 1 && path[i]; i++)
+                *dst++ = path[i];
+        *dst = 0;
+        compositor_wl.render_hw = hw;
+        compositor_wl.syncobj_ok = syncobj;
+        if (compositor_wl.syncobj_drm_fd >= 0 && compositor_wl.syncobj_drm_fd != fd)
+                system_close(compositor_wl.syncobj_drm_fd);
+        compositor_wl.syncobj_drm_fd = fd;
+        (void)dev;
 }
 
 /*
         The render node that goes with the card: the node next to it in sysfs (its device's drm directory holds both), else the first
-        render node the machine has. 0 when there is none.
+        hardware/virgl render node the machine has (preferring real DRM drivers over vgem/vkms). 0 when there is none.
 */
 static unsigned long compositor_wl_render_node(void)
 {
         unsigned char info[256];
-        char path[96], *tail;
-        unsigned long device;
+        char path[96], best_path[96], *tail;
+        unsigned long device = 0, best_dev = 0;
+        int best_rank = 0, best_syncobj = 0, best_fd = -1;
 
+        best_path[0] = 0;
         if (compositor.card >= 0)
         {
                 memory_zero(info, sizeof info);
                 // AT_EMPTY_PATH: the card's own descriptor.
-                if (compositor_call(syscall(statx), (positive)compositor.card, (positive) "", 0x1000, 0x7ff, (positive)info, 0) >= 0)
+                if (compositor_call(syscall(statx), (positive)compositor.card, (positive)"", 0x1000, 0x7ff, (positive)info, 0) >= 0)
                         for (unsigned long number = 128; number < 192; number++)
                         {
+                                int syncobj = 0, fd = -1, rank;
+
                                 tail = compositor_wl_text(path, "/sys/dev/char/");
                                 tail = compositor_wl_decimal(tail, *(unsigned int *)(info + 128));
                                 *tail++ = ':';
@@ -1660,42 +2118,211 @@ static unsigned long compositor_wl_render_node(void)
                                 tail = compositor_wl_text(path, "/dev/dri/renderD");
                                 tail = compositor_wl_decimal(tail, number);
                                 *tail = 0;
-                                device = compositor_wl_render_probe(path);
-                                if (device)
+                                rank = compositor_wl_render_classify(path, &device, &syncobj, &fd);
+                                if (rank > 0 && device)
+                                {
+                                        compositor_wl_render_adopt(path, device, rank >= 2, syncobj, fd);
                                         return device;
+                                }
+                                if (fd >= 0)
+                                        system_close(fd);
                         }
         }
         for (unsigned long number = 128; number < 192; number++)
         {
+                int syncobj = 0, fd = -1, rank;
+
                 tail = compositor_wl_text(path, "/dev/dri/renderD");
                 tail = compositor_wl_decimal(tail, number);
                 *tail = 0;
-                device = compositor_wl_render_probe(path);
-                if (device)
-                        return device;
+                rank = compositor_wl_render_classify(path, &device, &syncobj, &fd);
+                if (rank > best_rank && device)
+                {
+                        if (best_fd >= 0)
+                                system_close(best_fd);
+                        best_rank = rank;
+                        best_dev = device;
+                        best_syncobj = syncobj;
+                        best_fd = fd;
+                        for (unsigned long i = 0; i < sizeof best_path - 1 && path[i]; i++)
+                        {
+                                best_path[i] = path[i];
+                                best_path[i + 1] = 0;
+                        }
+                        if (rank >= 2)
+                                break;
+                }
+                else if (fd >= 0)
+                        system_close(fd);
         }
+        if (best_dev)
+        {
+                compositor_wl_render_adopt(best_path, best_dev, best_rank >= 2, best_syncobj, best_fd);
+                return best_dev;
+        }
+        compositor_wl.render_path[0] = 0;
+        compositor_wl.render_hw = 0;
+        compositor_wl.syncobj_ok = 0;
+        if (compositor_wl.syncobj_drm_fd >= 0)
+                system_close(compositor_wl.syncobj_drm_fd);
+        compositor_wl.syncobj_drm_fd = -1;
         return 0;
+}
+
+static void compositor_wl_dmabuf_add_pair(struct wayland_dmabuf_info *info, unsigned int format, unsigned long modifier)
+{
+        if (info->count >= WAYLAND_DMABUF_ENTRIES)
+                return;
+        for (long i = 0; i < info->count; i++)
+                if (info->entry[i].format == format && info->entry[i].modifier == modifier)
+                        return;
+        info->entry[info->count].format = format;
+        info->entry[info->count].modifier = modifier;
+        info->count++;
+}
+
+static int compositor_wl_fourcc_wanted(unsigned int fourcc)
+{
+        switch (fourcc)
+        {
+        case COMPOSITOR_WL_FOURCC_ARGB8888:
+        case COMPOSITOR_WL_FOURCC_XRGB8888:
+        case WAYLAND_FOURCC_ABGR8888:
+        case WAYLAND_FOURCC_XBGR8888:
+        case WAYLAND_FOURCC_ARGB2101010:
+        case WAYLAND_FOURCC_XRGB2101010:
+        case WAYLAND_FOURCC_ABGR2101010:
+        case WAYLAND_FOURCC_XBGR2101010:
+        case WAYLAND_FOURCC_NV12:
+                return 1;
+        default:
+                return 0;
+        }
+}
+
+static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info)
+{
+        unsigned int prop_ids[64];
+        p64 prop_vals[64];
+        struct
+        {
+                p64 props, values;
+                unsigned int count, id, type;
+        } obj;
+
+        if (compositor.card < 0 || !compositor.primary)
+                return;
+        memory_zero(&obj, sizeof obj);
+        obj.props = (p64)prop_ids;
+        obj.values = (p64)prop_vals;
+        obj.count = 64;
+        obj.id = compositor.primary;
+        obj.type = COMPOSITOR_OBJECT_PLANE;
+        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, &obj) != 0)
+                return;
+        if (obj.count > 64)
+                obj.count = 64;
+        for (unsigned int i = 0; i < obj.count; i++)
+        {
+                struct
+                {
+                        p64 values, blobs;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_blobs;
+                } meta;
+
+                memory_zero(&meta, sizeof meta);
+                meta.id = prop_ids[i];
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, &meta) != 0)
+                        continue;
+                if (!compositor_wl_str_eq(meta.name, "IN_FORMATS") || !prop_vals[i])
+                        continue;
+                {
+                        unsigned char blob_buf[4096];
+                        struct
+                        {
+                                unsigned int id, length;
+                                p64 data;
+                        } blob = {(unsigned int)prop_vals[i], sizeof blob_buf, (p64)blob_buf};
+
+                        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, &blob) == 0 && blob.length >= 24 &&
+                            blob.length <= sizeof blob_buf)
+                        {
+                                unsigned int fmt_count = *(unsigned int *)(blob_buf + 4);
+                                unsigned int fmt_off = *(unsigned int *)(blob_buf + 8);
+                                unsigned int mod_count = *(unsigned int *)(blob_buf + 12);
+                                unsigned int mod_off = *(unsigned int *)(blob_buf + 16);
+
+                                if (fmt_off + fmt_count * 4u <= blob.length && mod_off + mod_count * 24u <= blob.length)
+                                {
+                                        const unsigned int *fmts = (const unsigned int *)(blob_buf + fmt_off);
+                                        const unsigned char *mods = blob_buf + mod_off;
+
+                                        for (unsigned int m = 0; m < mod_count; m++)
+                                        {
+                                                unsigned long mask = *(const unsigned long *)(mods + m * 24u);
+                                                unsigned int off = *(const unsigned int *)(mods + m * 24u + 8u);
+                                                unsigned long mod = *(const unsigned long *)(mods + m * 24u + 16u);
+
+                                                for (unsigned int bit = 0; bit < 64 && off + bit < fmt_count; bit++)
+                                                        if ((mask & (1UL << bit)) && compositor_wl_fourcc_wanted(fmts[off + bit]))
+                                                                compositor_wl_dmabuf_add_pair(info, fmts[off + bit], mod);
+                                        }
+                                }
+                        }
+                }
+                break;
+        }
 }
 
 static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
 {
+        static const unsigned int base_formats[] = {
+            COMPOSITOR_WL_FOURCC_ARGB8888, COMPOSITOR_WL_FOURCC_XRGB8888,
+            WAYLAND_FOURCC_ABGR8888,       WAYLAND_FOURCC_XBGR8888,
+            WAYLAND_FOURCC_ARGB2101010,    WAYLAND_FOURCC_XRGB2101010,
+            WAYLAND_FOURCC_ABGR2101010,    WAYLAND_FOURCC_XBGR2101010,
+            WAYLAND_FOURCC_NV12,
+        };
+        int changed = 0;
+
         (void)context;
         compositor_wl.render = compositor_wl_render_node();
         if (!compositor_wl.render)
                 return 0;
         info->device = compositor_wl.render;
-        info->count = 2;
-        for (long at = 0; at < 2; at++)
-        {
-                info->entry[at].format = compositor_wl_dmabuf_entry[at].format;
-                info->entry[at].modifier = compositor_wl_dmabuf_entry[at].modifier;
-        }
+        info->count = 0;
+        for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
+                compositor_wl_dmabuf_add_pair(info, base_formats[i], 0);
+        for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
+                compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
+        compositor_wl_query_plane_modifiers(info);
         info->tranches = 1;
         info->tranche[0].device = info->device;
-        info->tranche[0].flags = 0;
-        info->tranche[0].count = 2;
-        info->tranche[0].index[0] = 0;
-        info->tranche[0].index[1] = 1;
+        info->tranche[0].flags = compositor.card >= 0 && compositor.primary ? 1 : 0;
+        info->tranche[0].count = info->count;
+        for (long at = 0; at < info->count; at++)
+                info->tranche[0].index[at] = (unsigned char)at;
+        if (compositor_wl.dmabuf_entry_count != info->count)
+                changed = 1;
+        for (long at = 0; !changed && at < info->count; at++)
+                if (compositor_wl.dmabuf_entries[at].format != info->entry[at].format ||
+                    compositor_wl.dmabuf_entries[at].modifier != info->entry[at].modifier)
+                        changed = 1;
+        if (changed)
+        {
+                if (compositor_wl.dmabuf_table > 0)
+                        system_close(compositor_wl.dmabuf_table);
+                compositor_wl.dmabuf_table = 0;
+                compositor_wl.dmabuf_table_size = 0;
+                compositor_wl.dmabuf_entry_count = info->count;
+                for (long at = 0; at < info->count; at++)
+                {
+                        compositor_wl.dmabuf_entries[at].format = info->entry[at].format;
+                        compositor_wl.dmabuf_entries[at].modifier = info->entry[at].modifier;
+                }
+        }
         return 1;
 }
 
@@ -1703,34 +2330,51 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
 static void compositor_wl_dmabuf_refresh(void)
 {
         unsigned long was;
+        int was_hw, was_sync;
 
         if (!compositor_wl.started)
                 return;
         was = compositor_wl.render;
-        if (compositor_wl_render_node() != was)
+        was_hw = compositor_wl.render_hw;
+        was_sync = compositor_wl.syncobj_ok;
+        if (compositor_wl_render_node() != was || compositor_wl.render_hw != was_hw || compositor_wl.syncobj_ok != was_sync)
                 wayland_dmabuf_changed();
 }
 
 // The table the feedback names the pairs by: a sealed file of entries of a format, four bytes of padding and a modifier.
 static long compositor_wl_dmabuf_table(void *context, long *size)
 {
-        unsigned char bytes[32];
-        long fd, done = 0;
+        unsigned char bytes[WAYLAND_DMABUF_ENTRIES * 16];
+        long count = compositor_wl.dmabuf_entry_count, total, fd, done = 0;
 
         (void)context;
-        if (compositor_wl.dmabuf_table <= 0)
+        if (count < 1)
+                count = 2;
+        total = count * 16;
+        if (compositor_wl.dmabuf_table <= 0 || compositor_wl.dmabuf_table_size != total)
         {
-                memory_zero(bytes, sizeof bytes);
-                for (long at = 0; at < 2; at++)
+                if (compositor_wl.dmabuf_table > 0)
+                        system_close(compositor_wl.dmabuf_table);
+                compositor_wl.dmabuf_table = 0;
+                memory_zero(bytes, (unsigned long)total);
+                for (long at = 0; at < count; at++)
+                {
+                        unsigned int fmt = compositor_wl.dmabuf_entry_count > 0 ? compositor_wl.dmabuf_entries[at].format
+                                                                                : compositor_wl_dmabuf_entry[at & 1].format;
+                        unsigned long mod = compositor_wl.dmabuf_entry_count > 0 ? compositor_wl.dmabuf_entries[at].modifier : 0;
+
                         for (long byte = 0; byte < 4; byte++)
-                                bytes[at * 16 + byte] = (unsigned char)(compositor_wl_dmabuf_entry[at].format >> (8 * byte));
+                                bytes[at * 16 + byte] = (unsigned char)(fmt >> (8 * byte));
+                        for (long byte = 0; byte < 8; byte++)
+                                bytes[at * 16 + 8 + byte] = (unsigned char)(mod >> (8 * byte));
+                }
                 // MFD_CLOEXEC | MFD_ALLOW_SEALING
-                fd = compositor_call(syscall(memfd_create), (positive) "moonwater-dmabuf-table", 3, 0, 0, 0, 0);
+                fd = compositor_call(syscall(memfd_create), (positive)"moonwater-dmabuf-table", 3, 0, 0, 0, 0);
                 if (fd < 0)
                         return -1;
-                while (done < (long)sizeof bytes)
+                while (done < total)
                 {
-                        long put = compositor_call(syscall(write), (positive)fd, (positive)(bytes + done), sizeof bytes - (unsigned long)done, 0, 0, 0);
+                        long put = compositor_call(syscall(write), (positive)fd, (positive)(bytes + done), (positive)(total - done), 0, 0, 0);
 
                         if (put <= 0)
                         {
@@ -1741,17 +2385,16 @@ static long compositor_wl_dmabuf_table(void *context, long *size)
                 }
                 compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0); // F_ADD_SEALS: all four
                 compositor_wl.dmabuf_table = (int)fd;
+                compositor_wl.dmabuf_table_size = total;
         }
-        *size = 32;
+        *size = compositor_wl.dmabuf_table_size;
         return compositor_wl.dmabuf_table;
 }
 
 /*
         A descriptor that is a dma-buf of at least size bytes, mapped read-only and shared, in the table the SIGBUS handler reads, like a pool.
-        A dma-buf is told from any other file by the filesystem its descriptor is on, the kernel's own for dma-bufs (fstatfs, DMA_BUF_MAGIC),
-        and then by the one ioctl that gives it the answer EINVAL (a sync with no direction), where another file says it knows no such
-        ioctl; its size is what seeking to its end gives. The filesystem is asked first because the ioctl of a file a client serves
-        itself (FUSE) is the client's to answer, with EINVAL if it likes or never, as its pages are (compositor_wl_memory_file).
+        When a valid dma-buf resides in non-CPU-mappable VRAM (mmap fails) and GPU or KMS import is available, WAYLAND_DMABUF_UNMAPPED is returned
+        so the buffer can still be imported directly on the card without failing create_immed.
 */
 static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
 {
@@ -1765,11 +2408,15 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
         if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&none, 0, 0, 0) != -22)
                 return 0;
         extent = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
-        if (extent < size)
+        if (extent >= 0 && extent < size)
                 return 0;
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
         if (got < 0 && got > -4096)
+        {
+                if (gpu_ready() || compositor.card >= 0 || compositor_wl.render != 0)
+                        return WAYLAND_DMABUF_UNMAPPED;
                 return 0;
+        }
         for (long at = 0; at < WAYLAND_CLIENTS * WAYLAND_POOLS; at++)
                 if (!compositor_wl.map[at].at)
                 {
@@ -1781,6 +2428,139 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
         compositor_call(syscall(munmap), (positive)got, (positive)size, 0, 0, 0, 0);
         return 0;
 }
+
+static void compositor_wl_syncobj_drop_handle(long slot)
+{
+        struct
+        {
+                unsigned int handle, pad;
+        } arg;
+
+        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used)
+                return;
+        if (compositor_wl.syncobj_drm_fd >= 0 && compositor_wl.syncobj[slot].handle)
+        {
+                arg.handle = compositor_wl.syncobj[slot].handle;
+                arg.pad = 0;
+                compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_DESTROY, (positive)&arg, 0, 0, 0);
+        }
+        compositor_wl.syncobj[slot].handle = 0;
+        compositor_wl.syncobj[slot].used = 0;
+}
+
+static long compositor_wl_syncobj_available(void *context, char *node, long node_cap)
+{
+        long flags = 0;
+
+        (void)context;
+        if (!compositor_wl.render)
+                compositor_wl.render = compositor_wl_render_node();
+        if (node && node_cap > 0)
+        {
+                long i = 0;
+
+                for (; i < node_cap - 1 && compositor_wl.render_path[i]; i++)
+                        node[i] = compositor_wl.render_path[i];
+                node[i] = 0;
+                if (i > 0)
+                        flags |= WAYLAND_SYNCOBJ_NODE_OK;
+        }
+        if (compositor_wl.syncobj_ok && compositor_wl.syncobj_drm_fd >= 0)
+                flags |= WAYLAND_SYNCOBJ_TIMELINE_OK;
+        return flags;
+}
+
+static long compositor_wl_syncobj_import(void *context, long fd)
+{
+        long slot = -1;
+        struct
+        {
+                unsigned int handle, flags;
+                int fd;
+                unsigned int pad;
+        } arg;
+
+        (void)context;
+        if (fd < 0 || compositor_wl.syncobj_drm_fd < 0)
+                return -1;
+        for (long i = 0; i < COMPOSITOR_WL_SYNCOBJS && slot < 0; i++)
+                if (!compositor_wl.syncobj[i].used)
+                        slot = i;
+        if (slot < 0)
+                return -1;
+        memory_zero(&arg, sizeof arg);
+        arg.fd = (int)fd;
+        if (compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_FD_TO_HANDLE, (positive)&arg, 0, 0, 0) < 0 ||
+            !arg.handle)
+                return -1;
+        compositor_wl.syncobj[slot].used = 1;
+        compositor_wl.syncobj[slot].handle = arg.handle;
+        return slot;
+}
+
+static void compositor_wl_syncobj_drop(void *context, long slot)
+{
+        (void)context;
+        compositor_wl_syncobj_drop_handle(slot);
+}
+
+static int compositor_wl_syncobj_ready(void *context, long slot, unsigned long long point)
+{
+        unsigned int handle;
+        unsigned long long pt = point;
+        struct
+        {
+                unsigned long long handles;
+                long long timeout_nsec;
+                unsigned int count_handles, flags, first_signaled, pad;
+                unsigned long long points;
+        } wait_arg;
+
+        (void)context;
+        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+                return 1;
+        handle = compositor_wl.syncobj[slot].handle;
+        memory_zero(&wait_arg, sizeof wait_arg);
+        wait_arg.handles = (unsigned long long)(unsigned long)&handle;
+        wait_arg.points = (unsigned long long)(unsigned long)&pt;
+        wait_arg.timeout_nsec = 0;
+        wait_arg.count_handles = 1;
+        wait_arg.flags = 1; // DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL
+        return compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_TIMELINE_WAIT,
+                               (positive)&wait_arg, 0, 0, 0) == 0;
+}
+
+static void compositor_wl_syncobj_signal(void *context, long slot, unsigned long long point)
+{
+        unsigned int handle;
+        unsigned long long pt = point;
+        struct
+        {
+                unsigned long long handles;
+                unsigned long long points;
+                unsigned int count_handles, pad;
+        } sig_arg;
+
+        (void)context;
+        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+                return;
+        handle = compositor_wl.syncobj[slot].handle;
+        memory_zero(&sig_arg, sizeof sig_arg);
+        sig_arg.handles = (unsigned long long)(unsigned long)&handle;
+        sig_arg.points = (unsigned long long)(unsigned long)&pt;
+        sig_arg.count_handles = 1;
+        compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_TIMELINE_SIGNAL,
+                        (positive)&sig_arg, 0, 0, 0);
+}
+
+static const struct wayland_syncobj_host compositor_wl_syncobj = {
+    .context = 0,
+    .available = compositor_wl_syncobj_available,
+    .import = compositor_wl_syncobj_import,
+    .drop = compositor_wl_syncobj_drop,
+    .ready = compositor_wl_syncobj_ready,
+    .signal = compositor_wl_syncobj_signal,
+};
 
 /*
         Whether a dma-buf has nobody writing it, for a client's picture: the descriptor says it can be read when the GPU is done. A short
@@ -2309,6 +3089,7 @@ static void compositor_wl_start(void)
                 compositor_wl.listen = -1;
                 return;
         }
+        wayland_syncobj_host(&compositor_wl_syncobj);
         compositor_wl.started = 1;
         compositor_xwm_start();
         // The X server's protocols go to the user the window manager's socket takes (compositor_xwm_accept), and to no other.
@@ -2953,6 +3734,17 @@ static void compositor_wl_stop(void)
         if (compositor_wl.dmabuf_table > 0)
                 system_close(compositor_wl.dmabuf_table);
         compositor_wl.dmabuf_table = 0;
+        compositor_wl.dmabuf_table_size = 0;
+        compositor_wl.dmabuf_entry_count = 0;
+        for (long at = 0; at < COMPOSITOR_WL_SYNCOBJS; at++)
+                if (compositor_wl.syncobj[at].used)
+                {
+                        compositor_wl_syncobj_drop_handle(at);
+                        compositor_wl.syncobj[at].used = 0;
+                }
+        if (compositor_wl.syncobj_drm_fd >= 0)
+                system_close(compositor_wl.syncobj_drm_fd);
+        compositor_wl.syncobj_drm_fd = -1;
         for (long at = 0; at < 16; at++)
                 if (compositor_wl.keymap[at] >= 0)
                         system_close(compositor_wl.keymap[at]);

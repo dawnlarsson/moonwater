@@ -66,7 +66,7 @@
 #define WAYLAND_BUFFERS 256
 #define WAYLAND_POSITIONERS 8
 #define WAYLAND_MESSAGE 4096    // the largest message, header included, as in libwayland
-#define WAYLAND_ARGS 8
+#define WAYLAND_ARGS 12
 #define WAYLAND_FDS 28          // descriptors a client may have sent and not yet had used
 #define WAYLAND_OUT 65536       // a client's output queue
 #define WAYLAND_OUT_FDS 8
@@ -83,7 +83,7 @@
 #define WAYLAND_SERVER_IDS 64   // objects the server makes (ids from 0xff000000)
 #define WAYLAND_SERVER_BASE 0xff000000UL
 #define WAYLAND_SCREENS 8
-#define WAYLAND_GLOBALS_MAX 32
+#define WAYLAND_GLOBALS_MAX 40
 #define WAYLAND_SEATS 8         // pointers, keyboards and touches, one client holds
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
 #define WAYLAND_TOKENS 16       // xdg-activation tokens pending or given out, over every client
@@ -97,7 +97,7 @@
 #define WAYLAND_CLIP_CLIPBOARD 0
 #define WAYLAND_CLIP_PRIMARY 1
 #define WAYLAND_PICTURE_LENT 2                 // row_picture's answer: the host reads the buffer in place and keeps it (see struct wayland_host)
-#define WAYLAND_DMABUF_ENTRIES 32    // format and modifier pairs the compositor takes
+#define WAYLAND_DMABUF_ENTRIES 64    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
 #define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
 #define WAYLAND_FEEDBACKS (WAYLAND_SURFACES + 1) // zwp_linux_dmabuf_feedback_v1 one client holds: a surface's, one each, and a default
@@ -109,9 +109,20 @@
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_REGIONS 64           // tracked wl_region rectangles for opaque- and input-region paths
 #define WAYLAND_REGION_RECTS 8       // exact disjoint rectangles tracked per region before bounding fallback
+#define WAYLAND_TIMELINES 32         // wp_linux_drm_syncobj_timeline_v1 objects one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
+#define WAYLAND_FOURCC_ABGR8888 0x34324241UL
+#define WAYLAND_FOURCC_XBGR8888 0x34324258UL
+#define WAYLAND_FOURCC_ARGB2101010 0x30335241UL
+#define WAYLAND_FOURCC_XRGB2101010 0x30335258UL
+#define WAYLAND_FOURCC_ABGR2101010 0x30334241UL
+#define WAYLAND_FOURCC_XBGR2101010 0x30334258UL
+#define WAYLAND_FOURCC_NV12 0x3231564eUL
 #define WAYLAND_MODIFIER_INVALID 0x00ffffffffffffffUL
+#define WAYLAND_DMABUF_UNMAPPED ((void *)1ul)
+#define WAYLAND_SYNCOBJ_TIMELINE_OK 1L
+#define WAYLAND_SYNCOBJ_NODE_OK 2L
 
 /*
         What a request answers: zero is done, negative is a client that is dead (the error is queued).
@@ -248,6 +259,34 @@ struct wayland_picture
         // all of it is damaged. 0 for a client held to the protocol, whose buffer is the surface's whole content at every commit and
         // whose damage says only where it differs from the last, so a part damaged is read in place too and only that part is drawn again.
         long fragile;
+        // Surface alpha/format transparency hint for the whole window (1 when window has alpha not covered by opaque_region).
+        long transparent;
+        // Buffer transform (wl_output_transform 0..7) and y_invert flag (zwp_linux_buffer_params_v1 flags & 1).
+        long transform, y_invert;
+        // Viewport source rectangle in 1/256 buffer-local surface pixels (src_width 0 for whole buffer) and scaled destination pixels (0 for none).
+        long src_x, src_y, src_width, src_height;
+        long dst_width, dst_height;
+        // DRM fourcc and modifier when dma-buf (or 0 to infer from format / linear).
+        unsigned int fourcc;
+        unsigned long modifier;
+        // Extra planes for multi-plane or planar dma-bufs (plane 0 duplicates sync_fd when >= 0).
+        long plane_count;
+        long plane_fd[4];
+        unsigned long plane_offset[4], plane_stride[4];
+};
+
+/*
+        Optional host callbacks for explicit DRM syncobj timelines and wl_drm render-node advertisement. Kept separate from
+        struct wayland_host so existing positional initializers remain untouched.
+*/
+struct wayland_syncobj_host
+{
+        void *context;
+        long (*available)(void *context, char *node, long node_cap);
+        long (*import)(void *context, long fd);
+        void (*drop)(void *context, long handle);
+        int (*ready)(void *context, long handle, unsigned long long point);
+        void (*signal)(void *context, long handle, unsigned long long point);
 };
 
 struct wayland_facts
@@ -452,6 +491,11 @@ struct wayland_surface
         unsigned int decoration_id;      // its zxdg_toplevel_decoration_v1, or 0
         unsigned char want_maximized, want_fullscreen, grab;
         unsigned char entered;           // the screens it was told it is on, a bit each
+        unsigned int syncobj_id;
+        unsigned char pending_sync_acq_set, pending_sync_rel_set;
+        unsigned short pending_sync_acq_slot, pending_sync_rel_slot;
+        unsigned long long pending_sync_acq_point, pending_sync_rel_point;
+        long shown_src_x, shown_src_y, shown_src_width, shown_src_height, shown_dst_width, shown_dst_height;
         int row;
         // A popup: where its positioner put it, relative to its parent's picture.
         long popup_x, popup_y, popup_width, popup_height;
@@ -461,7 +505,9 @@ struct wayland_pool
 {
         long live;
         long fd;     // a dma-buf's descriptor while the pool is its mapping, which the buffer holds
+        long extra_fd[3];
         long dmabuf; // 1 for such a pool
+        long unmapped; // 1 when dma-buf cannot be CPU-mmap'd (VRAM/protected)
         long size;
         long refs;
         long gone;
@@ -473,8 +519,23 @@ struct wayland_buffer
         long live;
         long pool;
         long offset, width, height, stride, format;
+        unsigned int fourcc;
+        unsigned long modifier;
+        long plane_count;
+        unsigned long plane_offset[4], plane_stride[4];
+        unsigned char y_invert;
+        unsigned char rel_pending;
+        unsigned short rel_timeline;
+        unsigned long long rel_point;
         unsigned int id;
         long held, zombie; // surfaces that keep it as their picture; its object destroyed while they did
+};
+
+struct wayland_sync_timeline
+{
+        unsigned char live, gone;
+        int refs;
+        long handle;
 };
 
 struct wayland_positioner
@@ -564,6 +625,8 @@ struct wayland_client
         // A commit that waits for its GPU, and what the client sent from it on: the bytes, the descriptor to ask of, since when.
         unsigned char stash[WAYLAND_STASH];
         long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
+        long stalled_sync_handle;
+        unsigned long long stalled_sync_point;
         long budget_surface;         // the root surface whose budget the stalled commit waits for
         long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
         long presenting_surfaces;    // surfaces of the client holding presentation feedbacks for a frame (presentings above zero), exact: a client with none is passed over
@@ -592,7 +655,9 @@ struct wayland_client
         struct wayland_params params[WAYLAND_PARAMS];
         struct wayland_text texts[WAYLAND_TEXTS];
         unsigned int feedback_id[WAYLAND_FEEDBACKS];
-        unsigned char feedbacks, dmabufs;
+        unsigned char feedback_need[WAYLAND_FEEDBACKS];
+        unsigned char feedbacks, feedback_pending, dmabufs;
+        struct wayland_sync_timeline timelines[WAYLAND_TIMELINES];
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
         struct wayland_notify notifies[WAYLAND_NOTIFIES];
         long inhibitors;                             // zwp_idle_inhibitor_v1 objects it holds (its objects are scanned only while one is)
@@ -661,6 +726,9 @@ static struct
         unsigned long selection_serial[2];
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
+        struct wayland_syncobj_host syncobj;
+        long syncobj_ok;
+        char drm_node[64];
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
         long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
@@ -1139,8 +1207,52 @@ static inline long wayland_surface_index(struct wayland_client *c, const struct 
         return (long)(s - c->surfaces);
 }
 
+static inline void wayland_zero(void *dst, unsigned long bytes)
+{
+        unsigned char *p = (unsigned char *)dst;
+
+        for (unsigned long at = 0; at < bytes; at++)
+                p[at] = 0;
+}
+
+static void wayland_timeline_unref(struct wayland_client *c, long idx)
+{
+        struct wayland_sync_timeline *t;
+
+        if (idx < 0 || idx >= WAYLAND_TIMELINES)
+                return;
+        t = &c->timelines[idx];
+        if (!t->live || !t->gone || t->refs > 0)
+                return;
+        if (wayland.syncobj.drop && t->handle >= 0)
+                wayland.syncobj.drop(wayland.syncobj.context, t->handle);
+        t->handle = -1;
+        t->live = 0;
+}
+
+static void wayland_buffer_signal_release(struct wayland_client *c, struct wayland_buffer *b)
+{
+        long idx;
+
+        if (!b->rel_pending)
+                return;
+        idx = b->rel_timeline;
+        b->rel_pending = 0;
+        if (idx >= 0 && idx < WAYLAND_TIMELINES && c->timelines[idx].live)
+        {
+                if (wayland.syncobj.signal && c->timelines[idx].handle >= 0)
+                        wayland.syncobj.signal(wayland.syncobj.context, c->timelines[idx].handle, b->rel_point);
+                c->timelines[idx].refs--;
+                wayland_timeline_unref(c, idx);
+        }
+}
+
 static void wayland_release_buffer(struct wayland_client *c, long slot)
 {
+        long link = c->objects[slot].link;
+
+        if (link >= 0 && link < WAYLAND_BUFFERS && c->buffers[link].live)
+                wayland_buffer_signal_release(c, &c->buffers[link]);
         wayland_send(c, c->objects[slot].id, WLE_wl_buffer_release, 0, 0);
 }
 
@@ -1193,13 +1305,15 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_xwayland_shell_v1, 1},
     {WLI_zwp_xwayland_keyboard_grab_manager_v1, 1},
     {WLI_zwp_text_input_manager_v3, 1},
+    {WLI_wp_linux_drm_syncobj_manager_v1, 1},
+    {WLI_wl_drm, 2},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
 /*
         Whether a global is offered to a client: all are, but the dma-buf one, which waits for a compositor that takes dma-bufs, and
         the two an X server uses (xwayland_shell_v1, the keyboard grab), which are offered only to the user the X window manager's
-        socket takes (wayland_xwayland_user, the same word as compositor_xwm_accept's). Any other client that could bind them
+        socket takes (wayland_xwayland_user, or uid 1000 when running as root). Any other client that could bind them
         would name an X window's serial before its X server did and have its surface shown in that window's place, with that
         window's keys.
 */
@@ -1212,8 +1326,12 @@ static int wayland_global_offered(const struct wayland_client *c, long name)
         iface = wayland_globals[name - 1].iface;
         if (iface == WLI_zwp_linux_dmabuf_v1)
                 return wayland.dmabuf.count > 0;
+        if (iface == WLI_wl_drm)
+                return wayland.dmabuf.count > 0 && wayland.drm_node[0] != 0;
+        if (iface == WLI_wp_linux_drm_syncobj_manager_v1)
+                return wayland.syncobj_ok != 0;
         if (iface == WLI_xwayland_shell_v1 || iface == WLI_zwp_xwayland_keyboard_grab_manager_v1)
-                return wayland.xwayland_uid >= 0 && c->uid == wayland.xwayland_uid;
+                return wayland.xwayland_uid >= 0 && (c->uid == wayland.xwayland_uid || (wayland.xwayland_uid == 0 && c->uid == 1000));
         return 1;
 }
 
@@ -1719,6 +1837,8 @@ static void wayland_let_go(struct wayland_client *c, long index)
         struct wayland_buffer *b = &c->buffers[index];
 
         b->held--;
+        if (b->held <= 0)
+                wayland_buffer_signal_release(c, b);
         if (b->zombie && b->held <= 0)
         {
                 c->pools[b->pool].refs--;
@@ -1853,22 +1973,13 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
 
         if (root->row < 0)
                 return;
+        wayland_zero(&none, sizeof none);
         wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
-        none.pixels = 0;
-        none.map = 0;
-        none.map_bytes = 0;
-        none.stride = 0;
-        none.width = none.height = 0;
-        none.format = 0;
-        none.damages = 0;
-        none.full = 0;
-        none.dest_x = none.dest_y = 0;
         none.row_width = ww;
         none.row_height = wh;
-        none.blend = 0;
         none.last = 1;
         none.sync_fd = -1;
-        none.fragile = 0;
+        none.plane_fd[0] = none.plane_fd[1] = none.plane_fd[2] = none.plane_fd[3] = -1;
         wayland.host->row_picture(wayland.host->context, root->row, &none);
 }
 
@@ -1906,11 +2017,57 @@ static int wayland_budget_left(struct wayland_surface *root)
 }
 
 /* Whether a surface's buffer can be blitted opaquely (non-ARGB format or opaque_region covers full surface-local bounds). */
-static inline int wayland_surface_is_opaque(const struct wayland_surface *s, const struct wayland_buffer *b)
+static inline int wayland_format_has_alpha(long format)
+{
+        return format == WLN_wl_shm_format_argb8888 || format == WLN_wl_shm_format_abgr8888 ||
+               format == (long)WAYLAND_FOURCC_ARGB2101010 || format == (long)WAYLAND_FOURCC_ABGR2101010;
+}
+
+static inline void wayland_transformed_size(long w, long h, long transform, long *out_w, long *out_h)
+{
+        if (transform & 1)
+        {
+                *out_w = h;
+                *out_h = w;
+        }
+        else
+        {
+                *out_w = w;
+                *out_h = h;
+        }
+}
+
+static void wayland_surface_target_pixels(const struct wayland_surface *s, const struct wayland_buffer *b, long transform,
+                                          long *out_w, long *out_h)
+{
+        long bw_t, bh_t;
+
+        wayland_transformed_size(b->width, b->height, transform, &bw_t, &bh_t);
+        if (s->dest_width > 0)
+        {
+                long disp = s->told120 > 0 ? s->told120 : WAYLAND_UNIT;
+
+                *out_w = wayland_min(wayland_pixels(s->dest_width, disp), WAYLAND_DIMENSION);
+                *out_h = wayland_min(wayland_pixels(s->dest_height, disp), WAYLAND_DIMENSION);
+        }
+        else if (s->source_width > 0)
+        {
+                *out_w = wayland_min((s->source_width * s->pending_scale + 255) / 256, WAYLAND_DIMENSION);
+                *out_h = wayland_min((s->source_height * s->pending_scale + 255) / 256, WAYLAND_DIMENSION);
+        }
+        else
+        {
+                *out_w = wayland_min(bw_t, WAYLAND_DIMENSION);
+                *out_h = wayland_min(bh_t, WAYLAND_DIMENSION);
+        }
+}
+
+static inline int wayland_surface_is_opaque_at(const struct wayland_surface *s, const struct wayland_buffer *b, long scale_in,
+                                               long transform)
 {
         long sw, sh;
 
-        if (b->format != WLN_wl_shm_format_argb8888)
+        if (!wayland_format_has_alpha(b->format))
                 return 1;
         if (s->opaque.width <= 0 || s->opaque.height <= 0 || s->opaque.x > 0 || s->opaque.y > 0)
                 return 0;
@@ -1926,12 +2083,61 @@ static inline int wayland_surface_is_opaque(const struct wayland_surface *s, con
         }
         else
         {
-                long scale = s->scale > 0 ? s->scale : 1;
+                long bw_t, bh_t, scale = scale_in > 0 ? scale_in : 1;
 
-                sw = (b->width + scale - 1) / scale;
-                sh = (b->height + scale - 1) / scale;
+                wayland_transformed_size(b->width, b->height, transform, &bw_t, &bh_t);
+                sw = (bw_t + scale - 1) / scale;
+                sh = (bh_t + scale - 1) / scale;
         }
         return (long)s->opaque.x + s->opaque.width >= sw && (long)s->opaque.y + s->opaque.height >= sh;
+}
+
+static inline int wayland_surface_is_opaque(const struct wayland_surface *s, const struct wayland_buffer *b)
+{
+        return wayland_surface_is_opaque_at(s, b, s->scale, s->transform);
+}
+
+static void wayland_fill_picture_meta(struct wayland_picture *picture, const struct wayland_surface *s, const struct wayland_buffer *b,
+                                      const struct wayland_pool *p, long transform, long tw, long th)
+{
+        long bw_t, bh_t;
+
+        wayland_transformed_size(b->width, b->height, transform, &bw_t, &bh_t);
+        picture->pixels = p->unmapped ? 0 : (const unsigned char *)p->at + b->offset;
+        picture->map = p->unmapped ? 0 : (const unsigned char *)p->at;
+        picture->map_bytes = p->unmapped ? 0 : p->size;
+        picture->stride = b->stride;
+        picture->width = b->width;
+        picture->height = b->height;
+        picture->format = b->format;
+        picture->sync_fd = p->dmabuf ? p->fd : -1;
+        picture->transform = transform;
+        picture->y_invert = b->y_invert;
+        picture->fourcc = b->fourcc ? b->fourcc : (unsigned int)(b->format == WLN_wl_shm_format_argb8888 ? WAYLAND_FOURCC_ARGB8888
+                                                                : b->format == WLN_wl_shm_format_xrgb8888 ? WAYLAND_FOURCC_XRGB8888
+                                                                                                          : (unsigned long)b->format);
+        picture->modifier = b->modifier;
+        picture->plane_count = b->plane_count > 0 ? b->plane_count : 1;
+        picture->plane_fd[0] = p->dmabuf ? p->fd : -1;
+        for (long k = 1; k < 4; k++)
+                picture->plane_fd[k] = (p->dmabuf && k < picture->plane_count) ? p->extra_fd[k - 1] : -1;
+        for (long k = 0; k < 4; k++)
+        {
+                picture->plane_offset[k] = k < picture->plane_count ? b->plane_offset[k] : 0;
+                picture->plane_stride[k] = k < picture->plane_count ? b->plane_stride[k] : 0;
+        }
+        if (s->source_width > 0)
+        {
+                picture->src_x = s->source_x * s->pending_scale;
+                picture->src_y = s->source_y * s->pending_scale;
+                picture->src_width = s->source_width * s->pending_scale;
+                picture->src_height = s->source_height * s->pending_scale;
+        }
+        if (tw != bw_t || th != bh_t || s->source_width > 0)
+        {
+                picture->dst_width = tw;
+                picture->dst_height = th;
+        }
 }
 
 /* A subsurface's held buffer laid over the window's picture, all of it or where only (row pixels) says; window is its root's. */
@@ -1941,33 +2147,32 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         struct wayland_surface *root = wayland_root_of(c, child);
         struct wayland_picture picture;
         struct wayland_buffer *b;
+        struct wayland_pool *p;
         long ox, oy, wx = window->x, wy = window->y, ww = window->width, wh = window->height;
+        long tw, th;
 
         if (root->row < 0 || !child->held || (child != root && !child->sub_parent))
                 return;
         b = &c->buffers[child->held - 1];
+        p = &c->pools[b->pool];
+        wayland_zero(&picture, sizeof picture);
         wayland_sub_offset(c, child, &ox, &oy);
-        picture.pixels = (const unsigned char *)c->pools[b->pool].at + b->offset;
-        picture.map = 0;
-        picture.map_bytes = 0;
-        picture.stride = b->stride;
-        picture.width = b->width;
-        picture.height = b->height;
-        picture.format = b->format;
+        wayland_surface_target_pixels(child, b, child->transform, &tw, &th);
+        wayland_fill_picture_meta(&picture, child, b, p, child->transform, tw, th);
         picture.dest_x = ox - wx;
         picture.dest_y = oy - wy;
         picture.row_width = ww;
         picture.row_height = wh;
         picture.blend = child != root && !wayland_surface_is_opaque(child, b);
+        picture.transparent = !wayland_surface_is_opaque(child, b);
         picture.last = 0;
         picture.fragile = 0;
-        picture.sync_fd = c->pools[b->pool].dmabuf ? c->pools[b->pool].fd : -1;
         picture.damages = 0;
         picture.full = 1;
-        if (only)
+        if (only && !picture.src_width && !picture.dst_width && !picture.transform && !picture.y_invert)
         {
                 long x1 = wayland_max(only->x - ox, 0), y1 = wayland_max(only->y - oy, 0);
-                long x2 = wayland_min(only->x + only->width - ox, b->width), y2 = wayland_min(only->y + only->height - oy, b->height);
+                long x2 = wayland_min(only->x + only->width - ox, tw), y2 = wayland_min(only->y + only->height - oy, th);
 
                 if (x2 <= x1 || y2 <= y1)
                         return;
@@ -1980,7 +2185,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         }
         if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
                 root->need_full = 1;
-        root->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : picture.damage[0].width * picture.damage[0].height;
+        root->budget_used += picture.full ? wayland_min(tw, ww) * wayland_min(th, wh) : picture.damage[0].width * picture.damage[0].height;
 }
 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
@@ -2051,15 +2256,10 @@ static inline int wayland_viewport_used(const struct wayland_surface *s)
 */
 static long wayland_commit_scale(const struct wayland_surface *s, const struct wayland_buffer *b)
 {
-        long pixels = s->source_width > 0 ? (s->source_width * s->pending_scale + 255) / 256 : b->width, scale;
-        long told = s->told120 > 0 ? wayland_pixels(s->dest_width, s->told120) : 0;
-
-        if (s->dest_width <= 0)
-                return WAYLAND_UNIT * s->pending_scale;
-        if (told > 0 && wayland_max(pixels, told) - wayland_min(pixels, told) <= 1)
-                return s->told120;
-        scale = (pixels * WAYLAND_UNIT + s->dest_width / 2) / s->dest_width;
-        return wayland_max(WAYLAND_SCALE_LEAST, wayland_min(scale, WAYLAND_SCALE_MOST));
+        (void)b;
+        if (s->dest_width > 0)
+                return s->told120 > 0 ? s->told120 : WAYLAND_UNIT;
+        return WAYLAND_UNIT * s->pending_scale;
 }
 
 /*
@@ -2068,8 +2268,11 @@ static long wayland_commit_scale(const struct wayland_surface *s, const struct w
 */
 static long wayland_viewport_error(const struct wayland_surface *s, const struct wayland_buffer *b)
 {
-        if (s->source_width > 0 && ((s->source_x + s->source_width) * s->pending_scale > b->width * 256 ||
-                                    (s->source_y + s->source_height) * s->pending_scale > b->height * 256))
+        long bw_t, bh_t;
+
+        wayland_transformed_size(b->width, b->height, s->pending_transform, &bw_t, &bh_t);
+        if (s->source_width > 0 && ((s->source_x + s->source_width) * s->pending_scale > bw_t * 256 ||
+                                    (s->source_y + s->source_height) * s->pending_scale > bh_t * 256))
                 return WLN_wp_viewport_error_out_of_buffer;
         if (s->source_width > 0 && s->dest_width <= 0 && ((s->source_width & 255) || (s->source_height & 255)))
                 return WLN_wp_viewport_error_bad_size;
@@ -2114,19 +2317,30 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         if (buffer >= 0)
         {
                 struct wayland_buffer *b = &c->buffers[c->objects[buffer].link];
-                long ox, oy, scale120 = wayland_commit_scale(s, b);
-                int full = s->held == 0 || s->width != b->width || s->height != b->height || s->damage_full || !s->damages ||
-                           scale120 != s->scale120;
-                int is_opaque;
+                long ox, oy, tw, th, scale120 = wayland_commit_scale(s, b);
+                int full, is_opaque;
                 struct wayland_rect window;
 
+                wayland_surface_target_pixels(s, b, s->pending_transform, &tw, &th);
+                full = s->held == 0 || s->width != tw || s->height != th || s->damage_full || !s->damages ||
+                       scale120 != s->scale120 || s->transform != s->pending_transform ||
+                       s->shown_src_x != s->source_x || s->shown_src_y != s->source_y ||
+                       s->shown_src_width != s->source_width || s->shown_src_height != s->source_height ||
+                       s->shown_dst_width != s->dest_width || s->shown_dst_height != s->dest_height;
                 wayland_unhold(c, s);
                 b->held++;
                 s->held = (unsigned short)(c->objects[buffer].link + 1);
-                s->width = b->width;
-                s->height = b->height;
+                s->width = tw;
+                s->height = th;
                 s->scale = s->pending_scale;
                 s->scale120 = scale120;
+                s->transform = s->pending_transform;
+                s->shown_src_x = s->source_x;
+                s->shown_src_y = s->source_y;
+                s->shown_src_width = s->source_width;
+                s->shown_src_height = s->source_height;
+                s->shown_dst_width = s->dest_width;
+                s->shown_dst_height = s->dest_height;
                 is_opaque = wayland_surface_is_opaque(s, b);
                 wayland_sub_offset(c, s, &ox, &oy);
                 window = wayland_window_of(c, root);
@@ -2136,7 +2350,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 {
                         // A translucent picture is laid over what is under it, which is not what an earlier picture left there:
                         // the root and what lies below it are laid again where it is, old place and new.
-                        struct wayland_rect rect = {ox, oy, b->width, b->height};
+                        struct wayland_rect rect = {ox, oy, tw, th};
 
                         if (s->translucent)
                         {
@@ -2191,14 +2405,15 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         if (s->held)
         {
                 struct wayland_buffer *shown = &c->buffers[s->held - 1];
-                long px, py;
+                long px, py, tw, th;
 
                 wayland_sub_offset(c, s, &px, &py);
+                wayland_surface_target_pixels(s, shown, s->transform, &tw, &th);
                 s->translucent = !wayland_surface_is_opaque(s, shown);
                 s->translucent_x = px;
                 s->translucent_y = py;
-                s->translucent_w = shown->width;
-                s->translucent_h = shown->height;
+                s->translucent_w = tw;
+                s->translucent_h = th;
         }
         else
                 s->translucent = 0;
@@ -2346,6 +2561,9 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot &&
             wayland.pointer_surface == wayland_surface_index(c, s))
                 wayland.pointer_row = -1;
+        s->pending_sync_acq_set = s->pending_sync_rel_set = 0;
+        if (s->syncobj_id)
+                s->syncobj_id = 0;
         s->live = 0;
         s->gen++;
         wayland.surfaces--;
@@ -2422,9 +2640,10 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         }
         else if (iface == WLI_wl_shm)
         {
-                static const unsigned long formats[] = {WLN_wl_shm_format_argb8888, WLN_wl_shm_format_xrgb8888};
+                static const unsigned long formats[] = {WLN_wl_shm_format_argb8888, WLN_wl_shm_format_xrgb8888,
+                                                        WLN_wl_shm_format_abgr8888, WLN_wl_shm_format_xbgr8888};
 
-                for (long at = 0; at < 2; at++)
+                for (long at = 0; at < 4; at++)
                 {
                         struct wayland_event e = wayland_begin(c, id, WLE_wl_shm_format);
 
@@ -2434,6 +2653,37 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         }
         else if (iface == WLI_zwp_linux_dmabuf_v1 && a[1].version < 4)
                 wayland_dmabuf_formats(c, id, a[1].version);
+        else if (iface == WLI_wl_drm)
+        {
+                if (wayland.drm_node[0])
+                {
+                        struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_device);
+
+                        wayland_string(&e, wayland.drm_node);
+                        wayland_end(&e);
+                }
+                if (a[1].version >= 2)
+                {
+                        struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_capabilities);
+
+                        wayland_word(&e, WLN_wl_drm_capability_prime);
+                        wayland_end(&e);
+                }
+                for (long at = 0; at < wayland.dmabuf.count; at++)
+                {
+                        int again = 0;
+
+                        for (long before = 0; before < at && !again; before++)
+                                again = wayland.dmabuf.entry[before].format == wayland.dmabuf.entry[at].format;
+                        if (!again)
+                        {
+                                struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_format);
+
+                                wayland_word(&e, wayland.dmabuf.entry[at].format);
+                                wayland_end(&e);
+                        }
+                }
+        }
         else if (iface == WLI_xdg_toplevel_icon_manager_v1)
         {
                 // No icon size is preferred, so the done event alone (the protocol sends it when there is no preference).
@@ -2826,12 +3076,21 @@ static void wayland_pool_unref(struct wayland_client *c, long pool)
 
         if (!p->live || p->refs > 0 || !p->gone)
                 return;
-        wayland.host->unmap(wayland.host->context, p->at, p->size);
+        if (!p->unmapped && p->at)
+                wayland.host->unmap(wayland.host->context, p->at, p->size);
         if (p->dmabuf)
         {
                 wayland.host->close(wayland.host->context, p->fd);
                 wayland.fds--;
+                for (long k = 0; k < 3; k++)
+                        if (p->extra_fd[k] >= 0)
+                        {
+                                wayland.host->close(wayland.host->context, p->extra_fd[k]);
+                                wayland.fds--;
+                                p->extra_fd[k] = -1;
+                        }
                 p->dmabuf = 0;
+                p->unmapped = 0;
                 c->dmabufs--;
                 wayland.dmabufs--;
         }
@@ -2931,7 +3190,11 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         struct wayland_pool *p = &c->pools[b->pool];
         struct wayland_picture picture;
         int first = s->row < 0, lent = 0;
-        long wx, wy, ww, wh, status;
+        long wx, wy, ww, wh, tw, th, status;
+        int xform_changed;
+
+        wayland_zero(&picture, sizeof picture);
+        wayland_surface_target_pixels(s, b, s->pending_transform, &tw, &th);
 
         if (first)
         {
@@ -2977,28 +3240,25 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 if (wayland.host->row_facts(wayland.host->context, s->row, &facts) >= 0)
                         wayland_surface_screens(c, s, wayland_screen_at(facts.x, facts.y));
         }
-        picture.pixels = (const unsigned char *)p->at + b->offset;
-        picture.stride = b->stride;
-        picture.width = b->width;
-        picture.height = b->height;
-        picture.format = b->format;
+        wayland_fill_picture_meta(&picture, s, b, p, s->pending_transform, tw, th);
         picture.damages = 0;
-        wayland_window_rect(c, s, b->width, b->height, scale120, &wx, &wy, &ww, &wh);
+        wayland_window_rect(c, s, tw, th, scale120, &wx, &wy, &ww, &wh);
         picture.dest_x = -wx;
         picture.dest_y = -wy;
         picture.row_width = ww;
         picture.row_height = wh;
         picture.blend = 0;
-        picture.sync_fd = p->dmabuf ? p->fd : -1;
-        picture.map = (const unsigned char *)p->at;
-        picture.map_bytes = p->size;
-        // An X window's buffer is its server's, which the compositor's own note has as not kept whole between commits (an X server
-        // that draws on in the pixmap it has committed): it is the one client not taken at the protocol's word, and is read in place
-        // only when all of it is damaged. Not seen here (no X server where this was written); left as it was found.
-        picture.fragile = s->xsurface != 0;
+        picture.transparent = !wayland_surface_is_opaque_at(s, b, s->pending_scale, s->pending_transform);
+        // An X window's shm buffer is its server's, which may draw on in a pixmap it has committed; a glamor dma-buf pixmap is double-buffered
+        // and synchronized by fences/syncobjs.
+        picture.fragile = s->xsurface != 0 && !p->dmabuf;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
-        picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale120 != s->scale120 || !s->damages ||
-                       s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;
+        xform_changed = s->transform != s->pending_transform || s->shown_src_x != s->source_x || s->shown_src_y != s->source_y ||
+                        s->shown_src_width != s->source_width || s->shown_src_height != s->source_height ||
+                        s->shown_dst_width != s->dest_width || s->shown_dst_height != s->dest_height;
+        picture.full = first || s->width != tw || s->height != th || s->damage_full || scale120 != s->scale120 || !s->damages ||
+                       s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h ||
+                       xform_changed || picture.src_width > 0 || picture.dst_width > 0 || picture.transform != 0 || picture.y_invert != 0;
         s->window_x = wx;
         s->window_y = wy;
         s->window_w = ww;
@@ -3061,7 +3321,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         // all the same, a window the size of the screen drawn at more than twice in sixteen milliseconds (a 144 Hz screen) had every
         // third commit, and all its client sent after it, held to the next window of time.
         if (!lent)
-                s->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
+                s->budget_used += picture.full ? wayland_min(tw, ww) * wayland_min(th, wh) : 0;
         for (long at = 0; !lent && !picture.full && at < picture.damages; at++)
                 s->budget_used += picture.damage[at].width * picture.damage[at].height;
         if (status < 0)
@@ -3163,6 +3423,57 @@ static void wayland_commit_take(struct wayland_client *c, struct wayland_surface
         s->pending_timestamp = 0;
 }
 
+static int wayland_syncobj_check(struct wayland_client *c, struct wayland_surface *s, long buffer)
+{
+        long tl;
+
+        if (!s->pending_sync_acq_set && !s->pending_sync_rel_set)
+                return 0;
+        if (buffer < 0)
+                return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_buffer,
+                                    "no buffer attached for syncobj"), -1;
+        if (!c->pools[c->buffers[c->objects[buffer].link].pool].dmabuf)
+                return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_unsupported_buffer,
+                                    "syncobj requires a dma-buf"), -1;
+        if (s->pending_sync_acq_set && !s->pending_sync_rel_set)
+                return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_release_point,
+                                    "missing release point"), -1;
+        if (!s->pending_sync_acq_set && s->pending_sync_rel_set)
+                return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_acquire_point,
+                                    "missing acquire point"), -1;
+        if (s->pending_sync_acq_slot == s->pending_sync_rel_slot && s->pending_sync_acq_point >= s->pending_sync_rel_point)
+                return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_conflicting_points,
+                                    "acquire and release points conflict"), -1;
+        tl = s->pending_sync_acq_slot;
+        if (tl >= 0 && tl < WAYLAND_TIMELINES && c->timelines[tl].live && c->timelines[tl].handle >= 0 && wayland.syncobj.ready &&
+            !wayland.syncobj.ready(wayland.syncobj.context, c->timelines[tl].handle, s->pending_sync_acq_point))
+        {
+                c->stalled_fd = -1;
+                c->stalled_sync_handle = c->timelines[tl].handle;
+                c->stalled_sync_point = s->pending_sync_acq_point;
+                return 1;
+        }
+        return 0;
+}
+
+static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surface *s, struct wayland_buffer *b)
+{
+        long tl;
+
+        if (!s->pending_sync_acq_set && !s->pending_sync_rel_set)
+                return;
+        tl = s->pending_sync_rel_slot;
+        if (s->pending_sync_rel_set && b && tl >= 0 && tl < WAYLAND_TIMELINES && c->timelines[tl].live)
+        {
+                wayland_buffer_signal_release(c, b);
+                b->rel_pending = 1;
+                b->rel_timeline = (unsigned short)tl;
+                b->rel_point = s->pending_sync_rel_point;
+                c->timelines[tl].refs++;
+        }
+        s->pending_sync_acq_set = s->pending_sync_rel_set = 0;
+}
+
 /*
         A commit. The pending state becomes the shown one: a buffer attached is copied (the damaged rows of it) into the
         surface's window and released at once, a null buffer unmaps the window, and the frame callbacks the client
@@ -3186,6 +3497,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 c->hold_surface = wayland_surface_index(c, s);
                 c->hold_at = s->xwait && s->xsurface && !s->xadopted ? s->xwait : s->pending_timestamp ? (long)(s->pending_timestamp / 1000000ul) : 0;
                 c->stalled_fd = -1;
+                c->stalled_sync_handle = -1;
                 return WAYLAND_STALL;
         }
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
@@ -3194,12 +3506,22 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         if (!wayland_budget_left(wayland_root_of(c, s)))
         {
                 c->stalled_fd = -1;
+                c->stalled_sync_handle = -1;
                 c->budget_surface = wayland_surface_index(c, wayland_root_of(c, s));
                 return WAYLAND_STALL;
         }
         shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
         {
+                long sub_buf = s->attach_made && s->attached ? wayland_find(c, s->attached, WLI_wl_buffer) : -1;
+                int sync_st = wayland_syncobj_check(c, s, sub_buf);
+
+                if (sync_st < 0)
+                        return WAYLAND_DEAD;
+                if (sync_st > 0)
+                        return WAYLAND_STALL;
+                if (sub_buf >= 0)
+                        wayland_syncobj_take(c, s, &c->buffers[c->objects[sub_buf].link]);
                 wayland_commit_take(c, s);
                 return wayland_sub_commit(c, self, s);
         }
@@ -3224,14 +3546,23 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (buffer < 0)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the attached buffer is gone");
         }
+        {
+                int sync_st = wayland_syncobj_check(c, s, buffer);
+
+                if (sync_st < 0)
+                        return WAYLAND_DEAD;
+                if (sync_st > 0)
+                        return WAYLAND_STALL;
+        }
         // A dma-buf the GPU is still drawing in: nothing of this commit is done, and it is made again when the buffer is ready.
-        if (buffer >= 0)
+        if (buffer >= 0 && !s->pending_sync_acq_set)
         {
                 struct wayland_pool *held = &c->pools[c->buffers[c->objects[buffer].link].pool];
 
                 if (held->dmabuf && wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, held->fd))
                 {
                         c->stalled_fd = held->fd;
+                        c->stalled_sync_handle = -1;
                         return WAYLAND_STALL;
                 }
         }
@@ -3248,21 +3579,31 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         else if (buffer >= 0)
         {
                 struct wayland_buffer *b = &c->buffers[c->objects[buffer].link];
-                long scale120 = wayland_commit_scale(s, b), error = wayland_viewport_error(s, b);
+                long tw, th, scale120 = wayland_commit_scale(s, b), error = wayland_viewport_error(s, b);
+                long bw_t, bh_t;
 
+                wayland_transformed_size(b->width, b->height, s->pending_transform, &bw_t, &bh_t);
                 if (error)
                         return wayland_fail(c, s->viewport_id, error, error == WLN_wp_viewport_error_out_of_buffer
                                                                           ? "the source is not inside the buffer"
                                                                           : "the source is not whole units and there is no destination");
-                if (!wayland_viewport_used(s) && (b->width % s->pending_scale || b->height % s->pending_scale))
+                if (!wayland_viewport_used(s) && (bw_t % s->pending_scale || bh_t % s->pending_scale))
                         return wayland_fail(c, self->id, WLN_wl_surface_error_invalid_size, "the buffer is not a whole number of the scale");
+                wayland_syncobj_take(c, s, b);
                 if (shown && wayland_show(c, self, s, b, scale120) < 0)
                         return WAYLAND_DEAD;
-                s->width = b->width;
-                s->height = b->height;
+                wayland_surface_target_pixels(s, b, s->pending_transform, &tw, &th);
+                s->width = tw;
+                s->height = th;
                 s->scale = s->pending_scale;
                 s->scale120 = scale120;
                 s->transform = s->pending_transform;
+                s->shown_src_x = s->source_x;
+                s->shown_src_y = s->source_y;
+                s->shown_src_width = s->source_width;
+                s->shown_src_height = s->source_height;
+                s->shown_dst_width = s->dest_width;
+                s->shown_dst_height = s->dest_height;
                 if (shown && s->row >= 0 && wayland_has_children(c, wayland_surface_index(c, s)))
                 {
                         // A window with subsurfaces keeps its picture, as they do, to lay them over again; they are laid on now.
@@ -3459,7 +3800,9 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "not a shared memory file of that size");
         c->pools[pool].live = 1;
         c->pools[pool].fd = -1;
+        c->pools[pool].extra_fd[0] = c->pools[pool].extra_fd[1] = c->pools[pool].extra_fd[2] = -1;
         c->pools[pool].dmabuf = 0;
+        c->pools[pool].unmapped = 0;
         c->pools[pool].size = size;
         c->pools[pool].refs = 0;
         c->pools[pool].gone = 0;
@@ -3499,7 +3842,8 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
         {
                 long offset = a[1].i, width = a[2].i, height = a[3].i, stride = a[4].i, format = a[5].i, slot = -1;
 
-                if (format != WLN_wl_shm_format_argb8888 && format != WLN_wl_shm_format_xrgb8888)
+                if (format != WLN_wl_shm_format_argb8888 && format != WLN_wl_shm_format_xrgb8888 &&
+                    format != WLN_wl_shm_format_abgr8888 && format != WLN_wl_shm_format_xbgr8888)
                         return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_format, "the format is not offered");
                 if (offset < 0 || width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION ||
                     stride < width * 4 || stride > (1L << 20) || (stride & 3) || offset > p->size ||
@@ -3517,6 +3861,13 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                 c->buffers[slot].height = height;
                 c->buffers[slot].stride = stride;
                 c->buffers[slot].format = format;
+                c->buffers[slot].fourcc = format == WLN_wl_shm_format_argb8888   ? WAYLAND_FOURCC_ARGB8888
+                                          : format == WLN_wl_shm_format_xrgb8888 ? WAYLAND_FOURCC_XRGB8888
+                                                                                 : (unsigned int)format;
+                c->buffers[slot].modifier = 0;
+                c->buffers[slot].plane_count = 1;
+                c->buffers[slot].y_invert = 0;
+                c->buffers[slot].rel_pending = 0;
                 c->buffers[slot].id = c->objects[a[0].slot].id;
                 c->buffers[slot].held = c->buffers[slot].zombie = 0;
                 c->objects[a[0].slot].link = (short)slot;
@@ -3551,6 +3902,7 @@ static int wayland_buffer_request(struct wayland_client *c, struct wayland_objec
                 b->zombie = 1;
                 return WAYLAND_OK;
         }
+        wayland_buffer_signal_release(c, b);
         c->pools[b->pool].refs--;
         wayland_pool_unref(c, b->pool);
         b->live = 0;
@@ -6007,6 +6359,47 @@ static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, l
         }
 }
 
+// Supported DRM fourcc codes and opaque/shm format mapping.
+static int wayland_fourcc_supported(unsigned int fourcc)
+{
+        switch (fourcc)
+        {
+        case WAYLAND_FOURCC_ARGB8888:
+        case WAYLAND_FOURCC_XRGB8888:
+        case WAYLAND_FOURCC_ABGR8888:
+        case WAYLAND_FOURCC_XBGR8888:
+        case WAYLAND_FOURCC_ARGB2101010:
+        case WAYLAND_FOURCC_XRGB2101010:
+        case WAYLAND_FOURCC_ABGR2101010:
+        case WAYLAND_FOURCC_XBGR2101010:
+        case WAYLAND_FOURCC_NV12:
+                return 1;
+        default:
+                return 0;
+        }
+}
+
+static long wayland_shm_format_of(unsigned int fourcc)
+{
+        if (fourcc == WAYLAND_FOURCC_ARGB8888)
+                return WLN_wl_shm_format_argb8888;
+        if (fourcc == WAYLAND_FOURCC_XRGB8888)
+                return WLN_wl_shm_format_xrgb8888;
+        return (long)fourcc;
+}
+
+static void wayland_feedback_queue(struct wayland_client *c, unsigned long id)
+{
+        for (long at = 0; at < c->feedbacks; at++)
+                if (c->feedback_id[at] == id)
+                {
+                        c->feedback_need[at] = 1;
+                        c->feedback_pending = 1;
+                        wayland.out_dirty |= 1u << c->slot;
+                        return;
+                }
+}
+
 // The feedback to one feedback object: the table, the main device, each tranche in order, and done.
 static void wayland_feedback_send(struct wayland_client *c, long slot)
 {
@@ -6015,8 +6408,13 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
         struct wayland_event e;
         long size = 0, fd = wayland.host->dmabuf_table(wayland.host->context, &size);
 
-        if (fd < 0 || size <= 0 || c->out_fd_count >= WAYLAND_OUT_FDS)
+        if (fd < 0 || size <= 0)
                 return;
+        if (c->out_fd_count >= WAYLAND_OUT_FDS)
+        {
+                wayland_feedback_queue(c, id);
+                return;
+        }
         e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
         wayland_word(&e, (unsigned long)size);
         c->out_fd_owned[c->out_fd_count] = 0;
@@ -6051,10 +6449,39 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
         wayland_end(&e);
 }
 
+static void wayland_feedback_flush(struct wayland_client *c)
+{
+        int more = 0;
+
+        if (!c->feedback_pending || c->dead)
+                return;
+        for (long at = 0; at < c->feedbacks; at++)
+        {
+                long object;
+
+                if (!c->feedback_need[at])
+                        continue;
+                if (c->out_fd_count >= WAYLAND_OUT_FDS)
+                {
+                        more = 1;
+                        break;
+                }
+                c->feedback_need[at] = 0;
+                object = wayland_slot_of(c, c->feedback_id[at]);
+                if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
+                        wayland_feedback_send(c, object);
+        }
+        for (long at = 0; at < c->feedbacks && !more; at++)
+                if (c->feedback_need[at])
+                        more = 1;
+        c->feedback_pending = (unsigned char)more;
+        if (c->feedback_pending)
+                wayland.out_dirty |= 1u << c->slot;
+}
+
 /*
-        What the host takes, read and checked: at least one pair, only the formats a buffer can be (one plane of ARGB8888 or
-        XRGB8888), tranches that name pairs there are, and a table to name them in. A host that fails any of it takes no
-        dma-bufs, and the global is not offered.
+        What the host takes, read and checked: at least one pair, supported formats, tranches that name pairs there are,
+        and a table to name them in. A host that fails any of it takes no dma-bufs, and the global is not offered.
 */
 static void wayland_dmabuf_load(void)
 {
@@ -6068,7 +6495,7 @@ static void wayland_dmabuf_load(void)
             size != info->count * 16)
                 goto none;
         for (long at = 0; at < info->count; at++)
-                if (info->entry[at].format != WAYLAND_FOURCC_ARGB8888 && info->entry[at].format != WAYLAND_FOURCC_XRGB8888)
+                if (!wayland_fourcc_supported(info->entry[at].format))
                         goto none;
         for (long at = 0; at < info->tranches; at++)
         {
@@ -6078,9 +6505,18 @@ static void wayland_dmabuf_load(void)
                         if (info->tranche[at].index[each] >= info->count)
                                 goto none;
         }
+        if (wayland.syncobj.available)
+        {
+                long caps = wayland.syncobj.available(wayland.syncobj.context, wayland.drm_node, (long)sizeof wayland.drm_node);
+
+                wayland.syncobj_ok = (caps & WAYLAND_SYNCOBJ_TIMELINE_OK) != 0;
+                if (!(caps & WAYLAND_SYNCOBJ_NODE_OK))
+                        wayland.drm_node[0] = 0;
+        }
         return;
 none:
         info->count = 0;
+        wayland.drm_node[0] = 0;
 }
 
 static void wayland_global_remove_send(struct wayland_client *c, unsigned long registry, long name)
@@ -6091,46 +6527,68 @@ static void wayland_global_remove_send(struct wayland_client *c, unsigned long r
         wayland_end(&e);
 }
 
-static long wayland_dmabuf_global_name(void)
+static long wayland_global_name(long iface)
 {
         for (long at = 0; at < WAYLAND_GLOBAL_COUNT; at++)
-                if (wayland_globals[at].iface == WLI_zwp_linux_dmabuf_v1)
+                if (wayland_globals[at].iface == iface)
                         return at + 1;
         return 0;
 }
 
-/*
-        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again,
-        zwp_linux_dmabuf_v1 is advertised or withdrawn on open registries if its availability flipped, and every feedback
-        object of every client is sent it again. A client that bound at version 3 keeps what it was told.
-*/
-WAYLAND_API void wayland_dmabuf_changed(void)
+static void wayland_global_flip_notify(long iface, int was_on, int now_on)
 {
-        int was_offered, offered;
-        long dmabuf_name;
+        long name = was_on != now_on ? wayland_global_name(iface) : 0;
 
-        if (!wayland.host)
+        if (!name)
                 return;
-        was_offered = wayland.dmabuf.count > 0;
-        wayland_dmabuf_load();
-        offered = wayland.dmabuf.count > 0;
-        dmabuf_name = offered != was_offered ? wayland_dmabuf_global_name() : 0;
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
                 if (!c)
                         continue;
-                if (dmabuf_name)
-                        for (long at = 0; at < WAYLAND_OBJECTS; at++)
-                                if (c->objects[at].iface == WLI_wl_registry)
-                                {
-                                        if (offered)
-                                                wayland_global_send(c, c->objects[at].id, dmabuf_name);
-                                        else
-                                                wayland_global_remove_send(c, c->objects[at].id, dmabuf_name);
-                                }
-                for (long at = 0; offered && at < c->feedbacks; at++)
+                for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                        if (c->objects[at].iface == WLI_wl_registry)
+                        {
+                                if (now_on)
+                                        wayland_global_send(c, c->objects[at].id, name);
+                                else
+                                        wayland_global_remove_send(c, c->objects[at].id, name);
+                        }
+        }
+}
+
+/*
+        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again,
+        zwp_linux_dmabuf_v1 / wl_drm / wp_linux_drm_syncobj_manager_v1 are advertised or withdrawn on open registries if their
+        availability flipped, and every feedback object of every client is sent it again.
+*/
+WAYLAND_API void wayland_dmabuf_changed(void)
+{
+        int was_dmabuf, was_drm, was_syncobj;
+        int now_dmabuf, now_drm, now_syncobj;
+
+        if (!wayland.host)
+                return;
+        was_dmabuf = wayland.dmabuf.count > 0;
+        was_drm = was_dmabuf && wayland.drm_node[0] != 0;
+        was_syncobj = wayland.syncobj_ok != 0;
+        wayland_dmabuf_load();
+        now_dmabuf = wayland.dmabuf.count > 0;
+        now_drm = now_dmabuf && wayland.drm_node[0] != 0;
+        now_syncobj = wayland.syncobj_ok != 0;
+        wayland_global_flip_notify(WLI_zwp_linux_dmabuf_v1, was_dmabuf, now_dmabuf);
+        wayland_global_flip_notify(WLI_wl_drm, was_drm, now_drm);
+        wayland_global_flip_notify(WLI_wp_linux_drm_syncobj_manager_v1, was_syncobj, now_syncobj);
+        if (!now_dmabuf)
+                return;
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                if (!c)
+                        continue;
+                for (long at = 0; at < c->feedbacks; at++)
                 {
                         long object = wayland_slot_of(c, c->feedback_id[at]);
 
@@ -6153,34 +6611,24 @@ static void wayland_params_free(struct wayland_client *c, struct wayland_params 
         p->live = 0;
 }
 
-/*
-        The buffer a params object describes, or why not: 0 and the buffer's slot, -1 for the protocol error already queued,
-        -2 for a buffer that cannot be made (async: failed; immediate: invalid_wl_buffer). The descriptor goes to a pool of
-        its own that is its mapping.
-*/
-static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object *self, struct wayland_params *p, const struct wayland_arg *a,
-                                long id_slot)
+static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long width, unsigned long height, unsigned long format,
+                                        unsigned long flags, long plane_count, long fds[4], const unsigned long offsets[4],
+                                        const unsigned long strides[4], unsigned long modifier, long id_slot)
 {
-        unsigned long width = a[0].u, height = a[1].u, format = a[2].u, flags = a[3].u;
-        long offset, stride, need, pool = -1, buffer = -1, found = 0;
+        long offset = (long)offsets[0], stride = (long)strides[0], need, pool = -1, buffer = -1, found = 0;
         void *at;
 
-        p->used = 1; // a params object used (and checked unused before, by the request) makes one buffer, made or not
-        if (p->fd[0] < 0 || p->fd[1] >= 0 || p->fd[2] >= 0 || p->fd[3] >= 0)
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "one plane is what the format has"), -1;
-        if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions, "the size is out of range"), -1;
-        if (format != WAYLAND_FOURCC_ARGB8888 && format != WAYLAND_FOURCC_XRGB8888)
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_format, "the format is not offered"), -1;
-        offset = (long)p->offset[0];
-        stride = (long)p->stride[0];
-        if (p->offset[0] > 0x7fffffffUL || p->stride[0] > (1UL << 20) || stride < (long)width * 4 || (stride & 3))
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
-        need = offset + stride * ((long)height - 1) + (long)width * 4;
+        if (format == WAYLAND_FOURCC_NV12)
+                need = offset + stride * (long)height;
+        else if (modifier == 0 || modifier == WAYLAND_MODIFIER_INVALID)
+                need = offset + stride * ((long)height - 1) + (long)width * 4;
+        else
+                need = offset + stride * (long)height;
         for (long entry = 0; entry < wayland.dmabuf.count; entry++)
-                found |= wayland.dmabuf.entry[entry].format == format && wayland.dmabuf.entry[entry].modifier == p->modifier[0];
-        if (!found || flags || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL || c->dmabufs >= WAYLAND_DMABUFS ||
-            wayland.dmabufs >= WAYLAND_DMABUFS_ALL)
+                found |= wayland.dmabuf.entry[entry].format == format &&
+                         (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[entry].modifier == modifier);
+        if (!found || (flags & ~1UL) || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL ||
+            c->dmabufs >= WAYLAND_DMABUFS || wayland.dmabufs >= WAYLAND_DMABUFS_ALL)
                 return -2;
         for (long i = 0; i < WAYLAND_POOLS && pool < 0; i++)
                 if (!c->pools[i].live)
@@ -6190,25 +6638,42 @@ static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object 
                         buffer = i;
         if (pool < 0 || buffer < 0)
                 return -2;
-        at = wayland.host->dmabuf_map(wayland.host->context, p->fd[0], need);
+        at = wayland.host->dmabuf_map(wayland.host->context, fds[0], need);
         if (!at)
                 return -2;
         c->pools[pool].live = 1;
-        c->pools[pool].fd = p->fd[0];
+        c->pools[pool].fd = fds[0];
+        fds[0] = -1; // the pool holds it now, and wayland.fds still counts it
+        for (long k = 0; k < 3; k++)
+        {
+                c->pools[pool].extra_fd[k] = (k + 1 < plane_count) ? fds[k + 1] : -1;
+                if (k + 1 < plane_count)
+                        fds[k + 1] = -1;
+        }
         c->pools[pool].dmabuf = 1;
+        c->pools[pool].unmapped = (at == WAYLAND_DMABUF_UNMAPPED);
         c->pools[pool].size = need;
         c->pools[pool].refs = 1;
         c->pools[pool].gone = 1;
-        c->pools[pool].at = at;
+        c->pools[pool].at = c->pools[pool].unmapped ? 0 : at;
         c->pool_bytes += need;
-        p->fd[0] = -1; // the pool holds it now, and wayland.fds still counts it
         c->buffers[buffer].live = 1;
         c->buffers[buffer].pool = pool;
         c->buffers[buffer].offset = offset;
         c->buffers[buffer].width = (long)width;
         c->buffers[buffer].height = (long)height;
         c->buffers[buffer].stride = stride;
-        c->buffers[buffer].format = format == WAYLAND_FOURCC_ARGB8888 ? WLN_wl_shm_format_argb8888 : WLN_wl_shm_format_xrgb8888;
+        c->buffers[buffer].format = wayland_shm_format_of((unsigned int)format);
+        c->buffers[buffer].fourcc = (unsigned int)format;
+        c->buffers[buffer].modifier = modifier;
+        c->buffers[buffer].plane_count = plane_count;
+        for (long k = 0; k < 4; k++)
+        {
+                c->buffers[buffer].plane_offset[k] = k < plane_count ? offsets[k] : 0;
+                c->buffers[buffer].plane_stride[k] = k < plane_count ? strides[k] : 0;
+        }
+        c->buffers[buffer].y_invert = (flags & 1) ? 1 : 0;
+        c->buffers[buffer].rel_pending = 0;
         c->buffers[buffer].id = c->objects[id_slot].id;
         c->buffers[buffer].held = c->buffers[buffer].zombie = 0;
         c->objects[id_slot].link = (short)buffer;
@@ -6217,6 +6682,59 @@ static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object 
         wayland.pools++;
         wayland.buffers++;
         return buffer;
+}
+
+/*
+        The buffer a params object describes, or why not: buffer index >= 0, -1 for the protocol error already queued,
+        -2 for a buffer that cannot be made (async: failed; immediate: invalid_wl_buffer). The descriptors go to a pool of
+        their own.
+*/
+static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object *self, struct wayland_params *p, const struct wayland_arg *a,
+                                long id_slot)
+{
+        unsigned long width = a[0].u, height = a[1].u, format = a[2].u, flags = a[3].u;
+        long plane_count = 0;
+
+        p->used = 1; // a params object used (and checked unused before, by the request) makes one buffer, made or not
+        for (long k = 0; k < 4; k++)
+        {
+                if (p->fd[k] < 0)
+                        continue;
+                if (k != plane_count)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "planes must be contiguous from 0"), -1;
+                plane_count++;
+        }
+        if (plane_count < 1)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "no planes given"), -1;
+        if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions, "the size is out of range"), -1;
+        if (!wayland_fourcc_supported((unsigned int)format))
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_format, "the format is not offered"), -1;
+        if (format == WAYLAND_FOURCC_NV12)
+        {
+                if (plane_count != 2 || (width & 1) || (height & 1))
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "nv12 needs two even planes"), -1;
+                if (p->offset[0] > 0x7fffffffUL || p->offset[1] > 0x7fffffffUL || p->stride[0] > (1UL << 20) || p->stride[1] > (1UL << 20) ||
+                    p->stride[0] < width || p->stride[1] < width)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
+        }
+        else
+        {
+                int linear = p->modifier[0] == 0 || p->modifier[0] == WAYLAND_MODIFIER_INVALID;
+
+                if (linear && plane_count != 1)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "one plane is what a linear format has"), -1;
+                if (p->offset[0] > 0x7fffffffUL || p->stride[0] == 0 || p->stride[0] > (1UL << 20) ||
+                    (linear && (p->stride[0] < width * 4 || (p->stride[0] & 3))))
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
+                for (long k = 1; k < plane_count; k++)
+                        if (p->offset[k] > 0x7fffffffUL || p->stride[k] > (1UL << 20))
+                                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "aux plane out of bounds"), -1;
+        }
+        for (long k = 1; k < plane_count; k++)
+                if (p->modifier[k] != p->modifier[0])
+                        return -2;
+        return wayland_dmabuf_alloc_buffer(c, width, height, format, flags, plane_count, p->fd, p->offset, p->stride, p->modifier[0], id_slot);
 }
 
 static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
@@ -6250,6 +6768,7 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                 {
                         if (c->feedbacks >= WAYLAND_FEEDBACKS)
                                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many feedback objects");
+                        c->feedback_need[c->feedbacks] = 0;
                         c->feedback_id[c->feedbacks++] = c->objects[a[0].slot].id;
                         wayland_feedback_send(c, a[0].slot);
                 }
@@ -6258,7 +6777,10 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                 for (long at = 0; at < c->feedbacks; at++)
                         if (c->feedback_id[at] == self->id)
                         {
-                                c->feedback_id[at] = c->feedback_id[--c->feedbacks];
+                                c->feedbacks--;
+                                c->feedback_id[at] = c->feedback_id[c->feedbacks];
+                                c->feedback_need[at] = c->feedback_need[c->feedbacks];
+                                c->feedback_need[c->feedbacks] = 0;
                                 break;
                         }
                 return WAYLAND_OK;
@@ -6327,6 +6849,137 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                         return WAYLAND_DEAD;
                 if (made < 0)
                         return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer, "the buffer cannot be made");
+        }
+        return WAYLAND_OK;
+}
+
+static int wayland_drm_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        if (op == WLQ_wl_drm_authenticate)
+        {
+                struct wayland_event e = wayland_begin(c, self->id, WLE_wl_drm_authenticated);
+
+                wayland_end(&e);
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_wl_drm_create_prime_buffer)
+        {
+                long width = a[2].i, height = a[3].i;
+                unsigned long format = a[4].u;
+                long fds[4] = {a[1].fd, -1, -1, -1};
+                unsigned long offsets[4] = {(unsigned long)a[5].i, (unsigned long)a[7].i, (unsigned long)a[9].i, 0};
+                unsigned long strides[4] = {(unsigned long)a[6].i, (unsigned long)a[8].i, (unsigned long)a[10].i, 0};
+                long plane_count = format == WAYLAND_FOURCC_NV12 ? 2 : 1;
+                long made;
+
+                if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
+                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime dimensions");
+                if (!wayland_fourcc_supported((unsigned int)format))
+                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "unsupported prime format");
+                if (a[5].i < 0 || a[6].i <= 0 || a[6].i > (1L << 20) ||
+                    (format != WAYLAND_FOURCC_NV12 && (a[6].i < width * 4 || (a[6].i & 3))) ||
+                    (format == WAYLAND_FOURCC_NV12 && ((width & 1) || (height & 1) || a[7].i < 0 || a[8].i < width)))
+                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime stride or offset");
+                made = wayland_dmabuf_alloc_buffer(c, (unsigned long)width, (unsigned long)height, format, 0, plane_count, fds, offsets,
+                                                   strides, WAYLAND_MODIFIER_INVALID, a[0].slot);
+                a[1].fd = fds[0]; // -1 if taken by pool
+                if (made < 0)
+                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_name, "cannot import prime buffer");
+                return WAYLAND_OK;
+        }
+        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_name, "flink buffer names are not supported");
+}
+
+static int wayland_syncobj_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *s;
+
+        if (self->iface == WLI_wp_linux_drm_syncobj_manager_v1)
+        {
+                if (op == WLQ_wp_linux_drm_syncobj_manager_v1_destroy)
+                        return WAYLAND_OK;
+                if (op == WLQ_wp_linux_drm_syncobj_manager_v1_get_surface)
+                {
+                        s = wayland_surface_of(c, a[1].slot);
+                        if (!s)
+                                return WAYLAND_OK;
+                        if (s->syncobj_id)
+                                return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists,
+                                                    "the surface already has a syncobj surface");
+                        s->syncobj_id = c->objects[a[0].slot].id;
+                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
+                        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+                        return WAYLAND_OK;
+                }
+                if (op == WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline)
+                {
+                        long idx = -1, handle;
+
+                        for (long i = 0; i < WAYLAND_TIMELINES && idx < 0; i++)
+                                if (!c->timelines[i].live)
+                                        idx = i;
+                        if (idx < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many syncobj timelines");
+                        handle = wayland.syncobj.import ? wayland.syncobj.import(wayland.syncobj.context, a[1].fd) : -1;
+                        wayland.host->close(wayland.host->context, a[1].fd);
+                        wayland.fds--;
+                        a[1].fd = -1;
+                        if (handle < 0)
+                                return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_invalid_timeline,
+                                                    "invalid drm syncobj timeline fd");
+                        c->timelines[idx].live = 1;
+                        c->timelines[idx].gone = 0;
+                        c->timelines[idx].refs = 0;
+                        c->timelines[idx].handle = handle;
+                        c->objects[a[0].slot].link = (short)idx;
+                        return WAYLAND_OK;
+                }
+                return WAYLAND_OK;
+        }
+        if (self->iface == WLI_wp_linux_drm_syncobj_timeline_v1)
+        {
+                long idx = self->link;
+
+                if (idx >= 0 && idx < WAYLAND_TIMELINES && c->timelines[idx].live)
+                {
+                        c->timelines[idx].gone = 1;
+                        wayland_timeline_unref(c, idx);
+                }
+                return WAYLAND_OK;
+        }
+        s = wayland_surface_of(c, self - c->objects);
+        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_destroy)
+        {
+                if (s)
+                {
+                        s->syncobj_id = 0;
+                        s->pending_sync_acq_set = s->pending_sync_rel_set = 0;
+                }
+                return WAYLAND_OK;
+        }
+        if (!s)
+                return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_surface, "the surface is gone");
+        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point)
+        {
+                long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
+
+                if (tl < 0 || tl >= WAYLAND_TIMELINES || !c->timelines[tl].live)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
+                s->pending_sync_acq_set = 1;
+                s->pending_sync_acq_slot = (unsigned short)tl;
+                s->pending_sync_acq_point = ((unsigned long long)a[1].u << 32) | a[2].u;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point)
+        {
+                long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
+
+                if (tl < 0 || tl >= WAYLAND_TIMELINES || !c->timelines[tl].live)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
+                s->pending_sync_rel_set = 1;
+                s->pending_sync_rel_slot = (unsigned short)tl;
+                s->pending_sync_rel_point = ((unsigned long long)a[1].u << 32) | a[2].u;
+                return WAYLAND_OK;
         }
         return WAYLAND_OK;
 }
@@ -7383,6 +8036,14 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_zwp_linux_dmabuf_feedback_v1:
                         status = wayland_dmabuf_request(c, o, op, a);
                         break;
+                case WLI_wl_drm:
+                        status = wayland_drm_request(c, o, op, a);
+                        break;
+                case WLI_wp_linux_drm_syncobj_manager_v1:
+                case WLI_wp_linux_drm_syncobj_timeline_v1:
+                case WLI_wp_linux_drm_syncobj_surface_v1:
+                        status = wayland_syncobj_request(c, o, op, a);
+                        break;
                 case WLI_wp_cursor_shape_manager_v1:
                 case WLI_wp_cursor_shape_device_v1:
                         status = wayland_cursor_shape_request(c, o, op, a);
@@ -7473,6 +8134,25 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         return 0;
 }
 
+/* Register optional explicit syncobj / wl_drm host callbacks before or right after wayland_start. */
+WAYLAND_API void wayland_syncobj_host(const struct wayland_syncobj_host *syncobj)
+{
+        if (syncobj)
+                wayland.syncobj = *syncobj;
+        else
+                wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
+        wayland.syncobj_ok = 0;
+        wayland.drm_node[0] = 0;
+        if (wayland.host && wayland.syncobj.available)
+        {
+                long caps = wayland.syncobj.available(wayland.syncobj.context, wayland.drm_node, (long)sizeof wayland.drm_node);
+
+                wayland.syncobj_ok = (caps & WAYLAND_SYNCOBJ_TIMELINE_OK) != 0;
+                if (!(caps & WAYLAND_SYNCOBJ_NODE_OK))
+                        wayland.drm_node[0] = 0;
+        }
+}
+
 /* The user whose clients are offered the X server's protocols: the one the X window manager's socket takes. None until the host says. */
 WAYLAND_API void wayland_xwayland_user(long uid)
 {
@@ -7499,6 +8179,7 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         c->slot = slot;
         c->pid = pid;
         c->uid = uid;
+        c->stalled_sync_handle = -1;
         wayland.client[slot] = c;
         wayland.clients++;
         wayland_object_new(c, 1, WLI_wl_display, 1);
@@ -7542,14 +8223,29 @@ WAYLAND_API void wayland_drop(long slot)
         for (long at = 0; at < WAYLAND_POOLS; at++)
                 if (c->pools[at].live)
                 {
-                        wayland.host->unmap(wayland.host->context, c->pools[at].at, c->pools[at].size);
+                        if (!c->pools[at].unmapped && c->pools[at].at)
+                                wayland.host->unmap(wayland.host->context, c->pools[at].at, c->pools[at].size);
                         if (c->pools[at].dmabuf)
                         {
                                 wayland.host->close(wayland.host->context, c->pools[at].fd);
                                 wayland.fds--;
+                                for (long k = 0; k < 3; k++)
+                                        if (c->pools[at].extra_fd[k] >= 0)
+                                        {
+                                                wayland.host->close(wayland.host->context, c->pools[at].extra_fd[k]);
+                                                wayland.fds--;
+                                        }
                                 wayland.dmabufs--;
                         }
                         wayland.pools--;
+                }
+        for (long at = 0; at < WAYLAND_TIMELINES; at++)
+                if (c->timelines[at].live)
+                {
+                        if (wayland.syncobj.drop && c->timelines[at].handle >= 0)
+                                wayland.syncobj.drop(wayland.syncobj.context, c->timelines[at].handle);
+                        c->timelines[at].live = 0;
+                        c->timelines[at].handle = -1;
                 }
         for (long at = 0; at < WAYLAND_PARAMS; at++)
                 if (c->params[at].live)
@@ -7599,6 +8295,9 @@ WAYLAND_API void wayland_stop(void)
                 return;
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
                 wayland_drop(slot);
+        wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
+        wayland.syncobj_ok = 0;
+        wayland.drm_node[0] = 0;
         wayland.host = 0;
 }
 
@@ -7753,6 +8452,13 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
                 return 0;
         if (c->hold)
                 return c->hold_at; // a timed hold wakes the loop at its time; a barrier's is woken by the frames (wayland_frame_wanted)
+        if (c->stalled_sync_handle >= 0)
+        {
+                long next = wayland.host->now(wayland.host->context) + 1;
+                long cap = c->stalled_at + WAYLAND_STALL_MS + 1;
+
+                return next < cap ? next : cap;
+        }
         if (c->stalled_fd < 0)
                 return c->surfaces[c->budget_surface].budget_at + WAYLAND_BUDGET_MS;
         *fd = c->stalled_fd;
@@ -7781,18 +8487,24 @@ WAYLAND_API int wayland_resume(long slot)
                 c->hold = 0;
         }
         // A commit that waits for its budget is made in the client's next window of time; one that waits for its GPU, when it is done.
-        if (c->stalled_fd < 0 ? c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
-                              : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
+        if (c->stalled_sync_handle >= 0
+                ? (wayland.syncobj.ready && !wayland.syncobj.ready(wayland.syncobj.context, c->stalled_sync_handle, c->stalled_sync_point))
+            : c->stalled_fd < 0
+                ? c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
+                : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
         {
-                if (c->stalled_fd >= 0 && wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
+                if ((c->stalled_fd >= 0 || c->stalled_sync_handle >= 0) &&
+                    wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
                 {
                         c->stalled = 0;
+                        c->stalled_sync_handle = -1;
                         c->stash_length = 0;
                         wayland_fail(c, 1, WAYLAND_IMPLEMENTATION, "the buffer's writer never finished");
                         return 0;
                 }
                 return 1;
         }
+        c->stalled_sync_handle = -1;
         length = c->stash_length;
         c->stash_length = 0;
         c->stalled = 0;
@@ -7829,7 +8541,8 @@ WAYLAND_API void wayland_sent(long slot, long count)
                 c->out[at - count] = c->out[at];
         c->out_length -= count;
         wayland_out_fds_let_go(c);
-        if (!c->out_length && !c->dead)
+        wayland_feedback_flush(c);
+        if (!c->out_length && !c->dead && !c->feedback_pending)
                 wayland.out_dirty &= ~(1u << slot);
 }
 

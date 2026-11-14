@@ -99437,9 +99437,10 @@ static fn steam_profile(void)
         positive socket = chrome_line(steam ? steam->session : null, "-S /run/moonwater/wayland-0");
         positive exported = chrome_line(steam ? steam->session : null, "export WAYLAND_DISPLAY=/run/moonwater/wayland-0");
         positive capabilities = chrome_line(steam ? steam->session : null, "BOWL_CAPABILITIES=none");
-        positive xwayland = chrome_line(steam ? steam->session : null, "/usr/bin/Xwayland :1");
-        positive wait = chrome_line(steam ? steam->session : null, "-S /tmp/.X11-unix/X1");
-        positive display = chrome_line(steam ? steam->session : null, "export DISPLAY=:1");
+        positive xwayland = chrome_line(steam ? steam->session : null, "/usr/bin/Xwayland \"$display\"");
+        positive wait = chrome_line(steam ? steam->session : null, "-S \"$xsaving\"");
+        positive display = chrome_line(steam ? steam->session : null, "export DISPLAY=\"$display\"");
+        positive display_scan = chrome_line(steam ? steam->session : null, "while [ $d -le 32 ];");
         positive run = chrome_line(steam ? steam->session : null, "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"");
         positive sound = chrome_line(steam ? steam->session : null, "PULSE_SERVER=unix:/run/moonwater/pulse/native");
         positive unset = chrome_line(steam ? steam->session : null, "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND");
@@ -99460,7 +99461,10 @@ static fn steam_profile(void)
         check("SDL and Proton are left to X11 through Xwayland, not Wayland",
               unset && unset < run);
         check("Xwayland starts before Steam, and the session waits for its socket before exporting DISPLAY",
-              xwayland && wait && display && xwayland < wait && wait < display && display < run);
+              display_scan && display_scan < xwayland && xwayland && wait && display && xwayland < wait && wait < display && display < run);
+        check("The session skips vgem and vkms render nodes when probing for hardware GL",
+              chrome_line(steam ? steam->session : null, "\"$node/device\"") != 0 &&
+                  chrome_line(steam ? steam->session : null, "driver_name=") != 0);
         check("The session ends Xwayland when Steam ends, and gives Steam's exit status back",
               ended && ended > run && strstr(steam->session[ended - 1], "kill $xwayland"));
         check("The session passes the arguments it was given to Steam",
@@ -101642,6 +101646,21 @@ static fn station_confinement(void)
                 log_direct(str("bowl: the station's confinement NOT RUN -- no unprivileged user namespaces\n"));
 }
 
+static fn bowl_hardened_and_limits_rows(void)
+{
+        check("system resource limits target NOFILE=524288 and MEMLOCK=64M",
+              SYSTEM_NOFILE_TARGET == 524288 && SYSTEM_MEMLOCK_TARGET == (64ULL << 20));
+        check("bowl_wayland_offered returns a valid boolean without crashing",
+              bowl_wayland_offered() == 0 || bowl_wayland_offered() == 1);
+#if MOONWATER_STRICT_BOWL >= STRICT_TIGHT
+        bowl_session_fill_started();
+        check("hardened bowl refuses inherited XDG_RUNTIME_DIR=/run/user/0 unless runtime path itself is /run/user/0",
+              bowl_path_same(bowl_runtime_path, BOWL_RUNTIME_DIR "0") ||
+                  (bowl_session_unusable("XDG_RUNTIME_DIR=/run/user/0") &&
+                   bowl_session_unusable("XDG_RUNTIME_DIR=/run/user/0/sub")));
+#endif
+}
+
 b32 main(void)
 {
         names();
@@ -101676,6 +101695,7 @@ b32 main(void)
         oci();
         nix();
         executable_in_root();
+        bowl_hardened_and_limits_rows();
         return test_report(null);
 }
 #endif /* CHECK_bowl */
@@ -122980,6 +123000,20 @@ static fn check_strip(void)
         check("strip: the body's bytes are the loop's, every row count, stride and tail", same);
 }
 
+static fn check_generation_wrap(void)
+{
+        font_engine g = {0};
+
+        font_start(&g, small_atlas, 128, 32);
+        check("font_start initializes generation to 1", g.generation == 1);
+        g.generation = 0xffffffffu;
+        font_reset(&g);
+        check("font_reset skips 0 on 32-bit wrap and lands on 1", g.generation == 1);
+        g.generation = 0xffffffffu;
+        font_start(&g, small_atlas, 128, 32);
+        check("font_start skips 0 on 32-bit wrap and lands on 1", g.generation == 1);
+}
+
 b32 main()
 {
         font_face one, two;
@@ -123046,6 +123080,7 @@ b32 main()
         check_hostile_arithmetic();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
+        check_generation_wrap();
 
         return test_report(null);
 }
@@ -126785,7 +126820,7 @@ static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 static int gpu_fake_wide;
 #define GPU_WIDE_FAKE(fd) do { if (gpu_fake_wide > 0) { if ((fd) >= 0) system_close((int)(fd)); (fd) = 1000000; } else if (gpu_fake_wide < 0) { if ((fd) >= 0) system_close((int)(fd)); (fd) = -2; } } while (0)
 // The buffers the last submit named (gpu_run_job's bos, seen before the call is made or answered): the rows ask whether a map's handle is in the list.
-static p64 gpu_seen_bos[1 + 8 + 256];
+static p64 gpu_seen_bos[1 + 64 + 256];
 static unsigned int gpu_seen_count;
 #define GPU_SUBMIT_SEEN(list, count) do { gpu_seen_count = (count); memory_copy(gpu_seen_bos, (list), (positive)(count) * sizeof(p64)); } while (0)
 // The fake kernel's answer to AMDGPU_INFO_GPUVM_FAULT (gpu.c's gpu_fault_query): gpu_fake_vm 0 the real call, 1 the fault below, -1 a refusal (EINVAL: a kernel without the query).
@@ -126812,12 +126847,14 @@ static unsigned int gpu_fake_vm_status, gpu_fake_vm_hub;
 #define GPU_KERNEL_FD 1000
 #define GPU_KERNEL_CARD 1001
 #define GPU_KERNEL_DMABUF 2000
+#define GPU_KERNEL_HANDLES 128
+
 static struct
 {
         int on, no_context;           // answering; a context is refused (ENODEV: a device that is gone)
-        unsigned int buffer[16];      // a handle's buffer and 1 (the handle is the index), 0 for a handle that is free
-        unsigned int mapped[16];      // the maps the handle's buffer has in the address space
-        positive va[16];              // the last of them
+        unsigned int buffer[GPU_KERNEL_HANDLES]; // a handle's buffer and 1 (the handle is the index), 0 for a handle that is free
+        unsigned int mapped[GPU_KERNEL_HANDLES]; // the maps the handle's buffer has in the address space
+        positive va[GPU_KERNEL_HANDLES];         // the last of them
         unsigned int closes, refused; // the handles closed, and the closes of a handle that was not there
         unsigned int contexts;
         unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
@@ -126829,7 +126866,7 @@ static unsigned int gpu_kernel_live(void)
 {
         unsigned int live = 0;
 
-        for (unsigned int h = 1; h < 16; h++)
+        for (unsigned int h = 1; h < GPU_KERNEL_HANDLES; h++)
                 live += gpu_kernel.buffer[h] != 0;
         return live;
 }
@@ -126837,7 +126874,7 @@ static unsigned int gpu_kernel_live(void)
 // The handle the render node has for a buffer, 0 for none.
 static unsigned int gpu_kernel_handle(unsigned int buffer)
 {
-        for (unsigned int h = 1; h < 16; h++)
+        for (unsigned int h = 1; h < GPU_KERNEL_HANDLES; h++)
                 if (gpu_kernel.buffer[h] == buffer + 1)
                         return h;
         return 0;
@@ -126864,7 +126901,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         {
                 unsigned int buffer = words[2] - GPU_KERNEL_DMABUF, h = gpu_kernel_handle(buffer);
 
-                for (unsigned int free = 1; !h && free < 16; free++)
+                for (unsigned int free = 1; !h && free < GPU_KERNEL_HANDLES; free++)
                         if (!gpu_kernel.buffer[free])
                                 h = free, gpu_kernel.buffer[h] = buffer + 1, gpu_kernel.mapped[h] = 0;
                 if (!h)
@@ -126873,7 +126910,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                 return 0;
         }
         case 0x40086409u: // DRM_IOCTL_GEM_CLOSE
-                if (words[0] == 0 || words[0] >= 16 || !gpu_kernel.buffer[words[0]])
+                if (words[0] == 0 || words[0] >= GPU_KERNEL_HANDLES || !gpu_kernel.buffer[words[0]])
                         return gpu_kernel.refused++, -22;
                 gpu_kernel.buffer[words[0]] = 0, gpu_kernel.mapped[words[0]] = 0, gpu_kernel.closes++;
                 return 0;
@@ -126881,7 +126918,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         {
                 unsigned int h = (unsigned int)longs[0], op = (unsigned int)longs[1];
 
-                if (h == 0 || h >= 16 || !gpu_kernel.buffer[h])
+                if (h == 0 || h >= GPU_KERNEL_HANDLES || !gpu_kernel.buffer[h])
                         return -2;
                 if (op == 1)
                         gpu_kernel.mapped[h]++, gpu_kernel.va[h] = longs[2];
@@ -187562,8 +187599,17 @@ static void test_dmabuf(void)
         c = s.c;
         params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
         wlc_forget(c);
-        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 1L);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 8L);
         WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_failed) == 1, "flags the shim does not do are a failed");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_forget(c);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 1L);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_created) == 1,
+                "Y_INVERT flag (1) on linux_buffer_params creates a buffer");
         wlc_end(c);
 
         /* the caps: a client holds at most 48 buffers, each with a descriptor, and params with descriptors given are closed with it */
@@ -189158,6 +189204,203 @@ static void test_damage_many(void)
         wayland_stop();
 }
 
+static struct wayland_picture cap_pic;
+static int cap_pic_seen;
+
+static int cap_row_picture(void *context, int row, const struct wayland_picture *picture)
+{
+        cap_pic = *picture;
+        cap_pic_seen = 1;
+        return fake_row_picture(context, row, picture);
+}
+
+static void *unmapped_dmabuf_map(void *context, long fd, long size)
+{
+        (void)context;
+        (void)fd;
+        (void)size;
+        return WAYLAND_DMABUF_UNMAPPED;
+}
+
+static struct
+{
+        int imports, drops, readies, signals;
+        int ready_answer;
+        unsigned long long last_acq, last_rel;
+} fake_sync;
+
+static long fake_sync_available(void *context, char *node, long node_cap)
+{
+        (void)context;
+        snprintf(node, (size_t)node_cap, "/dev/dri/renderD128");
+        return WAYLAND_SYNCOBJ_TIMELINE_OK | WAYLAND_SYNCOBJ_NODE_OK;
+}
+
+static long fake_sync_import(void *context, long fd)
+{
+        (void)context;
+        (void)fd;
+        return 100 + (++fake_sync.imports);
+}
+
+static void fake_sync_drop(void *context, long handle)
+{
+        (void)context;
+        (void)handle;
+        fake_sync.drops++;
+}
+
+static int fake_sync_ready(void *context, long handle, unsigned long long point)
+{
+        (void)context;
+        (void)handle;
+        fake_sync.readies++;
+        fake_sync.last_acq = point;
+        return fake_sync.ready_answer;
+}
+
+static void fake_sync_signal(void *context, long handle, unsigned long long point)
+{
+        (void)context;
+        (void)handle;
+        fake_sync.signals++;
+        fake_sync.last_rel = point;
+}
+
+static void test_syncobj_viewporter_and_formats(void)
+{
+        struct wayland_host host = fake_host;
+        struct wayland_syncobj_host shost = {0, fake_sync_available, fake_sync_import, fake_sync_drop, fake_sync_ready, fake_sync_signal};
+        struct session s;
+        struct wlc *c;
+        unsigned long vp_mgr, vp, params, buf, drm, sync_mgr, sync_surf, tl;
+        unsigned char abgr_px[4 * 4 * 4];
+
+        /* 1. Non-mmapable dma-buf (WAYLAND_DMABUF_UNMAPPED) + ABGR8888/MODIFIER_INVALID + wp_viewporter */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        fake.screen.width = 1280;
+        fake.screen.height = 720;
+        fake.screen.scale = 100;
+        fake.screen.refresh = 60000;
+        host.row_picture = cap_row_picture;
+        host.dmabuf_map = unmapped_dmabuf_map;
+        wayland_start(&host);
+        session_open(&s);
+        session_window(&s, 0xff112233u);
+        c = s.c;
+
+        /* shm abgr8888 & xbgr8888 */
+        memset(abgr_px, 0xaa, sizeof abgr_px);
+        {
+                long fd = wl_file(sizeof abgr_px, 0);
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1);
+                unsigned long b_abgr = wlc_id(c, WLI_wl_buffer, 1);
+                unsigned long b_xbgr = wlc_id(c, WLI_wl_buffer, 1);
+
+                wl_file_put(fd, 0, abgr_px, sizeof abgr_px);
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, fd, (long)sizeof abgr_px);
+                close((int)fd);
+                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, b_abgr, 0L, 4L, 4L, 16L, (long)WLN_wl_shm_format_abgr8888);
+                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, b_xbgr, 0L, 4L, 4L, 16L, (long)WLN_wl_shm_format_xbgr8888);
+                WLCHECK(c->errors == 0, "wl_shm accepts abgr8888 and xbgr8888 formats");
+        }
+
+        /* wp_viewporter source crop & destination scale */
+        vp_mgr = wl_global(c, s.registry, WLI_wp_viewporter, 1);
+        WLCHECK(vp_mgr != 0, "wp_viewporter global is advertised");
+        vp = wlc_id(c, WLI_wp_viewport, 1);
+        wlc_send(c, vp_mgr, WLQ_wp_viewporter_get_viewport, vp, s.surface);
+        wlc_send(c, vp, WLQ_wp_viewport_set_source, (long)(2 * 256), (long)(3 * 256), (long)(16 * 256), (long)(12 * 256));
+        wlc_send(c, vp, WLQ_wp_viewport_set_destination, 640L, 480L);
+
+        /* non-mmapable dma-buf with ABGR8888 & MODIFIER_INVALID */
+        params = wlc_id(c, WLI_zwp_linux_buffer_params_v1, 4);
+        wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_create_params, params);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, dmabuf_file(16, 80, 8, 0), 0L, 0L, 80L,
+                 (unsigned long)(WAYLAND_MODIFIER_INVALID >> 32), (unsigned long)(WAYLAND_MODIFIER_INVALID & 0xffffffffUL));
+        buf = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, buf, 16L, 8L, (long)WAYLAND_FOURCC_ABGR8888, 0L);
+        cap_pic_seen = 0;
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buf, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 16L, 8L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && cap_pic_seen && cap_pic.map == 0 && cap_pic.sync_fd >= 0 &&
+                    cap_pic.src_x == 2 * 256 && cap_pic.src_width == 16 * 256 && cap_pic.dst_width == 640 && cap_pic.dst_height == 480 &&
+                    cap_pic.fourcc == WAYLAND_FOURCC_ABGR8888 && cap_pic.modifier == WAYLAND_MODIFIER_INVALID,
+                "unmapped dma-buf passes sync_fd with map==0, fourcc/modifier, and wp_viewporter crop+scale");
+
+        /* feedback queue past WAYLAND_OUT_FDS */
+        {
+                unsigned long fbs[WAYLAND_OUT_FDS + 2];
+                long done_count = 0;
+
+                wlc_forget(c);
+                for (long i = 0; i < WAYLAND_OUT_FDS + 2; i++)
+                {
+                        fbs[i] = wlc_id(c, WLI_zwp_linux_dmabuf_feedback_v1, 4);
+                        wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_default_feedback, fbs[i]);
+                }
+                for (int round = 0; round < 6; round++)
+                {
+                        wayland_flush();
+                        wlc_pump(c);
+                }
+                done_count = wlc_count(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_done);
+                WLCHECK(done_count == WAYLAND_OUT_FDS + 2,
+                        "dmabuf feedback sends past WAYLAND_OUT_FDS flush queued feedbacks (%ld)", done_count);
+        }
+        wlc_end(c);
+        wayland_stop();
+
+        /* 2. wayland_syncobj_host + wl_drm + uid 1000 access when xwayland_uid == 0 */
+        memset(&fake, 0, sizeof fake);
+        memset(&fake_sync, 0, sizeof fake_sync);
+        fake.screen.width = 1280;
+        fake.screen.height = 720;
+        fake.screen.scale = 100;
+        wayland_start(&fake_host);
+        wayland_syncobj_host(&shost);
+        wl_check_xuser = 0; /* uid 1000 client from wlc_open still gets xwayland globals */
+        session_open(&s);
+        wayland_xwayland_user(0);
+        c = s.c;
+        WLCHECK(s.xshell != 0, "wayland_xwayland_user(0) still exposes xwayland_shell_v1 to uid 1000");
+
+        drm = wl_global(c, s.registry, WLI_wl_drm, 2);
+        sync_mgr = wl_global(c, s.registry, WLI_wp_linux_drm_syncobj_manager_v1, 1);
+        WLCHECK(drm != 0 && sync_mgr != 0, "wl_drm and wp_linux_drm_syncobj_manager_v1 globals advertised when syncobj host is up");
+        session_window(&s, 0xff00ff00u);
+        tl = wlc_id(c, WLI_wp_linux_drm_syncobj_timeline_v1, 1);
+        sync_surf = wlc_id(c, WLI_wp_linux_drm_syncobj_surface_v1, 1);
+        wlc_send(c, sync_mgr, WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline, tl, wl_file(4096, 0));
+        wlc_send(c, sync_mgr, WLQ_wp_linux_drm_syncobj_manager_v1_get_surface, sync_surf, s.surface);
+        wlc_send(c, sync_surf, WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point, tl, 0L, 42L);
+        wlc_send(c, sync_surf, WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point, tl, 0L, 43L);
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        buf = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, buf, 16L, 8L, DRM_XRGB8888, 0L);
+        fake_sync.ready_answer = 0; /* wait on acquire point -> stall */
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buf, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 16L, 8L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_stalled(c->slot) && fake_sync.readies >= 1 && fake_sync.last_acq == 42ULL,
+                "unready syncobj acquire point stalls commit and queries host");
+        fake_sync.ready_answer = 1;
+        wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(!wayland_stalled(c->slot) && c->errors == 0, "ready syncobj acquire point unblocks commit cleanly");
+        wlc_send(c, sync_surf, WLQ_wp_linux_drm_syncobj_surface_v1_destroy);
+        wlc_send(c, tl, WLQ_wp_linux_drm_syncobj_timeline_v1_destroy);
+        wlc_end(c);
+        WLCHECK(fake_sync.signals >= 1 && fake_sync.last_rel == 43ULL && fake_sync.drops >= 1,
+                "syncobj release point is signalled and timeline handle dropped on destroy");
+        wayland_syncobj_host(0);
+        wl_check_xuser = 1000;
+        leak_check("syncobj/viewporter/formats");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -189207,6 +189450,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_syncobj_viewporter_and_formats();
         test_games();
         test_scale();
         test_fractional_damage();
@@ -236816,7 +237060,7 @@ static void gpu_loss_rows(void)
         check("gpu loss: the maps are let go with the card", gpu_map_count == 0 && gpu.imports == 0);
         // A node that is absent (every node: ENOENT) is no card, and the start says so at the node; once it is there, the card starts.
         gpu_stop();
-        gpu_fake_absent = 8;
+        gpu_fake_absent = 64;
         started = gpu_start(1 << 20);
         gpu_fake_absent = 0;
         check("gpu loss: no render node, the start stops at the node (ENOENT)", !started && gpu_req.first == GPU_REQ_NODE && gpu_req.error == 2);
@@ -237488,7 +237732,7 @@ static void gpu_flight_rows(void)
 
         // 2. The job has ended (idle: the fence answers done), and the restart goes ahead: the recovery lets go of the map, and the card is given up for
         // the lack of a node (every node is absent here).
-        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_absent = 8;
+        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_absent = 64;
         compositor_gpu_restart_check();
         check("flight: once the card is idle the restart goes ahead: the map is let go of by the recovery, the job's pending clears, and the card is given up",
               gpu_map_count == 0 && gpu_gone_at >= 1 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_RECOVER && gpu.pending == 0 &&
@@ -237577,13 +237821,24 @@ static void gpu_import_rows(void)
         gpu_unimport(first, GPU_GONE_UNIMPORT);
         check("gpu import: let go of by the last, it is unmapped and its handle closed", gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
 
-        // 6. The table is eight imports: a ninth buffer is refused, and the handle the kernel made for it is closed (it is not left open with no import to close it).
-        for (unsigned int b = 0; b < 8; b++)
+        // 6. The table is full (GPU_IMPORTS): another buffer is refused, and the handle the kernel made for it is closed (not left open).
+        // Dead slots (released while busy) are evicted cleanly when the card is idle.
+        for (unsigned int b = 0; b < GPU_IMPORTS; b++)
                 gpu_import_fd(GPU_KERNEL_DMABUF + 1 + (int)b, 4096);
         before = gpu_kernel.closes;
-        check("gpu import: eight buffers are eight imports", gpu.imports == 8 && gpu_kernel_live() == 8);
-        check("gpu import: a ninth is refused, and its handle is closed", gpu_import_fd(GPU_KERNEL_DMABUF + 9, 4096) == 0 && gpu.imports == 8 && gpu_kernel_live() == 8 && gpu_kernel.closes == before + 1);
-        check("gpu import: one of the eight asked for again with the table full is held twice, not refused", gpu_import_fd(GPU_KERNEL_DMABUF + 3, 4096) != 0 && gpu.imports == 8);
+        check("gpu import: GPU_IMPORTS buffers fill the import table", gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS);
+        check("gpu import: one past GPU_IMPORTS is refused, and its handle is closed",
+              gpu_import_fd(GPU_KERNEL_DMABUF + GPU_IMPORTS + 1, 4096) == 0 && gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS &&
+                  gpu_kernel.closes == before + 1);
+        check("gpu import: an active import asked for again with the table full is held twice, not refused",
+              gpu_import_fd(GPU_KERNEL_DMABUF + 3, 4096) != 0 && gpu.imports == GPU_IMPORTS);
+        gpu.pending = 77, gpu_fake_busy = 1, gpu_fake_idle = 0;
+        gpu_unimport(gpu.imported_va[0], GPU_GONE_UNIMPORT);
+        check("gpu import: unimporting one slot while busy marks it dead without dropping it", gpu.imports == GPU_IMPORTS && gpu.imported_dead[0]);
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        check("gpu import: once idle, a dead slot is evicted so a new buffer succeeds",
+              gpu_import_fd(GPU_KERNEL_DMABUF + GPU_IMPORTS + 1, 4096) != 0 && gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS);
+        gpu_fake_busy = 0, gpu_fake_idle = 0;
         while (gpu.imports)
                 gpu_unimport(gpu.imported_va[0], GPU_GONE_UNIMPORT);
         check("gpu import: every import let go of by its holders leaves the kernel no handle", gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
@@ -237616,7 +237871,7 @@ static void gpu_import_rows(void)
         gpu.pending = 77, gpu.ctx = 1, gpu_kernel.no_context = 1;
         check("gpu idle: a wait refused with no new context to be had is a lost card, not a job waited on for good", !gpu_idle() && gpu_lost && gpu.pending == 77);
         compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_until = 0;
-        before = gpu_recovered, gpu_fake_absent = 8;
+        before = gpu_recovered, gpu_fake_absent = 64;
         compositor_gpu_lost_check();
         gpu_fake_absent = 0;
         check("gpu idle: the lost card is started again (here to no node: given up as no card), and nothing is pending on the old one",
@@ -237625,13 +237880,13 @@ static void gpu_import_rows(void)
 
         // The families: the four the kernels were written and run on are let in always; family 143 (the rest of gfx10: the same words by llvm-mc, run by nobody)
         // only where the owner's file asks, which a start looks for each time; no other family either way.
-        gpu_fake_wide = -1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        gpu_fake_wide = -1, gpu_fake_absent = 64, gpu_start(1 << 20);
         check("gpu family: with no file asking, the families are the four the kernels were run on, and 143 is not one",
               !gpu_wide && gpu_family_ok(144) && gpu_family_ok(146) && gpu_family_ok(149) && gpu_family_ok(151) && !gpu_family_ok(143));
-        gpu_fake_wide = 1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        gpu_fake_wide = 1, gpu_fake_absent = 64, gpu_start(1 << 20);
         check("gpu family: the owner's file lets family 143 in, and no other (RDNA3's 145, 148 and 150, Raven's 142 stay out)",
               gpu_wide && gpu_family_ok(143) && gpu_family_ok(149) && !gpu_family_ok(145) && !gpu_family_ok(148) && !gpu_family_ok(150) && !gpu_family_ok(142) && !gpu_family_ok(0));
-        gpu_fake_wide = -1, gpu_fake_absent = 8, gpu_start(1 << 20);
+        gpu_fake_wide = -1, gpu_fake_absent = 64, gpu_start(1 << 20);
         check("gpu family: the file gone at the next start, 143 is out again", !gpu_wide && !gpu_family_ok(143));
         gpu_fake_wide = 0, gpu_fake_absent = 0;
         gpu.fd = GPU_KERNEL_FD, gpu.at = 0;
@@ -238450,6 +238705,121 @@ static void grab_protocol_rows(void)
         memory_copy(&compositor, kept_comp, sizeof(compositor));
 }
 
+static void gpu_engine_and_render_regressions(void)
+{
+        static unsigned int kept_gpu_buf[(sizeof(gpu) + 3) / 4];
+        static unsigned int fake_vram[1 << 16];
+        unsigned char *fill_a = 0, *fill_b = 0;
+        unsigned int *kept_gpu = (unsigned int *)kept_gpu_buf;
+        static struct compositor_gscene kept_gscene_val;
+        struct compositor_gscene *kept_gscene = &kept_gscene_val;
+        unsigned int kept_size = gpu.size, kept_wide = gpu_wide, kept_gfx103 = gpu_gfx103;
+        unsigned int kept_lost = gpu_lost, kept_pending = gpu.pending;
+        int kept_fd = gpu.fd, kept_card = compositor.card;
+        unsigned int *kept_at = gpu.at;
+        int kept_up = compositor_gpu_state.up, kept_list_mode = compositor.table ? compositor.table->list_mode : 0;
+
+        /* 1. RDNA2 gpu_gfx103 family acceptance without wide flag */
+        gpu_wide = 0, gpu_gfx103 = 0;
+        check("gpu family: 143 refused when neither wide nor gfx103", !gpu_family_ok(143));
+        gpu_gfx103 = 1;
+        check("gpu family: 143 accepted when gpu_gfx103 is set", gpu_family_ok(143));
+        gpu_gfx103 = 0;
+
+        /* 2. gpu_register_memfd / gpu_unregister_memfd & gpu_drop_unmapped */
+        {
+                unsigned char dummy[8192];
+
+                check("gpu_register_memfd registers page range and unregisters cleanly",
+                      gpu_register_memfd(42, dummy, sizeof(dummy), 0));
+                gpu_unregister_memfd(dummy);
+        }
+        gpu_map_count = 2;
+        gpu_maps[0].from = 0, gpu_maps[0].to = 0, gpu_maps[0].va = 0x50000000ull, gpu_maps[0].bytes = 4096, gpu_maps[0].handle = 1;
+        gpu_maps[1].from = 0x20000000ull, gpu_maps[1].to = 0x20001000ull, gpu_maps[1].va = 0x50010000ull, gpu_maps[1].bytes = 4096, gpu_maps[1].handle = 2;
+        gpu.fd = GPU_KERNEL_FD, gpu_kernel.on = 1, gpu_kernel.buffer[1] = 10, gpu_kernel.mapped[1] = 1, gpu_kernel.buffer[2] = 11, gpu_kernel.mapped[2] = 1;
+        gpu_drop_unmapped();
+        check("gpu_drop_unmapped drops only forgotten (from==0&&to==0) maps",
+              gpu_map_count == 1 && gpu_maps[0].handle == 2);
+        gpu_map_count = 0, gpu_kernel.buffer[1] = 0, gpu_kernel.buffer[2] = 0, gpu_kernel.on = 0;
+
+        /* 3. gpu_scene unaligned partial/hand refusal & GPU_END_OVERFLOW & gpu_finish */
+        gpu.fd = GPU_KERNEL_FD, gpu.at = fake_vram, gpu.size = sizeof(fake_vram), gpu.pending = 0, gpu_lost = 0;
+        fake_vram[0] = 0u; /* op 0 fill */
+        check("gpu_scene refuses partial damage on unaligned width without starting ring",
+              !gpu_scene(0, 1, 4096, 8192, 65, 65, 8, 1, 0, 64, 8));
+        fake_vram[0] = 3u; /* op > 2 hand op */
+        check("gpu_scene refuses hand op on unaligned width cleanly",
+              !gpu_scene(0, 1, 4096, 8192, 65, 65, 8, 0, 0, 65, 8));
+        fake_vram[0] = 0u;
+        check("gpu_scene sets GPU_END_OVERFLOW when bins_at exceeds gpu.size",
+              !gpu_scene(0, 1, sizeof(fake_vram), 8192, 64, 64, 8, 0, 0, 64, 8) && gpu_end == GPU_END_OVERFLOW);
+
+        gpu_kernel.on = 1, gpu_kernel.no_context = 1;
+        gpu.pending = 99, gpu_lost = 0, gpu_fake_errno = 1;
+        check("gpu_finish returns false and marks gpu_lost when wait fails", !gpu_finish() && gpu_lost && gpu.pending == 99);
+        gpu_kernel.on = 0, gpu_kernel.no_context = 0, gpu_fake_errno = 0;
+
+        /* 4. compositor_over_pixel premultiplied ARGB8888 blend */
+        check("compositor_over_pixel opaque alpha=255 replaces dst",
+              compositor_over_pixel(0xff112233u, 0xff445566u) == 0xff445566u);
+        check("compositor_over_pixel transparent alpha=0 keeps dst",
+              compositor_over_pixel(0xff112233u, 0x00000000u) == 0xff112233u);
+        {
+                unsigned int blended = compositor_over_pixel(0xff0000ffu, 0x80008000u);
+
+                check("compositor_over_pixel half alpha composites premultiplied channel cleanly",
+                      (blended & 0xffu) > 100u && (blended & 0xffu) < 150u && ((blended >> 8) & 0xffu) >= 120u);
+        }
+
+        /* 5. compositor_gpu_slot_tag distinguishes tags & compositor_gpu_rotate rejects unaligned width */
+        memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+        compositor_gscene.tables = (unsigned char *)fake_vram;
+        compositor_gscene.tables_size = 4096;
+        compositor_gscene.tables_at = 1024;
+        {
+                unsigned int a1 = compositor_gpu_slot_tag(16, 2, 20, 128, 0x1111UL, 64, &fill_a);
+                unsigned int a2 = compositor_gpu_slot_tag(16, 2, 20, 128, 0x2222UL, 64, &fill_b);
+
+                check("compositor_gpu_slot_tag allocates distinct slots for different chip tags",
+                      a1 != 0 && a2 != 0 && a1 != a2 && compositor_gscene.kept == 2);
+        }
+        compositor_gpu_state.up = 1, compositor_gpu_state.out = 0x100000ull, compositor.card = GPU_KERNEL_FD;
+        {
+                int screen[4] = {0, 0, 100, 101}; /* 90-deg rotate gives pw=101 (non-mod-4) */
+
+                compositor_turns[0].pitch = 512;
+                check("compositor_gpu_rotate rejects non-mod-4 rotated width cleanly",
+                      !compositor_gpu_rotate(0, screen, 90, 0, 0, 100, 101));
+                screen[2] = 100, screen[3] = 100, compositor_turns[0].pitch = 404; /* non-mod-16 pitch */
+                check("compositor_gpu_rotate rejects non-mod-16 turn pitch cleanly",
+                      !compositor_gpu_rotate(0, screen, 90, 0, 0, 100, 100));
+        }
+
+        /* 6. compositor_direct_candidate blocks direct scanout when table->list_mode is non-zero */
+        {
+                struct windows fake_table = {0};
+                struct compositor_frame f = {0};
+                unsigned char row = 0;
+
+                fake_table.list_mode = 1;
+                compositor.table = &fake_table;
+                compositor.table_memfd = 1;
+                compositor.card = 1;
+                compositor.width = 100, compositor.height = 100;
+                compositor.w[0] = 100, compositor.h[0] = 100, compositor.picture_w[0] = 100, compositor.picture_h[0] = 100;
+                check("compositor_direct_candidate rejects direct scanout when list_mode is 1",
+                      compositor_direct_candidate(&f, &row, 1) == -1);
+                compositor.table = 0, compositor.table_memfd = 0;
+        }
+        (void)kept_list_mode;
+
+        memory_copy(&gpu, kept_gpu, sizeof(gpu));
+        memory_copy(&compositor_gscene, kept_gscene, sizeof(compositor_gscene));
+        gpu.size = kept_size, gpu_wide = kept_wide, gpu_gfx103 = kept_gfx103, gpu_lost = kept_lost, gpu.pending = kept_pending;
+        gpu.fd = kept_fd, gpu.at = kept_at, compositor.card = kept_card, compositor_gpu_state.up = kept_up;
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -238461,6 +238831,7 @@ b32 main(void)
         gpu_vmfault_rows();
         gpu_flight_rows();
         gpu_import_rows();
+        gpu_engine_and_render_regressions();
         gpu_late_rows();
         gpu_bench_rows();
         flip_wait_rows();
@@ -238505,6 +238876,15 @@ b32 main(void)
                         gpu_fake_step = (int)steps[k], gpu_fake_error = errors[k];
                         started = gpu_start(1 << 20);
                         gpu_fake_step = -1;
+                        if (steps[k] == GPU_REQ_USERPTR && started)
+                        {
+                                check("gpu requirements: failing userptr with udmabuf+PRIME falls back to udmabuf and starts",
+                                      gpu_userptr_gone && gpu_req.first == 0 &&
+                                          (gpu_req.mask & (1u << GPU_REQ_USERPTR)) != 0 &&
+                                          (gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) == (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME));
+                                gpu_stop();
+                                continue;
+                        }
                         check("gpu requirements: a card failing one step stops there, and that step is the first kept", !started && gpu_req.first == steps[k]);
                         check("gpu requirements: that step keeps its error", gpu_req.error == errors[k]);
                         check("gpu requirements: the steps before it passed, its own did not", (gpu_req.mask & (1u << steps[k])) == 0 && (gpu_req.mask & want) == want);
@@ -241859,11 +242239,14 @@ static void dl_app_rows(void)
         check("app list: a frame that records nothing is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_nothing) && shown == 1 && !dirty);
         check("app list: a discarded frame publishes no list", ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN] == gen_before && dl_app_ui.scene == null);
 
-        // A row the compositor refused: the next frame is painted as pixels, and no list is published for it.
+        // A row the compositor refused: ui_app_present reads table->buffer_index so a stale local shown == 0 syncs and flips cleanly to slot 1.
         table->shown[0] = table->frame[0];
+        table->buffer_index[0] = 0;
+        shown = 0;
         table->list_state[0] = 2;
         dirty = 1;
-        check("app list: a refused row's frame is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw) && shown == 0 && !dirty);
+        check("app list: a refused row syncs front from table->buffer_index and paints into slot 1",
+              ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw) && shown == 1 && table->buffer_index[0] == 1 && !dirty);
         check("app list: and no list is published for it", ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN] == gen_before);
         table->list_state[0] = 0;
 
@@ -241973,6 +242356,20 @@ static void dl_list_rows(void)
         table->list_mode = 1;
         compositor_lists_take(0, DL_W, DL_H, damage);
         check("compositor list: a list taken in list mode 0 is not drawn when the mode is on", dl_render_calls == calls);
+        /* A partial list published immediately after refusal (compositor_listed[0] == 0) must be refused with COMPOSITOR_LIST_PARTIAL. */
+        {
+                struct ui_draw_view pv = {0};
+
+                dl_publish();
+                if (ui_draw_list_open((const unsigned char address_to)head, WINDOW_LIST_BYTES, &pv) == 1)
+                {
+                        head[3] = 4; /* narrow clip x0 > 0 */
+                        compositor_listed[0] = 0;
+                        compositor_lists_take(0, DL_W, DL_H, damage);
+                        check("compositor list: partial list right after pixel fallback is refused with COMPOSITOR_LIST_PARTIAL",
+                              table->list_state[0] == 2 && compositor_list_why == COMPOSITOR_LIST_PARTIAL);
+                }
+        }
         table->list_mode = 1;
 }
 

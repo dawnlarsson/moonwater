@@ -8545,7 +8545,8 @@ static fn font_reset(font_engine address_to e)
         memory_zero(e->index, sizeof(e->index));
         e->slot_count = e->shelf_count = e->shelf_bottom = 0;
         e->scratched = false;
-        e->generation++;
+        if (!++e->generation)
+                e->generation = 1;
 }
 
 //      A slot made, at the place in the index the lookup ended at.
@@ -9043,9 +9044,12 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         //      An engine that has never run is zero already -- a static, or a
         //      new mapping -- and clearing it would make every page of its
         //      684 KB resident, 500 KB more than a terminal ever touches.
+        p32 generation = e->started ? e->generation + 1 : 1;
+
         if (e->started)
                 memory_zero(e, sizeof(*e));
         e->started = true;
+        e->generation = generation ? generation : 1;
         e->hint_until = 64;
         e->darken = 12;
         e->darken_until = 32;
@@ -11776,7 +11780,8 @@ static p8 font_identify(font_engine address_to e, p64 chain, p64 grid, p32 spans
         e->ident_turn = (i + 1) % FONT_IDENTS;
         e->idents[i] = (font_ident){chain, grid, spans, true};
         e->ident_last = i;
-        e->generation++;
+        if (!++e->generation)
+                e->generation = 1;
         return (p8)(i + 1);
 }
 

@@ -164,6 +164,67 @@ def text(made):
     return ''.join(lines)
 
 
+def check_regs(asm):
+    src = pathlib.Path(asm).read_text()
+    macros, cur_m, decls = {}, None, {}
+    for line in src.splitlines():
+        s = line.split(';', 1)[0].strip()
+        if not s:
+            continue
+        if s.startswith('.macro '):
+            cur_m = s.split()[1].rstrip(',')
+            macros[cur_m] = []
+        elif s == '.endm':
+            cur_m = None
+        elif cur_m is not None:
+            macros[cur_m].append(s)
+        m = re.match(r'kernel\s+(\w+)\s*,\s*(\d+)\s*,\s*(\d+)', s)
+        if m:
+            decls[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+    cur_k, k_lines = None, {}
+    for line in src.splitlines():
+        s = line.split(';', 1)[0].strip()
+        if cur_k is None:
+            m = re.match(r'^(\w+):$', s)
+            if m and m.group(1) in decls:
+                cur_k = m.group(1)
+                k_lines[cur_k] = []
+        elif re.match(r'^\.size\s+' + re.escape(cur_k) + r'\s*,', s):
+            cur_k = None
+        elif s:
+            k_lines[cur_k].append(s)
+
+    def scan(lines, seen):
+        vg, sg = -1, -1
+        for s in lines:
+            op = s.split()[0]
+            if op in macros and op not in seen:
+                mv, ms = scan(macros[op], seen | {op})
+                vg, sg = max(vg, mv), max(sg, ms)
+            for a, b in re.findall(r'\bv\[(\d+):(\d+)\]', s):
+                vg = max(vg, int(a), int(b))
+            for a in re.findall(r'\bv(\d+)\b', s):
+                vg = max(vg, int(a))
+            for a, b in re.findall(r'\bs\[(\d+):(\d+)\]', s):
+                for r in (int(a), int(b)):
+                    if r <= 105:
+                        sg = max(sg, r)
+            for a in re.findall(r'\bs(\d+)\b', s):
+                r = int(a)
+                if r <= 105:
+                    sg = max(sg, r)
+        return vg, sg
+
+    for name, (nv, ns) in decls.items():
+        if name not in k_lines:
+            continue
+        vg, sg = scan(k_lines[name], set())
+        if vg >= nv:
+            sys.exit('%s: kernel %s uses v%d, exceeding .amdhsa_next_free_vgpr %d' % (asm, name, vg, nv))
+        if sg >= ns:
+            sys.exit('%s: kernel %s uses s%d, exceeding .amdhsa_next_free_sgpr %d' % (asm, name, sg, ns))
+
+
 def main():
     if len(sys.argv) > 3 and sys.argv[1] == '--chips':
         chips(sys.argv[2], sys.argv[3:])
@@ -171,12 +232,17 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == '--probe':
         probe()
         return
+    if len(sys.argv) == 3 and sys.argv[1] == '--check-regs':
+        check_regs(sys.argv[2])
+        return
     if len(sys.argv) == 3 and sys.argv[1] == '--print':
         sys.stdout.write(text(kernels(build(sys.argv[2]))))
         return
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     asm, inc = sys.argv[1], sys.argv[2]
+    if pathlib.Path(asm).name != 'gpu_stress.asm':
+        check_regs(asm)
     llvm = kernels(build(asm))
     ours = arrays(pathlib.Path(inc).read_text())
     if [n for n, _ in llvm] != [n for n, _ in ours]:

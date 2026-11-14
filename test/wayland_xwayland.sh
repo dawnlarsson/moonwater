@@ -112,6 +112,27 @@ failures=$((failures + $(grep -c '^FAIL' "$work/rows.out")))
 
 kill "$xclpid" 2> /dev/null
 kill "$xpid" 2> /dev/null
+wait "$xpid" 2> /dev/null
+
+# When a render node is present, verify Xwayland starts with glamor enabled without glamor/GBM errors.
+if [ -c /dev/dri/renderD128 ]; then
+        if [ -n "$inside" ]; then
+                chroot "$xroot" /usr/bin/env -i $xenv /usr/bin/Xwayland :2 -fullscreen -nolisten local -verbose 3 > "$work/xwayland-glamor.log" 2>&1 &
+        else
+                Xwayland :2 -fullscreen -nolisten local -verbose 3 > "$work/xwayland-glamor.log" 2>&1 &
+        fi
+        xgpid=$!
+        i=0
+        while [ ! -S "${xroot%/}/tmp/.X11-unix/X2" ] && [ ! -S /tmp/.X11-unix/X2 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+        if kill -0 "$xgpid" 2> /dev/null && ! grep -qE "Failed to initialize glamor|GBM Wayland interfaces not available" "$work/xwayland-glamor.log"; then
+                row ok "Xwayland starts with glamor enabled when a render node is present"
+        else
+                row FAIL "Xwayland starts with glamor enabled when a render node is present" "$(tail -5 "$work/xwayland-glamor.log")"
+        fi
+        kill "$xgpid" 2> /dev/null
+        wait "$xgpid" 2> /dev/null
+fi
+
 kill "$cpid" 2> /dev/null
-wait "$xpid" "$cpid" 2> /dev/null
+wait "$cpid" 2> /dev/null
 exit "$failures"

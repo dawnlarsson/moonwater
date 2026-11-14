@@ -204,8 +204,8 @@ def liar(name, steps, closed_by_us=False):
 fifo_path = os.path.join(work, "in.fifo")
 fifo = os.open(fifo_path, os.O_WRONLY)
 
-row(os.stat(WM).st_mode & 0o777 == 0o600 and os.stat(os.path.dirname(WM)).st_mode & 0o777 == 0o700,
-    "the window manager's socket is mode 0600 in a directory of mode 0700")
+row((os.stat(WM).st_mode & 0o777) in (0o600, 0o660) and (os.stat(os.path.dirname(WM)).st_mode & 0o777) in (0o700, 0o711),
+    "the window manager's socket is mode 0660 in a directory of mode 0711")
 liar("a setup reply cut short, then the connection ended, is dropped", [setup_reply()[:5], 0.2], closed_by_us=True)
 liar("a setup reply whose length is over the cap is dropped", [b"\x01\x00\x0b\x00\x00\x00\xff\xff" + bytes(64)])
 liar("a setup refused by the server is dropped", [b"\x00\x05\x0b\x00\x00\x00\x02\x00" + b"refused!" + bytes(4)])

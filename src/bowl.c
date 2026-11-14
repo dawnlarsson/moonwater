@@ -1071,6 +1071,54 @@ static bipolar bowl_kernel_settings_seal(void)
         return 0;
 }
 
+static fn bowl_isolated_node_grant(string_address path, positive gid)
+{
+        p8 held[256];
+
+        if (system_stat_at(AT_FDCWD, path, 0, 0x001, held) < 0)
+                return;
+        if ((held[0] & 0x01) != 0 &&
+            (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) ==
+                0040000)
+                return;
+        system_change_owner_at(AT_FDCWD, path, 0, gid, 0);
+        system_change_mode_at(AT_FDCWD, path, 0660);
+}
+
+static fn bowl_isolated_dir_grant(string_address dir, string_address prefix,
+                                  positive gid)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 path[BOWL_PATH_LIMIT];
+        positive prefix_len = prefix ? string_length(prefix) : 0;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, dir))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                string_address name = entry->d_name;
+
+                if (file_is_dot(name))
+                        continue;
+                if (prefix_len &&
+                    string_compare_max(name, prefix, prefix_len))
+                        continue;
+                if (path_join(path, sizeof(path), dir, name))
+                        bowl_isolated_node_grant(path, gid);
+        }
+        file_walk_close(address_of walk);
+}
+
+static fn bowl_isolated_devices(void)
+{
+        bowl_isolated_dir_grant("/dev/dri", "renderD", 105);
+        bowl_isolated_dir_grant("/dev/dri", "card", 44);
+        bowl_isolated_node_grant("/dev/kfd", 105);
+        bowl_isolated_dir_grant("/dev/dma_heap", null, 105);
+        bowl_isolated_dir_grant("/dev", "nvidia", 105);
+}
+
 static bipolar bowl_isolated_populate(void)
 {
         bipolar failed = 0;
@@ -1079,11 +1127,14 @@ static bipolar bowl_isolated_populate(void)
         {
                 struct bowl_mount_point address_to point =
                     bowl_isolated_mounts + i;
+                string_address data =
+                    string_equals(point->target, "/dev/shm") ? "mode=1777" : 0;
 
                 failed = bowl_mkdir(point->target);
                 if (!failed)
                         failed = system_mount(point->source, point->target,
-                                              point->filesystem, point->flags, 0);
+                                              point->filesystem, point->flags,
+                                              data);
 
                 if (failed)
                 {
@@ -1092,6 +1143,7 @@ static bipolar bowl_isolated_populate(void)
                 }
         }
 
+        bowl_isolated_devices();
         return bowl_kernel_settings_seal();
 }
 
@@ -1943,6 +1995,10 @@ static bipolar bowl_input_mask(void)
         return 0;
 }
 
+static fn bowl_session_prepare_at(string_address home, string_address runtime,
+                                  bool user_dirs);
+static fn bowl_session_prepare_home_dirs(string_address home);
+
 static DEAD_END fn bowl_inside(string_address root,
                                string_address program,
                                string_address address_to arguments,
@@ -1956,7 +2012,10 @@ static DEAD_END fn bowl_inside(string_address root,
         /* Fast keeps the host's /run and /tmp, and the files this writes are
            Moonwater's /etc, which the view makes read-only. */
         if (!isolated)
-                bowl_session_prepare_from(environment);
+                bowl_session_prepare_at(
+                    string_get_environment(environment, "HOME"),
+                    string_get_environment(environment, "XDG_RUNTIME_DIR"),
+                    false);
 
         bowl_doing("make private", "/");
         failed = system_mount(0, "/", 0, MS_REC | MS_PRIVATE, 0);
@@ -1975,9 +2034,13 @@ static DEAD_END fn bowl_inside(string_address root,
         }
 
         /* Isolated /run is a fresh tmpfs: the guest sees the directories the
-           session variables name once it is there. */
+           session variables name once it is there. Fast creates the home XDG
+           subdirectories after /home/user has been mounted over /root. */
         if (isolated)
                 bowl_session_prepare_from(environment);
+        else
+                bowl_session_prepare_home_dirs(
+                    string_get_environment(environment, "HOME"));
 
         /*
                 Fast mode has not pivoted, so executing ROOT + /program by
@@ -2186,6 +2249,17 @@ static b32 bowl_session_unusable(string_address entry)
                 bowl_session_fill_started();
                 return !string_equals(bowl_user_assignment + sizeof("USER=") - 1,
                                       "root");
+        }
+        if (which == BOWL_VAR_RUNTIME &&
+            (bowl_path_same(value, BOWL_RUNTIME_DIR "0") ||
+             !string_compare_max(value, BOWL_RUNTIME_DIR "0/",
+                                 sizeof(BOWL_RUNTIME_DIR "0/") - 1)))
+        {
+                bowl_session_fill_started();
+                return !bowl_path_same(bowl_runtime_path, BOWL_RUNTIME_DIR "0") &&
+                       (MOONWATER_STRICT_BOWL >= STRICT_TIGHT ||
+                        system_access_at(AT_FDCWD, BOWL_RUNTIME_DIR "0", 2) <
+                            0);
         }
         return bowl_variables[which].path
                    ? bowl_path_steps(value) || bowl_session_host_path(value)
@@ -2594,7 +2668,8 @@ static fn bowl_session_identity(void)
                             BOWL_USER_ID_TEXT ":" BOWL_USER_NAME ":"
                             BOWL_SESSION_HOME ":/bin/sh\n"},
             {"/etc/group", "root:x:0:\n" BOWL_USER_NAME ":x:" BOWL_USER_ID_TEXT
-                           ":\n" BOWL_INPUT_GROUP_LINE "nogroup:x:65534:\n"},
+                           ":\naudio:x:29:\nvideo:x:44:\n" BOWL_INPUT_GROUP_LINE
+                           "render:x:105:\nnogroup:x:65534:\n"},
         };
         static const p8 digits[] = "0123456789abcdef";
         p8 raw[16];
@@ -2700,7 +2775,13 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
 
         if (!runtime || bowl_path_steps(runtime) ||
             bowl_session_host_path(runtime) ||
-            bowl_path_same(runtime, bowl_runtime_path))
+            bowl_path_same(runtime, bowl_runtime_path) ||
+            ((bowl_path_same(runtime, BOWL_RUNTIME_DIR "0") ||
+              !string_compare_max(runtime, BOWL_RUNTIME_DIR "0/",
+                                  sizeof(BOWL_RUNTIME_DIR "0/") - 1)) &&
+             !bowl_path_same(bowl_runtime_path, BOWL_RUNTIME_DIR "0") &&
+             (MOONWATER_STRICT_BOWL >= STRICT_TIGHT ||
+              system_access_at(AT_FDCWD, BOWL_RUNTIME_DIR "0", 2) < 0)))
                 runtime = bowl_runtime_path;
 
         /*  0700 is Weston's requirement of the runtime directory it is
@@ -2805,6 +2886,13 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
         bowl_session_home_dirs(home);
 }
 
+static fn bowl_session_prepare_home_dirs(string_address home)
+{
+        if (!home || bowl_path_steps(home) || bowl_session_host_path(home))
+                home = (string_address)BOWL_SESSION_HOME;
+        bowl_session_home_dirs(home);
+}
+
 static fn bowl_session_prepare(string_address home, string_address runtime)
 {
         bowl_session_prepare_at(home, runtime, true);
@@ -2845,6 +2933,21 @@ static bool bowl_sound_offered(void)
         return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;
 }
 
+#define BOWL_WAYLAND_VARIABLE "WAYLAND_DISPLAY"
+#define BOWL_WAYLAND_SOCKET "/run/moonwater/wayland-0"
+
+static bool bowl_wayland_offered(void)
+{
+        p8 held[256];
+
+        if (system_stat_at(AT_FDCWD, (string_address)BOWL_WAYLAND_SOCKET, 0,
+                           0x001, held) < 0)
+                return false;
+        return (held[0] & 0x01) != 0 &&
+               (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) ==
+                   0140000;
+}
+
 /*
         The language the person chose for the desktop (`moonwater language`, a code of two letters in /root/language), for the
         programs of a bowl to start in: LANGUAGE=de, which is the variable a browser takes its interface language from and a
@@ -2882,8 +2985,11 @@ static string_address address_to bowl_environment(
 {
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
-        bool have_bus = false, have_sound = false, have_language = false;
-        bool offer_bus = bowl_session_bus_offered(), offer_sound = bowl_sound_offered();
+        bool have_bus = false, have_sound = false, have_wayland = false,
+             have_language = false;
+        bool offer_bus = bowl_session_bus_offered(),
+             offer_sound = bowl_sound_offered(),
+             offer_wayland = bowl_wayland_offered();
         string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         positive n = 0;
         b32 skipped = false;
@@ -2907,6 +3013,8 @@ static string_address address_to bowl_environment(
                         have_bus = true;
                 if (bowl_env_named(inherited[at], BOWL_SOUND_VARIABLE))
                         have_sound = true;
+                if (bowl_env_named(inherited[at], BOWL_WAYLAND_VARIABLE))
+                        have_wayland = true;
                 if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
                         have_language = true;
 
@@ -2935,10 +3043,12 @@ static string_address address_to bowl_environment(
                         missing += !have[at];
                 missing += offer_bus && !have_bus;
                 missing += offer_sound && !have_sound;
+                missing += offer_wayland && !have_wayland;
                 missing += language && !have_language;
                 if (!skipped && !missing)
                         return inherited;
-                if (n + BOWL_ENV_DEFAULTS >= BOWL_ENV_ROOM)
+                if (n + BOWL_ENV_DEFAULTS + (offer_wayland ? 1 : 0) >=
+                    BOWL_ENV_ROOM)
                 {
                         if (!skipped)
                                 return inherited;
@@ -2954,6 +3064,8 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address)BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET;
         if (offer_sound && !have_sound)
                 mixed[n++] = (string_address)BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET;
+        if (offer_wayland && !have_wayland)
+                mixed[n++] = (string_address)BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET;
         if (language && !have_language)
                 mixed[n++] = language;
         mixed[n] = null;
@@ -3224,6 +3336,7 @@ typedef struct { p32 effective; p32 permitted; p32 inheritable; } bowl_cap_data;
 #define BOWL_CAP_VERSION_3 0x20080522u
 #define BOWL_PR_CAP_AMBIENT 47
 #define BOWL_PR_CAP_AMBIENT_RAISE 2
+#define BOWL_PR_CAP_AMBIENT_CLEAR_ALL 4
 
 /*
         Whether the program is given its namespace's capabilities across
@@ -3344,13 +3457,31 @@ static string_address address_to bowl_without_exposed_path(
         return clean;
 }
 
+static fn bowl_drop_ambient_capabilities(void)
+{
+        bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
+        bowl_cap_data data[2] = {{0}};
+
+        ul_prctl(BOWL_PR_CAP_AMBIENT, BOWL_PR_CAP_AMBIENT_CLEAR_ALL, 0);
+        if (system_call_2(syscall(capget), (positive)address_of header,
+                          (positive)data) < 0)
+                return;
+        data[0].inheritable = 0;
+        data[1].inheritable = 0;
+        system_call_2(syscall(capset), (positive)address_of header,
+                      (positive)data);
+}
+
 static bool bowl_keep_capabilities(void)
 {
         bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
         bowl_cap_data data[2] = {{0}};
 
         if (!bowl_capabilities_wanted(file_environment_all()))
+        {
+                bowl_drop_ambient_capabilities();
                 return true;
+        }
         if (system_call_2(syscall(capget), (positive)address_of header,
                           (positive)data) < 0)
                 return false;
@@ -3567,6 +3698,43 @@ static fn bowl_become_user(bool input)
         bowl_fill_valid = false;
 }
 
+#define BOWL_RLIMIT_NOFILE 7
+#define BOWL_RLIMIT_MEMLOCK 8
+#define BOWL_NOFILE_TARGET ((p64)524288)
+#define BOWL_MEMLOCK_TARGET ((p64)64 * 1024 * 1024)
+
+static fn bowl_raise_rlimit(positive resource, p64 target)
+{
+        p64 lim[2] = {target, target};
+
+        if (system_call_4(syscall(prlimit64), 0, resource, 0, (positive)lim) < 0)
+        {
+                (void)system_call_4(syscall(prlimit64), 0, resource,
+                                    (positive)lim, 0);
+                return;
+        }
+        if (lim[0] >= target)
+                return;
+
+        p64 want[2] = {target, lim[1] < target ? target : lim[1]};
+        if (system_call_4(syscall(prlimit64), 0, resource, (positive)want, 0) <
+                0 &&
+            lim[0] < lim[1])
+        {
+                lim[0] = lim[1] < target ? lim[1] : target;
+                (void)system_call_4(syscall(prlimit64), 0, resource,
+                                    (positive)lim, 0);
+        }
+}
+
+static fn bowl_resource_limits(void)
+{
+        bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
+#if MOONWATER_STRICT_BOWL < STRICT_LOCKED
+        bowl_raise_rlimit(BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET);
+#endif
+}
+
 static b32 bowl_launch(string_address root, string_address program,
                        string_address address_to arguments,
                        bool isolated)
@@ -3584,10 +3752,13 @@ static b32 bowl_launch(string_address root, string_address program,
                               "run it from a console shell, not from a "
                               "desktop session\n"));
 
+        bowl_resource_limits();
         if (!isolated && program && !bowl_as_root && bowl_is_root())
                 bowl_become_user(bowl_input_granted(root));
         environment = bowl_environment(file_environment_all());
         environment = bowl_without_exposed_path(environment);
+        if (!bowl_capabilities_wanted(environment))
+                bowl_drop_ambient_capabilities();
 
         terminal_terminfo_install();
 
@@ -8293,8 +8464,11 @@ static string_address bowl_desktop_alpine[] = {
     "breeze-icons", "kde-gtk-config", "xdg-desktop-portal-kde",
     "qt6-qtwayland", "xwayland", "dbus", "elogind", "polkit-elogind",
     "pipewire", "pipewire-pulse", "wireplumber", "mesa-dri-gallium",
-    "mesa-egl", "mesa-gbm", "mesa-vulkan-ati", "mesa-vulkan-intel",
-    "systemsettings", "font-noto", "font-dejavu", "xdg-user-dirs", null};
+    "mesa-va-gallium", "mesa-vdpau-gallium", "mesa-egl", "mesa-gbm",
+    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",
+    "mesa-vulkan-layers", "vulkan-loader", "intel-media-driver",
+    "libva-intel-driver", "systemsettings", "font-noto", "font-dejavu",
+    "xdg-user-dirs", null};
 
 /* 2024 MiB in 631 packages: 1963 MiB in 628 measured on x86-64 Alpine 3.24
    on 2026-10-01, and the three added since by their own sizes (apk add -s). */
@@ -8379,7 +8553,8 @@ static string_address bowl_desktop_session[] = {
     "> /bowls/alpine/etc/pam.d/kde",
     "bowl udev",
     "bowl bus",
-    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node\" ] || continue; "
+    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
+    "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done; "
     "[ \"$gl\" = card ] || export QSG_RENDER_LOOP=${QSG_RENDER_LOOP:-basic}",
     "exec dbus-run-session -- startplasma-wayland",
@@ -8401,23 +8576,32 @@ static string_address bowl_desktop_session[] = {
 */
 #define BOWL_GRAPHICS_ALPINE_PACKAGES                                       \
     "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",     \
-    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",           \
-    "vulkan-loader", "alsa-lib", "libpulse", "fontconfig", "font-dejavu"
+    "mesa-va-gallium", "mesa-vdpau-gallium", "mesa-vulkan-ati",             \
+    "mesa-vulkan-intel", "mesa-vulkan-swrast", "mesa-vulkan-layers",        \
+    "vulkan-loader", "intel-media-driver", "libva-intel-driver",            \
+    "alsa-lib", "libpulse", "fontconfig", "font-dejavu"
 
 static string_address bowl_graphics_alpine[] = {
     BOWL_GRAPHICS_ALPINE_PACKAGES, null};
 static string_address bowl_graphics_debian[] = {
     "libegl1", "libgl1", "libgles2", "libgbm1", "libgl1-mesa-dri",
-    "libegl-mesa0", "libglx-mesa0", "mesa-vulkan-drivers", "libvulkan1",
-    "libasound2t64", "libpulse0", "fontconfig", "fonts-dejavu-core", null};
+    "libegl-mesa0", "libglx-mesa0", "mesa-vulkan-drivers", "mesa-va-drivers",
+    "mesa-vdpau-drivers", "intel-media-va-driver", "i965-va-driver",
+    "libva2", "libva-drm2", "libva-wayland2", "libva-x11-2", "libvdpau1",
+    "libvulkan1", "libasound2t64", "libpulse0", "fontconfig",
+    "fonts-dejavu-core", null};
 static string_address bowl_graphics_arch[] = {
     "mesa", "libglvnd", "vulkan-icd-loader", "vulkan-radeon", "vulkan-intel",
-    "vulkan-virtio", "vulkan-swrast", "alsa-lib", "libpulse", "fontconfig",
+    "vulkan-virtio", "vulkan-swrast", "vulkan-mesa-layers",
+    "libva-mesa-driver", "mesa-vdpau", "intel-media-driver",
+    "libva-intel-driver", "alsa-lib", "libpulse", "fontconfig",
     "ttf-dejavu", null};
 static string_address bowl_graphics_fedora[] = {
     "mesa-libEGL", "mesa-libGL", "mesa-libGLES", "mesa-libgbm",
-    "mesa-dri-drivers", "mesa-vulkan-drivers", "vulkan-loader", "alsa-lib",
-    "pulseaudio-libs", "fontconfig", "dejavu-sans-fonts", null};
+    "mesa-dri-drivers", "mesa-va-drivers", "mesa-vdpau-drivers",
+    "mesa-vulkan-drivers", "vulkan-loader", "libva", "intel-media-driver",
+    "libva-intel-driver", "alsa-lib", "pulseaudio-libs", "fontconfig",
+    "dejavu-sans-fonts", null};
 
 static const struct bowl_component bowl_graphics_components[] = {
     {"alpine", bowl_graphics_alpine, 0},
@@ -8525,7 +8709,7 @@ static string_address bowl_chrome_session[] = {
     // GTK 3 (the file dialog in the browser) does not ask the portal what the scheme is: it is told at the start, by the theme
     // of the moment (the bus keeps it in color-scheme), unless the person has named one.
     "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
-    "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
+    "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     // musl 1.2.6 implements pwrite() via SYS_pwritev2, which Chromium's
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
@@ -8578,13 +8762,16 @@ static string_address bowl_chrome_names[] = {
 static string_address bowl_steam_arch[] = {
     // Steam itself; its dependencies are pacman's.
     "steam",
-    // The GPU: Mesa's GL and the Vulkan loader, with the Radeon, Intel, VirtIO
-    // and software Vulkan drivers, in 64 and 32 bits.
+    // The GPU: Mesa's GL, VA-API/VDPAU and the Vulkan loader, with the Radeon,
+    // Intel, VirtIO and software Vulkan drivers and Mesa layers, in 64 and 32 bits.
     "mesa", "lib32-mesa", "libglvnd", "lib32-libglvnd",
     "vulkan-icd-loader", "lib32-vulkan-icd-loader", "vulkan-radeon",
     "lib32-vulkan-radeon", "vulkan-intel", "lib32-vulkan-intel",
     "vulkan-virtio", "lib32-vulkan-virtio", "vulkan-swrast",
-    "lib32-vulkan-swrast",
+    "lib32-vulkan-swrast", "vulkan-mesa-layers", "lib32-vulkan-mesa-layers",
+    "libva-mesa-driver", "lib32-libva-mesa-driver", "mesa-vdpau",
+    "lib32-mesa-vdpau", "intel-media-driver", "libva-intel-driver",
+    "lib32-libva-intel-driver",
     // Sound: the PulseAudio client and ALSA's plugin for it, to Moonwater's
     // sound server, in 64 and 32 bits.
     "libpulse", "lib32-libpulse", "alsa-lib", "alsa-plugins",
@@ -9465,9 +9652,10 @@ static string_address bowl_steam_session[] = {
     "export STEAM_ZENITY=${STEAM_ZENITY:-zenity} GTK_A11Y=none",
     "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
     "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
-    "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
+    "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node\" ] || continue; "
+    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
+    "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",
     "[ \"$gl\" = card ] || export LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-1} GSK_RENDERER=${GSK_RENDERER:-cairo}",
     // Rootless, through the wrapper, when Canvas listens for a window manager of Xwayland: Steam runs under it, so the X server
@@ -9478,12 +9666,16 @@ static string_address bowl_steam_session[] = {
     "[ $status -ne 125 ] && exit $status",
     "echo \"steam: the rootless X server did not start, starting the rootful one\" >&2",
     "fi",
-    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland " BOWL_STEAM_DISPLAY " -nolisten local -nolisten tcp -fullscreen &",
+    "display=" BOWL_STEAM_DISPLAY "; xsaving=" BOWL_STEAM_X_SOCKET "; "
+    "d=1; while [ $d -le 32 ]; do "
+    "if [ ! -e \"/tmp/.X11-unix/X$d\" ] && [ ! -e \"/tmp/.X$d-lock\" ]; then "
+    "display=\":$d\"; xsaving=\"/tmp/.X11-unix/X$d\"; break; fi; "
+    "d=$((d + 1)); done",
+    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland \"$display\" -nolisten local -nolisten tcp -fullscreen &",
     "xwayland=$!",
-    "n=0; while [ ! -S " BOWL_STEAM_X_SOCKET " ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
-    "[ -S " BOWL_STEAM_X_SOCKET " ] || { echo \"steam: the X server did not start (no "
-    BOWL_STEAM_X_SOCKET " in 5 s)\" >&2; kill $xwayland 2>/dev/null; exit 1; }",
-    "export DISPLAY=" BOWL_STEAM_DISPLAY,
+    "n=0; while [ ! -S \"$xsaving\" ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
+    "[ -S \"$xsaving\" ] || { echo \"steam: the X server did not start (no $xsaving in 5 s)\" >&2; kill $xwayland 2>/dev/null; exit 1; }",
+    "export DISPLAY=\"$display\"",
     "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"",
     "status=$?; kill $xwayland 2>/dev/null; exit $status",
     null};

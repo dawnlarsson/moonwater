@@ -78,7 +78,7 @@ static struct wl_subcompositor *subcompositor;
 static struct zwp_linux_dmabuf_v1 *dmabuf_global;
 static struct gbm_device *gbm;
 #endif
-static int use_dmabuf, use_lock, follow, only_whole;
+static int use_dmabuf, use_lock, follow, only_whole, use_abgr, use_y_invert, use_crop;
 #ifdef HAVE_SCALE
 static struct wl_output *outputs[8];
 static int output_count;
@@ -159,7 +159,9 @@ static int make_buffer(struct buffer *b, int w, int h)
 #ifdef HAVE_DMABUF
         if (use_dmabuf)
         {
-                struct gbm_bo *bo = gbm_bo_create(gbm, (uint32_t)w, (uint32_t)h, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+                uint32_t fmt = use_abgr ? GBM_FORMAT_ABGR8888 : GBM_FORMAT_XRGB8888;
+                uint32_t flags = use_y_invert ? ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT : 0;
+                struct gbm_bo *bo = gbm_bo_create(gbm, (uint32_t)w, (uint32_t)h, fmt, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
                 struct zwp_linux_buffer_params_v1 *params;
 
                 if (!bo)
@@ -172,7 +174,7 @@ static int make_buffer(struct buffer *b, int w, int h)
                         return -1;
                 params = zwp_linux_dmabuf_v1_create_params(dmabuf_global);
                 zwp_linux_buffer_params_v1_add(params, b->dmabuf, 0, 0, gbm_bo_get_stride(bo), 0, 0);
-                b->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h, GBM_FORMAT_XRGB8888, 0);
+                b->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h, fmt, flags);
                 zwp_linux_buffer_params_v1_destroy(params);
                 wl_buffer_add_listener(b->buffer, &buffer_listener, b);
                 gbm_bo_destroy(bo);
@@ -196,7 +198,7 @@ static int make_shm_buffer(struct buffer *b, int w, int h)
         b->size = (size_t)size;
         b->fd = fd;
         pool = wl_shm_create_pool(shm, fd, size);
-        b->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_XRGB8888);
+        b->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, stride, use_abgr ? WL_SHM_FORMAT_ABGR8888 : WL_SHM_FORMAT_XRGB8888);
         wl_buffer_add_listener(b->buffer, &buffer_listener, b);
         wl_shm_pool_destroy(pool);
         if (!cut_files)
@@ -960,7 +962,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdDKubLSIC:PqvT")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdDKubBYVLSIC:PqvT")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -976,6 +978,9 @@ int main(int argc, char **argv)
                 case 'K': hold = 1; break;
                 case 'u': child_wanted = 1; break;
                 case 'b': use_dmabuf = 1; break;
+                case 'B': use_abgr = 1; break;
+                case 'Y': use_y_invert = 1; break;
+                case 'V': use_crop = 1; break;
                 case 'L': use_lock = 1; break;
                 case 'S': follow = 1; break;
                 case 'I': only_whole = 1; break;
@@ -1045,6 +1050,13 @@ int main(int argc, char **argv)
                 if (fractional_manager)
                         wp_fractional_scale_v1_add_listener(wp_fractional_scale_manager_v1_get_fractional_scale(fractional_manager, surface),
                                                             &fractional_listener, 0);
+        }
+        else if (use_crop && viewporter)
+        {
+                viewport = wp_viewporter_get_viewport(viewporter, surface);
+                wp_viewport_set_source(viewport, wl_fixed_from_int(0), wl_fixed_from_int(0),
+                                       wl_fixed_from_int(width / 2), wl_fixed_from_int(height / 2));
+                wp_viewport_set_destination(viewport, width, height);
         }
 #else
         if (follow)
