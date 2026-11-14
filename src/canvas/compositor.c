@@ -6926,6 +6926,9 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                         {
                                 unsigned int *into = compositor.backdrop[row] + (long)(by0 - blocks[1]) * blocks[2] + (bx0 - blocks[0]);
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                compositor_wl_lent_sync(1);
+#endif
                                 if (!compositor_frost(frames, at, bx0, by0, bx1 - bx0, by1 - by0, into, (unsigned long)blocks[2]))
                                 {
                                         compositor_glass_drop(row);
@@ -9316,18 +9319,30 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return g->why;
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
                 return g->why;
-        for (unsigned int at = 0; at < rects; at++)
-                if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
-                               (unsigned int)compositor.height, (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
-                               (unsigned int)rect[at][3]))
+        {
+                int aligned = !(g->width & 3) && !((compositor.scanout_pitch / 4) & 3) && !(out & 15);
+
+                for (unsigned int at = 0; at < rects; at++)
                 {
-                        if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
-                                compositor_gpu_recover();
-                        // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
-                        // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
-                        compositor_gpu_job_failed();
-                        return compositor_gpu_job_why();
+                        b32 ok = (at > 0 && aligned)
+                                     ? gpu_scene_more(COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
+                                                      (unsigned int)compositor.height, (unsigned int)rect[at][0], (unsigned int)rect[at][1],
+                                                      (unsigned int)rect[at][2], (unsigned int)rect[at][3])
+                                     : gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
+                                                 (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                                 (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
+                                                 (unsigned int)rect[at][3]);
+                        if (!ok)
+                        {
+                                if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
+                                        compositor_gpu_recover();
+                                // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
+                                // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
+                                compositor_gpu_job_failed();
+                                return compositor_gpu_job_why();
+                        }
                 }
+        }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
         compositor_gpu_state.failures = 0;
@@ -9931,7 +9946,6 @@ static void compositor_present(void)
 
         compositor_record_begin();
         compositor_present_on_card = 0;
-        compositor_wl_lent_sync(1);
         compositor_present_frames();
         compositor_wl_lent_sync(0);
         ended = clock_monotonic_nanoseconds();
@@ -10024,6 +10038,9 @@ static void compositor_present_frames(void)
                                                 frames[windows - 1].pixels = stage;
                                         }
                                 }
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                compositor_wl_lent_sync(1);
+#endif
                                 compositor_band_draw(frames, windows, redo);
                         }
                 }
@@ -10199,6 +10216,10 @@ static void compositor_present_frames(void)
         int apart = !gpu_drawn && !flip_own && compositor_changed_ready();
 #else
         int apart = !flip_own && compositor_changed_ready(), gpu_composed = 0;
+#endif
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (!gpu_composed)
+                compositor_wl_lent_sync(1);
 #endif
         if (!compositor.mirror_bytes && compositor.changed > 0)
         {

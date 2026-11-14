@@ -266,9 +266,10 @@ struct wayland_picture
         // Viewport source rectangle in 1/256 buffer-local surface pixels (src_width 0 for whole buffer) and scaled destination pixels (0 for none).
         long src_x, src_y, src_width, src_height;
         long dst_width, dst_height;
-        // DRM fourcc and modifier when dma-buf (or 0 to infer from format / linear).
+        // DRM fourcc and modifier when dma-buf (or 0 to infer from format / linear), and monotonic pool identity.
         unsigned int fourcc;
         unsigned long modifier;
+        unsigned long pool_id;
         // Extra planes for multi-plane or planar dma-bufs (plane 0 duplicates sync_fd when >= 0).
         long plane_count;
         long plane_fd[4];
@@ -511,6 +512,7 @@ struct wayland_pool
         long size;
         long refs;
         long gone;
+        unsigned long id;
         void *at;
 };
 
@@ -740,6 +742,7 @@ static struct
         long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
         unsigned int out_dirty;                      // bitmask of clients with queued bytes or dead state waiting to flush
         long idle_notifies;                          // live ext_idle_notification_v1 count across all clients
+        unsigned long pool_id;                       // monotonic pool identity counter
 } wayland;
 
 /* ---- the wire ---- */
@@ -2125,6 +2128,7 @@ static void wayland_fill_picture_meta(struct wayland_picture *picture, const str
         picture->height = b->height;
         picture->format = b->format;
         picture->sync_fd = p->dmabuf ? p->fd : -1;
+        picture->pool_id = p->id;
         picture->transform = transform;
         picture->y_invert = b->y_invert;
         picture->fourcc = b->fourcc ? b->fourcc : (unsigned int)(b->format == WLN_wl_shm_format_argb8888 ? WAYLAND_FOURCC_ARGB8888
@@ -6672,6 +6676,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         c->pools[pool].size = need;
         c->pools[pool].refs = 1;
         c->pools[pool].gone = 1;
+        c->pools[pool].id = ++wayland.pool_id;
         c->pools[pool].at = c->pools[pool].unmapped ? 0 : at;
         c->pool_bytes += need;
         c->buffers[buffer].live = 1;

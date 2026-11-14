@@ -149,6 +149,7 @@ static struct
                 positive va;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
         } source[WINDOWS];
+        int lent_synced;
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
 
 /*
@@ -917,6 +918,18 @@ static void compositor_wl_lent_sync(int start)
 {
         unsigned long end_sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
 
+        if (start)
+        {
+                if (compositor_wl.lent_synced)
+                        return;
+                compositor_wl.lent_synced = 1;
+        }
+        else
+        {
+                if (!compositor_wl.lent_synced)
+                        return;
+                compositor_wl.lent_synced = 0;
+        }
         for (int row = 0; row < WINDOWS; row++)
                 if (compositor_lent(row) && compositor_wl.lent[row].fd >= 0)
                 {
@@ -993,7 +1006,9 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         }
         if (compositor_wl_cut(picture->pixels))
                 return 0;
-        if (picture->sync_fd >= 0)
+        if (picture->pool_id)
+                dev = 0, ino = picture->pool_id;
+        else if (picture->sync_fd >= 0)
                 compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
         same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
                compositor_wl.lent[row].size == picture->map_bytes && compositor_wl.lent[row].dev == dev && compositor_wl.lent[row].ino == ino &&
@@ -1095,7 +1110,10 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 long need_bytes = picture->map_bytes > 0 ? picture->map_bytes
                                                          : (long)picture->plane_offset[0] + (long)picture->height * (long)stride;
 
-                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+                if (picture->pool_id)
+                        dev = 0, ino = picture->pool_id;
+                else
+                        compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
                 if (compositor_wl.source[row].map != picture->map || compositor_wl.source[row].fd != picture->sync_fd ||
                     compositor_wl.source[row].size != need_bytes || compositor_wl.source[row].dev != dev ||
                     compositor_wl.source[row].ino != ino ||

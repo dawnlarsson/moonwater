@@ -1921,6 +1921,26 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         return gpu_run();
 }
 
+// Submit an additional damage rectangle for a scene already binned into bins_at by gpu_scene.
+static b32 gpu_scene_more(positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
+                          unsigned int dy0, unsigned int dx1, unsigned int dy1)
+{
+        struct gpu_args address_to a = GPU_ARGS;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!gpu_idle())
+                return false;
+        dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
+        if (dx0 >= dx1 || dy0 >= dy1)
+                return true;
+        dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u;
+        dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
+        a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at;
+        a->dp = pitch, a->sp = w, a->gp = h;
+        a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
+        return gpu_run();
+}
+
 // One job moving a picture (src, sp pixels a row) into dst (dp a row) over w by h pixels, the card told by op. op 0 copies one rectangle,
 // d[y * dp + x] = s[y * sp + x] for x below w and y below h, the pitches in pixels; op 7 scales nearest, the card told by tables where each column and
 // row comes from: the processor has made the w entries of the columns' and then the h entries of the rows' at tab (a GPU address), each the source's
