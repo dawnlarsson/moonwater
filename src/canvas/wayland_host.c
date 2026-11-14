@@ -1084,12 +1084,22 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         }
         if (compositor_wl_cut(picture->pixels))
                 return 0;
+#ifdef MOONWATER_GPU_C
+        if (picture->sync_fd < 0 && compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead &&
+            !gpu_va_bytes(at, (positive)(height - 1) * stride + (positive)width * 4) &&
+            !gpu_map(at, (positive)(height - 1) * stride + (positive)width * 4))
+                return 0;
+#endif
         if (picture->pool_id)
                 dev = 0, ino = picture->pool_id;
         else if (picture->sync_fd >= 0)
                 compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
         same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
                compositor_wl.lent[row].size == picture->map_bytes && compositor_wl.lent[row].dev == dev && compositor_wl.lent[row].ino == ino &&
+               compositor_wl.lent[row].width == width && compositor_wl.lent[row].height == height &&
+               compositor_wl.lent[row].pitch == stride / 4 && compositor_wl.lent[row].fourcc == picture->fourcc &&
+               compositor_wl.lent[row].offset == (unsigned int)picture->plane_offset[0] &&
+               compositor_wl.lent[row].modifier == picture->modifier &&
                (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
         if (picture->sync_fd >= 0)
         {
@@ -2964,6 +2974,9 @@ static int compositor_wl_sync_start(long client, int fd)
         unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
         positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
+
+        if (client >= 0 && client < WAYLAND_CLIENTS && compositor_wl.slow_until[client] > clock_monotonic_nanoseconds())
+                return 0;
 
         compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
         got = compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);

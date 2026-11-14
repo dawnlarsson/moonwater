@@ -1043,9 +1043,10 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                         gpu_map_next = at + (to - from);
                         return true;
                 }
-                if (taken == -19 || taken == -22 || taken == -95 || taken == -38 || taken == -14 || taken == -1) // ENODEV, EINVAL, EOPNOTSUPP, ENOSYS, EFAULT, EPERM
+                if (taken == -19 || taken == -95 || taken == -38 ||
+                    (!gpu_maps_user && (taken == -22 || taken == -14 || taken == -1))) // ENODEV, EOPNOTSUPP, ENOSYS (or EINVAL/EFAULT/EPERM before any userptr succeeded)
                         gpu_userptr_gone = 1;
-                else
+                else if (taken != -22 && taken != -14 && taken != -1)
                 {
                         gpu_map_why = 3 | (unsigned int)-taken << 8;
                         gpu_map_refused(from);

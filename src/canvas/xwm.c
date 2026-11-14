@@ -1277,7 +1277,8 @@ static void compositor_xwm_consume(long n)
 {
         struct compositor_xwm *x = &compositor_xwm;
 
-        memory_copy(x->in, x->in + n, (positive)(x->in_len - n));
+        if (n > 0 && x->in_len > n)
+                memory_copy(x->in, x->in + n, (positive)(x->in_len - n));
         x->in_len -= n;
 }
 
@@ -1450,7 +1451,8 @@ static void compositor_xwm_flush(void)
                 compositor_xwm_drop("the write failed");
                 return;
         }
-        memory_copy(x->out, x->out + got, (positive)(x->out_len - got));
+        if (x->out_len > got)
+                memory_copy(x->out, x->out + got, (positive)(x->out_len - got));
         x->out_len -= got;
 }
 
@@ -1459,7 +1461,7 @@ static void compositor_xwm_read(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
 
-        for (int reads = 0; reads < 4 && x->fd >= 0 && !x->broken; reads++)
+        for (int reads = 0; reads < 4 && x->fd >= 0 && !x->broken && x->out_len <= COMPOSITOR_XWM_OUT - COMPOSITOR_XWM_ROOM; reads++)
         {
                 long got;
 

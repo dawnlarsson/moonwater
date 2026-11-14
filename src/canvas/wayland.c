@@ -3470,6 +3470,7 @@ static int wayland_syncobj_check(struct wayland_client *c, struct wayland_surfac
                 c->stalled_fd = -1;
                 c->stalled_sync_handle = c->timelines[tl].handle;
                 c->stalled_sync_point = s->pending_sync_acq_point;
+                c->budget_surface = -1;
                 return 1;
         }
         return 0;
@@ -3512,11 +3513,16 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         // not held (the commit before it may have set one, and the frame that clears it is the next one drawn).
         if (wayland_hold_wanted(c, s))
         {
+                int fifo_hold = s->pending_fifo && s->barrier && s->barrier_frame == wayland.frames;
+
                 c->hold = 1;
                 c->hold_surface = wayland_surface_index(c, s);
-                c->hold_at = s->xwait && s->xsurface && !s->xadopted ? s->xwait : s->pending_timestamp ? (long)(s->pending_timestamp / 1000000ul) : 0;
+                c->hold_at = s->xwait && s->xsurface && !s->xadopted ? s->xwait
+                             : (!fifo_hold && s->pending_timestamp) ? (long)(s->pending_timestamp / 1000000ul)
+                                                                    : 0;
                 c->stalled_fd = -1;
                 c->stalled_sync_handle = -1;
+                c->budget_surface = -1;
                 return WAYLAND_STALL;
         }
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
@@ -3582,6 +3588,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 {
                         c->stalled_fd = held->fd;
                         c->stalled_sync_handle = -1;
+                        c->budget_surface = -1;
                         return WAYLAND_STALL;
                 }
         }
@@ -8502,7 +8509,7 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
                 return next < cap ? next : cap;
         }
         if (c->stalled_fd < 0)
-                return c->surfaces[c->budget_surface].budget_at + WAYLAND_BUDGET_MS;
+                return c->budget_surface >= 0 ? c->surfaces[c->budget_surface].budget_at + WAYLAND_BUDGET_MS : 0;
         *fd = c->stalled_fd;
         return c->stalled_at + WAYLAND_STALL_MS + 1;
 }
@@ -8532,7 +8539,7 @@ WAYLAND_API int wayland_resume(long slot)
         if (c->stalled_sync_handle >= 0
                 ? (wayland.syncobj.ready && !wayland.syncobj.ready(wayland.syncobj.context, c->stalled_sync_handle, c->stalled_sync_point))
             : c->stalled_fd < 0
-                ? c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
+                ? c->budget_surface >= 0 && c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
                 : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
         {
                 if ((c->stalled_fd >= 0 || c->stalled_sync_handle >= 0) &&

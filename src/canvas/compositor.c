@@ -7766,14 +7766,16 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 
         // On more than one screen every frame is composed: a flip, the overlay and the window's framebuffer are one
         // crtc's, and the scanout is the whole space.
-        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor_cursor_in_scene() || !windows ||
+        if (compositor.card < 0 || compositor_cursor_in_scene() || !windows ||
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw || compositor_output_count() > 1 ||
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
+        if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
+                return -1;
         if (frames[windows - 1].blend)
                 return -1;
-        if (__atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+        if (!compositor_lent(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return -1;
         if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
@@ -8492,8 +8494,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         unsigned int *why = compositor.table ? &compositor.table->unscanned : &compositor_unscanned_spare;
 
-        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd)
-                return *why = compositor.card < 0 ? 1 : compositor.direct_refused ? 11 : 2, -1;
+        if (compositor.card < 0)
+                return *why = 1, -1;
         if (compositor_output_count() > 1)
                 return *why = 13, -1;
         if (compositor.cursor.soft)
@@ -8505,12 +8507,14 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         row = rows[windows - 1];
         const struct compositor_frame *frame = &frames[windows - 1];
 
+        if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
+                return *why = compositor.direct_refused ? 11 : 2, -1;
         if (compositor.table->glass[row] || frame->blend)
                 return *why = 5, -1;
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
         // the card, after it has drawn the pictures), so none is shown straight.
-        if (__atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+        if (!compositor_lent(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return *why = 16, -1;
         if (compositor.landing[row])
                 return *why = 4, -1; // a window landing is drawn smaller than its picture
@@ -9047,15 +9051,19 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
                 return 0;
         // A tab is a slice of its band's pixels (compositor_panel_tabs): the band is mapped whole, once, not a map a tab. The kernel looks at the pages
         // of every map at every job: on the box's 610M 34 tab slices cost each present 68 us more, the band as one map nothing to speak of.
-        for (int at = 0; at < WINDOWS_OUTPUTS && !compositor_gpu_va(f); at++)
         {
-                const unsigned int *band = at ? compositor.band_more[at] : compositor.band;
-                unsigned long had = at ? compositor.band_more_bytes[at] : compositor.band_bytes;
+                positive va = compositor_gpu_va(f);
 
-                if (band && f->pixels >= band && f->pixels < band + had / 4)
-                        gpu_map(band, had);
+                for (int at = 0; at < WINDOWS_OUTPUTS && !va; at++)
+                {
+                        const unsigned int *band = at ? compositor.band_more[at] : compositor.band;
+                        unsigned long had = at ? compositor.band_more_bytes[at] : compositor.band_bytes;
+
+                        if (band && f->pixels >= band && f->pixels < band + had / 4)
+                                gpu_map(band, had), va = compositor_gpu_va(f);
+                }
+                return va || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
         }
-        return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 
 #ifdef MOONWATER_GPU_C
@@ -21974,7 +21982,7 @@ static b32 compositor_main()
                         positive period = compositor.period ? compositor.period : 16666667ull;
                         positive frame = compositor.presented + period;
 
-                        frame = frame > now ? frame : now + period;
+                        frame = frame > now ? frame : now;
                         until = !until || frame < until ? frame : until;
                 }
 
@@ -21993,7 +22001,8 @@ static b32 compositor_main()
                 // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn.
                 if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages)
                 {
-                        positive frame = now - compositor.presented < compositor.period ? compositor.presented + compositor.period : now;
+                        positive period = compositor.period ? compositor.period : 16666667ull;
+                        positive frame = now - compositor.presented < period ? compositor.presented + period : now;
 
                         until = !until || frame < until ? frame : until;
                 }
@@ -22157,7 +22166,7 @@ static b32 compositor_main()
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.
-                if (compositor.damages)
+                if (compositor.damages && !compositor.flip_pending)
                 {
                         positive stamp = clock_monotonic_nanoseconds(), lead = compositor_present_lead();
 
@@ -22193,11 +22202,16 @@ static b32 compositor_main()
                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
                 // Callbacks or feedbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
-                else if (compositor_wl.started && wayland_frame_wanted() &&
-                         now - compositor.presented >= compositor.period)
+                else if (!compositor.damages && compositor_wl.started && wayland_frame_wanted())
                 {
-                        compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, now);
-                        compositor_wl_idle();
+                        positive stamp = clock_monotonic_nanoseconds();
+                        positive period = compositor.period ? compositor.period : 16666667ull;
+
+                        if (stamp - compositor.presented >= period)
+                        {
+                                compositor.presented = compositor_frame_dated(compositor.presented, period, stamp);
+                                compositor_wl_idle();
+                        }
                 }
 #endif
 
