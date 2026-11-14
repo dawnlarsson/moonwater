@@ -43,9 +43,388 @@ CONFIG_MOONWATER_INPUT_GID=104
 # Rendering Vendors
 #
 # AMD is in every build (profile gpu.amd, which the default set and the
-# always-on set both name): nothing here switches it off. NVIDIA is still off
-# until its firmware is pinned.
-CONFIG_DRM_NOUVEAU=n
+# always-on set both name): nothing here switches it off.
+# NVIDIA Nouveau is enabled with pre-GSP signed Falcon firmware pinned below
+# (Maxwell GM20x through Ampere GA10x, ~2.0 MiB zstd across 367 entries).
+# Large GSP-RM images (tu102/ga102/gsp-570.144.bin, ~63 MiB zstd combined) are
+# omitted from the initramfs EFI image: Turing/Ampere fall back to Falcon
+# firmware cleanly, while Ada/Blackwell remain on simpledrm unless GSP blobs
+# are supplied externally.
+CONFIG_FW_LOADER=y
+CONFIG_FW_LOADER_USER_HELPER=n
+CONFIG_FW_LOADER_COMPRESS=y
+CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+
+#> firmware nvidia/ga102/acr/ucode_ahesasc.bin ca69d947ccfa5d29e45e54825d0b6e9a41c591ad83784519568eb2eda94daa0e
+#> firmware nvidia/ga102/acr/ucode_asb.bin 27ee1438ff9eb11b8ade47afdebcecaa135c3e52e98e164b3820d7de0ecc2666
+#> firmware nvidia/ga102/acr/ucode_unload.bin ef413c92a1cfbe645c4ab2e8130df79e7d778999a58994d5a5303e380996256b
+#> firmware nvidia/ga102/gr/NET_img.bin 56b3b302589b9e3bbb7d6ac8f5e36840e4297773c3900779c27c0505c1e605d5
+#> firmware nvidia/ga102/gr/fecs_bl.bin b1153ed2bb2c7b3b19a2299d6f9fda5715b8b2833389ef07f8f268c41f904233
+#> firmware nvidia/ga102/gr/fecs_sig.bin ecb366986095eeb5f7326bfa21397b40991d0615e80cdbef7bb63691da93bcfc
+#> firmware nvidia/ga102/gr/gpccs_bl.bin aa2ad555bc8c88396b3bcc6cec9644ecd5b114c4b974b8f887f572da3287b22f
+#> firmware nvidia/ga102/gr/gpccs_sig.bin c298ede1d14a589e64760e6723bf826e00592a6d235b48422dc45f45cac390c8
+#> firmware nvidia/ga102/nvdec/scrubber.bin abb38039f8195852a912fca64b2e2c97c17fa71197d57166190f0081d717afbd
+#> firmware nvidia/ga102/sec2/desc.bin 1fd6fd67dc81d975cb7b129e2a405f61009a6665b8faf747aeb1bfc5c1223701
+#> firmware nvidia/ga102/sec2/hs_bl_sig.bin 1e24000c438e12a85558aaab86e514f814bdd89a4ee294dd3425eb27a32ab436
+#> firmware nvidia/ga102/sec2/image.bin e103b57312fdfc9a8b6a9f67f8389b7da0f214a5c478c2898e3fb434bde54dce
+#> firmware nvidia/ga102/sec2/sig.bin d2485ddbdaeca1f9a4cd4a49fc2bf19f4331f47a1f86d1b97cb9cf18c6407fe6
+#> firmware nvidia/ga103/acr/ucode_ahesasc.bin ca69d947ccfa5d29e45e54825d0b6e9a41c591ad83784519568eb2eda94daa0e nvidia/ga102/acr/ucode_ahesasc.bin
+#> firmware nvidia/ga103/acr/ucode_asb.bin 27ee1438ff9eb11b8ade47afdebcecaa135c3e52e98e164b3820d7de0ecc2666 nvidia/ga102/acr/ucode_asb.bin
+#> firmware nvidia/ga103/acr/ucode_unload.bin ef413c92a1cfbe645c4ab2e8130df79e7d778999a58994d5a5303e380996256b nvidia/ga102/acr/ucode_unload.bin
+#> firmware nvidia/ga103/gr/NET_img.bin a37f2c15407aff5e2976255eedc9c67ab41b0dcf583bdd928803bad872536333
+#> firmware nvidia/ga103/gr/fecs_bl.bin 3bd979eeb210009ac54832589ebefbc10bf03286c915c0e6ea45a480b8c10db9
+#> firmware nvidia/ga103/gr/fecs_sig.bin cefd39de9dd219e0ec252bb3a1e68139d7f03b615ec67c6abafe4bbe4a5b1419
+#> firmware nvidia/ga103/gr/gpccs_bl.bin d3a26f738aba6370478fe66081fa2b936b6ffa974e8c4514164e7be456bbf73d
+#> firmware nvidia/ga103/gr/gpccs_sig.bin e9b0c7f69d6fb780f60bd548cd5d493182b93ad8668644c46715e3af66ce54dd
+#> firmware nvidia/ga103/nvdec/scrubber.bin abb38039f8195852a912fca64b2e2c97c17fa71197d57166190f0081d717afbd nvidia/ga102/nvdec/scrubber.bin
+#> firmware nvidia/ga103/sec2/desc.bin 1fd6fd67dc81d975cb7b129e2a405f61009a6665b8faf747aeb1bfc5c1223701 nvidia/ga102/sec2/desc.bin
+#> firmware nvidia/ga103/sec2/hs_bl_sig.bin 1e24000c438e12a85558aaab86e514f814bdd89a4ee294dd3425eb27a32ab436 nvidia/ga102/sec2/hs_bl_sig.bin
+#> firmware nvidia/ga103/sec2/image.bin e103b57312fdfc9a8b6a9f67f8389b7da0f214a5c478c2898e3fb434bde54dce nvidia/ga102/sec2/image.bin
+#> firmware nvidia/ga103/sec2/sig.bin d2485ddbdaeca1f9a4cd4a49fc2bf19f4331f47a1f86d1b97cb9cf18c6407fe6 nvidia/ga102/sec2/sig.bin
+#> firmware nvidia/ga104/acr/ucode_ahesasc.bin ca69d947ccfa5d29e45e54825d0b6e9a41c591ad83784519568eb2eda94daa0e nvidia/ga102/acr/ucode_ahesasc.bin
+#> firmware nvidia/ga104/acr/ucode_asb.bin 27ee1438ff9eb11b8ade47afdebcecaa135c3e52e98e164b3820d7de0ecc2666 nvidia/ga102/acr/ucode_asb.bin
+#> firmware nvidia/ga104/acr/ucode_unload.bin ef413c92a1cfbe645c4ab2e8130df79e7d778999a58994d5a5303e380996256b nvidia/ga102/acr/ucode_unload.bin
+#> firmware nvidia/ga104/gr/NET_img.bin 73efb79d2140b8e0d58cc87cfedcf643caf781a24846e0a85ccc006604e149f9
+#> firmware nvidia/ga104/gr/fecs_bl.bin 1e6d373de23a11da5b9be6a53a8d15a30526d043773f2310c55c74c8db5dbfd1
+#> firmware nvidia/ga104/gr/fecs_sig.bin 6f9396a2b0f2306ea806fe12ecb634604148ed5b7b29b8420ab2e29843ec310c
+#> firmware nvidia/ga104/gr/gpccs_bl.bin fabd5eadb17dd8ac30cfa387b206ca1732ccf18eacd905ebd798d6114c5ffbd3
+#> firmware nvidia/ga104/gr/gpccs_sig.bin 7aea82391c59d15ceac9cb7f791eaa6e119e1a0211d527afadf9e4559750c718
+#> firmware nvidia/ga104/nvdec/scrubber.bin abb38039f8195852a912fca64b2e2c97c17fa71197d57166190f0081d717afbd nvidia/ga102/nvdec/scrubber.bin
+#> firmware nvidia/ga104/sec2/desc.bin 1fd6fd67dc81d975cb7b129e2a405f61009a6665b8faf747aeb1bfc5c1223701 nvidia/ga102/sec2/desc.bin
+#> firmware nvidia/ga104/sec2/hs_bl_sig.bin 1e24000c438e12a85558aaab86e514f814bdd89a4ee294dd3425eb27a32ab436 nvidia/ga102/sec2/hs_bl_sig.bin
+#> firmware nvidia/ga104/sec2/image.bin e103b57312fdfc9a8b6a9f67f8389b7da0f214a5c478c2898e3fb434bde54dce nvidia/ga102/sec2/image.bin
+#> firmware nvidia/ga104/sec2/sig.bin d2485ddbdaeca1f9a4cd4a49fc2bf19f4331f47a1f86d1b97cb9cf18c6407fe6 nvidia/ga102/sec2/sig.bin
+#> firmware nvidia/ga106/acr/ucode_ahesasc.bin ca69d947ccfa5d29e45e54825d0b6e9a41c591ad83784519568eb2eda94daa0e nvidia/ga102/acr/ucode_ahesasc.bin
+#> firmware nvidia/ga106/acr/ucode_asb.bin 27ee1438ff9eb11b8ade47afdebcecaa135c3e52e98e164b3820d7de0ecc2666 nvidia/ga102/acr/ucode_asb.bin
+#> firmware nvidia/ga106/acr/ucode_unload.bin ef413c92a1cfbe645c4ab2e8130df79e7d778999a58994d5a5303e380996256b nvidia/ga102/acr/ucode_unload.bin
+#> firmware nvidia/ga106/gr/NET_img.bin 6a3121fc6b9cd40a584fd175b24d59e5b99354ac92b3130bb09deb43279868e0
+#> firmware nvidia/ga106/gr/fecs_bl.bin ceff6d04b640c044c974dc28dd90d8cb9de4bb5d139ee121f55930e18f80e89b
+#> firmware nvidia/ga106/gr/fecs_sig.bin 218a58497e0dbed9d045ae3b2db1750f9ebea0cf8322f4402834f26aadd55105
+#> firmware nvidia/ga106/gr/gpccs_bl.bin 7abd2539313826fea92b66e805f9dd84cb464c9d9774d31d5bbfdb953a38cedf
+#> firmware nvidia/ga106/gr/gpccs_sig.bin e5efe0407d31160652a5a9370bc18caa6275a9889d4c31a132f7cd0e8e3d387a
+#> firmware nvidia/ga106/nvdec/scrubber.bin abb38039f8195852a912fca64b2e2c97c17fa71197d57166190f0081d717afbd nvidia/ga102/nvdec/scrubber.bin
+#> firmware nvidia/ga106/sec2/desc.bin 1fd6fd67dc81d975cb7b129e2a405f61009a6665b8faf747aeb1bfc5c1223701 nvidia/ga102/sec2/desc.bin
+#> firmware nvidia/ga106/sec2/hs_bl_sig.bin 1e24000c438e12a85558aaab86e514f814bdd89a4ee294dd3425eb27a32ab436 nvidia/ga102/sec2/hs_bl_sig.bin
+#> firmware nvidia/ga106/sec2/image.bin e103b57312fdfc9a8b6a9f67f8389b7da0f214a5c478c2898e3fb434bde54dce nvidia/ga102/sec2/image.bin
+#> firmware nvidia/ga106/sec2/sig.bin d2485ddbdaeca1f9a4cd4a49fc2bf19f4331f47a1f86d1b97cb9cf18c6407fe6 nvidia/ga102/sec2/sig.bin
+#> firmware nvidia/ga107/acr/ucode_ahesasc.bin ca69d947ccfa5d29e45e54825d0b6e9a41c591ad83784519568eb2eda94daa0e nvidia/ga102/acr/ucode_ahesasc.bin
+#> firmware nvidia/ga107/acr/ucode_asb.bin 27ee1438ff9eb11b8ade47afdebcecaa135c3e52e98e164b3820d7de0ecc2666 nvidia/ga102/acr/ucode_asb.bin
+#> firmware nvidia/ga107/acr/ucode_unload.bin ef413c92a1cfbe645c4ab2e8130df79e7d778999a58994d5a5303e380996256b nvidia/ga102/acr/ucode_unload.bin
+#> firmware nvidia/ga107/gr/NET_img.bin 3a03df45d172bc593199b2efbe8712293ac566db8ff1c6a62b5fae946c6ee2b9
+#> firmware nvidia/ga107/gr/fecs_bl.bin 0b1dc834a9a9c1ba2998a2a43059527b7d95f2dc5426621c4e259c47623c6a53
+#> firmware nvidia/ga107/gr/fecs_sig.bin e65d615482aebad5d2c07f480d97ae89bbb717bc4ee77743518d2077ea9fefbe
+#> firmware nvidia/ga107/gr/gpccs_bl.bin 28c069787b79e1495bcb4c95b1f71bc505fcf8d5ed1db165bca22080c00441ec
+#> firmware nvidia/ga107/gr/gpccs_sig.bin 290fdded203bd3fe3c5c31eaeb30e349d285ee0967c45eb443dafe51e13290fa
+#> firmware nvidia/ga107/nvdec/scrubber.bin abb38039f8195852a912fca64b2e2c97c17fa71197d57166190f0081d717afbd nvidia/ga102/nvdec/scrubber.bin
+#> firmware nvidia/ga107/sec2/desc.bin 1fd6fd67dc81d975cb7b129e2a405f61009a6665b8faf747aeb1bfc5c1223701 nvidia/ga102/sec2/desc.bin
+#> firmware nvidia/ga107/sec2/hs_bl_sig.bin 1e24000c438e12a85558aaab86e514f814bdd89a4ee294dd3425eb27a32ab436 nvidia/ga102/sec2/hs_bl_sig.bin
+#> firmware nvidia/ga107/sec2/image.bin e103b57312fdfc9a8b6a9f67f8389b7da0f214a5c478c2898e3fb434bde54dce nvidia/ga102/sec2/image.bin
+#> firmware nvidia/ga107/sec2/sig.bin d2485ddbdaeca1f9a4cd4a49fc2bf19f4331f47a1f86d1b97cb9cf18c6407fe6 nvidia/ga102/sec2/sig.bin
+#> firmware nvidia/gm200/acr/bl.bin 5b6abc625aefb3cd2a8617d87f1a8308e98fcfc1dfffe0857d77a5185dd45965
+#> firmware nvidia/gm200/acr/ucode_load.bin c8259b7db94acf8c01df1a282fd73d9bdfadce70ae9e27c9b17d5d1ddb901a64
+#> firmware nvidia/gm200/acr/ucode_unload.bin 5109fe637e33e8c6d76a5f4bf93ef4f73e7ea5ba942ee15a934773b8d073576f
+#> firmware nvidia/gm200/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7
+#> firmware nvidia/gm200/gr/fecs_data.bin f0119aa688bff0a64334e34d015bea9ddd3a5a5cabd6877c9596ef74dd15d777
+#> firmware nvidia/gm200/gr/fecs_inst.bin 674bdbcf56f011820838ff334688fb8a027aef6ca18371ac382d205491954ef8
+#> firmware nvidia/gm200/gr/fecs_sig.bin fbb04dc17a67cfaee440130105fcabd3983e3f8562e8064155577f36d22c325b
+#> firmware nvidia/gm200/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2
+#> firmware nvidia/gm200/gr/gpccs_data.bin 08fa664897c6615f504905613b4797d3a22372ce668587cdccbb7ee947c6a64b
+#> firmware nvidia/gm200/gr/gpccs_inst.bin 2dc59a73d9e5551c69b9c1e6e305de3e6fc701f2d9b92a710be416a54da591b7
+#> firmware nvidia/gm200/gr/gpccs_sig.bin 5565560b0729dd3b4af0dbd03b85394ae2836e91fc87120deed278e49e4cb572
+#> firmware nvidia/gm200/gr/sw_bundle_init.bin b5732f4e412384f411d3d7e5ec1fcbcc95b93b68957cecf6e351bb6a62675df0
+#> firmware nvidia/gm200/gr/sw_ctx.bin bf11e39dfc6b516319bf8834ae74619b89f86993b629b32e372f2d37101fa3a1
+#> firmware nvidia/gm200/gr/sw_method_init.bin 6372e2f6f547d7bd086beb066ce46ac379795f95c38eeeedd9e13c7b32515b24
+#> firmware nvidia/gm200/gr/sw_nonctx.bin bd9bd74512a6e4e6c255575c059b85e09635f6a4e9033458d5515899fb63b277
+#> firmware nvidia/gm204/acr/bl.bin 5b6abc625aefb3cd2a8617d87f1a8308e98fcfc1dfffe0857d77a5185dd45965 nvidia/gm200/acr/bl.bin
+#> firmware nvidia/gm204/acr/ucode_load.bin c8259b7db94acf8c01df1a282fd73d9bdfadce70ae9e27c9b17d5d1ddb901a64 nvidia/gm200/acr/ucode_load.bin
+#> firmware nvidia/gm204/acr/ucode_unload.bin 5109fe637e33e8c6d76a5f4bf93ef4f73e7ea5ba942ee15a934773b8d073576f nvidia/gm200/acr/ucode_unload.bin
+#> firmware nvidia/gm204/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gm204/gr/fecs_data.bin b5794424052f550b701f583c5ac346989eb08359fc17d27169f58203122f44ce
+#> firmware nvidia/gm204/gr/fecs_inst.bin 674bdbcf56f011820838ff334688fb8a027aef6ca18371ac382d205491954ef8 nvidia/gm200/gr/fecs_inst.bin
+#> firmware nvidia/gm204/gr/fecs_sig.bin 1a0b352932e485f6feff6b78a2bda44a35e13163c260d1ac52f74ec427cd294b
+#> firmware nvidia/gm204/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gm204/gr/gpccs_data.bin 33f944b5f2d190ea86f9974fd248328608bb12e981c5844ea909c4cfecbea954
+#> firmware nvidia/gm204/gr/gpccs_inst.bin 2dc59a73d9e5551c69b9c1e6e305de3e6fc701f2d9b92a710be416a54da591b7 nvidia/gm200/gr/gpccs_inst.bin
+#> firmware nvidia/gm204/gr/gpccs_sig.bin 4317101b143f147d431b5267039dd47b72523db21d35d699cc32810e5b156fae
+#> firmware nvidia/gm204/gr/sw_bundle_init.bin b5732f4e412384f411d3d7e5ec1fcbcc95b93b68957cecf6e351bb6a62675df0 nvidia/gm200/gr/sw_bundle_init.bin
+#> firmware nvidia/gm204/gr/sw_ctx.bin bf11e39dfc6b516319bf8834ae74619b89f86993b629b32e372f2d37101fa3a1 nvidia/gm200/gr/sw_ctx.bin
+#> firmware nvidia/gm204/gr/sw_method_init.bin 6372e2f6f547d7bd086beb066ce46ac379795f95c38eeeedd9e13c7b32515b24 nvidia/gm200/gr/sw_method_init.bin
+#> firmware nvidia/gm204/gr/sw_nonctx.bin bd9bd74512a6e4e6c255575c059b85e09635f6a4e9033458d5515899fb63b277 nvidia/gm200/gr/sw_nonctx.bin
+#> firmware nvidia/gm206/acr/bl.bin 5b6abc625aefb3cd2a8617d87f1a8308e98fcfc1dfffe0857d77a5185dd45965 nvidia/gm200/acr/bl.bin
+#> firmware nvidia/gm206/acr/ucode_load.bin 2621ad9ea92995814e0327365b3ffeb367433da4c9b1fc0c4c14f93e58915792
+#> firmware nvidia/gm206/acr/ucode_unload.bin e716e6479860a94e746420b26c26eb7486c87898d36a1c882211191e116315a7
+#> firmware nvidia/gm206/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gm206/gr/fecs_data.bin 47d32161bd243261be59a7ebbe184681f6d0f7d43b62fba60559d90dc83c4061
+#> firmware nvidia/gm206/gr/fecs_inst.bin 674bdbcf56f011820838ff334688fb8a027aef6ca18371ac382d205491954ef8 nvidia/gm200/gr/fecs_inst.bin
+#> firmware nvidia/gm206/gr/fecs_sig.bin 2845a954e261632b1b1593263e7ce44ed3bd3404dbe12a6043dec8930135c28f
+#> firmware nvidia/gm206/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gm206/gr/gpccs_data.bin e665c3469164e179ea791bfb5e25261830054ccd12616481b627e731045088ca
+#> firmware nvidia/gm206/gr/gpccs_inst.bin 2dc59a73d9e5551c69b9c1e6e305de3e6fc701f2d9b92a710be416a54da591b7 nvidia/gm200/gr/gpccs_inst.bin
+#> firmware nvidia/gm206/gr/gpccs_sig.bin 07f6fe18cf0313ec6064e3f1712fc180a208c5f1712fc754c9b5635340aee9f2
+#> firmware nvidia/gm206/gr/sw_bundle_init.bin b5732f4e412384f411d3d7e5ec1fcbcc95b93b68957cecf6e351bb6a62675df0 nvidia/gm200/gr/sw_bundle_init.bin
+#> firmware nvidia/gm206/gr/sw_ctx.bin bf11e39dfc6b516319bf8834ae74619b89f86993b629b32e372f2d37101fa3a1 nvidia/gm200/gr/sw_ctx.bin
+#> firmware nvidia/gm206/gr/sw_method_init.bin 6372e2f6f547d7bd086beb066ce46ac379795f95c38eeeedd9e13c7b32515b24 nvidia/gm200/gr/sw_method_init.bin
+#> firmware nvidia/gm206/gr/sw_nonctx.bin bd9bd74512a6e4e6c255575c059b85e09635f6a4e9033458d5515899fb63b277 nvidia/gm200/gr/sw_nonctx.bin
+#> firmware nvidia/gp100/acr/bl.bin 6b7b484b343a3a1ed58072893cb491bd97b5fd5e380acbfc50a1970cba77d766
+#> firmware nvidia/gp100/acr/ucode_load.bin 81f3f97490ee8b9b725169d9e9c85ebea782f30c0481064a39d50addf164da73
+#> firmware nvidia/gp100/acr/ucode_unload.bin 9f98f87c143f174f6fc5076b867fd263cf9c8771aff850f3271489cb623b0a2e
+#> firmware nvidia/gp100/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gp100/gr/fecs_data.bin 3e01234a632f258c75f49587c3eab2897d1f5bce58b1b8c336b753868e8ab930
+#> firmware nvidia/gp100/gr/fecs_inst.bin 811c6d723111e4338b126741113ad4e86173b26a00697d06885b08acdc1cd84b
+#> firmware nvidia/gp100/gr/fecs_sig.bin 842d623c9a62992652e911d45402f489033a4b67ccf08caab5adeffed6e022ac
+#> firmware nvidia/gp100/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gp100/gr/gpccs_data.bin a2b7809a88c9e1b9120b9855a0887517d0813783b151b5b0d3de513ce0b1cd0a
+#> firmware nvidia/gp100/gr/gpccs_inst.bin c9043b58d26e85ac2e9d23286c27b55f234f16d73b385c7eb8c7b7472d8a7957
+#> firmware nvidia/gp100/gr/gpccs_sig.bin bcf9d59222233b08981340ed80f437dacc60aee9bafc7646c9a6f425c720dc56
+#> firmware nvidia/gp100/gr/sw_bundle_init.bin ef9cb02e54454b762ddb815794a109862c8faae472eea4d2e27ac294f903f332
+#> firmware nvidia/gp100/gr/sw_ctx.bin 94d39da176efec257025bf0497facd155b7ad31986858ea51de48916c4c7e4e0
+#> firmware nvidia/gp100/gr/sw_method_init.bin c0849843dc4732c11c219ed565a65a9c2261bf8a06d388080ccb19b3f609840c
+#> firmware nvidia/gp100/gr/sw_nonctx.bin d8c04ec1ac6c8ab2d077aa941534605bfbb351276e3b566260db61f7e1971593
+#> firmware nvidia/gp102/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab
+#> firmware nvidia/gp102/acr/ucode_load.bin 5d2ce92a781c6c42a781a50badfbfc7db9267945996ee46aaa15429facdf2920
+#> firmware nvidia/gp102/acr/ucode_unload.bin 1f139e5ada193fc191ed9a235a53901076d0008f3ea15ab7ca66d33748ea6a03
+#> firmware nvidia/gp102/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173
+#> firmware nvidia/gp102/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gp102/gr/fecs_data.bin 041dfad51dc4964b99a1aa90b9ed1526195fbc66b969b5b6ad9b86b9cb3952c2
+#> firmware nvidia/gp102/gr/fecs_inst.bin 5112f12dbfdc5eb9fb5b00b443039e0d40c2be4d2a9fba2ccb2706c0000f947f
+#> firmware nvidia/gp102/gr/fecs_sig.bin 05bcaff805826200be9a1f80a96387918132d0a26068689318af80bd24c502a9
+#> firmware nvidia/gp102/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gp102/gr/gpccs_data.bin b91be1dffbc24afade1045ec2c3eeff2437f667a0f2eb5c462d2338fbd7beb2d
+#> firmware nvidia/gp102/gr/gpccs_inst.bin 36ad0ee74de6b79a4101cc6c4d4aa7618c49a967571c044b37f51d0f536cd52c
+#> firmware nvidia/gp102/gr/gpccs_sig.bin 722e4b6b95964783c036c4fc60c958cdbac305b2202d1f9734a38c96cbd45e64
+#> firmware nvidia/gp102/gr/sw_bundle_init.bin 5f543872e72731f164e9e9f1fc19fc30e73a508629d2c6d0724fe6247c976c50
+#> firmware nvidia/gp102/gr/sw_ctx.bin eec97c35ccf2c66125c490c12a33f73d8a44fd6826d083100c6ef7f11f0ed0e6
+#> firmware nvidia/gp102/gr/sw_method_init.bin 1123176ec93df9046b3fb5071141235424c101e405294f505494e00ba925a719
+#> firmware nvidia/gp102/gr/sw_nonctx.bin 29b22445ed536a852908ec6f1600fe757951de7dd7eff73c627f614639543172
+#> firmware nvidia/gp102/nvdec/scrubber.bin 0f70a43c184d6db4c4c4f1821bc51576decc9e3d61f45349ed113621df1e06e7
+#> firmware nvidia/gp102/sec2/desc-1.bin 0d0ce7988281fc9115d3c6320e7b904d530719ddeacdd85ea29f744ba7b039ee
+#> firmware nvidia/gp102/sec2/desc.bin 33116677910e9cc9ea047e420a40bd308dd6597503126feecd9827e056668a11
+#> firmware nvidia/gp102/sec2/image-1.bin 90404a9c365eb9b2d3f692c255bc3b50af9313ccae73306df369ec712c4b511e
+#> firmware nvidia/gp102/sec2/image.bin 9ca3293e0d11dcf08570ebe226f4d9889128238f8c5d5b5e3ea7999bb4880e3d
+#> firmware nvidia/gp102/sec2/sig-1.bin 14c3524427b08a6dca1fc846f3830387ee835c3257792860783e5e4148833ebb
+#> firmware nvidia/gp102/sec2/sig.bin 6611a8ff65b34aadfab9db2c072205df30174c18d62cb2acb1a6ad7ac5eb1dd9
+#> firmware nvidia/gp104/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/gp102/acr/bl.bin
+#> firmware nvidia/gp104/acr/ucode_load.bin 5d2ce92a781c6c42a781a50badfbfc7db9267945996ee46aaa15429facdf2920 nvidia/gp102/acr/ucode_load.bin
+#> firmware nvidia/gp104/acr/ucode_unload.bin 1f139e5ada193fc191ed9a235a53901076d0008f3ea15ab7ca66d33748ea6a03 nvidia/gp102/acr/ucode_unload.bin
+#> firmware nvidia/gp104/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/gp102/acr/unload_bl.bin
+#> firmware nvidia/gp104/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gp104/gr/fecs_data.bin 5dc0528718dcff24a292fb4a92bd1d73967eeb11e2e838852853496ede46dea0
+#> firmware nvidia/gp104/gr/fecs_inst.bin d4f0706e226fd447899fa05bdc94a6ed3f71c67e3ebdb881f47ecd0c7d294e63
+#> firmware nvidia/gp104/gr/fecs_sig.bin 9a47560b4a60c6c203fed3e4dbbf5db5da481400ee13b94c921ff9f703609b9f
+#> firmware nvidia/gp104/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gp104/gr/gpccs_data.bin 6db54b7a0b75ac9fbb8feb64488c36c843eec47bf4dccd72b29b7f4c55bdee5e
+#> firmware nvidia/gp104/gr/gpccs_inst.bin 36ad0ee74de6b79a4101cc6c4d4aa7618c49a967571c044b37f51d0f536cd52c
+#> firmware nvidia/gp104/gr/gpccs_sig.bin 3468062a8f2e02b47a00993e6190fbd2569747b4304fe9eb06f93fdacb626299
+#> firmware nvidia/gp104/gr/sw_bundle_init.bin 5f543872e72731f164e9e9f1fc19fc30e73a508629d2c6d0724fe6247c976c50 nvidia/gp102/gr/sw_bundle_init.bin
+#> firmware nvidia/gp104/gr/sw_ctx.bin eec97c35ccf2c66125c490c12a33f73d8a44fd6826d083100c6ef7f11f0ed0e6 nvidia/gp102/gr/sw_ctx.bin
+#> firmware nvidia/gp104/gr/sw_method_init.bin 1123176ec93df9046b3fb5071141235424c101e405294f505494e00ba925a719 nvidia/gp102/gr/sw_method_init.bin
+#> firmware nvidia/gp104/gr/sw_nonctx.bin 29b22445ed536a852908ec6f1600fe757951de7dd7eff73c627f614639543172 nvidia/gp102/gr/sw_nonctx.bin
+#> firmware nvidia/gp104/nvdec/scrubber.bin 0f70a43c184d6db4c4c4f1821bc51576decc9e3d61f45349ed113621df1e06e7 nvidia/gp102/nvdec/scrubber.bin
+#> firmware nvidia/gp104/sec2/desc-1.bin 0d0ce7988281fc9115d3c6320e7b904d530719ddeacdd85ea29f744ba7b039ee nvidia/gp102/sec2/desc-1.bin
+#> firmware nvidia/gp104/sec2/desc.bin 33116677910e9cc9ea047e420a40bd308dd6597503126feecd9827e056668a11 nvidia/gp102/sec2/desc.bin
+#> firmware nvidia/gp104/sec2/image-1.bin 90404a9c365eb9b2d3f692c255bc3b50af9313ccae73306df369ec712c4b511e nvidia/gp102/sec2/image-1.bin
+#> firmware nvidia/gp104/sec2/image.bin 9ca3293e0d11dcf08570ebe226f4d9889128238f8c5d5b5e3ea7999bb4880e3d nvidia/gp102/sec2/image.bin
+#> firmware nvidia/gp104/sec2/sig-1.bin 14c3524427b08a6dca1fc846f3830387ee835c3257792860783e5e4148833ebb nvidia/gp102/sec2/sig-1.bin
+#> firmware nvidia/gp104/sec2/sig.bin 6611a8ff65b34aadfab9db2c072205df30174c18d62cb2acb1a6ad7ac5eb1dd9 nvidia/gp102/sec2/sig.bin
+#> firmware nvidia/gp106/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/gp102/acr/bl.bin
+#> firmware nvidia/gp106/acr/ucode_load.bin 5d2ce92a781c6c42a781a50badfbfc7db9267945996ee46aaa15429facdf2920 nvidia/gp102/acr/ucode_load.bin
+#> firmware nvidia/gp106/acr/ucode_unload.bin 1f139e5ada193fc191ed9a235a53901076d0008f3ea15ab7ca66d33748ea6a03 nvidia/gp102/acr/ucode_unload.bin
+#> firmware nvidia/gp106/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/gp102/acr/unload_bl.bin
+#> firmware nvidia/gp106/gr/fecs_bl.bin 58a14906a9ad69a141ea417481a9464928aa0e56cff98a35753d712a91029ac7 nvidia/gm200/gr/fecs_bl.bin
+#> firmware nvidia/gp106/gr/fecs_data.bin 49288ac6c6e48f2e329d7c92a99cfcb259ab479f45744feb21b55e78c75a54a9
+#> firmware nvidia/gp106/gr/fecs_inst.bin 5112f12dbfdc5eb9fb5b00b443039e0d40c2be4d2a9fba2ccb2706c0000f947f nvidia/gp102/gr/fecs_inst.bin
+#> firmware nvidia/gp106/gr/fecs_sig.bin 1bcf5680d39eac6f0b641867836729c39f560de6d209c260583e6b080a75d996
+#> firmware nvidia/gp106/gr/gpccs_bl.bin af1d42219e8184c10ab89fcd93607b36b2240c9c56e239ec797946890c8064c2 nvidia/gm200/gr/gpccs_bl.bin
+#> firmware nvidia/gp106/gr/gpccs_data.bin 4f468ae62a5abbb158ce6303962755ca3f77df4ea697b7aadc6a970a5920ee27
+#> firmware nvidia/gp106/gr/gpccs_inst.bin 36ad0ee74de6b79a4101cc6c4d4aa7618c49a967571c044b37f51d0f536cd52c nvidia/gp102/gr/gpccs_inst.bin
+#> firmware nvidia/gp106/gr/gpccs_sig.bin b9681338ccbc9d367fcc76c0e2dfae935dc9c8b932c2a2b218e6a81450438b1f
+#> firmware nvidia/gp106/gr/sw_bundle_init.bin 5f543872e72731f164e9e9f1fc19fc30e73a508629d2c6d0724fe6247c976c50 nvidia/gp102/gr/sw_bundle_init.bin
+#> firmware nvidia/gp106/gr/sw_ctx.bin eec97c35ccf2c66125c490c12a33f73d8a44fd6826d083100c6ef7f11f0ed0e6 nvidia/gp102/gr/sw_ctx.bin
+#> firmware nvidia/gp106/gr/sw_method_init.bin 1123176ec93df9046b3fb5071141235424c101e405294f505494e00ba925a719 nvidia/gp102/gr/sw_method_init.bin
+#> firmware nvidia/gp106/gr/sw_nonctx.bin 29b22445ed536a852908ec6f1600fe757951de7dd7eff73c627f614639543172 nvidia/gp102/gr/sw_nonctx.bin
+#> firmware nvidia/gp106/nvdec/scrubber.bin 0f70a43c184d6db4c4c4f1821bc51576decc9e3d61f45349ed113621df1e06e7 nvidia/gp102/nvdec/scrubber.bin
+#> firmware nvidia/gp106/sec2/desc-1.bin 0d0ce7988281fc9115d3c6320e7b904d530719ddeacdd85ea29f744ba7b039ee nvidia/gp102/sec2/desc-1.bin
+#> firmware nvidia/gp106/sec2/desc.bin 33116677910e9cc9ea047e420a40bd308dd6597503126feecd9827e056668a11 nvidia/gp102/sec2/desc.bin
+#> firmware nvidia/gp106/sec2/image-1.bin 90404a9c365eb9b2d3f692c255bc3b50af9313ccae73306df369ec712c4b511e nvidia/gp102/sec2/image-1.bin
+#> firmware nvidia/gp106/sec2/image.bin 9ca3293e0d11dcf08570ebe226f4d9889128238f8c5d5b5e3ea7999bb4880e3d nvidia/gp102/sec2/image.bin
+#> firmware nvidia/gp106/sec2/sig-1.bin 14c3524427b08a6dca1fc846f3830387ee835c3257792860783e5e4148833ebb nvidia/gp102/sec2/sig-1.bin
+#> firmware nvidia/gp106/sec2/sig.bin 6611a8ff65b34aadfab9db2c072205df30174c18d62cb2acb1a6ad7ac5eb1dd9 nvidia/gp102/sec2/sig.bin
+#> firmware nvidia/gp107/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/gp102/acr/bl.bin
+#> firmware nvidia/gp107/acr/ucode_load.bin 5d2ce92a781c6c42a781a50badfbfc7db9267945996ee46aaa15429facdf2920 nvidia/gp102/acr/ucode_load.bin
+#> firmware nvidia/gp107/acr/ucode_unload.bin 1f139e5ada193fc191ed9a235a53901076d0008f3ea15ab7ca66d33748ea6a03 nvidia/gp102/acr/ucode_unload.bin
+#> firmware nvidia/gp107/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/gp102/acr/unload_bl.bin
+#> firmware nvidia/gp107/gr/fecs_bl.bin e683be6f7b2012f4e5e6f4995086a5f0ef5bc4fd687f24dcedc5df7070f3a43d
+#> firmware nvidia/gp107/gr/fecs_data.bin e61962ec88d1cc0c38f2397c6a5e8f3521d9299472e586700011fe621ee85999
+#> firmware nvidia/gp107/gr/fecs_inst.bin e68760571d3da8734485e819d79202f7ead21797ee8b4b67eb579aab1489f02a
+#> firmware nvidia/gp107/gr/fecs_sig.bin 6682d9eb17e81108484dc84c73f1e765ea7d8607ca3a96834ec1682f8e014856
+#> firmware nvidia/gp107/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5
+#> firmware nvidia/gp107/gr/gpccs_data.bin bc16310ec9c2128e7c8c51e23152b29f0f1ee7088494f11cf852e98afe19992c
+#> firmware nvidia/gp107/gr/gpccs_inst.bin 1ef4cc6d4798577850102dcddc300fe905e091dc7ddc9d6289360f6ef1291f76
+#> firmware nvidia/gp107/gr/gpccs_sig.bin 7eab77572dce601d91055d3efe5e8d4bfc1350367af324204bfd76282eebd9ef
+#> firmware nvidia/gp107/gr/sw_bundle_init.bin 5f543872e72731f164e9e9f1fc19fc30e73a508629d2c6d0724fe6247c976c50 nvidia/gp102/gr/sw_bundle_init.bin
+#> firmware nvidia/gp107/gr/sw_ctx.bin c60f4e9ea298af2ebfb466accacae95e4a1baa7138971b280a97c4131ff29121
+#> firmware nvidia/gp107/gr/sw_method_init.bin 1123176ec93df9046b3fb5071141235424c101e405294f505494e00ba925a719 nvidia/gp102/gr/sw_method_init.bin
+#> firmware nvidia/gp107/gr/sw_nonctx.bin 4890912b427bde77e4998a601ef8b282eae1ae5ce4dc20e5de2d7b50917f4ac0
+#> firmware nvidia/gp107/nvdec/scrubber.bin 0f70a43c184d6db4c4c4f1821bc51576decc9e3d61f45349ed113621df1e06e7 nvidia/gp102/nvdec/scrubber.bin
+#> firmware nvidia/gp107/sec2/desc-1.bin 0d0ce7988281fc9115d3c6320e7b904d530719ddeacdd85ea29f744ba7b039ee nvidia/gp102/sec2/desc-1.bin
+#> firmware nvidia/gp107/sec2/desc.bin 33116677910e9cc9ea047e420a40bd308dd6597503126feecd9827e056668a11 nvidia/gp102/sec2/desc.bin
+#> firmware nvidia/gp107/sec2/image-1.bin 90404a9c365eb9b2d3f692c255bc3b50af9313ccae73306df369ec712c4b511e nvidia/gp102/sec2/image-1.bin
+#> firmware nvidia/gp107/sec2/image.bin 9ca3293e0d11dcf08570ebe226f4d9889128238f8c5d5b5e3ea7999bb4880e3d nvidia/gp102/sec2/image.bin
+#> firmware nvidia/gp107/sec2/sig-1.bin 14c3524427b08a6dca1fc846f3830387ee835c3257792860783e5e4148833ebb nvidia/gp102/sec2/sig-1.bin
+#> firmware nvidia/gp107/sec2/sig.bin 6611a8ff65b34aadfab9db2c072205df30174c18d62cb2acb1a6ad7ac5eb1dd9 nvidia/gp102/sec2/sig.bin
+#> firmware nvidia/gp108/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/gp102/acr/bl.bin
+#> firmware nvidia/gp108/acr/ucode_load.bin 5d2ce92a781c6c42a781a50badfbfc7db9267945996ee46aaa15429facdf2920 nvidia/gp102/acr/ucode_load.bin
+#> firmware nvidia/gp108/acr/ucode_unload.bin 1f139e5ada193fc191ed9a235a53901076d0008f3ea15ab7ca66d33748ea6a03 nvidia/gp102/acr/ucode_unload.bin
+#> firmware nvidia/gp108/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/gp102/acr/unload_bl.bin
+#> firmware nvidia/gp108/gr/fecs_bl.bin e683be6f7b2012f4e5e6f4995086a5f0ef5bc4fd687f24dcedc5df7070f3a43d
+#> firmware nvidia/gp108/gr/fecs_data.bin a6655aadb7c6b4bcc55dc26221587634433ea2c87f332d95096bae40492e0130
+#> firmware nvidia/gp108/gr/fecs_inst.bin 52516f129a4e646cc5be8ae9998add9e83c7232555f8566007980b63792405e7
+#> firmware nvidia/gp108/gr/fecs_sig.bin d020cc1812c2c3fe4495c47cdac62db658aa596a1cd5a898a8e17a8c86982eca
+#> firmware nvidia/gp108/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5
+#> firmware nvidia/gp108/gr/gpccs_data.bin 0a9da8135cfed3810e9715c50c1853f395b1b08a9833d35d2a14f644136900e7
+#> firmware nvidia/gp108/gr/gpccs_inst.bin f76c317f4a4f9b4b1b542ed7fa41fec76339e84aed52b21e4cea6b330525db56
+#> firmware nvidia/gp108/gr/gpccs_sig.bin 3d612479349b75f56ed5986781e2ce2b0b5a26cdbc5601a17d2bcdca42fba8a2
+#> firmware nvidia/gp108/gr/sw_bundle_init.bin 5f543872e72731f164e9e9f1fc19fc30e73a508629d2c6d0724fe6247c976c50
+#> firmware nvidia/gp108/gr/sw_ctx.bin c60f4e9ea298af2ebfb466accacae95e4a1baa7138971b280a97c4131ff29121
+#> firmware nvidia/gp108/gr/sw_method_init.bin 1123176ec93df9046b3fb5071141235424c101e405294f505494e00ba925a719
+#> firmware nvidia/gp108/gr/sw_nonctx.bin 4890912b427bde77e4998a601ef8b282eae1ae5ce4dc20e5de2d7b50917f4ac0
+#> firmware nvidia/gp108/nvdec/scrubber.bin 0f70a43c184d6db4c4c4f1821bc51576decc9e3d61f45349ed113621df1e06e7 nvidia/gp102/nvdec/scrubber.bin
+#> firmware nvidia/gp108/sec2/desc.bin 0d0ce7988281fc9115d3c6320e7b904d530719ddeacdd85ea29f744ba7b039ee nvidia/gp102/sec2/desc-1.bin
+#> firmware nvidia/gp108/sec2/image.bin 90404a9c365eb9b2d3f692c255bc3b50af9313ccae73306df369ec712c4b511e nvidia/gp102/sec2/image-1.bin
+#> firmware nvidia/gp108/sec2/sig.bin 14c3524427b08a6dca1fc846f3830387ee835c3257792860783e5e4148833ebb nvidia/gp102/sec2/sig-1.bin
+#> firmware nvidia/gv100/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab
+#> firmware nvidia/gv100/acr/ucode_load.bin b349f0355548716770531eb9082544bb84de059f17bbf3952fb09dd27d8673d4
+#> firmware nvidia/gv100/acr/ucode_unload.bin 6df87cfa73816b01711b6debd64fb0af9973e28ebe101f45e2da798ab8b5970b
+#> firmware nvidia/gv100/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173
+#> firmware nvidia/gv100/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825
+#> firmware nvidia/gv100/gr/fecs_data.bin 8912bf456eb0ca5e3026ab900003fe45a0795eaea29e7f26216dfc0ae1747431
+#> firmware nvidia/gv100/gr/fecs_inst.bin 00db0996214aa8f54450e4052af32c98b4c0fe29c0c6c4983d234025ddc1dab5
+#> firmware nvidia/gv100/gr/fecs_sig.bin 8b636da582662995aa5ed3b8f530299a8aca801934657c85e6a031fb8fd1eab1
+#> firmware nvidia/gv100/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5
+#> firmware nvidia/gv100/gr/gpccs_data.bin a2d5a7589728dd26feb213412bf99c4487b20e7f2a44cb1aefe1c50b3e893c4f
+#> firmware nvidia/gv100/gr/gpccs_inst.bin 81ca0d73b1d5212cec30522a848326928f0c039d7b5b5caf44a423a42de6cecb
+#> firmware nvidia/gv100/gr/gpccs_sig.bin b445350b653bc25a038aa27eeeb884052f038b289769489485ef03dcab4f1f96
+#> firmware nvidia/gv100/gr/sw_bundle_init.bin 70c048d1b8dff4d2ba0266eed440359e5b85d7802786b922772faad1286015cf
+#> firmware nvidia/gv100/gr/sw_ctx.bin 6dd5b1716f1c8ae1dae07508edbf3c06dfb845e7869e202307d64b20d422e6c0
+#> firmware nvidia/gv100/gr/sw_method_init.bin 891b0b9444432e20705b20fe9a7037c51ba13fdb522fc1a1b69657deed933f0d
+#> firmware nvidia/gv100/gr/sw_nonctx.bin 005b247fe5b7316996cdc0ac5db7df7104f599056f72da90858dfd495ffb9115
+#> firmware nvidia/gv100/nvdec/scrubber.bin 64d157831ed50641ab05dff38afaa5950dd12a3d82ef80ad0aac9237451ec219
+#> firmware nvidia/gv100/sec2/desc.bin e342eaf5673e41f5979d6062c89c8d36c7bec3b5be1af0c43f87ce575a8fec70
+#> firmware nvidia/gv100/sec2/image.bin 1ff237d56dd51aa2577261f324ae680b2e5f973d8217595a3a8929e4bea3a718
+#> firmware nvidia/gv100/sec2/sig.bin d7cf400a4fff6cb25896b713e6774488b5a7c8b77fa4b64abd2b31c8485ac4c9
+#> firmware nvidia/tu102/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab
+#> firmware nvidia/tu102/acr/ucode_ahesasc.bin 224596e7c47ea1368445391738a6f32f63e184a644e637e49683bfb03adf5d98
+#> firmware nvidia/tu102/acr/ucode_asb.bin 268b21fab5398f5ed2bc4a17d468734efeb0f13a11e34c002ae0ea5a2130a2d1
+#> firmware nvidia/tu102/acr/ucode_unload.bin 2e5239994e33ba3ce7ab85f6fd30237d4d90af5954d837ae95e4dc211f76444c
+#> firmware nvidia/tu102/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173
+#> firmware nvidia/tu102/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825
+#> firmware nvidia/tu102/gr/fecs_data.bin a447935dcd8eb90a10788e39a8e43b03d60e5f2c1b2894db5c6c87cf7010ac27
+#> firmware nvidia/tu102/gr/fecs_inst.bin 1f1b45a2ad4ebbf38a18dff10ef0ad3c32fa93184678c4f8741a2b64036997c1
+#> firmware nvidia/tu102/gr/fecs_sig.bin 738ee131301176696cb95beb0766a33114e441376adc7591d271abc274248407
+#> firmware nvidia/tu102/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5
+#> firmware nvidia/tu102/gr/gpccs_data.bin df9651b65fc727c69dd0d7c3aaf3e3603f3c2c79c0ec08dee6c0e76317485eef
+#> firmware nvidia/tu102/gr/gpccs_inst.bin 484632eef86de685e3bd113c074aadbcd20328aedc46b896015c531f383c1624
+#> firmware nvidia/tu102/gr/gpccs_sig.bin fbc8f4ec0a6a0bffe9a209b80bebefb92cb92aac8bd1b821d132448c392f4d9b
+#> firmware nvidia/tu102/gr/sw_bundle_init.bin 71a50a09d38b73eaaf6d7d09ffb3c59395254f5e377f1e1de85445944fce23e4
+#> firmware nvidia/tu102/gr/sw_ctx.bin e1faebc5bc13ddf5abbb3afdee80ab0a08b526fde873994f46f99664a8671611
+#> firmware nvidia/tu102/gr/sw_method_init.bin 4070c3b6387f1a756e765bd11e47348d4305005edd1d7a0e62f60210a28f46f0
+#> firmware nvidia/tu102/gr/sw_nonctx.bin 5798f707e2a8605c2d33e2913758f9bc61a0604b699b0742d626278a5e9fbf82
+#> firmware nvidia/tu102/gr/sw_veid_bundle_init.bin f0bc69a638d4d128ecfa6f200d6b1ed75f8de37292b388d963da2884e98d3f9e
+#> firmware nvidia/tu102/nvdec/scrubber.bin d2165581f3d30d0f6751cfc34ff2127251f3000e2f94f32c3f381d3d1b04587a
+#> firmware nvidia/tu102/sec2/desc.bin 771ea959abb878cf7fc7fbf829822c9ebcd2575b49d8354fb043235a72f60566
+#> firmware nvidia/tu102/sec2/image.bin 1635b4cb1507fbb86b6bd362ecb533bd21c45b8aa28d8cb6e37431fe5e601365
+#> firmware nvidia/tu102/sec2/sig.bin 7f1ddd48c4bf0ef194b7b47d9be4b10c388cbaa8cbbf18737ef91e7bb689d983
+#> firmware nvidia/tu104/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/tu102/acr/bl.bin
+#> firmware nvidia/tu104/acr/ucode_ahesasc.bin 224596e7c47ea1368445391738a6f32f63e184a644e637e49683bfb03adf5d98 nvidia/tu102/acr/ucode_ahesasc.bin
+#> firmware nvidia/tu104/acr/ucode_asb.bin 268b21fab5398f5ed2bc4a17d468734efeb0f13a11e34c002ae0ea5a2130a2d1 nvidia/tu102/acr/ucode_asb.bin
+#> firmware nvidia/tu104/acr/ucode_unload.bin 2e5239994e33ba3ce7ab85f6fd30237d4d90af5954d837ae95e4dc211f76444c nvidia/tu102/acr/ucode_unload.bin
+#> firmware nvidia/tu104/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/tu102/acr/unload_bl.bin
+#> firmware nvidia/tu104/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825 nvidia/tu102/gr/fecs_bl.bin
+#> firmware nvidia/tu104/gr/fecs_data.bin 56f8c05867eeb09d8ddc58e6b9a14c6ac3a3d83094158de23d60e32eee491aea
+#> firmware nvidia/tu104/gr/fecs_inst.bin 31ce84f1b7f2c265f5c76897846b50a1ccd15e1d8f6bb1ef473413bd15901460
+#> firmware nvidia/tu104/gr/fecs_sig.bin eec27c82b3d72cf0de3ad0184dbff5ae1a34520bea5811e7014441eca2c5cc95
+#> firmware nvidia/tu104/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5 nvidia/tu102/gr/gpccs_bl.bin
+#> firmware nvidia/tu104/gr/gpccs_data.bin dcd302a8f6ea59f5102267c0739cde8440706d1774a6294d7fd85a25d9b48c73
+#> firmware nvidia/tu104/gr/gpccs_inst.bin f3286c65c5219d3a7a1c6d864ddfed780cf11a120774f8f0e698471e237115e9
+#> firmware nvidia/tu104/gr/gpccs_sig.bin 3662cb6811811ffd37120089a0641a81322167e775b3e99cdbeb4a6b321d8616
+#> firmware nvidia/tu104/gr/sw_bundle_init.bin 71a50a09d38b73eaaf6d7d09ffb3c59395254f5e377f1e1de85445944fce23e4
+#> firmware nvidia/tu104/gr/sw_ctx.bin e1faebc5bc13ddf5abbb3afdee80ab0a08b526fde873994f46f99664a8671611
+#> firmware nvidia/tu104/gr/sw_method_init.bin 4070c3b6387f1a756e765bd11e47348d4305005edd1d7a0e62f60210a28f46f0
+#> firmware nvidia/tu104/gr/sw_nonctx.bin c624a4e6431f6131f7e0531513343acba56703cc928bce4d7817c537c1e208fc
+#> firmware nvidia/tu104/gr/sw_veid_bundle_init.bin f0bc69a638d4d128ecfa6f200d6b1ed75f8de37292b388d963da2884e98d3f9e
+#> firmware nvidia/tu104/nvdec/scrubber.bin d2165581f3d30d0f6751cfc34ff2127251f3000e2f94f32c3f381d3d1b04587a nvidia/tu102/nvdec/scrubber.bin
+#> firmware nvidia/tu104/sec2/desc.bin 771ea959abb878cf7fc7fbf829822c9ebcd2575b49d8354fb043235a72f60566 nvidia/tu102/sec2/desc.bin
+#> firmware nvidia/tu104/sec2/image.bin 1635b4cb1507fbb86b6bd362ecb533bd21c45b8aa28d8cb6e37431fe5e601365 nvidia/tu102/sec2/image.bin
+#> firmware nvidia/tu104/sec2/sig.bin 7f1ddd48c4bf0ef194b7b47d9be4b10c388cbaa8cbbf18737ef91e7bb689d983 nvidia/tu102/sec2/sig.bin
+#> firmware nvidia/tu106/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/tu102/acr/bl.bin
+#> firmware nvidia/tu106/acr/ucode_ahesasc.bin 224596e7c47ea1368445391738a6f32f63e184a644e637e49683bfb03adf5d98 nvidia/tu102/acr/ucode_ahesasc.bin
+#> firmware nvidia/tu106/acr/ucode_asb.bin 268b21fab5398f5ed2bc4a17d468734efeb0f13a11e34c002ae0ea5a2130a2d1 nvidia/tu102/acr/ucode_asb.bin
+#> firmware nvidia/tu106/acr/ucode_unload.bin 2e5239994e33ba3ce7ab85f6fd30237d4d90af5954d837ae95e4dc211f76444c nvidia/tu102/acr/ucode_unload.bin
+#> firmware nvidia/tu106/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/tu102/acr/unload_bl.bin
+#> firmware nvidia/tu106/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825 nvidia/tu102/gr/fecs_bl.bin
+#> firmware nvidia/tu106/gr/fecs_data.bin 8f82cf20aafc03d6e21d360cb9a2a2b6c7f082a0451315db3b382c06d2e87807
+#> firmware nvidia/tu106/gr/fecs_inst.bin 22cb185b2aacaa27eabbd68d8898280b417cc94457451740a3da89a50a3c0fa1
+#> firmware nvidia/tu106/gr/fecs_sig.bin 87fc51c786a40707f1c8a7e47b70ee1d08ebeeca39281cc55f228c0b2d05f43b
+#> firmware nvidia/tu106/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5 nvidia/tu102/gr/gpccs_bl.bin
+#> firmware nvidia/tu106/gr/gpccs_data.bin d91ea8aaf453b440b396d02ac039d166401c0243d2000b09ffb12a9e15fba0a4
+#> firmware nvidia/tu106/gr/gpccs_inst.bin 948660a21f13dde646e60881bef3a1bcb6571f702e0ba43fd80639f1e81ebcff
+#> firmware nvidia/tu106/gr/gpccs_sig.bin fdf65f06545da9ba484f74d9c102af10e6614b80460c8e5de499f57b68fbcb43
+#> firmware nvidia/tu106/gr/sw_bundle_init.bin 71a50a09d38b73eaaf6d7d09ffb3c59395254f5e377f1e1de85445944fce23e4
+#> firmware nvidia/tu106/gr/sw_ctx.bin e1faebc5bc13ddf5abbb3afdee80ab0a08b526fde873994f46f99664a8671611
+#> firmware nvidia/tu106/gr/sw_method_init.bin 4070c3b6387f1a756e765bd11e47348d4305005edd1d7a0e62f60210a28f46f0
+#> firmware nvidia/tu106/gr/sw_nonctx.bin 5798f707e2a8605c2d33e2913758f9bc61a0604b699b0742d626278a5e9fbf82
+#> firmware nvidia/tu106/gr/sw_veid_bundle_init.bin f0bc69a638d4d128ecfa6f200d6b1ed75f8de37292b388d963da2884e98d3f9e
+#> firmware nvidia/tu106/nvdec/scrubber.bin d2165581f3d30d0f6751cfc34ff2127251f3000e2f94f32c3f381d3d1b04587a nvidia/tu102/nvdec/scrubber.bin
+#> firmware nvidia/tu106/sec2/desc.bin 771ea959abb878cf7fc7fbf829822c9ebcd2575b49d8354fb043235a72f60566 nvidia/tu102/sec2/desc.bin
+#> firmware nvidia/tu106/sec2/image.bin 1635b4cb1507fbb86b6bd362ecb533bd21c45b8aa28d8cb6e37431fe5e601365 nvidia/tu102/sec2/image.bin
+#> firmware nvidia/tu106/sec2/sig.bin 7f1ddd48c4bf0ef194b7b47d9be4b10c388cbaa8cbbf18737ef91e7bb689d983 nvidia/tu102/sec2/sig.bin
+#> firmware nvidia/tu116/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab
+#> firmware nvidia/tu116/acr/ucode_ahesasc.bin e84d70952bb032eea8504e37ac408fac0a8ea1468bd0b481a1394e33310c568a
+#> firmware nvidia/tu116/acr/ucode_asb.bin cf09f160a3ea5e30c163c8fe0deee1e7eb565b3a79a7cd49959c1f9d3a17120e
+#> firmware nvidia/tu116/acr/ucode_unload.bin 30334a89a5e3fa121dfe590d1321a4ca64f89d75f59aef75216e31dc1ff34a59
+#> firmware nvidia/tu116/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173
+#> firmware nvidia/tu116/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825
+#> firmware nvidia/tu116/gr/fecs_data.bin 93f77355859604e7ab2dadb4d0a1b91f92aa88f424c95c93eeb1ae9208a9ea38
+#> firmware nvidia/tu116/gr/fecs_inst.bin 91098efd8cf57582e64f90451066356962235a8fb9ac63ebb6e2b7bd821ec359
+#> firmware nvidia/tu116/gr/fecs_sig.bin df9ca9a5489fd789b24a5e815843a7b71109695d31d5dfa7f1dbcb394af5d1d6
+#> firmware nvidia/tu116/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5
+#> firmware nvidia/tu116/gr/gpccs_data.bin 0975ae304fc9016f0a232e3bc96609dac07ff5f134d52c307494370b906de6e8
+#> firmware nvidia/tu116/gr/gpccs_inst.bin 86126b5779fd3f2b500a39e4194d5657ba4db9794c94160bcedb9de1210c199a
+#> firmware nvidia/tu116/gr/gpccs_sig.bin 15eec2ff425650b99b97262a119254ac31930d57c1b110e18e9555e61abd78a8
+#> firmware nvidia/tu116/gr/sw_bundle_init.bin 71a50a09d38b73eaaf6d7d09ffb3c59395254f5e377f1e1de85445944fce23e4
+#> firmware nvidia/tu116/gr/sw_ctx.bin 3093e61c2bd38c406cdf224165e7cff5dad0438e4b48aa87127d782cbd6d8bf0
+#> firmware nvidia/tu116/gr/sw_method_init.bin 4070c3b6387f1a756e765bd11e47348d4305005edd1d7a0e62f60210a28f46f0
+#> firmware nvidia/tu116/gr/sw_nonctx.bin 5db9c44a463276d36050c9113bf2125edc7c1d30d7e7d044a81af278cce9fb8d
+#> firmware nvidia/tu116/gr/sw_veid_bundle_init.bin f0bc69a638d4d128ecfa6f200d6b1ed75f8de37292b388d963da2884e98d3f9e
+#> firmware nvidia/tu116/nvdec/scrubber.bin 9bce99f9f710299c5cd2d86d74bb10b8e0eb726e81139cee567b0ab38add4fec
+#> firmware nvidia/tu116/sec2/desc.bin 3d9974e54031450f98a7361832b7282d7b7b9e6b76794fb3cdb34b87063f6b89
+#> firmware nvidia/tu116/sec2/image.bin dfaffee43ebc9e1bc02903c19c204b2b4c9f3a24efa6ff7a4b21c224462df8eb
+#> firmware nvidia/tu116/sec2/sig.bin f00a716100b1172098760094757d06c566d84688467db101370a4cf6279f5bc9
+#> firmware nvidia/tu117/acr/bl.bin 01326cc997716bebb0eab9fe1f463fffa0ee586079e4ca0e5bb096ab6fcfedab nvidia/tu116/acr/bl.bin
+#> firmware nvidia/tu117/acr/ucode_ahesasc.bin e84d70952bb032eea8504e37ac408fac0a8ea1468bd0b481a1394e33310c568a nvidia/tu116/acr/ucode_ahesasc.bin
+#> firmware nvidia/tu117/acr/ucode_asb.bin cf09f160a3ea5e30c163c8fe0deee1e7eb565b3a79a7cd49959c1f9d3a17120e nvidia/tu116/acr/ucode_asb.bin
+#> firmware nvidia/tu117/acr/ucode_unload.bin 30334a89a5e3fa121dfe590d1321a4ca64f89d75f59aef75216e31dc1ff34a59 nvidia/tu116/acr/ucode_unload.bin
+#> firmware nvidia/tu117/acr/unload_bl.bin dcee20bfa564da6a8fadc21dd9e0087d45f630b8b18f8e296954a3b8f0e28173 nvidia/tu116/acr/unload_bl.bin
+#> firmware nvidia/tu117/gr/fecs_bl.bin 4f073068949007e5e65a64c25ac60e1a60910fbb2e33c02cd4f4ce7379ac5825 nvidia/tu116/gr/fecs_bl.bin
+#> firmware nvidia/tu117/gr/fecs_data.bin e11527020efbb96e9d9fecb0524d6f693cc016410e3fc88732b42516eab00211
+#> firmware nvidia/tu117/gr/fecs_inst.bin 3b597ecd7024ea05f00e6030c84b216f58e1b83832693fdbe2201fc785cd054e
+#> firmware nvidia/tu117/gr/fecs_sig.bin e7dc511e3f0903c2b972999d56dd45847ff56ae8cc1c6055ad37ab2f9cdd0577
+#> firmware nvidia/tu117/gr/gpccs_bl.bin 302d719d56b68b5641d659b05a84dde870072c31ecf931491f5303ebce1d62c5 nvidia/tu116/gr/gpccs_bl.bin
+#> firmware nvidia/tu117/gr/gpccs_data.bin 62007ae8765365000d19c28c4d5fcb99f5e5f17caf04123b373fe34a8e7e6538
+#> firmware nvidia/tu117/gr/gpccs_inst.bin dba26e5f7784cfa37cdfc9fe8c8af73075a50aaae0ab76367b6ea265578adc07
+#> firmware nvidia/tu117/gr/gpccs_sig.bin 0ee67953035e707f2aa68e227de44adb9ed64dec8c334491f77f8691fca9dd6b
+#> firmware nvidia/tu117/gr/sw_bundle_init.bin 71a50a09d38b73eaaf6d7d09ffb3c59395254f5e377f1e1de85445944fce23e4
+#> firmware nvidia/tu117/gr/sw_ctx.bin 3093e61c2bd38c406cdf224165e7cff5dad0438e4b48aa87127d782cbd6d8bf0
+#> firmware nvidia/tu117/gr/sw_method_init.bin 4070c3b6387f1a756e765bd11e47348d4305005edd1d7a0e62f60210a28f46f0
+#> firmware nvidia/tu117/gr/sw_nonctx.bin 5db9c44a463276d36050c9113bf2125edc7c1d30d7e7d044a81af278cce9fb8d
+#> firmware nvidia/tu117/gr/sw_veid_bundle_init.bin f0bc69a638d4d128ecfa6f200d6b1ed75f8de37292b388d963da2884e98d3f9e
+#> firmware nvidia/tu117/nvdec/scrubber.bin 9bce99f9f710299c5cd2d86d74bb10b8e0eb726e81139cee567b0ab38add4fec nvidia/tu116/nvdec/scrubber.bin
+#> firmware nvidia/tu117/sec2/desc.bin 3d9974e54031450f98a7361832b7282d7b7b9e6b76794fb3cdb34b87063f6b89 nvidia/tu116/sec2/desc.bin
+#> firmware nvidia/tu117/sec2/image.bin dfaffee43ebc9e1bc02903c19c204b2b4c9f3a24efa6ff7a4b21c224462df8eb nvidia/tu116/sec2/image.bin
+#> firmware nvidia/tu117/sec2/sig.bin f00a716100b1172098760094757d06c566d84688467db101370a4cf6279f5bc9 nvidia/tu116/sec2/sig.bin
+#> firmware_licence LICENCE.nvidia bc5225a57f49c5249dcf238e4ae6437811677a2a8a7f579c3d839e058653ee44
+
+CONFIG_DRM_NOUVEAU=y
 CONFIG_NOUVEAU_DEBUG=0
 CONFIG_NOUVEAU_DEBUG_DEFAULT=0
 
