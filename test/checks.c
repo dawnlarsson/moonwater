@@ -191011,6 +191011,24 @@ static void db_test_portal(void)
                 db_send(a, &call);
                 DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.m.body_length == 0, "the registry's Register is answered with nothing");
         }
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Inhibit", "Inhibit", "", DBUS_NAME_PORTAL, "", "sua{sv}", 0, 0};
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_string(&call.w, "");
+                dbus_o_u32(&call.w, 8);
+                dbus_o_u32(&call.w, 0);
+                dbus_o_pad(&call.w, 8);
+                db_send(a, &call);
+                DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "o") &&
+                            db_string_arg(&s, 0, text, sizeof text) &&
+                            !strcmp(text, "/org/freedesktop/portal/desktop/request/moonwater/1"),
+                        "Inhibit returns a request object path");
+                db_call(a, DBUS_NAME_PORTAL, "/org/freedesktop/portal/desktop/request/moonwater/1",
+                        "org.freedesktop.portal.Request", "Close", "", 0, 0);
+                DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.m.body_length == 0, "Request.Close on the inhibit handle succeeds");
+        }
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
         {
                 int found = 0, found_registry = 0;

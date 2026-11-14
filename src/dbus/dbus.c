@@ -1754,6 +1754,11 @@ static const char dbus_introspect_portal[] =
     "<interface name=\"org.freedesktop.host.portal.Registry\">\n"
     "<method name=\"Register\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/></method>\n"
     "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
+    "</interface>\n"
+    "<interface name=\"org.freedesktop.portal.Inhibit\">\n"
+    "<method name=\"Inhibit\"><arg type=\"s\" direction=\"in\"/><arg type=\"u\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<method name=\"CreateMonitor\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
     "</interface>\n</node>\n";
 
 // The variant of a setting: its signature and its value.
@@ -1927,6 +1932,16 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 return;
         if (!dbus_equal(m->path, DBUS_PATH_PORTAL))
         {
+                static const char req_prefix[] = "/org/freedesktop/portal/desktop/request/";
+                long p = 0;
+
+                while (req_prefix[p] && m->path[p] == req_prefix[p])
+                        p++;
+                if (!req_prefix[p] && dbus_equal(m->interface, "org.freedesktop.portal.Request") && dbus_equal(m->member, "Close"))
+                {
+                        dbus_reply_empty(from, m, dbus.service.unique);
+                        return;
+                }
                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownObject", "No such object", dbus.service.unique);
                 return;
         }
@@ -2005,6 +2020,14 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
         if (dbus_equal(m->interface, "org.freedesktop.host.portal.Registry") && dbus_equal(m->member, "Register"))
         {
                 dbus_reply_empty(from, m, dbus.service.unique);
+                return;
+        }
+        if (dbus_equal(m->interface, "org.freedesktop.portal.Inhibit") &&
+            (dbus_equal(m->member, "Inhibit") || dbus_equal(m->member, "CreateMonitor")))
+        {
+                dbus_reply_begin(&w, from, m, "o", dbus.service.unique, &body);
+                dbus_o_string(&w, "/org/freedesktop/portal/desktop/request/moonwater/1");
+                dbus_reply_end(&w, from, m, body);
                 return;
         }
         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", dbus.service.unique);
