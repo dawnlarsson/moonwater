@@ -5705,8 +5705,11 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
 
                         if (root && c->surfaces[wayland.pointer_surface].live)
                         {
+                                unsigned long serial = wayland_input_serial(c);
+
+                                c->pointer_enter = (unsigned int)serial;
                                 s = wayland_pick(c, root, wayland.pointer_x, wayland.pointer_y, &sx, &sy);
-                                wayland_pointer_enter_one(c, slot, s, wayland_serial(c), sx, sy);
+                                wayland_pointer_enter_one(c, slot, s, serial, sx, sy);
                         }
                 }
                 return WAYLAND_OK;
@@ -6113,8 +6116,13 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                 if (op == WLQ_wl_data_device_start_drag)
                 {
                         // Not done: the source of a drag is told it is not going.
-                        if (a[0].slot >= 0 && c->sources[c->objects[a[0].slot].link].state == 0)
-                                wayland_source_cancel(c, c->objects[a[0].slot].link);
+                        if (a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_data_source)
+                        {
+                                long src = c->objects[a[0].slot].link;
+
+                                if (src >= 0 && src < WAYLAND_SOURCES && c->sources[src].state == 0)
+                                        wayland_source_cancel(c, src);
+                        }
                         return WAYLAND_OK;
                 }
                 wayland_device_remove(c, 0, self->id);

@@ -1062,8 +1062,6 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         // word), so a commit with a part damaged is read in place like any other and that part alone is drawn again (the row's damage,
         // compositor_wl_lent_damage). The one buffer not taken at that word is one the shim says may not be whole (fragile: an X window's,
         // whose server draws on in what it committed): that one is read in place only when all of it is damaged, and copied otherwise.
-        if (compositor.resize == row)
-                return 0;
         if (!picture->pixels || !picture->map || picture->blend || !picture->last || x < 0 || y < 0 || width <= 0 || height <= 0)
                 return 0;
         if (compositor_wl_needs_xform(picture, width, height))
@@ -2211,6 +2209,11 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
         compositor_wl.hold = (int)mode;
         compositor.cursor.hold_hidden = mode == 1;
         compositor_cursor_move();
+}
+
+static int compositor_wl_held(void)
+{
+        return (compositor_wl.hold == 1 || compositor_wl.hold == 2) && compositor_wl.hold_row >= 0;
 }
 
 // The hand's counts, to the window that holds the pointer locked or confined; 1 when locked and the pointer is not to move.
@@ -3922,6 +3925,9 @@ static void compositor_wl_wake(void)
         compositor_wl_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();
+        for (int row = 0; row < WINDOWS; row++)
+                if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
+                        compositor_wl_drain(row);
         if (stats.rows > 0 || stats.clients > 0)
         {
                 int want = compositor_wl_pointer_row(), keys = compositor_wl_key_row();
@@ -3955,7 +3961,6 @@ static void compositor_wl_wake(void)
         for (int row = 0; row < WINDOWS; row++)
                 if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
                 {
-                        compositor_wl_drain(row);
                         wayland_row_wake(row);
                         compositor.woken &= ~(1u << row);
                 }

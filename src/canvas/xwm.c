@@ -993,6 +993,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                                           XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
                 if (w && (w->state & COMPOSITOR_XWM_FULLSCREEN))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
+                if (w && w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))
+                        c.mask &= ~(XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
                 // The compositor places a window (its place is sent when it changes): the place a client asks is not taken. A popup's
                 // is where it is.
                 if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))

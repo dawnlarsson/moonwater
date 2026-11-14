@@ -5747,6 +5747,7 @@ static int compositor_lent(int row);
 static unsigned int compositor_lent_fb(int row);
 static void compositor_lent_fb_fail(int row);
 static int compositor_wl_row_async(int row);
+static int compositor_wl_held(void);
 static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
 static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
@@ -5779,6 +5780,10 @@ static void compositor_lent_fb_fail(int row)
 static int compositor_wl_row_async(int row)
 {
         (void)row;
+        return 0;
+}
+static int compositor_wl_held(void)
+{
         return 0;
 }
 static int compositor_wl_row_blend(int row)
@@ -10147,6 +10152,7 @@ static void compositor_present_frames(void)
 
         // The top window on the overlay where it can be: nothing of it composed under the plane.
         int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, planed) : -1;
+        int plane_off = 0;
 
         if (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
                                           memory_compare(planed, compositor.plane_rect, sizeof(planed)) != 0))
@@ -10157,8 +10163,13 @@ static void compositor_present_frames(void)
                 compositor_damage(compositor.plane_rect[0], compositor.plane_rect[1],
                                   compositor.plane_rect[2] - compositor.plane_rect[0],
                                   compositor.plane_rect[3] - compositor.plane_rect[1]);
-                if (plane < 0 && !compositor_atomic_to(compositor_primary_fb(), -1, 0, 1, 0, 0, 0))
-                        compositor_overlay_off();
+                if (plane < 0)
+                {
+                        if (compositor_spare.fb)
+                                plane_off = 1;
+                        else if (!compositor_atomic_to(compositor_primary_fb(), -1, 0, 1, 0, 0, 0))
+                                compositor_overlay_off();
+                }
                 compositor.plane_row = compositor.direct_row = -1;
                 compositor.plane_fb = 0;
         }
@@ -10346,7 +10357,8 @@ static void compositor_present_frames(void)
                                 compositor_stale_part(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts, r);
                         }
         }
-        compositor_front_stale_any = 0;
+        if (compositor_output_count() < 2 && compositor.plane_row < 0)
+                compositor_front_stale_any = 0;
         // No clips at all would tell the card everything changed.
         dirty.fb_id = compositor.fb;
         dirty.clip_count = clips;
@@ -10360,7 +10372,7 @@ static void compositor_present_frames(void)
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
-        if (back && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
+        if ((back || plane_off) && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
                 compositor_overlay_off();
         if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
@@ -13814,6 +13826,7 @@ static void compositor_want(int row, int width, int height)
         if (compositor.edges[row] & COMPOSITOR_EDGE_TOP)
                 y = compositor.far_y[row] - height;
         compositor_place(row, x, y);
+        compositor_wl_settle(row);
         compositor_stretch(row);
         compositor_damage_row(row);
 }
@@ -18262,13 +18275,18 @@ static void compositor_drag_begin_client(int under)
 
 static void compositor_drag_stop(int row)
 {
+        int resized;
+
         if (row < 0 || (compositor.drag != row && compositor.resize != row))
                 return;
+        resized = compositor.resize == row;
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
         compositor.hold_rows = 0;
+        if (resized)
+                compositor.woken |= 1u << row;
 }
 #endif
 
@@ -18295,11 +18313,15 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         if (dragged >= 0 || resized >= 0)
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
         if (resized >= 0)
+        {
                 compositor_mark_clear();
-        // The two of a shared edge are let go where the hand left them, each still what it filled and remembering the rectangle
-        // it had before (compositor_resize_begin).
-        if (resized >= 0 && compositor.shared_row >= 0)
-                compositor.shared_row = COMPOSITOR_NONE;
+                compositor.woken |= 1u << resized;
+                if (compositor.shared_row >= 0)
+                {
+                        compositor.woken |= compositor.shared_lo_set | compositor.shared_hi_set;
+                        compositor.shared_row = COMPOSITOR_NONE;
+                }
+        }
         // A button is let go in the window it was pressed in: a second button pressed over another window while the
         // first is held is that window's, and the first's release is the one that window held the grab for. A button
         // that was never recorded as pressed in a window (its press was taken by a popup, a minimise or a hold's cancel)
@@ -18371,7 +18393,7 @@ static void compositor_at_hand(void (*act)(unsigned int, int), unsigned int code
 
                 compositor.at_real = 1;
                 compositor_pointer_shown();
-                if (compositor.pointer_x != led_x || compositor.pointer_y != led_y)
+                if ((compositor.pointer_x != led_x || compositor.pointer_y != led_y) && !compositor_wl_hold_counts(0, 0, 0))
                         compositor_motion();
         }
         act(code, arg);
@@ -18429,7 +18451,7 @@ static int compositor_minimize_press(unsigned int code, int down)
                 return 1;
         }
         compositor_minimize_code = 0;
-        if (code != COMPOSITOR_BTN_LEFT)
+        if (code != COMPOSITOR_BTN_LEFT || compositor_wl_held())
                 return 0;
 
         compositor_pointer_clamp();
@@ -18566,11 +18588,7 @@ static void compositor_button(unsigned int code, int down)
         if (under < 0)
                 return;
 
-        if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0
-#ifdef CONFIG_MOONWATER_WAYLAND
-            && !compositor_wl_hold_counts(0, 0, 0)
-#endif
-        )
+        if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0 && !compositor_wl_held())
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
 
@@ -19222,8 +19240,9 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
         // the last motion it was told of, which is none when it opened under a pointer that has not moved. Told once:
         // a wheel that reports in 120ths sends several events to a notch, and each would take two of the ring's places.
-        if (row >= 0 && (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
-                         compositor.pointer_y - compositor.y[row] != compositor.told_y))
+        if (row >= 0 && !compositor_wl_hold_counts(0, 0, 0) &&
+            (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
+             compositor.pointer_y - compositor.y[row] != compositor.told_y))
                 compositor_pointer_to(row);
         // What became of it, for moonwater debug.
         if (row < 0)
