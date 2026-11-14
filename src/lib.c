@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        503 routines (477 public, 26 local), 492 of them on all three and 11 local to one.
+        504 routines (478 public, 26 local), 493 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -312,7 +312,6 @@
           memory_offsets_between         public  yes     yes     yes
           memory_offsets_fields          public  yes     yes     yes
           memory_offsets_fields_arm64    local   --      yes     --
-          memory_over_u32_rect           public  yes     yes     yes
           memory_offsets_fields_blank    public  yes     yes     yes
           memory_offsets_fields_rv       local   --      --      yes
           memory_offsets_fields_x64      local   yes     --      --
@@ -322,6 +321,7 @@
           memory_offsets_range_x64       local   yes     --      --
           memory_over_cover_u32_rect     public  yes     yes     yes
           memory_over_tone_u32           public  yes     yes     yes
+          memory_over_u32_rect           public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
           memory_resample_u32_rect       public  yes     yes     yes
@@ -486,6 +486,7 @@
           string_duplicate_max           public  yes     yes     yes
           string_find                    public  yes     yes     yes
           string_first_of                public  yes     yes     yes
+          string_first_of_either_or_end  public  yes     yes     yes
           string_first_of_max            public  yes     yes     yes
           string_first_of_or_end         public  yes     yes     yes
           string_first_of_set            public  yes     yes     yes
@@ -3787,6 +3788,11 @@ __asm__(
 #define NEON_EITHER(n)                                                        \
     "cmeq v2.16b, v" n ".16b, v1.16b\n"                                       \
     "cmhs v" n ".16b, v2.16b, v" n ".16b\n"
+#define NEON_EITHER_TWO(n)                                                    \
+    "cmeq v2.16b, v" n ".16b, v1.16b\n"                                       \
+    "cmeq v18.16b, v" n ".16b, v3.16b\n"                                      \
+    "orr v2.16b, v2.16b, v18.16b\n"                                           \
+    "cmhs v" n ".16b, v2.16b, v" n ".16b\n"
 
 //      Sixteen bytes at [x5], as four mask bits a byte in x3.
 #define NEON_ONE(FLAG)                                                        \
@@ -4100,6 +4106,28 @@ __asm__(
         Each vector's fold stays live so QUAD_WHICH can ask which one
         answered without reading anything again.
 */
+#define AVX2_BROADCAST_TWO                                                    \
+    "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl %dl, %ecx\n"   \
+    "vmovd %ecx, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n"
+#define AVX2_EITHER_AT_TWO(D)                                                 \
+    "vpxor " D "(%rdi), %ymm1, %ymm0\n   vpxor " D "(%rdi), %ymm3, %ymm5\n"  \
+    "vpminub %ymm0, %ymm5, %ymm0\n   vpminub " D "(%rdi), %ymm0, %ymm0\n"     \
+    "vpcmpeqb %ymm0, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n"
+#define AVX2_EITHER_QUAD_TWO                                                  \
+    "vpxor (4*" AVX2_WIDTH ")(%rdi), %ymm1, %ymm4\n"                          \
+    "vpxor (4*" AVX2_WIDTH ")(%rdi), %ymm3, %ymm5\n"                          \
+    "vpminub %ymm4, %ymm5, %ymm4\n   vpminub (4*" AVX2_WIDTH ")(%rdi), %ymm4, %ymm4\n" \
+    "vpxor (5*" AVX2_WIDTH ")(%rdi), %ymm1, %ymm6\n"                          \
+    "vpxor (5*" AVX2_WIDTH ")(%rdi), %ymm3, %ymm5\n"                          \
+    "vpminub %ymm6, %ymm5, %ymm6\n   vpminub (5*" AVX2_WIDTH ")(%rdi), %ymm6, %ymm6\n" \
+    "vpxor (6*" AVX2_WIDTH ")(%rdi), %ymm1, %ymm8\n"                          \
+    "vpxor (6*" AVX2_WIDTH ")(%rdi), %ymm3, %ymm5\n"                          \
+    "vpminub %ymm8, %ymm5, %ymm8\n   vpminub (6*" AVX2_WIDTH ")(%rdi), %ymm8, %ymm8\n" \
+    "vpxor (7*" AVX2_WIDTH ")(%rdi), %ymm1, %ymm10\n"                         \
+    "vpxor (7*" AVX2_WIDTH ")(%rdi), %ymm3, %ymm5\n"                         \
+    "vpminub %ymm10, %ymm5, %ymm10\n   vpminub (7*" AVX2_WIDTH ")(%rdi), %ymm10, %ymm10\n" \
+    "vpminub %ymm4, %ymm6, %ymm11\n   vpminub %ymm8, %ymm10, %ymm12\n   vpminub %ymm11, %ymm12, %ymm0\n   vpcmpeqb %ymm0, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n" \
+    "add $(4*" AVX2_WIDTH "), %rdi\n   test %eax, %eax\n"
 #define AVX2_EITHER_AT(D)                                              \
     "vpxor " D "(%rdi), %ymm1, %ymm0\n"                                \
     "vpminub " D "(%rdi), %ymm0, %ymm0\n"                              \
@@ -8810,6 +8838,32 @@ __asm__(
     )
     "5:  " NARROW_FIRST_OF_FOUR("")
     ASM_END(string_first_of_or_end)
+    ASM_FUNC(string_first_of_either_or_end)
+    ASM_USERSPACE_WIDE(
+        ASM_NARROW("cpu_has_avx2", "5f")
+        WIDE_FIRST_OF(AVX2_WIDTH, AVX2_BROADCAST_TWO, AVX2_ZEROED,
+                      AVX2_EITHER_AT_TWO, AVX2_EITHER_QUAD_TWO,
+                      AVX2_EITHER_QUAD_WHICH, AVX2_LEAVE, WIDE_OR_END_TAIL)
+    )
+    "5:  movzbl %sil, %ecx\n   movzbl %dl, %edx\n"
+    "mov $1, %eax\n   cmp %ecx, %eax\n   je 11f\n   cmp %edx, %eax\n   jne 12f\n"
+    "11: inc %eax\n   cmp %ecx, %eax\n   je 13f\n   cmp %edx, %eax\n   jne 12f\n"
+    "13: inc %eax\n"
+    "12: movabs $0x0101010101010101, %r10\n"
+    "imul %r10, %rcx\n   mov %rcx, %rsi\n"
+    "imul %r10, %rdx\n   mov %rdx, %r8\n"
+    "imul %r10, %rax\n"
+    "mov %edi, %ecx\n   and $7, %ecx\n   and $-8, %rdi\n"
+    "mov (%rdi), %rdx\n   shl $3, %ecx\n   mov $-1, %r9\n   shl %cl, %r9\n"
+    "mov %r9, %rcx\n   not %rcx\n   and %rcx, %rax\n   and %r9, %rdx\n   or %rax, %rdx\n"
+    "movabs $0x7f7f7f7f7f7f7f7f, %r10\n   movabs $0x8080808080808080, %r11\n"
+    "1:  mov %rdx, %rax\n   and %r10, %rax\n   add %r10, %rax\n   or %rdx, %rax\n"
+    "mov %rdx, %r9\n   xor %rsi, %r9\n   mov %r9, %rcx\n   and %r10, %rcx\n   add %r10, %rcx\n   or %r9, %rcx\n   and %rcx, %rax\n"
+    "mov %rdx, %r9\n   xor %r8, %r9\n   mov %r9, %rcx\n   and %r10, %rcx\n   add %r10, %rcx\n   or %r9, %rcx\n   and %rcx, %rax\n"
+    "and %r11, %rax\n   xor %r11, %rax\n   jnz 2f\n"
+    "add $8, %rdi\n   mov (%rdi), %rdx\n   jmp 1b\n"
+    "2:  bsf %rax, %rax\n   shr $3, %rax\n   add %rdi, %rax\n" ASM_RET
+    ASM_END(string_first_of_either_or_end)
     //
     //       char *strnchr(const char *s, size_t count, int c)
     //
@@ -21819,6 +21873,33 @@ __asm__(
     "mov x0, x5\n" ASM_RET
 #endif
     ASM_END(string_first_of_or_end)
+    ASM_FUNC(string_first_of_either_or_end)
+#ifdef KERNEL_MODE
+#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
+    "and w1, w1, #0xff\n   and w2, w2, #0xff\n"
+    "1:  ldrb w3, [x0]\n   cbz w3, 2f\n   cmp w3, w1\n   b.eq 2f\n   cmp w3, w2\n   b.eq 2f\n   add x0, x0, #1\n   b 1b\n"
+    "2:\n" ASM_RET
+#else
+    "and w1, w1, #0xff\n   and w2, w2, #0xff\n"
+    "mov x10, #0x0101\n   movk x10, #0x0101, lsl #16\n   movk x10, #0x0101, lsl #32\n   movk x10, #0x0101, lsl #48\n   lsl x11, x10, #7\n"
+    "mul x3, x1, x10\n   mul x13, x2, x10\n   and x4, x0, #7\n   bic x5, x0, #7\n   ldr x6, [x5]\n"
+    "lsl x4, x4, #3\n   mov x7, #-1\n   lsl x7, x7, x4\n"
+    "mov w14, #1\n   cmp w14, w1\n   b.eq 3f\n   cmp w14, w2\n   b.ne 4f\n"
+    "3:  mov w14, #2\n   cmp w14, w1\n   b.eq 5f\n   cmp w14, w2\n   b.ne 4f\n"
+    "5:  mov w14, #3\n"
+    "4:  mul x14, x14, x10\n   bic x14, x14, x7\n   and x6, x6, x7\n   orr x6, x6, x14\n"
+    "1:  eor x8, x6, x3\n   sub x9, x8, x10\n   bic x9, x9, x8\n   and x9, x9, x11\n"
+    "eor x8, x6, x13\n   sub x12, x8, x10\n   bic x12, x12, x8\n   and x12, x12, x11\n   orr x9, x9, x12\n"
+    "sub x12, x6, x10\n   bic x12, x12, x6\n   and x12, x12, x11\n   orr x9, x9, x12\n"
+    "cbnz x9, 2f\n   add x5, x5, #8\n   ldr x6, [x5]\n   b 1b\n"
+    "2:  rbit x9, x9\n   clz x9, x9\n   lsr x9, x9, #3\n   add x0, x5, x9\n" ASM_RET
+#endif
+#else
+    "and w1, w1, #0xff\n   and w2, w2, #0xff\n   dup v1.16b, w1\n   dup v3.16b, w2\n"
+    NEON_SCAN(NEON_EITHER_TWO)
+    "mov x0, x5\n" ASM_RET
+#endif
+    ASM_END(string_first_of_either_or_end)
     //       string_first_of_max: the x86_64 block carries the reasoning.
     ASM_FUNC(string_first_of_max)
 #ifdef KERNEL_MODE
@@ -31004,6 +31085,22 @@ __asm__(
     RV_ZBB_END
 #endif
     ASM_END(string_first_of_or_end)
+    ASM_FUNC(string_first_of_either_or_end)
+    "andi a1, a1, 0xff\n   andi a2, a2, 0xff\n   lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1\n"
+    "slli t1, t0, 7\n   mul a3, a1, t0\n   mul t6, a2, t0\n"
+    "andi a4, a0, 7\n   andi a5, a0, -8\n   ld a6, 0(a5)\n   beqz a4, 1f\n"
+    "slli a4, a4, 3\n   li a7, -1\n   sll a7, a7, a4\n"
+    "li t2, 1\n   beq t2, a1, 3f\n   bne t2, a2, 4f\n"
+    "3:  li t2, 2\n   beq t2, a1, 5f\n   bne t2, a2, 4f\n"
+    "5:  li t2, 3\n"
+    "4:  mul t2, t2, t0\n   not t3, a7\n   and t2, t2, t3\n   and a6, a6, a7\n   or a6, a6, t2\n"
+    "1:  xor t2, a6, a3\n   sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n"
+    "xor t2, a6, t6\n   sub t5, t2, t0\n   not t4, t2\n   and t5, t5, t4\n   or t3, t3, t5\n"
+    "sub t5, a6, t0\n   not t4, a6\n   and t5, t5, t4\n   or t3, t3, t5\n   and t3, t3, t1\n   bnez t3, 2f\n"
+    "addi a5, a5, 8\n   ld a6, 0(a5)\n   j 1b\n"
+    "2:  sub t5, zero, t3\n   and t3, t3, t5\n   addi t3, t3, -1\n   and t3, t3, t0\n"
+    "mul t3, t3, t0\n   srli t3, t3, 56\n   addi t3, t3, -1\n   add a0, a5, t3\n" ASM_RET
+    ASM_END(string_first_of_either_or_end)
     //
     //       char *strnchr(const char *s, size_t count, int c)
     //
@@ -56775,6 +56872,8 @@ PURE address_any memory_first_of(address_any block, b8 value, positive size);
 PURE positive string_length_max(string_address source, positive bound);
 PURE b32 string_compare_max(const_string source, const_string input, positive bound);
 PURE string_address string_first_of_or_end(string_address source, p8 character);
+PURE string_address string_first_of_either_or_end(string_address source, p8 first,
+                                                   p8 second);
 PURE string_address string_first_of_max(string_address source, positive bound,
                                         p8 character);
 PURE string_address string_last_of_or_end(string_address source, p8 character);

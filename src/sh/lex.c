@@ -428,30 +428,34 @@ static inline INLINE bool lex_comments_on()
 */
 static PURE string_address lex_escaped_end(string_address at, p8 quote)
 {
-        while (string_get(at) && string_get(at) != quote)
-                at += string_is(at, '\\') && string_get(at + 1) ? 2 : 1;
-
-        return at;
+        while (1)
+        {
+                at = string_first_of_either_or_end(at, quote, '\\');
+                if (!string_get(at) || string_is(at, quote))
+                        return at;
+                at += string_get(at + 1) ? 2 : 1;
+        }
 }
 
 /* Where a POSIX dollar-single-quoted run closes. The escape is interpreted
    just before expansion; the lexer only keeps the quoted bytes together. */
 static PURE string_address lex_dollar_quote_end(string_address at)
 {
-        while (string_get(at) && string_not(at, '\''))
+        while (1)
         {
+                at = string_first_of_either_or_end(at, '\'', '\\');
+                if (!string_get(at) || string_is(at, '\''))
+                        return at;
                 //      dash's \c takes whatever follows as its operand, a
                 //      quote included, so $'\c'' is one control character
                 //      and a quote that closes it.
-                if (string_is(at, '\\') && string_get(at + 1))
+                if (string_get(at + 1))
                         at += shell_dash_compat && string_is(at + 1, 'c') &&
                                       string_get(at + 2)
                                   ? 3 : 2;
                 else
                         at++;
         }
-
-        return at;
 }
 
 /*
