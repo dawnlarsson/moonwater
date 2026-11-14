@@ -181921,6 +181921,11 @@ static void fake_row_do(void *context, int row, long what, long a, long b)
                 r->states &= ~(long)WAYLAND_STATE_FULLSCREEN;
         if (what == WAYLAND_DO_MINIMIZE)
                 r->states |= WAYLAND_STATE_SUSPENDED;
+        if (what == WAYLAND_DO_PLACE)
+        {
+                r->x = a;
+                r->y = b;
+        }
 }
 
 static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
@@ -184564,6 +184569,20 @@ static void test_popups(void)
         WLCHECK(c->errors == 0 && fake.row[1].used && fake.row[1].kind == WAYLAND_KIND_POPUP && fake.row[1].parent == 0,
                 "the popup is a window over its parent (%s)", c->error_text);
         WLCHECK(fake.row[1].x == 4 && fake.row[1].y == 13, "at the place it was told (%ld %ld)", fake.row[1].x, fake.row[1].y);
+        {
+                unsigned long pos2 = wlc_id(c, WLI_xdg_positioner, 6);
+
+                wlc_forget(c);
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_create_positioner, pos2);
+                wlc_send(c, pos2, WLQ_xdg_positioner_set_size, 40L, 30L);
+                wlc_send(c, pos2, WLQ_xdg_positioner_set_anchor_rect, 20L, 30L, 4L, 4L);
+                wlc_send(c, pos2, WLQ_xdg_positioner_set_anchor, (long)WLN_xdg_positioner_anchor_bottom_right);
+                wlc_send(c, pos2, WLQ_xdg_positioner_set_gravity, (long)WLN_xdg_positioner_gravity_bottom_right);
+                wlc_send(c, popup, WLQ_xdg_popup_reposition, pos2, 42L);
+                e = wlc_take(c, WLI_xdg_popup, WLE_xdg_popup_repositioned);
+                WLCHECK(e && e->u[0] == 42 && fake.row[1].x == 24 && fake.row[1].y == 34,
+                        "reposition updates an already-mapped popup's position (%ld %ld)", fake.row[1].x, fake.row[1].y);
+        }
         wlc_forget(c);
         fake.row[1].closing = 1;
         wayland_row_wake(1);
@@ -187880,6 +187899,14 @@ static void test_games(void)
                 WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 1, "a keyboard grab holds the keys of its window while it has them (%s)", cd->error_text);
                 wlc_send(cd, grab, WLQ_zwp_xwayland_keyboard_grab_v1_destroy);
                 WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 0, "and lets them go with its destroy (%s)", cd->error_text);
+                {
+                        unsigned long grab2 = wlc_id(cd, WLI_zwp_xwayland_keyboard_grab_v1, 1);
+
+                        wlc_send(cd, d.k.s.xgrab, WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard, grab2, d.k.s.surface, d.k.s.seat);
+                        WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 1, "a keyboard grab on an already-focused window is active immediately (%s)", cd->error_text);
+                        wlc_send(cd, grab2, WLQ_zwp_xwayland_keyboard_grab_v1_destroy);
+                        WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 0, "and clears shortcut_active on destroy (%s)", cd->error_text);
+                }
         }
         wlc_end(cd);
         /* the X server's protocols are offered to the user the X window manager's socket takes and to no other, and to nobody while

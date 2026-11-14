@@ -176,6 +176,7 @@ struct wayland_rect
 #define WAYLAND_DO_PINCH_WANT 11 // the window takes the pinch gesture (1) rather than Ctrl and a wheel (0): a client asked for a pinch object
 #define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
 #define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
+#define WAYLAND_DO_PLACE 14      // move an already-mapped popup (a, b are its x and y relative to its parent)
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -3572,10 +3573,8 @@ static int wayland_subcompositor_request(struct wayland_client *c, struct waylan
                         order = wayland_max(order, c->surfaces[at].sub_order);
         }
         if (s->role != WAYLAND_ROLE_SUBSURFACE)
-        {
                 c->subsurfaces++;
-                c->sub_mask |= 1ULL << wayland_surface_index(c, s);
-        }
+        c->sub_mask |= 1ULL << wayland_surface_index(c, s);
         s->role = WAYLAND_ROLE_SUBSURFACE;
         s->sub_parent = (unsigned short)(wayland_surface_index(c, parent) + 1);
         s->sub_id = c->objects[a[0].slot].id;
@@ -4194,6 +4193,8 @@ static int wayland_popup_request(struct wayland_client *c, struct wayland_object
                 wayland_word(&e, a[1].u);
                 wayland_end(&e);
                 wayland_popup_configure(c, s, p, parent);
+                if (s->row >= 0)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, s->popup_x, s->popup_y);
                 return WAYLAND_OK;
         }
         }
@@ -6828,6 +6829,11 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                         if (!surface)
                                 return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                         surface->xgrab = 1;
+                        if (surface->row >= 0 && surface->row == wayland.keyboard_row && !surface->shortcut_active)
+                        {
+                                surface->shortcut_active = 1;
+                                surface->escape_down = 0;
+                        }
                         c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
                         c->objects[a[0].slot].aux = (unsigned short)surface->gen;
                 }
@@ -6837,7 +6843,14 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
         {
                 surface = wayland_surface_of(c, self - c->objects);
                 if (surface && op == WLQ_zwp_xwayland_keyboard_grab_v1_destroy)
+                {
                         surface->xgrab = 0;
+                        if (!surface->shortcuts)
+                        {
+                                surface->shortcut_active = 0;
+                                surface->escape_down = 0;
+                        }
+                }
         }
         return WAYLAND_OK;
 }

@@ -1283,6 +1283,15 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_FOCUS:
                 compositor_reveal(row);
                 break;
+        case WAYLAND_DO_PLACE:
+                if (compositor.table && compositor.table->popup_parent[row])
+                {
+                        compositor_damage_row(row);
+                        compositor.table->popup_x[row] = (int)a;
+                        compositor.table->popup_y[row] = (int)b;
+                        compositor_popup_first(row);
+                }
+                break;
         case WAYLAND_DO_PINCH_WANT:
                 compositor.table->pinch_wanted[row] = a ? 1u : 0u;
                 break;
