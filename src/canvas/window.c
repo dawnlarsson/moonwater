@@ -4543,35 +4543,10 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
 // Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
 static int windows_clip_text(const unsigned char *bytes, unsigned long length)
 {
-        for (unsigned long at = 0; at < length;)
-        {
-                unsigned int lead = bytes[at], size, value;
-
-                if (!lead)
-                        return 0;
-                if (lead < 0x80)
-                {
-                        at++;
-                        continue;
-                }
-                if (lead < 0xc2 || lead > 0xf4)
-                        return 0;
-                size = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-                if (length - at < size)
-                        return 0;
-                value = lead & (0x7fu >> size);
-                for (unsigned int k = 1; k < size; k++)
-                {
-                        if ((bytes[at + k] & 0xc0) != 0x80)
-                                return 0;
-                        value = value << 6 | (bytes[at + k] & 0x3f);
-                }
-                if ((size == 3 && (value < 0x800 || (value >= 0xd800 && value <= 0xdfff))) ||
-                    (size == 4 && (value < 0x10000 || value > 0x10ffff)))
-                        return 0;
-                at += size;
-        }
-        return 1;
+        if (!length)
+                return 1;
+        return !memory_first_of((address_any)bytes, 0, (positive)length) &&
+               memory_utf8_valid_span((address_any)bytes, (positive)length).x == (positive)length;
 }
 
 // "/proc/PID/fd/NUMBER" into path (48 bytes).

@@ -720,32 +720,29 @@ static const char *taskbar_host_file = "/proc/sys/kernel/hostname";
 // A whole number at the start of text, 0 with none.
 static long taskbar_tray_number(const char *text)
 {
-        long value = 0;
+        positive used = 0, value;
 
         while (*text == ' ')
                 text++;
-        while (*text >= '0' && *text <= '9' && value < 1000000000000L)
-                value = value * 10 + (*text++ - '0');
-        return value;
+        value = string_digits((string_address)text, &used);
+        return used ? (long)value : 0;
 }
 
 // The value of a /proc/meminfo key in kB, 0 when it is not there.
 static long taskbar_tray_meminfo(const char *text, const char *key)
 {
-        int size = 0;
+        positive size = string_length((string_address)key);
 
-        while (key[size])
-                size++;
-        for (int at = 0; text[at]; at++)
+        for (string_address line = (string_address)text; line && *line;)
         {
-                int same = 1;
+                string_address nl;
 
-                if (at && text[at - 1] != '\n')
-                        continue;
-                for (int column = 0; column < size && same; column++)
-                        same = text[at + column] == key[column];
-                if (same)
-                        return taskbar_tray_number(text + at + size);
+                if (!string_compare_max(line, (string_address)key, size))
+                        return taskbar_tray_number((const char *)(line + size));
+                nl = string_first_of(line, '\n');
+                if (!nl)
+                        break;
+                line = nl + 1;
         }
         return 0;
 }

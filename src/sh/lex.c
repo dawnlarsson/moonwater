@@ -594,14 +594,9 @@ static KEEP string_address lex_arithmetic_end(string_address start)
 */
 static bool lex_escaped_at(string_address at)
 {
-        positive run = 0;
-
-        while (at > lex_line_start && string_is(at - 1, '\\'))
-        {
-                at--;
-                run++;
-        }
-        return run & 1;
+        if (at <= lex_line_start || !string_is(at - 1, '\\'))
+                return false;
+        return memory_span_byte_reverse(lex_line_start, '\\', (positive)(at - lex_line_start)) & 1;
 }
 
 /*

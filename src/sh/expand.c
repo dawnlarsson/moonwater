@@ -10223,20 +10223,29 @@ static HOT fn expand_into(string_address text, bool quoted, p8 plain,
                                                         : expand_plain_set);
                 p8 seen;
 
-                if (assignment && !quoted)
+                if (assignment && !quoted && run)
                 {
-                        positive at = 0;
-
-                        while (at < run)
+                        if (tilde && string_is(step, '~'))
+                                run = 0;
+                        else
                         {
-                                if (string_is(step + at, '~') &&
-                                    (!at ? tilde : string_is(step + at - 1, ':')))
-                                        break;
+                                positive pos = 1;
 
-                                at++;
+                                while (pos < run)
+                                {
+                                        string_address hit = (string_address)memory_first_of(
+                                            step + pos, '~', run - pos);
+
+                                        if (!hit)
+                                                break;
+                                        if (string_is(hit - 1, ':'))
+                                        {
+                                                run = (positive)(hit - step);
+                                                break;
+                                        }
+                                        pos = (positive)(hit - step) + 1;
+                                }
                         }
-
-                        run = at;
                 }
 
                 if (run)
