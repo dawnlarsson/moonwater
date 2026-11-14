@@ -197,8 +197,8 @@ static int taskbar_text(int high, int pad, int characters)
         CELL(TASKBAR_NOTICES, taskbar.notices_item, (UI_DOT * scale + 50) / 100, taskbar_notices_cell(view, t, n))       \
         CELL(TASKBAR_MIC, taskbar.mic_item, glyph, taskbar_mic_cell(view, t, n))                                        \
         CELL(TASKBAR_VOLUME, taskbar.volume_item, glyph, taskbar_volume_cell(view, t, n, ink, ground))                  \
-        CELL(-4, taskbar.battery_item, 0, taskbar_say(view, t, n, text, ink, ground))                                   \
-        CELL(-3, 1, 0, taskbar_say(view, t, n, clock, ink, ground))
+        CELL(-4, taskbar.battery_item && !taskbar.tray_custom, 0, taskbar_say(view, t, n, text, ink, ground))           \
+        CELL(-3, !taskbar.tray_custom, 0, taskbar_say(view, t, n, clock, ink, ground))
 
 /*
         The band as the kit's layout has it (ui_tree, ui/ui.c). The root is the band's output, where it is in the desktop's
@@ -260,7 +260,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         int scale = taskbar_scaled(view->scale), length = m ? view->height : view->width, thick = taskbar_thick(view->scale);
         int gap = TASKBAR_GAP * scale / 100; // not a setting: the kit's gap between pieces that go together (TASKBAR_GAP), scaled like the rest
         int pad = taskbar.padding * scale / 100; // `taskbar padding`: the room round the text inside a tab
-        int inset = 3 * scale / 100, high = thick - inset, count = (int)view->count, pitch = 0, dot = 0, button = 0, lead, items = 0, tray, cell, glyph, room, most;
+        int inset = 3 * scale / 100, high = thick - inset, count = (int)view->count, pitch = 0, dot = 0, button = 0, lead, items = 0, icons = 0, tray, tray_w, cell, text_w = 0, glyph, room, most;
         const struct ui_size gives = {UI_PERCENT, 100, 0, UI_TREE_MOST, 1};
         struct ui_node address_to n;
 
@@ -276,12 +276,30 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
 #define TASKBAR_CELL(slot, shown, mark, paint) items += (shown) != 0;
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
-        items = taskbar.tray_custom ? 1 : items;
+        icons = (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0);
         tray = length / 2 < length - lead - 2 * gap ? length / 2 : length - lead - 2 * gap; // the most the tray may be
-        cell = taskbar_text(high, pad, taskbar.tray_custom ? (taskbar.tray_chars > 0 ? taskbar.tray_chars : 1) : 5);
-        cell = cell * items > tray ? (tray > 0 ? tray : 0) / items : cell;
+        cell = taskbar_text(high, pad, 5);
+        if (taskbar.tray_custom)
+        {
+                text_w = taskbar_text(high, pad, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
+                if (icons * cell + text_w > tray)
+                {
+                        int room_tray = tray > 0 ? tray : 0;
+
+                        if (icons > 0 && icons * cell >= room_tray)
+                                cell = text_w = room_tray / (icons + 1);
+                        else
+                                text_w = room_tray - icons * cell;
+                }
+                tray_w = icons * cell + text_w;
+        }
+        else
+        {
+                cell = cell * items > tray ? (tray > 0 ? tray : 0) / items : cell;
+                tray_w = cell * items;
+        }
         glyph = (cell < high ? cell : high) * 70 / 100;
-        room = length - lead - cell * items - (count + 2) * gap;
+        room = length - lead - tray_w - (count + 2) * gap;
         most = count && room > 0 ? room / count : 0;
         most = most > 8 * thick ? 8 * thick : most;
 
@@ -332,11 +350,16 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
 
         // The tail.
         n = ui_tree_open(t);
-        n->dir = m, n->justify = UI_END, n->size[m] = gives, n->size[m].min = gap + cell * items;
-        taskbar_open(t, TASKBAR_TRAY, m, gap, cell * items);
-#define TASKBAR_CELL(slot, shown, mark, paint) if ((shown) && !taskbar.tray_custom) { n = taskbar_open(t, slot, m, 0, cell); if (mark) taskbar_mark(t, n, mark); ui_tree_close(t); }
+        n->dir = m, n->justify = UI_END, n->size[m] = gives, n->size[m].min = gap + tray_w;
+        taskbar_open(t, TASKBAR_TRAY, m, gap, tray_w);
+#define TASKBAR_CELL(slot, shown, mark, paint) if (shown) { n = taskbar_open(t, slot, m, 0, cell); if (mark) taskbar_mark(t, n, mark); ui_tree_close(t); }
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
+        if (taskbar.tray_custom)
+        {
+                n = taskbar_open(t, -9, m, 0, text_w);
+                ui_tree_close(t);
+        }
         ui_tree_close(t);
         ui_tree_close(t);
 
@@ -455,7 +478,7 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
         if (at < 0)
                 return TASKBAR_HIT_NONE;
         which = t->node[at].id - 1;
-        return which == -4 || which == -3 ? TASKBAR_TRAY : which;
+        return which == -4 || which == -3 || which == -9 ? TASKBAR_TRAY : which;
 }
 
 /*
@@ -1075,7 +1098,9 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 case TASKBAR_LAUNCHER: // its mark in place of a title
                         taskbar_launcher_glyph(view, t, n, ink);
                         break;
-                case TASKBAR_TRAY: // a format of the person's is one text over the whole tray, and has none of the cells
+                case TASKBAR_TRAY:
+                        break;
+                case -9: // a format of the person's is drawn in its text cell after the tray icons
                         if (taskbar.tray_custom)
                                 taskbar_say(view, t, n, taskbar.tray_text, ink, ground);
                         break;

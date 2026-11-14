@@ -130683,6 +130683,25 @@ static void check_taskbar_tray(void)
     view = compositor_taskbar_view();
     check("tray format: the tray is one slot, with no clock or battery cell inside it", taskbar_slot(&view, -2, &x, &y, &w, &h) &&
           !taskbar_slot(&view, -3, &cx, &cy, &cw, &ch) && !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+    {
+        int vx, vy, vw, vh, mx, my, mw, mh, nx, ny, nw, nh;
+
+        taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD_12H);
+        taskbar_volume_set(1, 50, 0, 0);
+        taskbar_mic_set(1, 0);
+        taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
+        view = compositor_taskbar_view();
+        check("tray format: 12h clock keeps notices, mic, and volume cells",
+              taskbar_slot(&view, TASKBAR_NOTICES, &nx, &ny, &nw, &nh) &&
+              taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh) &&
+              taskbar_slot(&view, TASKBAR_VOLUME, &vx, &vy, &vw, &vh) &&
+              taskbar_hit_reach(&view, nx + nw / 2, ny + nh / 2, 0) == TASKBAR_NOTICES &&
+              taskbar_hit_reach(&view, mx + mw / 2, my + mh / 2, 0) == TASKBAR_MIC &&
+              taskbar_hit_reach(&view, vx + vw / 2, vy + vh / 2, 0) == TASKBAR_VOLUME);
+        taskbar_volume_set(0, 0, 0, 0);
+        taskbar_mic_set(0, 0);
+        taskbar_notices_set(0, 0);
+    }
     taskbar_tray_set("\xe6\x97\xa5\xe6\x9c\xac {host}");
     check("tray format: a character is counted once, not by its bytes", taskbar.tray_custom && taskbar.tray_chars >= 3);
     {
