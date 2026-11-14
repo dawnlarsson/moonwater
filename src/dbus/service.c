@@ -57,6 +57,42 @@ static long sessionbus_call(positive number, positive a, positive b, positive c,
         return (long)system_call_6(number, a, b, c, d, e, f);
 }
 
+static int sessionbus_dup_fd(int fd)
+{
+        return (int)sessionbus_call(syscall(fcntl), (positive)fd, 1030, 0, 0, 0, 0); // F_DUPFD_CLOEXEC
+}
+
+static void sessionbus_close_fd(int fd)
+{
+        system_close(fd);
+}
+
+struct sessionbus_iovec
+{
+        void *base;
+        unsigned long length;
+};
+
+struct sessionbus_msghdr
+{
+        void *name;
+        unsigned int namelen;
+        unsigned int pad0;
+        struct sessionbus_iovec *iov;
+        unsigned long iovlen;
+        void *control;
+        unsigned long controllen;
+        int flags;
+        int pad1;
+};
+
+struct sessionbus_cmsghdr
+{
+        unsigned long len;
+        int level;
+        int type;
+};
+
 static void *sessionbus_alloc(void *context, long bytes)
 {
         long got = sessionbus_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
@@ -352,17 +388,47 @@ static void sessionbus_read(long slot)
         {
                 long room, got, asked;
                 unsigned char *to = dbus_in_room(slot, &room);
+                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 16];
+                struct sessionbus_iovec iov;
+                struct sessionbus_msghdr msg;
 
                 if (!to || room <= 0)
                         return;
                 asked = room > SESSIONBUS_READ ? SESSIONBUS_READ : room;
-                got = sessionbus_call(syscall(read), (positive)sessionbus.fd[slot], (positive)to, (positive)asked, 0, 0, 0);
+                iov.base = to;
+                iov.length = (unsigned long)asked;
+                msg.name = 0;
+                msg.namelen = 0;
+                msg.pad0 = 0;
+                msg.iov = &iov;
+                msg.iovlen = 1;
+                msg.control = ctrl;
+                msg.controllen = sizeof ctrl;
+                msg.flags = 0;
+                msg.pad1 = 0;
+                // MSG_DONTWAIT | MSG_CMSG_CLOEXEC
+                got = sessionbus_call(syscall(recvmsg), (positive)sessionbus.fd[slot], (positive)&msg, 0x40 | 0x40000000, 0, 0, 0);
                 if (got == -11)
                         return;
                 if (got <= 0)
                 {
                         sessionbus_drop(slot);
                         return;
+                }
+                for (unsigned long off = 0; off + sizeof(struct sessionbus_cmsghdr) <= msg.controllen;)
+                {
+                        const struct sessionbus_cmsghdr *cm = (const struct sessionbus_cmsghdr *)(ctrl + off);
+
+                        if (cm->len < sizeof *cm || off + cm->len > msg.controllen)
+                                break;
+                        if (cm->level == 1 && cm->type == 1)
+                        {
+                                long nfds = (long)(cm->len - sizeof *cm) / (long)sizeof(int);
+                                const int *fds = (const int *)(ctrl + off + sizeof *cm);
+
+                                dbus_in_fds(slot, fds, nfds);
+                        }
+                        off += (cm->len + 7ul) & ~7ul;
                 }
                 dbus_in_done(slot, got);
                 // a read that came short has emptied the socket: asking again would only be told EAGAIN (the poll says when there is more)
@@ -375,7 +441,8 @@ static void sessionbus_read(long slot)
 static void sessionbus_flush(long slot)
 {
         const unsigned char *bytes;
-        long length, got;
+        const int *fds;
+        long length, nfds, got;
 
         if (sessionbus.fd[slot] < 0)
                 return;
@@ -384,9 +451,47 @@ static void sessionbus_flush(long slot)
                 sessionbus_drop(slot);
                 return;
         }
-        length = dbus_out(slot, &bytes);
+        length = dbus_out_fds(slot, &bytes, &fds, &nfds);
         if (!length)
                 return;
+        if (nfds > 0)
+        {
+                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 8];
+                struct sessionbus_cmsghdr *cm = (struct sessionbus_cmsghdr *)ctrl;
+                struct sessionbus_iovec iov;
+                struct sessionbus_msghdr msg;
+                unsigned long clen = sizeof(struct sessionbus_cmsghdr) + (unsigned long)nfds * sizeof(int);
+                int *dst = (int *)(ctrl + sizeof(struct sessionbus_cmsghdr));
+
+                for (unsigned long k = 0; k < sizeof ctrl; k++)
+                        ctrl[k] = 0;
+                cm->len = clen;
+                cm->level = 1;
+                cm->type = 1;
+                for (long k = 0; k < nfds; k++)
+                        dst[k] = fds[k];
+                iov.base = (void *)bytes;
+                iov.length = (unsigned long)length;
+                msg.name = 0;
+                msg.namelen = 0;
+                msg.pad0 = 0;
+                msg.iov = &iov;
+                msg.iovlen = 1;
+                msg.control = ctrl;
+                msg.controllen = (clen + 7ul) & ~7ul;
+                msg.flags = 0;
+                msg.pad1 = 0;
+                // MSG_DONTWAIT | MSG_NOSIGNAL
+                got = sessionbus_call(syscall(sendmsg), (positive)sessionbus.fd[slot], (positive)&msg, 0x40 | 0x4000, 0, 0, 0);
+                if (got > 0)
+                {
+                        dbus_sent_fds(slot);
+                        dbus_sent(slot, got);
+                }
+                else if (got != -11)
+                        sessionbus_drop(slot);
+                return;
+        }
         // MSG_DONTWAIT | MSG_NOSIGNAL
         got = sessionbus_call(syscall(sendto), (positive)sessionbus.fd[slot], (positive)bytes, (positive)length, 0x40 | 0x4000, 0, 0);
         if (got > 0)
@@ -443,6 +548,7 @@ static b32 sessionbus_main()
         }
         for (int at = 0; at < DBUS_CLIENTS; at++)
                 sessionbus.fd[at] = -1;
+        dbus_set_fd_ops(sessionbus_dup_fd, sessionbus_close_fd);
         if (dbus_start(&sessionbus_host) < 0 || sessionbus_listen() < 0)
         {
                 string_format(log, (string_address) "sessionbus: cannot listen on %s\n", (string_address)sessionbus.path);

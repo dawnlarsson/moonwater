@@ -1387,15 +1387,26 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                         return -1;
                 return 1;
         }
-        // Scaled ARGB8888 without transform/y_invert/crop/blend: route directly to lib.c's SIMD/asm memory_resample_u32_rect.
-        if (fourcc == COMPOSITOR_WL_FOURCC_ARGB8888 && !(picture->transform & 7) && !picture->y_invert && !picture->blend &&
+        // Scaled 32-bit RGB without transform/y_invert/crop/blend: route through lib.c's SIMD/asm memory_resample_u32_rect.
+        if ((fourcc == COMPOSITOR_WL_FOURCC_ARGB8888 || fourcc == WAYLAND_FOURCC_XRGB8888 ||
+             fourcc == COMPOSITOR_WL_FOURCC_ABGR8888 || fourcc == COMPOSITOR_WL_FOURCC_XBGR8888) &&
+            !(picture->transform & 7) && !picture->y_invert && !picture->blend &&
             sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256 && picture->sync_fd < 0)
         {
-                memory_resample_u32_rect(to + (unsigned long)(dy0 + oy1) * pitch + (unsigned long)(dx0 + ox1), pitch,
-                                         (positive)(ox2 - ox1), (positive)(oy2 - oy1),
+                unsigned int *dst_base = to + (unsigned long)(dy0 + oy1) * pitch + (unsigned long)(dx0 + ox1);
+                positive rw = (positive)(ox2 - ox1);
+                positive rh = (positive)(oy2 - oy1);
+
+                memory_resample_u32_rect(dst_base, pitch, rw, rh,
                                          (const unsigned int *)picture->pixels, (positive)picture->stride / 4,
                                          (positive)bw, (positive)bh, (positive)tw, (positive)th,
                                          (positive)ox1, (positive)oy1);
+                if (fourcc == COMPOSITOR_WL_FOURCC_ABGR8888 || fourcc == COMPOSITOR_WL_FOURCC_XBGR8888)
+                        for (positive ry = 0; ry < rh; ry++)
+                                memory_swizzle_rb_u32(dst_base + ry * pitch, rw);
+                if (fourcc == WAYLAND_FOURCC_XRGB8888 || fourcc == COMPOSITOR_WL_FOURCC_XBGR8888)
+                        for (positive ry = 0; ry < rh; ry++)
+                                memory_or_u32(dst_base + ry * pitch, rw, 0xff000000u);
                 if (compositor_wl_cut(picture->pixels))
                         return -1;
                 compositor_wl_laid(row, dx0 + ox1, dy0 + oy1, dx0 + ox2, dy0 + oy2);

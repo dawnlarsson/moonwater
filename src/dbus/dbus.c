@@ -72,6 +72,7 @@
 #define DBUS_AUTH_TOTAL 4096
 #define DBUS_HELLO_MS 5000       // how long a connection has to authenticate and say Hello
 #define DBUS_SERVICE DBUS_CLIENTS // the slot of the portal service, which has no socket
+#define DBUS_FDS 32              // most file descriptors queued per direction on a client or per message
 
 #define DBUS_CALL 1
 #define DBUS_RETURN 2
@@ -114,11 +115,17 @@ struct dbus_client
         long out_head, out_length;              // the queue is out[out_head, out_length): what is sent moves the head
         long full_since;                        // when its queue first refused a message since it last read (0: it has not)
         long id;                                // the unique name is :1.id
-        unsigned char hello, uid_ok, no_fds, want_data; // want_data: EXTERNAL was named with no data, and DATA is asked for
+        unsigned char hello, uid_ok, no_fds, want_data, unix_fds; // want_data: EXTERNAL was named with no data, and DATA is asked for
         long names, pending;
         long rules;                             // rule[0, rules) holds every rule it has (a hole where one was removed): what a broadcast looks through
         char unique[16];
         struct dbus_rule rule[DBUS_RULES];
+        long in_fds, out_fds, out_fd_runs;
+        int in_fd[DBUS_FDS], out_fd[DBUS_FDS];
+        struct
+        {
+                long at, count;
+        } out_fd_run[DBUS_FDS];
         unsigned char in[DBUS_MESSAGE + 16];
         unsigned char out[DBUS_OUT];
 };
@@ -164,6 +171,27 @@ static struct
         unsigned char scratch[DBUS_STAMPED];
         unsigned char stamped[DBUS_STAMPED];
 } dbus;
+
+static struct
+{
+        int (*dup_fd)(int fd);
+        void (*close_fd)(int fd);
+} dbus_fd_ops;
+
+DBUS_API void dbus_set_fd_ops(int (*dup_fd)(int fd), void (*close_fd)(int fd))
+{
+        dbus_fd_ops.dup_fd = dup_fd;
+        dbus_fd_ops.close_fd = close_fd;
+}
+
+static void dbus_close_fds(const int *fds, long count)
+{
+        if (!dbus_fd_ops.close_fd)
+                return;
+        for (long k = 0; k < count; k++)
+                if (fds[k] >= 0)
+                        dbus_fd_ops.close_fd(fds[k]);
+}
 
 /*
         ---- small things ----
@@ -616,7 +644,7 @@ struct dbus_message
         const unsigned char *bytes;
         long size, body_at, body_length;
         unsigned char type, flags;
-        unsigned long serial, reply;
+        unsigned long serial, reply, fds;
         const char *path, *interface, *member, *error, *destination, *sender, *signature;
         unsigned has;
 };
@@ -641,6 +669,7 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
         m->has = 0;
         m->path = m->interface = m->member = m->error = m->destination = m->sender = m->signature = "";
         m->reply = 0;
+        m->fds = 0;
         if (size < 16 || size > DBUS_STAMPED || b[0] != 'l' || b[3] != 1 || b[1] < DBUS_CALL || b[1] > DBUS_SIGNAL)
                 return -1;
         m->bytes = b;
@@ -701,8 +730,15 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
                         m->sender = text, m->has |= DBUS_HAS_SENDER;
                 else if (code == 8)
                         m->signature = text, m->has |= DBUS_HAS_SIGNATURE;
-                else if (code == 9 && !dbus_get32(b + at - 4))
-                        m->has |= DBUS_HAS_FDS; // GDBus says 0 descriptors on every call; one with any is a message this bus cannot take
+                else if (code == 9)
+                {
+                        unsigned long count = dbus_get32(b + at - 4);
+
+                        if (count > DBUS_FDS || (count && !dbus_fd_ops.close_fd))
+                                return -1;
+                        m->fds = count;
+                        m->has |= DBUS_HAS_FDS;
+                }
                 else
                         return -1;
         }
@@ -834,8 +870,8 @@ static void dbus_o_field_string(struct dbus_out *w, unsigned code, char kind, co
         dbus_o_string(w, value);
 }
 
-// A message's header; the body follows, then dbus_o_end. Returns where the body's alignment starts counting (its start).
-static void dbus_o_header(struct dbus_out *w, unsigned type, unsigned flags, unsigned long serial, const struct dbus_fields *f)
+// A message's header; the body follows, then dbus_o_end.
+static void dbus_o_header_fds(struct dbus_out *w, unsigned type, unsigned flags, unsigned long serial, const struct dbus_fields *f, unsigned long fds)
 {
         long fields_at;
 
@@ -870,8 +906,22 @@ static void dbus_o_header(struct dbus_out *w, unsigned type, unsigned flags, uns
                 dbus_o_field_string(w, 7, 's', f->sender);
         if (f->signature && *f->signature)
                 dbus_o_field_string(w, 8, 'g', f->signature);
+        if (fds)
+        {
+                dbus_o_pad(w, 8);
+                dbus_o_u8(w, 9);
+                dbus_o_u8(w, 1);
+                dbus_o_u8(w, 'u');
+                dbus_o_u8(w, 0);
+                dbus_o_u32(w, fds);
+        }
         dbus_o_patch32(w, 12, (unsigned long)(w->length - fields_at));
         dbus_o_pad(w, 8);
+}
+
+static void dbus_o_header(struct dbus_out *w, unsigned type, unsigned flags, unsigned long serial, const struct dbus_fields *f)
+{
+        dbus_o_header_fds(w, type, flags, serial, f, 0);
 }
 
 static void dbus_o_end(struct dbus_out *w, long body_at)
@@ -1018,9 +1068,11 @@ static void dbus_unique_text(char *into, long id)
         DBUS_UNASKED that nothing unasked can take, so another client's flood cannot crowd out its answers or have it
         dropped. The first refusal since it last read starts its stall clock, which dbus_tick ends it by.
 */
-static int dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long n, int asked)
+static int dbus_deliver_fds(struct dbus_client *c, const unsigned char *bytes, long n, int asked, const int *fds, long nfds)
 {
         if (!c || c->slot == DBUS_SERVICE || c->dead)
+                return 0;
+        if (nfds > 0 && (!c->unix_fds || c->out_fds + nfds > DBUS_FDS || c->out_fd_runs >= DBUS_FDS))
                 return 0;
         if (c->out_length - c->out_head + n > (asked ? DBUS_OUT : DBUS_UNASKED))
         {
@@ -1030,14 +1082,31 @@ static int dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long 
         }
         if (c->out_length + n > DBUS_OUT)
         {
+                long shift = c->out_head;
+
                 // what is not sent yet goes to the front, once, so that there is room behind it
                 dbus_copy(c->out, c->out + c->out_head, c->out_length - c->out_head);
                 c->out_length -= c->out_head;
                 c->out_head = 0;
+                for (long k = 0; k < c->out_fd_runs; k++)
+                        c->out_fd_run[k].at -= shift;
+        }
+        if (nfds > 0)
+        {
+                c->out_fd_run[c->out_fd_runs].at = c->out_length;
+                c->out_fd_run[c->out_fd_runs].count = nfds;
+                c->out_fd_runs++;
+                for (long k = 0; k < nfds; k++)
+                        c->out_fd[c->out_fds++] = fds[k];
         }
         dbus_copy(c->out + c->out_length, bytes, n);
         c->out_length += n;
         return 1;
+}
+
+static int dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long n, int asked)
+{
+        return dbus_deliver_fds(c, bytes, n, asked, 0, 0);
 }
 
 static unsigned long dbus_next_serial(void)
@@ -1270,7 +1339,7 @@ static int dbus_rule_same(const struct dbus_rule *a, const struct dbus_rule *b)
 /* ---- delivery ---- */
 
 // A message to every client with a rule it matches; from is the sender's slot, -1 for the bus.
-static void dbus_broadcast(const unsigned char *bytes, long n, long from, const struct dbus_message *m)
+static void dbus_broadcast_fds(const unsigned char *bytes, long n, long from, const struct dbus_message *m, const int *fds, long nfds)
 {
         for (long at = 0; at < DBUS_CLIENTS; at++)
         {
@@ -1281,10 +1350,36 @@ static void dbus_broadcast(const unsigned char *bytes, long n, long from, const 
                 for (long k = 0; k < c->rules; k++)
                         if (c->rule[k].used && dbus_rule_matches(&c->rule[k], from, m))
                         {
-                                dbus_deliver(c, bytes, n, DBUS_UNASKED_FOR);
+                                if (nfds > 0)
+                                {
+                                        int duped[DBUS_FDS];
+                                        long ok = 1;
+
+                                        if (!c->unix_fds || !dbus_fd_ops.dup_fd)
+                                                break;
+                                        for (long j = 0; j < nfds; j++)
+                                        {
+                                                duped[j] = dbus_fd_ops.dup_fd(fds[j]);
+                                                if (duped[j] < 0)
+                                                {
+                                                        dbus_close_fds(duped, j);
+                                                        ok = 0;
+                                                        break;
+                                                }
+                                        }
+                                        if (ok && !dbus_deliver_fds(c, bytes, n, DBUS_UNASKED_FOR, duped, nfds))
+                                                dbus_close_fds(duped, nfds);
+                                }
+                                else
+                                        dbus_deliver(c, bytes, n, DBUS_UNASKED_FOR);
                                 break;
                         }
         }
+}
+
+static void dbus_broadcast(const unsigned char *bytes, long n, long from, const struct dbus_message *m)
+{
+        dbus_broadcast_fds(bytes, n, from, m, 0, 0);
 }
 
 // A signal of the bus: NameOwnerChanged to those who ask for it, or a unicast one to a client: NameAcquired (what it asked
@@ -2042,7 +2137,7 @@ static long dbus_stamp(const struct dbus_message *m, const char *sender)
         struct dbus_fields f = {m->path, m->interface, m->member, m->error, m->destination, sender, m->signature, m->reply,
                                 (m->has & DBUS_HAS_REPLY) != 0};
 
-        dbus_o_header(&w, m->type, m->flags, m->serial, &f);
+        dbus_o_header_fds(&w, m->type, m->flags, m->serial, &f, m->fds);
         dbus_o_raw(&w, m->bytes + m->body_at, m->body_length);
         dbus_o_end(&w, DBUS_ALIGN(w.length - m->body_length, 8));
         return w.bad ? -1 : w.length;
@@ -2096,9 +2191,10 @@ static void dbus_trace(struct dbus_client *from, const struct dbus_message *m)
 }
 
 // One message from a client that has said Hello, routed.
-static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
+static void dbus_route(struct dbus_client *from, const struct dbus_message *m, const int *fds)
 {
         long to, n;
+        long nfds = (long)m->fds;
         struct dbus_client *target;
 
         if (dbus.host->trace)
@@ -2110,6 +2206,7 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
 
                 if (!dest[0] || dbus_equal(dest, DBUS_NAME_BUS))
                 {
+                        dbus_close_fds(fds, nfds);
                         dbus_bus_call(from, m);
                         return;
                 }
@@ -2117,16 +2214,25 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                 to = dbus_equal(dest, DBUS_NAME_PORTAL) ? DBUS_SERVICE : dbus_resolve(dest);
                 if (to == DBUS_SERVICE)
                 {
+                        dbus_close_fds(fds, nfds);
                         dbus_service_call(from, m);
                         return;
                 }
                 if (to < 0)
                 {
+                        dbus_close_fds(fds, nfds);
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.ServiceUnknown",
                                          "The name is not provided by any service and is not owned", DBUS_NAME_BUS);
                         return;
                 }
                 target = dbus_client_of(to);
+                if (nfds > 0 && (!target || !target->unix_fds))
+                {
+                        dbus_close_fds(fds, nfds);
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs",
+                                         "Message recipient does not support file descriptor passing", DBUS_NAME_BUS);
+                        return;
+                }
                 {
                         struct dbus_pending *p = 0;
                         int answered = !(m->flags & DBUS_FLAG_NO_REPLY);
@@ -2136,12 +2242,14 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                                         p = &dbus.pending[at];
                         if (answered && (!p || from->pending >= DBUS_PENDING_PER))
                         {
+                                dbus_close_fds(fds, nfds);
                                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "Too many calls wait for a reply", DBUS_NAME_BUS);
                                 return;
                         }
                         n = dbus_stamp(m, from->unique);
-                        if (n <= 0 || !dbus_deliver(target, dbus.stamped, n, DBUS_UNASKED_FOR))
+                        if (n <= 0 || !dbus_deliver_fds(target, dbus.stamped, n, DBUS_UNASKED_FOR, fds, nfds))
                         {
+                                dbus_close_fds(fds, nfds);
                                 // the callee's queue holds what others sent it and it has not read: the call is refused, not the callee
                                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded",
                                                  "The recipient has not read what it was sent", DBUS_NAME_BUS);
@@ -2162,35 +2270,46 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
         {
                 n = dbus_stamp(m, from->unique);
                 if (n < 0)
+                {
+                        dbus_close_fds(fds, nfds);
                         return;
+                }
                 if (m->destination[0])
                 {
                         to = dbus_resolve(m->destination);
-                        if (to >= 0 && to != DBUS_SERVICE)
-                                dbus_deliver(dbus_client_of(to), dbus.stamped, n, DBUS_UNASKED_FOR);
+                        target = to >= 0 && to != DBUS_SERVICE ? dbus_client_of(to) : 0;
+                        if (!target || !dbus_deliver_fds(target, dbus.stamped, n, DBUS_UNASKED_FOR, fds, nfds))
+                                dbus_close_fds(fds, nfds);
                         return;
                 }
                 // the rules are matched against the message as it came (the sender a rule names is `from`, never what it wrote),
                 // which is the stamped one but for the sender: it is not parsed again
-                dbus_broadcast(dbus.stamped, n, from->slot, m);
+                dbus_broadcast_fds(dbus.stamped, n, from->slot, m, fds, nfds);
+                dbus_close_fds(fds, nfds);
                 return;
         }
         // a reply or an error: to the caller that asked it of this client, once
         to = m->destination[0] ? dbus_resolve(m->destination) : -1;
         if (to < 0 || to == DBUS_SERVICE || !(m->has & DBUS_HAS_REPLY))
+        {
+                dbus_close_fds(fds, nfds);
                 return;
+        }
         {
                 struct dbus_pending *p = dbus_pending_find(to, m->reply, from->slot);
 
                 if (!p)
+                {
+                        dbus_close_fds(fds, nfds);
                         return;
+                }
                 p->used = 0;
                 if (dbus_client_of(to) && dbus_client_of(to)->pending > 0)
                         dbus_client_of(to)->pending--;
         }
         n = dbus_stamp(m, from->unique);
-        if (n > 0)
-                dbus_deliver(dbus_client_of(to), dbus.stamped, n, DBUS_ASKED_FOR);
+        if (n <= 0 || !dbus_deliver_fds(dbus_client_of(to), dbus.stamped, n, DBUS_ASKED_FOR, fds, nfds))
+                dbus_close_fds(fds, nfds);
 }
 
 // The first call of a connection, which must be Hello: it gets its unique name.
@@ -2327,7 +2446,13 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
         }
         if (dbus_equal(word[0], "NEGOTIATE_UNIX_FD"))
         {
-                dbus_say(c, "ERROR \"file descriptors are not passed\"\r\n");
+                if (dbus_fd_ops.close_fd && c->uid_ok)
+                {
+                        c->unix_fds = 1;
+                        dbus_say(c, "AGREE_UNIX_FD\r\n");
+                }
+                else
+                        dbus_say(c, "ERROR \"file descriptors are not passed\"\r\n");
                 return 0;
         }
         if (dbus_equal(word[0], "BEGIN"))
@@ -2498,6 +2623,9 @@ DBUS_API void dbus_drop(long slot)
 
         if (!c)
                 return;
+        dbus_close_fds(c->in_fd, c->in_fds);
+        dbus_close_fds(c->out_fd, c->out_fds);
+        c->in_fds = c->out_fds = c->out_fd_runs = 0;
         dbus.client[slot] = 0;
         dbus.clients--;
         if (c->hello)
@@ -2641,13 +2769,33 @@ DBUS_API void dbus_in_done(long slot, long count)
                                 c->why = "a message that is not valid";
                                 break;
                         }
-                        if (!c->hello)
                         {
-                                if (dbus_hello(c, &m) < 0)
-                                        c->dead = 1, c->why = "the first call was not Hello";
+                                int msg_fds[DBUS_FDS];
+                                long nfds = (long)m.fds;
+
+                                if (nfds > 0 && (!c->unix_fds || nfds > c->in_fds))
+                                {
+                                        c->dead = 1;
+                                        c->why = "a message that is not valid";
+                                        break;
+                                }
+                                for (long k = 0; k < nfds; k++)
+                                        msg_fds[k] = c->in_fd[k];
+                                if (nfds > 0)
+                                {
+                                        for (long k = nfds; k < c->in_fds; k++)
+                                                c->in_fd[k - nfds] = c->in_fd[k];
+                                        c->in_fds -= nfds;
+                                }
+                                if (!c->hello)
+                                {
+                                        dbus_close_fds(msg_fds, nfds);
+                                        if (dbus_hello(c, &m) < 0)
+                                                c->dead = 1, c->why = "the first call was not Hello";
+                                }
+                                else
+                                        dbus_route(c, &m, msg_fds);
                         }
-                        else
-                                dbus_route(c, &m);
                         at += total;
                 }
         }
@@ -2659,12 +2807,78 @@ DBUS_API void dbus_in_done(long slot, long count)
         }
 }
 
+DBUS_API void dbus_in_fds(long slot, const int *fds, long count)
+{
+        struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
+
+        if (!c || c->dead || count <= 0)
+        {
+                dbus_close_fds(fds, count);
+                return;
+        }
+        if (!c->unix_fds || c->in_fds + count > DBUS_FDS)
+        {
+                dbus_close_fds(fds, count);
+                c->dead = 1;
+                c->why = "too many file descriptors";
+                return;
+        }
+        for (long k = 0; k < count; k++)
+                c->in_fd[c->in_fds++] = fds[k];
+}
+
 DBUS_API long dbus_out(long slot, const unsigned char **bytes)
 {
         struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
 
         *bytes = c ? c->out + c->out_head : 0;
         return c ? c->out_length - c->out_head : 0;
+}
+
+DBUS_API long dbus_out_fds(long slot, const unsigned char **bytes, const int **fds, long *nfds)
+{
+        struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
+        long len;
+
+        *fds = 0;
+        *nfds = 0;
+        if (!c)
+        {
+                *bytes = 0;
+                return 0;
+        }
+        *bytes = c->out + c->out_head;
+        len = c->out_length - c->out_head;
+        if (c->out_fd_runs > 0)
+        {
+                if (c->out_fd_run[0].at == c->out_head)
+                {
+                        *fds = c->out_fd;
+                        *nfds = c->out_fd_run[0].count;
+                        if (c->out_fd_runs > 1 && c->out_fd_run[1].at - c->out_head < len)
+                                len = c->out_fd_run[1].at - c->out_head;
+                }
+                else if (c->out_fd_run[0].at > c->out_head && c->out_fd_run[0].at - c->out_head < len)
+                        len = c->out_fd_run[0].at - c->out_head;
+        }
+        return len;
+}
+
+DBUS_API void dbus_sent_fds(long slot)
+{
+        struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
+        long count;
+
+        if (!c || c->out_fd_runs <= 0 || c->out_fd_run[0].at != c->out_head)
+                return;
+        count = c->out_fd_run[0].count;
+        dbus_close_fds(c->out_fd, count);
+        for (long k = count; k < c->out_fds; k++)
+                c->out_fd[k - count] = c->out_fd[k];
+        c->out_fds -= count;
+        for (long k = 1; k < c->out_fd_runs; k++)
+                c->out_fd_run[k - 1] = c->out_fd_run[k];
+        c->out_fd_runs--;
 }
 
 // count bytes of what dbus_out gave were written: they leave the queue, and a client that read anything is not stalled.

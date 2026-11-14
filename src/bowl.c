@@ -8784,8 +8784,9 @@ static string_address bowl_steam_arch[] = {
     "bubblewrap",
     // The wrapper that starts the rootless X server (xwayland-moonwater) is a Python script.
     "python",
-    // Steam's launcher looks up helpers (zenity) with `which`, which Arch's base lacks.
-    "which", "zenity",
+    // Steam's launcher looks up helpers (zenity) with `which`, which Arch's base lacks,
+    // and dbus provides /run/dbus/system_bus_socket for Chromium/CEF.
+    "which", "zenity", "dbus",
     null};
 
 // Nothing of the bowl's /usr/bin by name: the session is the way in.
@@ -9651,6 +9652,7 @@ static string_address bowl_steam_session[] = {
     "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GSETTINGS_BACKEND=memory",
     "export STEAM_ZENITY=${STEAM_ZENITY:-zenity} GTK_A11Y=none",
     "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
+    "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
     "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
     "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",

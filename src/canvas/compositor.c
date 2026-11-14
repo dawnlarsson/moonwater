@@ -9899,12 +9899,13 @@ static void compositor_metric_note(unsigned long long nanoseconds)
                 compositor_metric_processor[compositor_metric_processor_at] = nanoseconds,
                 compositor_metric_processor_at = (compositor_metric_processor_at + 1) % WINDOWS_METRIC_RUN, compositor_metric_processor_count++;
         compositor_metric_presents++;
-        compositor_metric_publish();
+        if ((compositor_metric_presents & 15) == 1)
+                compositor_metric_publish();
 }
 
 static void compositor_present(void)
 {
-        unsigned long long began = clock_monotonic_nanoseconds();
+        unsigned long long began = clock_monotonic_nanoseconds(), ended;
         enum compositor_record_path path;
 
         compositor_record_begin();
@@ -9912,9 +9913,10 @@ static void compositor_present(void)
         compositor_wl_lent_sync(1);
         compositor_present_frames();
         compositor_wl_lent_sync(0);
-        compositor_metric_note(clock_monotonic_nanoseconds() - began);
+        ended = clock_monotonic_nanoseconds();
+        compositor_metric_note(ended - began);
         path = compositor_present_on_card ? COMPOSITOR_RECORD_CARD : compositor.plane_row >= 0 ? COMPOSITOR_RECORD_PLANE : COMPOSITOR_RECORD_PROCESSOR;
-        compositor_record_present(began, clock_monotonic_nanoseconds(), path);
+        compositor_record_present(began, ended, path);
 }
 
 static void compositor_present_frames(void)
