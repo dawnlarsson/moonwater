@@ -81,7 +81,9 @@
 #define COMPOSITOR_XWM_MOVERESIZE_CANCEL 11u
 #define COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR 68
 #define COMPOSITOR_XWM_XA_WINDOW 33
-#define COMPOSITOR_XWM_XA_WM_NAME 39          // predefined atoms: WM_NAME, and the types STRING and ATOM
+#define COMPOSITOR_XWM_XA_WM_HINTS 35
+#define COMPOSITOR_XWM_XA_WM_NAME 39          // predefined atoms: WM_HINTS, WM_NAME, WM_NORMAL_HINTS, and the types STRING and ATOM
+#define COMPOSITOR_XWM_XA_WM_NORMAL_HINTS 40
 #define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_TITLE 128              // a title's bytes, its NUL included (the shim takes fewer)
 #define COMPOSITOR_XWM_PENDING 512            // the property requests whose replies are waited for, in the order they were asked (a full table closes the connection)
@@ -91,6 +93,8 @@
 #define COMPOSITOR_XWM_PROP_TRANSIENT 4
 #define COMPOSITOR_XWM_PROP_TYPE 5
 #define COMPOSITOR_XWM_PROP_STATE 6
+#define COMPOSITOR_XWM_PROP_WM_HINTS 7
+#define COMPOSITOR_XWM_PROP_NORMAL_HINTS 8
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
 #define COMPOSITOR_XWM_PROTO_FOCUS 2u
 #define COMPOSITOR_XWM_NO_PLACE (-100000)
@@ -138,6 +142,8 @@ struct compositor_xwm_window
         int sent_x, sent_y;            // what the compositor last asked of its place and size
         unsigned int sent_w, sent_h;
         unsigned int restore_w, restore_h; // its size before fullscreen
+        unsigned int min_w, min_h, max_w, max_h; // WM_NORMAL_HINTS size bounds (0 = unset)
+        unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
         unsigned int asking;           // title requests in flight
         unsigned int dirty;            // the shim has not the window's latest title
         char title[COMPOSITOR_XWM_TITLE];
@@ -207,13 +213,11 @@ static void compositor_xwm_window_op(unsigned int opcode, unsigned int window)
                 compositor_xwm_queue(req, n);
 }
 
-static void compositor_xwm_focus(unsigned int window)
+static void compositor_xwm_active(unsigned int window)
 {
         unsigned char req[64], data[4];
-        long n = xwm_enc_set_input_focus(req, 16, XWM_REVERT_POINTER_ROOT, window, XWM_CURRENT_TIME);
+        long n;
 
-        if (n > 0)
-                compositor_xwm_queue(req, n);
         if (compositor_xwm.root && compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
         {
                 xwm_put32(data, window);
@@ -223,6 +227,16 @@ static void compositor_xwm_focus(unsigned int window)
                 if (n > 0)
                         compositor_xwm_queue(req, n);
         }
+}
+
+static void compositor_xwm_focus(unsigned int window)
+{
+        unsigned char req[64];
+        long n = xwm_enc_set_input_focus(req, 16, XWM_REVERT_POINTER_ROOT, window, XWM_CURRENT_TIME);
+
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        compositor_xwm_active(window);
 }
 
 static void compositor_xwm_configure(unsigned int window, const struct xwm_configure *c)
@@ -636,6 +650,31 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 }
                 w->state |= COMPOSITOR_XWM_PROTO_KNOWN;
         }
+        else if (p->what == COMPOSITOR_XWM_PROP_WM_HINTS)
+        {
+                w->no_input = 0;
+                if (r.format == XWM_FORMAT_32 && r.value_len >= 8 && (xwm_get32(r.value) & 1u))
+                        w->no_input = xwm_get32(r.value + 4) == 0;
+        }
+        else if (p->what == COMPOSITOR_XWM_PROP_NORMAL_HINTS)
+        {
+                w->min_w = w->min_h = w->max_w = w->max_h = 0;
+                if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
+                {
+                        unsigned int flags = xwm_get32(r.value);
+
+                        if ((flags & 16u) && r.value_len >= 28)
+                        {
+                                w->min_w = xwm_get32(r.value + 20);
+                                w->min_h = xwm_get32(r.value + 24);
+                        }
+                        if ((flags & 32u) && r.value_len >= 36)
+                        {
+                                w->max_w = xwm_get32(r.value + 28);
+                                w->max_h = xwm_get32(r.value + 32);
+                        }
+                }
+        }
 }
 
 /* ---- the window table ---- */
@@ -809,6 +848,20 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
         has arranged, or is resizing) in the units of the screen's scale. A size is asked once; what the client then makes of it is its
         own, and a window the compositor asks nothing of keeps the size it has.
 */
+static void compositor_xwm_clamp_size(const struct compositor_xwm_window *w, unsigned int *width, unsigned int *height)
+{
+        if (!w || (w->state & COMPOSITOR_XWM_FULLSCREEN))
+                return;
+        if (w->max_w && *width > w->max_w)
+                *width = w->max_w;
+        if (w->max_h && *height > w->max_h)
+                *height = w->max_h;
+        if (w->min_w && *width < w->min_w)
+                *width = w->min_w;
+        if (w->min_h && *height < w->min_h)
+                *height = w->min_h;
+}
+
 static void compositor_xwm_sync(struct compositor_xwm_window *w)
 {
         struct windows *table = compositor.table;
@@ -835,11 +888,17 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         if (table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]))
         {
                 long width = (long)table->want_width[row], height = (long)table->want_height[row];
-                if (width > 0 && height > 0 && ((unsigned int)width != w->sent_w || (unsigned int)height != w->sent_h))
+                if (width > 0 && height > 0)
                 {
-                        c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                        c.width = (unsigned int)width;
-                        c.height = (unsigned int)height;
+                        unsigned int cw = (unsigned int)width, ch = (unsigned int)height;
+
+                        compositor_xwm_clamp_size(w, &cw, &ch);
+                        if (cw != w->sent_w || ch != w->sent_h)
+                        {
+                                c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
+                                c.width = cw;
+                                c.height = ch;
+                        }
                 }
         }
         if (!c.mask)
@@ -911,6 +970,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 compositor_xwm_ask_title(w);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_PROTOCOLS, compositor_xwm.atoms[COMPOSITOR_XWM_A_PROTOCOLS], COMPOSITOR_XWM_ATOM_TYPE);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_TRANSIENT, COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR, COMPOSITOR_XWM_XA_WINDOW);
+                compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_WM_HINTS, COMPOSITOR_XWM_XA_WM_HINTS, 0);
+                compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_NORMAL_HINTS, COMPOSITOR_XWM_XA_WM_NORMAL_HINTS, 0);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_STATE, compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_STATE], COMPOSITOR_XWM_ATOM_TYPE);
                 // The type is asked last: its reply says the others have come.
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_TYPE, compositor_xwm.atoms[COMPOSITOR_XWM_A_TYPE], COMPOSITOR_XWM_ATOM_TYPE);
@@ -935,9 +996,10 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
                 c.x = e->x;
                 c.y = e->y;
-                // A size within the output.
+                // A size within the output and the window's WM_NORMAL_HINTS bounds.
                 c.width = compositor.width > 0 && e->width > (unsigned int)compositor.width ? (unsigned int)compositor.width : e->width;
                 c.height = compositor.height > 0 && e->height > (unsigned int)compositor.height ? (unsigned int)compositor.height : e->height;
+                compositor_xwm_clamp_size(w, &c.width, &c.height);
                 c.border = e->border;
                 c.sibling = e->sibling;
                 c.stack_mode = e->detail;
@@ -986,6 +1048,10 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_ask_title(w);
                 else if (e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_PROTOCOLS])
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_PROTOCOLS, e->atom, COMPOSITOR_XWM_ATOM_TYPE);
+                else if (e->atom == COMPOSITOR_XWM_XA_WM_HINTS)
+                        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_WM_HINTS, e->atom, 0);
+                else if (e->atom == COMPOSITOR_XWM_XA_WM_NORMAL_HINTS)
+                        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NORMAL_HINTS, e->atom, 0);
                 break;
         case XWM_EV_UNMAP_NOTIFY:
                 w = compositor_xwm_find(e->window, 0);
@@ -1577,10 +1643,14 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
 
                         if (w->id && w->row >= 0 && w->row == x->focus_row && !(w->state & COMPOSITOR_XWM_POPUPISH))
                         {
-                                compositor_xwm_focus(w->id);
+                                if (!w->no_input)
+                                        compositor_xwm_focus(w->id);
+                                else if (w->protocols & COMPOSITOR_XWM_PROTO_FOCUS)
+                                        compositor_xwm_active(w->id);
                                 if (w->protocols & COMPOSITOR_XWM_PROTO_FOCUS)
                                         compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_TAKE_FOCUS]);
-                                focused = 1;
+                                if (!w->no_input || (w->protocols & COMPOSITOR_XWM_PROTO_FOCUS))
+                                        focused = 1;
                         }
                 }
                 if (!focused)

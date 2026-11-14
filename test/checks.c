@@ -238375,6 +238375,36 @@ static void grab_protocol_rows(void)
         check("xwm ewmh: _NET_CLOSE_WINDOW requests window close on row",
               (compositor.state[0] & WINDOW_CLOSING) && compositor.close_asks[0] == 1);
 
+        // ICCCM WM_HINTS InputHint=0 and WM_NORMAL_HINTS PMinSize/PMaxSize.
+        {
+                unsigned char reply[32 + 36];
+                struct compositor_xwm_pending pend = {1, 0x880001u, COMPOSITOR_XWM_PROP_WM_HINTS};
+                unsigned int cw = 100, ch = 900;
+
+                memory_zero(reply, sizeof(reply));
+                reply[0] = 1, reply[1] = XWM_FORMAT_32;
+                xwm_put32(reply + 4, 2);
+                xwm_put32(reply + 16, 2);
+                xwm_put32(reply + 32, 1u); // InputHint flag
+                xwm_put32(reply + 36, 0u); // input = False
+                compositor_xwm_property(reply, 32 + 8, &pend);
+                check("xwm icccm: WM_HINTS InputHint=0 sets no_input", xw && xw->no_input == 1);
+
+                memory_zero(reply, sizeof(reply));
+                reply[0] = 1, reply[1] = XWM_FORMAT_32;
+                xwm_put32(reply + 4, 9);
+                xwm_put32(reply + 16, 9);
+                xwm_put32(reply + 32, 16u | 32u); // PMinSize | PMaxSize
+                xwm_put32(reply + 32 + 20, 320u); // min_width
+                xwm_put32(reply + 32 + 24, 240u); // min_height
+                xwm_put32(reply + 32 + 28, 800u); // max_width
+                xwm_put32(reply + 32 + 32, 600u); // max_height
+                pend.what = COMPOSITOR_XWM_PROP_NORMAL_HINTS;
+                compositor_xwm_property(reply, 32 + 36, &pend);
+                compositor_xwm_clamp_size(xw, &cw, &ch);
+                check("xwm icccm: WM_NORMAL_HINTS clamps configure size to min/max", cw == 320u && ch == 600u);
+        }
+
         compositor_xwm_forget(0x880001u);
 
         memory_copy(&compositor_xwm, kept_xwm, sizeof(compositor_xwm));
