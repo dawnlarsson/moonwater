@@ -4972,10 +4972,13 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
                 wayland_word(&e, wayland_fixed(sx, s->scale120));
                 wayland_word(&e, wayland_fixed(sy, s->scale120));
                 wayland_end(&e);
-                wayland_pointer_frame(c, slots[at]);
         }
         // The places the hand moved, to the client's relative pointers: as moved, the same accelerated or not.
-        wayland_relative_send(c, s->scale120, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
+        // When held (locked or confined), raw deltas are sent by wayland_pointer_relative.
+        if (!wayland.hold_mode || row != wayland.hold_row)
+                wayland_relative_send(c, s->scale120, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
+        for (long at = 0; at < count; at++)
+                wayland_pointer_frame(c, slots[at]);
 }
 
 /*
@@ -7035,15 +7038,19 @@ static void wayland_relative_send(struct wayland_client *c, long scale120, long 
         }
 }
 
-// The hand's counts, to the client whose window holds the pointer locked.
+// The hand's counts, to the client whose window holds the pointer locked or confined.
 WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long micro)
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
+        long slots[WAYLAND_SEATS], count;
 
-        if (!wayland.host || !s || row != wayland.hold_row || wayland.hold_mode != 1)
+        if (!wayland.host || !s || row != wayland.hold_row || (wayland.hold_mode != 1 && wayland.hold_mode != 2))
                 return;
         wayland_relative_send(c, s->scale120, dx, dy, dx, dy, micro);
+        count = wayland_seats(c, WLI_wl_pointer, slots);
+        for (long at = 0; at < count; at++)
+                wayland_pointer_frame(c, slots[at]);
 }
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)

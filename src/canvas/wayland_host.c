@@ -869,7 +869,6 @@ static void compositor_wl_fd_ident(long fd, unsigned long *dev, unsigned long *i
         *ino = 0;
         if (fd < 0)
                 return;
-        memory_zero(info, sizeof info);
         // AT_EMPTY_PATH (0x1000), STATX_BASIC_STATS (0x7ff): stx_ino at 32 (u64), stx_dev_major at 136 (u32), stx_dev_minor at 140 (u32).
         if (compositor_call(syscall(statx), (positive)fd, (positive)"", 0x1000, 0x7ff, (positive)info, 0) < 0)
                 return;
@@ -1539,11 +1538,6 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         (void)context;
         if (row < 0 || row >= WINDOWS || !table)
                 return -1;
-        if (picture->sync_fd >= 0)
-        {
-                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
-                        return 1;
-        }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
         if (has_content && !compositor_wl.laying[row].open)
@@ -1569,6 +1563,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 compositor_wl_take(row);
                 return WAYLAND_PICTURE_LENT;
         }
+        if (picture->sync_fd >= 0 && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+                return 1;
         if (!compositor_wl.laying[row].open)
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
@@ -2107,18 +2103,18 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
         (void)context;
         compositor_wl.hold_row = (int)row;
         compositor_wl.hold = (int)mode;
-        compositor.touch.hidden = mode == 1;
+        compositor.cursor.hold_hidden = mode == 1;
         compositor_cursor_move();
 }
 
-// The hand's counts, to the window that holds the pointer locked; 1 when they went there and the pointer is not to move.
+// The hand's counts, to the window that holds the pointer locked or confined; 1 when locked and the pointer is not to move.
 static int compositor_wl_hold_counts(int dx, int dy, positive now)
 {
-        if (compositor_wl.hold != 1 || compositor_wl.hold_row < 0)
+        if ((compositor_wl.hold != 1 && compositor_wl.hold != 2) || compositor_wl.hold_row < 0)
                 return 0;
         if (dx || dy)
                 wayland_pointer_relative(compositor_wl.hold_row, dx, dy, (long)(now / 1000));
-        return 1;
+        return compositor_wl.hold == 1;
 }
 
 // A pointer confined to a window, moved, is put back inside it.

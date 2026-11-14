@@ -834,9 +834,29 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
         int y1 = y > t->y1 ? y : t->y1;
         int x2 = x + width < t->x2 ? x + width : t->x2;
         int y2 = y + height < t->y2 ? y + height : t->y2;
+        int w = x2 - x1;
 
-        if (x2 <= x1 || y2 <= y1 || width <= 0 || height <= 0)
+        if (w <= 0 || y2 <= y1 || width <= 0 || height <= 0)
                 return;
+        if (w <= 4096)
+        {
+                unsigned int scratch[4096];
+                int chunk = 4096 / w;
+
+                for (int py = y1; py < y2; py += chunk)
+                {
+                        int rows = y2 - py < chunk ? y2 - py : chunk;
+                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                        memory_resample_u32_rect(scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows,
+                                                 frame->pixels, frame->pitch,
+                                                 (unsigned long)frame->source_w, (unsigned long)frame->source_h,
+                                                 (unsigned long)width, (unsigned long)height,
+                                                 (unsigned long)(x1 - x), (unsigned long)(py - y));
+                        memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows);
+                }
+                return;
+        }
         for (int py = y1; py < y2; py++)
         {
                 unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
@@ -4863,6 +4883,7 @@ static struct
                 int soft;               // the pointer is drawn into the scanout
                 int drawn, x, y;        // where the software pointer was last damaged
                 int client_hidden;   // a window's client asked for no pointer (wl_pointer.set_cursor with no surface), over that window
+                int hold_hidden;     // a client holds the pointer locked (zwp_locked_pointer_v1)
                 unsigned int shape;     // what the pointer wears now
                 int asked_row;          // the window whose shape the pointer took at the last motion (COMPOSITOR_NONE for none), and the shape it had
                 int asked_seen;
@@ -11973,16 +11994,18 @@ static void compositor_cursor_move(void)
         struct compositor_pointer now;
         int hot_x, hot_y, inset;
 
+        int hidden = compositor.cursor.client_hidden || compositor.cursor.hold_hidden;
+
         compositor.cursor.dyn = compositor_pointer_dynamic();
         compositor_pointer_now(&now);
         if (compositor.cursor.drawn)
                 compositor_cursor_damage(), compositor.cursor.drawn = 0;
-        if (compositor.cursor.client_hidden || compositor_cursor_in_scene())
+        if (hidden || compositor_cursor_in_scene())
         {
                 // A plane that was showing the pointer shows nothing now, and says so again when it is wanted.
                 if (compositor.cursor.handle[0] && compositor.cursor.plane_on)
                         compositor_cursor_planes_off();
-                if (!compositor.cursor.client_hidden)
+                if (!hidden)
                 {
                         compositor.cursor.x = compositor_drawn_x(), compositor.cursor.y = compositor_drawn_y();
                         compositor.cursor.drawn_as = now, compositor.cursor.drawn = 1;
@@ -21832,24 +21855,16 @@ static b32 compositor_main()
                 // last one went out, so a program that draws faster than the
                 // card can scan costs one composition a frame and not one a
                 // picture. The time in the tray is drawn at the next minute.
+                now = clock_monotonic_nanoseconds();
                 if (compositor.wake_stage)
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor.wake_at < until ? compositor.wake_at : until;
-                }
 
                 if (compositor.hold >= 0)
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor.hold_until < until ? compositor.hold_until : until;
-                }
 
                 if (compositor.cursor.magnified)
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor.cursor.magnified_until < until ? compositor.cursor.magnified_until
                                                                                      : until;
-                }
 
                 // The pointer's own times: the next frame of a held button's change of size or of the dynamic shape's, and its stretch letting go.
                 {
@@ -21864,36 +21879,25 @@ static b32 compositor_main()
                 {
                         positive due = compositor_volume.look_at ? compositor_volume.look_at : 1; // 1: not yet looked, so now
 
-                        now = clock_monotonic_nanoseconds();
                         until = !until || due < until ? due : until;
                 }
 
                 // A lead is cleared a frame after its newest place, so the loop wakes for it.
                 if (compositor_predict_due())
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor_predict_due() < until ? compositor_predict_due() : until;
-                }
 
                 // A finger held still is the right button when its time is up; a finger's mark fades a frame at a time.
                 // Neither wakes the loop while no finger is down and no mark is fading.
                 if (compositor_touch_due())
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor_touch_due() < until ? compositor_touch_due() : until;
-                }
                 // A drag's pointer resting in the top band brings the grid up when its time is up, with no motion.
                 if (compositor_snap_due())
-                {
-                        now = clock_monotonic_nanoseconds();
                         until = !until || compositor_snap_due() < until ? compositor_snap_due() : until;
-                }
                 if (compositor_spots_any(1))
                 {
                         positive period = compositor.period ? compositor.period : 16666667ull;
                         positive frame = compositor.presented + period;
 
-                        now = clock_monotonic_nanoseconds();
                         frame = frame > now ? frame : now + period;
                         until = !until || frame < until ? frame : until;
                 }
@@ -21904,7 +21908,6 @@ static b32 compositor_main()
                         positive minute;
 
                         clock_gettime(CLOCK_REALTIME, address_of real);
-                        now = clock_monotonic_nanoseconds();
                         minute = now + (positive)(59 - real.tv_sec % 60) * 1000000000ull +
                                  (positive)(1000000000l - real.tv_nsec) + 1000000ull;
                         until = !until || minute < until ? minute : until;
@@ -21914,10 +21917,8 @@ static b32 compositor_main()
                 // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn.
                 if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages)
                 {
-                        positive frame;
+                        positive frame = now - compositor.presented < compositor.period ? compositor.presented + compositor.period : now;
 
-                        now = clock_monotonic_nanoseconds();
-                        frame = now - compositor.presented < compositor.period ? compositor.presented + compositor.period : now;
                         until = !until || frame < until ? frame : until;
                 }
                 // A copy or a paste that stalls is ended when its time is up.
@@ -21925,13 +21926,10 @@ static b32 compositor_main()
                         positive wl_due = compositor_wl.started ? compositor_wl_due() : 0;
 
                         if (wl_due)
-                        {
-                                now = clock_monotonic_nanoseconds();
                                 until = !until || wl_due < until ? wl_due : until;
-                        }
                 }
 #endif
-                if (compositor.flip_pending && compositor_flip_lost(clock_monotonic_nanoseconds()))
+                if (compositor.flip_pending && compositor_flip_lost(now))
                 {
                         compositor_flip_done();
                         compositor_damage_space();
@@ -21939,17 +21937,14 @@ static b32 compositor_main()
                 // No screen is connected: the connectors are asked again in a while, for a uevent that was lost and a connector that says none.
                 if (compositor.screens_gone)
                 {
-                        now = clock_monotonic_nanoseconds();
                         if (!compositor.screens_look)
                                 compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
                         until = !until || compositor.screens_look < until ? compositor.screens_look : until;
                 }
                 if (compositor.damages)
                 {
-                        positive frame, waiting;
+                        positive frame, waiting = compositor_flip_wait(now);
 
-                        now = clock_monotonic_nanoseconds();
-                        waiting = compositor_flip_wait(now);
                         // The flip's event wakes the loop; else the present is made when it is due (compositor_present_due).
                         frame = waiting ? waiting
                                         : compositor_present_due(compositor.presented, compositor.period, compositor.flip_when,
@@ -21958,11 +21953,11 @@ static b32 compositor_main()
                 }
 #ifdef MOONWATER_GPU_C
                 // The GPU's late probe: a card that is not there is looked for again when its time comes. Nothing is waited for while the card is up or off.
-                if (compositor_gpu_late_at(clock_monotonic_nanoseconds()))
                 {
-                        positive frame = compositor_gpu_late_at(clock_monotonic_nanoseconds());
+                        positive frame = compositor_gpu_late_at(now);
 
-                        until = !until || frame < until ? frame : until;
+                        if (frame)
+                                until = !until || frame < until ? frame : until;
                 }
 #endif
 
@@ -21972,15 +21967,16 @@ static b32 compositor_main()
                 idle_turn = until && until <= now;
                 awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
                                           until ? (positive)wait : 0, 0, 0, 0);
-                compositor_loop_tick(clock_monotonic_nanoseconds(), idle_turn);
+                now = clock_monotonic_nanoseconds();
+                compositor_loop_tick(now, idle_turn);
 
                 // Whatever woke the loop, a sleep may be what it woke from; and auto's theme may have turned with the clock.
                 compositor_theme_tick();
-                compositor_wake_check(clock_monotonic_nanoseconds());
-                compositor_wake_pass(clock_monotonic_nanoseconds());
-                compositor_hold_drop(clock_monotonic_nanoseconds());
+                compositor_wake_check(now);
+                compositor_wake_pass(now);
+                compositor_hold_drop(now);
 #ifdef MOONWATER_GPU_C
-                compositor_gpu_late_tick(clock_monotonic_nanoseconds());
+                compositor_gpu_late_tick(now);
 #endif
 
                 if (awaited < 0)
@@ -22038,42 +22034,42 @@ static b32 compositor_main()
                         compositor_uevents_read();
                 if (compositor.space_wanted && !compositor.flip_pending)
                         compositor_space_retake();
-                if (compositor.screens_gone && compositor.screens_look && clock_monotonic_nanoseconds() >= compositor.screens_look)
+                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look)
                 {
                         compositor.screens_look = 0;
                         compositor_space_retake();
                 }
 
                 // A pointer that was shaken is its own size again when its time is up.
-                if (compositor.cursor.magnified && clock_monotonic_nanoseconds() >= compositor.cursor.magnified_until)
+                if (compositor.cursor.magnified && now >= compositor.cursor.magnified_until)
                 {
                         compositor.cursor.magnified = 0;
                         compositor_cursor_move();
                 }
 
                 // The pointer's values on their way are drawn where they are now, and a stretch nothing moves under lets go (compositor_cursor_tick).
-                compositor_cursor_tick(clock_monotonic_nanoseconds());
+                compositor_cursor_tick(now);
 
                 // The shape the window under a resting pointer publishes is shown (compositor_shape_sync).
                 compositor_shape_sync();
 
                 if (compositor_predict_due())
-                        compositor_predict_expire(clock_monotonic_nanoseconds());
+                        compositor_predict_expire(now);
 
                 // A finger held long enough, and the marks that fade.
                 if (compositor_touch_due())
-                        compositor_touch_tick(clock_monotonic_nanoseconds());
+                        compositor_touch_tick(now);
                 if (compositor_snap_due())
-                        compositor_snap_tick(clock_monotonic_nanoseconds());
+                        compositor_snap_tick(now);
                 if (compositor_spots_any(1))
-                        compositor_spots_tick(clock_monotonic_nanoseconds());
+                        compositor_spots_tick(now);
 
                 if (compositor_notices_look() && compositor.band)
                         compositor_tabs_changed();
                 if (compositor.band && taskbar_tick())
                         compositor_tabs_changed();
-                if (compositor.band && clock_monotonic_nanoseconds() >= compositor_volume.look_at)
-                        compositor_volume_look(clock_monotonic_nanoseconds());
+                if (compositor.band && now >= compositor_volume.look_at)
+                        compositor_volume_look(now);
 
 #ifdef CONFIG_MOONWATER_WAYLAND
                 // The windows' clients are told of what changed, before the frame is drawn: no event waits for it.
@@ -22081,7 +22077,7 @@ static b32 compositor_main()
 #endif
 
                 // The taskbar's place for this frame, before the frame is drawn: a slide is one step a pass.
-                compositor_taskbar_slide(clock_monotonic_nanoseconds());
+                compositor_taskbar_slide(now);
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.
@@ -22093,22 +22089,25 @@ static b32 compositor_main()
                         if (stamp >= compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, stamp) &&
                             !compositor_flip_wait(stamp))
                         {
+                                positive after_present;
+
                                 // A present late in its period is paced by the card's vblank and is dated as made; any other when it was due.
                                 compositor_late_begin(lead, stamp);
                                 compositor.presented = compositor_late.aim ? stamp : compositor_frame_dated(compositor.presented, compositor.period, stamp);
                                 compositor_present();
+                                after_present = clock_monotonic_nanoseconds();
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
                                 compositor_wl_presented();
 #endif
                                 compositor_land_keep();
                                 compositor_glide_keep();
-                                compositor_taskbar_keep(clock_monotonic_nanoseconds());
+                                compositor_taskbar_keep(after_present);
                                 compositor_preview_keep();
                                 compositor_overlays_keep();
                                 if (compositor.motion_ts)
                                 {
-                                        compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());
+                                        compositor_latency(1, compositor.motion_ts, after_present);
                                         compositor.motion_ts = 0;
                                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -22119,9 +22118,9 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
                 // Callbacks or feedbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
                 else if (compositor_wl.started && wayland_frame_wanted() &&
-                         clock_monotonic_nanoseconds() - compositor.presented >= compositor.period)
+                         now - compositor.presented >= compositor.period)
                 {
-                        compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, clock_monotonic_nanoseconds());
+                        compositor.presented = compositor_frame_dated(compositor.presented, compositor.period, now);
                         compositor_wl_idle();
                 }
 #endif
