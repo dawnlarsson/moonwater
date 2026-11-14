@@ -48,7 +48,7 @@
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 16384                     // what is queued for the server; a queue that would overflow closes the connection
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
-#define COMPOSITOR_XWM_ATOMS 18
+#define COMPOSITOR_XWM_ATOMS 21
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
 #define COMPOSITOR_XWM_A_DELETE 1
 #define COMPOSITOR_XWM_A_NET_STATE 2
@@ -63,6 +63,11 @@
 #define COMPOSITOR_XWM_A_TYPE 11              // _NET_WM_WINDOW_TYPE, then the types that are popups: tooltip, drop-down menu, popup menu,
 #define COMPOSITOR_XWM_A_TYPE_FIRST 12        // combo, notification, drag and drop
 #define COMPOSITOR_XWM_A_TYPE_LAST 17
+#define COMPOSITOR_XWM_A_NET_SUPPORTED 18
+#define COMPOSITOR_XWM_A_NET_CHECK 19
+#define COMPOSITOR_XWM_A_NET_MOVERESIZE 20
+#define COMPOSITOR_XWM_MOVERESIZE_MOVE 8u
+#define COMPOSITOR_XWM_MOVERESIZE_CANCEL 11u
 #define COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR 68
 #define COMPOSITOR_XWM_XA_WINDOW 33
 #define COMPOSITOR_XWM_XA_WM_NAME 39          // predefined atoms: WM_NAME, and the types STRING and ATOM
@@ -220,14 +225,19 @@ static void compositor_xwm_wm_state(unsigned int window)
                 compositor_xwm_queue(req, n);
 }
 
-/* The window manager's own window, input only, and its ownership of WM_S0 (ICCCM 4.3.8): the selection an X server looks
-   at to know a window manager runs. Its id is the first of the resources the setup gave the window manager. */
+/* The window manager's own window, input only, its ownership of WM_S0 (ICCCM 4.3.8), and the EWMH root properties
+   (_NET_SUPPORTING_WM_CHECK and _NET_SUPPORTED) that toolkits check before asking for _NET_WM_MOVERESIZE or fullscreen. */
 static void compositor_xwm_claim(void)
 {
+        static const unsigned int supported_atoms[] = {
+            COMPOSITOR_XWM_A_NET_SUPPORTED, COMPOSITOR_XWM_A_NET_CHECK, COMPOSITOR_XWM_A_NET_NAME,
+            COMPOSITOR_XWM_A_NET_STATE,     COMPOSITOR_XWM_A_FULLSCREEN, COMPOSITOR_XWM_A_NET_MOVERESIZE,
+            COMPOSITOR_XWM_A_TYPE};
+        static const unsigned char wm_name[] = "moonwater";
         struct compositor_xwm *x = &compositor_xwm;
-        unsigned char req[64];
+        unsigned char req[128], data[64];
         long n;
-        unsigned int window = x->resource_base | (1u & x->resource_mask);
+        unsigned int window = x->resource_base | (1u & x->resource_mask), count = 0;
 
         if (x->claimed)
                 return;
@@ -243,6 +253,27 @@ static void compositor_xwm_claim(void)
                 xwm_put32(req + 12, XWM_CURRENT_TIME);
                 compositor_xwm_queue(req, n);
         }
+        xwm_put32(data, window);
+        n = xwm_enc_change_property(req, sizeof req, XWM_PROP_REPLACE, window, x->atoms[COMPOSITOR_XWM_A_NET_CHECK],
+                                    COMPOSITOR_XWM_XA_WINDOW, XWM_FORMAT_32, data, 4);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        n = xwm_enc_change_property(req, sizeof req, XWM_PROP_REPLACE, window, x->atoms[COMPOSITOR_XWM_A_NET_NAME],
+                                    x->atoms[COMPOSITOR_XWM_A_UTF8], XWM_FORMAT_8, wm_name, sizeof wm_name - 1);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        n = xwm_enc_change_property(req, sizeof req, XWM_PROP_REPLACE, x->root, x->atoms[COMPOSITOR_XWM_A_NET_CHECK],
+                                    COMPOSITOR_XWM_XA_WINDOW, XWM_FORMAT_32, data, 4);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        for (unsigned int i = 0; i < (unsigned int)(sizeof supported_atoms / sizeof supported_atoms[0]); i++)
+                xwm_put32(data + 4 * count++, x->atoms[supported_atoms[i]]);
+        for (unsigned int type = COMPOSITOR_XWM_A_TYPE_FIRST; type <= COMPOSITOR_XWM_A_TYPE_LAST; type++)
+                xwm_put32(data + 4 * count++, x->atoms[type]);
+        n = xwm_enc_change_property(req, sizeof req, XWM_PROP_REPLACE, x->root, x->atoms[COMPOSITOR_XWM_A_NET_SUPPORTED],
+                                    COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, data, count * 4);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
 }
 
 /* _XWAYLAND_ALLOW_COMMITS: the window manager's word that Xwayland may commit the window's surface, set once it manages the window. */
@@ -295,7 +326,8 @@ static void compositor_xwm_intern(unsigned int at)
                                                                 "UTF8_STRING", "WM_TAKE_FOCUS", "_NET_WM_WINDOW_TYPE",
                                                                 "_NET_WM_WINDOW_TYPE_TOOLTIP", "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
                                                                 "_NET_WM_WINDOW_TYPE_POPUP_MENU", "_NET_WM_WINDOW_TYPE_COMBO",
-                                                                "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_DND"};
+                                                                "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_DND",
+                                                                "_NET_SUPPORTED", "_NET_SUPPORTING_WM_CHECK", "_NET_WM_MOVERESIZE"};
         unsigned char req[64];
         unsigned long length = 0;
         long n;
@@ -656,7 +688,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 return;
         w->row = (int)row;
         if (w->state & COMPOSITOR_XWM_FULLSCREEN)
-                compositor_arrange((int)row, COMPOSITOR_MAXIMIZED);
+                compositor_fullscreen_row((int)row);
 }
 
 /* Fullscreen: the window's X size is the output's, at the origin, and the shim's row covers the screen. Let go: floats again. */
@@ -679,7 +711,7 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
                 compositor_xwm_configure(w->id, &c);
                 compositor_xwm_net_state(w->id, 1);
                 if (w->row >= 0)
-                        compositor_arrange(w->row, COMPOSITOR_MAXIMIZED);
+                        compositor_fullscreen_row(w->row);
         }
         else
         {
@@ -745,6 +777,36 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         {
                 w->sent_w = c.width;
                 w->sent_h = c.height;
+        }
+}
+
+/* EWMH _NET_WM_MOVERESIZE: an X client asks to move or resize its window while the person holds the left button on it. */
+static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned int direction)
+{
+        static const unsigned int edge_of[8] = {
+            COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_LEFT,    COMPOSITOR_EDGE_TOP,
+            COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_RIGHT,   COMPOSITOR_EDGE_RIGHT,
+            COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_RIGHT, COMPOSITOR_EDGE_BOTTOM,
+            COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_LEFT,  COMPOSITOR_EDGE_LEFT};
+        int row;
+
+        if (!w || w->row < 0 || w->row >= WINDOWS || !compositor.showing[w->row])
+                return;
+        row = w->row;
+        if (direction == COMPOSITOR_XWM_MOVERESIZE_CANCEL)
+        {
+                compositor_drag_stop(row);
+                return;
+        }
+        // Only while the person holds the left button on this window: a client cannot take the pointer.
+        if (!(compositor.button_down & 1u) || compositor.button_row[0] != row || compositor.drag >= 0 || compositor.resize >= 0)
+                return;
+        if (direction == COMPOSITOR_XWM_MOVERESIZE_MOVE)
+                compositor_drag_begin_client(row);
+        else if (direction < 8)
+        {
+                compositor_resize_begin(row, edge_of[direction]);
+                compositor_lit(row, edge_of[direction], 1);
         }
 }
 
@@ -886,6 +948,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         else if (e->data[0] == COMPOSITOR_XWM_NET_TOGGLE)
                                 compositor_xwm_fullscreen(w, !(w->state & COMPOSITOR_XWM_FULLSCREEN));
                 }
+                else if (e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE] && e->format == XWM_FORMAT_32)
+                        compositor_xwm_moveresize(compositor_xwm_find(e->window, 0), e->data[2]);
                 break;
         default:
                 break;

@@ -136,6 +136,29 @@ rm -f /root/canvas.motion
 echo dark > /root/canvas.theme
 sleep 1.5
 
+# A client inside a user namespace mapping container uid 1000 to host uid 0 (as a bowl does) sends EXTERNAL "1000" while
+# SO_PEERCRED on the host reports uid 0. Map gid 1000 too so GDBus's SCM_CREDENTIALS message carries a valid group.
+if command -v unshare > /dev/null 2>&1 && unshare -U --map-user=1000 --map-group=1000 true 2> /dev/null; then
+        if command -v gdbus > /dev/null 2>&1; then
+                out=$(unshare -U --map-user=1000 --map-group=1000 gdbus call --address "$address" --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.ReadAll "['org.freedesktop.appearance']" 2>&1)
+                case $out in
+                *"'color-scheme': <uint32 1>"*) row ok "a bowl-style user namespace GDBus client (uid 1000 -> outer 0) authenticates" ;;
+                *) row FAIL "a bowl-style user namespace GDBus client (uid 1000 -> outer 0)" "$out" ;;
+                esac
+        fi
+        if command -v dbus-send > /dev/null 2>&1; then
+                out=$(unshare -U --map-user=1000 --map-group=1000 dbus-send --bus="$address" --print-reply --dest=org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings.ReadOne string:org.freedesktop.appearance string:color-scheme 2>&1)
+                case $out in
+                *"uint32 1"*) row ok "a bowl-style user namespace libdbus client (uid 1000 -> outer 0) authenticates" ;;
+                *) row FAIL "a bowl-style user namespace libdbus client (uid 1000 -> outer 0)" "$out" ;;
+                esac
+        fi
+        if command -v busctl > /dev/null 2>&1; then
+                out=$(unshare -U --map-user=1000 --map-group=1000 busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
+                [ "$out" = "v u 1" ] && row ok "a bowl-style user namespace sd-bus client (uid 1000 -> outer 0) authenticates" || row FAIL "a bowl-style user namespace sd-bus client (uid 1000 -> outer 0)" "$out"
+        fi
+fi
+
 # The bus ends when asked, and takes its socket with it.
 kill -TERM $bpid 2> /dev/null
 i=0

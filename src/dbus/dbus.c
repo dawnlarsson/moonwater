@@ -2355,6 +2355,88 @@ DBUS_API int dbus_start(const struct dbus_host *host)
         return 0;
 }
 
+// A line in /proc/<pid>/uid_map is three decimals: <inside> <outside> <count>. A peer inside bowl's user namespace (mapping
+// container uid 1000 to host uid 0) carries kernel SO_PEERCRED uid 0 yet authenticates with EXTERNAL "1000"; map its outer
+// uid to the inside uid here, while refusing to map a non-zero outer uid down to 0.
+DBUS_API long dbus_uid_from_map(const char *text, long length, long uid)
+{
+        unsigned long want = (unsigned long)(unsigned int)uid;
+        long at = 0, lines = 0;
+        unsigned long single_inside = 0, single_count = 0;
+
+        if (!text || length <= 0 || uid < 0)
+                return uid;
+        while (at < length)
+        {
+                unsigned long inside = 0, outside = 0, count = 0;
+                int fields = 0;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r'))
+                        at++;
+                if (at >= length || text[at] == '\n')
+                {
+                        if (at < length)
+                                at++;
+                        continue;
+                }
+                for (int f = 0; f < 3; f++)
+                {
+                        unsigned long value = 0;
+                        int any = 0;
+
+                        while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                                at++;
+                        while (at < length && text[at] >= '0' && text[at] <= '9')
+                        {
+                                value = value * 10u + (unsigned long)(unsigned char)(text[at] - '0');
+                                at++;
+                                any = 1;
+                                if (value > 0xffffffffUL)
+                                        break;
+                        }
+                        if (!any || value > 0xffffffffUL ||
+                            (at < length && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r'))
+                                break;
+                        if (f == 0)
+                                inside = value;
+                        else if (f == 1)
+                                outside = value;
+                        else
+                                count = value;
+                        fields++;
+                }
+                if (fields == 3)
+                {
+                        while (at < length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r'))
+                                at++;
+                        if (at < length && text[at] != '\n')
+                                fields = 0;
+                }
+                while (at < length && text[at] != '\n')
+                        at++;
+                if (at < length && text[at] == '\n')
+                        at++;
+                if (fields != 3 || count == 0)
+                        continue;
+                lines++;
+                single_inside = inside;
+                single_count = count;
+                if (want >= outside && want - outside < count)
+                {
+                        unsigned long mapped = inside + (want - outside);
+
+                        if (mapped > 0xffffffffUL || (uid != 0 && mapped == 0))
+                                return uid;
+                        return (long)mapped;
+                }
+        }
+        // A nested single-uid child userns (e.g. bwrap/pressure-vessel inside bowl) started from outer uid 0 may expose only
+        // its one uid; unwrap directly when there is one extent of length 1 and the host credential was uid 0.
+        if (uid == 0 && lines == 1 && single_count == 1)
+                return (long)single_inside;
+        return uid;
+}
+
 // A connection accepted: its slot, or -1 for none (too many, too many of one uid). The host's alloc gives zeroed memory.
 DBUS_API long dbus_connect(long pid, long uid)
 {

@@ -1297,7 +1297,7 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_MOVE:
                 // Only while the person holds the left button on this window: a client cannot take the pointer.
                 if ((compositor.button_down & 1u) && compositor.button_row[0] == row && compositor.drag < 0 && compositor.resize < 0)
-                        compositor_drag_begin(row);
+                        compositor_drag_begin_client(row);
                 break;
         case WAYLAND_DO_RESIZE:
         {
@@ -1332,10 +1332,10 @@ static int compositor_wl_row_facts(void *context, int row, struct wayland_facts 
                 facts->width = (long)table->want_width[row];
                 facts->height = (long)table->want_height[row];
         }
-        if (compositor.arranged[row] == COMPOSITOR_ROOM)
-                states |= WAYLAND_STATE_MAXIMIZED;
-        else if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+        if (compositor.fullscreen[row])
                 states |= WAYLAND_STATE_FULLSCREEN;
+        else if (compositor.arranged[row] == COMPOSITOR_ROOM || compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+                states |= WAYLAND_STATE_MAXIMIZED;
         else if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 states |= WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_RIGHT | WAYLAND_STATE_TILED_TOP | WAYLAND_STATE_TILED_BOTTOM;
         if (compositor.focus == row)

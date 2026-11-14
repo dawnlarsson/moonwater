@@ -4687,7 +4687,8 @@ static struct
         unsigned int overlays_up, overlay_from, overlay_goal;
         positive overlay_at;
         // The window being resized, how large it was and where the hand took hold (press_x, press_y: a drag's too).
-        int resize_w, resize_h, press_x, press_y;
+        // button_x, button_y keep where the left button went down inside a window, before a client asks to move.
+        int resize_w, resize_h, press_x, press_y, button_x, button_y;
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
         // one), the low side's and the high side's (left or top), whether the edge runs down, and the size each had.
         int shared_row, shared_lo, shared_hi, shared_vertical, shared_size[2];
@@ -17683,17 +17684,19 @@ static void compositor_lit(int row, unsigned int edges, unsigned int held);
 /*
         The window is taken hold of to be moved, wherever the pointer is on it now: its popups go, the hand's place on it
         is kept, and what a drop on a target would restore. The press on its top does this, and so does a client's own
-        request to be moved while the person holds a button on it (the Wayland shim's xdg_toplevel.move).
+        request to be moved while the person holds a button on it (the Wayland shim's xdg_toplevel.move). press_x and
+        press_y mark where the hold began: for a native press, where the pointer is now; for a client move, where the button
+        went down so its own drag threshold does not pay a second compositor slop.
 */
-static void compositor_drag_begin(int under)
+static void compositor_drag_begin_from(int under, int press_x, int press_y)
 {
         compositor_popups_close(under, -1);
         compositor.drag = under;
         compositor.drag_moved = 0;
         compositor.drag_x = compositor.pointer_x - compositor.x[under];
         compositor.drag_y = compositor.pointer_y - compositor.y[under];
-        compositor.press_x = compositor.pointer_x;
-        compositor.press_y = compositor.pointer_y;
+        compositor.press_x = press_x;
+        compositor.press_y = press_y;
         compositor_hold_take(0, under);
         // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
         if (compositor.arranged[under] == COMPOSITOR_FLOATING)
@@ -17712,6 +17715,38 @@ static void compositor_drag_begin(int under)
         // The window is in the hand: all of its line is lit until it is let go.
         compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
 }
+
+static void compositor_drag_begin(int under)
+{
+        compositor_drag_begin_from(under, compositor.pointer_x, compositor.pointer_y);
+}
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_drag_begin_client(int under)
+{
+        compositor_drag_begin_from(under, compositor.button_x, compositor.button_y);
+        if (compositor.arranged[under] != COMPOSITOR_FLOATING &&
+            ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
+                          ui_touch_slop(compositor_row_scale(under))))
+        {
+                compositor_float_for_drag(under);
+                compositor.drag_moved = 1;
+                compositor_damage_row(under);
+                compositor_preview(under);
+        }
+}
+
+static void compositor_drag_stop(int row)
+{
+        if (row < 0 || (compositor.drag != row && compositor.resize != row))
+                return;
+        compositor_preview(COMPOSITOR_NONE);
+        compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+        compositor_mark_clear();
+        compositor_lit(COMPOSITOR_NONE, 0, 0);
+        compositor.hold_rows = 0;
+}
+#endif
 
 // A release with flags: WINDOW_KEY_CANCEL is one that is no click (a finger that became two, or was held).
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
@@ -18123,6 +18158,8 @@ static void compositor_button(unsigned int code, int down)
         {
                 compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
                 compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
+                if (code == COMPOSITOR_BTN_LEFT)
+                        compositor.button_x = compositor.pointer_x, compositor.button_y = compositor.pointer_y;
         }
 }
 

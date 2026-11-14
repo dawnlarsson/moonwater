@@ -93,10 +93,14 @@ function bus_supervise {
 
 function bus_start {
   if [ -s /run/moonwater/bus.pid ] && kill -0 $(cat /run/moonwater/bus.pid) 2> /dev/null; then
+    [ -S /run/moonwater/bus ] || desktop_wait_for /run/moonwater/bus $(cat /run/moonwater/bus.pid)
     return
   fi
+  rm -f /run/moonwater/bus
   (bus_supervise) > /dev/null 2>&1 &
-  echo $! > /run/moonwater/bus.pid
+  bus_sup=$!
+  echo $bus_sup > /run/moonwater/bus.pid
+  desktop_wait_for /run/moonwater/bus $bus_sup
 }
 
 function bus_stop {

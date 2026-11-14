@@ -107,7 +107,8 @@
 #define WAYLAND_NOTIFIES 8           // ext-idle-notify notifications one client holds
 #define WAYLAND_TEXTS 4              // zwp_text_input_v3 objects one client holds
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
-#define WAYLAND_REGIONS 64           // tracked wl_region rectangles for opaque-region fast paths
+#define WAYLAND_REGIONS 64           // tracked wl_region rectangles for opaque- and input-region paths
+#define WAYLAND_REGION_RECTS 8       // exact disjoint rectangles tracked per region before bounding fallback
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
 #define WAYLAND_MODIFIER_INVALID 0x00ffffffffffffffUL
@@ -432,9 +433,10 @@ struct wayland_surface
         unsigned int shortcut_id;
         unsigned char shortcut_active, escape_down;
         long escape_at;
-        unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, shown_full, translucent;
+        unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, input_bounded, input_count, shown_full, translucent;
         long translucent_x, translucent_y, translucent_w, translucent_h; // where a translucent picture was laid
         struct wayland_rect opaque, pending_opaque, cached_opaque;
+        struct wayland_rect input_rects[WAYLAND_REGION_RECTS];
         unsigned char pending_opaque_set, cached_opaque_set;
         struct wayland_rect shown_rect;
         // The window's budget (a root surface's): the window of time its copies are counted in (its start, ms), and its pixels so far.
@@ -487,8 +489,9 @@ struct wayland_positioner
 
 struct wayland_region
 {
-        unsigned char live, exact;
-        struct wayland_rect rect;
+        unsigned char live, exact, count, overflow;
+        struct wayland_rect rect, bounds;
+        struct wayland_rect rects[WAYLAND_REGION_RECTS];
 };
 
 /*
@@ -1416,7 +1419,7 @@ static long wayland_screen_at(long x, long y);
 */
 static void wayland_configure(struct wayland_client *c, struct wayland_surface *s, long initial)
 {
-        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0}, ask;
         struct wayland_event e;
         unsigned long states[16];
         long count = 0, slot, bounds_w = 0, bounds_h = 0;
@@ -1426,9 +1429,31 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                 return;
         if (s->row >= 0)
                 wayland.host->row_facts(wayland.host->context, s->row, &facts);
+        ask = facts;
+        // A toplevel asked to start fullscreen has no row before its first buffer yet, so Xwayland -fullscreen's startup
+        // configure would tell it 0x0 and not fullscreen (letting it lock X11 at 640x480) unless the initial ask says so here;
+        // told_* stays on facts so the host's first real state/size still reconciles once the row opens.
+        if (s->role == WAYLAND_ROLE_TOPLEVEL && s->row < 0)
+        {
+                if (s->want_fullscreen)
+                {
+                        if (wayland.screens)
+                        {
+                                const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
+
+                                ask.x = own->x;
+                                ask.y = own->y;
+                                ask.width = own->width;
+                                ask.height = own->height;
+                        }
+                        ask.states |= WAYLAND_STATE_FULLSCREEN | WAYLAND_STATE_ACTIVATED;
+                }
+                else if (s->want_maximized)
+                        ask.states |= WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_ACTIVATED;
+        }
         if (s->role == WAYLAND_ROLE_TOPLEVEL)
         {
-                long all = facts.states, version;
+                long all = ask.states, version;
 
                 slot = wayland_find(c, s->role_id, WLI_xdg_toplevel);
                 if (slot < 0)
@@ -1460,7 +1485,7 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         states[count++] = WLN_xdg_toplevel_state_suspended;
                 if (initial && wayland.screens)
                 {
-                        const struct wayland_screen *own = &wayland.screen[wayland_screen_at(facts.x, facts.y)];
+                        const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
 
                         bounds_w = wayland_units(own->width, wayland_surface_unit(s));
                         bounds_h = wayland_units(own->height, wayland_surface_unit(s));
@@ -1483,8 +1508,8 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                 }
                 wayland_decoration_send(c, s);
                 e = wayland_begin(c, c->objects[slot].id, WLE_xdg_toplevel_configure);
-                wayland_word(&e, (unsigned long)(facts.width > 0 ? wayland_max(1, wayland_units(facts.width, wayland_surface_unit(s))) : 0));
-                wayland_word(&e, (unsigned long)(facts.height > 0 ? wayland_max(1, wayland_units(facts.height, wayland_surface_unit(s))) : 0));
+                wayland_word(&e, (unsigned long)(ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0));
+                wayland_word(&e, (unsigned long)(ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0));
                 wayland_words(&e, states, count);
                 wayland_end(&e);
                 s->told_width = facts.width;
@@ -2452,7 +2477,7 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
                                 rslot = at;
                 if (rslot >= 0)
                 {
-                        c->regions[rslot] = (struct wayland_region){1, 0, {0, 0, 0, 0}};
+                        c->regions[rslot] = (struct wayland_region){.live = 1};
                         c->objects[a[0].slot].link = (short)rslot;
                 }
                 return WAYLAND_OK;
@@ -2489,6 +2514,215 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
         return WAYLAND_OK;
 }
 
+static struct wayland_rect wayland_rect_union(struct wayland_rect a, struct wayland_rect b)
+{
+        long x1 = wayland_min(a.x, b.x), y1 = wayland_min(a.y, b.y);
+        long x2 = wayland_max(a.x + a.width, b.x + b.width), y2 = wayland_max(a.y + a.height, b.y + b.height);
+
+        return (struct wayland_rect){x1, y1, x2 - x1, y2 - y1};
+}
+
+static struct wayland_rect wayland_rect_bounds(const struct wayland_rect *rects, long count)
+{
+        struct wayland_rect box = rects[0];
+
+        for (long i = 1; i < count; i++)
+                box = wayland_rect_union(box, rects[i]);
+        return box;
+}
+
+static void wayland_region_add_exact(struct wayland_region *r, struct wayland_rect add)
+{
+        long nx = add.x, ny = add.y, nw = add.width, nh = add.height;
+        long nx2 = nx + nw, ny2 = ny + nh;
+
+        if (!r->exact)
+        {
+                r->exact = 1;
+                r->rect = add;
+                return;
+        }
+        {
+                long rx2 = r->rect.x + r->rect.width, ry2 = r->rect.y + r->rect.height;
+
+                if (nx <= r->rect.x && ny <= r->rect.y && nx2 >= rx2 && ny2 >= ry2)
+                        r->rect = add;
+                else if (r->rect.x <= nx && r->rect.y <= ny && rx2 >= nx2 && ry2 >= ny2)
+                {
+                }
+                else if (ny <= r->rect.y && ny2 >= ry2 && nx <= rx2 && nx2 >= r->rect.x)
+                {
+                        long x1 = wayland_min(r->rect.x, nx), x2 = wayland_max(rx2, nx2);
+
+                        r->rect.x = x1;
+                        r->rect.width = x2 - x1;
+                }
+                else if (nx <= r->rect.x && nx2 >= rx2 && ny <= ry2 && ny2 >= r->rect.y)
+                {
+                        long y1 = wayland_min(r->rect.y, ny), y2 = wayland_max(ry2, ny2);
+
+                        r->rect.y = y1;
+                        r->rect.height = y2 - y1;
+                }
+                else if (nw * nh > r->rect.width * r->rect.height)
+                        r->rect = add;
+        }
+}
+
+static void wayland_region_add_rect(struct wayland_region *r, struct wayland_rect add)
+{
+        long nx2 = add.x + add.width, ny2 = add.y + add.height;
+
+        wayland_region_add_exact(r, add);
+        r->bounds = !r->count && !r->overflow ? add : wayland_rect_union(r->bounds, add);
+        if (r->overflow)
+                return;
+        for (long i = 0; i < r->count;)
+        {
+                struct wayland_rect b = r->rects[i];
+                long bx2 = b.x + b.width, by2 = b.y + b.height;
+
+                if (b.x <= add.x && b.y <= add.y && bx2 >= nx2 && by2 >= ny2)
+                        return;
+                if (add.x <= b.x && add.y <= b.y && nx2 >= bx2 && ny2 >= by2)
+                {
+                        r->rects[i] = r->rects[--r->count];
+                        continue;
+                }
+                if (b.y == add.y && b.height == add.height && add.x <= bx2 && nx2 >= b.x)
+                {
+                        add.x = wayland_min(b.x, add.x);
+                        add.width = wayland_max(bx2, nx2) - add.x;
+                        nx2 = add.x + add.width;
+                        r->rects[i] = r->rects[--r->count];
+                        continue;
+                }
+                if (b.x == add.x && b.width == add.width && add.y <= by2 && ny2 >= b.y)
+                {
+                        add.y = wayland_min(b.y, add.y);
+                        add.height = wayland_max(by2, ny2) - add.y;
+                        ny2 = add.y + add.height;
+                        r->rects[i] = r->rects[--r->count];
+                        continue;
+                }
+                i++;
+        }
+        if (r->count < WAYLAND_REGION_RECTS)
+                r->rects[r->count++] = add;
+        else
+                r->overflow = 1;
+}
+
+static void wayland_region_sub_overflow(struct wayland_region *r, struct wayland_rect sub)
+{
+        long sx = sub.x, sy = sub.y, sx2 = sx + sub.width, sy2 = sy + sub.height;
+        long rx = r->bounds.x, ry = r->bounds.y, rx2 = rx + r->bounds.width, ry2 = ry + r->bounds.height;
+
+        if (sx <= rx && sx2 >= rx2 && sy <= ry && sy2 >= ry2)
+                r->bounds = (struct wayland_rect){0, 0, 0, 0};
+        else if (sy <= ry && sy2 >= ry2)
+        {
+                if (sx <= rx && sx2 > rx)
+                        r->bounds.x = sx2, r->bounds.width = rx2 - sx2;
+                else if (sx < rx2 && sx2 >= rx2)
+                        r->bounds.width = sx - rx;
+        }
+        else if (sx <= rx && sx2 >= rx2)
+        {
+                if (sy <= ry && sy2 > ry)
+                        r->bounds.y = sy2, r->bounds.height = ry2 - sy2;
+                else if (sy < ry2 && sy2 >= ry2)
+                        r->bounds.height = sy - ry;
+        }
+        if (r->bounds.width <= 0 || r->bounds.height <= 0)
+        {
+                r->count = 0;
+                r->overflow = 0;
+                r->bounds = (struct wayland_rect){0, 0, 0, 0};
+        }
+}
+
+static void wayland_region_sub_rect(struct wayland_region *r, struct wayland_rect sub)
+{
+        struct wayland_rect out[WAYLAND_REGION_RECTS];
+        long sx = sub.x, sy = sub.y, sx2 = sx + sub.width, sy2 = sy + sub.height, out_count = 0;
+        int over = 0;
+
+        r->exact = 0;
+        r->rect.width = r->rect.height = 0;
+        if (r->overflow)
+        {
+                wayland_region_sub_overflow(r, sub);
+                return;
+        }
+        for (long i = 0; i < r->count; i++)
+        {
+                struct wayland_rect b = r->rects[i];
+                long bx2 = b.x + b.width, by2 = b.y + b.height, iy1, iy2;
+
+                if (sx >= bx2 || sx2 <= b.x || sy >= by2 || sy2 <= b.y)
+                {
+                        if (out_count < WAYLAND_REGION_RECTS)
+                                out[out_count++] = b;
+                        else
+                                over = 1;
+                        continue;
+                }
+                if (sx <= b.x && sx2 >= bx2 && sy <= b.y && sy2 >= by2)
+                        continue;
+                iy1 = wayland_max(b.y, sy);
+                iy2 = wayland_min(by2, sy2);
+                if (sy > b.y)
+                {
+                        if (out_count < WAYLAND_REGION_RECTS)
+                                out[out_count++] = (struct wayland_rect){b.x, b.y, b.width, sy - b.y};
+                        else
+                                over = 1;
+                }
+                if (sy2 < by2)
+                {
+                        if (out_count < WAYLAND_REGION_RECTS)
+                                out[out_count++] = (struct wayland_rect){b.x, sy2, b.width, by2 - sy2};
+                        else
+                                over = 1;
+                }
+                if (sx > b.x && iy2 > iy1)
+                {
+                        if (out_count < WAYLAND_REGION_RECTS)
+                                out[out_count++] = (struct wayland_rect){b.x, iy1, sx - b.x, iy2 - iy1};
+                        else
+                                over = 1;
+                }
+                if (sx2 < bx2 && iy2 > iy1)
+                {
+                        if (out_count < WAYLAND_REGION_RECTS)
+                                out[out_count++] = (struct wayland_rect){sx2, iy1, bx2 - sx2, iy2 - iy1};
+                        else
+                                over = 1;
+                }
+        }
+        if (over)
+        {
+                r->bounds = wayland_rect_bounds(r->rects, r->count);
+                r->count = 0;
+                r->overflow = 1;
+                wayland_region_sub_overflow(r, sub);
+                return;
+        }
+        r->count = (unsigned char)out_count;
+        for (long i = 0; i < out_count; i++)
+                r->rects[i] = out[i];
+        if (out_count == 0)
+                r->bounds = (struct wayland_rect){0, 0, 0, 0};
+        else if (out_count == 1)
+        {
+                r->exact = 1;
+                r->rect = r->bounds = out[0];
+        }
+        else
+                r->bounds = wayland_rect_bounds(out, out_count);
+}
+
 static int wayland_region_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_region *r = self->link >= 0 && self->link < WAYLAND_REGIONS ? &c->regions[self->link] : 0;
@@ -2502,57 +2736,18 @@ static int wayland_region_request(struct wayland_client *c, struct wayland_objec
                 }
                 return WAYLAND_OK;
         }
-        // flags bit 0: a rectangle was added, so the region is not empty.
+        // flags bit 0: a non-empty region (may still have rectangles after subtractions).
         if (op == WLQ_wl_region_add && a[2].i > 0 && a[3].i > 0)
         {
                 self->flags |= 1;
                 if (r)
-                {
-                        long nx = a[0].i, ny = a[1].i, nw = a[2].i, nh = a[3].i;
-                        long nx2 = nx + nw, ny2 = ny + nh;
-
-                        if (!r->exact)
-                        {
-                                r->exact = 1;
-                                r->rect = (struct wayland_rect){nx, ny, nw, nh};
-                        }
-                        else
-                        {
-                                long rx2 = r->rect.x + r->rect.width, ry2 = r->rect.y + r->rect.height;
-
-                                if (nx <= r->rect.x && ny <= r->rect.y && nx2 >= rx2 && ny2 >= ry2)
-                                        r->rect = (struct wayland_rect){nx, ny, nw, nh};
-                                else if (r->rect.x <= nx && r->rect.y <= ny && rx2 >= nx2 && ry2 >= ny2)
-                                {
-                                }
-                                else if (ny <= r->rect.y && ny2 >= ry2 && nx <= rx2 && nx2 >= r->rect.x)
-                                {
-                                        long x1 = wayland_min(r->rect.x, nx), x2 = wayland_max(rx2, nx2);
-
-                                        r->rect.x = x1;
-                                        r->rect.width = x2 - x1;
-                                }
-                                else if (nx <= r->rect.x && nx2 >= rx2 && ny <= ry2 && ny2 >= r->rect.y)
-                                {
-                                        long y1 = wayland_min(r->rect.y, ny), y2 = wayland_max(ry2, ny2);
-
-                                        r->rect.y = y1;
-                                        r->rect.height = y2 - y1;
-                                }
-                                else if (nw * nh > r->rect.width * r->rect.height)
-                                        r->rect = (struct wayland_rect){nx, ny, nw, nh};
-                        }
-                }
+                        wayland_region_add_rect(r, (struct wayland_rect){a[0].i, a[1].i, a[2].i, a[3].i});
         }
-        else if (op == WLQ_wl_region_subtract && a[2].i > 0 && a[3].i > 0 && r && r->exact)
+        else if (op == WLQ_wl_region_subtract && a[2].i > 0 && a[3].i > 0 && r && (r->count || r->overflow))
         {
-                long sx = a[0].i, sy = a[1].i, sw = a[2].i, sh = a[3].i;
-
-                if (sx < r->rect.x + r->rect.width && sx + sw > r->rect.x && sy < r->rect.y + r->rect.height && sy + sh > r->rect.y)
-                {
-                        r->exact = 0;
-                        r->rect.width = r->rect.height = 0;
-                }
+                wayland_region_sub_rect(r, (struct wayland_rect){a[0].i, a[1].i, a[2].i, a[3].i});
+                if (!r->count && !r->overflow)
+                        self->flags &= ~1u;
         }
         return WAYLAND_OK;
 }
@@ -3139,9 +3334,31 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                         wayland_callback_answer(c, c->objects[a[0].slot].id, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
         case WLQ_wl_surface_set_input_region:
-                // A region with nothing added is a surface the pointer passes through, which a subsurface over its window may ask
-                // for; no region is all of it again. Taken at the commit in truth, here at once.
-                s->input_none = a[0].slot >= 0 && !(c->objects[a[0].slot].flags & 1);
+                // A region with nothing added (or emptied by subtract) lets pointer events pass through; no region is all of it again.
+                s->input_none = 0;
+                s->input_bounded = 0;
+                s->input_count = 0;
+                if (a[0].slot >= 0)
+                {
+                        struct wayland_object *ro = &c->objects[a[0].slot];
+                        struct wayland_region *r = ro->link >= 0 && ro->link < WAYLAND_REGIONS ? &c->regions[ro->link] : 0;
+
+                        if (!(ro->flags & 1))
+                                s->input_none = s->input_bounded = 1;
+                        else if (r && !r->overflow && r->count > 0 && r->count <= WAYLAND_REGION_RECTS)
+                        {
+                                s->input_bounded = 1;
+                                s->input_count = r->count;
+                                for (long i = 0; i < r->count; i++)
+                                        s->input_rects[i] = r->rects[i];
+                        }
+                        else if (r && r->bounds.width > 0 && r->bounds.height > 0)
+                        {
+                                s->input_bounded = 1;
+                                s->input_count = 1;
+                                s->input_rects[0] = r->bounds;
+                        }
+                }
                 return WAYLAND_OK;
         case WLQ_wl_surface_set_opaque_region:
                 s->pending_opaque_set = 1;
@@ -4119,47 +4336,118 @@ static void wayland_pointer_frame(struct wayland_client *c, long slot)
         }
 }
 
+static int wayland_surface_hits(const struct wayland_surface *s, int is_root, long px, long py)
+{
+        if (s->input_none || (!is_root && !s->held))
+                return 0;
+        if (s->width > 0 && s->height > 0 && (px < 0 || py < 0 || px >= s->width || py >= s->height))
+                return 0;
+        if (!s->input_bounded)
+                return 1;
+        {
+                long scale = s->scale120 > 0 ? s->scale120 : WAYLAND_UNIT;
+                long lx = wayland_units(px, scale), ly = wayland_units(py, scale);
+
+                for (long i = 0; i < s->input_count; i++)
+                {
+                        const struct wayland_rect *r = &s->input_rects[i];
+
+                        if (lx >= r->x && lx < r->x + r->width && ly >= r->y && ly < r->y + r->height)
+                                return 1;
+                }
+        }
+        return 0;
+}
+
+/* The previous child of a surface below `below`, highest first, restricted to sub_order >= 0 or < 0. */
+static long wayland_prev_child(const struct wayland_client *c, long parent, long below, int *found, int non_neg)
+{
+        long best = -1;
+
+        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        {
+                long at = wayland_first_bit(mask);
+                const struct wayland_surface *s = &c->surfaces[at];
+
+                if (s->sub_parent != parent + 1)
+                        continue;
+                if (non_neg ? s->sub_order < 0 : s->sub_order >= 0)
+                        continue;
+                if ((!*found || s->sub_order < below) && (best < 0 || s->sub_order > c->surfaces[best].sub_order))
+                        best = at;
+        }
+        *found = 1;
+        return best;
+}
+
+static struct wayland_surface *wayland_pick_node(struct wayland_client *c, struct wayland_surface *node,
+                                                 const struct wayland_surface *root, long ax, long ay, long root_scale,
+                                                 long x, long y, long depth, long *sx, long *sy)
+{
+        long parent = wayland_surface_index(c, node);
+
+        if (depth >= WAYLAND_SURFACES)
+                return 0;
+        for (int pass = 0; pass < 2; pass++)
+        {
+                int found = 0;
+                long order = 0;
+
+                if (pass == 1)
+                {
+                        long ox = wayland_pixels(ax, root_scale), oy = wayland_pixels(ay, root_scale);
+
+                        if (wayland_surface_hits(node, node == root, x - ox, y - oy))
+                        {
+                                *sx = x - ox;
+                                *sy = y - oy;
+                                return node;
+                        }
+                }
+                for (long child = wayland_prev_child(c, parent, order, &found, pass == 0); child >= 0;
+                     child = wayland_prev_child(c, parent, order, &found, pass == 0))
+                {
+                        struct wayland_surface *ch = &c->surfaces[child];
+                        struct wayland_surface *hit;
+
+                        order = ch->sub_order;
+                        hit = wayland_pick_node(c, ch, root, ax + ch->sub_x, ay + ch->sub_y, root_scale, x, y, depth + 1, sx, sy);
+                        if (hit)
+                                return hit;
+                }
+        }
+        return 0;
+}
+
 /*
         The surface of a window that holds a point of its picture, with the point in that surface's own pixels: the topmost
         subsurface that shows there and takes the pointer (an input region with nothing in it takes none), else the root. The
-        later sibling is above the earlier and a child above what it hangs from.
+        later sibling is above the earlier and children placed above lie over what they hang from while children placed below
+        lie behind it.
 */
 static struct wayland_surface *wayland_pick(struct wayland_client *c, struct wayland_surface *root, long x, long y, long *sx, long *sy)
 {
-        struct wayland_surface *best = root;
-        long best_rank = -1, bx = 0, by = 0, wx, wy, ww, wh;
+        struct wayland_surface *hit = 0;
+        long wx, wy, ww, wh;
 
         wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         x += wx;
         y += wy;
 
-        if (c->sub_mask)
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        if (!c->sub_mask && !root->input_bounded)
         {
-                long at = wayland_first_bit(mask);
-                struct wayland_surface *s = &c->surfaces[at];
-                long ox, oy, depth = 0, rank;
-
-                if (!s->held || s->input_none || wayland_root_of(c, s) != root)
-                        continue;
-                wayland_sub_offset(c, s, &ox, &oy);
-                if (x < ox || y < oy || x >= ox + s->width || y >= oy + s->height)
-                        continue;
-                for (struct wayland_surface *up = s; up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent && depth < 16;
-                     up = &c->surfaces[up->sub_parent - 1])
-                        depth++;
-                rank = depth * 2000000 + s->sub_order + 1000000;
-                if (rank > best_rank)
-                {
-                        best_rank = rank;
-                        best = s;
-                        bx = ox;
-                        by = oy;
-                }
+                *sx = x;
+                *sy = y;
+                return root;
         }
-        *sx = x - bx;
-        *sy = y - by;
-        return best;
+        hit = wayland_pick_node(c, root, root, 0, 0, root->scale120 > 0 ? root->scale120 : WAYLAND_UNIT, x, y, 0, sx, sy);
+        if (!hit)
+        {
+                *sx = x;
+                *sy = y;
+                return root;
+        }
+        return hit;
 }
 
 static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial, long sx, long sy)
@@ -4340,6 +4628,7 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
+        c->press_serial = (unsigned int)serial;
         wayland.touch[point].live = 1;
         wayland.touch[point].client = c->slot;
         wayland.touch[point].row = (int)row;

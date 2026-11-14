@@ -276,6 +276,50 @@ static int sessionbus_listen(void)
         return 0;
 }
 
+static long sessionbus_peer_uid(long pid, long uid)
+{
+        char path[48], digits[24], text[4096];
+        long pos = 0, d = 0, got = 0;
+        bipolar handle;
+
+        if (pid <= 0)
+                return uid;
+        {
+                const char *head = "/proc/";
+                const char *tail = "/uid_map";
+                unsigned long n = (unsigned long)pid;
+
+                for (long k = 0; head[k]; k++)
+                        path[pos++] = head[k];
+                do
+                {
+                        digits[d++] = (char)('0' + (n % 10u));
+                        n /= 10u;
+                }
+                while (n && d < (long)sizeof digits);
+                while (d > 0)
+                        path[pos++] = digits[--d];
+                for (long k = 0; tail[k]; k++)
+                        path[pos++] = tail[k];
+                path[pos] = 0;
+        }
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        if (handle < 0)
+                return uid;
+        while (got < (long)sizeof text)
+        {
+                bipolar part = system_read_once(handle, text + got, (positive)((long)sizeof text - got));
+
+                if (part <= 0)
+                        break;
+                got += (long)part;
+        }
+        system_close(handle);
+        if (got <= 0)
+                return uid;
+        return dbus_uid_from_map(text, got, uid);
+}
+
 static void sessionbus_accept(void)
 {
         for (int tries = 0; tries < SESSIONBUS_ACCEPTS; tries++)
@@ -292,7 +336,7 @@ static void sessionbus_accept(void)
                         system_close((int)fd);
                         continue;
                 }
-                slot = dbus_connect(credentials[0], credentials[1]);
+                slot = dbus_connect(credentials[0], sessionbus_peer_uid(credentials[0], credentials[1]));
                 if (slot < 0)
                 {
                         system_close((int)fd);

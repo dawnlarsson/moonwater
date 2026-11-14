@@ -77,6 +77,9 @@ bit UL_SCHED_UTIL_MAX	a word of one sched_setattr request, built for the call
 bit UL_SCHED_UTIL_MIN	a word of one sched_setattr request, built for the call
 bit WAYLAND_ICON_CONTENT	wayland.c (another hand's): what an icon object has been given, for the object's life
 bit WAYLAND_ICON_SET	wayland.c (another hand's): what an icon object has been given, for the object's life
+bit WAYLAND_STATE_ACTIVATED	a local copy (ask) of one configure event's facts on the stack of wayland_configure
+bit WAYLAND_STATE_FULLSCREEN	a local copy (ask) of one configure event's facts on the stack of wayland_configure
+bit WAYLAND_STATE_MAXIMIZED	a local copy (ask) of one configure event's facts on the stack of wayland_configure
 bit WIFI_AKM_OTHER	what one heard network offers; akms is assigned before the bits are added
 bit WIFI_AKM_PSK	what one heard network offers; akms is assigned before the bits are added
 bit WIFI_AKM_PSK_SHA256	what one heard network offers; akms is assigned before the bits are added

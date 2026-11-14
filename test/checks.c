@@ -99535,6 +99535,8 @@ static fn steam_profile(void)
                           strstr(script, "range(1, DISPLAYS + 1)"));
                 check("The wrapper ends the server when its program ends, and runs the program with DISPLAY set",
                       strstr(script, "DISPLAY=display") && strstr(script, "process.terminate()") && strstr(script, "child.wait()"));
+                check("The wrapper keeps a child's exit 125 from meaning the rootless X server never started",
+                      strstr(script, "1 if status == UNSTARTED else status"));
                 check("The wrapper is written where the bowl runs it from, and is small",
                       string_equals(BOWL_XWAYLAND_WRAPPER, "/usr/local/bin/xwayland-moonwater") && sizeof(bowl_xwayland_script) < 8192);
         }
@@ -182916,6 +182918,10 @@ static void test_state_remap(void)
         wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_fullscreen, 0L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 1280 && e->u[1] == 720 && e->u[2] == 8,
+                "fullscreen before initial commit configures the screen's size and fullscreen state (%lu %lu %lu)",
+                e ? e->u[0] : 0UL, e ? e->u[1] : 0UL, e ? e->u[2] : 0UL);
         e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
         WLCHECK(e != 0, "the initial configure comes with the first commit");
         state_ack(&s, e);
@@ -183469,6 +183475,37 @@ static void test_touch(void)
         wlc_end(c);
         leak_check("touch");
         wayland_stop();
+
+        /* a touch press's serial also authorizes an interactive xdg_toplevel.move */
+        {
+                struct wl_event_seen *e;
+
+                wl_reset();
+                fake.caps = WLN_wl_seat_capability_touch | WLN_wl_seat_capability_pointer;
+                wayland_start(&fake_host);
+                session_open(&s);
+                session_window(&s, 0xff223344);
+                c = s.c;
+                touch = wlc_id(c, WLI_wl_touch, 9);
+                wlc_send(c, s.seat, WLQ_wl_seat_get_touch, touch);
+                wlc_pump(c);
+                wlc_forget(c);
+                wayland_touch_down(0, 1, 10, 10);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_touch, WLE_wl_touch_down);
+                WLCHECK(e && e->n >= 1, "touch down delivers a serial");
+                if (e)
+                {
+                        unsigned long serial = e->u[0];
+
+                        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_move, s.seat, (long)serial);
+                        WLCHECK(fake.row[0].did_count == 1 && fake.row[0].did[0] == WAYLAND_DO_MOVE,
+                                "a move that names a touch press's serial is asked of the window");
+                }
+                wlc_end(c);
+                leak_check("touch move");
+                wayland_stop();
+        }
 }
 
 /* A finger's notch: the kit's UI_NOTCH (the theme in ui/ui.c, not included here), in pixels at 100 percent, written as the number the shim is handed. */
@@ -185862,6 +185899,63 @@ static void test_subsurfaces(void)
                 }
                 wlc_end(c);
         }
+
+        /* a partial input_region (add + subtract) lets hits pass through the cutout, and subtracting it all passes through */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long pointer = wlc_id(c, WLI_wl_pointer, 9), reg = wlc_id(c, WLI_wl_region, 1);
+                struct wl_event_seen *e;
+
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, pointer);
+                wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_region, reg);
+                wlc_send(c, reg, WLQ_wl_region_add, 0L, 0L, 8L, 8L);
+                wlc_send(c, reg, WLQ_wl_region_subtract, 4L, 0L, 4L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_set_input_region, reg);
+                wlc_pump(c);
+                wlc_forget(c);
+
+                wayland_pointer_to(0, 6, 6);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e && e->u[1] == t.child, "the kept half of a subsurface input region takes the pointer");
+                wlc_forget(c);
+
+                wayland_pointer_to(0, 10, 6);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e && e->u[1] == t.s.surface, "the subtracted half passes through to the root below");
+                wlc_forget(c);
+
+                wlc_send(c, reg, WLQ_wl_region_subtract, 0L, 0L, 4L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_set_input_region, reg);
+                wlc_send(c, reg, WLQ_wl_region_destroy);
+                wayland_pointer_motion(0, 6, 6);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_motion);
+                WLCHECK(e && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_enter) == 0,
+                        "a region emptied by subtract passes through rather than blocking");
+        }
+        wlc_end(c);
+
+        /* a subsurface placed below the root does not receive pointer hits under the root */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long pointer = wlc_id(c, WLI_wl_pointer, 9);
+                struct wl_event_seen *e;
+
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, pointer);
+                wlc_send(c, t.sub, WLQ_wl_subsurface_place_below, t.s.surface);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                wlc_pump(c);
+                wlc_forget(c);
+                wayland_pointer_to(0, 6, 6);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e && e->u[1] == t.s.surface, "a subsurface placed below root does not steal pointer focus");
+        }
+        wlc_end(c);
 
         /* frame callbacks of a subsurface wait for the window's frame, with its parent's */
         tree_open(&t, 1);
@@ -190449,6 +190543,36 @@ static void db_test_auth(void)
         dbus_tick();
         DBCHECK(dbus_dead(slot), "a connection that says nothing for a few seconds ends");
         dbus_drop(slot);
+
+        {
+                const char *host_map = "         0          0 4294967295\n";
+                const char *bowl_map = "      1000          0          1\n";
+                const char *nested_map = "      1000       1000          1\n";
+                const char *escalate_map = "         0       1000          1\n";
+                const char *overflow_map = "4294967290          0         10\n";
+                const char *trailing_junk = "      1000          0          1 junk\n";
+
+                DBCHECK(dbus_uid_from_map(host_map, (long)strlen(host_map), 0) == 0 &&
+                            dbus_uid_from_map(host_map, (long)strlen(host_map), 1000) == 1000,
+                        "host uid_map keeps both root and unprivileged uids");
+                DBCHECK(dbus_uid_from_map(bowl_map, (long)strlen(bowl_map), 0) == 1000,
+                        "bowl uid_map maps kernel peer uid 0 to inside uid 1000");
+                DBCHECK(dbus_uid_from_map(nested_map, (long)strlen(nested_map), 0) == 1000,
+                        "nested single-uid uid_map unwraps inside uid 1000 from outer uid 0");
+                DBCHECK(dbus_uid_from_map(escalate_map, (long)strlen(escalate_map), 1000) == 1000,
+                        "unprivileged userns mapping cannot elevate a non-zero peer uid to 0");
+                DBCHECK(dbus_uid_from_map(overflow_map, (long)strlen(overflow_map), 9) == 9 &&
+                            dbus_uid_from_map(trailing_junk, (long)strlen(trailing_junk), 0) == 0 &&
+                            dbus_uid_from_map("", 0, 0) == 0,
+                        "overflowing, malformed, and empty uid_maps fall back safely");
+
+                slot = dbus_connect(9, dbus_uid_from_map(bowl_map, (long)strlen(bowl_map), 0));
+                db_feed(slot, "\0AUTH EXTERNAL 31303030\r\n", 25);
+                db_take_text(slot, text, sizeof text);
+                DBCHECK(!strncmp(text, "OK ", 3), "container client mapped through uid_map authenticates with EXTERNAL");
+                dbus_drop(slot);
+        }
+
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
@@ -237997,6 +238121,165 @@ static void present_due_rows(void)
         }
 }
 
+// EWMH/XDG grab protocols: maximized vs fullscreen row_facts, immediate float past button slop on client move, and XWM _NET_SUPPORTED / _NET_WM_MOVERESIZE.
+static void grab_protocol_rows(void)
+{
+        static struct windows tbl;
+        static unsigned char kept_comp[sizeof(compositor)], kept_xwm[sizeof(compositor_xwm)];
+        struct wayland_facts facts;
+        struct compositor_xwm_window *xw;
+        struct xwm_event ev;
+        unsigned long off = 0;
+        unsigned int wm_win = 0, root_check_win = 0;
+        int saw_check_on_wm = 0, saw_name_on_wm = 0, saw_check_on_root = 0, saw_supported = 0, saw_moveresize = 0;
+
+        memory_copy(kept_comp, &compositor, sizeof(compositor));
+        memory_copy(kept_xwm, &compositor_xwm, sizeof(compositor_xwm));
+        memory_zero(&compositor, sizeof(compositor));
+        memory_zero(&compositor_xwm, sizeof(compositor_xwm));
+        memory_zero(&tbl, sizeof(tbl));
+
+        compositor.card = -1;
+        compositor.table = &tbl;
+        compositor.width = 1920, compositor.height = 1080, compositor.scale = 100;
+        compositor.drag = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
+        compositor.shared_row = COMPOSITOR_NONE, compositor.focus = COMPOSITOR_NONE, compositor.grab = COMPOSITOR_NONE;
+        compositor.showing[0] = 1;
+        compositor.stacked = 1, compositor.stack[0] = 0;
+        compositor.x[0] = 0, compositor.y[0] = 0, compositor.w[0] = 1920, compositor.h[0] = 1080;
+        compositor.arranged[0] = COMPOSITOR_MAXIMIZED, compositor.fullscreen[0] = 0;
+        tbl.state[0] = WINDOW_NO_GRAB;
+
+        check("grab facts: COMPOSITOR_MAXIMIZED without fullscreen reports MAXIMIZED, not FULLSCREEN",
+              compositor_wl_row_facts(0, 0, &facts) == 0 &&
+                  (facts.states & WAYLAND_STATE_MAXIMIZED) && !(facts.states & WAYLAND_STATE_FULLSCREEN));
+        compositor.arranged[0] = COMPOSITOR_ROOM;
+        check("grab facts: COMPOSITOR_ROOM reports MAXIMIZED, not FULLSCREEN",
+              compositor_wl_row_facts(0, 0, &facts) == 0 &&
+                  (facts.states & WAYLAND_STATE_MAXIMIZED) && !(facts.states & WAYLAND_STATE_FULLSCREEN));
+        compositor_fullscreen_row(0);
+        check("grab facts: compositor_fullscreen_row sets fullscreen state and WAYLAND_STATE_FULLSCREEN",
+              compositor.fullscreen[0] == 1 && compositor_wl_row_facts(0, 0, &facts) == 0 &&
+                  (facts.states & WAYLAND_STATE_FULLSCREEN));
+
+        // Client drag initiation after pointer already moved past button slop floats immediately without a second slop.
+        compositor.fullscreen[0] = 0, compositor.arranged[0] = COMPOSITOR_MAXIMIZED;
+        compositor.x[0] = 0, compositor.y[0] = 0, compositor.w[0] = 1920, compositor.h[0] = 1080;
+        compositor.pointer_x = 100, compositor.pointer_y = 200;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor.pointer_x = 120, compositor.pointer_y = 200;
+        compositor_drag_begin_client(0);
+        check("client drag: floats immediately when pointer already moved past press slop",
+              compositor.drag == 0 && compositor.arranged[0] == COMPOSITOR_FLOATING);
+        compositor_drag_stop(0);
+        check("client drag: compositor_drag_stop ends drag cleanly while keeping floating state",
+              compositor.drag == COMPOSITOR_NONE && compositor.resize == COMPOSITOR_NONE &&
+                  compositor.arranged[0] == COMPOSITOR_FLOATING);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+        // If the pointer has not yet left slop, client drag arms without prematurely unmaximizing.
+        compositor.arranged[0] = COMPOSITOR_MAXIMIZED, compositor.fullscreen[0] = 0;
+        compositor.x[0] = 0, compositor.y[0] = 0, compositor.w[0] = 1920, compositor.h[0] = 1080;
+        compositor.pointer_x = 100, compositor.pointer_y = 200;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor.pointer_x = 101, compositor.pointer_y = 200;
+        compositor_drag_begin_client(0);
+        check("client drag: stays arranged until slop threshold is crossed",
+              compositor.drag == 0 && compositor.arranged[0] == COMPOSITOR_MAXIMIZED);
+        compositor_drag_stop(0);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+        // compositor_xwm_claim emits _NET_SUPPORTING_WM_CHECK, _NET_WM_NAME, and _NET_SUPPORTED including _NET_WM_MOVERESIZE.
+        compositor_xwm.listen = -1, compositor_xwm.fd = -1, compositor_xwm.poll_at = -1, compositor_xwm.focus_row = -2;
+        compositor_xwm.root = 0x100u, compositor_xwm.resource_base = 0x2000u, compositor_xwm.resource_mask = 0x1fffffu;
+        compositor_xwm.seq = 1;
+        for (unsigned int i = 0; i < COMPOSITOR_XWM_ATOMS; i++)
+                compositor_xwm.atoms[i] = 1000u + i;
+        compositor_xwm_claim();
+        while (off + 4 <= (unsigned long)compositor_xwm.out_len)
+        {
+                unsigned char op = compositor_xwm.out[off];
+                unsigned long len = (unsigned long)xwm_get16(compositor_xwm.out + off + 2) * 4u;
+
+                if (len < 4 || off + len > (unsigned long)compositor_xwm.out_len)
+                        break;
+                if (op == XWM_OP_CHANGE_PROPERTY && len >= 24)
+                {
+                        unsigned int win = xwm_get32(compositor_xwm.out + off + 4);
+                        unsigned int prop = xwm_get32(compositor_xwm.out + off + 8);
+                        unsigned int type = xwm_get32(compositor_xwm.out + off + 12);
+                        unsigned int fmt = compositor_xwm.out[off + 16];
+                        unsigned int count = xwm_get32(compositor_xwm.out + off + 20);
+
+                        if (win == compositor_xwm.root && prop == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CHECK] && fmt == 32 && count == 1 && off + 28 <= (unsigned long)compositor_xwm.out_len)
+                        {
+                                root_check_win = xwm_get32(compositor_xwm.out + off + 24);
+                                saw_check_on_root = 1;
+                        }
+                        else if (win == compositor_xwm.root && prop == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_SUPPORTED] && fmt == 32)
+                        {
+                                saw_supported = 1;
+                                for (unsigned int j = 0; j < count && off + 24 + (j + 1) * 4u <= (unsigned long)compositor_xwm.out_len; j++)
+                                        if (xwm_get32(compositor_xwm.out + off + 24 + j * 4u) == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE])
+                                                saw_moveresize = 1;
+                        }
+                        else if (win != compositor_xwm.root && prop == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CHECK] && fmt == 32 && count == 1 &&
+                                 type == COMPOSITOR_XWM_XA_WINDOW && off + 28 <= (unsigned long)compositor_xwm.out_len)
+                        {
+                                wm_win = xwm_get32(compositor_xwm.out + off + 24);
+                                saw_check_on_wm = (wm_win == win);
+                        }
+                        else if (win != compositor_xwm.root && prop == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_NAME] && fmt == 8 && count == 9 &&
+                                 off + 33 <= (unsigned long)compositor_xwm.out_len &&
+                                 memory_compare(compositor_xwm.out + off + 24, "moonwater", 9) == 0)
+                                saw_name_on_wm = 1;
+                }
+                off += len;
+        }
+        check("xwm claim: sets _NET_SUPPORTING_WM_CHECK on root and wm window, _NET_WM_NAME, and _NET_SUPPORTED with _NET_WM_MOVERESIZE",
+              saw_check_on_root && saw_check_on_wm && wm_win != 0 && root_check_win == wm_win &&
+                  saw_name_on_wm && saw_supported && saw_moveresize);
+
+        // _NET_WM_MOVERESIZE ClientMessages start move/resize only when left button is held on the window, and CANCEL stops cleanly.
+        xw = compositor_xwm_find(0x880001u, 1);
+        if (xw)
+                xw->row = 0;
+        xwm_event_clear(&ev);
+        ev.kind = XWM_EV_CLIENT_MESSAGE, ev.window = 0x880001u;
+        ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE], ev.format = XWM_FORMAT_32;
+        ev.data[2] = COMPOSITOR_XWM_MOVERESIZE_MOVE;
+        compositor_xwm_event(&ev);
+        check("xwm moveresize: ignored when left mouse button is not held on the window",
+              xw && compositor.drag == COMPOSITOR_NONE && compositor.resize == COMPOSITOR_NONE);
+
+        compositor.arranged[0] = COMPOSITOR_FLOATING;
+        compositor.x[0] = 50, compositor.y[0] = 50, compositor.w[0] = 400, compositor.h[0] = 300;
+        compositor.pointer_x = 100, compositor.pointer_y = 200;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor.pointer_x = 120, compositor.pointer_y = 200;
+        compositor_xwm_event(&ev);
+        check("xwm moveresize: MOVE starts compositor drag while left button is held",
+              compositor.drag == 0 && compositor.resize == COMPOSITOR_NONE);
+        ev.data[2] = COMPOSITOR_XWM_MOVERESIZE_CANCEL;
+        compositor_xwm_event(&ev);
+        check("xwm moveresize: CANCEL stops compositor drag",
+              compositor.drag == COMPOSITOR_NONE && compositor.resize == COMPOSITOR_NONE);
+
+        ev.data[2] = 4; // _NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT
+        compositor_xwm_event(&ev);
+        check("xwm moveresize: SIZE_BOTTOMRIGHT starts compositor bottom-right edge resize",
+              compositor.resize == 0 && compositor.edges[0] == (COMPOSITOR_EDGE_RIGHT | COMPOSITOR_EDGE_BOTTOM));
+        ev.data[2] = COMPOSITOR_XWM_MOVERESIZE_CANCEL;
+        compositor_xwm_event(&ev);
+        check("xwm moveresize: CANCEL stops compositor edge resize",
+              compositor.resize == COMPOSITOR_NONE && compositor.drag == COMPOSITOR_NONE);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        compositor_xwm_forget(0x880001u);
+
+        memory_copy(&compositor_xwm, kept_xwm, sizeof(compositor_xwm));
+        memory_copy(&compositor, kept_comp, sizeof(compositor));
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -238015,6 +238298,7 @@ b32 main(void)
         frame_dated_rows();
         present_due_rows();
         close_ask_rows();
+        grab_protocol_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;
