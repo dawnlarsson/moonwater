@@ -111,6 +111,7 @@ fetch() {
         mkdir -p -- "$(dirname -- "$cached")"
         stage=$(mktemp "$cached.XXXXXX") || die "cannot stage $fetch_name"
         if ! curl --fail --location --silent --show-error \
+                --retry 5 --retry-delay 2 \
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --output "$stage" "$source/$fetch_name?id=$commit"; then
                 rm -f -- "$stage"
