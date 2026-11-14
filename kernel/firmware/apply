@@ -44,6 +44,7 @@ set -eu
 
 commit=965ee9b6ec253bf7ac7f5924b5b5585d1912bc4d
 source="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
+mirror="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$commit"
 whence_digest=eeccfed23dd1f2717fe03de205972d62748ae7f0c29be404d4481eb0aea827d4
 
 config=artifacts/.config
@@ -111,9 +112,13 @@ fetch() {
         mkdir -p -- "$(dirname -- "$cached")"
         stage=$(mktemp "$cached.XXXXXX") || die "cannot stage $fetch_name"
         if ! curl --fail --location --silent --show-error \
-                --retry 5 --retry-delay 2 \
+                --retry 2 --retry-delay 1 \
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-                --output "$stage" "$source/$fetch_name?id=$commit"; then
+                --output "$stage" "$source/$fetch_name?id=$commit" &&
+           ! curl --fail --location --silent --show-error \
+                --retry 3 --retry-delay 1 \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --output "$stage" "$mirror/$fetch_name"; then
                 rm -f -- "$stage"
                 die "could not download $fetch_name"
         fi
