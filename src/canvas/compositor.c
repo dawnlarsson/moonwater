@@ -9211,6 +9211,9 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
         return COMPOSITOR_GPU_WHY_DRAWN;
 }
 
+// A job of the card is a submit and a wait (tens of microseconds and a kernel entry, more than the card spends on a few tens of thousand pixels), so two
+// damage rectangles are one job when the box round them is no more than this many pixels bigger than the two together.
+#define COMPOSITOR_GPU_MERGE_SLACK 32768
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
         struct compositor_gscene *g = &compositor_gscene;
@@ -9264,7 +9267,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                         long a_r = (long)(rx2 - rx1) * (ry2 - ry1);
                         long a_u = (long)(ux2 - ux1) * (uy2 - uy1);
 
-                        if (a_u <= a_j + a_r + 4096)
+                        if (a_u <= a_j + a_r + COMPOSITOR_GPU_MERGE_SLACK)
                         {
                                 rect[j][0] = ux1, rect[j][1] = uy1, rect[j][2] = ux2, rect[j][3] = uy2;
                                 rx2 = rx1;
@@ -9322,7 +9325,7 @@ static void compositor_lists_set(int on);
 // that sets the mode itself to draw lists with a renderer of its own is not undone by a present on a machine with no card.
 //
 // THE SWITCH: on by default, wherever the card composes in earnest (compositor_gpu_able); off while the file /run/moonwater/lists-off is there (looked for every
-// 32nd present: touch it, and remove it, to turn only the lists off; canvas gpu off turns the card off and the lists with it). A card that is up but cannot map the
+// 512th present: touch it, and remove it, to turn only the lists off; canvas gpu off turns the card off and the lists with it). A card that is up but cannot map the
 // windows' pictures sends every list back to the program's pixels, which is guarded against there; a flicker seen with the lists on (2026-11-04) was not found on a
 // card that composes, and moonwater debug says the lists drawn, refused and switched back to pixels.
 static int compositor_lists_switch(void)
@@ -9330,7 +9333,7 @@ static int compositor_lists_switch(void)
         static unsigned int probes;
         static int on = 1;
 
-        if ((probes++ & 31) == 0)
+        if ((probes++ & 511) == 0)
         {
                 long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-off", FILE_READ | O_CLOEXEC);
 
@@ -9429,7 +9432,15 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
 
         compositor_gpu_able_count(why);
         compositor_gpu_lists_sync();
-        compositor_gpu_issues();
+        // The board's issues are a function of counters that move at every present (the drawn count) and of faults and states that move at a refusal:
+        // a refused present says its news at once, a drawn one every 64th, which is a second of the board's lag and a table walk and a few hundred
+        // bytes copied less in each of the others.
+        {
+                static unsigned int issues_at;
+
+                if (why != COMPOSITOR_GPU_WHY_DRAWN || (++issues_at & 63) == 0)
+                        compositor_gpu_issues();
+        }
 
         if (why == COMPOSITOR_GPU_WHY_DRAWN)
         {

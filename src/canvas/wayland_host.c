@@ -901,6 +901,19 @@ static int compositor_wl_needs_xform(const struct wayland_picture *picture, long
 
 // The dma-buf reads of the pictures shown in place are bracketed for a present: started before the frames are built and ended after (the
 // kernel's sync, which is what makes a processor read of a dma-buf coherent on the architectures that need it).
+#define COMPOSITOR_WL_SYNC_REACH 512
+// Whether the present's damage is on, or within the reach of, the window's box.
+static int compositor_wl_row_damaged(int row)
+{
+        long x0 = compositor.x[row] - COMPOSITOR_WL_SYNC_REACH, y0 = compositor.y[row] - COMPOSITOR_WL_SYNC_REACH;
+        long x1 = compositor.x[row] + (long)compositor.w[row] + COMPOSITOR_WL_SYNC_REACH, y1 = compositor.y[row] + (long)compositor.h[row] + COMPOSITOR_WL_SYNC_REACH;
+
+        for (unsigned int at = 0; at < compositor.damages; at++)
+                if (compositor.damage[at][0] < x1 && compositor.damage[at][2] > x0 && compositor.damage[at][1] < y1 && compositor.damage[at][3] > y0)
+                        return 1;
+        return 0;
+}
+
 static void compositor_wl_lent_sync(int start)
 {
         unsigned long end_sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
@@ -912,6 +925,12 @@ static void compositor_wl_lent_sync(int start)
                         {
                                 long client = wayland_row_owner(row);
 
+                                // A present that draws none of the window (a pointer's move, a clock's tick elsewhere) reads none of its buffer: no poll,
+                                // two timers and two ioctls a window a present, and no wait for a client's card to finish what it is drawing. The box is
+                                // taken COMPOSITOR_WL_SYNC_REACH wider than the window, since the glass is composed from what is round the damage.
+                                compositor_wl.lent[row].synced = 0;
+                                if (!compositor_wl_row_damaged(row))
+                                        continue;
                                 compositor_wl.lent[row].synced =
                                         compositor_wl_dmabuf_ready(client, (int)compositor_wl.lent[row].fd) &&
                                         compositor_wl_sync_start(client, (int)compositor_wl.lent[row].fd);
@@ -2333,6 +2352,11 @@ static void compositor_wl_dmabuf_refresh(void)
         int was_hw, was_sync;
 
         if (!compositor_wl.started)
+                return;
+        // A hardware render node that is still there, as the same device, with syncobj settled, cannot be improved on: one statx, not a walk of
+        // sysfs and /dev/dri with an open and ioctls a node (a drm uevent is a connector poll or a client's reset, not a card that came).
+        if (compositor_wl.render && compositor_wl.render_hw && compositor_wl.render_path[0] &&
+            compositor_wl_node(compositor_wl.render_path) == compositor_wl.render)
                 return;
         was = compositor_wl.render;
         was_hw = compositor_wl.render_hw;
