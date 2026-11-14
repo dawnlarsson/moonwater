@@ -1115,9 +1115,16 @@ settings_insert linux/drivers/input/joydev.c "	joydev->dev.type = &input_node_ty
 lttpr_cap=linux/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 if [ -f "$lttpr_cap" ]; then
         if grep -q -F -- 'DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
-                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/'
-        elif ! grep -q -F -- 'DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
+                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/'
+        elif grep -q -F -- 'DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
+                settings_replace "$lttpr_cap" 's/DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/'
+        elif ! grep -q -F -- 'DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
                 die "amdgpu lttpr_caps: expected line moved in $lttpr_cap"
+        fi
+        if grep -q -F -- 'DC_LOG_ERROR("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\n");' "$lttpr_cap"; then
+                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/DC_LOG_DC("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/'
+        elif ! grep -q -F -- 'DC_LOG_DC("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\n");' "$lttpr_cap"; then
+                die "amdgpu lttpr_caps: expected lane count line moved in $lttpr_cap"
         fi
 fi
 

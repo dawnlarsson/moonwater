@@ -260,6 +260,7 @@ CONFIG_IGB=y
 CONFIG_IGC=y
 CONFIG_NET_VENDOR_REALTEK=y
 CONFIG_R8169=y
+#> firmware rtl_nic/rtl8125b-2.fw 529bf1c25c97ff52b401090d00ff89cc22351012336e5a0c9662728a3ee909ef
 #
 #       And the card a modern hypervisor offers when it is not pretending to
 #       be hardware at all. A cloud instance or a kvm guest with virtio and no
