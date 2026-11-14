@@ -11,8 +11,11 @@
 # SAMPLES is the sampler's log: records of a uint64 monotonic time, a uint32 frame number, a uint32 row count and one uint64 hash a row.
 # The classification of a distinct frame S, with P the frame sampled before it and N the one after (both in the whole log):
 #   torn     every row of S is a row of P or of N, both kinds present, and S is neither: a band written before the read and the rest after
+#   blank    S matches an all-zero (buffer 0) frame or flashes zeroed rows transiently while P and N are non-zero at those rows
 #   foreign  a row of S that equals the row of P and of N in its place (they agree, S differs) and whose value is seen in no other frame of the
 #            log at that row: a colour that exists in no frame (a half-composed or cleared window, a wrong scaled picture)
+#   edge     a row of S that equals neither P nor N while P[r] == N[r], repeated at least twice in the log (a transient edge/blend glitch or
+#            recurring halo outside filter-caret fade)
 #   flipflop S equal to the frame two before it, and different from the one before: a state that goes away and comes back
 # Legitimate animation changes rows that P and N disagree on, so none of the three counts a moving edge; a card session's counts are compared
 # with the processor's (canvas gpu off), which draws the same animation.
@@ -23,6 +26,21 @@ EV_SYN, EV_KEY, EV_REL = 0, 1, 2
 REL_X, REL_Y, REL_WHEEL = 0, 1, 8
 BTN_LEFT = 0x110
 KEY = {'d': 32, 'i': 23, 's': 31, 'p': 25, 'l': 38, 'a': 30, 'y': 21, 'n': 49, 'e': 18, 'r': 19, 'o': 24, 'k': 37, 'c': 46}
+
+
+def _zero_row_hash():
+    """Exact gpu_scan_sample.c row_hash() digest for W*4 zero bytes."""
+    h = 1469598103934665603
+    mask = (1 << 64) - 1
+    row_bytes = W * 4
+    for _ in range(row_bytes // 8 + row_bytes % 8):
+        h = (h * 1099511628211) & mask
+    return h
+
+
+ZERO_ROW = _zero_row_hash()
+CARET_MAX_ROWS = 36
+CARET_MIN_INTERVAL_NS = 120_000_000
 
 
 def now_ns():
@@ -149,19 +167,39 @@ def load(samples):
 def classify(samples, steps):
     frames = load(samples)
     n = len(frames)
+    click_filter_step = next((i for i, (lbl, _, _) in enumerate(steps) if "filter" in lbl), -1)
+    scroll_ranges = [
+        (start, end) for lbl, start, end in steps
+        if "flick" in lbl or "overscroll" in lbl
+    ]
+
+    def in_step_list(ts, ranges):
+        return any(s <= ts <= e for s, e in ranges)
+
     # the frames' value at each row, by row: a value seen in no other frame of the log at its row is 'unseen'
     seen = [dict() for _ in range(H)]
     for k, (t, rows) in enumerate(frames):
         for r, v in enumerate(rows):
             seen[r].setdefault(v, set()).add(k)
     torn = [False] * n
+    blank = [False] * n
+    blank_rows = [0] * n
     foreign = [0] * n
+    edge = [0] * n
+    edge_bad = [0] * n
     flip = [False] * n
+    flip_bad = [False] * n
+
+    filter_start = steps[click_filter_step][1] if click_filter_step >= 0 else None
+
     for k in range(n):
-        s = frames[k][1]
+        t, s = frames[k]
+        if len(s) == H and all(v == ZERO_ROW for v in s):
+            blank[k] = True
         if 1 <= k < n - 1:
             p, q = frames[k - 1][1], frames[k + 1][1]
-            if s != p and s != q and p != q:
+            quick_q = (frames[k + 1][0] - t) < 45_000_000
+            if quick_q and s != p and s != q and p != q:
                 has_p = has_q = False
                 ok = True
                 for r in range(H):
@@ -173,27 +211,84 @@ def classify(samples, steps):
                         ok = False
                         break
                 torn[k] = ok and has_p and has_q
+
+            b_cnt = 0
+            f_cnt = 0
+            e_rows = []
+            for r in range(H):
+                if not blank[k] and s[r] == ZERO_ROW and p[r] != ZERO_ROW and q[r] != ZERO_ROW:
+                    b_cnt += 1
+                if p[r] == q[r] and s[r] != p[r]:
+                    if len(seen[r].get(s[r], ())) == 1:
+                        f_cnt += 1
+                    else:
+                        e_rows.append(r)
+            blank_rows[k] = b_cnt
+            foreign[k] = f_cnt
+
+            # Ignore small localized filter-caret fade turnarounds and single-cursor-block cross-step passes.
+            if e_rows:
+                span = max(e_rows) - min(e_rows)
+                dt_prev = t - frames[k - 1][0]
+                caret_like = (
+                    filter_start is not None
+                    and t >= filter_start
+                    and len(e_rows) <= CARET_MAX_ROWS
+                    and span < CARET_MAX_ROWS * 2
+                    and dt_prev >= CARET_MIN_INTERVAL_NS
+                )
+                if not caret_like:
+                    edge[k] = len(e_rows)
+                    cur_step = next(((s_t, e_t) for _, s_t, e_t in steps if s_t <= t <= e_t), None)
+                    same_step_repeat = cur_step is not None and any(
+                        any(k2 != k and cur_step[0] <= frames[k2][0] <= cur_step[1] for k2 in seen[r].get(s[r], ()))
+                        for r in e_rows
+                    )
+                    if not in_step_list(t, scroll_ranges) and (len(e_rows) > 40 or span >= 40 or same_step_repeat):
+                        edge_bad[k] = len(e_rows)
+
         if k >= 2 and s == frames[k - 2][1] and s != frames[k - 1][1]:
             flip[k] = True
-        if 1 <= k < n - 1:
-            p, q = frames[k - 1][1], frames[k + 1][1]
-            count = 0
-            for r in range(H):
-                if p[r] == q[r] and s[r] != p[r] and len(seen[r].get(s[r], ())) == 1:
-                    count += 1
-            foreign[k] = count
+            diff_rows = [r for r in range(H) if s[r] != frames[k - 1][1][r]]
+            dt = t - frames[k - 1][0]
+            caret_flip = (
+                filter_start is not None
+                and t >= filter_start
+                and 0 < len(diff_rows) <= CARET_MAX_ROWS
+                and max(diff_rows) - min(diff_rows) < CARET_MAX_ROWS * 2
+                and dt >= CARET_MIN_INTERVAL_NS
+            )
+            cross_step = any(
+                start <= t <= end and frames[k - 1][0] < start
+                for _, start, end in steps
+            )
+            if not caret_flip and not cross_step and not in_step_list(t, scroll_ranges):
+                flip_bad[k] = True
+
     rows = []
     for label, start, end in steps:
         ks = [k for k in range(n) if start <= frames[k][0] <= end]
         if not ks:
-            rows.append((label, 0, 0, 0, 0, 0))
+            rows.append((label, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             continue
         distinct = len(ks)
         t_count = sum(1 for k in ks if torn[k])
+        b_count = sum(1 for k in ks if blank[k] or blank_rows[k])
+        b_rows = sum(blank_rows[k] + (H if blank[k] else 0) for k in ks)
         f_count = sum(1 for k in ks if foreign[k])
+        f_rows = sum(foreign[k] for k in ks)
+        e_count = sum(1 for k in ks if edge[k])
+        e_rows = sum(edge[k] for k in ks)
+        e_bad_count = sum(1 for k in ks if edge_bad[k])
         p_count = sum(1 for k in ks if flip[k])
-        rows.append((label, distinct, t_count, f_count, p_count, sum(foreign[k] for k in ks)))
-    return frames, rows
+        p_bad_count = sum(1 for k in ks if flip_bad[k])
+        rows.append((label, distinct, t_count, f_count, p_count, f_rows, b_count, b_rows, e_count, e_rows, e_bad_count + p_bad_count))
+    return frames, rows, {
+        "blank_any": sum(1 for k in range(n) if blank[k] or blank_rows[k]),
+        "torn_any": sum(1 for k in range(n) if torn[k]),
+        "flip_bad": sum(1 for k in range(n) if flip_bad[k]),
+        "edge_bad": sum(1 for k in range(n) if edge_bad[k]),
+    }
 
 
 def main():
@@ -208,11 +303,36 @@ def main():
             for line in f:
                 label, start, end = line.rstrip("\n").split("\t")
                 steps.append((label, int(start), int(end)))
-        frames, rows = classify(samples, steps)
+        frames, rows, overall = classify(samples, steps)
         print("frames %d" % len(frames))
-        for label, distinct, t_count, f_count, p_count, rowsf in rows:
-            print("step %-30s distinct %3d torn %2d foreign %2d (rows %5d) flipflop %2d" % (label, distinct, t_count, f_count, rowsf, p_count))
-        print("totals torn %d foreign %d flipflop %d" % (sum(r[2] for r in rows), sum(r[3] for r in rows), sum(r[4] for r in rows)))
+        for label, distinct, t_count, f_count, p_count, rowsf, b_count, b_rows, e_count, e_rows, _ in rows:
+            print(
+                "step %-30s distinct %3d torn %2d blank %2d (rows %5d) foreign %2d (rows %5d) edge %2d (rows %5d) flipflop %2d"
+                % (label, distinct, t_count, b_count, b_rows, f_count, rowsf, e_count, e_rows, p_count)
+            )
+        print(
+            "totals torn %d blank %d (rows %d) foreign %d edge %d flipflop %d"
+            % (
+                sum(r[2] for r in rows),
+                sum(r[6] for r in rows),
+                sum(r[7] for r in rows),
+                sum(r[3] for r in rows),
+                sum(r[8] for r in rows),
+                sum(r[4] for r in rows),
+            )
+        )
+        bad = (
+            len(frames) < 2
+            or overall["torn_any"] > 0
+            or overall["blank_any"] > 0
+            or overall["flip_bad"] > 0
+            or overall["edge_bad"] > 0
+        )
+        if bad:
+            sys.exit(
+                "flicker/render anomaly detected: frames=%d torn=%d blank=%d flipflop_bad=%d edge_bad=%d"
+                % (len(frames), overall["torn_any"], overall["blank_any"], overall["flip_bad"], overall["edge_bad"])
+            )
         return
     sys.exit("usage: gpu_anim_flicker.py drive|classify ...")
 

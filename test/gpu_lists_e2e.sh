@@ -103,6 +103,8 @@ session()
         # the flicker detector, after the screens above (it leaves the filter focused and its caret blinking): input over the fifo (hover, click,
         # wheel, typing), every distinct screen kept in order; the card session with its lists on and the off session (the processor paints) are the same input and the same reference
         python3 "$(dirname "$fonts")/test/gpu_lists_flicker.py" "$work/$mode.img" "$work/input.fifo" "$work/flicker-$mode" > "$work/flicker-$mode.txt" 2>&1
+        printf '%d\n' "$?" > "$work/flicker-$mode.status"
+        if kill -0 "$cpid" 2> /dev/null; then echo alive > "$work/$mode.alive"; else echo dead > "$work/$mode.alive"; fi
         bin/moonwater debug > "$work/$mode.touched.txt" 2>&1 # the lists drawn, refused and switched back to pixels under that input
         kill "$cpid" 2> /dev/null
         wait "$cpid" 2> /dev/null
@@ -132,6 +134,14 @@ row()
         if [ "$1" = ok ]; then echo "ok $2"; else echo "FAIL $2 ${3:-}"; failures=$((failures + 1)); fi
 }
 
+is_drawn_screen()
+{
+        [ -s "$1" ] || return 1
+        sz=$(LC_ALL=C wc -c < "$1" 2> /dev/null | tr -d ' ')
+        nz=$(LC_ALL=C tr -d '\000' < "$1" 2> /dev/null | LC_ALL=C wc -c | tr -d ' ')
+        [ "${sz:-0}" -eq 1920000 ] && [ "${nz:-0}" -ge 1024 ]
+}
+
 fonts=$(cd "$(dirname "$0")/../fonts" && pwd)
 unshare -rm sh "$self" session card "$work" "$fonts" > "$work/card.session.out" 2>&1
 unshare -rm sh "$self" session off "$work" "$fonts" > "$work/off.session.out" 2>&1
@@ -152,13 +162,14 @@ stretch_lost=$(grep -m1 'a list stretched past its end' "$work/card.touched.txt"
 if [ "${touched_refused:-1}" = 0 ] && [ "${touched_switched:-0}" -le "${stretch_lost:-0}" ]; then row ok "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels"; else row FAIL "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels" "refused ${touched_refused:-none}, switched ${touched_switched:-0} ($(grep '^  list' "$work/card.touched.txt" 2> /dev/null | tr -s ' ' | tr '\n' ';'))"; fi
 if [ "${lists_off:-1}" = 0 ]; then row ok "with canvas gpu off the apps paint pixels (no list)"; else row FAIL "with canvas gpu off the apps paint pixels (no list)" "lists ${lists_off:-none}"; fi
 
-# the two screens: the same pixels; a difference is written out as PPM for the report
-diff_count=$(cmp -l "$work/card.settled.img" "$work/off.settled.img" 2> /dev/null | wc -l)
-if [ "${diff_count:-1}" = 0 ]; then
-        row ok "the card's screen and the processor's are the same pixels"
-else
-        row FAIL "the card's screen and the processor's are the same pixels" "$diff_count bytes differ (see $work/card.ppm, $work/off.ppm)"
-        python3 - "$work/card.settled.img" "$work/card.ppm" "$work/off.settled.img" "$work/off.ppm" 2> /dev/null <<'PY'
+# the two screens: non-blank exact-size images with the same pixels; a difference is written out as PPM for the report
+if is_drawn_screen "$work/card.settled.img" && is_drawn_screen "$work/off.settled.img"; then
+        diff_count=$(cmp -l "$work/card.settled.img" "$work/off.settled.img" 2> /dev/null | wc -l)
+        if [ "${diff_count:-1}" = 0 ]; then
+                row ok "the card's screen and the processor's are the same pixels"
+        else
+                row FAIL "the card's screen and the processor's are the same pixels" "$diff_count bytes differ (see $work/card.ppm, $work/off.ppm)"
+                python3 - "$work/card.settled.img" "$work/card.ppm" "$work/off.settled.img" "$work/off.ppm" 2> /dev/null <<'PY'
 import sys
 def ppm(src, out):
     data = open(src, 'rb').read()
@@ -166,10 +177,13 @@ def ppm(src, out):
 ppm(sys.argv[1], sys.argv[2])
 ppm(sys.argv[3], sys.argv[4])
 PY
+        fi
+else
+        row FAIL "the card's screen and the processor's are drawn 800x600 screens" "card=$(wc -c < "$work/card.settled.img" 2> /dev/null || echo missing) off=$(wc -c < "$work/off.settled.img" 2> /dev/null || echo missing)"
 fi
 
 # the toggle: each screen after the setting changed is the screen before (the apps repainted in the mode they are in)
-if [ -s "$work/card.settled.img" ] && [ -s "$work/toggle-off.img" ] && [ -s "$work/toggle-on.img" ]; then
+if is_drawn_screen "$work/card.settled.img" && is_drawn_screen "$work/toggle-off.img" && is_drawn_screen "$work/toggle-on.img"; then
         changed_off=$(cmp -l "$work/card.settled.img" "$work/toggle-off.img" 2> /dev/null | wc -l)
         changed_on=$(cmp -l "$work/card.settled.img" "$work/toggle-on.img" 2> /dev/null | wc -l)
         if [ "$changed_off" -le 64 ]; then row ok "canvas gpu off while the apps run: they repaint the same screen"; else row FAIL "canvas gpu off while the apps run: they repaint the same screen" "$changed_off bytes changed"; fi
@@ -180,7 +194,20 @@ fi
 
 # the kill: the compositor is alive, and the screen after it is drawn (not blank)
 if [ "$(cat "$work/killed.alive" 2> /dev/null)" = alive ]; then row ok "an applet killed mid-publish: the compositor lives on"; else row FAIL "an applet killed mid-publish: the compositor lives on" "$(cat "$work/killed.alive" 2> /dev/null || echo no-record)"; fi
-if [ -s "$work/killed.img" ] && [ "$(tr -d '\000' < "$work/killed.img" | wc -c)" -gt 0 ]; then row ok "the screen after the kill is drawn"; else row FAIL "the screen after the kill is drawn" "no screen"; fi
+if is_drawn_screen "$work/killed.img"; then row ok "the screen after the kill is drawn"; else row FAIL "the screen after the kill is drawn" "blank or wrong size ($(wc -c < "$work/killed.img" 2> /dev/null || echo missing))"; fi
+
+# the flicker detectors: both sessions finished with compositor alive and zero torn/flipflop/blank flicker frames
+for mode in card off; do
+        alive=$(cat "$work/$mode.alive" 2> /dev/null || echo no-record)
+        if [ "$alive" = alive ]; then row ok "$mode session compositor survived flicker input"; else row FAIL "$mode session compositor survived flicker input" "$alive"; fi
+        status=$(cat "$work/flicker-$mode.status" 2> /dev/null)
+        summary=$(grep -m1 '^totals ' "$work/flicker-$mode.txt" 2> /dev/null || tail -1 "$work/flicker-$mode.txt" 2> /dev/null)
+        if [ "${status:-1}" = 0 ]; then
+                row ok "$mode session has no flicker frames"
+        else
+                row FAIL "$mode session has no flicker frames" "status=${status:-missing} (${summary:-no output})"
+        fi
+done
 
 # the reasons the card was refused, and the GPU's counts, from moonwater canvas in each session
 grep '^  gpu' "$work/card.canvas.txt" 2> /dev/null | sed 's/^/card: /'
