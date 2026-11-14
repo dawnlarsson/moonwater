@@ -970,6 +970,8 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         // word), so a commit with a part damaged is read in place like any other and that part alone is drawn again (the row's damage,
         // compositor_wl_lent_damage). The one buffer not taken at that word is one the shim says may not be whole (fragile: an X window's,
         // whose server draws on in what it committed): that one is read in place only when all of it is damaged, and copied otherwise.
+        if (compositor.resize == row)
+                return 0;
         if (!picture->pixels || !picture->map || picture->blend || !picture->last || x < 0 || y < 0 || width <= 0 || height <= 0)
                 return 0;
         if (compositor_wl_needs_xform(picture, width, height))

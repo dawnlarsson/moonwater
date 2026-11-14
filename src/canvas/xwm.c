@@ -141,6 +141,7 @@ struct compositor_xwm_window
         unsigned int width, height;
         int sent_x, sent_y;            // what the compositor last asked of its place and size
         unsigned int sent_w, sent_h;
+        unsigned long long sync_present; // last present a resize configure was sent on
         unsigned int restore_w, restore_h; // its size before fullscreen
         unsigned int min_w, min_h, max_w, max_h; // WM_NORMAL_HINTS size bounds (0 = unset)
         unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
@@ -893,11 +894,13 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
                         unsigned int cw = (unsigned int)width, ch = (unsigned int)height;
 
                         compositor_xwm_clamp_size(w, &cw, &ch);
-                        if (cw != w->sent_w || ch != w->sent_h)
+                        if ((cw != w->sent_w || ch != w->sent_h) &&
+                            (compositor.resize != row || w->sync_present != compositor_metric_presents))
                         {
                                 c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
                                 c.width = cw;
                                 c.height = ch;
+                                w->sync_present = compositor_metric_presents;
                         }
                 }
         }

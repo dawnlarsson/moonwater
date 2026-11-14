@@ -9170,7 +9170,9 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                                 compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
                         }
                 }
-                if (!gpu_map_written(compositor_gpu_scaled_pool[used].memory, bytes) || !(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)))
+                if (!(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)) &&
+                    (!gpu_map_written(compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes) ||
+                     !(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes))))
                 {
                         if (gpu_lost)
                                 compositor_gpu_recover();
@@ -9198,7 +9200,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
                 compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)f->width;
-                compositor_gpu_scaled_copy[k].gpu_base = 0;
+                compositor_gpu_scaled_copy[k].gpu_base = dst_va;
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
                 used++;
         }
