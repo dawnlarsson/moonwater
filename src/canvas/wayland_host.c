@@ -116,6 +116,8 @@ static struct
         {
                 int used;
                 unsigned int handle;
+                int eventfd, armed;
+                unsigned long long armed_point;
         } syncobj[COMPOSITOR_WL_SYNCOBJS];
         positive slow_until[WAYLAND_CLIENTS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
@@ -135,9 +137,10 @@ static struct
                 positive va, import;
                 const unsigned char *map;
                 long fd, size;
-                unsigned long dev, ino;
+                unsigned long dev, ino, modifier;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
-                int synced;
+                unsigned int fourcc, offset, scan_fb, scan_handle;
+                int synced, scan_failed;
         } lent[WINDOWS];
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
         // when the buffer changes or the row closes.
@@ -807,11 +810,93 @@ static positive compositor_lent_va(int row)
         return compositor_lent(row) ? compositor_wl_live(compositor_wl.lent[row].va, compositor_wl.lent[row].epoch) : 0;
 }
 
+static void compositor_wl_lent_drop_fb(int row)
+{
+        if (compositor_wl.lent[row].scan_fb)
+        {
+                unsigned int close[2] = {compositor_wl.lent[row].scan_handle, 0};
+
+                if (compositor.card >= 0)
+                {
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor_wl.lent[row].scan_fb);
+                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                }
+                compositor_wl.lent[row].scan_fb = 0;
+                compositor_wl.lent[row].scan_handle = 0;
+        }
+}
+
+static unsigned int compositor_lent_fb(int row)
+{
+        unsigned int fourcc;
+        struct
+        {
+                unsigned int handle, flags;
+                int fd;
+        } prime;
+        struct
+        {
+                unsigned int fb_id, width, height, pixel_format, flags;
+                unsigned int handles[4], pitches[4], offsets[4];
+                unsigned long long modifier[4];
+        } fb = {0};
+
+        if (!compositor_lent(row) || compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0)
+                return 0;
+        if (compositor_wl.lent[row].scan_fb)
+                return compositor_wl.lent[row].scan_fb;
+        prime.handle = 0;
+        prime.flags = 0;
+        prime.fd = (int)compositor_wl.lent[row].fd;
+        if (system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime) != 0 || !prime.handle)
+        {
+                compositor_wl.lent[row].scan_failed = 1;
+                return 0;
+        }
+        fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
+        fb.width = (unsigned int)compositor_wl.lent[row].width;
+        fb.height = (unsigned int)compositor_wl.lent[row].height;
+        fb.pixel_format = fourcc;
+        fb.handles[0] = prime.handle;
+        fb.pitches[0] = (unsigned int)(compositor_wl.lent[row].pitch * 4);
+        fb.offsets[0] = compositor_wl.lent[row].offset;
+        if (compositor_wl.lent[row].modifier && compositor_wl.lent[row].modifier != 0x00ffffffffffffffULL)
+        {
+                fb.flags = 2u;
+                fb.modifier[0] = compositor_wl.lent[row].modifier;
+        }
+        if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0 || !fb.fb_id)
+        {
+                unsigned int close[2] = {prime.handle, 0};
+
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                compositor_wl.lent[row].scan_failed = 1;
+                return 0;
+        }
+        compositor_wl.lent[row].scan_fb = fb.fb_id;
+        compositor_wl.lent[row].scan_handle = prime.handle;
+        return fb.fb_id;
+}
+
+static void compositor_lent_fb_fail(int row)
+{
+        if (row < 0 || row >= WINDOWS)
+                return;
+        compositor_wl.lent[row].scan_failed = 1;
+        compositor_wl_lent_drop_fb(row);
+}
+
+static int compositor_wl_row_async(int row)
+{
+        return row >= 0 && wayland_row_hint(row, WAYLAND_HINT_ASYNC) != 0;
+}
+
 // The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's.
 static void compositor_wl_unlend(int row)
 {
         if (!compositor_lent(row))
                 return;
+        compositor_wl_lent_drop_fb(row);
         if (compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
                 gpu_release_import(compositor_wl.lent[row].import);
         memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
@@ -1023,8 +1108,13 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                         return 0;
                 va = import + (positive)(at - picture->map);
         }
-        if (compositor_lent(row) && !same && compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
-                gpu_release_import(compositor_wl.lent[row].import);
+        if (compositor_lent(row) && !same)
+        {
+                compositor_wl_lent_drop_fb(row);
+                if (compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
+                        gpu_release_import(compositor_wl.lent[row].import);
+                compositor_wl.lent[row].scan_failed = 0;
+        }
         compositor_wl.lent[row].pixels = (const unsigned int *)at;
         compositor_wl.lent[row].pitch = stride / 4;
         compositor_wl.lent[row].width = width;
@@ -1037,6 +1127,9 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         compositor_wl.lent[row].size = picture->map_bytes;
         compositor_wl.lent[row].dev = dev;
         compositor_wl.lent[row].ino = ino;
+        compositor_wl.lent[row].fourcc = picture->fourcc;
+        compositor_wl.lent[row].offset = (unsigned int)picture->plane_offset[0];
+        compositor_wl.lent[row].modifier = picture->modifier;
         compositor_wl.lent[row].synced = 0;
         return 1;
 }
@@ -2214,6 +2307,7 @@ static char *compositor_wl_text(char *at, const char *text)
 #define COMPOSITOR_WL_SYNCOBJ_FD_TO_HANDLE 0xc01064c2UL
 #define COMPOSITOR_WL_SYNCOBJ_TIMELINE_WAIT 0xc03064caUL
 #define COMPOSITOR_WL_SYNCOBJ_TIMELINE_SIGNAL 0xc01864cdUL
+#define COMPOSITOR_WL_SYNCOBJ_EVENTFD 0xc01864cfUL
 
 static int compositor_wl_str_eq(const char *a, const char *b)
 {
@@ -2670,6 +2764,13 @@ static void compositor_wl_syncobj_drop_handle(long slot)
                 arg.pad = 0;
                 compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_DESTROY, (positive)&arg, 0, 0, 0);
         }
+        if (compositor_wl.syncobj[slot].eventfd >= 0)
+        {
+                compositor_call(syscall(close), (positive)compositor_wl.syncobj[slot].eventfd, 0, 0, 0, 0, 0);
+                compositor_wl.syncobj[slot].eventfd = -1;
+        }
+        compositor_wl.syncobj[slot].armed = 0;
+        compositor_wl.syncobj[slot].armed_point = 0;
         compositor_wl.syncobj[slot].handle = 0;
         compositor_wl.syncobj[slot].used = 0;
 }
@@ -2721,6 +2822,9 @@ static long compositor_wl_syncobj_import(void *context, long fd)
                 return -1;
         compositor_wl.syncobj[slot].used = 1;
         compositor_wl.syncobj[slot].handle = arg.handle;
+        compositor_wl.syncobj[slot].eventfd = -1;
+        compositor_wl.syncobj[slot].armed = 0;
+        compositor_wl.syncobj[slot].armed_point = 0;
         return slot;
 }
 
@@ -2779,6 +2883,46 @@ static void compositor_wl_syncobj_signal(void *context, long slot, unsigned long
                         (positive)&sig_arg, 0, 0, 0);
 }
 
+static long compositor_wl_syncobj_eventfd(void *context, long slot, unsigned long long point)
+{
+        unsigned long long tmp;
+        struct
+        {
+                unsigned int handle, flags;
+                unsigned long long point;
+                int fd;
+                unsigned int pad;
+        } arg;
+
+        (void)context;
+        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+                return -1;
+        if (compositor_wl.syncobj[slot].eventfd < 0)
+        {
+                long efd = compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+
+                if (efd < 0)
+                        return -1;
+                compositor_wl.syncobj[slot].eventfd = (int)efd;
+        }
+        if (compositor_wl.syncobj[slot].armed && compositor_wl.syncobj[slot].armed_point == point)
+                return compositor_wl.syncobj[slot].eventfd;
+        compositor_call(syscall(read), (positive)compositor_wl.syncobj[slot].eventfd, (positive)&tmp, sizeof tmp, 0, 0, 0);
+        arg.handle = compositor_wl.syncobj[slot].handle;
+        arg.flags = 0;
+        arg.point = point;
+        arg.fd = compositor_wl.syncobj[slot].eventfd;
+        arg.pad = 0;
+        if (compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_EVENTFD, (positive)&arg, 0, 0, 0) < 0)
+        {
+                compositor_wl.syncobj[slot].armed = 0;
+                return -1;
+        }
+        compositor_wl.syncobj[slot].armed = 1;
+        compositor_wl.syncobj[slot].armed_point = point;
+        return compositor_wl.syncobj[slot].eventfd;
+}
+
 static const struct wayland_syncobj_host compositor_wl_syncobj = {
     .context = 0,
     .available = compositor_wl_syncobj_available,
@@ -2786,6 +2930,7 @@ static const struct wayland_syncobj_host compositor_wl_syncobj = {
     .drop = compositor_wl_syncobj_drop,
     .ready = compositor_wl_syncobj_ready,
     .signal = compositor_wl_syncobj_signal,
+    .eventfd = compositor_wl_syncobj_eventfd,
 };
 
 /*

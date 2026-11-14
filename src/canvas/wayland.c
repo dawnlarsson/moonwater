@@ -288,6 +288,7 @@ struct wayland_syncobj_host
         void (*drop)(void *context, long handle);
         int (*ready)(void *context, long handle, unsigned long long point);
         void (*signal)(void *context, long handle, unsigned long long point);
+        long (*eventfd)(void *context, long handle, unsigned long long point);
 };
 
 struct wayland_facts
@@ -8480,6 +8481,12 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
                 return c->hold_at; // a timed hold wakes the loop at its time; a barrier's is woken by the frames (wayland_frame_wanted)
         if (c->stalled_sync_handle >= 0)
         {
+                long efd = wayland.syncobj.eventfd ? wayland.syncobj.eventfd(wayland.syncobj.context, c->stalled_sync_handle, c->stalled_sync_point) : -1;
+                if (efd >= 0)
+                {
+                        *fd = efd;
+                        return c->stalled_at + WAYLAND_STALL_MS + 1;
+                }
                 long next = wayland.host->now(wayland.host->context) + 1;
                 long cap = c->stalled_at + WAYLAND_STALL_MS + 1;
 

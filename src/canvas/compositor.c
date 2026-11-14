@@ -4230,6 +4230,7 @@ _Static_assert(sizeof(struct compositor_cursor) == 28, "drm_mode_cursor");
 #define COMPOSITOR_UDMABUF_CREATE 0x40187542u // _IOW('u', 0x42, struct udmabuf_create)
 #define COMPOSITOR_XRGB8888 0x34325258u
 #define COMPOSITOR_FLIP_EVENT 1u
+#define COMPOSITOR_FLIP_ASYNC 2u
 #define COMPOSITOR_EVENT_FLIP_COMPLETE 2u
 
 struct compositor_input_event
@@ -5743,6 +5744,9 @@ static void compositor_preview_keep(void)
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch);
 static positive compositor_lent_va(int row);
 static int compositor_lent(int row);
+static unsigned int compositor_lent_fb(int row);
+static void compositor_lent_fb_fail(int row);
+static int compositor_wl_row_async(int row);
 static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
 static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
@@ -5759,6 +5763,20 @@ static positive compositor_lent_va(int row)
         return 0;
 }
 static int compositor_lent(int row)
+{
+        (void)row;
+        return 0;
+}
+static unsigned int compositor_lent_fb(int row)
+{
+        (void)row;
+        return 0;
+}
+static void compositor_lent_fb_fail(int row)
+{
+        (void)row;
+}
+static int compositor_wl_row_async(int row)
 {
         (void)row;
         return 0;
@@ -7326,6 +7344,8 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 unsigned long user_data;
         } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
 
+        if (row >= 0 && compositor_wl_row_async(row))
+                flip.flags |= COMPOSITOR_FLIP_ASYNC;
         // Headless: the file's names are exchanged now, so the flip is done at once (only the compositor's own buffers flip).
         if (compositor.card < 0)
         {
@@ -7337,7 +7357,13 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         }
         flip.user_data = ++compositor.flip_serial;
         if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
-                return 0;
+        {
+                if (!(flip.flags & COMPOSITOR_FLIP_ASYNC))
+                        return 0;
+                flip.flags &= ~COMPOSITOR_FLIP_ASYNC;
+                if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
+                        return 0;
+        }
         compositor_flip_refused = 0;
         compositor.flip_pending = 1;
         compositor.flip_issued = clock_monotonic_nanoseconds();
@@ -7740,8 +7766,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
-        if (compositor_lent(row) || frames[windows - 1].blend)
-                return -1; // its picture is the client's buffer or non-opaque, not an opaque table buffer that a plane would show
+        if (frames[windows - 1].blend)
+                return -1;
         if (__atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return -1;
         if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
@@ -7749,25 +7775,35 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
             compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
-        return compositor_window_fb(row, compositor.front[row]) ? row : -1;
+        return (compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
 }
 
 // The frame of a window shown straight: the tabs over its buffer, and the card flipped to it. False when the card will not.
 static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
 {
-        unsigned int which = compositor.front[row], fb = compositor_window_fb(row, which);
+        int lent = compositor_lent(row), rect[4];
+        unsigned int which = compositor.front[row];
+        unsigned int fb = lent ? compositor_lent_fb(row) : compositor_window_fb(row, which);
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
 
+        if (lent && compositor_tabs_rect(tabs, count, rect))
+                return 0;
         if (!fb)
                 return 0;
         if (compositor.on_screen != fb && compositor.flip_pending)
                 return 1;
-        compositor_direct_patch(row, which, tabs, count);
+        if (!lent)
+                compositor_direct_patch(row, which, tabs, count);
         if (compositor.on_screen != fb)
         {
                 if (!compositor_flip(fb, row, which))
                 {
+                        if (lent)
+                        {
+                                compositor_lent_fb_fail(row);
+                                return 0;
+                        }
                         compositor_direct_unpatch_at(row, which);
                         compositor.direct_refused = 1;
                         compositor.table->refused = 5;
@@ -9989,7 +10025,7 @@ static void compositor_present_frames(void)
         tinted = compositor_preview_lift(frames, windows, &preview);
         int turning = compositor_turning();
         int direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
-        int stay_live_direct = direct >= 0 && direct == compositor.direct_row && !compositor_overlay_ready() &&
+        int stay_live_direct = direct >= 0 && !compositor_lent(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
                                compositor.patched[direct][compositor.front[direct] & 1u] &&
                                compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
                                compositor.under[compositor.front[direct] & 1u];
