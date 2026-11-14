@@ -1533,7 +1533,8 @@ static int compositor_wl_hold_counts(int dx, int dy, positive now)
 {
         if (compositor_wl.hold != 1 || compositor_wl.hold_row < 0)
                 return 0;
-        wayland_pointer_relative(compositor_wl.hold_row, dx, dy, (long)(now / 1000));
+        if (dx || dy)
+                wayland_pointer_relative(compositor_wl.hold_row, dx, dy, (long)(now / 1000));
         return 1;
 }
 
@@ -2673,7 +2674,7 @@ static int compositor_wl_key(unsigned int code, int value)
         if (code == CK_CAPSLOCK && value == 1)
                 compositor.keymap.caps ^= 1;
         // The keys down, and the window they went to, as the compositor keeps them for its own windows.
-        if (code < 128)
+        if (code < 256)
         {
                 unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[code >> 3];
 

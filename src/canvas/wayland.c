@@ -1969,14 +1969,29 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
 static void wayland_flatten(struct wayland_client *c, long parent, const struct wayland_rect *only, const struct wayland_rect *window)
 {
+        long self = parent < 0 ? ~parent : parent;
         int found = 0;
         long order = 0;
 
-        for (long child = wayland_next_child(c, parent, order, &found); child >= 0; child = wayland_next_child(c, parent, order, &found))
+        if (parent < 0)
+        {
+                for (long child = wayland_next_child(c, self, order, &found); child >= 0 && c->surfaces[child].sub_order < 0;
+                     child = wayland_next_child(c, self, order, &found))
+                {
+                        order = c->surfaces[child].sub_order;
+                        wayland_flatten(c, ~child, only, window);
+                }
+                if (c->surfaces[self].held)
+                        wayland_child_copy(c, &c->surfaces[self], only, window);
+        }
+        found = 0;
+        order = 0;
+        for (long child = wayland_next_child(c, self, order, &found); child >= 0; child = wayland_next_child(c, self, order, &found))
         {
                 order = c->surfaces[child].sub_order;
-                wayland_child_copy(c, &c->surfaces[child], only, window);
-                wayland_flatten(c, child, only, window);
+                if (parent < 0 && order < 0)
+                        continue;
+                wayland_flatten(c, ~child, only, window);
         }
 }
 
@@ -2001,9 +2016,7 @@ static void wayland_relay(struct wayland_client *c, struct wayland_surface *root
         root->window_w = window.width;
         root->window_h = window.height;
         root->need_full = 0;
-        if (root->held)
-                wayland_child_copy(c, root, 0, &window);
-        wayland_flatten(c, wayland_surface_index(c, root), 0, &window);
+        wayland_flatten(c, ~wayland_surface_index(c, root), 0, &window);
         wayland_row_take(c, root);
 }
 
@@ -2270,7 +2283,9 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
                         c->surfaces[at].sub_parent = 0;
                 }
         }
+        c->sub_mask &= ~(1ull << wayland_surface_index(c, s));
         s->sub_parent = 0;
+        s->sub_order = 0;
         if (root && root != s && root->live)
         {
                 root->need_full = 1;
@@ -2854,20 +2869,39 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
 */
 static long wayland_xparent(struct wayland_client *c, const struct wayland_surface *s, long *px, long *py)
 {
+        long best_row = -1, best_x = 0, best_y = 0, best_score = 0;
+
         for (long at = 0; at < WAYLAND_SURFACES; at++)
         {
                 const struct wayland_surface *o = &c->surfaces[at];
                 struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+                long score = 1;
 
                 if (o == s || !o->live || !o->xsurface || !o->xadopted || o->xpopup || o->row < 0)
                         continue;
                 if (wayland.host->row_facts(wayland.host->context, o->row, &facts) < 0)
                         continue;
-                *px = s->xx - facts.x;
-                *py = s->xy - facts.y;
-                return o->row;
+                if (o->row == wayland.pointer_row)
+                        score = 4;
+                else if (o->row == wayland.keyboard_row || (facts.states & WAYLAND_STATE_ACTIVATED))
+                        score = 3;
+                else if (facts.width > 0 && facts.height > 0 && s->xx >= facts.x && s->xx < facts.x + facts.width &&
+                         s->xy >= facts.y && s->xy < facts.y + facts.height)
+                        score = 2;
+                if (score > best_score)
+                {
+                        best_score = score;
+                        best_row = o->row;
+                        best_x = facts.x;
+                        best_y = facts.y;
+                }
         }
-        return -1;
+        if (best_row >= 0)
+        {
+                *px = s->xx - best_x;
+                *py = s->xy - best_y;
+        }
+        return best_row;
 }
 
 /*
@@ -6890,6 +6924,11 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         surface->shortcut_id = c->objects[a[0].slot].id;
                         c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
                         c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                        if (surface->row >= 0 && surface->row == wayland.keyboard_row)
+                        {
+                                surface->shortcut_active = 1;
+                                wayland_send(c, surface->shortcut_id, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active, 0, 0);
+                        }
                 }
                 return WAYLAND_OK;
         case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
@@ -7909,7 +7948,6 @@ WAYLAND_API void wayland_row_wake(long row)
                 }
                 // This ask is told, or has nobody here to tell (an X window, which its window manager asks): it is not looked at again.
                 s->closes = facts.closing;
-                return;
         }
         // The compositor's own word on the state is the last word too: a window it took out of fullscreen (or out of maximized) is not
         // put back in it when it is shown again, for a request the compositor has since let go of.

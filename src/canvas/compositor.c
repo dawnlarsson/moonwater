@@ -18042,7 +18042,11 @@ static void compositor_button(unsigned int code, int down)
         if (under < 0)
                 return;
 
-        if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0)
+        if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0
+#ifdef CONFIG_MOONWATER_WAYLAND
+            && !compositor_wl_hold_counts(0, 0, 0)
+#endif
+        )
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
 

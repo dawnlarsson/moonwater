@@ -99427,7 +99427,8 @@ static fn steam_profile(void)
         check("The steam profile has Xwayland, which the session starts beside Steam, bubblewrap for the Steam Runtime, and which for steam.sh",
               chrome_has(part ? part->packages : null, "xorg-xwayland") &&
                   chrome_has(part ? part->packages : null, "bubblewrap") &&
-                  chrome_has(part ? part->packages : null, "which"));
+                  chrome_has(part ? part->packages : null, "which") &&
+                  chrome_has(part ? part->packages : null, "zenity"));
         check("The steam component exposes no program of the bowl by name: its session is the way in",
               part && part->expose && !part->expose[0]);
         check("Steam's launcher is the profile's own name and no other name",
@@ -183749,6 +183750,16 @@ static void test_shortcuts(void)
         WLCHECK(wayland_shortcuts_key(0, 15, 1, 0) == 0, "and no window has the keys, so the chords run");
         wlc_send(c, inhibitor, WLQ_zwp_keyboard_shortcuts_inhibitor_v1_destroy);
         WLCHECK(c->errors == 0, "the inhibitor is destroyed");
+        wayland_keyboard_to(0);
+        wlc_pump(c);
+        wlc_forget(c);
+        inhibitor = wlc_id(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1);
+        wlc_send(c, shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, inhibitor, s.surface, s.seat);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wayland_row_shortcuts(0) == 1 &&
+                    wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active) == 1,
+                "an inhibitor created while its window already has the keys is active at once");
+        wlc_send(c, inhibitor, WLQ_zwp_keyboard_shortcuts_inhibitor_v1_destroy);
         wlc_end(c);
         wayland_stop();
 }
@@ -190953,6 +190964,9 @@ static void db_test_portal(void)
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.host.portal.Registry", "version");
         DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
                 "the host Registry portal answers version 1");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Inhibit", "version");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
+                "the Inhibit portal answers version 1");
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.FileChooser", "OpenFile", "", 0, 0);
         DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod"), "and its methods are not there");
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "Write", "", 0, 0);

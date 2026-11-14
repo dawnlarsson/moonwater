@@ -703,15 +703,19 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
                 w->state |= COMPOSITOR_XWM_FULLSCREEN;
                 w->restore_w = w->width;
                 w->restore_h = w->height;
-                c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                c.x = 0;
-                c.y = 0;
-                c.width = compositor.width > 0 ? (unsigned int)compositor.width : 1;
-                c.height = compositor.height > 0 ? (unsigned int)compositor.height : 1;
-                compositor_xwm_configure(w->id, &c);
-                compositor_xwm_net_state(w->id, 1);
                 if (w->row >= 0)
                         compositor_fullscreen_row(w->row);
+                c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
+                c.x = w->row >= 0 && compositor.showing[w->row] ? compositor.x[w->row] : 0;
+                c.y = w->row >= 0 && compositor.showing[w->row] ? compositor.y[w->row] : 0;
+                c.width = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0
+                              ? compositor.w[w->row]
+                              : (compositor.width > 0 ? (unsigned int)compositor.width : 1);
+                c.height = w->row >= 0 && compositor.showing[w->row] && compositor.h[w->row] > 0
+                               ? compositor.h[w->row]
+                               : (compositor.height > 0 ? (unsigned int)compositor.height : 1);
+                compositor_xwm_configure(w->id, &c);
+                compositor_xwm_net_state(w->id, 1);
         }
         else
         {
@@ -751,13 +755,7 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
         if (table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]))
         {
-                long scale = compositor_row_scale(row), width = (long)table->want_width[row], height = (long)table->want_height[row];
-
-                if (scale > 0 && scale != 100)
-                {
-                        width = width * 100 / scale;
-                        height = height * 100 / scale;
-                }
+                long width = (long)table->want_width[row], height = (long)table->want_height[row];
                 if (width > 0 && height > 0 && ((unsigned int)width != w->sent_w || (unsigned int)height != w->sent_h))
                 {
                         c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
@@ -1403,6 +1401,8 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
         // The window that has the keys has the X focus (and is told, if it asked to be: WM_TAKE_FOCUS).
         if (x->fd >= 0 && (int)compositor.focus != x->focus_row)
         {
+                int focused = 0;
+
                 x->focus_row = (int)compositor.focus;
                 for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
                 {
@@ -1413,8 +1413,11 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                                 compositor_xwm_focus(w->id);
                                 if (w->protocols & COMPOSITOR_XWM_PROTO_FOCUS)
                                         compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_TAKE_FOCUS]);
+                                focused = 1;
                         }
                 }
+                if (!focused)
+                        compositor_xwm_focus(0);
                 // The window that took the keys has its transient dialogs over it, as it had them.
                 for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
                 {

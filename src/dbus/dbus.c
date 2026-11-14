@@ -1837,7 +1837,7 @@ static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_mes
                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "ReadAll takes an array of namespaces", DBUS_NAME_PORTAL);
                 return;
         }
-        dbus_reply_begin(&w, from, m, "a{sa{sv}}", DBUS_NAME_PORTAL, &body);
+        dbus_reply_begin(&w, from, m, "a{sa{sv}}", dbus.service.unique, &body);
         dbus_o_u32(&w, 0);
         outer_at = w.length - 4;
         dbus_o_pad(&w, 8);
@@ -1889,7 +1889,8 @@ static struct
         unsigned char version;
 } dbus_interfaces[8] = {{"org.freedesktop.portal.Settings", 2},
                         {"org.freedesktop.portal.FileChooser", 1},
-                        {"org.freedesktop.host.portal.Registry", 1}};
+                        {"org.freedesktop.host.portal.Registry", 1},
+                        {"org.freedesktop.portal.Inhibit", 1}};
 
 static long dbus_interface_version(const char *name)
 {
