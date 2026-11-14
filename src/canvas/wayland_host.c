@@ -1281,8 +1281,7 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 compositor_close(row);
                 break;
         case WAYLAND_DO_FOCUS:
-                compositor_raise(row);
-                compositor_focus(row);
+                compositor_reveal(row);
                 break;
         case WAYLAND_DO_PINCH_WANT:
                 compositor.table->pinch_wanted[row] = a ? 1u : 0u;

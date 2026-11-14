@@ -238145,7 +238145,7 @@ static void grab_protocol_rows(void)
         struct xwm_event ev;
         unsigned long off = 0;
         unsigned int wm_win = 0, root_check_win = 0;
-        int saw_check_on_wm = 0, saw_name_on_wm = 0, saw_check_on_root = 0, saw_supported = 0, saw_moveresize = 0;
+        int saw_check_on_wm = 0, saw_name_on_wm = 0, saw_check_on_root = 0, saw_supported = 0, saw_moveresize = 0, saw_active = 0, saw_max_v = 0;
 
         memory_copy(kept_comp, &compositor, sizeof(compositor));
         memory_copy(kept_xwm, &compositor_xwm, sizeof(compositor_xwm));
@@ -238234,8 +238234,16 @@ static void grab_protocol_rows(void)
                         {
                                 saw_supported = 1;
                                 for (unsigned int j = 0; j < count && off + 24 + (j + 1) * 4u <= (unsigned long)compositor_xwm.out_len; j++)
-                                        if (xwm_get32(compositor_xwm.out + off + 24 + j * 4u) == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE])
+                                {
+                                        unsigned int a = xwm_get32(compositor_xwm.out + off + 24 + j * 4u);
+
+                                        if (a == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE])
                                                 saw_moveresize = 1;
+                                        else if (a == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
+                                                saw_active = 1;
+                                        else if (a == compositor_xwm.atoms[COMPOSITOR_XWM_A_MAX_VERT])
+                                                saw_max_v = 1;
+                                }
                         }
                         else if (win != compositor_xwm.root && prop == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CHECK] && fmt == 32 && count == 1 &&
                                  type == COMPOSITOR_XWM_XA_WINDOW && off + 28 <= (unsigned long)compositor_xwm.out_len)
@@ -238252,7 +238260,7 @@ static void grab_protocol_rows(void)
         }
         check("xwm claim: sets _NET_SUPPORTING_WM_CHECK on root and wm window, _NET_WM_NAME, and _NET_SUPPORTED with _NET_WM_MOVERESIZE",
               saw_check_on_root && saw_check_on_wm && wm_win != 0 && root_check_win == wm_win &&
-                  saw_name_on_wm && saw_supported && saw_moveresize);
+                  saw_name_on_wm && saw_supported && saw_moveresize && saw_active && saw_max_v);
 
         // _NET_WM_MOVERESIZE ClientMessages start move/resize only when left button is held on the window, and CANCEL stops cleanly.
         xw = compositor_xwm_find(0x880001u, 1);
@@ -238288,6 +238296,40 @@ static void grab_protocol_rows(void)
         check("xwm moveresize: CANCEL stops compositor edge resize",
               compositor.resize == COMPOSITOR_NONE && compositor.drag == COMPOSITOR_NONE);
         compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+        // EWMH _NET_WM_STATE maximization, WM_CHANGE_STATE iconic minimize, _NET_ACTIVE_WINDOW restore+focus, and _NET_CLOSE_WINDOW.
+        xwm_event_clear(&ev);
+        ev.kind = XWM_EV_CLIENT_MESSAGE, ev.window = 0x880001u, ev.format = XWM_FORMAT_32;
+        ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_STATE];
+        ev.data[0] = COMPOSITOR_XWM_NET_ADD;
+        ev.data[1] = compositor_xwm.atoms[COMPOSITOR_XWM_A_MAX_VERT];
+        ev.data[2] = compositor_xwm.atoms[COMPOSITOR_XWM_A_MAX_HORZ];
+        compositor_xwm_event(&ev);
+        check("xwm ewmh: _NET_WM_STATE MAXIMIZED_VERT/HORZ ADD arranges row as room and records COMPOSITOR_XWM_MAXIMIZED",
+              xw && (xw->state & COMPOSITOR_XWM_MAXIMIZED) && compositor.arranged[0] == COMPOSITOR_ROOM);
+        ev.data[0] = COMPOSITOR_XWM_NET_REMOVE;
+        compositor_xwm_event(&ev);
+        check("xwm ewmh: _NET_WM_STATE MAXIMIZED_VERT/HORZ REMOVE floats row and clears COMPOSITOR_XWM_MAXIMIZED",
+              xw && !(xw->state & COMPOSITOR_XWM_MAXIMIZED) && compositor.arranged[0] == COMPOSITOR_FLOATING);
+
+        ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_CHANGE_STATE];
+        ev.data[0] = COMPOSITOR_XWM_STATE_ICONIC;
+        compositor_xwm_event(&ev);
+        check("xwm icccm: WM_CHANGE_STATE IconicState minimizes window row",
+              (compositor.state[0] & WINDOW_MINIMIZED) != 0);
+
+        ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE];
+        ev.data[0] = 1;
+        compositor_xwm_event(&ev);
+        check("xwm ewmh: _NET_ACTIVE_WINDOW unminimizes and focuses window row",
+              !(compositor.state[0] & WINDOW_MINIMIZED) && compositor.focus == 0);
+
+        compositor.state[0] = 0, compositor.close_asks[0] = 0;
+        ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CLOSE];
+        compositor_xwm_event(&ev);
+        check("xwm ewmh: _NET_CLOSE_WINDOW requests window close on row",
+              (compositor.state[0] & WINDOW_CLOSING) && compositor.close_asks[0] == 1);
+
         compositor_xwm_forget(0x880001u);
 
         memory_copy(&compositor_xwm, kept_xwm, sizeof(compositor_xwm));
