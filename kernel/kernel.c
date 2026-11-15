@@ -206,6 +206,59 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //       of the frame. DIRENT_HTREE is passed as the literal 3; the build
 //       asserts it, in namei.c, where the enum is.
 //
+//       READ AGAINST 7.3 (2026-11-15), each body line for line beside the
+//       pristine fs/ext4/namei.c of the signed tarball. The calls and their
+//       arguments: __ext4_read_dirblock(dir, block, 3, "htree_dirblock_to_tree",
+//       1051), an error pointer returned as its errno with nothing else done
+//       (DIRENT_HTREE makes a hole -EFSCORRUPTED, so bh is never NULL);
+//       __fscrypt_prepare_readdir, the out-of-line half of the inline the C
+//       calls, only when S_ENCRYPTED is set, as the inline tests; a negative
+//       answer from it or from fscrypt_fname_alloc_buffer(EXT4_NAME_LEN) is
+//       brelse and that errno, with no free (the C frees nothing there either);
+//       __ext4_check_dir_entry("htree_dirblock_to_tree", 1077, dir, NULL, de,
+//       bh, b_data, b_size, (block << i_blkbits) + (de - b_data) cut to an
+//       unsigned int), whose nonzero answer ends the walk with the count so far;
+//       ext4fs_dirhash(dir, name, name_len, hinfo), a negative answer the count;
+//       fscrypt_fname_disk_to_usr(dir, hash, minor, {name, name_len},
+//       &fname_crypto_str), an error the count without the length put back (as
+//       the C); ext4_htree_store_dirent(dir_file, hash, minor, de, name), the
+//       length put back after it on the encrypted path; __brelse, brelse's
+//       non-NULL half; and fscrypt_fname_free_buffer only where S_ENCRYPTED,
+//       which elsewhere is the C's kfree(NULL). The lines are GCC's, which
+//       numbers a macro call that spans lines by the line of its name: the
+//       pristine call sites preprocessed by the gcc, x86_64, aarch64 and
+//       riscv64 compilers here all give 1051 and 1077 (clang gives the line of
+//       the closing parenthesis, 1080; the kernel is built with GCC).
+//
+//       What the bodies read once and the C reads again: s_blocksize, b_data
+//       and b_size are fixed for a buffer this holds a reference on; i_flags
+//       (encrypted, casefolded) cannot change under the caller's shared
+//       i_rwsem, because setting an encryption policy or the casefold flag
+//       takes it exclusive; the metadata_csum feature is not set or cleared on
+//       a mounted filesystem; s_inodes_count is read once at the top, and
+//       online resize only ever grows it, so a stale count can only send an
+//       entry to the real check, which reads it afresh -- the fast test never
+//       passes an entry the C would refuse. The x86_64 batch skips the hash of
+//       an entry with no inode, which the C computes and throws away: for the
+//       half_md4 names it takes, ext4fs_dirhash allocates nothing and cannot
+//       fail, so no error is lost, and the hinfo->hash it leaves behind (the
+//       last live entry's, not the last entry's) is dead -- ext4_htree_fill_tree
+//       hands hinfo to the next block, which writes it before it reads it, and
+//       ext4_htree_next_block keeps its own hash. With CONFIG_FS_ENCRYPTION off
+//       (no profile here) the fscrypt branches are not built, which is
+//       unreachable for an encrypted directory too, since ext4_readdir has
+//       returned the stub's -EOPNOTSUPP before any of this. No divergence in
+//       what the function does. One defect beside it, found and not fixed:
+//       the riscv64 body sets s0 to the frame's top as GCC does but keeps ra
+//       and the old s0 at L_RA and L_S0, 96 and 88 bytes under it, where
+//       arch/riscv/kernel/stacktrace.c reads the frame record at s0-8 and
+//       s0-16; a stack trace taken in a callee (lockdep, KASAN, a WARN) on a
+//       frame-pointer riscv64 kernel reads the caller's saved s9 and s10 as
+//       the next frame and return address and stops or misreports there. The
+//       same holds for ext4_find_dest_de, offset_iterate_dir,
+//       moonwater_emit_batch and call_filldir; the three dir.c routines below
+//       have the record where it belongs.
+//
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
 //> replace fs/ext4/namei.c htree_dirblock_to_tree
@@ -909,6 +962,35 @@ __asm__(
 //       block is mostly not this loop's. The same image lists every directory
 //       of a reference ext4 image byte-for-byte as the host's kernel does.
 //
+//       READ AGAINST 7.3 (2026-11-15), the three bodies line for line beside
+//       the pristine fs/ext4/namei.c. One fix: the line handed to
+//       __ext4_check_dir_entry was 2050, and 7.3's call is at 2051 -- the
+//       pristine call site preprocessed by every gcc here gives 2051 (GCC numbers
+//       a call that spans lines by the line of the macro's name; clang would
+//       say 2052) -- so the "EXT4-fs error ... ext4_find_dest_de:2050" a
+//       corrupt entry prints, through ext4_error_inode, named the line above
+//       the check. It is 2051 on all three now. The rest agrees: the check's
+//       arguments ("ext4_find_dest_de", 2051, dir, NULL, de, bh, buf, buf_size,
+//       offset) and its nonzero answer as -EFSCORRUPTED; ext4_match's own first
+//       test (no inode, no match) before anything; a casefolded directory, or a
+//       no-key name (disk_name.name NULL), to the real ext4_match, and otherwise
+//       fscrypt_match_name's likely branch -- the lengths equal and the bytes
+//       equal -- made in place, -EEXIST on a match; the room test on a signed
+//       int, a deleted entry all room; offset += rlen; -ENOSPC past top, and
+//       *dest_de and 0 otherwise. A record length of 0 or 0xffff is the block
+//       size for the check and buf_size for the walk, for every page size:
+//       7.3's ext4_rec_len_from_disk has no PAGE_SIZE condition left. Two
+//       things the C does differently and no caller can see: reclen is
+//       ext4_dir_rec_len(fname_len(fname), dir), whose parameter is a __u8, so
+//       the C cuts the name length to eight bits before the sum and the port
+//       cuts the sum to sixteen -- the same number for every length up to 255,
+//       and no longer name gets here (ext4_lookup refuses one with
+//       -ENAMETOOLONG, namei.c:1769, and an encrypted name is bounded by its
+//       policy at 255); and s_inodes_count and i_flags are read once, the
+//       first growing only (online resize) and the second fixed while the
+//       caller holds the directory's i_rwsem exclusive. No lock or reference
+//       is taken by either.
+//
 //> arch x86_64 arm64 riscv64
 //> perf full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
 //> replace fs/ext4/namei.c ext4_find_dest_de
@@ -985,7 +1067,7 @@ __asm__(
     "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
     ".Lfd_slow:      mov     F_OFF(%rsp), %eax\n   mov     %rax, 16(%rsp)\n"
     "        mov     %r14, 0(%rsp)\n   mov     F_BUFSZ(%rsp), %eax\n   mov     %rax, 8(%rsp)\n"
-    "        lea     .Lfd_fn(%rip), %rdi\n   mov     $2050, %esi\n   mov     %r12, %rdx\n"
+    "        lea     .Lfd_fn(%rip), %rdi\n   mov     $2051, %esi\n   mov     %r12, %rdx\n"
     "        xor     %ecx, %ecx\n   mov     %rbx, %r8\n   mov     %r13, %r9\n"
     "        call    __ext4_check_dir_entry\n   test    %eax, %eax\n   jnz     .Lfd_corrupt\n"
     "                \n"
@@ -1098,7 +1180,7 @@ __asm__(
     "                \n"
     "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
     ".Lfd_slow:      ldr     w0, [sp, #F_OFF]\n   str     x0, [sp, #F_ARG]\n   adrp    x0, .Lfd_fn\n"
-    "        add     x0, x0, :lo12:.Lfd_fn\n   mov     w1, #2050\n   mov     x2, x19\n"
+    "        add     x0, x0, :lo12:.Lfd_fn\n   mov     w1, #2051\n   mov     x2, x19\n"
     "        mov     x3, xzr\n   mov     x4, x23\n   mov     x5, x20\n   mov     x6, x21\n"
     "        ldr     w7, [sp, #F_BUFSZ]\n   bl      __ext4_check_dir_entry\n"
     "        cbnz    w0, .Lfd_corrupt\n"
@@ -1229,7 +1311,7 @@ __asm__(
     "                \n"
     "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
     ".Lfd_slow:      lwu     t0, F_OFF(sp)\n   sd      t0, F_ARG(sp)\n   lla     a0, .Lfd_fn\n"
-    "        li      a1, 2050\n   mv      a2, s1\n   li      a3, 0\n   mv      a4, s5\n"
+    "        li      a1, 2051\n   mv      a2, s1\n   li      a3, 0\n   mv      a4, s5\n"
     "        mv      a5, s2\n   mv      a6, s3\n   lw      a7, F_BUFSZ(sp)\n"
     "        call    __ext4_check_dir_entry\n   bnez    a0, .Lfd_corrupt\n"
     "                \n"
@@ -1364,6 +1446,37 @@ __asm__(
 //       made the unwinder report a bad frame in a KASAN and lockdep guest. The
 //       indirect call to the actor goes through the retpoline thunk when the
 //       kernel has one.
+//
+//       READ AGAINST 7.3 (2026-11-15), the three bodies beside the pristine
+//       fs/libfs.c and fs/readdir.c. The calls: offset_dir_lookup(dir,
+//       ctx->pos), NULL being ctx->pos = DIR_OFFSET_EOD; the parent's d_lock,
+//       and per reference the child's, nested with DENTRY_D_LOCK_NESTED where
+//       lockdep is built, around a d_lockref.count++ (dget_dlock); dput of the
+//       reference each batch started from, after the spinlock is let go, and of
+//       the one held on a refusal; no reference is taken at the end of the
+//       directory, so every one taken is given back. Where the C differs and it
+//       does not show: the C emits the entry offset_dir_lookup gave without
+//       testing it again, and the port tests simple_positive on it under the
+//       parent's lock; it reads d_inode, d_hash.pprev, d_name, d_fsdata, i_ino
+//       and i_mode under that lock where the C reads them of a referenced
+//       dentry under none. Both are the same answer for as long as the caller
+//       holds the directory's i_rwsem, which offset_readdir asserts: create,
+//       unlink, rmdir and rename (which moves d_name and d_fsdata) take it
+//       exclusive. A name over 1024 bytes ends the walk as the end of the
+//       directory would; the one user of simple_offset_dir_operations in 7.3 is
+//       shmem (mm/shmem.c:3091), whose lookup is simple_lookup, which refuses a
+//       name over NAME_MAX with -ENAMETOOLONG (fs/libfs.c:71), so there is no
+//       such entry. For the image emit (moonwater_emit_batch), against 7.3's
+//       filldir64: its new FILLDIR_FLAG_NOINTR, a d_type bit that skips the
+//       signal test, is set by neither offset_dir_emit nor ext4's get_dtype, so
+//       the test is filldir64's own; signal_pending is read once a batch where
+//       filldir64 reads it a dirent, which is the answer for a signal that
+//       landed a moment later, and no caller can tell those apart; and the
+//       first dirent of a call (prev_reclen 0) gets d_off 0 in the image where
+//       the C writes its own offset there, prev being dirent -- a value the
+//       next dirent's write or getdents64's put_user of ctx.pos replaces before
+//       the call returns. buf->error is -EINVAL after any dirent written, as
+//       filldir64 leaves it.
 //
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
@@ -2106,6 +2219,31 @@ __asm__(
 //       null fname message is the C's. The layout of struct fname, private to
 //       dir.c, is asserted there.
 //
+//       READ AGAINST 7.3 (2026-11-15), the three bodies beside the pristine
+//       fs/ext4/dir.c and ext4.h, and beside ext4_dx_readdir, whose loop this
+//       runs ahead of. The null fname: __ext4_msg(sb, KERN_ERR, the C's format,
+//       "call_filldir", 554, i_ino, current->comm) and 0 -- 554 is what every
+//       gcc here makes of that __LINE__ (the line of the ext4_msg call; clang
+//       would say 556). Each entry is dir_emit's call: the name and its length,
+//       fname->inode widened to u64, get_dtype (no filetype feature, or a type
+//       of 8 or more, is DT_UNKNOWN; else ext4_filetype_table, the nibbles of
+//       0xac162480), and hash2pos with FMODE_32BITHASH, FMODE_64BITHASH and
+//       is_32bit_api as 7.3 has them (in_compat_syscall under CONFIG_COMPAT,
+//       which is TS_COMPAT or TIF_32BIT; x32 is refused by the build). The
+//       state ext4_dx_readdir is left in is the one its own loop would leave:
+//       on a refusal extra_fname, curr_node and the two hashes name the entry
+//       refused and 1 comes back; at the end of the tree curr_node is the last
+//       node with its hashes and 0 comes back, so the caller's next_node finds
+//       rb_next NULL and refills or ends, as it would have. What the loop does
+//       between nodes and this does not: the !curr_node test, which cannot fire
+//       mid-tree, and inode_eq_iversion, which cannot change inside one call --
+//       the directory's i_rwsem is held shared across it and every change to
+//       its entries takes it exclusive. ctx->pos is set before each entry where
+//       the C sets it once a node; a chain shares one hash, so it is the same
+//       value unless an actor rewrote its own ctx->pos between two entries of a
+//       chain (filldir64, getdents64's, does not). Locks and references: none
+//       in either.
+//
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 ext4 getdents: 1000 names 51.1 -> 40.8 us (-20%)
 //> replace fs/ext4/dir.c call_filldir
@@ -2544,6 +2682,29 @@ __asm__(
 //       churning an ext4 directory drew no report and the 4 KiB slab went from
 //       4620 objects in use to 141 after the caches were dropped (it is not
 //       growing).
+//
+//       READ AGAINST 7.3 (2026-11-15), the three routines on each of the three
+//       architectures beside the pristine fs/ext4/dir.c and include/linux/slab.h.
+//       ext4_dir_open is 7.3's kzalloc_obj(*info) with the arena's 32 bytes
+//       more, -ENOMEM and private_data untouched when it fails, 0 and
+//       private_data set when not. ext4_htree_store_dirent: the object 7.3's
+//       kzalloc_flex(*new_fn, name, len + 1) asks for, zeroed, its fields
+//       written as the C writes them (hash, minor_hash, le32 inode, name_len cut
+//       to the __u8 it is, file_type, the name's len bytes; the NUL and next
+//       are the zeroing), -ENOMEM with nothing changed when the chunk cannot be
+//       had; then the C's descent (hash, then minor hash; an equal pair goes
+//       second on the node's chain and returns 0) and rb_link_node and
+//       rb_insert_color(&new->rb_hash, &info->root). free_rb_tree_fname frees
+//       what the C's postorder walk frees -- every fname of the tree -- and
+//       leaves root as RB_ROOT, curr_node and extra_fname as the C leaves them
+//       (untouched; ext4_dx_readdir clears them itself). The arena is sound
+//       only if every dir_private_info comes from this ext4_dir_open and every
+//       free_rb_tree_fname is given &info->root: in 7.3 ext4_dir_open is the
+//       only allocation (dir.c:689), and the calls are ext4_htree_free_dir_info
+//       and ext4_dx_readdir's two, all &info->root. The allocations go to
+//       __kmalloc_noprof, the entry the C's kzalloc reaches through alloc_hooks:
+//       the same caches and flags; what is lost is the allocation-profiling tag
+//       of CONFIG_MEM_ALLOC_PROFILING, which no profile here turns on.
 //
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
