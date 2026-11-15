@@ -1246,6 +1246,8 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 }
 
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
+// Where the window lists start in a table whose buffers are buffer bytes each: after the header and every row's two buffers.
+#define WINDOWS_LISTS_AT(buffer) (WINDOWS_HEADER + (unsigned long)(buffer) * 2 * WINDOWS)
 
 /*
         A window's list (ui/ui.c's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
@@ -3225,7 +3227,7 @@ static int windows_lists_fit(const struct windows *table, unsigned long size, un
 
         if (!lists)
                 return 1;
-        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_HEADER + buffer * 2 * WINDOWS || lists > size)
+        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_LISTS_AT(buffer) || lists > size)
                 return 0;
         return (size - lists) / WINDOW_LIST_BYTES >= WINDOWS;
 }

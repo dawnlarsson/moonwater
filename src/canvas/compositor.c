@@ -20981,12 +20981,11 @@ static void compositor_lists_set(int on)
 */
 static int compositor_table(void)
 {
-        unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
         // Every window's buffer as large as the largest window may ever be, a row of it stride pixels: for the session,
-        // as the table is sealed at its size and mapped by every window.
+        // as the table is sealed at its size and mapped by every window. They start at WINDOWS_HEADER (window.c).
         unsigned long buffer = compositor_buffer_room();
         // And a window list for every row after the pictures (window.c's WINDOW_LIST_BYTES): sparse, so only what a program writes is there.
-        unsigned long bytes = header + buffer * 2 * WINDOWS + WINDOW_LIST_BYTES * WINDOWS;
+        unsigned long bytes = WINDOWS_LISTS_AT(buffer) + WINDOW_LIST_BYTES * WINDOWS;
         long handle, mapped;
         p8 name[48];
 
@@ -21030,7 +21029,7 @@ static int compositor_table(void)
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, WINDOWS_MODE, 0, 0, 0);
 
         compositor.table = (struct windows *)mapped;
-        compositor.pixels = header;
+        compositor.pixels = WINDOWS_HEADER;
         compositor.buffer = buffer;
         compositor.table->output_width = (unsigned int)compositor_most_width();
         compositor.table->output_height = (unsigned int)compositor_most_height();
@@ -21039,9 +21038,9 @@ static int compositor_table(void)
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
         compositor.table->refused = compositor.memfd_failed;
-        compositor.table->pixels = header;
+        compositor.table->pixels = WINDOWS_HEADER;
         compositor.table->buffer = buffer;
-        compositor.table->lists = header + buffer * 2 * WINDOWS;
+        compositor.table->lists = WINDOWS_LISTS_AT(buffer);
         compositor.table->list_bytes = WINDOW_LIST_BYTES;
         compositor_lists_set(0);
         compositor_table_outputs();
