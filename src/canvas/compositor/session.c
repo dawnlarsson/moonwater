@@ -433,28 +433,30 @@ static unsigned int compositor_ink_role(int role)
 }
 
 
-// The wheel's glide (ui_wheel_turn), as the table keeps it: a change knocks every window, as a theme change does.
-static void compositor_wheel_publish(unsigned int off)
+// A setting the table keeps for every window, a field of it or two (other none for one), set to what was read: a change knocks every
+// window (themed counts up), as a theme change does, and the same value knocks none. The callers have a table.
+static void compositor_table_publish(unsigned int *field, unsigned int value, unsigned int *other, unsigned int other_value)
 {
-        struct windows *table = compositor.table;
-
-        if (!table || table->wheel_off == off)
+        if (*field == value && (!other || *other == other_value))
                 return;
-        table->wheel_off = off;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        *field = value;
+        if (other)
+                *other = other_value;
+        __atomic_add_fetch(&compositor.table->themed, 1, __ATOMIC_RELEASE);
 }
 
-// The caret's blink and width (ui.c's ui_caret_wave and ui_caret_thick), as the table keeps them, each one more than its place:
-// a change knocks every window, as a theme change does.
+// The wheel's glide (ui_wheel_turn), as the table keeps it.
+static void compositor_wheel_publish(unsigned int off)
+{
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->wheel_off, off, 0, 0);
+}
+
+// The caret's blink and width (ui.c's ui_caret_wave and ui_caret_thick), as the table keeps them, each one more than its place.
 static void compositor_caret_publish(unsigned int speed, unsigned int thick)
 {
-        struct windows *table = compositor.table;
-
-        if (!table || (table->caret_speed == speed && table->caret_thick == thick))
-                return;
-        table->caret_speed = speed;
-        table->caret_thick = thick;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->caret_speed, speed, &compositor.table->caret_thick, thick);
 }
 
 // The width of a lit edge or corner (compositor_lit_px): the lit edge is drawn again at the old width and at the new, so the
@@ -470,39 +472,26 @@ static void compositor_border_publish(unsigned int width)
                 compositor_damage_line(compositor.lit_row);
 }
 
-// The language the windows speak (ui/ui.c), as the table keeps it: a change knocks every window, as a theme change does.
+// The language the windows speak (ui/ui.c), as the table keeps it.
 static void compositor_language_publish(unsigned int code)
 {
-        struct windows *table = compositor.table;
-
-        if (!table || table->language == code)
-                return;
-        table->language = code;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->language, code, 0, 0);
 }
 
-// The text's size in percent (ui.c's ui_em), as the table keeps it, 0 for 100: a change knocks every window, as a theme change does.
+// The text's size in percent (ui.c's ui_em), as the table keeps it, 0 for 100.
 static void compositor_text_publish(unsigned int percent)
 {
-        struct windows *table = compositor.table;
-
-        if (!table || table->text_scale == percent)
-                return;
-        table->text_scale = percent;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->text_scale, percent, 0, 0);
 }
 
 // The scroll body's switches, as the table keeps them (scroll_off: WINDOW_SCROLL_FLIP, _STOPS, _STILL and _DRAG, _DRAG alone the standard) with the
-// trackpad's speed in percent (scroll_speed). A change knocks every window, as a theme change does.
+// trackpad's speed in percent (scroll_speed).
 static void compositor_scroll_publish(unsigned int off, unsigned int speed)
 {
-        struct windows *table = compositor.table;
-
-        if (!table || (table->scroll_off == off && table->scroll_speed == speed))
-                return;
-        table->scroll_off = off;
-        table->scroll_speed = speed;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->scroll_off, off, &compositor.table->scroll_speed, speed);
 }
 
 // Whether a Scrolling switch is on for the word its file holds (the row's standard when it holds none, or none of its words). A switch row's
