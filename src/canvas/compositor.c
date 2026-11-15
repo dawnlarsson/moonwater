@@ -51,7 +51,8 @@
 
 /*
         The files under /run/moonwater that change what the compositor does: switches for the machine's owner and the checks, each
-        only looked for (it is there or it is not), and none a setting a person keeps (those are under /root). Who looks, and when:
+        only looked for (it is there or it is not), and none a setting a person keeps (those are under /root). Who looks, and when; whoever
+        adds a switch file adds its row here:
 
             present-early     compositor.c's start, once: every present by the old rule, early in its period (compositor_late.early)
             present-wait      compositor.c's start, once: every job of the card's present waited for in place (compositor_card.nowait 0)
@@ -61,6 +62,10 @@
             gpu-gfx10         gpu.c, gpu_start: the cards of family 143 (RDNA1 and 2) let in, which no one has run the kernels on
             touch-trace       window.c, window_trace_touch, at each touch-down, the compositor's and each program's: the trace appended
                               to touch-trace.log
+            layers-off        wayland_host.c, compositor_wl_start, once: a client's subsurfaces laid into its window's picture as before,
+                              not drawn as layers of their own
+            cursor-plane-probe  kms.c, at the pointer's start: the cursor plane tried on i915 and xe, with a vblank probe that keeps it only
+                              where the pipe runs on with it
 
         And the files that are not switches: keys (the machine script's chords, written by the script before the compositor starts and read
         once then, input.c) and the FIFO keys.fire a chord's name is written to; record/ (record.h: start and report, taken at a look when the
