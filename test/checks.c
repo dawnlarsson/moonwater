@@ -131150,6 +131150,15 @@ static void check_compositor_held(void)
     compositor_take(1);
     check("held: a picture no card job reads in place is said taken at once, and not held",
           !compositor_card_reads(1) && table->shown[1] == table->frame[1] && !(compositor.held_rows & 2u));
+    // A job of the card still reading the row's picture in place (the late present's): the next picture is held as the direct row's is.
+    compositor_card.on = 1, compositor_card.rows = 1u << 1;
+    table->buffer_index[1] = 1;
+    table->frame[1]++;
+    compositor_take(1);
+    check("held: a picture a card job may still read in place is not said taken, and is held for the job's end",
+          compositor_card_reads(1) && table->shown[1] != table->frame[1] && (compositor.held_rows & 2u) &&
+              compositor.taken_held[1] == table->frame[1]);
+    compositor_card.on = 0, compositor_card.rows = 0;
     compositor.held_rows = 0;
 }
 
