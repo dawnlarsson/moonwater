@@ -115443,10 +115443,21 @@ static fn splash_sources(void)
                   splash_check_source("kernel/patch/apply", "efi_moonwater_splash(handle);") == 1 &&
                   splash_check_source("kernel/patch/apply", "efi_decompress_kernel(&kernel_entry, boot_params);") == 1 &&
                   splash_check_source("kernel/patch/apply", "dpy = setup_primary_display();") == 1);
-        check("the compositor draws no splash of its own: no word of one is left in it or in the settings table",
-              splash_check_source("src/canvas/compositor.c", "splash") == 0 &&
-                  splash_check_source("src/canvas/compositor.c", "Splash") == 0 &&
-                  splash_check_source("src/sh/registry.c", "splash") == 0 && splash_check_source("src/sh/registry.c", "Splash") == 0);
+        {
+                // compositor.c and the parts it includes (src/canvas/compositor/, test/compositor_split.py's cut list).
+                static const char *const compositor_files[] = {
+                    "src/canvas/compositor.c", "src/canvas/compositor/compose.c", "src/canvas/compositor/keymap.c",
+                    "src/canvas/compositor/pointer.c", "src/canvas/compositor/outputs.c", "src/canvas/compositor/damage.c",
+                    "src/canvas/compositor/glass.c", "src/canvas/compositor/scanout.c", "src/canvas/compositor/gpu_host.c",
+                    "src/canvas/compositor/present.c", "src/canvas/compositor/kms.c", "src/canvas/compositor/session.c",
+                    "src/canvas/compositor/manage.c", "src/canvas/compositor/input.c"};
+                b32 none = splash_check_source("src/sh/registry.c", "splash") == 0 && splash_check_source("src/sh/registry.c", "Splash") == 0;
+
+                for (unsigned int at = 0; at < sizeof(compositor_files) / sizeof(compositor_files[0]); at++)
+                        none = none && splash_check_source((string_address)compositor_files[at], "splash") == 0 &&
+                               splash_check_source((string_address)compositor_files[at], "Splash") == 0;
+                check("the compositor draws no splash of its own: no word of one is left in it, its parts or the settings table", none);
+        }
 }
 
 static fn splash_scenes(void)

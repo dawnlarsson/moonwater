@@ -828,7 +828,7 @@ attacker gets its invariants here once there is a lane that proves them.
 
 ## The clipboard (Canvas)
 
-The compositor (`src/canvas/compositor.c`, `compositor_clip_*`) holds two
+The compositor (`src/canvas/compositor/manage.c`, `compositor_clip_*`) holds two
 selections: CLIPBOARD (copy and paste) and PRIMARY (the last selection, pasted
 with the middle button). Programs reach them through the window table
 (`src/canvas/window.c`, `windows_clip_*`); scripts through
