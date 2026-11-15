@@ -105,6 +105,26 @@ DOMAIN_BUDGET = {"text": "full", "awk": "full", "builtins": "full",
 #       util-linux's new one. A run now names any tool that has moved since.
 #       Change a version here when the pins and floors are taken again
 #       against the new one, not before.
+#
+#       A box whose own tools are not these (Ubuntu 24.04 on 2026-11-15:
+#       bash 5.2.21, dash 0.5.12, coreutils 9.4 and on down) can build the
+#       pinned releases into a prefix and put its bin first on PATH, which
+#       moves every program a lane finds through PATH and quiets the NOTE a
+#       run prints. It does not move the shells: SHELL_MODES runs /bin/bash
+#       and /bin/dash by absolute path, so the shell and builtins domains
+#       still compare against the box's own bash and dash, and with bash
+#       first on PATH the NOTE says nothing about it. Nor is dash ever
+#       checked off a pacman box: its version is asked of pacman alone. And
+#       awk is whatever PATH names: on that box it was mawk, with no gawk
+#       installed, so the awk lane had been comparing against mawk and the
+#       gawk row here never fired (nor the util-linux one: no hexdump there
+#       either). The baselines of 2026-11-15 were taken with the pinned
+#       builds in /opt/moonwater-reference/bin first on PATH, inside
+#       `unshare -m` with the pinned bash and dash bind-mounted over
+#       /usr/bin/bash and /usr/bin/dash. That dash is upstream's defaults
+#       with libedit, as Arch (where these pins were taken) builds it:
+#       $LINENO set and fc present, which Debian's --disable-lineno dash
+#       without libedit lacks.
 REFERENCE_VERSIONS = {
     "bash": ("bash --version", rb"version (\d+\.\d+\.\d+)", "5.3.20"),
     # dash will not say its version; a pacman box can.
