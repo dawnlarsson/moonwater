@@ -547,6 +547,18 @@ def check(tree):
     if 'compositor_text(root)' not in written[DIFFERENTIAL] and '"src/canvas/compositor.c"' in written[DIFFERENTIAL]:
         raise Refused('%s still reads compositor.c alone' % DIFFERENTIAL)
     say('test/differential.py reads the compositor through compositor_text, which gives it as it was')
+    # The core_state lane's canvas_sources (differential.py) cuts these sections out of that text for CHECK_canvas_cells: each is
+    # there once, and the same text, so compositor-backend.inc and CHECK_canvas_cells' preprocessed text are what they were.
+    flat = scope['compositor_text'](tree)
+    for name in ('backend: the look on the CPU', 'keymap: what a key means', 'pointer: what a hand means',
+                 'outputs: the screens one desktop spans'):
+        start, end = '/* ---- %s ---- */' % name, '/* ---- end of the %s ---- */' % name.split(':')[0]
+        if original.count(start) != 1 or flat.count(start) != 1:
+            raise Refused('canvas_sources: the section line %r is not once in compositor.c before and after' % start)
+        if flat[flat.index(start):flat.index(end, flat.index(start))] != original[original.index(start):original.index(end, original.index(start))]:
+            raise Refused('canvas_sources: the %s section differs after the split' % name.split(':')[0])
+    say('test/differential.py canvas_sources: the backend, keymap, pointer and outputs sections it cuts for CHECK_canvas_cells are '
+        'each once and the same text after the split')
     return written
 
 
