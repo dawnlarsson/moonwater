@@ -178835,6 +178835,59 @@ b32 main()
                                 string_format(log, "  terminal list pool: %p coverage copies, %p tone sets, %p bytes\n", covers, tones, (positive)ui_app_list.scene.used);
                         }
                 }
+                /*
+                        An idle terminal presents no frame after it settles: with the keys and a caret on the grid, nothing said and nothing
+                        moved, a frame is due only where the caret's cover changes. Its solid phase is drawn on the processor into both
+                        pictures, then the list mode is on and the clock in the off phase: the first knock records the off caret as a list,
+                        and each knock after it (the compositor took the list, the blink's wait is read again) presents nothing. A list
+                        frame that kept no caret for buffer 0 left the solid one there, and the owner's machine took a list at every knock.
+                */
+                {
+                        struct windows address_to table = terminal.own.table;
+                        unsigned int own = terminal.own.row, first_lists = 0, later_lists = 0, speed_was = ui_kit.caret_speed;
+                        positive since = 20000000000ull, cycle, at, clock_was = ui_kit.test_clock, now_was = (positive)ui_kit.now, since_was = terminal.caret.since;
+                        b32 focused_was = terminal.focused, caret_on;
+                        long timeout = -1;
+
+                        ui_kit.caret_speed = UI_CARET_NORMAL;
+                        cycle = (positive)ui_caret_cycle();
+                        terminal.focused = true;
+                        ui_kit.now = ui_kit.test_clock = since;
+                        terminal_caret_step(since, &timeout);
+                        terminal.caret.since = since;
+                        table->list_mode = 0;
+                        for (unsigned int k = 0; k < 2; k++)
+                        {
+                                table->shown[own] = table->frame[own];
+                                terminal_frame();
+                        }
+                        caret_on = terminal_caret_index != ~0u && terminal.caret_cover[0] == UI_CARET_FULL && terminal.caret_cover[1] == UI_CARET_FULL;
+                        table->list_mode = 1;
+                        for (unsigned int knock = 0; knock < 20; knock++)
+                        {
+                                unsigned int listed = render_generation(), framed = table->frame[own];
+
+                                at = since + cycle / 2 + (positive)knock * 1000000ull;
+                                ui_kit.now = ui_kit.test_clock = at;
+                                table->shown[own] = table->frame[own];
+                                terminal.dirty = false;
+                                timeout = -1;
+                                terminal_caret_step(at, &timeout);
+                                if (terminal.dirty && terminal_frame())
+                                        terminal.dirty = false;
+                                if (!knock)
+                                        first_lists = render_generation() != listed && table->frame[own] != framed;
+                                else
+                                        later_lists += table->frame[own] - framed;
+                        }
+                        string_format(log, "  idle terminal: the off caret's list at the first knock %p, frames at the next 19 knocks %p\n",
+                                      (positive)first_lists, (positive)later_lists);
+                        check("terminal lists: an idle terminal with the keys records its caret's off phase once, and presents no frame after it settles",
+                              caret_on && first_lists && later_lists == 0);
+                        terminal.dirty = false;
+                        terminal.focused = focused_was, terminal.caret.since = since_was, ui_kit.caret_speed = speed_was;
+                        ui_kit.test_clock = clock_was, ui_kit.now = now_was;
+                }
                 render_listing = false;
                 render_state = saved;
                 ui_app_list.ready = 0, ui_app_ui = null;

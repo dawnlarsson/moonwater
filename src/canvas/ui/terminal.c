@@ -1704,6 +1704,11 @@ static b32 terminal_list_frame(const struct window_cell address_to now, unsigned
         terminal.margin_spoiled[0] = terminal.margin_spoiled[1] = true;
         terminal.forced = false;
         terminal.shown = 0;
+        // The list is the picture in buffer 0, and its caret is the one this frame drew: the blink's wait (terminal_caret_step) reads
+        // it there, and asks no frame till the cover changes. Left unsaid, a focused idle terminal in its caret's off phase recorded a
+        // list at every knock, one a screen period, for a picture that did not change.
+        terminal.caret_at[0] = terminal_caret_index, terminal.caret_cover[0] = terminal_caret_cover;
+        terminal.caret_block[0] = terminal_caret_block, terminal.caret_marks[0] = terminal_caret_marks;
         return true;
 }
 
