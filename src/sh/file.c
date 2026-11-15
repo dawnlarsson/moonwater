@@ -42941,7 +42941,8 @@ static bool touch_stamp(string_address text, b64 now, b64 address_to out)
         b64 fraction = 0;
         bool has_fraction = false;
 
-        string_digits(text, address_of digits);
+        //      Only how many digits lead is wanted here; their value is read below, field by field.
+        (void)string_digits(text, address_of digits);
 
         if (string_is(text + digits, '.'))
         {
@@ -52993,7 +52994,8 @@ static bool xargs_count_value(string_address value, p8 letter, positive address_
         if (string_is(digits, '+'))
                 digits++;
 
-        string_digits(digits, address_of taken);
+        //      Only how many digits there are; the value is the checked read below, which saturates.
+        (void)string_digits(digits, address_of taken);
         string_digits_checked_exact(digits, 10, address_of made);
 
         if (!taken || string_get(digits + taken))

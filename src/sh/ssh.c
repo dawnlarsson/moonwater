@@ -2281,8 +2281,9 @@ static positive ssh_run(string_address address_to words, bipolar output)
                 return 255;
         if (!child)
         {
-                if (output >= 0)
-                        system_call_3(syscall(dup3), (positive)output, 1, 0);
+                //      A program whose output could not be given it is not run.
+                if (output >= 0 && system_call_3(syscall(dup3), (positive)output, 1, 0) < 0)
+                        system_call_1(syscall(exit_group), 127);
                 (void)descriptors_close_except(3, descriptors_none, descriptors_none);
                 system_execute(words[0], words, empty);
                 system_call_1(syscall(exit_group), 127);
@@ -2371,7 +2372,9 @@ static DEAD_END fn ssh_view_enter(const ssh_settings address_to settings)
                         ssh_child_refuse("refused: sshd -T could not be started", null, 2);
                 if (!child)
                 {
-                        system_call_3(syscall(dup3), (positive)pipe_ends[1], 1, 0);
+                        //      With no pipe for what it says, sshd -T says nothing, which refuses the start below.
+                        if (system_call_3(syscall(dup3), (positive)pipe_ends[1], 1, 0) < 0)
+                                system_call_1(syscall(exit_group), 127);
                         (void)descriptors_close_except(3, descriptors_none, descriptors_none);
                         system_execute(test[0], test, empty);
                         system_call_1(syscall(exit_group), 127);
@@ -2480,8 +2483,10 @@ static b32 ssh_serve(bipolar ready)
                 return 1;
         if (!child)
         {
-                system_call_3(syscall(dup3), (positive)ends[1], 2, 0);
-                system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
+                //      A server whose lines would reach no log is not started.
+                if (system_call_3(syscall(dup3), (positive)ends[1], 2, 0) < 0 ||
+                    system_call_3(syscall(dup3), (positive)ends[1], 1, 0) < 0)
+                        system_call_1(syscall(exit_group), 2);
                 (void)system_signal_install(15, 0, 0, 0, null);
                 ssh_view_enter(address_of settings);
         }
