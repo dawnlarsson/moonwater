@@ -2683,7 +2683,7 @@ static int compositor_osk_row(void)
 }
 
 // A keyboard that is taken as one is plugged in (WINDOWS_INPUT_KEYBOARD). The headless compositor's fifo is not one.
-static b32 compositor_osk_physical(void)
+static b32 compositor_keyboard_plugged(void)
 {
         for (unsigned int at = 0; at < compositor.input_count; at++)
                 if (compositor.inputs[at] >= 0 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
@@ -2706,7 +2706,7 @@ static b32 compositor_osk_starts(void)
 {
         if (compositor.osk_setting == COMPOSITOR_OSK_ON)
                 return 1;
-        return compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_osk_touch() || !compositor_osk_physical());
+        return compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_osk_touch() || !compositor_keyboard_plugged());
 }
 
 // A row put away (the keyboard, while nothing has its field) or shown again; its picture is drawn again both times.
@@ -2790,7 +2790,7 @@ static void compositor_osk_publish(void)
         table->osk_setting = compositor.osk_setting;
         table->osk_shown = compositor.osk_shown;
         table->osk_input = compositor.osk_typed ? 2 : compositor.owner != COMPOSITOR_PREDICT_MOUSE ? 1 : 0;
-        table->osk_physical = compositor_osk_physical();
+        table->osk_physical = compositor_keyboard_plugged();
         // The layout's name, its two letters packed (us is 'u' | 's' << 8): the keyboard lays its letters out by it (osk.c).
         table->osk_layout = (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[0] |
                             (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[1] << 8;
@@ -2824,7 +2824,7 @@ static void compositor_osk_sync(void)
         }
         if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF &&
             !compositor.osk_turned)
-                want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_osk_physical();
+                want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_keyboard_plugged();
         for (unsigned int row = 0; row < WINDOWS; row++)
                 if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
                         compositor_osk_unpan((int)row);
