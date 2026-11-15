@@ -52976,6 +52976,9 @@ def fuzz_judge(chains, results, user):
             if kind == "roundtrip-a" and first and second:
                 shown = (bytes.fromhex(following["out"]) + bytes.fromhex(following["err"])).lower()
                 said = [bytes.fromhex(a) for a in run["argv"][len(following["argv"]):]]
+                #   A word a number row keeps as its number is shown as that number.
+                standing = FUZZ_NUMBER_WORDS.get(tuple(bytes.fromhex(a) for a in following["argv"]), {})
+                said = [standing.get(word.lower(), word) for word in said]
                 if not all(word.lower() in shown for word in said):
                     note("a setting that was taken is not what is then shown", number, following,
                          "%s => %r" % (fuzz_show(said), shown[:160]))
@@ -53023,6 +53026,39 @@ def fuzz_judge(chains, results, user):
             if change["what"] == "created" and change["path"].count("/") == 1:
                 note("a new entry at the root of the machine", number, None, change["path"])
     return found
+
+
+def fuzz_number_words(registry):
+    """What the words of the settings table's number rows are shown as, by
+    the row's command words: the tree keeps a word that stands for a number
+    as the number (src/sh/registry.c setting_parse), so a percent row's three
+    words are 60, 100 and 160 (Scroll speed: slow, normal, fast), and
+    `default` of a row whose .reset is a number is that number (Volume reads
+    back "100 percent"). A row with no .reset keeps and shows the word
+    default (setting_reset), and its default is left as it is said."""
+    words = {}
+    for chunk in registry.split("SETTING_PLAIN_ROW(")[1:]:
+        chunk = re.split(r"\n\s*(?://|SETTING_|#)", chunk)[0]
+        if "SETTING_NUMBER" not in chunk:
+            continue
+        found = re.search(r'\(("[^"]+"(?:,\s*"[^"]+")*)\),\s*(?:"[^"]*"|null),\s*(?:"([^"]*)"|null)', chunk)
+        if not found:
+            continue
+        path = tuple(word.encode() for word in re.findall(r'"([^"]+)"', found.group(1)))
+        unit = re.search(r'\.unit = "([^"]*)"', chunk)
+        reset = re.search(r'\.reset = "([0-9]+)"', chunk)
+        shown = {}
+        if reset:
+            shown[b"default"] = reset.group(1).encode()
+        named = (found.group(2) or "").split()
+        if unit and unit.group(1) == "percent" and len(named) == 3:
+            shown.update(zip((word.encode() for word in named), (b"60", b"100", b"160")))
+        if shown:
+            words[path] = shown
+    return words
+
+
+FUZZ_NUMBER_WORDS = {}
 
 
 def harness_moonwater_cli_fuzz(argv):
@@ -53146,6 +53182,7 @@ def harness_moonwater_cli_fuzz(argv):
               f"{len(verbs)} verbs, {len(commands)} usage lines")
         rng = random.Random(args.seed)
         sources = "".join(path.read_text(errors="replace") for path in sorted((root / "src").rglob("*.c")))
+        FUZZ_NUMBER_WORDS.update(fuzz_number_words((root / "src/sh/registry.c").read_text(errors="replace")))
         files = {name for name in re.findall(r'"(/root/[A-Za-z0-9._-]+|/etc/[A-Za-z0-9._-]+|/run/moonwater/[A-Za-z0-9._-]+)"', sources)
                  if name not in ("/root/main.moonwater.sh", "/root/.nix-channels", "/root/link")}
         #   The state directory's files are named in the sources as the directory's macro and a leaf.
