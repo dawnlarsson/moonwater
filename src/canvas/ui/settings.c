@@ -1112,7 +1112,10 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
 #define SETTINGS_KERNEL_CASE(name, key, text) case WINDOWS_ISSUE_KERNEL_##name:
         WINDOWS_KERNEL_CLASSES(SETTINGS_KERNEL_CASE)
 #undef SETTINGS_KERNEL_CASE
-        case WINDOWS_ISSUE_RADIO: string_copy_bounded((string_address)into, (string_address)issue->detail, room); break;
+        case WINDOWS_ISSUE_RADIO:
+        case WINDOWS_ISSUE_NOTIFICATION: // a program's notifications (the bus's org.freedesktop.Notifications): "summary - body", the program's own words
+                string_copy_bounded((string_address)into, (string_address)issue->detail, room);
+                break;
         default: language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code); break;
         }
 }
@@ -1144,7 +1147,7 @@ static int settings_sub_rows(int row, int count)
         {
                 const struct windows_issue address_to issue = &settings_board.issue[i];
 
-                if (!issue->used || !windows_issue_same(issue->key, key))
+                if (!issue->used || !windows_issue_same(issue->key, key) || issue->code == WINDOWS_ISSUE_NOTIFICATION)
                         continue;
                 settings_issue_text(issue, text, sizeof(text));
                 next = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
@@ -1154,7 +1157,7 @@ static int settings_sub_rows(int row, int count)
                         settings_sub[settings_sub_count - 1].code = issue->code;
                 count = next;
                 // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
-                if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_RADIO))
+                if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_NOTIFICATION))
                         count = settings_sub_put(section, true, null, issue->detail, count);
         }
         // The kernel's notices row lists them with one line that dismisses every kernel notice, after the last of them.
