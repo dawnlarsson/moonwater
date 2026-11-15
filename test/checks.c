@@ -196375,6 +196375,166 @@ static void db_test_notifications(void)
         dbus_start(&db_host);
 }
 
+/*
+        File descriptors passed (SCM_RIGHTS, 21dcc3d), every cap with a row: the descriptors a client may have waiting (DBUS_FDS), a
+        message that names more than came with it, a callee that did not ask for them, a listener whose queue of them is full, and a
+        client that goes with descriptors queued both ways. The bus is root's and holds what every client sends it, so each of them
+        is closed exactly once, whatever path it took: the fake operations count every descriptor made and closed.
+*/
+#define DB_FDS 4096
+static unsigned char db_fd_open[DB_FDS];
+static int db_fd_next, db_fd_twice;
+
+static int db_fd_new(void)
+{
+        int fd = db_fd_next++;
+
+        db_fd_open[fd] = 1;
+        return fd;
+}
+
+static int db_fd_dup(int fd)
+{
+        if (fd < 0 || fd >= DB_FDS || !db_fd_open[fd])
+                return -1;
+        return db_fd_new();
+}
+
+static void db_fd_close(int fd)
+{
+        if (fd < 0 || fd >= DB_FDS || !db_fd_open[fd])
+                db_fd_twice++;
+        else
+                db_fd_open[fd] = 0;
+}
+
+static int db_fds_open(void)
+{
+        int n = 0;
+
+        for (int k = 0; k < DB_FDS; k++)
+                n += db_fd_open[k];
+        return n;
+}
+
+// A client that agreed to descriptors: authenticated, NEGOTIATE_UNIX_FD, BEGIN, Hello.
+static long db_connect_fds(void)
+{
+        long slot = dbus_connect(1000, 1000);
+        char text[200];
+
+        db_feed(slot, "\0AUTH EXTERNAL 31303030\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n", 1 + 24 + 19 + 7);
+        db_take_text(slot, text, sizeof text);
+        db_hello(slot);
+        db_drain(slot);
+        return strstr(text, "AGREE_UNIX_FD") ? slot : -1;
+}
+
+// A message carrying count descriptors (its UNIX_FDS field says `says`), the descriptors given to the bus first, as a read gives them.
+static void db_send_fds(long slot, unsigned type, const char *dest, const char *member, int count, unsigned long says)
+{
+        struct db_call c;
+        struct dbus_fields f = {"/o", "org.example.Fd", member, "", dest, "", says ? "h" : "", 0, 0};
+        int fds[DBUS_FDS + 8];
+
+        for (int k = 0; k < count; k++)
+                fds[k] = db_fd_new();
+        if (count)
+                dbus_in_fds(slot, fds, count);
+        c.w = (struct dbus_out){c.bytes, 0, sizeof c.bytes, 0};
+        dbus_o_header_fds(&c.w, type, 0, ++db_serial, &f, says);
+        c.body = c.w.length;
+        if (says)
+                dbus_o_u32(&c.w, 0);
+        db_send(slot, &c);
+}
+
+static void db_test_fds(void)
+{
+        long callee, caller, plain, listener[3];
+        const unsigned char *bytes;
+        const int *fds;
+        long n, nfds;
+        struct db_seen s;
+
+        db_reset();
+        memset(db_fd_open, 0, sizeof db_fd_open);
+        db_fd_next = 3, db_fd_twice = 0;
+        dbus_set_fd_ops(db_fd_dup, db_fd_close);
+        callee = db_connect_fds();
+        caller = db_connect_fds();
+        DBCHECK(callee >= 0 && caller >= 0, "with descriptor operations the bus agrees to NEGOTIATE_UNIX_FD");
+        db_request(callee, "org.example.Fds", 0);
+        db_drain(callee);
+
+        // a call with two, to a callee that asked for them: queued with the call, given with it, closed once sent
+        db_send_fds(caller, DBUS_CALL, "org.example.Fds", "Take", 2, 2);
+        n = dbus_out_fds(callee, &bytes, &fds, &nfds);
+        DBCHECK(n > 0 && nfds == 2 && db_fds_open() == 2, "a call with two descriptors reaches its callee with its two (%ld, %d open)", nfds, db_fds_open());
+        dbus_sent_fds(callee);
+        dbus_sent(callee, n);
+        DBCHECK(db_fds_open() == 0 && !db_fd_twice, "and the bus closes its own once they are sent (%d open)", db_fds_open());
+
+        // more than DBUS_FDS waiting: the client is ended and every one closed
+        {
+                int many[DBUS_FDS + 1];
+                long greedy = db_connect_fds();
+
+                for (int k = 0; k <= DBUS_FDS; k++)
+                        many[k] = db_fd_new();
+                dbus_in_fds(greedy, many, DBUS_FDS + 1);
+                DBCHECK(dbus_dead(greedy) && db_fds_open() == 0, "a client that sends %d descriptors at once is ended and they are closed (%d open)", DBUS_FDS + 1,
+                        db_fds_open());
+                dbus_drop(greedy);
+        }
+
+        // a message that says more than came with it ends its sender; the ones that came are closed with it
+        {
+                long liar = db_connect_fds();
+
+                db_send_fds(liar, DBUS_CALL, "org.example.Fds", "Take", 1, 2);
+                DBCHECK(dbus_dead(liar), "a message that names two descriptors with one sent ends its sender");
+                dbus_drop(liar);
+                DBCHECK(db_fds_open() == 0, "and the one is closed (%d open)", db_fds_open());
+        }
+
+        // a callee that did not ask for descriptors: the call is an error to its caller and they are closed
+        plain = db_connect(1000);
+        db_hello(plain);
+        db_request(plain, "org.example.Plain", 0);
+        db_drain(plain);
+        db_drain(caller);
+        db_send_fds(caller, DBUS_CALL, "org.example.Plain", "Take", 1, 1);
+        db_next(caller, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.InvalidArgs") && !db_queued(plain) && db_fds_open() == 0,
+                "a call with a descriptor to a callee that did not ask for them is InvalidArgs to the caller (not a full queue's error), and it is closed (%d open)",
+                db_fds_open());
+
+        // a signal with one to three listeners: a copy each, the one sent closed; a listener whose queue of them is full is passed by
+        for (int k = 0; k < 3; k++)
+        {
+                listener[k] = db_connect_fds();
+                db_rule(listener[k], "type='signal',interface='org.example.Fd'");
+                db_drain(listener[k]);
+        }
+        db_send_fds(caller, DBUS_SIGNAL, "", "Shared", 1, 1);
+        DBCHECK(db_fds_open() == 3, "a signal with a descriptor to three listeners is three copies, the one sent closed (%d open)", db_fds_open());
+        for (int k = 0; k < DBUS_FDS; k++)
+                db_send_fds(caller, DBUS_SIGNAL, "", "Shared", 1, 1);
+        DBCHECK(db_fds_open() == 3 * DBUS_FDS && !dbus_dead(listener[0]),
+                "past %d waiting on a listener the next copy is not queued and is closed; no listener is ended for it (%d open)", DBUS_FDS, db_fds_open());
+
+        // clients that go with descriptors queued: every one closed, none twice
+        for (int k = 0; k < 3; k++)
+                dbus_drop(listener[k]);
+        dbus_drop(callee);
+        dbus_drop(caller);
+        dbus_drop(plain);
+        DBCHECK(db_fds_open() == 0 && !db_fd_twice, "clients that go take their queued descriptors with them: %d open, %d closed twice", db_fds_open(), db_fd_twice);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+        dbus_set_fd_ops(0, 0);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
@@ -196385,6 +196545,7 @@ int main(int argc, char **argv)
         db_test_deadlines();
         db_test_kept();
         db_test_notifications();
+        db_test_fds();
         db_test_auth();
         db_test_hello_and_names();
         db_test_routing();

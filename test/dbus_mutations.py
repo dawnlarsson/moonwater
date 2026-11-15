@@ -90,6 +90,14 @@ M = [
     ("a kept name owned by whoever asks first", "if (dbus_name_kept(text))", "if (0)"),
     ("the accessibility bus a client's", '{"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications", 0}',
      '{"org.freedesktop.secrets", "org.freedesktop.Notifications", 0}'),
+    # ---- file descriptors (21dcc3d), every one closed once ----
+    ("a client's descriptors past DBUS_FDS taken", "if (!c->unix_fds || c->in_fds + count > DBUS_FDS)", "if (!c->unix_fds || c->in_fds + count > DBUS_FDS + 8)"),
+    ("a message naming more descriptors than came taken", "if (nfds > 0 && (!c->unix_fds || nfds > c->in_fds))", "if (nfds > 0 && !c->unix_fds)"),
+    ("a listener's refused copy left open", "if (ok && !dbus_deliver_fds(c, bytes, n, DBUS_UNASKED_FOR, duped, nfds))\n                                                dbus_close_fds(duped, nfds);",
+     "if (ok && !dbus_deliver_fds(c, bytes, n, DBUS_UNASKED_FOR, duped, nfds))\n                                                ;"),
+    ("descriptors sent left open", "        dbus_close_fds(c->out_fd, count);", "        (void)count;"),
+    ("descriptors to a callee that did not ask", "if (nfds > 0 && (!target || !target->unix_fds))", "if (nfds > 0 && !target)"),
+    ("a client that goes keeps its queued descriptors", "        dbus_close_fds(c->out_fd, c->out_fds);\n        c->in_fds", "        c->in_fds"),
     # ---- the desktop's notifications (MW-2026-198) ----
     ("a notification's control bytes kept", "                if (code < 0x20)\n                        code += 0x2400;", "                if (0)\n                        code += 0x2400;"),
     ("a notification's override kept", "(code >= 0x202a && code <= 0x202e) || ", ""),
