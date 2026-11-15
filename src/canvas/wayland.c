@@ -403,6 +403,9 @@ struct wayland_surface
         unsigned int callback[WAYLAND_CALLBACKS];
         long pending_scale;
         long pending_transform;
+        // The pending buffer's place against the one shown, in the surface's units (attach's x and y before version 5, offset after):
+        // a cursor's hotspot moves by it at the commit, the other way (wayland_cursor_picture).
+        long pending_dx, pending_dy;
         // The callbacks a commit took, waiting for the frame.
         unsigned int ready[WAYLAND_CALLBACKS];
         unsigned char readies;
@@ -744,6 +747,12 @@ static struct
         unsigned int out_dirty;                      // bitmask of clients with queued bytes or dead state waiting to flush
         long idle_notifies;                          // live ext_idle_notification_v1 count across all clients
         unsigned long pool_id;                       // monotonic pool identity counter
+        // The pointer's picture a client drew (wl_pointer.set_cursor with a surface, wayland_cursor_picture): the client (its slot, -1 for
+        // none) and the surface (its index and generation) named for the window under the pointer, the hotspot in the surface's units, and
+        // the count that moves whenever any of it, or what the surface shows, changes.
+        long cursor_client, cursor_surface, cursor_hot_x, cursor_hot_y;
+        unsigned int cursor_gen;
+        unsigned long cursor_serial;
 } wayland;
 
 /* ---- the wire ---- */
@@ -2580,7 +2589,14 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot &&
             wayland.pointer_surface == wayland_surface_index(c, s))
                 wayland.pointer_row = -1;
+        // The pointer's picture it was (wayland_cursor_picture) is none: its buffer was let go of above (wayland_sub_drop).
+        if (wayland.cursor_client == c->slot && wayland.cursor_surface == wayland_surface_index(c, s))
+        {
+                wayland.cursor_client = wayland.cursor_surface = -1;
+                wayland.cursor_serial++;
+        }
         s->pending_sync_acq_set = s->pending_sync_rel_set = 0;
+        s->pending_dx = s->pending_dy = 0;
         if (s->syncobj_id)
                 s->syncobj_id = 0;
         s->live = 0;
@@ -3647,6 +3663,17 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
                         wayland_row_take(c, s);
                 }
+                else if (s->role == WAYLAND_ROLE_CURSOR)
+                {
+                        // A cursor's buffer is held while it is the surface's picture, which the compositor reads when it draws the
+                        // pointer (wayland_cursor_picture), and is let go of when another replaces it.
+                        if (s->held != (unsigned short)(c->objects[buffer].link + 1))
+                        {
+                                wayland_unhold(c, s);
+                                b->held++;
+                                s->held = (unsigned short)(c->objects[buffer].link + 1);
+                        }
+                }
                 else
                 {
                         unsigned short now = (unsigned short)(c->objects[buffer].link + 1);
@@ -3677,8 +3704,22 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         s->serials = 0;
                         s->entered = 0;
                 }
+                if (s->role == WAYLAND_ROLE_CURSOR)
+                        wayland_unhold(c, s);
                 s->width = s->height = 0;
         }
+        // A cursor's hotspot moves against the buffer's place (attach's x and y, or offset), and what the pointer shows is new.
+        if (s->role == WAYLAND_ROLE_CURSOR)
+        {
+                if (wayland.cursor_client == c->slot && wayland.cursor_surface == wayland_surface_index(c, s) && wayland.cursor_gen == s->gen)
+                {
+                        wayland.cursor_hot_x = wayland_max(-WAYLAND_DIMENSION, wayland_min(wayland.cursor_hot_x - s->pending_dx, WAYLAND_DIMENSION));
+                        wayland.cursor_hot_y = wayland_max(-WAYLAND_DIMENSION, wayland_min(wayland.cursor_hot_y - s->pending_dy, WAYLAND_DIMENSION));
+                }
+                if (wayland.cursor_client == c->slot && wayland.cursor_surface == wayland_surface_index(c, s))
+                        wayland.cursor_serial++;
+        }
+        s->pending_dx = s->pending_dy = 0;
 
         // A commit with no buffer of its own still lays on the subsurfaces that were waiting for it.
         if (buffer < 0 && !initial && shown && s->row >= 0 && (s->flags & WAYLAND_SURFACE_MAPPED) &&
@@ -3738,6 +3779,11 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                         return wayland_fail(c, self->id, WLN_wl_surface_error_invalid_offset, "attach with an offset");
                 s->attached = a[0].slot >= 0 ? c->objects[a[0].slot].id : 0;
                 s->attach_made = 1;
+                if (self->version < 5)
+                {
+                        s->pending_dx = a[1].i;
+                        s->pending_dy = a[2].i;
+                }
                 return WAYLAND_OK;
         case WLQ_wl_surface_damage:
                 wayland_damage_add(s, a, 0);
@@ -3787,6 +3833,8 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                         s->pending_opaque = (struct wayland_rect){0, 0, 0, 0};
                 return WAYLAND_OK;
         case WLQ_wl_surface_offset:
+                s->pending_dx = a[0].i;
+                s->pending_dy = a[1].i;
                 return WAYLAND_OK;
         case WLQ_wl_surface_commit:
                 return wayland_commit(c, self, s);
@@ -4943,6 +4991,12 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
                 wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, -1, 0);
         if (is)
                 wayland.host->row_do(wayland.host->context, row, WAYLAND_DO_CURSOR, -1, 0);
+        // And so is the picture a client drew for it (wayland_cursor_picture): the client names one again for the surface it enters.
+        if (wayland.cursor_client >= 0)
+        {
+                wayland.cursor_client = wayland.cursor_surface = -1;
+                wayland.cursor_serial++;
+        }
         wayland.pointer_row = is ? row : -1;
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
         wayland_constraints_update();
@@ -5748,13 +5802,33 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
 /* A pointer or a keyboard let go: out of its client's list. A pointer's set_cursor is taken and its image not yet shown. */
 static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        // wl_pointer.set_cursor (serial, surface, hotspot): the serial is the enter's (wayland_pointer_serial_ok), and only the client
-        // with the pointer may set its cursor. No surface hides the pointer over its window. A surface is not drawn yet: its window
-        // gets the arrow, the compositor's own, rather than the client's picture (a gap in the protocol, not a fake of it).
+        // wl_pointer.set_cursor (serial, surface, hotspot): the surface takes the cursor role (one with another role is the role error,
+        // whatever the serial), the serial is the enter's (wayland_pointer_serial_ok), and only the client with the pointer may set its
+        // cursor. No surface hides the pointer over its window. A surface is the client's picture of the pointer, which the compositor
+        // reads with wayland_cursor_picture; it is told the arrow (WAYLAND_DO_CURSOR) for as long as it draws no such picture.
+        if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && a[1].slot >= 0)
+        {
+                struct wayland_surface *named = wayland_surface_of(c, a[1].slot);
+
+                if (!named || (named->role != WAYLAND_ROLE_NONE && named->role != WAYLAND_ROLE_CURSOR) || (named->flags & WAYLAND_SURFACE_XDG) ||
+                    named->xsurface)
+                        return wayland_fail(c, self->id, WLN_wl_pointer_error_role, "the cursor's surface has another role");
+                named->role = WAYLAND_ROLE_CURSOR;
+        }
         if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && wayland.pointer_row >= 0 &&
             wayland.row_client[wayland.pointer_row] == c->slot && wayland_pointer_serial_ok(c, a[0].u))
+        {
+                struct wayland_surface *named = a[1].slot >= 0 ? wayland_surface_of(c, a[1].slot) : 0;
+
                 wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR,
                                      a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
+                wayland.cursor_client = named ? c->slot : -1;
+                wayland.cursor_surface = named ? wayland_surface_index(c, named) : -1;
+                wayland.cursor_gen = named ? named->gen : 0;
+                wayland.cursor_hot_x = wayland_max(-WAYLAND_DIMENSION, wayland_min((long)a[2].i, WAYLAND_DIMENSION));
+                wayland.cursor_hot_y = wayland_max(-WAYLAND_DIMENSION, wayland_min((long)a[3].i, WAYLAND_DIMENSION));
+                wayland.cursor_serial++;
+        }
         if (op == WLQ_wl_pointer_release && self->iface == WLI_wl_pointer)
                 wayland_seat_remove(c, WLI_wl_pointer, self->id);
         else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
@@ -6328,7 +6402,15 @@ static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland
                 return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
         if (op == WLQ_wp_cursor_shape_device_v1_set_shape && wayland.pointer_row >= 0 &&
             wayland.row_client[wayland.pointer_row] == c->slot && wayland_pointer_serial_ok(c, a[0].u))
+        {
                 wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, wayland_cursor_code(a[1].u), 0);
+                // A shape named takes the place of a picture the client drew (set_cursor's surface).
+                if (wayland.cursor_client >= 0)
+                {
+                        wayland.cursor_client = wayland.cursor_surface = -1;
+                        wayland.cursor_serial++;
+                }
+        }
         return WAYLAND_OK;
 }
 
@@ -8166,6 +8248,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         for (long row = 0; row < WAYLAND_ROWS; row++)
                 wayland.row_client[row] = wayland.row_surface[row] = -1;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
+        wayland.cursor_client = wayland.cursor_surface = -1;
         wayland.xwayland_uid = -1;
         wayland.host = host;
         wayland.input_at = host->now(host->context);
@@ -8256,6 +8339,12 @@ WAYLAND_API void wayland_drop(long slot)
                 return;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
+        // Its picture of the pointer is none: the pools it was in are let go of below.
+        if (wayland.cursor_client == slot)
+        {
+                wayland.cursor_client = wayland.cursor_surface = -1;
+                wayland.cursor_serial++;
+        }
         for (long at = 0; at < WAYLAND_SURFACES; at++)
                 if (c->surfaces[at].live)
                 {
@@ -9439,6 +9528,58 @@ WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *mo
 WAYLAND_API long wayland_row_owner(long row)
 {
         return row >= 0 && row < WAYLAND_ROWS ? wayland.row_client[row] : -1;
+}
+
+/*
+        The pointer's picture a client drew for its window under the pointer (wl_pointer.set_cursor with a surface), for the compositor
+        to draw in place of its own shape: the first pixel of the surface's buffer (format WLN_wl_shm_format_argb8888, premultiplied, or
+        _xrgb8888; stride bytes a row, width by height pixels), the hotspot in those pixels (the point of it that is the pointer's place,
+        which may lie outside it), the buffer's scale (its pixels a unit of the surface), and serial, which moves whenever any of that
+        does: a commit of the surface, another surface or hotspot named, a shape named in its place, the pointer on another surface, the
+        surface or its client gone. 1 for row the window under the pointer and a picture that is a buffer of one of those two formats the
+        compositor can read; 0 otherwise, with out's pixels 0 and its serial the one now, and the compositor draws the shape it was told
+        (WAYLAND_DO_CURSOR: the arrow while a surface is named, which has drawn nothing yet). The pixels are the client's pool, read-only
+        and held (the buffer is not released while it is the picture) until the shim is next fed or a client is dropped: the compositor
+        copies them then, as it copies any client picture. A pool its client cut is read as zeros (the SIGBUS handler's pages).
+*/
+struct wayland_cursor
+{
+        const unsigned char *pixels;
+        long stride, width, height, format;
+        long hot_x, hot_y, scale;
+        unsigned long serial;
+};
+
+WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
+{
+        struct wayland_client *c = wayland.cursor_client >= 0 && wayland.cursor_client < WAYLAND_CLIENTS ? wayland.client[wayland.cursor_client] : 0;
+        struct wayland_surface *s = c && wayland.cursor_surface >= 0 && wayland.cursor_surface < WAYLAND_SURFACES ? &c->surfaces[wayland.cursor_surface] : 0;
+        const struct wayland_buffer *b;
+        const struct wayland_pool *p;
+        long scale;
+
+        out->pixels = 0;
+        out->stride = out->width = out->height = out->format = out->hot_x = out->hot_y = 0;
+        out->scale = 1;
+        out->serial = wayland.cursor_serial;
+        if (!s || !s->live || s->gen != wayland.cursor_gen || s->role != WAYLAND_ROLE_CURSOR || !s->held || row < 0 || row >= WAYLAND_ROWS ||
+            row != wayland.pointer_row || wayland.row_client[row] != wayland.cursor_client)
+                return 0;
+        b = &c->buffers[s->held - 1];
+        p = &c->pools[b->pool];
+        if (!b->live || !p->live || p->unmapped || !p->at || (b->format != WLN_wl_shm_format_argb8888 && b->format != WLN_wl_shm_format_xrgb8888) ||
+            b->width <= 0 || b->height <= 0)
+                return 0;
+        scale = s->scale > 0 ? s->scale : 1;
+        out->pixels = (const unsigned char *)p->at + b->offset;
+        out->stride = b->stride;
+        out->width = b->width;
+        out->height = b->height;
+        out->format = b->format;
+        out->hot_x = wayland.cursor_hot_x * scale;
+        out->hot_y = wayland.cursor_hot_y * scale;
+        out->scale = scale;
+        return 1;
 }
 
 #endif /* WAYLAND_INCLUDED */

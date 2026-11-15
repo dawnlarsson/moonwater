@@ -184090,7 +184090,13 @@ static void test_cursor_shape(void)
         WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_NOTALLOWED, "a set_cursor with a serial that is not a recent input is nothing");
         wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, 0ul, 0ul, 0ul);
         WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_HIDDEN, "a set_cursor with no surface hides the pointer over the window");
-        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, (unsigned long)s.surface, 0ul, 0ul);
+        {
+                unsigned long drawn = wlc_id(c, WLI_wl_surface, 6);
+
+                // A surface of its own: the window's surface has a role, and naming it is the role error (test_cursor_picture).
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, drawn);
+                wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, drawn, 0ul, 0ul);
+        }
         WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_ARROW, "a set_cursor with a surface gives the arrow until the surface is drawn");
 
         wayland_pointer_to(-1, 0, 0);
@@ -187078,6 +187084,109 @@ static void test_cursor(void)
         wayland_stop();
 }
 
+/*
+        The pointer's picture a client draws (wl_pointer.set_cursor with a surface), as the compositor reads it (wayland_cursor_picture): none
+        until the surface has a buffer, then that buffer's pixels, size and hotspot, for the window under the pointer only; the hotspot moved
+        by the buffer's offset; a serial that moves with every change; the buffer held while it is the picture and released when replaced;
+        none again when a shape is named, when the pointer leaves, and when the surface goes; and a surface with another role refused.
+*/
+static void test_cursor_picture(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wayland_cursor cur;
+        unsigned long pointer, cursor, first, second, manager, device, was;
+        long a, serial;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        manager = wl_global(c, s.registry, WLI_wp_cursor_shape_manager_v1, 2);
+        wlc_forget(c);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_enter, 0);
+        serial = a >= 0 ? (long)c->ev[a].u[0] : 0;
+        cursor = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, cursor);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && !cur.pixels, "no picture of the client's before set_cursor");
+        was = cur.serial;
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, cursor, 3L, 5L);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was && fake_cursor[0] == WAYLAND_CURSOR_ARROW,
+                "a surface named that has drawn nothing is no picture yet, the arrow is worn, and the serial moved");
+        was = cur.serial;
+        first = wl_buffer_of(&s, 8, 6, 0x80402010, WLN_wl_shm_format_argb8888);
+        wlc_send(c, cursor, WLQ_wl_surface_attach, first, 0L, 0L);
+        wlc_send(c, cursor, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 6L);
+        wlc_send(c, cursor, WLQ_wl_surface_commit);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 1 && cur.pixels && cur.width == 8 && cur.height == 6 && cur.stride == 32 &&
+                    cur.format == WLN_wl_shm_format_argb8888 && cur.hot_x == 3 && cur.hot_y == 5 && cur.scale == 1 && cur.serial != was &&
+                    ((const unsigned *)cur.pixels)[0] == 0x80402010u && ((const unsigned *)cur.pixels)[8 * 6 - 1] == 0x80402010u,
+                "the surface's commit is the picture: its pixels, 8 by 6, the hotspot named, and a new serial (%ld by %ld, hot %ld %ld)",
+                cur.width, cur.height, cur.hot_x, cur.hot_y);
+        WLCHECK(wayland_cursor_picture(1, &cur) == 0 && !cur.pixels, "it is the picture of the window under the pointer only");
+        WLCHECK(releases_of(c, first) == 0, "the buffer is held while it is the picture");
+        was = cur.serial;
+        second = wl_buffer_of(&s, 16, 16, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, cursor, WLQ_wl_surface_offset, 1L, -2L);
+        wlc_send(c, cursor, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, cursor, WLQ_wl_surface_set_buffer_scale, 2L);
+        wlc_send(c, cursor, WLQ_wl_surface_commit);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 1 && cur.width == 16 && cur.format == WLN_wl_shm_format_xrgb8888 && cur.scale == 2 &&
+                    cur.hot_x == 4 && cur.hot_y == 14 && cur.serial != was && ((const unsigned *)cur.pixels)[17] == 0xff00ff00u,
+                "a buffer at an offset moves the hotspot the other way, in the buffer's pixels at its scale (hot %ld %ld, scale %ld)", cur.hot_x,
+                cur.hot_y, cur.scale);
+        WLCHECK(releases_of(c, first) == 1 && releases_of(c, second) == 0, "the buffer it replaced is released, the new one held");
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, pointer);
+        was = cur.serial;
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial, (unsigned long)WLN_wp_cursor_shape_device_v1_shape_text);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was && fake_cursor[0] == WAYLAND_CURSOR_TEXT,
+                "a shape named in its place is no picture");
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, cursor, 0L, 0L);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 1 && cur.hot_x == 0 && cur.hot_y == 0, "the surface named again is the picture it holds");
+        was = cur.serial;
+        wayland_pointer_to(-1, 0, 0);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was, "the pointer leaving the window is no picture");
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0, "and coming back is none until the client names it again");
+        a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_enter, a + 1);
+        serial = a >= 0 ? (long)c->ev[a].u[0] : 0;
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, cursor, 1L, 1L);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 1, "named again after the enter, it is the picture");
+        was = cur.serial;
+        wlc_send(c, cursor, WLQ_wl_surface_destroy);
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was && releases_of(c, second) == 1,
+                "the surface destroyed is no picture, and its buffer is released");
+        WLCHECK(c->errors == 0, "none of it is a protocol error (%s)", c->error_text);
+        /* the window's own surface has a role: named as the cursor, it is the role error */
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, s.surface, 0L, 0L);
+        WLCHECK(refused_with(c, WLN_wl_pointer_error_role), "a toplevel's surface named as the cursor is the role error");
+        wlc_end(c);
+        leak_check("cursor picture");
+        /* and a cursor's surface may not be made a window */
+        session_open(&s);
+        c = s.c;
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+        cursor = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, cursor);
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, 1L, cursor, 0L, 0L);
+        WLCHECK(c->errors == 0, "a surface is named as the cursor whatever the serial");
+        s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, s.xdg, cursor);
+        WLCHECK(refused_with(c, WLN_xdg_wm_base_error_role), "and has the cursor role from then on: it is no xdg surface");
+        wlc_end(c);
+        leak_check("cursor role");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
 /* ---- dma-bufs ---- */
 
 #define DRM_ARGB8888 0x34325241L
@@ -189442,6 +189551,7 @@ int main(int argc, char **argv)
         test_tree_cost();
         test_geometry();
         test_cursor();
+        test_cursor_picture();
         test_budget();
         test_stall_state();
         test_dmabuf();
