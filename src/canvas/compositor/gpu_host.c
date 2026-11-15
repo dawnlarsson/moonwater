@@ -487,7 +487,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0, compositor_gpu_scaled_pool[used].fd = 0;
                         memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-scaled", 1 | 2, 0, 0, 0, 0);
                         if (memfd >= 0 && system_truncate_handle((int)memfd, grown) == 0 &&
-                            compositor_call(syscall(fcntl), (positive)memfd, 1033, 2, 0, 0, 0) == 0)
+                            compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) == 0) // F_SEAL_SHRINK
                         {
                                 mapped = compositor_call(syscall(mmap), 0, grown, 3, 1, (positive)memfd, 0);
                                 if (mapped < 0 && mapped > -4096)

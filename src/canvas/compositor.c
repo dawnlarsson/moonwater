@@ -2449,6 +2449,12 @@ static b32 compositor_main()
                 compositor_loop_wanted(wanted, &slots, held);
                 count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at, fence_at = slots.fence_at;
                 uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
+                // A part that adds an entry and not its count (COMPOSITOR_POLLS) has written past the list: said and ended at once, not polled.
+                if (count > COMPOSITOR_POLLS)
+                {
+                        compositor_say("the poll list ran past its count, entries", (bipolar)count);
+                        break;
+                }
 
                 // With nothing to show or time the wait is for ever. With
                 // something to show it is until a frame has gone by since the
