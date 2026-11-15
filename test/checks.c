@@ -241197,6 +241197,28 @@ static void gpu_scan_rows(void)
 }
 
 /*
+        The overlay's buffers (compositor_overlay_buffers) are made at the output's width, and the band composed into them is the output's width
+        at the present (compositor_present_overlaid): buffers made for a narrower output are made again, not composed into, and with no card to make
+        them the overlay is refused (its tabs are patched into the window instead). Before, buffers with rows enough were kept at any width, and a
+        band of a wider output ran each row into the next and its last past the buffer's end (the owner's machine: a fill's store into the page after).
+*/
+static void gpu_overlay_rows(void)
+{
+        int kept_width = compositor.width, kept_card = compositor.card;
+        unsigned int kept_rows = compositor.overlay_rows, kept_made = compositor_overlay_width;
+
+        compositor.card = -1; // no card: a buffer made again is refused
+        compositor.width = 1920;
+        compositor.overlay_rows = 64, compositor_overlay_width = 1920;
+        check("gpu overlay: buffers of the output's width with rows enough are kept", compositor_overlay_buffers(48));
+        compositor.width = 2560;
+        check("gpu overlay: buffers made for a narrower output are made again, not composed into (here refused: no card)",
+              !compositor_overlay_buffers(48) && compositor.overlay_rows == 0);
+        compositor.width = kept_width, compositor.card = kept_card;
+        compositor.overlay_rows = kept_rows, compositor_overlay_width = kept_made;
+}
+
+/*
         A lent dma-buf the processor composes (the card drew no present): read in place where its client's card wrote it, which on a card with memory of
         its own is a write-combined mapping read with plain loads (13 ms a present of a 1080p game on the owner's machine). The processor reads it in two
         presents running (compositor_wl_lent_sync counts the first read of each present) and the row is copied into the table once (compositor_wl_seed,
@@ -243675,6 +243697,7 @@ b32 main(void)
         }
         // The rows of the shim's host that need no card (its state made by hand), before the card's.
         gpu_wc_rows();
+        gpu_overlay_rows();
         gpu_scan_rows();
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {

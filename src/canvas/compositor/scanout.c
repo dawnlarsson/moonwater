@@ -1131,10 +1131,17 @@ static int compositor_overlay_ready(void)
         return 1;
 }
 
-// The overlay's two buffers, rows of the output's width each, made again when the band wants more rows.
+/*
+        The overlay's two buffers, rows of the output's width each, made again when the band wants more rows, and when the output is another
+        width than they were made at: the band is composed at the output's width (compositor_present_overlaid's target, the tabs' rectangle cut to
+        compositor.width), so in a buffer of a narrower one each row ran into the next and the last past the buffer's end, into the page after it
+        (a space grown under them: a game's mode, a screen joined). compositor_overlay_width is the width they hold.
+*/
+static unsigned int compositor_overlay_width;
+
 static int compositor_overlay_buffers(unsigned int rows)
 {
-        if (rows <= compositor.overlay_rows)
+        if (rows <= compositor.overlay_rows && compositor_overlay_width == (unsigned int)compositor.width)
                 return 1;
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.overlay_fb[which])
@@ -1147,6 +1154,7 @@ static int compositor_overlay_buffers(unsigned int rows)
                         compositor.overlay_fb[which] = 0;
                 }
         compositor.overlay_rows = 0;
+        compositor_overlay_width = 0;
         rows = (rows + 63) & ~63u;
         for (unsigned int which = 0; which < 2; which++)
         {
@@ -1182,6 +1190,7 @@ static int compositor_overlay_buffers(unsigned int rows)
                 compositor.overlay_bytes = dumb.size;
         }
         compositor.overlay_rows = rows;
+        compositor_overlay_width = (unsigned int)compositor.width;
         return 1;
 }
 
