@@ -7,6 +7,10 @@
 #define GPU_VA 0x1000000000ull
 #define GPU_BASES_AT 40960 // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
 #define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024, the bases from GPU_BASES_AT
+// The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k, its arguments at
+// 512 + GPU_PACKETS * k. A slot is not written while its job may run (gpu_slot_take).
+#define GPU_SLOTS 2
+#define GPU_PACKETS 256
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 #define GPU_IMPORTS 64
@@ -61,7 +65,7 @@ static unsigned int gpu_epoch; // the card's descriptor count: it goes up each t
                                // from an earlier epoch is none of the card's (wayland_host.c's lent and source addresses check it)
 static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover starts the card again with them)
 #ifndef GPU_SUBMIT_FAKE
-#define GPU_SUBMIT_FAKE(error, taken)
+#define GPU_SUBMIT_FAKE(error, taken, sequence)
 #endif
 #ifndef GPU_OPEN_FAKE
 #define GPU_OPEN_FAKE(fd)
@@ -144,9 +148,15 @@ static struct { unsigned int first, error, mask, mode, owner, family, device, ro
 static char gpu_display[32]; // the display card's bus (set by the compositor before the start: "" for a headless one, or one the kernel does not name)
 #define GPU_NODES 8
 static unsigned int gpu_last_error; // the last job's refusal: the submit's errno, 62 (ETIME) for one that hung (two seconds old, not done), 5 for a wait that failed
-// How the last job came to be given up on (gpu_end; gpu_last_error is its errno). LATE: the wait's cap (a tick) passed with the job running: the job is only slow,
-// it stays pending (gpu_idle holds the buffer) and the frame is drawn some other way, with no cool-down. HUNG: two seconds old and not done, or the kernel's log has
-// a page fault since it was submitted. WAIT: the wait itself failed. A refused submit has none. gpu_late_end says a late job's end when it comes, once.
+/*
+        A pending job (gpu.pending, submitted at gpu_job_began; the one before it, in the other slot, is gpu_before while it is not seen done) has a deadline:
+        GPU_HANG_NS after its submit it is hung. A call that waits for its job (gpu_run) waits a tick, GPU_LATE_NS, and then leaves it pending: the frame is
+        drawn some other way, with no cool-down. A pending job's end is said once (gpu_end_said), by the call that waited it out or by gpu_late_end, and only
+        when it is a bad one: its deadline passed, the kernel's log has a page fault since its submit (looked at from GPU_FAULT_FIRST past a tick, then every
+        GPU_FAULT_EVERY: gpu_fault_poll), or its fence answered an error (gpu_idle comes on that: gpu_found). gpu_end says how the last call's job was
+        given up on, gpu_last_error its errno: LATE, the tick passed with the job running (or a slot is still a running job's); HUNG, past its deadline or
+        faulted; WAIT, the wait itself failed; OVERFLOW, the bins did not fit. A refused submit has none.
+*/
 enum gpu_end
 {
         GPU_END_NONE,
@@ -155,16 +165,18 @@ enum gpu_end
         GPU_END_WAIT,
         GPU_END_OVERFLOW
 };
-static enum gpu_end gpu_end;   // the last call's
-static enum gpu_end gpu_found; // the end of a late job that gpu_idle came on after the fact, until gpu_late_end has said it
-static b32 gpu_owed;           // a late job is pending and its end is not yet said to the caller
-static positive gpu_fault_poll; // when the kernel's log is next looked at for a page fault of the late job (monotonic ns)
-static b32 gpu_patient;        // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first
+static enum gpu_end gpu_end;    // the last call's
+static enum gpu_end gpu_found;  // the bad end gpu_idle came on of a job whose end was not said, until gpu_late_end has said it
+static b32 gpu_end_said;        // the end of the pending jobs has been said: it is not said again
+static positive gpu_fault_poll; // when the kernel's log is next looked at for a page fault of the pending job (monotonic ns)
+static b32 gpu_patient;         // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first
+static struct { positive sequence, began; } gpu_before; // the job before the pending one, in the other slot, while it is not seen done (0: none)
+static unsigned int gpu_slot, gpu_pending_slot; // the slot the last job was built in (GPU_ARGS is its arguments), and the pending job's
 #define GPU_LATE_NS 16000000ull      // a job not done this long after it was submitted is late: a tick (the heaviest whole-screen job measured, 8K, is 5.5 ms)
 #define GPU_HANG_NS 2000000000ull    // and one not done this long after is hung. The kernel's own timeout for a job is amdgpu.lockup_timeout, which at v6.12 is sixty
                                      // seconds for the compute ring this uses: until it ends the job nothing here ends it, the buffer stays the job's (gpu_idle), and the
                                      // processor draws
-#define GPU_FAULT_FIRST 250000000ull // a late job's first look at the kernel's log for a page fault is this long after it went late, and the next ones
+#define GPU_FAULT_FIRST 250000000ull // a pending job's first look at the kernel's log for a page fault is this long after it went late, and the next ones
 #define GPU_FAULT_EVERY 500000000ull // this far apart
 
 // A step of the prerequisites: passed (its bit in mask) or failed (the first failure and its error kept). GPU_STEP_FAKE is the check's fake card: it may
@@ -196,7 +208,7 @@ static unsigned int gpu_raw(int fd, unsigned int request, void *a)
 #define GPU_GEM_CLOSE 0x40086409u // DRM_IOW(0x09, struct drm_gem_close)
 
 /*
-        The card's driver, behind nine calls. Everything above them is any card's: the scene's records and their bins, the table of maps and of imports and
+        The card's driver, behind ten calls. Everything above them is any card's: the scene's records and their bins, the table of maps and of imports and
         their addresses, the tick and the marks, the late, hung and lost job, the self-test, the prerequisites. Everything below them is one driver's requests
         of the kernel and one chip's command words. A second driver, or a second chip of this one with other words, is a second struct gpu_backend and its
         kernels; nothing above the calls names amdgpu. (The requests every DRM driver has are not behind them: the version, a handle closed, a dma-buf to a
@@ -207,6 +219,8 @@ struct gpu_job
         const unsigned int *kernel; // the program's two resource words (the code follows them in the card's buffer)
         positive code, arguments;   // the card's addresses of the code and of the arguments' block
         unsigned int columns, rows; // the grid: columns of 64 pixels (a wave), rows of what the kernel takes a row to be
+        unsigned int address_to packets_at; // the job's room for its command words (GPU_PACKETS bytes of the card's buffer: its slot's), and its card address
+        positive packets;
 };
 struct gpu_vm_fault
 {
@@ -239,6 +253,8 @@ struct gpu_backend
         int (*wait)(positive sequence, positive until);
         // 9. the last page fault of the card's address space, zeros for none
         unsigned int (*fault)(struct gpu_vm_fault *fault);
+        // 10. a job's fence as a sync_file: a descriptor that polls readable once the job is done (one of a job done long ago is readable at once)
+        unsigned int (*fence)(positive sequence, int *fd);
 };
 
 static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int *device)
@@ -322,19 +338,17 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
             GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
             GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
             GPU_PKT(0x15, 3), job->columns, job->rows, 1, 0x45};
-        _Static_assert(sizeof(ib) <= 512, "the packets end where the arguments begin (GPU_ARGS)");
+        _Static_assert(sizeof(ib) <= GPU_PACKETS, "the packets end where the next slot's begin (GPU_PACKETS)");
         // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
-        p64 boin[3] = {0, named | 8ull << 32, (positive)bos}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
+        p64 boin[3] = {0, named | 8ull << 32, (positive)bos}, ibc[4] = {0, job->packets, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
             list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, named ? 2 : 1, (positive)list}; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
         unsigned int error = 0;
         b32 taken = false;
 
-        memory_copy(gpu.at, ib, sizeof(ib));
-        GPU_SUBMIT_FAKE(error, taken); // a check's fake submit answers an error before the call is made, or takes the job (the call is then not made)
-        if (taken)
-                cs[0] = 1; // the job's sequence number
-        else if (error == 0)
+        memory_copy(job->packets_at, ib, sizeof(ib));
+        GPU_SUBMIT_FAKE(error, taken, cs[0]); // a check's fake submit answers an error before the call is made, or takes the job and gives its sequence (the call is then not made)
+        if (!taken && error == 0)
                 error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs);
         *sequence = cs[0];
         return error;
@@ -374,8 +388,20 @@ static unsigned int gpu_amd_fault(struct gpu_vm_fault *fault)
         return gpu_call(1u, 5, 32, ask);
 }
 
+// AMDGPU_FENCE_TO_HANDLE (0x14) with AMDGPU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD (2): union drm_amdgpu_fence_to_handle, its in half a struct drm_amdgpu_fence (the context,
+// the compute ring: ip type 1, instance 0, ring 0, the sequence) and what is asked; the kernel writes the descriptor over the first word. A sequence the ring has done
+// long ago is answered with a fence already signalled, one past the last submitted is EINVAL.
+static unsigned int gpu_amd_fence(positive sequence, int *fd)
+{
+        unsigned int in[8] = {gpu.ctx, 1, 0, 0, (unsigned int)sequence, (unsigned int)(sequence >> 32), 2, 0};
+        unsigned int e = gpu_call(3u, 0x14, 32, in);
+
+        *fd = e ? -1 : (int)in[0];
+        return e;
+}
+
 static const struct gpu_backend gpu_amd = {"amdgpu",       gpu_amd_identify, gpu_amd_buffer, gpu_amd_context, gpu_amd_user,
-                                           gpu_amd_bind,   gpu_amd_unbind,   gpu_amd_submit, gpu_amd_wait,    gpu_amd_fault};
+                                           gpu_amd_bind,   gpu_amd_unbind,   gpu_amd_submit, gpu_amd_wait,    gpu_amd_fault, gpu_amd_fence};
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver (one today)
 
 // A handle of the card's let go of (any DRM driver's request).
@@ -489,6 +515,7 @@ static positive gpu_bin_room;
 
 static void gpu_maps_reset(void);
 static void gpu_kmsg_drain(void);
+static void gpu_bins_forget(void);
 
 static void gpu_stop(void)
 {
@@ -502,7 +529,8 @@ static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         memory_zero(&gpu, sizeof(gpu));
-        gpu.fd = -1, gpu_owed = 0, gpu_found = GPU_END_NONE;
+        gpu.fd = -1, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0;
+        gpu_bins_forget();
         gpu_epoch++;
 }
 
@@ -1278,42 +1306,76 @@ static void gpu_release_import(positive at)
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
 // s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene, 5 with boxes (both by clang, any width), 6 by hand with or without boxes for a width and a pitch of a multiple of 4 (gpu_scene picks).
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab; };
-#define GPU_ARGS ((struct gpu_args address_to)(gpu.at + 128))
+#define GPU_ARGS_AT(slot) (512 + GPU_PACKETS * (positive)(slot)) // a slot's arguments, in bytes of the buffer
+#define GPU_ARGS ((struct gpu_args address_to)((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot))) // the arguments of the slot the job is built in
+typedef char gpu_slots_fit[GPU_ARGS_AT(GPU_SLOTS) <= 1024 && GPU_PACKETS * GPU_SLOTS <= 512 && sizeof(struct gpu_args) <= GPU_PACKETS ? 1 : -1]; // before the kernels
+
+// The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
+// binned, and what it was binned for (its width and height, and the damage its lists hold), which gpu_scene_more_submit draws more of.
+static struct { positive job[2], at; unsigned int side, w, h, dx0, dy0, dx1, dy1; } gpu_bins;
+static void gpu_bins_forget(void)
+{
+        memory_zero(&gpu_bins, sizeof(gpu_bins));
+}
 
 /*
-        Whether the buffer is the processor's again: no job that was given up on (gpu_run waits a tick for each, GPU_LATE_NS) can still read it. A job not
-        seen done is asked after again with a deadline already past; while it may run nothing may write the buffer (its arguments, lists and records would
-        change under it: a wave that starts late reads them as they are then), so the compositor draws on the processor. Answered with an error (the job
-        ended by the queue's reset, or the context the reset left guilty), it is over and the jobs after it go to a context of their own; if the job was a
-        late one whose end is still owed, that end is kept for gpu_late_end to say.
+        Whether a job (its sequence, as gpu_submit answered it) is done, without waiting: 1 done, and every job before it (the ring runs them in order); 0
+        still running; -1 its fence answered an error (the job ended by the queue's reset, or the context the reset left guilty refuses it): it is over, and so
+        is every job of its context, the jobs after go to a context of their own, and a job whose end was not said has it said by gpu_late_end (WAIT). A
+        sequence no pending job has (0, a job seen done, one of a context let go of) is done. While a job may run nothing it reads may be written (its slot's
+        arguments and packets, the lists it draws: a wave that starts late reads them as they are then), so the compositor draws on the processor.
 */
-static b32 gpu_idle(void)
+static int gpu_done(positive sequence)
 {
         int ended;
 
-        if (!gpu.pending)
-                return true;
-        if ((ended = gpu_backend->wait(gpu.pending, clock_monotonic_nanoseconds())) >= 0)
+        if (!sequence || (sequence != gpu.pending && sequence != gpu_before.sequence))
+                return 1;
+        ended = gpu_backend->wait(sequence, 0); // a time long past: the kernel looks and does not wait
+        if (ended > 0)
         {
-                if (!ended)
-                        return false; // still running
-                gpu_owed = 0, gpu_last_job = clock_monotonic_nanoseconds();
+                if (sequence == gpu.pending)
+                        gpu.pending = 0;
+                gpu_before.sequence = 0, gpu_last_job = clock_monotonic_nanoseconds();
         }
-        else
+        else if (ended < 0)
         {
-                if (gpu_owed)
-                        gpu_found = GPU_END_WAIT, gpu_owed = 0;
+                if (!gpu_end_said)
+                        gpu_found = GPU_END_WAIT, gpu_end_said = 1;
+                // No new context either: the descriptor answers neither the wait nor the context (the device is gone, or its reset left it dead), so the job can
+                // never be asked after again and the buffer would be held for good. The card is lost: the caller starts it again (gpu_recover closes the
+                // descriptor, and the kernel ends what ran on it), and nothing is written here until it has.
                 if (gpu_backend->context(&gpu.ctx, gpu.ctx) != 0)
-                {
-                        // No new context either: the descriptor answers neither the wait nor the context (the device is gone, or its reset left it dead), so the
-                        // job can never be asked after again and the buffer would be held for good. The card is lost: the caller starts it again (gpu_recover closes
-                        // the descriptor, and the kernel ends what ran on it), and nothing is written here until it has.
                         gpu_lost = 1;
-                        return false;
-                }
+                else
+                        gpu.pending = 0, gpu_before.sequence = 0, gpu_bins.job[0] = gpu_bins.job[1] = 0;
         }
-        gpu.pending = 0;
-        return true;
+        return ended;
+}
+
+// Whether the buffer is the processor's again: no job is pending (the last one submitted is done, or over with its context).
+static b32 gpu_idle(void)
+{
+        return !gpu.pending || gpu_done(gpu.pending) > 0 || !gpu.pending;
+}
+
+// The slot the next job is built in: the first when no job is pending, else the one the pending job is not in, once the job before it (in that slot) is
+// done. -1 while it is not: nothing of that slot may be written yet.
+static int gpu_slot_take(void)
+{
+        if (gpu.pending && gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)
+                return -1;
+        return (int)(gpu_slot = gpu.pending ? gpu_pending_slot ^ 1u : 0);
+}
+
+// A job's sync_file (AMDGPU_FENCE_TO_HANDLE): a descriptor that polls readable when the job is done, for a loop that waits on its other descriptors too; the
+// caller closes it. -errno for none (EINVAL for no job, or one the kernel does not know).
+static int gpu_fence_fd(positive sequence)
+{
+        int fd = -1;
+        unsigned int e = sequence ? gpu_backend->fence(sequence, &fd) : 22;
+
+        return e ? -(int)e : fd;
 }
 
 // Whether the bo list of the last submit had a map (its listed is that submit's serial), in the words of the line.
@@ -1621,9 +1683,9 @@ static void gpu_fault_note(b32 hang)
         gpu_fault_text(&s);
 }
 
-// The job in gpu.pending waited for, in one wait that ends when the job does, until it is done or cap has passed since it was submitted (gpu_job_began). True when it is done.
-// Otherwise gpu_end says how it was given up on: LATE (the cap was a tick: the job stays pending and its end is owed, gpu_late_end says it), HUNG (the cap was the
-// hang's two seconds), WAIT (the wait itself failed). A hang or a failed wait is read in the kernel's log at once (gpu_fault) and is the caller's to take.
+// The pending job waited for, in one wait that ends when the job does, until it is done or cap has passed since it was submitted (gpu_job_began). True when it is
+// done, and every job before it. Otherwise gpu_end says how it was given up on: LATE (the cap was a tick: the job stays pending, its end not said), HUNG (the cap
+// was its deadline), WAIT (the wait itself failed). A hang or a failed wait is said here, read in the kernel's log at once (gpu_fault), and is the caller's to take.
 static b32 gpu_wait_job(positive cap)
 {
         for (;;)
@@ -1637,50 +1699,48 @@ static b32 gpu_wait_job(positive cap)
                 if (ended < 0)
                         gpu_end = GPU_END_WAIT, gpu_last_error = 5; // EIO: the wait itself failed
                 else if (ended)
-                        return true;
+                        return gpu.pending = 0, gpu_before.sequence = 0, gpu_last_job = clock_monotonic_nanoseconds(), true;
                 else if (clock_monotonic_nanoseconds() < until)
                         continue;
                 else if (cap >= GPU_HANG_NS)
-                        gpu_end = GPU_END_HUNG, gpu_last_error = 62; // ETIME: still running after two seconds
+                        gpu_end = GPU_END_HUNG, gpu_last_error = 62; // ETIME: still running at its deadline
                 else
-                {
-                        gpu_end = GPU_END_LATE, gpu_owed = 1, gpu_fault_poll = clock_monotonic_nanoseconds() + GPU_FAULT_FIRST;
-                        return false;
-                }
-                gpu_job_error = gpu_last_error, gpu_fault_note(true);
+                        return gpu_end = GPU_END_LATE, false;
+                gpu_end_said = 1, gpu_job_error = gpu_last_error, gpu_fault_note(true);
                 return false;
         }
 }
 
 /*
-        The end of a job the wait gave up on as late, said once to the caller (the compositor asks at each present): GPU_END_NONE while the job is within bounds,
-        or ended without trouble. The job's end is a bad one when its fence answers an error (gpu_idle comes on it: WAIT), when it is GPU_HANG_NS old and not
-        done (HUNG), or when the kernel's log has a page fault since it was submitted (HUNG; the log is read from GPU_FAULT_FIRST after the job went late, then
-        every GPU_FAULT_EVERY, so a frame does not pay for it). Each of those is read in the kernel's log and said in gpu_fault; gpu_end and gpu_last_error say it
-        as a job that failed in the call would.
+        The end of a pending job whose end was not said, said once to the caller (the compositor asks at each present): GPU_END_NONE while the job is within
+        bounds, or ended without trouble. Its end is a bad one when its fence answers an error (gpu_idle comes on it: WAIT), when it is past its deadline and not
+        done (HUNG: the oldest job the ring has not done is the one it runs, so the deadline is that one's), or when the kernel's log has a page fault since it was
+        submitted (HUNG; the log is read from GPU_FAULT_FIRST after a tick, then every GPU_FAULT_EVERY, so a frame does not pay for it). Each is read in the
+        kernel's log and said in gpu_fault; gpu_end and gpu_last_error say it as a job that failed in the call would.
 */
 static enum gpu_end gpu_late_end(void)
 {
         enum gpu_end over = GPU_END_NONE;
-        positive now;
+        positive now, began;
 
-        if (gpu.pending && gpu_owed && !gpu_idle() && gpu_owed)
+        if (gpu.pending && !gpu_end_said && !gpu_idle() && !gpu_end_said)
         {
                 now = clock_monotonic_nanoseconds();
-                if (now - gpu_job_began >= GPU_HANG_NS)
+                began = gpu_before.sequence && gpu_done(gpu_before.sequence) == 0 ? gpu_before.began : gpu_job_began;
+                if (now - began >= GPU_HANG_NS)
                         over = GPU_END_HUNG;
                 else if (now >= gpu_fault_poll)
                 {
                         struct gpu_fault_scan s;
 
                         gpu_fault_poll = now + GPU_FAULT_EVERY;
-                        gpu_fault_read(gpu_job_began, &s);
+                        gpu_fault_read(began, &s);
                         if (s.have_at)
                                 over = GPU_END_HUNG;
                 }
                 if (over)
                 {
-                        gpu_owed = 0, gpu_end = over, gpu_last_error = 62, gpu_job_error = 62, gpu_fault_note(true);
+                        gpu_end_said = 1, gpu_end = over, gpu_last_error = 62, gpu_job_error = 62, gpu_fault_note(true);
                         return over;
                 }
         }
@@ -1693,8 +1753,8 @@ static enum gpu_end gpu_late_end(void)
         return over;
 }
 
-// Wait synchronously for any in-flight late GPU job (up to GPU_HANG_NS from gpu_job_began).
-// Returns true once idle; false if the card is lost or the job hung/errored (sets gpu_end/gpu_last_error).
+// The pending jobs waited for, to the last one's deadline: true once the card is idle; false if it is lost, or the job hung or its wait failed (said here, as gpu_end
+// and gpu_last_error).
 __attribute__((unused)) static b32 gpu_finish(void)
 {
         if (!gpu.pending)
@@ -1703,13 +1763,7 @@ __attribute__((unused)) static b32 gpu_finish(void)
                 return true;
         if (gpu_lost)
                 return false;
-        if (gpu_wait_job(GPU_HANG_NS))
-        {
-                gpu.pending = 0, gpu_owed = 0, gpu_last_job = clock_monotonic_nanoseconds();
-                return true;
-        }
-        gpu_owed = 0;
-        return false;
+        return gpu_wait_job(GPU_HANG_NS);
 }
 
 // No record waits for a job any more (the maps' addresses are no longer handed out to one): the marks of the lookups are cleared.
@@ -1732,19 +1786,26 @@ static b32 gpu_map_named(unsigned int i)
         return pages ? gpu_maps[i].handed || now : gpu_maps[i].handed && now;
 }
 
-#define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_run_job)
-// Run the kernel over the arguments' w by rows pixels; false if it did not finish (then gpu_idle holds the buffer until it has).
-static b32 gpu_run_job(void)
+#define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
+/*
+        The kernel run over the w by rows pixels of the arguments of the slot the job was built in (gpu_slot, which the caller took with gpu_slot_take and wrote:
+        GPU_ARGS), submitted and not waited for: its sequence, for gpu_done, gpu_fence_fd and gpu_wait_job; 0 when the submit was refused (gpu_last_error its
+        errno; gpu_lost when the card lost its state, the caller recovers). The job is then the pending one, the one pending before it gpu_before: two at most,
+        one in each slot. Its deadline is GPU_HANG_NS on (gpu_late_end).
+*/
+static positive gpu_submit(void)
 {
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op);
-        const struct gpu_job job = {gpu_kernels[which].words, GPU_VA + gpu_kernel_at[which], GPU_VA + 512, (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows};
+        const struct gpu_job job = {gpu_kernels[which].words, GPU_VA + gpu_kernel_at[which], GPU_VA + GPU_ARGS_AT(gpu_slot), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows,
+                                    (unsigned int address_to)((p8 address_to)gpu.at + GPU_PACKETS * gpu_slot), GPU_VA + GPU_PACKETS * gpu_slot};
         p64 bos[1 + GPU_IMPORTS + GPU_MAPS];
-        positive sequence = 0;
+        positive sequence = 0, began = clock_monotonic_nanoseconds(), kept = gpu_job_began;
         unsigned int named, tries = 0, again = 0;
 
-        if (!gpu_idle())
-                return false;
-        gpu_job_began = clock_monotonic_nanoseconds();
+        // A slot whose job may still run is not the next job's: its packets and arguments are that job's (gpu_slot_take is the caller's way to a free one).
+        if (gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)) && gpu.pending)
+                return gpu_end = GPU_END_LATE, 0;
+        gpu_job_began = began; // (the time a refusal reads the kernel's log from; the pending job's own again if it is refused)
         if (!++gpu_submit_serial) // (counted from 1: 0 is a map no submit has named)
                 gpu_submit_serial++;
         for (;;)
@@ -1767,8 +1828,8 @@ static b32 gpu_run_job(void)
                 if (gpu_last_error == 125 || gpu_last_error == 19 || gpu_last_error == 22)
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_lost = 1;
-                        return false;
+                        gpu_lost = 1, gpu_job_began = kept;
+                        return 0;
                 }
                 // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
                 // ten), and the kernel asks for the call again, which takes the pages afresh. Asked again up to GPU_AGAIN times with the processor let go of between: three
@@ -1782,15 +1843,22 @@ static b32 gpu_run_job(void)
                 if (++tries == 3 || gpu_drop_unmapped())
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        return false;
+                        gpu_job_began = kept;
+                        return 0;
                 }
         }
-        gpu.pending = sequence;
-        if (!gpu_wait_job(gpu_patient ? GPU_HANG_NS : GPU_LATE_NS))
+        if (gpu.pending)
+                gpu_before.sequence = gpu.pending, gpu_before.began = kept;
+        gpu.pending = sequence, gpu_pending_slot = gpu_slot, gpu_end_said = 0, gpu_fault_poll = began + GPU_LATE_NS + GPU_FAULT_FIRST;
+        return sequence;
+}
+
+// A job run and waited for a tick (the hang's two seconds for the self-test: gpu_patient); false if it did not finish (then gpu_idle holds the buffer until it has).
+static b32 gpu_run_job(void)
+{
+        if (!gpu_idle() || !gpu_submit())
                 return false;
-        gpu.pending = 0;
-        gpu_last_job = clock_monotonic_nanoseconds();
-        return true;
+        return gpu_wait_job(gpu_patient ? GPU_HANG_NS : GPU_LATE_NS);
 }
 
 // A job run and waited for (gpu_run_job), timed: the count and the total wait the metrics publish.
@@ -1803,6 +1871,18 @@ static b32 gpu_run(void)
         if (!gpu.pending) // a job given up on may still read the maps: their addresses stay handed out until it is done (gpu_idle)
                 gpu_handed_clear();
         return done;
+}
+
+// A job submitted without a wait (gpu_submit), counted as gpu_run counts one. The records it was built from are run: the marks of their maps are let go of
+// (the job's bo list names them, and no map is dropped while a job may run: gpu_idle).
+static positive gpu_go(void)
+{
+        positive sequence = gpu_submit();
+
+        gpu_jobs++;
+        if (sequence)
+                gpu_handed_clear();
+        return sequence;
 }
 
 // ui_box_radii on a box record's rx and ry (words 6 and 7): where two corners come to more than a side, the one factor that fits them all.
@@ -1828,23 +1908,23 @@ static void gpu_radii(unsigned int address_to r)
 // 256ths), m how many changes of cover follow it, which are its own and are passed over.
 #define GPU_RECORDS(body) for (i = 0; i < n; i++) { unsigned int address_to q = ops + 8 * i; int e = (q[0] & 255) == 2, m = e ? (int)(q[0] >> 8 & 15) : 0, x0 = e ? (int)q[1] >> 8 : (int)q[1], y0 = e ? (int)q[2] >> 8 : (int)q[2], \
         x1 = e ? ((int)q[3] + 255) >> 8 : (int)q[3], y1 = e ? ((int)q[4] + 255) >> 8 : (int)q[4]; \
-        if (i + (unsigned int)m >= n) return false; \
+        if (i + (unsigned int)m >= n) return -1; \
         x0 = x0 < (int)dx0 ? (int)dx0 : x0, y0 = y0 < (int)dy0 ? (int)dy0 : y0, x1 = x1 > (int)dx1 ? (int)dx1 : x1, y1 = y1 > (int)dy1 ? (int)dy1 : y1; \
         if (x0 < x1 && y0 < y1) { unsigned int tx0 = (unsigned int)x0 >> 6, ty0 = (unsigned int)y0 >> 6, tx1 = (unsigned int)(x1 - 1) >> 6, ty1 = (unsigned int)(y1 - 1) >> 6; body } i += m; }
-static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
-                     unsigned int dy0, unsigned int dx1, unsigned int dy1)
+// The scene's job built: its records binned into the bins at bins_at (room bytes there for the table and the lists), and the arguments of the slot the job is
+// built in (gpu_slot) written. 1 built; 0 nothing to draw (the damage is empty); -1 refused (a record that runs past the scene, a scene the kernels by hand do not
+// draw, bins that do not fit: gpu_end OVERFLOW). binned is the damage the lists hold (whole patches of 64 by 4).
+static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, positive room, positive d_at, unsigned int pitch, unsigned int w, unsigned int h,
+                           unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int binned[4])
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);
         unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, scene_op = 4, i, address_to list = tab + 2 * cw * ch, record[16 * 8];
         struct gpu_args address_to a = GPU_ARGS;
         b32 aligned = !(w & 3) && !(pitch & 3) && !(d_at & 15), partial;
 
-        gpu_last_error = 0, gpu_end = GPU_END_NONE; // this call's answer: a hang of its job is 62 here, and an older job's is not read as its own
-        if (!gpu_idle()) // the lists and the arguments are not to be written under a job that may still read them
-                return false;
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (dx0 >= dx1 || dy0 >= dy1)
-                return true;
+                return 0;
         partial = dx0 > 0 || dy0 > 0 || dx1 < w || dy1 < h;
         for (i = 0; i < n; i++)
         {
@@ -1852,7 +1932,7 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
                 unsigned int m = kind == 2 ? (ops[8 * i] >> 8 & 15) : 0;
 
                 if (i + m >= n)
-                        return false;
+                        return -1;
                 if (kind == 2)
                         scene_op = 5, hand |= ops[8 * i] > 2;
                 else
@@ -1860,11 +1940,12 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
                 i += m;
         }
         if (!aligned && (hand || partial))
-                return false;
+                return -1;
         dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u; // the kernel draws whole patches: so the ops are binned for them
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
-        if (bins_at >= gpu.size || 8ull * cw * ch > gpu.size - bins_at)
-                return gpu_end = GPU_END_OVERFLOW, false;
+        binned[0] = dx0, binned[1] = dy0, binned[2] = dx1, binned[3] = dy1;
+        if (bins_at >= gpu.size || room > gpu.size - bins_at || 8ull * cw * ch > room)
+                return gpu_end = GPU_END_OVERFLOW, -1;
         {
                 positive tab_bytes = (positive)cw * ch * 8, need;
                 int staged = 0;
@@ -1889,8 +1970,8 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
                 GPU_RECORDS(bins_count(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, 1 + (positive)m);)
                 at = (unsigned int)bins_starts(tab, (positive)cw * ch);
                 need = tab_bytes + 32ull * at;
-                if (need > gpu.size - bins_at) // the lists must fit what the buffer has left
-                        return gpu_end = GPU_END_OVERFLOW, false;
+                if (need > room) // the lists must fit the room they have
+                        return gpu_end = GPU_END_OVERFLOW, -1;
                 if (staged && need > gpu_bin_room)
                 {
                         positive want = (need + 4095) & ~(positive)4095;
@@ -1919,27 +2000,98 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = scene_op;
         if (aligned)
                 a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
-        return gpu_run();
+        return 1;
+}
+
+// A scene drawn, and waited for (gpu_run): the bins at bins_at, to the end of the buffer. True when it was drawn (or there was nothing to draw).
+static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
+                     unsigned int dy0, unsigned int dx1, unsigned int dy1)
+{
+        unsigned int binned[4];
+        int built;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE; // this call's answer: a hang of its job is 62 here, and an older job's is not read as its own
+        if (!gpu_idle()) // the lists and the arguments are not to be written under a job that may still read them
+                return false;
+        gpu_slot_take();
+        built = gpu_scene_build(ops_at, n, bins_at, bins_at < gpu.size ? gpu.size - bins_at : 0, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
+        return built < 0 ? false : built == 0 ? true : gpu_run();
+}
+
+// The arguments of a job that draws the damage dx0 dy0 dx1 dy1 of a scene of w by h binned at bins_at, the damage made whole patches and cut to clip (the patches
+// the lists were binned for). False for no pixel to draw.
+static b32 gpu_scene_rect(positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0, unsigned int dy0, unsigned int dx1,
+                          unsigned int dy1, const unsigned int clip[4])
+{
+        struct gpu_args address_to a = GPU_ARGS;
+
+        dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u;
+        dx0 = dx0 < clip[0] ? clip[0] : dx0, dy0 = dy0 < clip[1] ? clip[1] : dy0, dx1 = dx1 > clip[2] ? clip[2] : dx1, dy1 = dy1 > clip[3] ? clip[3] : dy1;
+        if (dx0 >= dx1 || dy0 >= dy1)
+                return false;
+        a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at;
+        a->dp = pitch, a->sp = w, a->gp = h;
+        a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
+        return true;
 }
 
 // Submit an additional damage rectangle for a scene already binned into bins_at by gpu_scene.
 static b32 gpu_scene_more(positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
                           unsigned int dy0, unsigned int dx1, unsigned int dy1)
 {
-        struct gpu_args address_to a = GPU_ARGS;
+        const unsigned int whole[4] = {0, 0, w, h};
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!gpu_idle())
                 return false;
-        dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
-        if (dx0 >= dx1 || dy0 >= dy1)
-                return true;
-        dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u;
-        dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
-        a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at;
-        a->dp = pitch, a->sp = w, a->gp = h;
-        a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
-        return gpu_run();
+        gpu_slot_take();
+        return !gpu_scene_rect(bins_at, d_at, pitch, w, h, dx0, dy0, dx1, dy1, whole) || gpu_run();
+}
+
+/*
+        A scene drawn without a wait: built in the slot gpu_slot_take gives and binned into the side of [bins_at, the buffer's last megabyte) that no pending job
+        reads (two sides, used in turn), then submitted (gpu_submit). The job's sequence, which gpu_done, gpu_fence_fd and gpu_wait_job take; 0 when nothing was
+        submitted: gpu_end LATE while the slot or the side is still a running job's (the jobs before are late), OVERFLOW for bins that do not fit their side, NONE
+        with nothing to draw or a scene the kernels by hand do not draw (gpu_last_error says a refused submit, gpu_lost a card that lost its state). The records,
+        the tables they name and the destination are the caller's to keep as they are until the job is done.
+*/
+static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h,
+                                 unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1)
+{
+        positive top = gpu.size > (1 << 20) ? gpu.size - (1 << 20) : 0, room = bins_at < top ? ((top - bins_at) / 2) & ~4095ull : 0, at, sequence;
+        unsigned int side = gpu_bins.side ^ 1u, binned[4];
+        int built;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (gpu_lost || gpu_done(gpu_bins.job[side]) == 0 || gpu_slot_take() < 0)
+                return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
+        at = bins_at + side * room;
+        built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
+        if (built <= 0 || !(sequence = gpu_go()))
+                return 0;
+        gpu_bins.job[side] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.w = w, gpu_bins.h = h;
+        gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
+        return sequence;
+}
+
+// Another damage rectangle of the last scene gpu_scene_submit binned (its lists are read as they are), drawn into d_at without a wait: the sequence, 0 for none
+// (as gpu_scene_submit says). Only what those lists were binned for is drawn: a scene of another size, or one the kernel by hand does not draw, is refused,
+// and the damage is cut to the lists'.
+static positive gpu_scene_more_submit(positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0, unsigned int dy0, unsigned int dx1,
+                                      unsigned int dy1)
+{
+        const unsigned int clip[4] = {gpu_bins.dx0, gpu_bins.dy0, gpu_bins.dx1, gpu_bins.dy1};
+        positive sequence;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!gpu_bins.at || w != gpu_bins.w || h != gpu_bins.h || (w & 3) || (pitch & 3) || (d_at & 15))
+                return 0;
+        if (gpu_lost || gpu_slot_take() < 0)
+                return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
+        if (!gpu_scene_rect(gpu_bins.at, d_at, pitch, w, h, dx0, dy0, dx1, dy1, clip) || !(sequence = gpu_go()))
+                return 0;
+        gpu_bins.job[gpu_bins.side] = sequence;
+        return sequence;
 }
 
 // One job moving a picture (src, sp pixels a row) into dst (dp a row) over w by h pixels, the card told by op. op 0 copies one rectangle,
@@ -1949,11 +2101,12 @@ static b32 gpu_scene_more(positive bins_at, positive d_at, unsigned int pitch, u
 // job, so when this is true the destination is written: nothing that reads it, or releases the source, is run before. false if the card did not finish it (as gpu_run says).
 static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int op, unsigned int w, unsigned int h)
 {
-        struct gpu_args address_to a = GPU_ARGS;
+        struct gpu_args address_to a;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!w || !h || !gpu_idle())
                 return false;
+        gpu_slot_take(), a = GPU_ARGS;
         a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = op, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = op ? GPU_VA + GPU_BASES_AT : 0;
         return gpu_run();
 }

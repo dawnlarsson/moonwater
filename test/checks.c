@@ -126797,7 +126797,8 @@ static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fa
 static unsigned int gpu_fake_waits; // the waits answered as still running before the fence goes on to say what gpu_fake_idle or the card says: a job that ends within the late cap
 static int gpu_fake_errno;          // a wait the kernel refuses is answered as failed while it is set (the fence has an error)
 static unsigned int gpu_fake_wait_calls, gpu_fake_submits, gpu_fake_requests; // the waits asked, the submits made, and every request made of the kernel's DRM (GPU_CONTROL)
-#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_wait_asked(wait))
+static positive gpu_fake_until; // the time the last wait was asked to wait until (0: it looks and does not wait)
+#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_until = (wait)[1], gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_wait_asked(wait))
 // The fake card with no hardware under it: the submit is taken (its sequence number 1) without a call, and the kernel's log has a page fault in it while gpu_fake_fault is set.
 static int gpu_fake_card, gpu_fake_fault;
 #define GPU_LOG_FAKE(since, out) do { if (gpu_fake_fault) (out)->have_at = 1, (out)->at = 0x2000000100ull; } while (0)
@@ -126813,7 +126814,9 @@ static long gpu_fake_userptr;
 static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 // The words of the IB of the last job submitted (gpu_run_job's ib, which is in scope where this is expanded), kept before any answer is made: a check reads the packets a job sent.
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
-#define GPU_SUBMIT_FAKE(error, taken) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true; } while (0)
+// A job the fake card takes is given the next of its sequences (gpu_fake_sequence, counted from 1), as the kernel gives a context's jobs theirs.
+static positive gpu_fake_sequence;
+#define GPU_SUBMIT_FAKE(error, taken, sequence) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true, (sequence) = ++gpu_fake_sequence; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 // The file that lets the other gfx10 families in (/run/moonwater/gpu-gfx10), as the check has it: 0 the machine's own answer, 1 there (an fd that is not open: the
 // close of it is refused and does nothing), -1 not there.
@@ -126844,6 +126847,8 @@ static unsigned int gpu_fake_vm_status, gpu_fake_vm_hub;
         number no row has open. Every other descriptor's request is made as it always is, but for the context a fake card with no descriptor is asked for
         (gpu_fake_card: the kernel makes one, as it does on a card).
 */
+static unsigned int gpu_fake_fence_ask[8]; // the last AMDGPU_FENCE_TO_HANDLE asked of the fake card, and the errno it answers (0: a descriptor)
+static long gpu_fake_fence_error;
 #define GPU_KERNEL_FD 1000
 #define GPU_KERNEL_CARD 1001
 #define GPU_KERNEL_DMABUF 2000
@@ -126886,6 +126891,15 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         p64 *longs = (p64 *)a;
 
         gpu_fake_requests++;
+        // AMDGPU_FENCE_TO_HANDLE on the fake card: the words asked are kept, and the sync_file is an eventfd (a descriptor the row closes), or the error the row gives.
+        if (gpu_fake_card && fd < 0 && request == 0xc0206454u)
+        {
+                memory_copy(gpu_fake_fence_ask, words, sizeof(gpu_fake_fence_ask));
+                if (gpu_fake_fence_error)
+                        return -gpu_fake_fence_error;
+                words[0] = (unsigned int)system_call_2(syscall(eventfd2), 0, 0x80000);
+                return 0;
+        }
         if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD))
         {
                 if (gpu_fake_card && fd < 0 && request == 0xc0106442u && !gpu_kernel.no_context) // DRM_IOCTL_AMDGPU_CTX
@@ -238063,7 +238077,7 @@ static void gpu_bench_rows(void)
 
         memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_maps, gpu_maps, sizeof(gpu_maps));
         gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_bench_buffer, gpu.size = sizeof(gpu_bench_buffer), gpu.imports = 0, gpu.pending = 0;
-        gpu_owed = 0, gpu_found = GPU_END_NONE, gpu_fake_card = 1, gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_tick = 100;
+        gpu_end_said = 0, gpu_before.sequence = 0, gpu_found = GPU_END_NONE, gpu_fake_card = 1, gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_tick = 100;
         // The maps a desktop holds: 200 of them, the scanout's the last made (the one a present looks up).
         for (unsigned int i = 0; i < MAPS; i++)
         {
@@ -238133,7 +238147,7 @@ static unsigned int gpu_late_screen[64 * 4];        // and its scanout
 // The compositor's state as a card that has just started has it, and the fake card (no descriptor, a submit the fake takes, a fence it answers).
 static void gpu_late_reset(void)
 {
-        gpu.pending = 0, gpu_owed = 0, gpu_found = GPU_END_NONE, gpu_end = GPU_END_NONE, gpu_last_error = 0;
+        gpu.pending = 0, gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_end = GPU_END_NONE, gpu_last_error = 0;
         gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_fake_fault = 0;
         compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.told = 1, compositor_gpu_state.force = 1, compositor_gpu_state.cool_until = 0;
         compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.hung_at = 0, compositor_gpu_state.hung_off = 0;
@@ -238178,13 +238192,13 @@ static void gpu_late_rows(void)
         memory_copy(ops, q, 32);
         gpu_fake_waits = 3;
         check("gpu late: a job the fence ends within the late cap is asked after again while it runs, and done", gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) &&
-              !gpu.pending && gpu_end == GPU_END_NONE && gpu_fake_waits == 0 && !gpu_owed);
+              !gpu.pending && gpu_end == GPU_END_NONE && gpu_fake_waits == 0 && gpu_found == GPU_END_NONE);
 
         // 2. A job still running at the cap: given up on as late with the job pending; the present is the processor's, and nothing is cooled, counted or restarted.
         gpu_late_reset();
         gpu_fake_idle = 0, gpu_fake_busy = 1;
         drew = compositor_gpu_present(&f, 0);
-        check("gpu late: a job still running at the late cap is given up on as late, held as pending", gpu.pending && gpu_end == GPU_END_LATE && gpu_owed);
+        check("gpu late: a job still running at the late cap is given up on as late, held as pending, its end not said", gpu.pending && gpu_end == GPU_END_LATE && !gpu_end_said);
         check("gpu late: and that present is the processor's", !drew);
         check("gpu late: no cool-down, no restart, no failure counted, the card not given up", compositor_gpu_state.cool_until == 0 && !compositor_gpu_state.restart_due &&
               compositor_gpu_state.failures == 0 && !compositor_gpu_state.dead && compositor_gpu_state.hung_at == 0 && compositor_gpu_state.cool_steps == 0);
@@ -238195,7 +238209,7 @@ static void gpu_late_rows(void)
         // 3. The late job's fence then says done: it is over, nothing is escalated, and the card draws the next present.
         gpu_fake_busy = 0, gpu_fake_idle = 1;
         drew = compositor_gpu_present(&f, 0);
-        check("gpu late: a late job that finishes costs nothing, and the card draws the next present", drew == 1 && !gpu.pending && !gpu_owed && compositor_gpu_state.cool_until == 0 &&
+        check("gpu late: a late job that finishes costs nothing, and the card draws the next present", drew == 1 && !gpu.pending && gpu_found == GPU_END_NONE && compositor_gpu_state.cool_until == 0 &&
               compositor_gpu_state.failures == 0 && compositor_gpu_state.hung_at == 0);
 
         // 4. A late job two seconds old and still running takes the hang path: the card cools and is to start again, the present is the processor's.
@@ -238212,7 +238226,7 @@ static void gpu_late_rows(void)
         check("gpu late: a late job two seconds old and still running takes the hang path (cool-down, restart due, the hang counted)", !drew && gpu_end == GPU_END_HUNG &&
               gpu_last_error == 62 && compositor_gpu_state.cool_until > now && compositor_gpu_state.restart_due && compositor_gpu_state.hung_at != 0 &&
               compositor_gpu_state.cool_steps == 1 && !compositor_gpu_state.dead);
-        check("gpu late: the hang is said once (the job's end is no longer owed)", !gpu_owed && gpu.pending);
+        check("gpu late: the hang is said once (the job's end is said, the job still pending)", gpu_end_said && gpu.pending);
 
         // 5. A late job whose fence then answers an error is a hang, at its first look.
         gpu_late_reset();
@@ -238246,6 +238260,128 @@ static void gpu_late_rows(void)
         gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_fault[0] = 0;
         compositor.card = kept_card, compositor_gpu = kept_gpu_on, compositor.width = kept_width, compositor.height = kept_height, compositor.damages = kept_damages;
         compositor.scanout = kept_scanout, compositor.scanout_pitch = kept_pitch, compositor.scanout_bytes = kept_bytes;
+}
+
+/*
+        The jobs without a wait (gpu.c's gpu_submit, gpu_scene_submit, gpu_scene_more_submit, gpu_done, gpu_fence_fd), on the fake card (no descriptor, a submit the
+        fake takes and numbers, a fence it answers for every job alike): a scene is submitted and not waited for; the next is built in the other slot and the other
+        side of the bins while it runs; a third waits for the first, and nothing of the first's is written; a job is asked after without a wait; its sync_file is
+        the kernel's answer to AMDGPU_FENCE_TO_HANDLE; and a pending job's deadline, its fence's error and a refused submit end it, or keep it, as gpu.c says.
+*/
+static void gpu_async_rows(void)
+{
+        unsigned char kept_gpu[sizeof(gpu)], args0[sizeof(struct gpu_args)], bins0[4096];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, was_ctx, submits;
+        positive base = GPU_DATA + 65536, ops_at = base, bins_at = base + 65536, d_at = base + 8192, first, second, third, more, room, first_g, now, kept_began, kept_pending;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_late_buffer + ops_at);
+        const unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0};
+        const struct gpu_args address_to slot0 = (const struct gpu_args address_to)((p8 address_to)gpu_late_buffer + GPU_ARGS_AT(0));
+        int fd;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_late_buffer, gpu.size = sizeof(gpu_late_buffer), gpu.imports = 0, gpu.pending = 0;
+        gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_lost = 0, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        gpu_fake_card = 1, gpu_fake_busy = 1, gpu_fake_idle = 0, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_map_count = 0, gpu_tick = 100;
+        room = ((gpu.size - (1 << 20) - bins_at) / 2) & ~4095ull;
+        memory_copy(ops, q, 32);
+
+        // 1. A scene submitted without a wait: the pending job, in slot 0, binned in a side of the bins; the kernel is asked for no wait.
+        gpu_fake_wait_calls = 0, gpu_fake_submits = 0;
+        first = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        first_g = slot0->g;
+        check("gpu async: a scene is submitted and not waited for: its sequence is the pending job's, built in slot 0, its bins in a side of the room",
+              first && gpu.pending == first && gpu_pending_slot == 0 && gpu_fake_submits == 1 && gpu_fake_wait_calls == 0 && slot0->op == 6 &&
+                  (first_g == GPU_VA + bins_at || first_g == GPU_VA + bins_at + room));
+        check("gpu async: the job's packets are slot 0's and name slot 0's arguments", gpu_fake_ib_words > 30 && gpu_fake_ib[32] == (unsigned int)(GPU_VA + GPU_ARGS_AT(0)));
+
+        // 2. The next, while the first runs: the other slot, the other side, the first held as the job before it; still no wait.
+        second = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        check("gpu async: the next scene is built while the first runs, in slot 1 and the other side of the bins, and the first is the job before it",
+              second && second != first && gpu.pending == second && gpu_before.sequence == first && gpu_pending_slot == 1 && gpu_fake_submits == 2 &&
+                  gpu_fake_wait_calls == 0 && GPU_ARGS == (struct gpu_args address_to)((p8 address_to)gpu_late_buffer + GPU_ARGS_AT(1)) && GPU_ARGS->g != first_g &&
+                  (GPU_ARGS->g == GPU_VA + bins_at || GPU_ARGS->g == GPU_VA + bins_at + room) && gpu_fake_ib[32] == (unsigned int)(GPU_VA + GPU_ARGS_AT(1)));
+
+        // 3. A third while both run: refused as late, and nothing of the first's (its arguments, its bins) written.
+        memory_copy(args0, slot0, sizeof(args0)), memory_copy(bins0, (p8 address_to)gpu_late_buffer + (first_g - GPU_VA), sizeof(bins0));
+        submits = gpu_fake_submits, gpu_fake_until = 1;
+        third = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        check("gpu async: a third scene while both run is refused as late, and the first's arguments and bins are as they were",
+              !third && gpu_end == GPU_END_LATE && gpu_fake_submits == submits && !memory_compare(args0, slot0, sizeof(args0)) &&
+                  !memory_compare(bins0, (p8 address_to)gpu_late_buffer + (first_g - GPU_VA), sizeof(bins0)) && gpu.pending == second && gpu_before.sequence == first);
+        check("gpu async: the slot was asked after without a wait (the time waited until is 0)", gpu_fake_until == 0);
+        gpu_slot = gpu_pending_slot;
+        check("gpu async: a submit of a job in the pending job's own slot is refused as late, and the kernel not asked", !gpu_submit() && gpu_end == GPU_END_LATE &&
+              gpu_fake_submits == submits && gpu.pending == second);
+
+        // 4. A job asked after: running, then done, without a wait; the job after it is still pending.
+        gpu_fake_until = 1;
+        check("gpu async: gpu_done says a running job is running, without a wait", gpu_done(first) == 0 && gpu_fake_until == 0 && gpu_before.sequence == first);
+        check("gpu async: gpu_done says a job no pending job has (none, or one seen done) is done, and asks the kernel nothing",
+              (submits = gpu_fake_wait_calls, gpu_done(0) == 1 && gpu_done(first + second + 100) == 1 && gpu_fake_wait_calls == submits));
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        check("gpu async: once the fence says done the first job is seen done, and the second is still the pending one", gpu_done(first) == 1 && !gpu_before.sequence &&
+              gpu.pending == second);
+
+        // 5. A job's sync_file: the kernel is asked for the job's fence as a sync_file (the context, the compute ring, the sequence, GET_SYNC_FILE_FD).
+        fd = gpu_fence_fd(second);
+        check("gpu async: a job's sync_file is a descriptor, asked of the kernel for the compute ring's fence of its sequence",
+              fd >= 0 && gpu_fake_fence_ask[0] == gpu.ctx && gpu_fake_fence_ask[1] == 1 && gpu_fake_fence_ask[2] == 0 && gpu_fake_fence_ask[3] == 0 &&
+                  gpu_fake_fence_ask[4] == (unsigned int)second && gpu_fake_fence_ask[5] == (unsigned int)(second >> 32) && gpu_fake_fence_ask[6] == 2);
+        if (fd >= 0)
+                system_close(fd);
+        gpu_fake_fence_error = 22;
+        check("gpu async: a sync_file the kernel refuses is its errno, and one of no job is EINVAL", gpu_fence_fd(second) == -22 && gpu_fence_fd(0) == -22);
+        gpu_fake_fence_error = 0;
+
+        // 6. The third now: slot 0 again (the first is done), the first's side again; then another rectangle of it in slot 1, over the same lists.
+        gpu_fake_busy = 1, gpu_fake_idle = 0;
+        third = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        check("gpu async: with the first done the third is built in its slot and its side", third && gpu_pending_slot == 0 && slot0->g == first_g && gpu_before.sequence == second);
+        submits = gpu_fake_submits;
+        check("gpu async: another rectangle while the job before is in its slot is refused as late", !gpu_scene_more_submit(d_at, 64, 64, 4, 0, 0, 64, 4) &&
+              gpu_end == GPU_END_LATE && gpu_fake_submits == submits);
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        check("gpu async: another rectangle of a scene of another size is refused, and nothing submitted",
+              !gpu_scene_more_submit(d_at, 128, 128, 4, 0, 0, 64, 4) && gpu_fake_submits == submits);
+        check("gpu async: the second is seen done, the third still pending", gpu_done(second) == 1 && !gpu_before.sequence && gpu.pending == third);
+        gpu_fake_busy = 1, gpu_fake_idle = 0;
+        more = gpu_scene_more_submit(d_at, 64, 64, 4, 0, 0, 64, 4);
+        check("gpu async: another rectangle of the last scene is drawn from its lists, in the other slot", more && gpu.pending == more && gpu_pending_slot == 1 &&
+              GPU_ARGS->g == first_g && GPU_ARGS->op == 6 && gpu_before.sequence == third && gpu_bins.job[gpu_bins.side] == more);
+        submits = gpu_fake_submits;
+        check("gpu async: a scene that waits is refused while jobs are pending, and nothing submitted",
+              !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_fake_submits == submits && gpu.pending == more);
+
+        // 7. A refused submit while a job is pending leaves the pending job as it was (its sequence, its submit's time, the one before it).
+        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_done(third);
+        gpu_fake_busy = 1, gpu_fake_idle = 0, gpu_fake_again = 40;
+        kept_pending = gpu.pending, kept_began = gpu_job_began;
+        check("gpu async: a submit the kernel keeps refusing is not taken, and the pending job is as it was",
+              !gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu.pending == kept_pending && gpu_job_began == kept_began && !gpu_before.sequence);
+        gpu_fake_again = 0;
+
+        // 8. The deadline: a pending job within it is nothing; past it, it is hung, said once; the oldest job the ring has not done is the one whose deadline counts.
+        now = clock_monotonic_nanoseconds();
+        gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_job_began = now - (GPU_HANG_NS - 500000000ull), gpu_fault_poll = now + 3600000000000ull, gpu_fake_fault = 0;
+        check("gpu async: a pending job a second and a half old is within its deadline: nothing is said", gpu_late_end() == GPU_END_NONE && !gpu_end_said);
+        gpu_job_began = now - GPU_HANG_NS;
+        check("gpu async: a pending job past its deadline is hung, said once", gpu_late_end() == GPU_END_HUNG && gpu_end_said && gpu_last_error == 62 &&
+              gpu_late_end() == GPU_END_NONE && gpu.pending);
+        gpu_end_said = 0, gpu_job_began = now, gpu_before.sequence = gpu.pending + 1, gpu_before.began = now - GPU_HANG_NS;
+        check("gpu async: the job before the pending one, still running past its own deadline, is the hung one", gpu_late_end() == GPU_END_HUNG && gpu_end_said);
+        gpu_before.sequence = 0;
+
+        // 9. A pending job whose fence answers an error: over, on a new context, and its end said once as a failed wait.
+        gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_fake_busy = 0, gpu_fake_errno = 1, was_ctx = gpu.ctx, gpu_lost = 0;
+        check("gpu async: a pending job whose fence answers an error is over, the jobs after on a new context", gpu_done(gpu.pending) == -1 && !gpu.pending &&
+              gpu.ctx != was_ctx && !gpu_lost && !gpu_bins.job[0] && !gpu_bins.job[1]);
+        gpu_fake_errno = 0;
+        check("gpu async: and its end is said once, as a failed wait", gpu_late_end() == GPU_END_WAIT && gpu_late_end() == GPU_END_NONE);
+
+        gpu_fake_card = 0, gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_fake_errno = 0, gpu_lost = 0, gpu_handed_clear();
+        gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        memory_copy(&gpu, kept_gpu, sizeof(gpu));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_fault[0] = 0;
 }
 
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
@@ -238950,6 +239086,7 @@ b32 main(void)
         gpu_import_rows();
         gpu_engine_and_render_regressions();
         gpu_late_rows();
+        gpu_async_rows();
         gpu_bench_rows();
         flip_wait_rows();
         descriptor_rows();
