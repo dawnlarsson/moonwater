@@ -164,6 +164,14 @@ static struct
         */
         unsigned char wc_reads[WINDOWS], wc_copy[WINDOWS];
         unsigned int wc_presents, wc_seeded;
+        // The last refusal of a client's buffer as a framebuffer to scan out (compositor_lent_fb): what was asked, and the kernel's errno or why it was
+        // not asked (COMPOSITOR_WL_SCAN_*), and how many there were.
+        struct
+        {
+                unsigned int fourcc, pitch, offset, width, height, count;
+                unsigned long long modifier;
+                int error;
+        } scan_refused;
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
 
 /*
@@ -837,9 +845,53 @@ static void compositor_wl_lent_drop_fb(int row)
         }
 }
 
+/*
+        A client's dma-buf as a framebuffer the card scans out (ADDFB2 of its handle on the display's node): the window's rectangle of it, at the
+        byte the window's first pixel is (a window that is part of its buffer, a toolkit's shadow round it, is not the buffer's top left), with the
+        modifier the client gave it when it gave one (linear too: the kernel then reads no tiling of the buffer's own), and none for an implicit one.
+        amdgpu's rules for a linear framebuffer (amdgpu_display_verify_plane: a pitch and an offset of whole 256-byte blocks) are asked here first, so a
+        buffer the kernel would refuse is not asked for; every refusal is kept (compositor_wl.scan_refused) with what was asked and why.
+*/
+// The two requests of the display's node, which a check fakes (CHECK_gpu_kit's gpu_scan_rows) to see what is asked and answer it.
+#ifndef COMPOSITOR_WL_PRIME
+#define COMPOSITOR_WL_PRIME(prime) system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of(prime))
+#endif
+#ifndef COMPOSITOR_WL_ADDFB
+#define COMPOSITOR_WL_ADDFB(fb) system_control(compositor.card, COMPOSITOR_ADDFB2, address_of(fb))
+#endif
+#define COMPOSITOR_WL_SCAN_PITCH (-1)  // not asked: amdgpu takes a linear pitch of whole 256-byte blocks only
+#define COMPOSITOR_WL_SCAN_OFFSET (-2) // not asked: nor an offset that is not one
+#define COMPOSITOR_WL_SCAN_PRIME (-3)  // the display's node would not take the buffer (PRIME_FD_TO_HANDLE refused)
+
+static void compositor_wl_scan_refuse(int row, unsigned int fourcc, unsigned int pitch, unsigned int offset, int error)
+{
+        compositor_wl.scan_refused.fourcc = fourcc;
+        compositor_wl.scan_refused.pitch = pitch;
+        compositor_wl.scan_refused.offset = offset;
+        compositor_wl.scan_refused.width = (unsigned int)compositor_wl.lent[row].width;
+        compositor_wl.scan_refused.height = (unsigned int)compositor_wl.lent[row].height;
+        compositor_wl.scan_refused.modifier = compositor_wl.lent[row].modifier;
+        compositor_wl.scan_refused.error = error;
+        compositor_wl.scan_refused.count++;
+        compositor_wl.lent[row].scan_failed = 1;
+        if (compositor.table)
+        {
+                compositor.table->client_scan_fourcc = fourcc;
+                compositor.table->client_scan_modifier = compositor_wl.scan_refused.modifier;
+                compositor.table->client_scan_pitch = pitch;
+                compositor.table->client_scan_offset = offset;
+                compositor.table->client_scan_width = compositor_wl.scan_refused.width;
+                compositor.table->client_scan_height = compositor_wl.scan_refused.height;
+                compositor.table->client_scan_errno = error;
+                compositor.table->client_scan_refused = compositor_wl.scan_refused.count;
+        }
+}
+
 static unsigned int compositor_lent_fb(int row)
 {
+        static const char *const amd[] = {"amdgpu"};
         unsigned int fourcc;
+        long refused;
         struct
         {
                 unsigned int handle, flags;
@@ -856,32 +908,37 @@ static unsigned int compositor_lent_fb(int row)
                 return 0;
         if (compositor_wl.lent[row].scan_fb)
                 return compositor_wl.lent[row].scan_fb;
-        prime.handle = 0;
-        prime.flags = 0;
-        prime.fd = (int)compositor_wl.lent[row].fd;
-        if (system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime) != 0 || !prime.handle)
-        {
-                compositor_wl.lent[row].scan_failed = 1;
-                return 0;
-        }
         fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
         fb.width = (unsigned int)compositor_wl.lent[row].width;
         fb.height = (unsigned int)compositor_wl.lent[row].height;
         fb.pixel_format = fourcc;
-        fb.handles[0] = prime.handle;
         fb.pitches[0] = (unsigned int)(compositor_wl.lent[row].pitch * 4);
-        fb.offsets[0] = compositor_wl.lent[row].offset;
-        if (compositor_wl.lent[row].modifier && compositor_wl.lent[row].modifier != 0x00ffffffffffffffULL)
+        fb.offsets[0] = (unsigned int)((const unsigned char *)compositor_wl.lent[row].pixels - compositor_wl.lent[row].map);
+        if (compositor_wl.lent[row].modifier != 0x00ffffffffffffffULL)
         {
-                fb.flags = 2u;
+                fb.flags = 2u; // DRM_MODE_FB_MODIFIERS: the client's, linear (0) or not
                 fb.modifier[0] = compositor_wl.lent[row].modifier;
         }
-        if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0 || !fb.fb_id)
+        if (compositor_driver_in(amd, 1) && !compositor_wl.lent[row].modifier && (fb.pitches[0] & 255u || fb.offsets[0] & 255u))
+        {
+                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], fb.pitches[0] & 255u ? COMPOSITOR_WL_SCAN_PITCH : COMPOSITOR_WL_SCAN_OFFSET);
+                return 0;
+        }
+        prime.handle = 0;
+        prime.flags = 0;
+        prime.fd = (int)compositor_wl.lent[row].fd;
+        if (COMPOSITOR_WL_PRIME(prime) != 0 || !prime.handle)
+        {
+                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], COMPOSITOR_WL_SCAN_PRIME);
+                return 0;
+        }
+        fb.handles[0] = prime.handle;
+        if ((refused = COMPOSITOR_WL_ADDFB(fb)) != 0 || !fb.fb_id)
         {
                 unsigned int close[2] = {prime.handle, 0};
 
                 system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                compositor_wl.lent[row].scan_failed = 1;
+                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], refused < 0 ? (int)-refused : (int)refused);
                 return 0;
         }
         compositor_wl.lent[row].scan_fb = fb.fb_id;

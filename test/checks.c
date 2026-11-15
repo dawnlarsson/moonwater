@@ -128198,6 +128198,14 @@ static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 // A job the fake card takes is given the next of its sequences (gpu_fake_sequence, counted from 1), as the kernel gives a context's jobs theirs.
 static positive gpu_fake_sequence;
+// The display node's PRIME import and ADDFB2 of a client's dma-buf to scan out (compositor_lent_fb), faked: what was asked is kept, and the answer is
+// gpu_fake_addfb_answer (0, or the kernel's -errno) with the next framebuffer id.
+static unsigned char gpu_fake_addfb[128];
+static int gpu_fake_addfb_calls, gpu_fake_prime_calls;
+static long gpu_fake_addfb_answer;
+#define COMPOSITOR_WL_PRIME(prime) (gpu_fake_prime_calls++, (prime).handle = 7u, 0L)
+#define COMPOSITOR_WL_ADDFB(fb) (gpu_fake_addfb_calls++, memory_copy(gpu_fake_addfb, &(fb), sizeof(fb) < sizeof gpu_fake_addfb ? sizeof(fb) : sizeof gpu_fake_addfb), \
+                                 (fb).fb_id = gpu_fake_addfb_answer ? 0u : 40u + (unsigned int)gpu_fake_addfb_calls, gpu_fake_addfb_answer)
 #define GPU_SUBMIT_FAKE(error, taken, sequence) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true, (sequence) = ++gpu_fake_sequence; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 // The file that lets the other gfx10 families in (/run/moonwater/gpu-gfx10), as the check has it: 0 the machine's own answer, 1 there (an fd that is not open: the
@@ -239909,6 +239917,76 @@ static void gpu_lent_rows(void)
 }
 
 /*
+        A client's dma-buf as a framebuffer to scan out (compositor_lent_fb), the display node's requests faked (no card has run this path): the window's
+        rectangle at the byte its first pixel is in the buffer (here 2 rows and 64 pixels in), a modifier the client named linear (0) or another passed with
+        DRM_MODE_FB_MODIFIERS as it is, an implicit one (DRM_FORMAT_MOD_INVALID) with no flag so the kernel reads the buffer's own layout; on amdgpu a linear
+        pitch or offset that is not whole 256-byte blocks refused before the request (amdgpu_display_verify_plane refuses it), and every refusal kept with
+        what was asked and why.
+*/
+static void gpu_scan_rows(void)
+{
+        enum { ROW = 6 };
+        struct fb_asked
+        {
+                unsigned int fb_id, width, height, pixel_format, flags;
+                unsigned int handles[4], pitches[4], offsets[4];
+                unsigned long long modifier[4];
+        } asked;
+        static unsigned int buffer[256 * 64];
+        int kept_card = compositor.card;
+        char kept_driver[sizeof compositor.driver];
+        unsigned int refused = compositor_wl.scan_refused.count;
+
+        memory_copy(kept_driver, compositor.driver, sizeof kept_driver);
+        memory_zero(compositor.driver, sizeof compositor.driver);
+        memory_copy(compositor.driver, "amdgpu", 7);
+        compositor.card = 1000; // no descriptor: the requests are the fakes, and a framebuffer's removal is EBADF
+#define GPU_SCAN_LEND(modifier_, pitch_, x_)                                                                                                              \
+        (compositor_wl_unlend(ROW), memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]),                                                   \
+         compositor_wl.lent[ROW].map = (const unsigned char *)buffer, compositor_wl.lent[ROW].pitch = (pitch_),                                             \
+         compositor_wl.lent[ROW].pixels = buffer + 2 * (pitch_) + (x_), compositor_wl.lent[ROW].width = 128, compositor_wl.lent[ROW].height = 32,           \
+         compositor_wl.lent[ROW].fd = 9, compositor_wl.lent[ROW].size = sizeof buffer, compositor_wl.lent[ROW].fourcc = 0x34325258u,                      \
+         compositor_wl.lent[ROW].modifier = (modifier_))
+        GPU_SCAN_LEND(0, 256, 64);
+        gpu_fake_addfb_answer = 0;
+        check("gpu scan: a lent dma-buf named linear is a framebuffer", compositor_lent_fb(ROW) != 0);
+        memory_copy(&asked, gpu_fake_addfb, sizeof asked);
+        check("gpu scan: of the window's rectangle at the byte its first pixel is (two rows and 64 pixels in)",
+              asked.width == 128 && asked.height == 32 && asked.pitches[0] == 1024 && asked.offsets[0] == 2 * 1024 + 64 * 4 && asked.handles[0] == 7u &&
+                      asked.pixel_format == 0x34325258u);
+        check("gpu scan: linear asked as linear, with the modifiers flag", asked.flags == 2u && asked.modifier[0] == 0);
+        GPU_SCAN_LEND(0x00ffffffffffffffULL, 256, 64);
+        check("gpu scan: an implicit layout (DRM_FORMAT_MOD_INVALID) is asked with no flag, the kernel reading the buffer's own",
+              compositor_lent_fb(ROW) != 0 && (memory_copy(&asked, gpu_fake_addfb, sizeof asked), asked.flags == 0 && asked.modifier[0] == 0));
+        GPU_SCAN_LEND(0x0200000000000001ULL, 256, 64);
+        check("gpu scan: another modifier is asked as it is, with the flag (the kernel refuses what no plane lists)",
+              compositor_lent_fb(ROW) != 0 && (memory_copy(&asked, gpu_fake_addfb, sizeof asked), asked.flags == 2u && asked.modifier[0] == 0x0200000000000001ULL));
+        {
+                int calls = gpu_fake_addfb_calls;
+
+                GPU_SCAN_LEND(0, 250, 64);
+                check("gpu scan: on amdgpu a linear pitch of no whole 256-byte blocks is refused before it is asked, and kept",
+                      !compositor_lent_fb(ROW) && gpu_fake_addfb_calls == calls && compositor_wl.scan_refused.error == -1 &&
+                              compositor_wl.scan_refused.pitch == 1000 && compositor_wl.scan_refused.count == refused + 1);
+                GPU_SCAN_LEND(0, 256, 3);
+                check("gpu scan: and so is an offset of none (the window three pixels in)",
+                      !compositor_lent_fb(ROW) && gpu_fake_addfb_calls == calls && compositor_wl.scan_refused.error == -2 &&
+                              compositor_wl.scan_refused.offset == 2 * 1024 + 12);
+        }
+        GPU_SCAN_LEND(0, 256, 64);
+        gpu_fake_addfb_answer = -22;
+        check("gpu scan: a framebuffer the kernel refuses is kept refused with its errno and what was asked",
+              !compositor_lent_fb(ROW) && compositor_wl.scan_refused.error == 22 && compositor_wl.scan_refused.width == 128 &&
+                      compositor_wl.scan_refused.fourcc == 0x34325258u && compositor_wl.lent[ROW].scan_failed);
+        check("gpu scan: and not asked again for the same buffer", !compositor_lent_fb(ROW));
+        gpu_fake_addfb_answer = 0;
+#undef GPU_SCAN_LEND
+        memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
+        compositor.card = kept_card;
+        memory_copy(compositor.driver, kept_driver, sizeof kept_driver);
+}
+
+/*
         A lent dma-buf the processor composes (the card drew no present): read in place where its client's card wrote it, which on a card with memory of
         its own is a write-combined mapping read with plain loads (13 ms a present of a 1080p game on the owner's machine). The processor reads it in two
         presents running (compositor_wl_lent_sync counts the first read of each present) and the row is copied into the table once (compositor_wl_seed,
@@ -242353,6 +242431,7 @@ b32 main(void)
         }
         // The rows of the shim's host that need no card (its state made by hand), before the card's.
         gpu_wc_rows();
+        gpu_scan_rows();
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
                 // A card that is there and draws the self-test wrong fails here; no card at all is no failure, and no pass either: every row after this one
