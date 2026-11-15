@@ -128252,6 +128252,7 @@ static struct
         // memfd, offset and size of the last (refused with udmabuf_error while that is set), and each GEM_USERPTR is counted and given a handle.
         int udmabuf;
         long udmabuf_error;
+        unsigned long udmabuf_limit; // the bytes a dma-buf may have (udmabuf's size_limit_mb, 64 MB by default: past it EINVAL); 0 none
         unsigned int udmabufs, udmabuf_memfd, userptrs;
         unsigned long udmabuf_offset, udmabuf_size;
 } gpu_kernel;
@@ -128318,6 +128319,8 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                 gpu_kernel.udmabuf_memfd = words[0], gpu_kernel.udmabuf_offset = longs[1], gpu_kernel.udmabuf_size = longs[2];
                 if (gpu_kernel.udmabuf_error)
                         return -gpu_kernel.udmabuf_error;
+                if (gpu_kernel.udmabuf_limit && longs[2] > gpu_kernel.udmabuf_limit)
+                        return -22;
                 return GPU_KERNEL_DMABUF + 500 + gpu_kernel.udmabufs++;
         case 0xc0186451u: // DRM_IOCTL_AMDGPU_GEM_USERPTR: a handle of a new buffer number (900 on), written in the high half of the flags' word
         {
@@ -239708,7 +239711,7 @@ static b32 gpu_route_rows(void)
         gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_dma = 0, gpu_pin_count = 0, gpu_pin_sum = 0;
 
         gpu_fake_userptr = 19; // ENODEV: the kernel without CONFIG_DRM_AMDGPU_USERPTR
-        check("gpu route: the sealed table's pages map by dma-buf first, with no userptr asked", gpu_map_written(pic, W * W * 4) && !gpu_userptr_gone && gpu_maps_dma == 1);
+        check("gpu route: a userptr refused with ENODEV maps the table's pages by dma-buf", gpu_map_written(pic, W * W * 4) && gpu_userptr_gone && gpu_maps_dma == 1);
         check("gpu route: the map is the table's pages (the pin goes on for their offset)", gpu_pin_count == 1 && gpu_pin_sum == 1 && gpu_pin_offset == 4096);
         dst = (positive)gpu_va_written(pic, W * W * 4);
         check("gpu route: the card's address for the picture", dst != 0);
@@ -241013,7 +241016,8 @@ static void gpu_late_rows(void)
 }
 
 /*
-        The compositor's own memory through one import (gpu.c's gpu_map_as and gpu_region_of), with the fake kernel's udmabuf, PRIME and userptr: a picture in a sealed
+        The compositor's own memory through one import (gpu.c's gpu_map_as and gpu_region_of, and the order before it that the owner's file gpu-own-userptr
+        asks for), with the fake kernel's udmabuf (its size limit 64 MB, as the kernel's size_limit_mb), PRIME and userptr: a picture in a sealed
         registered memfd is mapped by udmabuf first, the whole memfd in one dma-buf, so no userptr is made for it, a second picture in it is that map's, and a job's
         bo list names one handle for both; an unsealed one goes by userptr as before; a picture of the sealed window table is a dma-buf of its own pages (the table's
         rows are made and given back apart), pinned; and a udmabuf refused falls back to userptr.
@@ -241053,7 +241057,7 @@ static void gpu_own_rows(void)
         memory_copy(kept_gpu, &gpu, sizeof(gpu));
         gpu.fd = GPU_KERNEL_FD, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_late_buffer, gpu.size = sizeof(gpu_late_buffer), gpu.imports = 0, gpu.pending = 0, gpu.broken = 0;
         memory_zero(&gpu_kernel, sizeof(gpu_kernel));
-        gpu_kernel.on = 1, gpu_kernel.udmabuf = 1;
+        gpu_kernel.on = 1, gpu_kernel.udmabuf = 1, gpu_kernel.udmabuf_limit = 64ul << 20, gpu_own_userptr = 0, gpu_maps_own_user = 0, gpu_maps_own_errno = 0;
         gpu_fake_card = 1, gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_fake_userptr = 0, gpu_lost = 0;
         gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS, gpu_tick = 100, gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_user = 0, gpu_maps_dma = 0;
         gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_pin_count = 0, gpu_pin_sum = 0;
@@ -241079,8 +241083,8 @@ static void gpu_own_rows(void)
         // 2. An unsealed registered memfd: udmabuf would refuse it; userptr, as before.
         gpu_register_memfd((int)fd_open, loose, BYTES, 0);
         userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
-        check("gpu own: a picture in an unsealed registered memfd is mapped by userptr, with no udmabuf asked",
-              gpu_map(loose + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 && gpu_kernel.udmabufs == udmabufs && gpu_maps_user == 1);
+        check("gpu own: a picture in an unsealed registered memfd is mapped by userptr, with no udmabuf asked and no fallback counted",
+              gpu_map(loose + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 && gpu_kernel.udmabufs == udmabufs && gpu_maps_user == 1 && gpu_maps_own_user == 0);
 
         // 3. The sealed window table: a picture is a dma-buf of its own pages, and its row's pin goes on.
         gpu_shared.fd = (int)fd_table, gpu_shared.at = (unsigned char address_to)table, gpu_shared.bytes = BYTES, gpu_shared.pin = gpu_fake_pin;
@@ -241092,9 +241096,73 @@ static void gpu_own_rows(void)
         // 4. A sealed memfd udmabuf refuses: userptr after it.
         gpu_register_memfd((int)fd_refused, refused, BYTES, 0);
         gpu_kernel.udmabuf_error = 22, userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
-        check("gpu own: a sealed memfd udmabuf refuses is mapped by userptr after it", gpu_map(refused + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 &&
-              (gpu_map_why & 255) == 6);
+        check("gpu own: a sealed memfd udmabuf refuses is mapped by userptr after it, counted as the compositor's own fallen back with the refusal's errno",
+              gpu_map(refused + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 && (gpu_map_why & 255) == 6 && gpu_maps_own_user == 1 && gpu_maps_own_errno == 22);
         gpu_kernel.udmabuf_error = 0;
+
+        // 5. A registered memfd past udmabuf's size limit (72 MB: EINVAL, as the kernel answers past size_limit_mb): userptr after it, and the present is drawn.
+        {
+                unsigned int address_to big;
+                long fd_big = gpu_memfd_make(72ul << 20, 2, &big);
+                positive va;
+
+                gpu_register_memfd((int)fd_big, big, 72ul << 20, 0);
+                userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
+                check("gpu own: a memfd past udmabuf's size limit is refused by it (EINVAL) and mapped by userptr after it",
+                      fd_big >= 0 && gpu_map(big + 1024, PIC) && gpu_kernel.udmabuf_size == 72ul << 20 && gpu_kernel.userptrs == userptrs + 1 &&
+                          (gpu_map_why & 255) == 6 && (gpu_map_why >> 8) == 22);
+                va = gpu_va_bytes(big + 1024, PIC);
+                {
+                        const unsigned int q[8] = {4, 0, 0, 64, 4, (unsigned int)va, (unsigned int)(va >> 32), 64};
+
+                        memory_copy(ops, q, sizeof(q));
+                        check("gpu own: and the present that reads it is drawn", va && gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4));
+                }
+                gpu_forget(big, 72ul << 20), gpu_trim(), gpu_unregister_memfd(big);
+                if (fd_big >= 0)
+                        system_call_2(syscall(munmap), (positive)big, 72ul << 20), system_close((int)fd_big);
+        }
+
+        // 6. With the owner's file gpu-own-userptr the order is the one before: a sealed registered memfd asks userptr first, of the picture's own pages.
+        gpu_own_userptr = 1;
+        {
+                unsigned int address_to plain;
+                long fd_plain = gpu_memfd_make(BYTES, 2, &plain);
+
+                gpu_register_memfd((int)fd_plain, plain, BYTES, 0);
+                userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
+                check("gpu own: with gpu-own-userptr a picture in a sealed registered memfd is a userptr of its own pages, no udmabuf asked",
+                      fd_plain >= 0 && gpu_map(plain + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 && gpu_kernel.udmabufs == udmabufs &&
+                          gpu_maps[gpu_map_count - 1].bytes == PIC && !gpu_maps[gpu_map_count - 1].dma);
+                gpu_userptr_gone = 1;
+                check("gpu own: and once userptr is gone the dma-buf route is its fallback, of the picture's own pages", gpu_map(plain + 32768, PIC) &&
+                      gpu_kernel.udmabufs == udmabufs + 1 && gpu_kernel.udmabuf_offset == 32768 * 4 && gpu_kernel.udmabuf_size == PIC);
+                gpu_userptr_gone = 0;
+                gpu_forget(plain, BYTES), gpu_trim(), gpu_unregister_memfd(plain);
+                if (fd_plain >= 0)
+                        system_call_2(syscall(munmap), (positive)plain, BYTES), system_close((int)fd_plain);
+        }
+
+        // 7. A userptr the kernel refuses with EFAULT (a client dma-buf's mapping: hmm_range_fault refuses a VM_IO or VM_PFNMAP range) before any userptr map has
+        //    succeeded, on a card whose start took an anonymous page by userptr: the refusal is the address's, userptr is not gone for the session, and the refused
+        //    map is kept to be said (other memory, step 5, its address and bytes).
+        {
+                long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+
+                gpu_own_userptr = 0, gpu_userptr_ok = 1, gpu_maps_user = 0, gpu_fake_userptr = 14, gpu_userptr_gone = 0;
+                check("gpu own: an EFAULT before any userptr map, on a card whose start took a page by userptr, leaves userptr on and the refusal kept as other memory",
+                      !gpu_map((const void *)page, 4096) && !gpu_userptr_gone && gpu_map_refusal.kind == GPU_MAP_OTHER && gpu_map_refusal.why == 5 &&
+                          gpu_map_refusal.at == (positive)page && gpu_map_refusal.bytes == 4096);
+                gpu_userptr_ok = 0;
+                check("gpu own: on a card whose start did not take a page by userptr, the same EFAULT makes userptr gone, as before",
+                      !gpu_map((const void *)page, 4096) && gpu_userptr_gone);
+                gpu_fake_userptr = 0, gpu_userptr_gone = 0;
+                gpu_kernel.udmabuf_error = 22;
+                check("gpu own: a picture of the table the dma-buf route refuses with userptr gone is kept as the table's, step 6",
+                      (gpu_userptr_gone = 1, !gpu_map(table + 16384, 8192)) && gpu_map_refusal.kind == GPU_MAP_TABLE && (gpu_map_refusal.why & 255) == 6);
+                gpu_kernel.udmabuf_error = 0, gpu_userptr_gone = 0;
+                system_call_2(syscall(munmap), (positive)page, 4096);
+        }
 
         while (gpu_map_count)
                 gpu_drop(0, GPU_GONE_RECOVER);
@@ -241105,7 +241173,7 @@ static void gpu_own_rows(void)
         system_call_2(syscall(munmap), (positive)table, BYTES), system_call_2(syscall(munmap), (positive)refused, BYTES);
         system_close((int)fd_sealed), system_close((int)fd_open), system_close((int)fd_table), system_close((int)fd_refused);
         memory_zero(&gpu_kernel, sizeof(gpu_kernel));
-        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_handed_clear();
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_own_userptr = 0, gpu_maps_own_user = 0, gpu_maps_own_errno = 0, gpu_handed_clear();
         memory_copy(&gpu, kept_gpu, sizeof(gpu));
         gpu_map_count = kept_count, gpu_map_next = kept_next, gpu_tick = kept_tick, gpu_maps_user = 0, gpu_maps_dma = 0, gpu_last_error = 0, gpu_end = GPU_END_NONE;
 }

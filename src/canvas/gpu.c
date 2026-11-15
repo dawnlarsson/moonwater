@@ -59,6 +59,15 @@ __attribute__((unused)) static void gpu_unregister_memfd(void *at)
 }
 static b32 gpu_userptr_off, gpu_userptr_gone; // off: /run/moonwater/gpu-nouserptr says to use the dma-buf route for every map (a test); gone: the kernel refused userptr with
                                               // ENODEV, EINVAL, EOPNOTSUPP or ENOSYS, which is not asked again (every map after goes by the dma-buf route)
+// /run/moonwater/gpu-own-userptr, looked for at each start as gpu-nouserptr is: the order of the maps before the compositor's own sealed memfds went by the dma-buf
+// route first (userptr first for every map, the dma-buf route its fallback, a registered memfd mapped a picture at a time), for the owner's A and B and as the way back.
+static b32 gpu_own_userptr;
+// The maps of the compositor's own memory that went to userptr because the dma-buf route refused them (udmabuf past its size_limit_mb, an import or a bind refused),
+// and the last refusal's errno (moonwater debug): the rest of gpu_maps_user are memory that is not the compositor's (a client's pool) or not sealed.
+static unsigned int gpu_maps_own_user, gpu_maps_own_errno;
+// The start's probe took an anonymous page by userptr: a userptr refused after with EINVAL, EFAULT or EPERM is the address's (a dma-buf's mmap, a page gone), not
+// the kernel's, and does not make userptr gone for the session (gpu_map_as).
+static b32 gpu_userptr_ok;
 static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
 static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
 static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
@@ -619,12 +628,16 @@ static b32 gpu_start(positive bytes)
         long at, hash;
 
         memory_zero(&gpu_req, sizeof(gpu_req));
-        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0;
+        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_userptr_ok = 0;
         // The test's switch (/run/moonwater/gpu-nouserptr): the table's pages go by the dma-buf route, and no userptr is asked for them.
         {
                 long off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-nouserptr", FILE_READ | O_CLOEXEC);
 
                 gpu_userptr_off = off >= 0, gpu_userptr_gone = 0;
+                if (off >= 0)
+                        system_close((int)off);
+                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-own-userptr", FILE_READ | O_CLOEXEC);
+                gpu_own_userptr = off >= 0;
                 if (off >= 0)
                         system_close((int)off);
                 off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
@@ -711,6 +724,7 @@ static b32 gpu_start(positive bytes)
                         long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
 
                         e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, GPU_USER_WRITTEN);
+                        gpu_userptr_ok = e == 0;
                         if (!(page < 0 && page > -4096))
                                 system_call_2(syscall(munmap), (positive)page, 4096);
                         if (e != 0)
@@ -1048,18 +1062,20 @@ static b32 gpu_map_dmabuf(const struct gpu_region address_to r, positive from, p
 
 /*
         A map of the pages that hold [addr, addr + size). The compositor's own memory (gpu_region_of) whose memfd is sealed goes by the dma-buf route first, userptr
-        second: a buffer of a dma-buf is one the kernel pinned when it was made, where it walks a userptr's pages at every submit that names it (80 to 400 us a
-        present for ten 1080p buffers) and answers EAGAIN when one moved; a registered memfd is mapped whole, so every picture in it is one handle in a job's
-        bo list. Any other memory goes by userptr, and by the dma-buf route only once userptr is refused for good or switched off (gpu-nouserptr).
+        second (unless the owner's file gpu-own-userptr asks for the order before): a buffer of a dma-buf is one the kernel pinned when it was made, where it walks a userptr's pages at every
+        submit that names it (80 to 400 us a present for ten 1080p buffers) and answers EAGAIN when one moved; a registered memfd is mapped whole, so every picture in
+        it is one handle in a job's bo list; a dma-buf udmabuf refuses (EINVAL past its size_limit_mb, 64 MB a buffer by default: an 8K picture is 127 MB) is
+        asked of userptr after it, and counted (gpu_maps_own_user). Otherwise, and for any other memory, userptr first, and the dma-buf route only once userptr
+        is refused for good or switched off (gpu-nouserptr).
 */
-static b32 gpu_map_as(const void *addr, positive size, b32 written)
+static b32 gpu_map_try(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
         unsigned int handle = 0, e;
         unsigned int old = 0;
         long taken = 0;
         struct gpu_region region;
-        b32 own = gpu_region_of(from, to, &region), first = own && gpu_memfd_sealed(region.fd);
+        b32 own = gpu_region_of(from, to, &region), first = own && !gpu_own_userptr && gpu_memfd_sealed(region.fd);
 
         if (first && region.whole && region.base + (region.bytes & ~4095ull) >= to && !(region.base & 4095))
                 from = region.base, to = region.base + (region.bytes & ~4095ull);
@@ -1105,11 +1121,13 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                         gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
                         gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].pin = 0;
                         gpu_map_count++, gpu_maps_user++;
+                        if (first) // the dma-buf route refused it first: gpu_map_why is that refusal
+                                gpu_maps_own_user++, gpu_maps_own_errno = gpu_map_why >> 8;
                         gpu_map_next = at + (to - from);
                         return true;
                 }
                 if (taken == -19 || taken == -95 || taken == -38 ||
-                    (!gpu_maps_user && (taken == -22 || taken == -14 || taken == -1))) // ENODEV, EOPNOTSUPP, ENOSYS (or EINVAL/EFAULT/EPERM before any userptr succeeded)
+                    (!gpu_maps_user && !gpu_userptr_ok && (taken == -22 || taken == -14 || taken == -1))) // ENODEV, EOPNOTSUPP, ENOSYS (or EINVAL/EFAULT/EPERM before any userptr succeeded)
                         gpu_userptr_gone = 1;
                 else if (taken != -22 && taken != -14 && taken != -1)
                 {
@@ -1125,6 +1143,25 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         return gpu_map_dmabuf(&region, from, to, at, written);
 }
 
+
+// The last map refused (gpu_map_as), for the card's line in moonwater debug and a fault's story: its address and bytes, what memory it was (1 the window table's
+// pictures, 2 a registered memfd's, 3 other memory: a client's pool, a dma-buf's mapping, the compositor's own anonymous scratch), gpu_map_why's step and errno
+// then, and the tick. (Whether an import covers the range is not known here: an import has a card address and no processor one.)
+#define GPU_MAP_TABLE 1
+#define GPU_MAP_REGISTERED 2
+#define GPU_MAP_OTHER 3
+static struct { positive at, bytes; unsigned int kind, why, tick; } gpu_map_refusal;
+static b32 gpu_map_as(const void *addr, positive size, b32 written)
+{
+        struct gpu_region region;
+        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull;
+
+        if (gpu_map_try(addr, size, written))
+                return true;
+        gpu_map_refusal.at = (positive)addr, gpu_map_refusal.bytes = size, gpu_map_refusal.why = gpu_map_why, gpu_map_refusal.tick = gpu_tick;
+        gpu_map_refusal.kind = !gpu_region_of(from, to, &region) ? GPU_MAP_OTHER : region.whole ? GPU_MAP_REGISTERED : GPU_MAP_TABLE;
+        return false;
+}
 
 // (The map found last is looked at first: a present asks for the same few pictures over and over, and the table is up to 256 maps looked at in order. The
 // place kept is only where the looking starts: the map there is held to the pointer as any other is, so a table that has moved under it costs a look, not an answer.)

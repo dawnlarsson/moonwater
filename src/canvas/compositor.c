@@ -1251,6 +1251,7 @@ enum compositor_gpu_why
         COMPOSITOR_GPU_WHY_HANG,      // the scene did not finish
         COMPOSITOR_GPU_WHY_TURN,      // a turned screen's rotation did not finish on the card (the processor turned it)
         COMPOSITOR_GPU_WHY_OTHER,     // a frame of another kind, or the damage is empty
+        COMPOSITOR_GPU_WHY_ROUND = COMPOSITOR_GPU_WHY_OTHER + 1, // a window with alpha whose picture reaches into a round corner (the card does not draw that yet): no map in it
         // the pointer drawn into the scene wears a window's client's own picture (compositor_picture); slot 17, after OTHER, is the
         // round corners' that window.c names already
         COMPOSITOR_GPU_WHY_POINTER = COMPOSITOR_GPU_WHY_OTHER + 2,
@@ -1496,7 +1497,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
         if (f->blend && ri > 0 && (f->square & 15) != 15)
-                return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
+                return g->why = COMPOSITOR_GPU_WHY_ROUND, false;
         if (b)
         {
                 compositor_gpu_rect(0, ox + r, oy, ox + ow - r, oy + b, f->edge, 0, 0, 0);
