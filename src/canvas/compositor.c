@@ -1251,6 +1251,9 @@ enum compositor_gpu_why
         COMPOSITOR_GPU_WHY_HANG,      // the scene did not finish
         COMPOSITOR_GPU_WHY_TURN,      // a turned screen's rotation did not finish on the card (the processor turned it)
         COMPOSITOR_GPU_WHY_OTHER,     // a frame of another kind, or the damage is empty
+        // the pointer drawn into the scene wears a window's client's own picture (compositor_picture); slot 17, after OTHER, is the
+        // round corners' that window.c names already
+        COMPOSITOR_GPU_WHY_POINTER = COMPOSITOR_GPU_WHY_OTHER + 2,
         COMPOSITOR_GPU_WHY_COUNT
 };
 typedef char compositor_gpu_why_fits[COMPOSITOR_GPU_WHY_COUNT <= WINDOWS_GPU_REASONS ? 1 : -1];
@@ -3141,6 +3144,8 @@ struct compositor_pointer
         int scale;              // device pixels a cell, in 256ths
         int hw, hh, c;          // the dynamic shape's half width, half height and corner radius, in 256ths of a cell
         int ux, uy, grow;       // its stretch: the unit direction times 64, and how much longer along it in 256ths (0 for none)
+        int span, hot_x, hot_y; // a client's picture: its square's side, and the pointer's pixel of the square (compositor_picture)
+        unsigned long picture;  // which picture of a window's client it is (compositor_picture.made), 0 for the compositor's own shapes
 };
 
 // A value on its way to another (0 at rest): where it left from, where it goes, and when it left.
@@ -3459,6 +3464,135 @@ static const unsigned char compositor_cursor_by_edges[16] = {
 };
 
 /*
+        A window's client's own picture of the pointer (wl_pointer.set_cursor with a surface, wayland.c's wayland_cursor_picture), copied
+        in the pass the shim names it and worn over the client's window in place of the shape the client was told (the arrow). The copy
+        is in the screen's device pixels: the buffer's pixels times the desktop's scale over the buffer's, each pixel of the copy the
+        mean of the buffer's under it (premultiplied, so the mean is of what shows), and no more than the plane, CP_PLANE, either way: a
+        larger one is made smaller to fit, its shape kept. A buffer more than CP_PICTURE_SOURCE_MOST pixels either way is not read at all
+        and the pointer is the arrow, so a client cannot have a pass read more of its pool than that for a picture. The colours are kept
+        two ways: premultiplied, as the plane takes them (a colour past its alpha, which no premultiplied picture has, is taken at its
+        alpha), and as an ink and a cover, the colour over its alpha and the alpha, which a scene mixes with memory_mix_u32_row as it
+        mixes the compositor's own shapes. The square drawn holds the picture and the hotspot both (the pointer's pixel, which the
+        client may put outside its picture), so the picture is where the client put it; a hotspot further out than the plane reaches
+        is taken at the plane's edge.
+*/
+#define CP_PICTURE_SOURCE_MOST 256
+#define CP_PICTURE_SCALE_MOST 8 // a buffer's scale past this is not read either
+
+static struct
+{
+        unsigned long made;     // counted up for each copy made, so a pointer's picture names its copy (compositor_pointer.picture)
+        unsigned long worn;     // the copy the pointer wears now, 0 for the compositor's own shape
+        unsigned long serial;   // the shim's count of what it named (wayland_cursor_picture) when the copy was last asked for
+        int asked;              // whether it has been asked for since the pointer came to the window
+        int width, height;      // the copy, in device pixels
+        int left, top;          // the copy's corner in its square
+        int span, hot_x, hot_y; // the square's side, and the pointer's pixel of it
+        unsigned int premultiplied[CP_PLANE * CP_PLANE]; // rows CP_PLANE apart: the plane's pixels
+        unsigned int ink[CP_PLANE * CP_PLANE];           // the colour over its alpha, the top byte zero
+        unsigned char cover[CP_PLANE * CP_PLANE];        // the alpha
+} compositor_picture;
+
+// n over d rounded toward minus infinity, d above zero: a hotspot left of a picture is left of its copy too.
+static long compositor_picture_floor(long n, long d)
+{
+        return n / d - (n % d < 0);
+}
+
+/*
+        A client's picture copied (see above): pixels the first, stride bytes a row, width by height of them, premultiplied ARGB8888 or,
+        opaque, XRGB8888; the hotspot in its pixels; the buffer's scale; the desktop's in percent. The copy's number (never 0), or 0 when
+        it is not one the pointer wears.
+*/
+static unsigned long compositor_picture_take(const unsigned char *pixels, long stride, long width, long height, int opaque, long hot_x,
+                                             long hot_y, long scale, int percent)
+{
+        long wide, tall, most, hx, hy, left, top, right, bottom;
+
+        if (!pixels || width <= 0 || height <= 0 || width > CP_PICTURE_SOURCE_MOST || height > CP_PICTURE_SOURCE_MOST || stride < 4 * width ||
+            scale <= 0 || scale > CP_PICTURE_SCALE_MOST || percent <= 0)
+                return 0;
+        wide = (width * percent + 50 * scale) / (100 * scale);
+        tall = (height * percent + 50 * scale) / (100 * scale);
+        wide = wide > 0 ? wide : 1, tall = tall > 0 ? tall : 1;
+        most = wide > tall ? wide : tall;
+        if (most > CP_PLANE)
+        {
+                wide = wide * CP_PLANE / most, tall = tall * CP_PLANE / most;
+                wide = wide > 0 ? wide : 1, tall = tall > 0 ? tall : 1;
+        }
+        for (long y = 0; y < tall; y++)
+        {
+                long y0 = y * height / tall, y1 = (y + 1) * height / tall;
+
+                y1 = y1 > y0 ? y1 : y0 + 1;
+                for (long x = 0; x < wide; x++)
+                {
+                        long x0 = x * width / wide, x1 = (x + 1) * width / wide;
+                        unsigned long sums[4] = {0, 0, 0, 0}, count, mean[4];
+                        unsigned int at = (unsigned int)(y * CP_PLANE + x), ink = 0;
+
+                        x1 = x1 > x0 ? x1 : x0 + 1;
+                        count = (unsigned long)((y1 - y0) * (x1 - x0));
+                        for (long v = y0; v < y1; v++)
+                                for (long u = x0; u < x1; u++)
+                                {
+                                        const unsigned char *pixel = pixels + v * stride + u * 4;
+                                        unsigned int alpha = opaque ? 255u : pixel[3];
+
+                                        for (int channel = 0; channel < 3; channel++)
+                                                sums[channel] += pixel[channel] < alpha ? pixel[channel] : alpha;
+                                        sums[3] += alpha;
+                                }
+                        for (int channel = 0; channel < 4; channel++)
+                                mean[channel] = (sums[channel] + count / 2) / count;
+                        // Each colour's mean is at most the alpha's: every colour summed was at most its pixel's alpha.
+                        for (int channel = 0; channel < 3 && mean[3]; channel++)
+                                ink |= (unsigned int)((mean[channel] * 255 + mean[3] / 2) / mean[3]) << (8 * channel);
+                        compositor_picture.premultiplied[at] = (unsigned int)(mean[3] << 24 | mean[2] << 16 | mean[1] << 8 | mean[0]);
+                        compositor_picture.ink[at] = ink;
+                        compositor_picture.cover[at] = (unsigned char)mean[3];
+                }
+        }
+        hx = compositor_picture_floor(hot_x * wide, width), hy = compositor_picture_floor(hot_y * tall, height);
+        hx = hx < wide - CP_PLANE ? wide - CP_PLANE : hx > CP_PLANE - 1 ? CP_PLANE - 1 : hx;
+        hy = hy < tall - CP_PLANE ? tall - CP_PLANE : hy > CP_PLANE - 1 ? CP_PLANE - 1 : hy;
+        left = hx < 0 ? hx : 0, top = hy < 0 ? hy : 0;
+        right = hx + 1 > wide ? hx + 1 : wide, bottom = hy + 1 > tall ? hy + 1 : tall;
+        compositor_picture.width = (int)wide, compositor_picture.height = (int)tall;
+        compositor_picture.left = (int)-left, compositor_picture.top = (int)-top;
+        compositor_picture.hot_x = (int)(hx - left), compositor_picture.hot_y = (int)(hy - top);
+        compositor_picture.span = (int)(right - left > bottom - top ? right - left : bottom - top);
+        if (!++compositor_picture.made)
+                compositor_picture.made++;
+        return compositor_picture.made;
+}
+
+/*
+        A client's picture (p, the copy it names) over t with its square's corner at left, top, cut to t's damage: mixed by its cover into
+        a scene's pixels, or written premultiplied into a plane's (plane), which are clear round it. Nothing for a copy since replaced.
+*/
+static void compositor_picture_draw(const struct compositor_target *t, int left, int top, const struct compositor_pointer *p, int plane)
+{
+        int px = left + compositor_picture.left, py = top + compositor_picture.top;
+        int x1 = px > t->x1 ? px : t->x1, x2 = px + compositor_picture.width < t->x2 ? px + compositor_picture.width : t->x2;
+        int y1 = py > t->y1 ? py : t->y1, y2 = py + compositor_picture.height < t->y2 ? py + compositor_picture.height : t->y2;
+        unsigned long from = (unsigned long)(y1 - py) * CP_PLANE + (unsigned long)(x1 - px);
+
+        if (p->picture != compositor_picture.made || x2 <= x1 || y2 <= y1)
+                return;
+        if (plane)
+        {
+                memory_copy_rect_u32(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                                     compositor_picture.premultiplied + from, CP_PLANE, (positive)(x2 - x1), (positive)(y2 - y1));
+                return;
+        }
+        for (int row = y1; row < y2; row++, from += CP_PLANE)
+                memory_mix_u32_row(t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), compositor_picture.ink + from,
+                                   compositor_picture.cover + from, (positive)(x2 - x1));
+}
+
+/*
         A picture's square: its side in pixels, and the pixel of it the pointer is on (the dynamic shape's middle). A bitmap's hot pixel
         starts at its hot cell's corner (compositor_pointer_row), so it is as many pixels in as the cells before the hot cell take, rounded
         up, and the square reaches as many past it as the cells after it take, rounded up: the whole cell is in it at any scale. At a
@@ -3470,6 +3604,12 @@ static int compositor_pointer_span(const struct compositor_pointer *p, int *hot_
         const signed char *hot = compositor_cursor_hot[p->shape];
         int span;
 
+        // A client's picture says its own square (compositor_picture_take).
+        if (p->picture)
+        {
+                *hot_x = p->hot_x, *hot_y = p->hot_y;
+                return p->span;
+        }
         if (p->dyn)
         {
                 span = (CP_DYN_CELL * p->scale + 255) >> 8;
@@ -3611,6 +3751,12 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
         int x1 = left > t->x1 ? left : t->x1, x2 = left + span < t->x2 ? left + span : t->x2;
         int y1 = top > t->y1 ? top : t->y1, y2 = top + span < t->y2 ? top + span : t->y2;
 
+        // A client's own picture is its pixels, mixed by their alpha (or the plane's, written as they are).
+        if (p->picture)
+        {
+                compositor_picture_draw(t, left, top, p, (fill >> 24) != 0);
+                return;
+        }
         if (x2 <= x1 || y2 <= y1)
                 return;
         memory_fill_u32_rect(inks[0], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, fill & 0xffffffu);
@@ -3642,6 +3788,12 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
         unsigned int at[2];
 
+        // A client's own picture has colours a cover table cannot carry: the processor draws the present.
+        if (p->picture)
+        {
+                compositor_gscene.why = COMPOSITOR_GPU_WHY_POINTER;
+                return false;
+        }
         if (memory_compare(&last, p, sizeof(last)))
                 last = *p, count++;
         {
@@ -5068,9 +5220,10 @@ static int compositor_cursor_size(void)
 static int compositor_cursor_in_scene(void)
 {
         // A screen turned (by the card or by Canvas) has no plane that turns with it: its pointer is drawn into the scene. So is one
-        // larger than two pixels a cell, shaken or not, which is the most the plane holds of the dynamic shape with its stretch.
+        // larger than two pixels a cell, shaken or not, which is the most the plane holds of the dynamic shape with its stretch. A
+        // client's picture is never larger than the plane (compositor_picture_take), whatever size the pointer is set to.
         return compositor.cursor.soft || compositor_turning() ||
-               (compositor.cursor.handle[0] && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL * 256);
+               (compositor.cursor.handle[0] && !compositor_picture.worn && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL * 256);
 }
 
 // The screens as rectangles of the space, and how many: one, the whole space, where none is listed.
@@ -11887,6 +12040,13 @@ static void compositor_pointer_now(struct compositor_pointer *p)
         positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
         int morph, grow, scale, most;
 
+        // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button.
+        if (compositor_picture.worn)
+        {
+                *p = (struct compositor_pointer){.shape = CP_ARROW, .scale = 256, .span = compositor_picture.span, .hot_x = compositor_picture.hot_x,
+                                                 .hot_y = compositor_picture.hot_y, .picture = compositor_picture.worn};
+                return;
+        }
         compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
         morph = compositor_sway_at(&compositor.cursor.morph, now);
         grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
@@ -12135,7 +12295,8 @@ static int compositor_drawn_y(void)
         The pointer where it is and as it is now. Drawn into the scanout, it is a square of damage where it was and where it is, and is
         drawn over what is composed there; on the plane, the plane is moved, and painted first when the picture is not the one it wears (a
         value of the dynamic shape or of a held button on its way is a new picture each frame). The classic pointer and the dynamic one
-        are two pictures like any other two. A window's client that asked for no pointer has none.
+        are two pictures like any other two, and so is a picture a window's client drew (compositor_picture), the same copy on the plane
+        and in the scene. A window's client that asked for no pointer has none.
 */
 static void compositor_cursor_move(void)
 {
@@ -18079,11 +18240,12 @@ static void compositor_pointer_to(int row)
 
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_asked_shape(int row); // wayland_host.c: the CP_ shape the row's client asked for, or -1
+static int compositor_picture_poll(int row);   // the picture row's client drew for the pointer, after the shim (below)
 #endif
 
 /*
         The shapes a window's client asks for are drawn with the compositor's own bitmaps (CP_ARROW to CP_NOTALLOWED, the codes of
-        wayland_cursor_code in wayland.c); a client's own cursor picture is never drawn. This is the one decision point for them:
+        wayland_cursor_code in wayland.c); a picture it draws itself is worn in their place (compositor_picture). This is the one decision point for them:
         with CP_CLIENT_SHAPES 0 a client's shape is ignored and the program's own shape (the arrow when it has none) is worn instead.
 */
 #define CP_CLIENT_SHAPES 1
@@ -18135,6 +18297,10 @@ static void compositor_motion(void)
                 compositor.cursor.client_hidden = asked == -2;
                 compositor.cursor.asked_row = of;
                 compositor.cursor.asked_seen = asked;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // Over the window's own part, the picture its client drew for the pointer, where it drew one, in place of the arrow.
+                compositor_picture_poll(asked >= 0 ? of : COMPOSITOR_NONE);
+#endif
         }
         compositor_cursor_moved(clock_monotonic_nanoseconds());
         if (compositor.cursor.magnify)
@@ -18215,6 +18381,11 @@ static void compositor_shape_sync(void)
 
         if (of >= 0 && of < WINDOWS && compositor_asked_shape(of) != compositor.cursor.asked_seen)
                 compositor_motion();
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // The client's picture is looked at each pass too (its serial moves with every change): a new one, or none, is shown now.
+        else if (compositor_picture_poll(compositor.cursor.asked_seen >= 0 ? of : COMPOSITOR_NONE))
+                compositor_cursor_move();
+#endif
 }
 
 /*
@@ -21657,11 +21828,12 @@ static void compositor_band_room(void)
 }
 
 /*
-        compositor [-s SCALE] [-l LAYOUT] [-t] [-T] [-G] [-f FONT.ttf] [-u DESCRIPTOR] [-H WIDTHxHEIGHT FILE] [-i FILE]
+        compositor [-s SCALE] [-l LAYOUT] [-t] [-T] [-G] [-P] [-f FONT.ttf] [-u DESCRIPTOR] [-H WIDTHxHEIGHT FILE] [-i FILE]
 
         Takes the card, or with -H maps FILE as the screen instead and takes
         none, and then -G has the render node compose all the same (a build with the GPU; without -G a compositor with no
-        card composes on the processor). -T says the -i device is a tablet, a virtual machine's pointer, whose wheel can be
+        card composes on the processor), and -P draws the pointer into FILE, as a card with no plane has it drawn (without
+        it a headless screen has none). -T says the -i device is a tablet, a virtual machine's pointer, whose wheel can be
         a trackpad's stream. -s is the desktop scale when Canvas is not there to say, -t puts
         the tabs on the top edge and not the bottom, -f is the face the tabs'
         titles and the time are written in (without one the tabs are only
@@ -21700,6 +21872,33 @@ static int compositor_descriptor_crowded(long descriptor)
 static int compositor_wl_dmabuf_missing(void)
 {
         return compositor_wl.started && !compositor_wl.render;
+}
+
+/*
+        The picture the pointer wears over row (COMPOSITOR_NONE for none of a client's): the one row's client drew, copied when the shim's
+        serial for it has moved since it was last asked (compositor_picture_take; the pixels are the client's pool, read in this pass and
+        not after), and none when it drew none or one the pointer does not wear. True when what the pointer wears changed.
+*/
+static int compositor_picture_poll(int row)
+{
+        struct wayland_cursor picture;
+        unsigned long was = compositor_picture.worn;
+
+        if (row < 0 || row >= WINDOWS || !compositor_wl.started || !wayland_cursor_picture(row, &picture))
+        {
+                compositor_picture.worn = 0;
+                compositor_picture.asked = 0;
+                return was != 0;
+        }
+        if (!compositor_picture.asked || picture.serial != compositor_picture.serial)
+        {
+                compositor_picture.asked = 1;
+                compositor_picture.serial = picture.serial;
+                compositor_picture.worn = compositor_picture_take(picture.pixels, picture.stride, picture.width, picture.height,
+                                                                  picture.format == WLN_wl_shm_format_xrgb8888, picture.hot_x, picture.hot_y,
+                                                                  picture.scale, compositor.scale);
+        }
+        return compositor_picture.worn != was;
 }
 #endif
 
@@ -21845,6 +22044,8 @@ static b32 compositor_main()
                         taskbar_position_default(TASKBAR_TOP);
                 else if (compositor_option(option, 'T'))
                         tablet = 1; // the -i device is a tablet, a virtual machine's pointer: its wheel can be a trackpad's stream
+                else if (compositor_option(option, 'P'))
+                        compositor.cursor.soft = 1; // the pointer drawn into the screen, as on a card with no plane: a headless one's pixels have it
                 else if (at + 1 < program_argument_count() && compositor_option(option, 's'))
                         compositor.scale = (int)compositor_number(program_argument(++at), 0) * 100;
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))

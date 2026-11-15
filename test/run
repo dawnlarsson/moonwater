@@ -6833,6 +6833,32 @@ lane_wayland()
                 fi
         fi
 
+        #       A client's own pointer picture (test/wayland_cursor.py): the compositor with the shim headless, the pointer drawn into its
+        #       screen (-P), and a client that speaks the wire from the script, so no libwayland is asked for: the picture at the pointer
+        #       with its hotspot, its alpha, a new commit, the pointer hidden, and the arrow for a buffer past what is read.
+        if [ "$(uname -s)" = Linux ] && command -v python3 > /dev/null 2>&1 && unshare -rm true 2> /dev/null; then
+                if [ -x "$work/shell-wayland" ] || freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
+                        unshare -rm python3 test/wayland_cursor.py "$work/shell-wayland" "$work/cursor" > "$work/cursor.out" 2>&1 < /dev/null
+                        wayland_at=0
+                        while IFS= read -r wayland_line; do
+                                case $wayland_line in
+                                "ok "*) wayland_at=$((wayland_at + 1)); tally "wayland-cursor-$wayland_at" 1 1 ;;
+                                "FAIL "*)
+                                        wayland_at=$((wayland_at + 1))
+                                        tally "wayland-cursor-$wayland_at" 0 1
+                                        wayland_status=1
+                                        note "wayland cursor: $wayland_line"
+                                        ;;
+                                esac
+                        done < "$work/cursor.out"
+                        [ "$wayland_at" -gt 0 ] || { tally wayland-cursor-ran 0 1; wayland_status=1; note "wayland cursor ran no row"; }
+                else
+                        tally wayland-cursor-build 0 1
+                        wayland_status=1
+                        note "wayland: the compositor with the shim did not build for the pointer picture rows"
+                fi
+        fi
+
         [ "$wayland_status" = 0 ]
 )
 

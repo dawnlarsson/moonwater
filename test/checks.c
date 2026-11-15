@@ -135715,6 +135715,152 @@ static void check_compositor_predict_model(void)
 }
 
 /*
+        A window's client's own picture of the pointer (compositor_picture_take, the copy compositor_picture_poll makes of what
+        wayland_cursor_picture names): worn at the pointer with its hotspot on it, drawn into the headless screen by the software path
+        (the scene's pixels) and painted into the plane's buffer by the same copy, at the desktop's scale over the buffer's, no larger
+        than the plane, its colours mixed by their alpha, a colour past its alpha taken at it, gone where the client hid the pointer, and
+        refused (the arrow) past the sizes it may be read at. The pixels below are premultiplied ARGB8888, as a client's buffer is.
+*/
+static unsigned int picture_mix(unsigned int ground, unsigned int ink, unsigned int cover)
+{
+    unsigned int out = 0;
+
+    for (int shift = 0; shift < 24; shift += 8)
+        out |= (((ground >> shift & 255) * (255 - cover) + (ink >> shift & 255) * cover + 127) / 255) << shift;
+    return out;
+}
+
+// The picture's copy taken, worn and drawn with the pointer at x, y, and the frame composed.
+static fn picture_wear(const unsigned int address_to pixels, long width, long height, long stride, int opaque, long hot_x, long hot_y,
+                       long scale, int x, int y)
+{
+    compositor_picture.worn = compositor_picture_take((const unsigned char address_to)pixels, stride, width, height, opaque, hot_x, hot_y,
+                                                      scale, compositor.scale);
+    compositor.pointer_x = x, compositor.pointer_y = y;
+    compositor_cursor_move();
+    compositor_present();
+}
+
+static void check_compositor_picture(void)
+{
+    static unsigned int picture[4][6] = {
+        {0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u},
+        {0xff00ff00u, 0x80808080u, 0, 0xff0000ffu, 0, 0},
+        {0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u},
+        {0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u}};
+    static unsigned int doubled[8][12], large[128][128], wide[100][200], plane[CP_PLANE * CP_PLANE];
+    struct windows address_to table = predict_setup();
+    const unsigned int ground = 0x404040u;
+    struct compositor_pointer now;
+    struct compositor_target t = {plane, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+    int hot_x, hot_y, span, same = 1;
+
+    if (!table)
+    {
+        check("picture: the table is mapped", false);
+        return;
+    }
+    picture_wear(&picture[0][0], 6, 4, 24, 0, 2, 1, 1, 100, 60);
+    check("picture: a client's picture is worn with its hotspot on the pointer, its opaque pixels its own colours",
+          compositor_picture.worn && compositor.cursor.drawn && compositor.cursor.drawn_as.picture == compositor_picture.worn &&
+              glass_at(98, 59) == 0xff0000u && glass_at(103, 59) == 0xff0000u && glass_at(98, 60) == 0x00ff00u && glass_at(101, 60) == 0x0000ffu);
+    check("picture: its translucent pixels are mixed over what is under them by their alpha, and its clear ones leave it",
+          glass_at(99, 60) == picture_mix(ground, 0xffffffu, 0x80) && glass_at(100, 61) == picture_mix(ground, 0xff0000u, 0x80) &&
+              glass_at(100, 60) == ground && glass_at(102, 60) == ground);
+    check("picture: a colour past its alpha, which no premultiplied picture has, is taken at its alpha",
+          glass_at(98, 62) == picture_mix(ground, 0xff0000u, 0x40) && glass_at(103, 62) == picture_mix(ground, 0xff0000u, 0x40));
+    check("picture: nothing of it is drawn past its square", glass_at(97, 59) == ground && glass_at(104, 59) == ground &&
+                                                                 glass_at(98, 58) == ground && glass_at(98, 63) == ground);
+
+    // The plane's buffer, painted as compositor_cursor_paint paints it: the same copy, premultiplied, at the square's corner.
+    compositor_pointer_now(&now);
+    span = compositor_pointer_span(&now, &hot_x, &hot_y);
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, hot_x - compositor_cursor_inset(span), hot_y - compositor_cursor_inset(span), &now,
+                           compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
+    for (int y = 0; y < CP_PLANE; y++)
+        for (int x = 0; x < CP_PLANE; x++)
+            same &= plane[y * CP_PLANE + x] == (x >= 6 || y >= 4 ? 0u : y == 3 ? 0x40400000u : picture[y][x]);
+    check("picture: the plane is given the same copy, premultiplied, its hotspot the plane's place, and clear round it",
+          span == 6 && hot_x == 2 && hot_y == 1 && same);
+#ifdef MOONWATER_GPU_C
+    check("picture: the GPU's scene does not draw a client's picture, and says why (the processor composes that present)",
+          !compositor_gpu_cursor(100, 60, &now, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)) &&
+              compositor_gscene.why == COMPOSITOR_GPU_WHY_POINTER);
+#endif
+
+    compositor.pointer_x = 140, compositor.pointer_y = 90;
+    compositor_motion();
+    compositor_present();
+    check("picture: moved, it is drawn where the pointer went and gone from where it was",
+          glass_at(138, 89) == 0xff0000u && glass_at(98, 59) == ground && glass_at(101, 60) == ground);
+    compositor.cursor.client_hidden = 1;
+    compositor_cursor_move();
+    compositor_present();
+    check("picture: a client that hid the pointer (set_cursor with no surface) has none over its window",
+          glass_at(138, 89) == ground && glass_at(139, 90) == ground && !compositor.cursor.drawn);
+    compositor.cursor.client_hidden = 0;
+
+    // Twice the pixels at a buffer's scale of 2 are the same picture at a desktop of 100, its hotspot given in the buffer's pixels.
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 12; x++)
+            doubled[y][x] = picture[y / 2][x / 2];
+    picture_wear(&doubled[0][0], 12, 8, 48, 0, 4, 2, 2, 100, 60);
+    check("picture: a buffer of scale 2 is half its pixels each way at a desktop of 100, its hotspot with it",
+          glass_at(98, 59) == 0xff0000u && glass_at(101, 60) == 0x0000ffu && glass_at(99, 60) == picture_mix(ground, 0xffffffu, 0x80) &&
+              glass_at(104, 59) == ground && glass_at(98, 63) == ground);
+    compositor.scale = 200;
+    picture_wear(&picture[0][0], 6, 4, 24, 0, 2, 1, 1, 100, 60);
+    check("picture: and one of scale 1 is twice them at a desktop of 200",
+          glass_at(96, 58) == 0xff0000u && glass_at(107, 59) == 0xff0000u && glass_at(98, 60) == picture_mix(ground, 0xffffffu, 0x80) &&
+              glass_at(99, 61) == picture_mix(ground, 0xffffffu, 0x80) && glass_at(100, 60) == ground && glass_at(102, 60) == 0x0000ffu &&
+              glass_at(103, 61) == 0x0000ffu && glass_at(106, 60) == ground && glass_at(108, 58) == ground && compositor_picture.span == 12);
+    compositor.scale = 100;
+
+    // A picture larger than the plane is made smaller to fit, each pixel the mean of those under it.
+    for (int y = 0; y < 128; y++)
+        for (int x = 0; x < 128; x++)
+            large[y][x] = (x + y) & 1 ? 0xffffffffu : 0;
+    picture_wear(&large[0][0], 128, 128, 512, 0, 127, 127, 1, 100, 160);
+    check("picture: one larger than the plane is made smaller to fit it, each pixel the mean of the four under it",
+          compositor_picture.width == CP_PLANE && compositor_picture.height == CP_PLANE && compositor_picture.span == CP_PLANE &&
+              compositor_picture.hot_x == 63 && compositor_picture.hot_y == 63 && compositor_picture.premultiplied[0] == 0x80808080u &&
+              compositor_picture.premultiplied[CP_PLANE * CP_PLANE - 1] == 0x80808080u && glass_at(90, 100) == picture_mix(ground, 0xffffffu, 0x80));
+    for (int y = 0; y < 100; y++)
+        for (int x = 0; x < 200; x++)
+            wide[y][x] = 0xff00ff00u;
+    picture_wear(&wide[0][0], 200, 100, 800, 0, 0, 0, 1, 100, 60);
+    check("picture: and keeps its shape", compositor_picture.width == CP_PLANE && compositor_picture.height == CP_PLANE / 2);
+    check("picture: one past the most read either way, a scale past the most, or rows shorter than its width is not worn: the arrow is",
+          !compositor_picture_take((const unsigned char address_to)&large[0][0], 4 * (CP_PICTURE_SOURCE_MOST + 1), CP_PICTURE_SOURCE_MOST + 1, 1, 0, 0, 0, 1, 100) &&
+              !compositor_picture_take((const unsigned char address_to)&large[0][0], 512, 128, 128, 0, 0, 0, CP_PICTURE_SCALE_MOST + 1, 100) &&
+              !compositor_picture_take((const unsigned char address_to)&large[0][0], 511, 128, 128, 0, 0, 0, 1, 100) &&
+              !compositor_picture_take(null, 512, 128, 128, 0, 0, 0, 1, 100));
+
+    // A hotspot outside the picture: the picture is drawn where the client put it, beside the pointer, and no further than the plane.
+    picture_wear(&picture[0][0], 6, 4, 24, 0, -3, 2, 1, 100, 60);
+    check("picture: a hotspot left of the picture has the picture right of the pointer, where the client put it",
+          glass_at(103, 58) == 0xff0000u && glass_at(102, 58) == ground && glass_at(106, 59) == 0x0000ffu && compositor_picture.span == 9 &&
+              compositor_picture.hot_x == 0 && compositor_picture.hot_y == 2);
+    picture_wear(&picture[0][0], 6, 4, 24, 0, -1000, 0, 1, 100, 60);
+    check("picture: and one further out than the plane reaches is taken at its edge",
+          compositor_picture.span == CP_PLANE && glass_at(100 + CP_PLANE - 6, 60) == 0xff0000u);
+
+    // An opaque format's top byte is not its alpha.
+    picture[1][2] = 0x00123456u;
+    picture_wear(&picture[0][0], 6, 4, 24, 1, 2, 1, 1, 100, 60);
+    check("picture: an XRGB8888 picture is opaque whatever its top byte", glass_at(100, 60) == 0x123456u && glass_at(99, 60) == 0x808080u);
+    picture[1][2] = 0;
+
+    compositor_picture.worn = 0;
+    compositor_cursor_move();
+    compositor_present();
+    check("picture: worn no longer, the pointer is the compositor's arrow again",
+          compositor.cursor.drawn && !compositor.cursor.drawn_as.picture && glass_at(100, 60) == compositor_cursor_ink(1, 0) && glass_at(99, 59) == ground);
+    compositor.cursor.soft = 0;
+}
+
+/*
         The wheel through the compositor's reader, from a pipe that stands for a device in slot 0: what a notch
         becomes in the ring of the window under the pointer, what moonwater debug is told of it, and a swipe at a
         window that is not reading while it comes, which its ring of WINDOWS_EVENTS events used to cut off.
@@ -176392,6 +176538,7 @@ b32 main()
         check_compositor_predict_drag();
         check_compositor_predict_model();
         check_compositor_predict_table();
+        check_compositor_picture();
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
