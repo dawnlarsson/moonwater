@@ -137360,7 +137360,7 @@ static void check_notices_dot(void)
 
         /*
                 The popup's labels are drawn through its own kit's scratch line, which only ui_scratch_fit maps, and each app maps its
-                own at its size (the size hook, notices_size). The rows above were drawn through the terminal's kit, which has one; a
+                own at its size (the kit's size, ui_app_size). The rows above were drawn through the terminal's kit, which has one; a
                 popup whose size hook left its kit unmapped drew its rows with no text, an empty window. Here the popup's kit is the
                 terminal's with the scratch taken away, sized as notices_open sizes it, and its picture must have ink in it beyond the
                 rule the menu draws.
@@ -137373,7 +137373,7 @@ static void check_notices_dot(void)
             notices.ui.scratch = null, notices.ui.scratch_width = 0, notices.ui.scratch_scale = 0;
             notices.ui.glass = 1, notices.ui.opaque = 0, notices.ui.scale = 100;
             ui_popmenu_size(&notices.ui, &notices.menu, NOTICES_SHOT_H);
-            notices_size((unsigned int)notices.menu.width, (unsigned int)notices.menu.height);
+            ui_app_size(&notices_app, (unsigned int)notices.menu.width, (unsigned int)notices.menu.height);
             check("notices: the popup's kit has a scratch line at least as wide as the popup once it is sized",
                   notices.ui.scratch != null && notices.ui.scratch_width >= notices.width);
             notices_draw(picture);

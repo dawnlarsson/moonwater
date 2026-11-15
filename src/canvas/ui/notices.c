@@ -32,15 +32,14 @@ static struct
         struct window_row own;
         struct ui ui;
         struct ui_popmenu menu;
-        struct ui_anchor anchor; // the dot the popup opens beside (-a): the kit's
         struct windows_issues board;
         char text[NOTICES_SHOWN][NOTICES_TEXT], keys[NOTICES_SHOWN][32];
         int width, height, shown, x, y;
         unsigned int ground;
-        b32 focused, dirty, beside;
-        string_address font;     // the face this is drawn in (-f), which the Settings it starts is drawn in too
-        string_address bold;     // and the bold face (-b)
+        b32 focused, dirty;
 } notices;
+
+static struct ui_app notices_app; // the app, defined with its runner below: its faces (-f, -b) are the ones the Settings it starts is drawn in
 
 /*
         A kernel notice's line: its key and its message, then how often it came and how long ago it last did, each in the form its
@@ -97,19 +96,6 @@ static void notices_board(void)
                 ui_popmenu_add(&notices.menu, WORDS(notices_dismiss), null, 0, NOTICES_ID_DISMISS);
 }
 
-static void notices_size(unsigned int width, unsigned int height)
-{
-        notices.width = (int)width, notices.height = (int)height;
-        // The labels are drawn through the kit's scratch line, which only ui_scratch_fit maps: a popup that maps none draws no text.
-        ui_scratch_fit(&notices.ui, width);
-        notices.dirty = true;
-}
-
-static void notices_dirty(void)
-{
-        notices.dirty = true;
-}
-
 static void notices_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &notices.ui;
@@ -118,15 +104,10 @@ static void notices_draw(unsigned int address_to pixels)
         ui_popmenu_draw(ui, &notices.menu);
 }
 
-static b32 notices_frame(void)
-{
-        return ui_app_present(&notices.own, &notices.shown, &notices.dirty, notices.width, notices.height, notices_draw);
-}
-
 // Settings on its System notices page: started with -n, which lifts a Settings already up and asks it for that page.
 static b32 notices_settings(void)
 {
-        string_address face = notices.font ? notices.font : (string_address)UI_FONT_REGULAR;
+        string_address face = notices_app.font ? notices_app.font : (string_address)UI_FONT_REGULAR;
         string_address words[5] = {(string_address) "/settings", (string_address) "-f", face, (string_address) "-n", null};
 
         return ui_start_apart(words, 4);
@@ -169,26 +150,14 @@ static fn notices_language(void)
         notices.dirty = true;
 }
 
+// The popup as large as its menu, beside the dot (-a) or in the middle. A second start finds the popup up and lifts it, and stops.
 static int notices_open(void)
 {
-        struct windows address_to table = notices.own.table;
-        unsigned int row = notices.own.row;
-        int room = (int)table->output_height - ui_px(&notices.ui, 2 * (24 + 24));
-        int width, height;
-
-        // A second start finds the popup up and lifts it, and this one stops (the header's one window).
         if (ui_lift_other(&notices.own, (string_address) "notices", false))
                 return 0;
         notices_board();
-        ui_popmenu_size(&notices.ui, &notices.menu, room > 0 ? room : 0);
-        width = notices.menu.width, height = notices.menu.height;
-        notices_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width), (unsigned int)height);
-        ui_anchor_take(&notices.anchor, table, notices.beside);
-        if (notices.anchor.anchored)
-                ui_anchor_set(&notices.anchor, table, row, notices.width, notices.height);
-        else
-                ui_centre(table, row, notices.width, notices.height, ui_px(&notices.ui, 12));
-        notices_frame();
+        ui_popmenu_size(&notices.ui, &notices.menu, ui_app_room(&notices_app));
+        ui_app_place(&notices_app, notices.menu.width, notices.menu.height);
         return -1;
 }
 
@@ -204,37 +173,20 @@ static struct ui_app notices_app = {
         .focused = &notices.focused,
         .ground = &notices.ground,
         .open = notices_open,
-        .frame = notices_frame,
         .language = notices_language,
         .event = notices_event,
-        .changed = notices_dirty,
-        .size = notices_size,
         .dismiss = true, // and by the keys going elsewhere
+        .width = &notices.width,
+        .height = &notices.height,
+        .shown = &notices.shown,
+        .draw = notices_draw,
 };
 
 static b32 notices_main()
 {
         memory_zero(&notices, sizeof(notices));
-        notices.shown = -1;
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-        {
-                string_address value;
-
-                if (string_equals(program_argument(at), (string_address) "-a"))
-                {
-                        notices.beside = true;
-                        continue;
-                }
-                if (at + 1 >= (positive)program_argument_count())
-                        break;
-                if ((value = ui_argument(at, (string_address) "-f")))
-                        notices_app.font = notices.font = value;
-                else if ((value = ui_argument(at, (string_address) "-b")))
-                        notices_app.bold = notices.bold = value;
-                else
-                        continue;
-                at++;
-        }
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
+                took = ui_app_option(&notices_app, at);
         return ui_app_run(&notices_app);
 }
 
