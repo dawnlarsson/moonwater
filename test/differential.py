@@ -29027,6 +29027,10 @@ def harness_core_state(argv):
 /* The library's name for offsetof (a4dca589), which spark.c and moonwater.c
    now spell; lib.c is not part of this program. */
 #define offset_of(type, member) __builtin_offsetof(type, member)
+/* The library's null and sized, which spark.c and core.c spell too; the
+   same things as lib.c's, a null pointer and the type sizeof gives. */
+#define null ((void *)0)
+typedef size_t sized;
 typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
@@ -29035,6 +29039,15 @@ typedef int64_t s64;
 #define PURE
 #define string_length_max strnlen
 #define memory_fill memset
+/* The rest of lib.c's that moonwater.c and spark.c call, as the C library's
+   names lib.c gives them: strlen and strcmp are its aliases, memory_copy is
+   the memmove-shaped copy, memory_copy_apart the memcpy-shaped one, and
+   memory_zero is bzero (the size where memset takes the byte). */
+#define string_length strlen
+#define string_compare strcmp
+#define memory_copy memmove
+#define memory_copy_apart memcpy
+#define memory_zero(to, size) memset((to), 0, (size))
 #define __user
 #define PAGE_SIZE 4096u
 #define U32_MAX UINT32_MAX
@@ -29114,6 +29127,10 @@ static unsigned int hash_crc32(unsigned int crc, const void *data, unsigned long
 }
 '''
     # spark.inc was folded into lib.c (c71eaa092): nothing to read here any more.
+    # What of it spark.c still reads is the Spark ABI names, outside lib.c's
+    # gates for every build of spark.c (the spawn copy's two ceilings among
+    # them), so that block is taken from lib.c as it is.
+    source += section((root / "src/lib.c").read_text(), "#ifndef MOONWATER_SPARK_ENTRY_INCLUDED\n", "\n#define FLAT ")
     source += spark
     source += section(spark, "struct snapshot_builder\n", "static HOT void snapshot_system")
     source += r'''
@@ -31605,8 +31622,32 @@ int main(void) {
                 "unsigned long __ro_after_init efi_rng_seed = EFI_INVALID_TABLE_ADDR;\n"
                 "static const efi_config_table_type_t common_tables[] __initconst = {\n"
                 "\t{LINUX_EFI_RANDOM_SEED_TABLE_GUID,\t&efi_rng_seed,\t\t\"RNG\"\t\t},\n\t{},\n};\n",
+            # The splash call goes above the decompression, the settings table above the seed.
             "linux/drivers/firmware/efi/libstub/x86-stub.c":
-                "extern char _bss[], _ebss[];\n\nvoid efi_stub_entry(void)\n{\n\tefi_random_get_seed();\n}\n",
+                "extern char _bss[], _ebss[];\n\nvoid efi_stub_entry(void)\n{\n"
+                "\tstatus = efi_decompress_kernel(&kernel_entry, boot_params);\n"
+                "\tefi_random_get_seed();\n}\n",
+            # The splash's object goes above the generic stub's objects, its
+            # prototype below the seed's.
+            "linux/drivers/firmware/efi/libstub/Makefile":
+                "lib-$(CONFIG_EFI_GENERIC_STUB)\t+= efi-stub.o string.o intrinsics.o systable.o \\\n"
+                "\t\t\t\t   primary_display.o efi-stub-entry.o\n",
+            "linux/drivers/firmware/efi/libstub/efistub.h":
+                "efi_status_t efi_random_get_seed(void);\n\nefi_status_t check_platform_features(void);\n",
+            # The input group's device type: defined below the input class,
+            # declared below its declaration, and given to each event and
+            # joystick node below the line that gives it the class.
+            "linux/drivers/input/input.c":
+                "const struct class input_class = {\n\t.name\t\t= \"input\",\n\t.devnode\t= input_devnode,\n};\n"
+                "EXPORT_SYMBOL_GPL(input_class);\n",
+            "linux/include/linux/input.h":
+                "extern const struct class input_class;\n",
+            "linux/drivers/input/evdev.c":
+                "\tevdev->dev.devt = MKDEV(INPUT_MAJOR, minor);\n\tevdev->dev.class = &input_class;\n"
+                "\tevdev->dev.parent = &dev->dev;\n",
+            "linux/drivers/input/joydev.c":
+                "\tjoydev->dev.devt = MKDEV(INPUT_MAJOR, minor);\n\tjoydev->dev.class = &input_class;\n"
+                "\tjoydev->dev.parent = &dev->dev;\n",
             "linux/arch/x86/boot/compressed/vmlinux.lds.S":
                 "\t.rodata : {\n\t}\n\t.data :\tALIGN(0x1000) {\n\t}\n",
             "linux/arch/x86/boot/header.S":
@@ -31694,6 +31735,33 @@ int main(void) {
                     scheduler_placed(read("linux/kernel/sched/fair.c")) and
                     "16384 >> PAGE_SHIFT; /* Moonwater: fault-around" in read("linux/mm/memory.c") and
                     "65536 >> PAGE_SHIFT" not in read("linux/mm/memory.c"))
+
+        # The splash: the stub's file copied among libstub's, its object named
+        # above the generic stub's, its prototype below the seed's, and on x86
+        # the call above the decompression.
+        def splash_placed(tree):
+            read = lambda name: (tree / "linux/drivers/firmware/efi/libstub" / name).read_text()
+            makefile, header, stub = read("Makefile"), read("efistub.h"), read("x86-stub.c")
+            return (read("moonwater-splash.c") == (root / "kernel/patch/splash-stub.c").read_text() and
+                    makefile.index("+= moonwater-splash.o") < makefile.index("lib-$(CONFIG_EFI_GENERIC_STUB)") and
+                    header.index("efi_status_t efi_random_get_seed(void);") <
+                    header.index("void efi_moonwater_splash(efi_handle_t handle);") and
+                    stub.index("\tefi_moonwater_splash(handle);") < stub.index("\tstatus = efi_decompress_kernel("))
+
+        # The input group: the device type after the class it is beside, and
+        # each node given it after the line that gives it the class.
+        def input_group_placed(tree):
+            read = lambda name: (tree / name).read_text()
+            input_c, input_h = read("linux/drivers/input/input.c"), read("linux/include/linux/input.h")
+            evdev, joydev = read("linux/drivers/input/evdev.c"), read("linux/drivers/input/joydev.c")
+            return (input_c.index("EXPORT_SYMBOL_GPL(input_class);") < input_c.index("static char *input_node_devnode(") and
+                    "EXPORT_SYMBOL_GPL(input_node_type);" in input_c and
+                    input_h.index("extern const struct class input_class;") <
+                    input_h.index("extern const struct device_type input_node_type;") and
+                    evdev.index("\tevdev->dev.class = &input_class;") < evdev.index("\tevdev->dev.type = &input_node_type;") <
+                    evdev.index("\tevdev->dev.parent = &dev->dev;") and
+                    joydev.index("\tjoydev->dev.class = &input_class;") < joydev.index("\tjoydev->dev.type = &input_node_type;") <
+                    joydev.index("\tjoydev->dev.parent = &dev->dev;"))
 
         # kernel/kernel.c's tags made real: the C original retired to a prototype,
         # the function the asm calls made global with one, the literal asserted,
@@ -31783,6 +31851,7 @@ line_add_padded() { line_add "$@"; }
                 (tree / target).write_text("")
             shutil.copy(root / "kernel/patch/fold-x86.h", tree / "kernel/patch/fold-x86.h")
             shutil.copy(root / "kernel/patch/functions", tree / "kernel/patch/functions")
+            shutil.copy(root / "kernel/patch/splash-stub.c", tree / "kernel/patch/splash-stub.c")
             shutil.copy(root / "kernel/kernel.c", tree / "kernel/kernel.c")
             # The kernel's own lines the settings section's edits are placed by.
             for name, text in settings_anchors.items():
@@ -31811,6 +31880,8 @@ line_add_padded() { line_add "$@"; }
                 assert all(("# moonwater took " + name in makefile) != stock
                            for name in displaced), makefile
                 assert settings_placed(tree), result.stderr
+                assert splash_placed(tree), result.stderr
+                assert input_group_placed(tree), result.stderr
                 #   An overlay keeps no negative dentry and no unused one without an
                 #   upper layer: the hook is defined ahead of the operations table and
                 #   named in it.
