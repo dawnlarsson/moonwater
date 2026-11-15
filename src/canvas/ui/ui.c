@@ -17693,6 +17693,7 @@ static fn ui_trail_draw(struct ui address_to ui, struct ui_trail address_to t)
             ui_host(&field, .class = "head");        // the box of a widget the view does not draw: its place is written to field
             ui_col(.class = "inset") { ... }         // a container: ui_row or ui_col; ui_text, ui_button and ui_control are leaves
             ui_control(&tabs, .class = "tabs");      // a control of the kit's that the app keeps: placed, drawn and pressed by the view
+            ui_rows(&list, .class = "list");         // the kit's list: placed, laid out across the window, drawn and turned by the view
             height = ui_view_end(&view);             // laid out: the window's height, every host's rectangle and every control's box
             ui_view_draw(ui, &view, keys);           // painted (the window has the keys: the focused button shows its ring)
             asks = ui_view_event(ui, &view, event);  // an event: UI_VIEW_DRAW (due again), _TAKEN (the view's), _QUIT (a handler said stop)
@@ -17741,7 +17742,9 @@ static fn ui_trail_draw(struct ui address_to ui, struct ui_trail address_to t)
         drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key). The buttons are
         the kit's one row, drawn over the picture and pressed wherever they are: a button is not cut to a scroll container.
 
-        What is still a host: the list, a page's column of groups, the lines and the strips, the old composites with a scroller of their own, and the
+        A list is an element too (ui_rows(&list, ...)): the view puts it where the tree says, runs its rows the window's width, lays it out,
+        draws it and turns it with the wheel; what a press on a row does is the app's (ui_list_click). What is still a host: a page's
+        column of groups, the lines and the strips, the old composites with a scroller of their own, and the
         text of a field (a field's control is an element, placed and drawn by the view; what is typed in it and the pointer on it
         are still handed to its engine by its app, ui_field_event, and the view gives such a field no pointer). What removing the
         old way needs: those given elements, the checks that read the old structs' fields (settings.page, mixer.row) read the
@@ -17787,6 +17790,7 @@ struct ui_props
         int arg;                          // what the handler is given
         struct ui_rect address_to host;   // where the element's rectangle is written by ui_view_end, device pixels: a host's, or any element's the app asks for
         struct ui_control address_to control; // the app's control the element is (ui_control), or the surface of a container
+        struct ui_list address_to list;   // the kit's list the element is (ui_rows): placed, laid out, drawn and turned by the wheel by the view
 };
 
 // A class: what its name stands for, in logical pixels. A zero is not said, so a class that says nothing of a thing leaves
@@ -17862,6 +17866,7 @@ struct ui_item
         const char address_to text;
         struct ui_rect address_to host;
         struct ui_control address_to control;
+        struct ui_list address_to list;   // a list's (ui_rows)
         b32 (*on)(int value);             // a button's or a control's handler, and what it is given
         int arg;
 };
@@ -17893,6 +17898,12 @@ struct ui_view
 };
 
 static struct ui_view address_to ui_view_now; // the view being declared: the last ui_view_begin's
+
+// A list that is an element (ui_rows) is the list's own code, after the view: its place and layout, its picture, the wheel on it and where it is.
+struct ui_list;
+static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width);
+static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l);
+static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, const struct window_event address_to event);
 
 // The finger's recogniser and a scroll region's keys are defined with the list and the lines, after the view.
 static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region);
@@ -18104,7 +18115,7 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         }
         item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = item->scroll = -1;
         item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop, item->cut = p->cut || look.cut;
-        item->control = p->control, item->on = p->on, item->arg = p->arg;
+        item->control = p->control, item->list = p->list, item->on = p->on, item->arg = p->arg;
         // A column that scrolls: its scroller is the view's, by its order among the build's. Its body is stepped to the kit's time, and
         // its children are laid out at the place it rests at (a pull past an end is drawn by ui_view_draw, on the picture).
         if (look.scroll && dir == 1 && item != &v->discard && v->scrolls < UI_VIEW_SCROLLS)
@@ -18163,6 +18174,7 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 #define ui_button(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BUTTON, .text = (words), __VA_ARGS__})
 #define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
 #define ui_control(c, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .control = (c), __VA_ARGS__})
+#define ui_rows(l, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .list = (l), __VA_ARGS__})
 
 // A text of the view that wraps, as the layout asks it (ui_tree_run): the height its lines come to at a width, one line where its words fit
 // it. With no face it is the one line it was declared with.
@@ -18253,6 +18265,8 @@ static int ui_view_end(struct ui_view address_to v)
                 }
                 if (item->control)
                         ui_view_box(ui, n, item->control);
+                if (item->list)
+                        ui_view_list_lay(ui, item->list, n, v->width);
                 if (item->host)
                         *item->host = (struct ui_rect){n->x, n->y, n->w, n->h};
                 if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
@@ -18386,7 +18400,9 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                 if (n->y + n->h + reach <= top || n->y - reach >= bottom)
                         continue;
                 ui->top = top < 0 ? 0 : top, ui->bottom = bottom > ui->height ? ui->height : bottom;
-                if (item->control)
+                if (item->list)
+                        ui_list_draw(ui, item->list);
+                else if (item->control)
                         ui_control_draw(ui, item->control);
                 else if (item->kind == UI_ITEM_BOX && item->paint)
                         ui_fill(ui, n->x, n->y, n->w, n->h, item->paint);
@@ -18443,7 +18459,13 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         p32 asks = 0;
 
         if (event->type == WINDOW_EVENT_WHEEL)
+        {
+                // A list's rows under the pointer turn with the wheel, as a scroll container does: the list's own glide.
+                for (int at = 0; !under && at < v->tree.count; at++)
+                        if (v->item[at].list && ui_view_list_wheel(ui, v->item[at].list, x, y, event))
+                                return UI_VIEW_DRAW | UI_VIEW_TAKEN;
                 return under && ui_wheel_turn(ui, under, event) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
+        }
         for (int k = 0; k < v->scrolls && (motion || button); k++)
         {
                 struct ui_scroll address_to s = &v->scroll[k];
@@ -20203,6 +20225,28 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         l->scroll.content = l->content;
         l->scroll.scale = ui->scale;
         ui_scroll_clamp(&l->scroll);
+}
+
+/*
+        A list that is an element of a view (ui_rows): put where the tree put it, its rows running the window's whole width (row_x, row_w: the lit
+        row, the hover and the press reach both edges, and the words keep to the list's own box), and laid out, by ui_view_end; drawn where it is
+        declared, by ui_view_draw; and turned by the wheel over its rows, by ui_view_event. What a press on a row does is the app's
+        (ui_list_click). A list the app has not described yet (no describe) is not laid out.
+*/
+static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width)
+{
+        if (!l->describe)
+                return;
+        ui_list_place(ui, l, n->x, n->y, n->w, n->h);
+        l->row_x = 0, l->row_w = width;
+        ui_list_layout(ui, l);
+}
+
+static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, const struct window_event address_to event)
+{
+        int across = l->row_w > 0 ? l->row_x : l->x, wide = l->row_w > 0 ? l->row_w : l->w;
+
+        return l->describe && x >= across && x < across + wide && y >= l->y && y < l->y + l->h && ui_wheel_turn(ui, &l->scroll, event);
 }
 
 // How far across the list's rows run (device pixels): what the page gave them, else the list's own box.
