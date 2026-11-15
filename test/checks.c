@@ -242747,6 +242747,37 @@ static void plate_wanted_rows(void)
         memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
 }
 
+/*
+        What the tabs covered of a window shown straight (compositor_direct_under_ready): mapped the screen's size at the least, and when a space taken again
+        asks it to hold a rectangle of more pixels than it has, made again that size with what it held, never written past.
+*/
+static void under_ready_rows(void)
+{
+        unsigned int *kept_under = compositor.under[1];
+        positive kept_bytes = compositor_under_bytes[1];
+        int kept_width = compositor.width, kept_height = compositor.height;
+        unsigned int *first;
+        b32 ok;
+
+        compositor.under[1] = 0, compositor_under_bytes[1] = 0, compositor.width = 800, compositor.height = 600;
+        ok = compositor_direct_under_ready(1, 4ull * 800 * 64);
+        first = compositor.under[1];
+        check("under: the first is the screen's size at the least", ok && first && compositor_under_bytes[1] >= 4ull * 800 * 600);
+        first[0] = 0x11223344u, first[800 * 600 - 1] = 0x55667788u;
+        compositor.width = 7680, compositor.height = 4320;
+        ok = compositor_direct_under_ready(1, 4ull * 7680 * 64); // 491520 pixels: more than 800 by 600 has
+        check("under: a band of more pixels than the screen it was made for has it made again, as large", ok && compositor_under_bytes[1] >= 4ull * 7680 * 64 &&
+              compositor.under[1] && compositor.under[1][0] == 0x11223344u && compositor.under[1][800 * 600 - 1] == 0x55667788u);
+        if (ok)
+                compositor.under[1][7680 * 64 - 1] = 1; // its last pixel is its own
+        first = compositor.under[1];
+        ok = compositor_direct_under_ready(1, 4ull * 1920 * 64);
+        check("under: and one that fits is the same, not made again", ok && compositor.under[1] == first);
+        if (compositor.under[1])
+                system_call_2(syscall(munmap), (positive)compositor.under[1], compositor_under_bytes[1]);
+        compositor.under[1] = kept_under, compositor_under_bytes[1] = kept_bytes, compositor.width = kept_width, compositor.height = kept_height;
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -243607,6 +243638,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        under_ready_rows();
         plate_wanted_rows();
         scanout_refused_rows();
         metric_present_rows();

@@ -681,6 +681,35 @@ static unsigned int *compositor_direct_stage_ready(void)
 // The tabs written over a row's buffer, what they covered kept, and the program told the rectangle.
 static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned int count, int rect[4]);
 
+/*
+        What the tabs covered of a buffer shown straight is kept in under[which], a rectangle of the tabs' size in rows of its own width. It was mapped
+        once, at the first patch, the size of the screen then, and never again: a space taken again at another size (a game's mode, a screen of
+        another size plugged in) can ask it to hold a band of more pixels than that screen had (an 800 by 600 start, then a 7680-wide band of 64
+        rows), and the copy into it ran past its end. It is the size the rectangle asks now (the screen's at the least), made again when it is too
+        small, with what it held.
+*/
+static positive compositor_under_bytes[2];
+
+static b32 compositor_direct_under_ready(unsigned int which, positive need)
+{
+        positive bytes = (positive)compositor.width * (positive)compositor.height * 4;
+        long mapped;
+
+        if (compositor.under[which] && compositor_under_bytes[which] >= need)
+                return true;
+        bytes = ((need > bytes ? need : bytes) + 4095) & ~4095ull;
+        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        if (compositor.under[which])
+        {
+                memory_copy((void *)mapped, compositor.under[which], compositor_under_bytes[which]);
+                compositor_call(syscall(munmap), (positive)compositor.under[which], compositor_under_bytes[which], 0, 0, 0, 0);
+        }
+        compositor.under[which] = (unsigned int *)mapped, compositor_under_bytes[which] = bytes;
+        return true;
+}
+
 static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
 {
         int rect[4];
@@ -696,15 +725,8 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                 return;
         }
 
-        if (!compositor.under[which])
-        {
-                long mapped = compositor_call(syscall(mmap), 0, (positive)compositor.width * (positive)compositor.height * 4, 3,
-                                              0x22, (positive)-1, 0);
-
-                if (mapped < 0 && mapped > -4096)
-                        return;
-                compositor.under[which] = (unsigned int *)mapped;
-        }
+        if (!compositor_direct_under_ready(which, 4ull * (positive)(rect[2] - rect[0]) * (positive)(rect[3] - rect[1])))
+                return;
         // When updating tabs on an already-patched live on-screen buffer, stage the clean client pixels + new tabs off-screen
         // and write only finished pixels so the scanout never shows an unpatched frame.
         if (compositor.patched[row][which])
