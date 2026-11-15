@@ -7257,6 +7257,24 @@ static void compositor_gpu_pin(positive offset, b32 on)
                 compositor_row_reclaim((int)row);
 }
 
+/*
+        A refusal of a table picture's framebuffer, as the table says it: the step that failed (refused) and the kernel's error, which is what raises the
+        board's warning (windows_gpu_wanted: a refusal with an error). On amdgpu there is none: the table's pages reach the card as an import of a udmabuf,
+        amdgpu imports a dma-buf it did not make with no AMDGPU_GEM_CREATE_CPU_GTT_USWC, so amdgpu_display_supported_domains gives it VRAM alone, and
+        amdgpu_display_user_framebuffer_create refuses an import it cannot place in GTT (EINVAL), whatever its pitch or offset. That is every amdgpu's
+        answer, which the owner can do nothing about: it is said in moonwater debug (the refusal's step), not as a warning that hides the ones that are not.
+        What amdgpu can show straight is a client's own dma-buf (compositor_lent_fb). The refusal is made once a session (direct_refused).
+*/
+static int compositor_driver_in(const char *const *names, unsigned int count);
+static void compositor_window_fb_refused(unsigned int step, long error)
+{
+        static const char *const no_imports[] = {"amdgpu"};
+
+        compositor.direct_refused = 1;
+        compositor.table->refused = step;
+        compositor.table->refused_error = compositor_driver_in(no_imports, 1) ? 0 : (unsigned int)-error;
+}
+
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
 // or the card refuses (a card that cannot show memory it did not make), and then none is asked for again.
 static unsigned int compositor_window_fb(int row, unsigned int which)
@@ -7282,9 +7300,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
 
                 if (handle < 0)
                 {
-                        compositor.direct_refused = 1;
-                        compositor.table->refused = 1;
-                        compositor.table->refused_error = (unsigned int)-handle;
+                        compositor_window_fb_refused(1, handle);
                         return 0;
                 }
                 compositor.udmabuf = (int)handle + 1;
@@ -7299,18 +7315,14 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         dmabuf = system_control(compositor.udmabuf - 1, COMPOSITOR_UDMABUF_CREATE, address_of create);
         if (dmabuf < 0)
         {
-                compositor.direct_refused = 1;
-                compositor.table->refused = 2;
-                compositor.table->refused_error = (unsigned int)-dmabuf;
+                compositor_window_fb_refused(2, dmabuf);
                 return 0;
         }
         prime.fd = (int)dmabuf;
         if ((made = system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime)) != 0)
         {
                 system_close(dmabuf);
-                compositor.direct_refused = 1;
-                compositor.table->refused = 3;
-                compositor.table->refused_error = (unsigned int)-made;
+                compositor_window_fb_refused(3, made);
                 return 0;
         }
         system_close(dmabuf);
@@ -7325,9 +7337,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
                 unsigned int close[2] = {prime.handle, 0};
 
                 system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                compositor.direct_refused = 1;
-                compositor.table->refused = 4;
-                compositor.table->refused_error = (unsigned int)-made;
+                compositor_window_fb_refused(4, made);
                 return 0;
         }
         compositor.scan_fb[row][which] = fb.fb_id;

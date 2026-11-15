@@ -241303,6 +241303,39 @@ static void metric_present_rows(void)
         compositor_metric_loop_most = kept_most, compositor_metric_flips_jobs = kept_flips, compositor_metric_flip_jobs_most = kept_jobs_most;
 }
 
+/*
+        A table picture's framebuffer refused (compositor_window_fb_refused): its step and the kernel's error said in the table, which raise the board's warning
+        of a refused direct scan-out, but on amdgpu the step alone (every amdgpu refuses an imported udmabuf for scanout), and no warning.
+*/
+static void scanout_refused_rows(void)
+{
+        static struct windows table;
+        struct windows *kept_table = compositor.table;
+        struct windows_issue want[WINDOWS_GPU_CODES];
+        char kept_driver[sizeof(compositor.driver)];
+        int kept_refused = compositor.direct_refused, warned;
+        unsigned int count;
+
+        memory_copy(kept_driver, compositor.driver, sizeof(kept_driver));
+        memory_zero(&table, sizeof(table)), compositor.table = &table, table.gpu_on = 1; // the board's GPU issues are judged with canvas gpu on
+        string_copy((string_address)compositor.driver, (string_address) "i915");
+        compositor_window_fb_refused(4, -22);
+        count = windows_gpu_wanted(&table, want, WINDOWS_GPU_CODES), warned = 0;
+        for (unsigned int at = 0; at < count; at++)
+                warned |= want[at].code == WINDOWS_ISSUE_GPU_SCANOUT;
+        check("scanout: a refused framebuffer of a table picture is its step and its error, and a warning", compositor.direct_refused && table.refused == 4 &&
+              table.refused_error == 22 && warned);
+        memory_zero(&table, sizeof(table)), table.gpu_on = 1, compositor.direct_refused = 0;
+        string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        compositor_window_fb_refused(4, -22);
+        count = windows_gpu_wanted(&table, want, WINDOWS_GPU_CODES), warned = 0;
+        for (unsigned int at = 0; at < count; at++)
+                warned |= want[at].code == WINDOWS_ISSUE_GPU_SCANOUT;
+        check("scanout: on amdgpu the step is said and no warning is raised (amdgpu shows no imported buffer)", compositor.direct_refused && table.refused == 4 &&
+              table.refused_error == 0 && !warned);
+        compositor.table = kept_table, compositor.direct_refused = kept_refused, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -242163,6 +242196,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        scanout_refused_rows();
         metric_present_rows();
         dirty_rows();
         close_ask_rows();
