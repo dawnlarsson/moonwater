@@ -117081,6 +117081,93 @@ static fn machine_auto(void)
         }
 }
 
+/*
+        init's start of a boot service (src/sh/system.c, init_service_start),
+        with a start that fails as many times as a row asks and then answers
+        a child: a fork that fails is said on the console with its reason and
+        tried again, at once and then after the machine process's own pauses,
+        and five in a row are said and leave the service alone. A failed fork
+        was neither said nor tried again, so the settle, network or machine
+        service was not there for the rest of the boot.
+*/
+static positive machine_start_failing;
+static positive machine_start_calls;
+static p64 machine_start_at[8];
+static p8 machine_start_said[2048];
+static positive machine_start_used;
+
+static bipolar machine_start_stub(string_address path, string_address address_to arguments,
+                                  positive count)
+{
+        (void)path;
+        (void)arguments;
+        (void)count;
+        if (machine_start_calls < array_count(machine_start_at))
+                machine_start_at[machine_start_calls] = clock_monotonic_nanoseconds();
+        return machine_start_calls++ < machine_start_failing ? -EAGAIN : 4242;
+}
+
+static fn machine_start_capture(address_any data, positive length)
+{
+        if (machine_start_used + length >= sizeof(machine_start_said))
+                length = sizeof(machine_start_said) - 1 - machine_start_used;
+        memory_copy_apart(machine_start_said + machine_start_used, data, length);
+        machine_start_used += length;
+        machine_start_said[machine_start_used] = end;
+}
+
+static bipolar machine_start_run(positive failing)
+{
+        static const init_service service = {(string_address) "the checked service",
+                                             (string_address) "/nowhere", null, 0};
+
+        machine_start_failing = failing;
+        machine_start_calls = 0;
+        machine_start_used = 0;
+        machine_start_said[0] = end;
+        return init_service_start(machine_start_capture, machine_start_stub, address_of service);
+}
+
+// How many times the words are in what was said.
+static positive machine_start_count(string_address words)
+{
+        positive seen = 0;
+
+        for (string_address at = (string_address)string_find(machine_start_said, words); at;
+             at = (string_address)string_find(at + 1, words))
+                seen++;
+        return seen;
+}
+
+static fn machine_services(void)
+{
+        bipolar got = machine_start_run(0);
+
+        check("a boot service that starts is started once, and nothing is said",
+              got == 4242 && machine_start_calls == 1 && !machine_start_used);
+
+        got = machine_start_run(2);
+        check("one whose fork fails twice is started at the third try",
+              got == 4242 && machine_start_calls == 3);
+        check("and each failure is said on the console, with the service and the reason",
+              machine_start_count((string_address) "could not start the checked service: ") == 2 &&
+                  !machine_start_count((string_address) "leaving it alone"));
+        check("and the first is tried again at once, the second after 250 ms",
+              machine_start_at[1] - machine_start_at[0] < 200000000ull &&
+                  machine_start_at[2] - machine_start_at[1] >= 250000000ull);
+
+        got = machine_start_run(1000);
+        check("one that never starts is tried five times and left alone",
+              got == -1 && machine_start_calls == 5 &&
+                  machine_start_count((string_address) "could not start the checked service: ") == 5 &&
+                  machine_start_count((string_address) "the checked service did not start in 5 "
+                                                       "tries; leaving it alone") == 1);
+        check("after the machine process's pauses between them, 250 ms doubling",
+              machine_start_at[4] - machine_start_at[0] >= 1750000000ull &&
+                  machine_start_at[3] - machine_start_at[2] >= 500000000ull &&
+                  machine_start_at[4] - machine_start_at[3] >= 1000000000ull);
+}
+
 b32 main(void)
 {
         machine_hooks();
@@ -117089,6 +117176,7 @@ b32 main(void)
         machine_stop_self();
         machine_sntp();
         machine_auto();
+        machine_services();
         return test_report(null);
 }
 #endif /* CHECK_machine */

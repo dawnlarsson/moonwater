@@ -117,6 +117,66 @@ static bipolar start_service(string_address path,
         return child;
 }
 
+/*
+        A boot service, by what the console calls it and what is run.
+*/
+typedef struct
+{
+        string_address name;
+        string_address path;
+        string_address address_to arguments;
+        positive count;
+} init_service;
+
+typedef bipolar (*init_starter)(string_address path, string_address address_to arguments,
+                                positive count);
+
+static const init_service init_settle = {(string_address) "moonwater boot",
+                                         (string_address)settle_program, settle_argv, 2};
+#ifndef SHELL_NO_UTILITIES
+static const init_service init_network = {(string_address) "ip watch",
+                                          (string_address)network_program, network_argv, 2};
+#endif
+static const init_service init_machine = {(string_address) "the machine script",
+                                          (string_address)machine_program, machine_argv, 3};
+
+static positive machine_restart_wait(positive failures);
+
+/*
+        A boot service started by start (start_service, but for the checks),
+        and a start that fails said on the console with its reason and tried
+        again: at once, and then after machine_restart_wait's pause for that
+        many failures in a row, the machine process's own, 250 ms doubling.
+        MACHINE_GIVE_UP of them in a row are said, and the service is left
+        alone (-1). A fork that failed -- clone's EAGAIN or ENOMEM, on a
+        machine short of processes or of memory -- was neither said nor tried
+        again: the settle, network or machine service was not there for the
+        rest of the boot, and nothing on the screen said why.
+*/
+static bipolar init_service_start(writer say, init_starter start,
+                                  const init_service address_to service)
+{
+        for (positive failures = 1;; failures++)
+        {
+                bipolar child = start(service->path, service->arguments, service->count);
+
+                if (child > 0)
+                        return child;
+
+                string_format(say, init_label "could not start %s: %b\n", service->name, child);
+                log_flush();
+                if (failures >= MACHINE_GIVE_UP)
+                {
+                        string_format(say, init_label "%s did not start in %p tries; leaving "
+                                                      "it alone\n",
+                                      service->name, failures);
+                        log_flush();
+                        return -1;
+                }
+                host_pause(machine_restart_wait(failures));
+        }
+}
+
 
 
 /*
@@ -622,20 +682,19 @@ static DEAD_END b32 system_init()
         system_x11_directory();
 #endif
 
-        bipolar settling = start_service((string_address)settle_program,
-                                         settle_argv, 2);
+        bipolar settling = init_service_start(log, start_service, address_of init_settle);
         positive quick_exits = 0;
         positive backoff = 0;
         positive started = clock_monotonic_nanoseconds();
         bipolar wait_error = 0;
 
 #ifndef SHELL_NO_UTILITIES
-        bipolar network = start_service((string_address)network_program, network_argv, 2);
+        bipolar network = init_service_start(log, start_service, address_of init_network);
         positive network_started = clock_monotonic_nanoseconds();
         positive network_failures = 0;
 #endif
 
-        bipolar machine = start_service((string_address)machine_program, machine_argv, 3);
+        bipolar machine = init_service_start(log, start_service, address_of init_machine);
         positive machine_started = clock_monotonic_nanoseconds();
         positive machine_failures = 0;
 
@@ -697,7 +756,8 @@ static DEAD_END b32 system_init()
                                 }
 
                                 network_started = clock_monotonic_nanoseconds();
-                                network = start_service((string_address)network_program, network_argv, 2);
+                                network = init_service_start(log, start_service,
+                                                             address_of init_network);
                                 continue;
                         }
 #endif
@@ -746,7 +806,8 @@ static DEAD_END b32 system_init()
                                 if (pause_ns)
                                         host_pause(pause_ns);
                                 machine_started = clock_monotonic_nanoseconds();
-                                machine = start_service((string_address)machine_program, machine_argv, 3);
+                                machine = init_service_start(log, start_service,
+                                                             address_of init_machine);
                                 continue;
                         }
 
