@@ -17903,7 +17903,7 @@ static struct ui_view address_to ui_view_now; // the view being declared: the la
 struct ui_list;
 static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width);
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l);
-static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, const struct window_event address_to event);
+static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, b32 anywhere, const struct window_event address_to event);
 
 // The finger's recogniser and a scroll region's keys are defined with the list and the lines, after the view.
 static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region);
@@ -18460,10 +18460,19 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
 
         if (event->type == WINDOW_EVENT_WHEEL)
         {
-                // A list's rows under the pointer turn with the wheel, as a scroll container does: the list's own glide.
+                // A list's rows under the pointer turn with the wheel, as a scroll container does: the list's own glide. Over no list and no
+                // container, the view's first list turns, wherever the pointer is: the rows a window is for (the launcher's under its field).
+                int first = -1;
+
                 for (int at = 0; !under && at < v->tree.count; at++)
-                        if (v->item[at].list && ui_view_list_wheel(ui, v->item[at].list, x, y, event))
-                                return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                        if (v->item[at].list)
+                        {
+                                first = first < 0 ? at : first;
+                                if (ui_view_list_wheel(ui, v->item[at].list, x, y, false, event))
+                                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                        }
+                if (!under && first >= 0)
+                        return ui_view_list_wheel(ui, v->item[first].list, x, y, true, event) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
                 return under && ui_wheel_turn(ui, under, event) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
         }
         for (int k = 0; k < v->scrolls && (motion || button); k++)
@@ -20230,7 +20239,8 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
 /*
         A list that is an element of a view (ui_rows): put where the tree put it, its rows running the window's whole width (row_x, row_w: the lit
         row, the hover and the press reach both edges, and the words keep to the list's own box), and laid out, by ui_view_end; drawn where it is
-        declared, by ui_view_draw; and turned by the wheel over its rows, by ui_view_event. What a press on a row does is the app's
+        declared, by ui_view_draw; and turned by the wheel over its rows (the view's first list wherever the wheel is, over no other list and no
+        scroll container), by ui_view_event. What a press on a row does is the app's
         (ui_list_click). A list the app has not described yet (no describe) is not laid out.
 */
 static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width)
@@ -20242,11 +20252,11 @@ static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l,
         ui_list_layout(ui, l);
 }
 
-static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, const struct window_event address_to event)
+static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, b32 anywhere, const struct window_event address_to event)
 {
         int across = l->row_w > 0 ? l->row_x : l->x, wide = l->row_w > 0 ? l->row_w : l->w;
 
-        return l->describe && x >= across && x < across + wide && y >= l->y && y < l->y + l->h && ui_wheel_turn(ui, &l->scroll, event);
+        return l->describe && (anywhere || (x >= across && x < across + wide && y >= l->y && y < l->y + l->h)) && ui_wheel_turn(ui, &l->scroll, event);
 }
 
 // How far across the list's rows run (device pixels): what the page gave them, else the list's own box.
