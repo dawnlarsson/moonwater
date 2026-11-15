@@ -246245,15 +246245,26 @@ static void dl_list_rows(void)
         check("compositor list: a picture of the program's clears the refusal, and no list is drawn for it",
               dl_render_calls == calls && table->list_state[0] == 0 && table->list_refused == 1);
 
-        // A torn list (an odd generation) is refused without the renderer, and counted as a publish writing it.
-        dl_publish();
-        head[UI_DRAW_LIST_GEN] |= 1;
-        calls = dl_render_calls;
-        invalid = table->list_invalid[WINDOW_LIST_PUBLISHING];
-        compositor_lists_take(0, DL_W, DL_H, damage);
-        check("compositor list: a torn list is refused without the renderer", dl_render_calls == calls && table->list_state[0] == 2);
-        check("compositor list: and counted as a publish writing its header", table->list_invalid[WINDOW_LIST_PUBLISHING] == invalid + 1);
-        head[UI_DRAW_LIST_GEN] &= ~1u;
+        // A list a publish is writing (an odd generation) is no refusal: it is not taken, drawn, counted or seen, and the take after the publish
+        // draws it.
+        {
+                unsigned int state = table->list_state[0], refused = table->list_refused, seen = table->list_seen[0];
+                int taken;
+
+                dl_publish();
+                head[UI_DRAW_LIST_GEN] |= 1;
+                calls = dl_render_calls;
+                invalid = table->list_invalid[WINDOW_LIST_PUBLISHING];
+                taken = compositor_lists_take(0, DL_W, DL_H, damage);
+                check("compositor list: a list a publish is writing is not taken, drawn, refused or counted, and its generation is not seen",
+                      taken < 0 && dl_render_calls == calls && table->list_state[0] == state && table->list_refused == refused &&
+                          table->list_seen[0] == seen && table->list_invalid[WINDOW_LIST_PUBLISHING] == invalid);
+                head[UI_DRAW_LIST_GEN] &= ~1u;
+                dl_render_answer = 1;
+                check("compositor list: and the take after the publish draws it",
+                      compositor_lists_take(0, DL_W, DL_H, damage) == 1 && dl_render_calls == calls + 1 && table->list_state[0] == 1);
+                dl_render_answer = 0;
+        }
 
         // A list whose count is past its room is refused without the renderer, and counted as the header's.
         dl_publish();

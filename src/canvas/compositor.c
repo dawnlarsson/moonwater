@@ -15830,9 +15830,15 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
                         __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
                 return 0;
         }
+        // A publish writing the header (an odd generation, now or since the generation was read) is no refusal: the list is not taken this
+        // time, nor its generation seen, nor counted, and the take after the publish, which the program's knock brings, looks at it again.
+        if (gen & 1)
+                return -1;
+        invalid = window_list_check(list, (int)width, (int)height, &view);
+        if (invalid == WINDOW_LIST_PUBLISHING)
+                return -1;
         table->list_seen[row] = gen;
         // A list that is not one to render is refused, and counted by which of window_list_check's tests it failed.
-        invalid = window_list_check(list, (int)width, (int)height, &view);
         if (invalid != WINDOW_LIST_VALID)
         {
                 compositor_list_invalid(table, invalid, &view, width, height);
@@ -15960,6 +15966,7 @@ static void compositor_take(int row)
         if (frame == compositor.seen[row])
                 return;
 
+        unsigned int seen = compositor.seen[row], reclaim = compositor.reclaim;
         compositor.reclaim &= ~(1u << row);
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
@@ -15967,6 +15974,12 @@ static void compositor_take(int row)
         // A window's list (window_list_of) is drawn into its picture here, before the picture is shown, or refused; the damage it sets stands.
         unsigned int refused_before = __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE);
         int listed = compositor_lists_take(row, width, height, damage);
+        // A publish was writing the list: the frame is not taken now (the window shows what it showed), and the next take takes it.
+        if (listed < 0)
+        {
+                compositor.seen[row] = seen, compositor.reclaim = reclaim;
+                return;
+        }
         b32 list_refused = !listed && __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE) != refused_before;
 
         if (listed)
