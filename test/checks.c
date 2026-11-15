@@ -134139,6 +134139,93 @@ static void check_icons(void)
         a kit program, the lettered tile for another program that says who it is, and the window symbol for one that says nothing;
         a picture that changes is drawn again, and a tab too short for its icon draws none outside itself.
 */
+/*
+        The band never writes past its buffer. The compositor's crash at accd044 was a row stored one row past the bottom of a
+        1080-row buffer, and the band's cells are text the kit draws into the band's own picture (ui_cell_line, ui_cell_turned) from
+        each element's rectangle. Here the band is drawn on every edge, at 100 to 200 percent, with three long titles, the tray's
+        cells and a format of the person's, from 40 to 2000 pixels long, into a buffer of exactly the band's bytes (view->band_bytes)
+        that ends at a protected page: a store past its last pixel ends the check there, as the crash ended the compositor.
+*/
+static unsigned int band_guard_glass_pixels[2100 * 300];
+
+static int band_guard_glass(void *context, int x, int y, int width, int height)
+{
+    (void)context;
+    if (width <= 0 || height <= 0 || (long)width * height > (long)(sizeof(band_guard_glass_pixels) / sizeof(band_guard_glass_pixels[0])))
+        return 0;
+    for (int row = 0; row < height; row++)
+        for (int column = 0; column < width; column++)
+            band_guard_glass_pixels[row * width + column] = (unsigned int)((x + column) * 0x000103 + (y + row) * 0x050201) & 0xffffffu;
+    return width;
+}
+
+static void check_taskbar_guard(void)
+{
+    static const char *const long_titles[3] = {"A window whose title runs on well past any tab the band could ever give it, and then on again",
+                                               "\xd8\xa7\xd9\x84\xd9\x86\xd8\xa7\xd9\x81\xd8\xb0\xd8\xa9 a title with Arabic in it and more words after them",
+                                               "short"};
+    static const char *const edges[4] = {"bottom", "top", "left", "right"};
+    static const int scales[4] = {100, 125, 150, 200}, lengths[8] = {40, 97, 160, 333, 640, 1080, 1366, 2000};
+    static struct windows guard_table;
+    struct windows address_to kept_table = compositor.table;
+    int drawn = 0, tried = 0, rect[4];
+
+    memory_zero(&guard_table, sizeof(guard_table));
+    guard_table.themed = 1, guard_table.theme = 1, guard_table.accent = 0xffffffu;
+    compositor.table = &guard_table;
+    taskbar_volume_set(1, 50, 0, 0);
+    taskbar_mic_set(1, 0);
+    taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
+    for (int custom = 0; custom < 2; custom++)
+    {
+        taskbar_tray_set(custom ? "{time.24h.hour}:{time.24h.min} and more words of the person's own" : SETTING_TASKBAR_TRAY_STANDARD);
+        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position++)
+            for (int each = 0; each < 4; each++)
+                for (int at = 0; at < 8; at++)
+                {
+                    struct taskbar_view view;
+                    int bx, by, bw, bh;
+                    positive bytes, room;
+                    long mapped;
+
+                    taskbar_settings_set(edges[position], "primary", "battery none\n");
+                    view = band_view(position, long_titles);
+                    view.scale = scales[each];
+                    if (position >= TASKBAR_LEFT)
+                        view.height = lengths[at];
+                    else
+                        view.width = lengths[at];
+                    view.glass = band_guard_glass_pixels;
+                    taskbar_band(&view, &bx, &by, &bw, &bh);
+                    if (bw <= 0 || bh <= 0)
+                        continue;
+                    bytes = (positive)bw * (positive)bh * 4, room = (bytes + 4095) & ~4095ul;
+                    mapped = (long)system_call_6(syscall(mmap), 0, room + 4096, 3, 0x22, (positive)-1, 0);
+                    if (mapped < 0 && mapped > -4096)
+                        continue;
+                    if (system_call_3(syscall(mprotect), (positive)mapped + room, 4096, 0) != 0)
+                    {
+                        system_call_2(syscall(munmap), (positive)mapped, room + 4096);
+                        continue;
+                    }
+                    // The band's last pixel is the last before the protected page.
+                    view.pixels = (unsigned int address_to)(mapped + (long)(room - bytes));
+                    view.band_bytes = bytes;
+                    tried++;
+                    drawn += taskbar_draw(&view, ~0ul, band_guard_glass, null, rect) != 0;
+                    system_call_2(syscall(munmap), (positive)mapped, room + 4096);
+                }
+    }
+    taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+    taskbar_volume_set(0, 0, 0, 0);
+    taskbar_mic_set(0, 0);
+    taskbar_notices_set(0, 0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    compositor.table = kept_table;
+    check("taskbar guard: a band on every edge at 100 to 200 percent, long titles, the tray's cells and a format of the person's, 40 to 2000 pixels long, drawn into exactly its bytes before a protected page, writes nothing past them",
+          tried == 2 * 4 * 4 * 8 && drawn > tried / 2);
+}
+
 static void check_taskbar_identity(void)
 {
     static unsigned int first[BAND_W * COMPOSITOR_PANEL], second[BAND_W * COMPOSITOR_PANEL], picture[WINDOWS_ICON * WINDOWS_ICON], again[WINDOWS_ICON * WINDOWS_ICON];
@@ -178093,6 +178180,7 @@ b32 main()
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
         check_icons();
         check_taskbar_identity();
+        check_taskbar_guard();
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
         check_taskbar_scale();
 #if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
