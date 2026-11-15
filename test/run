@@ -7420,9 +7420,26 @@ lane_differential_oracle()
 #       initialised from itself on riscv64. One build a machine, the foreign
 #       two linked by their own binutils' ld and run under qemu-user, each
 #       asked a line of shell and a utility through its multicall name.
+#       scope_exit (src/lib.util.c) is clang's defer statement, and a clang
+#       that does not take -fdefer-ts (Ubuntu's 18 and 19) cannot build what
+#       uses it: run at every exit, naming what is above it by reference, has
+#       no other spelling in clang, which has no nested functions. Such a
+#       clang is one this cannot ask, said as NOT RUN with its version, where
+#       it was a shell that did not build and a red row.
+clang_defers()
+{
+        clang -fdefer-ts -E -x c /dev/null > /dev/null 2>&1 && return 0
+        clang_refusal="$(clang --version 2> /dev/null | sed -n 1p) takes no -fdefer-ts, which scope_exit needs"
+        return 1
+}
+
 clang_one()
 {
         clang_target=$1
+        if ! clang_defers; then
+                note "clang $clang_target: NOT RUN -- $clang_refusal"
+                return 2
+        fi
         case $clang_target in
         x86_64) clang_triple=x86_64-linux-gnu ;;
         arm64) clang_triple=aarch64-linux-gnu ;;
@@ -7517,6 +7534,7 @@ gate_cross()
 gate_clang()
 {
         command -v clang > /dev/null 2>&1 || { echo "no clang here"; return 2; }
+        clang_defers || { echo "$clang_refusal"; return 2; }
         clang_one x86_64
 }
 
