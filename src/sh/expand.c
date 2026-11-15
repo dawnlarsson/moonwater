@@ -320,6 +320,14 @@ positive shell_substitution_generation HOT_STATE;
 // null arguments. MARK_BREAK is the quoted boundary that preserves both.
 #define MARK_SEPARATE 5
 
+//      Empty marks cut a word into runs shorter than it, and a word is mostly
+//      short: in one under this many bytes, moving the bytes around them one
+//      at a time costs less than a memory_first_of and a copy a run (the
+//      fields of set -- ""$u""x"" "$u"""y took 167 instructions a field kept
+//      run by run where they take 62 byte by byte), and in a longer one a run
+//      at a time costs less.
+#define EXPAND_RUNS 32
+
 #define EXPAND_PARAMETER_INDIRECT 1
 #define EXPAND_PARAMETER_MISSING 2
 
@@ -494,15 +502,35 @@ static fn expand_drop_empty()
         if (!expand_empty_count)
                 return;
 
-        for (positive at = 0; at < expand_length; at++)
-        {
-                if (expand_mark[at] == MARK_EMPTY)
-                        continue;
+        //      The bytes between two empty marks are one run, found by
+        //      memory_first_of and moved down whole in both halves, in a
+        //      word of EXPAND_RUNS bytes or more.
+        if (expand_length < EXPAND_RUNS)
+                for (positive at = 0; at < expand_length; at++)
+                {
+                        if (expand_mark[at] == MARK_EMPTY)
+                                continue;
 
-                expand_text[used] = expand_text[at];
-                expand_mark[used] = expand_mark[at];
-                used++;
-        }
+                        expand_text[used] = expand_text[at];
+                        expand_mark[used] = expand_mark[at];
+                        used++;
+                }
+        else
+                for (positive at = 0; at < expand_length; at++)
+                {
+                        positive run = memory_span_without_byte(
+                            expand_mark + at, MARK_EMPTY, expand_length - at);
+
+                        if (used != at)
+                        {
+                                memory_copy(expand_text + used,
+                                            expand_text + at, run);
+                                memory_copy(expand_mark + used,
+                                            expand_mark + at, run);
+                        }
+                        used += run;
+                        at += run;
+                }
 
         expand_length = used;
         expand_empty_count = 0;
@@ -2035,6 +2063,10 @@ enum
 /* Membership and whitespace are two properties of the same byte.  Keeping
    them in one table halves the hot splitter's footprint and preparation work. */
 static b8 expand_ifs_kind[256];
+//      The bytes no separator can start with, for string_span_max: none in
+//      IFS, and no high byte while a multibyte IFS character may begin at
+//      one under a UTF-8 locale.
+static b8 expand_ifs_plain[STRING_SET_BYTES];
 static p8 expand_ifs_mb[8][4];
 static b8 expand_ifs_mb_len[8];
 static positive expand_ifs_mb_count;
@@ -2051,6 +2083,7 @@ static fn expand_ifs_prepare()
         string_address ifs = expand_ifs();
 
         memory_fill(expand_ifs_kind, 0, sizeof(expand_ifs_kind));
+        memory_fill(expand_ifs_plain, 1, sizeof(expand_ifs_plain));
         expand_ifs_mb_count = 0;
 
         while (string_get(ifs))
@@ -2075,10 +2108,14 @@ static fn expand_ifs_prepare()
 
                 ifs++;
                 expand_ifs_kind[value] = EXPAND_IFS_MEMBER;
+                expand_ifs_plain[value] = 0;
 
                 if (value == ' ' || value == '\t' || value == '\n')
                         expand_ifs_kind[value] |= EXPAND_IFS_BLANK;
         }
+
+        if (expand_ifs_mb_count && shell_utf8_on())
+                memory_fill(expand_ifs_plain + 0x80, 0, 0x80);
 }
 
 static PURE bool expand_in_ifs(p8 value)
@@ -2122,6 +2159,20 @@ static HOT positive expand_ifs_span(string_address text, positive left)
                         return width;
 
         return 0;
+}
+
+//      expand_ifs_span at a byte of the working buffer, with its two common
+//      answers given where it is asked: a member of IFS is one byte, and a
+//      byte expand_ifs_plain holds starts no separator.
+static inline INLINE positive expand_ifs_width(positive at)
+{
+        p8 value = expand_text[at];
+
+        if (expand_in_ifs(value))
+                return 1;
+        if (expand_ifs_plain[value])
+                return 0;
+        return expand_ifs_span(expand_text + at, expand_length - at);
 }
 
 /*
@@ -2631,52 +2682,154 @@ static CONST bool expand_quoted_metacharacter(p8 value, bool regex)
         return regex && (bit & (value < 64 ? regex_low : regex_high));
 }
 
-static inline INLINE PURE bool expand_lift_escaped(positive step, b32 mode)
+/*
+        What a lift writes. A pattern, a regex and a replacement put a
+        backslash in front of a quoted byte their reader would take as
+        syntax -- a metacharacter, or the & of a replacement -- so in them a
+        quoted byte is looked at and in the other modes it is not; an empty
+        mark is never copied. The quoted bytes that need no backslash are
+        expand_lift_bare by mode, made once from expand_quoted_metacharacter.
+*/
+static bool expand_lift_escapes(b32 mode)
 {
-        p8 value = expand_text[step];
+        return mode == EXPAND_CAPTURE_PATTERN || mode == EXPAND_CAPTURE_REGEX ||
+               mode == EXPAND_CAPTURE_REPLACEMENT;
+}
 
-        if (expand_mark[step] != MARK_QUOTED)
-                return false;
-        if (mode == EXPAND_CAPTURE_REPLACEMENT)
-                return value == '&';
-        return (mode == EXPAND_CAPTURE_PATTERN || mode == EXPAND_CAPTURE_REGEX) &&
-               expand_quoted_metacharacter(value, mode == EXPAND_CAPTURE_REGEX);
+static b8 expand_lift_bare[3][STRING_SET_BYTES];
+static bool expand_lift_bare_ready;
+
+static const b8 address_to expand_lift_bare_set(b32 mode)
+{
+        if (!expand_lift_bare_ready)
+        {
+                for (positive value = 0; value < STRING_SET_BYTES; value++)
+                {
+                        expand_lift_bare[0][value] =
+                            !expand_quoted_metacharacter((p8)value, false);
+                        expand_lift_bare[1][value] =
+                            !expand_quoted_metacharacter((p8)value, true);
+                        expand_lift_bare[2][value] = value != '&';
+                }
+                expand_lift_bare_ready = true;
+        }
+        return expand_lift_bare[mode == EXPAND_CAPTURE_PATTERN ? 0
+                                : mode == EXPAND_CAPTURE_REGEX ? 1
+                                                               : 2];
+}
+
+//      The marks a lift that escapes copies as they stand, while the buffer
+//      holds an empty mark as well as quoted bytes that may want one.
+static const b8 expand_lift_through[STRING_SET_BYTES] = {
+        [MARK_PLAIN] = 1, [MARK_FIELD] = 1, [MARK_BREAK] = 1,
+        [MARK_SEPARATE] = 1};
+
+/*
+        The working buffer from start on as a lift writes it, into into
+        unless that is null; answers how many bytes that is. A run of bytes
+        copied as they stand ends at the next empty mark, or in a mode that
+        escapes at the next quoted byte or empty mark: one memory_first_of
+        when only one of the two can be there, one string_span_max over the
+        marks when both can, and one copy. A run of quoted bytes is then one
+        memory_span_byte, with a string_span_max and a copy for each stretch
+        that needs no backslash: only the byte that does, and an empty mark,
+        are taken one at a time.
+*/
+static positive expand_lift_walk(positive start, b32 mode, p8 address_to into)
+{
+        bool escapes = expand_lift_escapes(mode);
+        const b8 address_to bare = escapes ? expand_lift_bare_set(mode) : null;
+        positive used = 0;
+        positive step = start;
+
+        while (step < expand_length)
+        {
+                positive left = expand_length - step;
+                positive run = !escapes
+                                   ? memory_span_without_byte(
+                                         expand_mark + step, MARK_EMPTY, left)
+                               : !expand_empty_count
+                                   ? memory_span_without_byte(
+                                         expand_mark + step, MARK_QUOTED, left)
+                                   : string_span_max(expand_mark + step, left,
+                                                     expand_lift_through);
+                positive stop;
+
+                if (into)
+                        memory_copy_apart(into + used, expand_text + step, run);
+                used += run;
+                step += run;
+
+                if (step == expand_length)
+                        break;
+                if (!escapes || expand_mark[step] != MARK_QUOTED)
+                {
+                        step++;
+                        continue;
+                }
+
+                stop = step + memory_span_byte(expand_mark + step, MARK_QUOTED,
+                                               expand_length - step);
+                while (step < stop)
+                {
+                        run = string_span_max(expand_text + step, stop - step,
+                                              bare);
+                        if (into)
+                                memory_copy_apart(into + used,
+                                                  expand_text + step, run);
+                        used += run;
+                        step += run;
+
+                        if (step == stop)
+                                break;
+                        if (into)
+                        {
+                                into[used] = '\\';
+                                into[used + 1] = expand_text[step];
+                        }
+                        used += 2;
+                        step++;
+                }
+        }
+
+        return used;
 }
 
 /*
         The working buffer from start on, lifted out as one string in the
         store: empty marks dropped, and a backslash kept in front of each
         quoted byte the consumer would otherwise read as syntax. Null when
-        it does not fit.
+        it does not fit. With no empty mark in the buffer, and no quoted
+        byte a backslash could be wanted for, that is one copy.
 */
 static p8 address_to expand_lift(positive start, b32 mode)
 {
-        positive room = 1;
-        positive used = 0;
-        positive step;
+        positive left = expand_length > start ? expand_length - start : 0;
+        positive used;
         p8 address_to into;
 
-        for (step = start; step < expand_length; step++)
-        {
-                if (expand_mark[step] == MARK_EMPTY)
-                        continue;
-                if (room > positive_max - 2)
-                        return null;
-                room += 1 + expand_lift_escaped(step, mode);
-        }
-
-        if (!(into = shell_store_take(address_of expand_store, room)))
+        //      Each byte is at most two, and one more ends the string.
+        if (left > (positive_max - 1) / 2)
                 return null;
 
-        for (step = start; step < expand_length; step++)
+        if (!expand_empty_count &&
+            (!expand_lift_escapes(mode) ||
+             memory_span_without_byte(expand_mark + start, MARK_QUOTED,
+                                      left) == left))
         {
-                if (expand_mark[step] == MARK_EMPTY)
-                        continue;
-                if (expand_lift_escaped(step, mode))
-                        into[used++] = '\\';
-                into[used++] = expand_text[step];
+                if (!(into = shell_store_take(address_of expand_store,
+                                              left + 1)))
+                        return null;
+                memory_copy_apart(into, expand_text + start, left);
+                into[left] = end;
+                return into;
         }
 
+        used = expand_lift_walk(start, mode, null);
+        if (!(into = shell_store_take(address_of expand_store, used + 1)))
+                return null;
+
+        expand_lift_walk(start, mode, into);
         into[used] = end;
         return into;
 }
@@ -4624,7 +4777,36 @@ static string_address expand_dollar_quoted_run(string_address at)
         raise the depth. Nested `${`, `$( )`, process substitution and
         backticks still hide a `}` of their own. `$( )` / `$(( ))` keep
         counting parentheses.
+
+        Every other byte is skipped in one string_span by the set of the
+        three closers the shell asks for, ( ), [ ] and ${ }: all but the
+        terminator, the quotes, the backslash, the dollar and the two
+        brackets, and for ${ } the backtick and the < and > of a process
+        substitution where the { is no bracket. Any other pair walks a byte
+        at a time.
 */
+static const b8 expand_bracket_plain_sets[3][STRING_SET_BYTES] = {
+        {[1 ... 33] = 1, [35] = 1, [37 ... 38] = 1, [42 ... 91] = 1,
+         [93 ... 255] = 1},
+        {[1 ... 33] = 1, [35] = 1, [37 ... 38] = 1, [40 ... 90] = 1,
+         [94 ... 255] = 1},
+        {[1 ... 33] = 1, [35] = 1, [37 ... 38] = 1, [40 ... 59] = 1,
+         [61] = 1, [63 ... 91] = 1, [93 ... 95] = 1, [97 ... 124] = 1,
+         [126 ... 255] = 1},
+};
+
+static inline INLINE CONST const b8 address_to
+expand_bracket_plain(p8 open, p8 close, bool dollar_brace)
+{
+        if (dollar_brace)
+                return close == '}' ? expand_bracket_plain_sets[2] : null;
+        if (open == '(' && close == ')')
+                return expand_bracket_plain_sets[0];
+        if (open == '[' && close == ']')
+                return expand_bracket_plain_sets[1];
+        return null;
+}
+
 static COLD PURE string_address expand_bracket_end_quoted(string_address at,
                                                          p8 open, p8 close,
                                                          bool posix_double,
@@ -4634,10 +4816,17 @@ static COLD PURE string_address expand_bracket_end_quoted(string_address at,
         bool dollar_brace = parameter && open == '{';
         bool raw_single = posix_double && open == '{' && shell_posix_on() &&
                           !lex_parameter_pattern(at);
+        const b8 address_to plain = expand_bracket_plain(open, close,
+                                                         dollar_brace);
 
-        while (string_get(at))
+        while (1)
         {
-                p8 value = string_get(at);
+                p8 value;
+
+                if (plain)
+                        at += string_span(at, plain);
+                if (!(value = string_get(at)))
+                        break;
 
                 if (value == '$' && string_is(at + 1, '\''))
                 {
@@ -4737,10 +4926,16 @@ static inline INLINE HOT PURE string_address expand_bracket_end_mode(
         string_address start = at;
         positive depth = 1;
         bool dollar_brace = parameter && open == '{';
+        const b8 address_to plain = expand_bracket_plain(open, close,
+                                                         dollar_brace);
 
         while (1)
         {
-                p8 value = string_get(at);
+                p8 value;
+
+                if (plain)
+                        at += string_span(at, plain);
+                value = string_get(at);
 
                 if (value == close)
                 {
@@ -7137,19 +7332,21 @@ static positive shell_shown_character(const p8 address_to value, positive left)
         return used < left && fed == 1 ? used + 1 : 0;
 }
 
-// Whether a value holds a high byte bash will not show as itself.
+//      Whether a value holds a high byte bash will not show as itself. The
+//      ASCII between two high bytes is one memory_ascii_span, not a test a
+//      byte.
 static bool shell_bytes_unshown(const p8 address_to value, positive length)
 {
-        for (positive at = 0; at < length; at++)
-                if (value[at] >= 0x80)
-                {
-                        positive shown = shell_shown_character(value + at,
-                                                               length - at);
+        positive at = 0;
 
-                        if (!shown)
-                                return true;
-                        at += shown - 1;
-                }
+        while ((at += memory_ascii_span(value + at, length - at)) < length)
+        {
+                positive shown = shell_shown_character(value + at, length - at);
+
+                if (!shown)
+                        return true;
+                at += shown;
+        }
         return false;
 }
 
@@ -11106,7 +11303,8 @@ static inline INLINE string_address expand_keep_bytes(string_address text,
 }
 
 // One field's bytes, kept: the common word has no empty marks in it and is
-// one copy, and the rare one is copied a byte at a time around them.
+// one copy, and the rare one is a copy of each run between them, or of each
+// byte in a field shorter than EXPAND_RUNS.
 static HOT string_address expand_keep_field(positive at, positive stop)
 {
         p8 address_to result;
@@ -11123,9 +11321,22 @@ static HOT string_address expand_keep_field(positive at, positive stop)
                 return (string_address) "";
         }
 
-        for (; at < stop; at++)
-                if (expand_mark[at] != MARK_EMPTY)
-                        result[used++] = expand_text[at];
+        if (stop - at < EXPAND_RUNS)
+        {
+                for (; at < stop; at++)
+                        if (expand_mark[at] != MARK_EMPTY)
+                                result[used++] = expand_text[at];
+        }
+        else
+                for (; at < stop; at++)
+                {
+                        positive run = memory_span_without_byte(
+                            expand_mark + at, MARK_EMPTY, stop - at);
+
+                        memory_copy_apart(result + used, expand_text + at, run);
+                        used += run;
+                        at += run;
+                }
 
         result[used] = end;
         return result;
@@ -11149,6 +11360,16 @@ static inline INLINE bool glob_quoted_special(p8 byte)
                (shell_extglob_on && (lex_extended_head(byte) || byte == '(' ||
                                      byte == ')' || byte == '|'));
 }
+
+//      The bytes that cannot make a field a pattern, whatever their marks:
+//      all but *, ? and [, and with extglob on the ( an extended group needs
+//      after its head as well. A ] is magic only after a [, and a +, @ or !
+//      only before a (.
+static const b8 expand_glob_inert[2][STRING_SET_BYTES] = {
+        {[0 ... 41] = 1, [43 ... 62] = 1, [64 ... 90] = 1, [92 ... 255] = 1},
+        {[0 ... 39] = 1, [41] = 1, [43 ... 62] = 1, [64 ... 90] = 1,
+         [92 ... 255] = 1},
+};
 
 static HOT bool expand_emit(positive at, positive stop, shell_words address_to out)
 {
@@ -11179,6 +11400,15 @@ static HOT bool expand_emit(positive at, positive stop, shell_words address_to o
                 which of those places the scan is standing in.
         */
         positive bracket = 0;
+
+        //      Nearly every field holds none of the bytes that can make it a
+        //      pattern, and then there is no pattern to build: one
+        //      string_span_max over its bytes says so, where each byte was
+        //      walked twice below to build one and throw it away.
+        if (string_span_max(expand_text + at, stop - at,
+                            expand_glob_inert[shell_extglob_on ? 1 : 0]) ==
+            stop - at)
+                goto keep;
 
         for (index = at; index < stop; index++)
         {
@@ -11328,6 +11558,7 @@ static HOT bool expand_emit(positive at, positive stop, shell_words address_to o
                         return true;
         }
 
+keep:
         {
                 string_address kept = expand_keep_field(at, stop);
 
@@ -11347,11 +11578,16 @@ static HOT bool expand_emit(positive at, positive stop, shell_words address_to o
         Only bytes that came out of an unquoted expansion can be a separator, so
         the marks do the whole of the deciding. A run of IFS whitespace is one
         separator; anything else in IFS is a separator on its own, with the
-        whitespace around it swallowed.
+        whitespace around it swallowed. The marks of the bytes that can
+        never split are expand_split_inert.
 */
+static const b8 expand_split_inert[STRING_SET_BYTES] = {
+        [MARK_PLAIN] = 1, [MARK_QUOTED] = 1, [MARK_EMPTY] = 1};
+
 static HOT positive expand_split(shell_words address_to out)
 {
         positive at = 0;
+        positive field_end = 0;
         positive start;
 
         // A word that expanded to nothing at all is no field, unless some part
@@ -11403,10 +11639,35 @@ static HOT positive expand_split(shell_words address_to out)
                         continue;
                 }
 
-                if (expand_mark[at] == MARK_FIELD)
+                //      A quoted, plain or empty byte splits nothing, and the run
+                //      of them is one string_span_max over the marks.
+                if (expand_mark[at] != MARK_FIELD)
                 {
-                        positive width = expand_ifs_span(expand_text + at,
-                                                         expand_length - at);
+                        at++;
+                        at += string_span_max(expand_mark + at,
+                                              expand_length - at,
+                                              expand_split_inert);
+                        continue;
+                }
+
+                {
+                        positive width;
+
+                        //      Inside a run of unquoted expansion, whose end
+                        //      is found once, the bytes up to the next that
+                        //      could start a separator are one
+                        //      string_span_max, where each was a call of
+                        //      expand_ifs_span.
+                        if (field_end <= at)
+                                field_end = at + memory_span_byte(
+                                                     expand_mark + at, MARK_FIELD,
+                                                     expand_length - at);
+                        at += string_span_max(expand_text + at, field_end - at,
+                                              expand_ifs_plain);
+                        if (at == field_end)
+                                continue;
+
+                        width = expand_ifs_width(at);
 
                         if (width)
                         {
@@ -11420,9 +11681,7 @@ static HOT positive expand_split(shell_words address_to out)
                                 if (at < expand_length &&
                                     expand_mark[at] == MARK_FIELD)
                                 {
-                                        width = expand_ifs_span(
-                                            expand_text + at,
-                                            expand_length - at);
+                                        width = expand_ifs_width(at);
                                         if (width)
                                         {
                                                 at += width;
