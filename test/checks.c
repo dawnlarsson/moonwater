@@ -117369,8 +117369,11 @@ static bipolar machine_start_stub(string_address path, string_address address_to
         return machine_start_calls++ < machine_start_failing ? -EAGAIN : 4242;
 }
 
+//      A writer handed no length is handed a string to its terminator (string_format's %s).
 static fn machine_start_capture(address_any data, positive length)
 {
+        if (!length)
+                length = string_length((string_address)data);
         if (machine_start_used + length >= sizeof(machine_start_said))
                 length = sizeof(machine_start_said) - 1 - machine_start_used;
         memory_copy_apart(machine_start_said + machine_start_used, data, length);
