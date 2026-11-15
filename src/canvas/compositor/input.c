@@ -2871,14 +2871,20 @@ static void compositor_chip_draw(const struct compositor_target *t)
 
         if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha)
                 return;
-        compositor_reading(t);
         compositor_chip_place(box);
+
+        // The box cut to the target, the same for both layers: a target it does not meet (a slice above or below it) has nothing
+        // of it, and its width or height, none or less, is not a count to hand the mix.
+        int x1 = box[0] > t->x1 ? box[0] : t->x1, y1 = box[1] > t->y1 ? box[1] : t->y1;
+        int x2 = box[0] + box[2] < t->x2 ? box[0] + box[2] : t->x2, y2 = box[1] + box[3] < t->y2 ? box[1] + box[3] : t->y2;
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        compositor_reading(t);
         for (int layer = 0; layer < layers; layer++)
         {
                 unsigned int ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
                 const unsigned char *cover = c->cover + (unsigned long)layer * c->w * c->h;
-                int x1 = box[0] > t->x1 ? box[0] : t->x1, y1 = box[1] > t->y1 ? box[1] : t->y1;
-                int x2 = box[0] + box[2] < t->x2 ? box[0] + box[2] : t->x2, y2 = box[1] + box[3] < t->y2 ? box[1] + box[3] : t->y2;
 
                 memory_mix_const_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
                                           t->pitch,

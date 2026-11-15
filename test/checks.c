@@ -132542,6 +132542,60 @@ static void check_compositor_aside(void)
 }
 
 /*
+        The chip over a target that does not meet its box: a slice of a scene composed apart above or below it, a target left
+        or right of it, writes nothing, and one that meets it by a row or a column has that row or column of it and nothing
+        else. The target is a page with a page that faults on each side, so a count made of a clip that went negative (a width
+        or height of none or less handed to the mix) faults rather than passes.
+*/
+static void check_compositor_chip_clip(void)
+{
+    static unsigned char cover[40 * 10];
+    struct compositor_chip was = compositor.chip;
+    long mapped = compositor_call(syscall(mmap), 0, 3 * 4096, 3, 0x22, (positive)-1, 0);
+    // Where the target's 64 by 16 pixels lie on the desktop, against the chip's box at 100, 100, 40 by 10.
+    static const int places[][2] = {{100, 200}, {100, 74}, {20, 100}, {200, 100}, {100, 109}, {139, 96}, {60, 84}};
+    static const int meets[][4] = {{0}, {0}, {0}, {0}, {100, 109, 140, 110}, {139, 100, 140, 110}, {0}};
+    unsigned int wrong = 0;
+
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("chip clip: the target's pages are mapped", false);
+        return;
+    }
+    unsigned int *page = (unsigned int *)(mapped + 4096);
+
+    compositor_call(syscall(mprotect), (positive)mapped, 4096, 0, 0, 0, 0);
+    compositor_call(syscall(mprotect), (positive)(mapped + 2 * 4096), 4096, 0, 0, 0, 0);
+    for (unsigned int at = 0; at < sizeof(cover); at++)
+        cover[at] = (unsigned char)(at * 37u | 1u);
+    memory_zero(&compositor.chip, sizeof(compositor.chip));
+    compositor.chip.kind = COMPOSITOR_CHIP_HINT, compositor.chip.rel_x = 100, compositor.chip.rel_y = 100;
+    compositor.chip.w = 40, compositor.chip.h = 10, compositor.chip.alpha = 255, compositor.chip.cover = cover;
+    for (unsigned int k = 0; k < sizeof(places) / sizeof(places[0]); k++)
+    {
+        struct compositor_target t = {page, 64, 4096, 4096, places[k][0], places[k][1], places[k][0] + 64, places[k][1] + 16,
+                                      places[k][0], places[k][1], 0};
+
+        for (unsigned int at = 0; at < 1024; at++)
+            page[at] = 0x5a5a5a5au;
+        compositor_chip_draw(&t);
+        for (unsigned int at = 0; at < 1024; at++)
+        {
+            int x = places[k][0] + (int)(at % 64), y = places[k][1] + (int)(at / 64);
+            int inside = x >= meets[k][0] && x < meets[k][2] && y >= meets[k][1] && y < meets[k][3];
+
+            wrong += inside ? page[at] == 0x5a5a5a5au : page[at] != 0x5a5a5a5au;
+        }
+    }
+    compositor.chip = was;
+    compositor_call(syscall(munmap), (positive)mapped, 3 * 4096, 0, 0, 0, 0);
+    check("chip clip: a target above, below, left or right of the chip, or past its corner, has nothing of it, and one that meets it "
+          "by a row or a column has that and no more",
+          wrong == 0);
+}
+
+
+/*
         A shared edge: two windows that meet edge to edge with the same extent take a press anywhere along their edge, from
         one end to the other, as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint
         across the whole of that edge and nowhere else. An edge that does not meet exactly, and a corner, are the window's
@@ -177831,6 +177885,7 @@ b32 main()
         check_compositor_snap_tint();
         check_compositor_preview_held();
         check_compositor_aside();
+        check_compositor_chip_clip();
         check_compositor_shared();
         check_compositor_cycle();
         check_compositor_hover();
