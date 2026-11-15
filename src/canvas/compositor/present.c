@@ -40,17 +40,19 @@ static unsigned int compositor_metric_presents_second, compositor_metric_lists_s
 /*
         The present's timing, a second at a time (moonwater debug's presents line): the presents made late in their period and those of them that missed
         their vblank (compositor_late's counts at the last mark), the loop's longest time inside one present since the mark (compositor_present), and the
-        flips committed while a job of the card still ran, with the most jobs in flight at one of them since the mark (the card's present without a wait).
+        flips committed while a job of the card still ran, with the most jobs in flight at one of them since the mark (the card's present without a wait),
+        and the loop's time inside the card's waits since the mark (every job gpu_run waited for, gpu.c's gpu_job_ns: a list's render, a client's copy, a
+        wake, a scale or a present waited for in place), in microseconds a second.
 */
 static unsigned long long compositor_metric_late_then, compositor_metric_missed_then, compositor_metric_loop_most, compositor_metric_flips_jobs,
-    compositor_metric_flips_jobs_then;
+    compositor_metric_flips_jobs_then, compositor_metric_waited_then;
 static unsigned int compositor_metric_flip_jobs_most, compositor_metric_late_second, compositor_metric_missed_second, compositor_metric_loop_most_second,
-    compositor_metric_flip_jobs_second, compositor_metric_flip_jobs_most_second;
+    compositor_metric_flip_jobs_second, compositor_metric_flip_jobs_most_second, compositor_metric_waited_second;
 
 static void compositor_metric_publish(void)
 {
         struct windows address_to table = compositor.table;
-        unsigned long long now = clock_monotonic_nanoseconds(), lists = compositor_list_counts[COMPOSITOR_LIST_DRAWN];
+        unsigned long long now = clock_monotonic_nanoseconds(), lists = compositor_list_counts[COMPOSITOR_LIST_DRAWN], waited = 0;
         unsigned int mean, worst;
 
         if (!table)
@@ -65,11 +67,12 @@ static void compositor_metric_publish(void)
         table->metric_maps_own_user = gpu_maps_own_user, table->metric_maps_own_errno = gpu_maps_own_errno;
         table->metric_wakes = gpu_wakes, table->metric_jobs = gpu_jobs;
         table->metric_job_mean = gpu_jobs ? (unsigned int)(gpu_job_ns / gpu_jobs / 1000) : 0;
+        waited = gpu_job_ns;
 #endif
         if (!compositor_metric_since)
                 compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists,
                 compositor_metric_late_then = compositor_late.made, compositor_metric_missed_then = compositor_late.missed,
-                compositor_metric_flips_jobs_then = compositor_metric_flips_jobs;
+                compositor_metric_flips_jobs_then = compositor_metric_flips_jobs, compositor_metric_waited_then = waited;
         if (now - compositor_metric_since >= 1000000000ull)
         {
                 compositor_metric_presents_second = windows_metric_rate(compositor_metric_presents - compositor_metric_presents_then, now - compositor_metric_since);
@@ -79,6 +82,8 @@ static void compositor_metric_publish(void)
                 compositor_metric_flip_jobs_second = windows_metric_rate(compositor_metric_flips_jobs - compositor_metric_flips_jobs_then, now - compositor_metric_since);
                 compositor_metric_loop_most_second = (unsigned int)(compositor_metric_loop_most / 1000);
                 compositor_metric_flip_jobs_most_second = compositor_metric_flip_jobs_most;
+                compositor_metric_waited_second = windows_metric_rate((waited - compositor_metric_waited_then) / 1000, now - compositor_metric_since);
+                compositor_metric_waited_then = waited;
                 compositor_metric_late_then = compositor_late.made, compositor_metric_missed_then = compositor_late.missed;
                 compositor_metric_flips_jobs_then = compositor_metric_flips_jobs, compositor_metric_loop_most = 0, compositor_metric_flip_jobs_most = 0;
                 compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists;
@@ -89,6 +94,7 @@ static void compositor_metric_publish(void)
         table->metric_late = compositor_metric_late_second, table->metric_missed = compositor_metric_missed_second;
         table->metric_lead = (unsigned int)(compositor_present_lead() / 1000), table->metric_present_most = compositor_metric_loop_most_second;
         table->metric_flip_jobs = compositor_metric_flip_jobs_second, table->metric_flip_jobs_most = compositor_metric_flip_jobs_most_second;
+        table->metric_waited = compositor_metric_waited_second;
 }
 
 // The loop's turns a second, and those whose ppoll had nothing to wait for (a timer already due, so the turn spun): the wake rate in moonwater debug.

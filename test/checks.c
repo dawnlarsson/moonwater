@@ -244362,14 +244362,15 @@ static void dirty_rows(void)
 
 /*
         The present's timing as the table says it, a second at a time (compositor_metric_publish, moonwater debug's presents line): the presents made late
-        in the last second and those that missed, the lead in use (none headless), the loop's longest present, and the flips with jobs in flight.
+        in the last second and those that missed, the lead in use (none headless), the loop's longest present, the flips with jobs in flight, and the
+        loop's time inside the card's waits.
 */
 static void metric_present_rows(void)
 {
         static struct windows table;
         struct windows *kept_table = compositor.table;
         positive kept_made = compositor_late.made, kept_missed = compositor_late.missed, kept_since = compositor_metric_since, now;
-        unsigned long long kept_most = compositor_metric_loop_most, kept_flips = compositor_metric_flips_jobs;
+        unsigned long long kept_most = compositor_metric_loop_most, kept_flips = compositor_metric_flips_jobs, kept_waited = compositor_metric_waited_then;
         unsigned int kept_jobs_most = compositor_metric_flip_jobs_most;
         int kept_card = compositor.card;
 
@@ -244379,14 +244380,19 @@ static void metric_present_rows(void)
         compositor_metric_publish(); // the mark
         compositor_late.made += 60, compositor_late.missed += 2, compositor_metric_loop_most = 4321000ull;
         compositor_metric_flips_jobs += 30, compositor_metric_flip_jobs_most = 2;
+        gpu_job_ns += 2500000ull; // 2.5 ms waited on the card's jobs in the second
         now = clock_monotonic_nanoseconds();
         compositor_metric_since = now - 1000000000ull; // a second ago
         compositor_metric_publish();
+        check("metrics: the loop's time inside the card's waits in the second is the table's, in microseconds",
+              table.metric_waited >= 2490 && table.metric_waited <= 2500);
         check("metrics: a second's presents made late and missed, the loop's longest present and the flips with jobs in flight are the table's",
               table.metric_late >= 59 && table.metric_late <= 60 && table.metric_missed >= 1 && table.metric_missed <= 2 && table.metric_present_most == 4321 &&
                   table.metric_flip_jobs >= 29 && table.metric_flip_jobs <= 30 && table.metric_flip_jobs_most == 2);
         check("metrics: a headless compositor says no lead", table.metric_lead == 0);
-        check("metrics: and the next second starts from nothing", compositor_metric_loop_most == 0 && compositor_metric_flip_jobs_most == 0);
+        check("metrics: and the next second starts from nothing", compositor_metric_loop_most == 0 && compositor_metric_flip_jobs_most == 0 &&
+                                                                      compositor_metric_waited_then == gpu_job_ns);
+        gpu_job_ns -= 2500000ull, compositor_metric_waited_then = kept_waited;
         compositor.table = kept_table, compositor.card = kept_card;
         compositor_late.made = kept_made, compositor_late.missed = kept_missed, compositor_metric_since = kept_since;
         compositor_metric_loop_most = kept_most, compositor_metric_flips_jobs = kept_flips, compositor_metric_flip_jobs_most = kept_jobs_most;
