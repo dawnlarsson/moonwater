@@ -2692,7 +2692,7 @@ static b32 compositor_keyboard_plugged(void)
 }
 
 // A screen that fingers touch is plugged in (compositor_input_add's touchscreen).
-static b32 compositor_osk_touch(void)
+static b32 compositor_touchscreen_plugged(void)
 {
         for (unsigned int at = 0; at < compositor.input_count; at++)
                 if (compositor.inputs[at] >= 0 && compositor.touchscreen[at])
@@ -2706,7 +2706,7 @@ static b32 compositor_osk_starts(void)
 {
         if (compositor.osk_setting == COMPOSITOR_OSK_ON)
                 return 1;
-        return compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_osk_touch() || !compositor_keyboard_plugged());
+        return compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_touchscreen_plugged() || !compositor_keyboard_plugged());
 }
 
 // A row put away (the keyboard, while nothing has its field) or shown again; its picture is drawn again both times.
