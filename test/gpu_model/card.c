@@ -20,6 +20,22 @@ static p64 gpu_model_seen[1 + 64 + 256];
 static unsigned int gpu_model_seen_count;
 #define GPU_SUBMIT_SEEN(list, count) (gpu_model_seen_count = (count), memory_copy(gpu_model_seen, (list), (positive)(count) * sizeof(p64)))
 
+// The kernel's answers for the maps (gpu_map, gpu_drop) on the model card: a userptr buffer is a handle of its own (AMDGPU_GEM_USERPTR writes it in the
+// high half of the flags' word), its address given and taken (GEM_VA) and the handle let go of (GEM_CLOSE) are done. The model reaches a map's pages by
+// gpu_maps (the regions of a job), so nothing else is kept. Every other request of the card's descriptor (none: gpu.fd is -1) is refused, EBADF.
+static unsigned int gpu_model_handles = 100;
+static long gpu_model_control(int fd, unsigned int request, void address_to a)
+{
+        p64 address_to longs = (p64 address_to)a;
+
+        if (request == 0xc0186451u) // DRM_IOCTL_AMDGPU_GEM_USERPTR
+                return longs[2] = (longs[2] & 0xffffffffull) | (p64)++gpu_model_handles << 32, 0;
+        if (request == 0x40406448u || request == 0x40086409u) // DRM_IOCTL_AMDGPU_GEM_VA, DRM_IOCTL_GEM_CLOSE
+                return 0;
+        return fd < 0 ? -9 : system_control(fd, request, a);
+}
+#define GPU_CONTROL(fd, request, a) gpu_model_control((int)(fd), (unsigned int)(request), (void address_to)(a))
+
 #include "../../src/canvas/gpu.c"
 
 #define GPU_MODEL_CARD_WORDS 4096 // the words of each kernel the card counts the runs of

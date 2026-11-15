@@ -128122,7 +128122,7 @@ b32 main()
 }
 #endif
 
-#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list)
+#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list) || defined(CHECK_gpu_model_kit)
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #include "../src/canvas/window.c"
@@ -128375,6 +128375,10 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
 #define GPU_CONTROL(fd, request, a) gpu_kernel_control((int)(fd), (unsigned int)(request), (void *)(a))
 #define GPU_UDMABUF_OPEN() (gpu_kernel.on && gpu_kernel.udmabuf ? (long)GPU_KERNEL_UDMABUF : system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC))
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
+#endif
+#ifdef CHECK_gpu_model_kit
+#define GPU_MODEL_CARD // the model of the card under gpu.c's seams: test/gpu_model/card.c includes gpu.c, which the compositor then finds included
+#include "gpu_model.c"
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
 // other descriptor's call is made as it always is.
@@ -246090,6 +246094,648 @@ b32 main()
         return test_report(null);
 }
 #endif /* CHECK_gpu_model */
+
+#ifdef CHECK_gpu_model_kit
+/*
+        CHECK_gpu_kit's rows that draw on a card, which say NOT RUN on a machine with no card, run with the model as the card (test/gpu_model.c,
+        whose self-test row in CHECK_gpu_model holds it to GPU_TEST_HASH): the blocks are CHECK_gpu_kit's, copied as they are by the script of
+        this commit's message, with each block's pixels counted as one row (a pixel that differs from the processor's is a failure of that row and
+        is named, the first five of a block) where CHECK_gpu_kit counts every pixel. They are the seeded differential of the scene kernel against
+        the processor's painters: random boxes over random pictures off every edge with every radius and alpha (ui_kit_fill), rings, clipped boxes,
+        fills, dots and clears (the records of every cover change, 8 and 9), glyphs translated through 256 tones, images from the card's buffer and
+        from a memfd's pages, mixes, turns a quarter, a half and three quarters with a damage rectangle drawn alone, and text runs as a scene and as
+        a program's list (with the face, the fourth argument). The seed is CHECK_gpu_kit's, 88172645. The rounds 697 wide are clang's kernels, which
+        the model does not take: NOT RUN.
+*/
+static unsigned int gpu_seed = 88172645u;
+static unsigned int gpu_random(void)
+{
+        gpu_seed ^= gpu_seed << 13, gpu_seed ^= gpu_seed >> 17, gpu_seed ^= gpu_seed << 5;
+        return gpu_seed;
+}
+
+static unsigned int gpu_kit_want[700 * 420];
+static positive model_wrong; // the pixels that differ from the processor's, every block's
+
+b32 main()
+{
+        enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        int PW = 696;
+        positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20), wrong_before;
+        unsigned int address_to pic, address_to ops;
+        struct ui ui;
+        positive bad = 0;
+
+        if (!gpu_model_card_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
+        {
+                check("gpu model kit: the model card's buffer is made", false);
+                return test_report(null);
+        }
+        check("gpu model kit: the model card draws the self-test to GPU_TEST_HASH here too", gpu_test_hash() == GPU_TEST_HASH && !gpu_model.fault.code);
+        gpu_model_card_reset();
+        gpu_patient = 1;
+        pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = gpu_kit_want, ui.pitch = PP, ui.width = PW, ui.height = PH, ui.top = 0, ui.bottom = PH, ui.scale = 100;
+        wrong_before = model_wrong;
+        for (int round = 0; round < ROUNDS; round++)
+        {
+                PW = round & 1 ? 697 : 696, ui.width = PW;
+                if (round & 1) // 697 wide: clang's kernels (ops 4 and 5), which the model does not take
+                        continue;
+                for (positive i = 0; i < (positive)PP * PH; i++)
+                        pic[i] = gpu_kit_want[i] = gpu_random();
+                for (int k = 0; k < N; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k, mode = gpu_random() % 8;
+                        int x0 = (int)(gpu_random() % ((PW + 16) * 256)) - 8 * 256, y0 = (int)(gpu_random() % ((PH + 16) * 256)) - 8 * 256;
+                        int w = (int)(gpu_random() % (mode == 0 ? 3 * 256 : mode < 3 ? 40 * 256 : 400 * 256)) - (mode == 7 ? 100 : 0);
+                        int h = (int)(gpu_random() % (mode == 1 ? 3 * 256 : mode < 3 ? 40 * 256 : 300 * 256)) - (mode == 7 ? 100 : 0);
+                        int rx = mode == 4 ? 0 : (int)(gpu_random() % (mode == 5 ? 900 * 256 : 24 * 256)), ry = mode == 4 ? 0 : (int)(gpu_random() % (mode == 6 ? 900 * 256 : 24 * 256));
+                        unsigned int argb = gpu_random();
+                        struct ui_box box;
+
+                        if (gpu_random() % 3 == 0)
+                                argb |= 0xff000000u;
+                        if (gpu_random() % 11 == 0)
+                                argb &= 0x00ffffffu;
+                        box.x0 = x0, box.y0 = y0, box.x1 = x0 + w, box.y1 = y0 + h, box.rx = rx, box.ry = ry;
+                        q[0] = 2, q[1] = (unsigned int)box.x0, q[2] = (unsigned int)box.y0, q[3] = (unsigned int)box.x1, q[4] = (unsigned int)box.y1, q[5] = argb, q[6] = (unsigned int)rx,
+                        q[7] = (unsigned int)ry;
+                        ui_kit_fill(&ui, &box, argb, 0);
+                }
+                if (!gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                {
+                        check("gpu kit: the scene finishes", false);
+                        return test_report(null);
+                }
+                for (int y = 0; y < PH; y++)
+                        for (int x = 0; x < PW; x++)
+                        {
+                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++bad) < 6)
+                                        string_format(log, "  FAIL gpu kit round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                        }
+        }
+
+        check("gpu model kit: the boxes of the even rounds (ui_kit_fill, 696 wide) drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+        string_format(log, "gpu model kit: the 20 odd rounds of the boxes NOT RUN -- 697 wide is clang's scene kernels (ops 4 and 5), whose words the model does not take\n");
+        wrong_before = model_wrong;
+        // A glyph translated (op 10, font_cell's cell on its ground): coverage bytes through 256 tones, against the processor's translate, as a program's list through the cut
+        // (compositor_gpu_list_ops) with the base of the list the buffer's start; rectangles anywhere in the picture, pitches past the rectangle's width, three tables
+        // shared by the ops, coverage with zeros and full bytes, over a random picture, in order.
+        {
+                enum { TRW = 400, TRH = 100, TRP = 404, TRN = 24, TRROUNDS = 30 };
+                positive base_t = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (16 << 20), ops_t = base_t + (1 << 20), bins_t = ops_t + (1 << 20), cover_t = bins_t + (2 << 20);
+                unsigned int address_to tpic = (unsigned int address_to)((p8 address_to)gpu.at + base_t), address_to tops = (unsigned int address_to)((p8 address_to)gpu.at + ops_t);
+                unsigned int address_to cut = tops + 8 * 100, want_t[TRP * TRH];
+                p8 address_to cover = (p8 address_to)gpu.at + cover_t;
+                positive address_to tbases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT), translate_bad = 0;
+
+                tbases[7] = GPU_VA;
+                for (int round = 0; round < TRROUNDS; round++)
+                {
+                        positive used = 4096, tables[3];
+                        unsigned int made;
+
+                        for (int t = 0; t < 3; t++)
+                        {
+                                unsigned int address_to table = (unsigned int address_to)(cover + used);
+
+                                for (int i = 0; i < 256; i++)
+                                        table[i] = gpu_random();
+                                tables[t] = cover_t + used, used += 1024;
+                        }
+                        for (positive i = 0; i < (positive)TRP * TRH; i++)
+                                tpic[i] = want_t[i] = gpu_random();
+                        for (int k = 0; k < TRN; k++)
+                        {
+                                unsigned int address_to q = tops + 8 * k;
+                                int x0 = (int)(gpu_random() % (TRW - 1)), y0 = (int)(gpu_random() % (TRH - 1));
+                                int x1 = x0 + 1 + (int)(gpu_random() % (unsigned int)(TRW - x0 - 1 < 40 ? TRW - x0 - 1 : 40)), y1 = y0 + 1 + (int)(gpu_random() % (unsigned int)(TRH - y0 - 1 < 30 ? TRH - y0 - 1 : 30));
+                                positive cols = (positive)(x1 - x0), rows = (positive)(y1 - y0), pitch = cols + gpu_random() % 24, table = tables[gpu_random() % 3], at = cover_t + used;
+                                unsigned int address_to table_words = (unsigned int address_to)(cover + (table - cover_t));
+
+                                for (positive i = 0; i < rows * pitch + 16; i++)
+                                        cover[used + i] = (p8)(gpu_random() % 5 == 0 ? 0 : gpu_random() % 7 == 0 ? 255 : gpu_random());
+                                for (positive r = 0; r < rows; r++)
+                                        for (positive c = 0; c < cols; c++)
+                                                want_t[(positive)(y0 + (int)r) * TRP + (positive)(x0 + (int)c)] = table_words[cover[used + r * pitch + c]];
+                                q[0] = 10u | (unsigned int)pitch << 8, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)x1, q[4] = (unsigned int)y1;
+                                q[5] = (unsigned int)table, q[6] = 0, q[7] = (unsigned int)at;
+                                used += (rows * pitch + 16 + 15) & ~15ull;
+                        }
+                        made = compositor_gpu_list_ops(tops, TRN, cover_t, used, gpu.size, TRW, TRH, 7, cut, 1000);
+                        check("gpu translate: the glyphs of a frame are taken whole", made == TRN);
+                        if (made != TRN || !gpu_scene(ops_t + 32 * 100, made, bins_t, base_t, TRP, TRW, TRH, 0, 0, TRW, TRH))
+                        {
+                                check("gpu translate: the scene finishes", false);
+                                break;
+                        }
+                        for (int y = 0; y < TRH; y++)
+                                for (int x = 0; x < TRW; x++)
+                                {
+                                        if (tpic[(positive)y * TRP + x] != want_t[(positive)y * TRP + x] && (++model_wrong, ++translate_bad) < 6)
+                                                string_format(log, "  FAIL gpu translate round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)tpic[(positive)y * TRP + x], (positive)want_t[(positive)y * TRP + x]);
+                                }
+                }
+        }
+
+        check("gpu model kit: the translated glyphs (op 10, through compositor_gpu_list_ops) drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+        wrong_before = model_wrong;
+        // Rings, ripples and rows: the kit's own calls, ui_kit_ring and ui_kit_fill with a clip, on the processor and recorded (the box's record and the
+        // records that change its cover), over rows a list is scrolled under (top and bottom of the ui), against a random picture; a width that is not a
+        // multiple of 4 is for the kernels that cannot, and is refused.
+        {
+                struct ui_scene scene;
+                struct ui rec;
+                positive ring_bad = 0;
+
+                for (int round = 0; round < 40; round++)
+                {
+                        int top = round % 3 ? 0 : (int)(gpu_random() % 200), bottom = round % 3 == 1 ? PH : PH - (int)(gpu_random() % 200);
+
+                        PW = 696;
+                        ui.width = PW, ui.top = top, ui.bottom = bottom, ui.opaque = round & 1;
+                        ui.band_top = ui.band_bottom = 0;
+                        if (round % 5 == 4)
+                                ui.band_top = (int)(gpu_random() % 60), ui.band_bottom = PH - (int)(gpu_random() % 60);
+                        rec = ui;
+                        rec.scene = &scene;
+                        memory_zero(&scene, sizeof(scene));
+                        scene.ops = ops, scene.room = 4 * N;
+                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                pic[i] = gpu_kit_want[i] = gpu_random();
+                        for (int k = 0; k < N; k++)
+                        {
+                                unsigned int kind = gpu_random() % 5, mode = gpu_random() % 8, argb = gpu_random();
+                                int x0 = (int)(gpu_random() % ((PW + 16) * 256)) - 8 * 256, y0 = (int)(gpu_random() % ((PH + 16) * 256)) - 8 * 256;
+                                int w = (int)(gpu_random() % (mode == 0 ? 3 * 256 : mode < 3 ? 40 * 256 : 300 * 256)) - (mode == 7 ? 100 : 0);
+                                int h = (int)(gpu_random() % (mode == 1 ? 3 * 256 : mode < 3 ? 40 * 256 : 200 * 256)) - (mode == 7 ? 100 : 0);
+                                int rx = mode == 4 ? 0 : (int)(gpu_random() % (mode == 5 ? 900 * 256 : 24 * 256)), ry = mode == 4 ? 0 : (int)(gpu_random() % (mode == 6 ? 900 * 256 : 24 * 256));
+                                int thickness = gpu_random() % 3 ? (int)(gpu_random() % (12 * 256)) : (int)(gpu_random() % 600);
+                                struct ui_box box = {x0, y0, x0 + w, y0 + h, rx, ry}, clip;
+
+                                if (gpu_random() % 3 == 0)
+                                        argb |= 0xff000000u;
+                                if (gpu_random() % 11 == 0)
+                                        argb &= 0x00ffffffu;
+                                if (gpu_random() % 16 == 0)
+                                        thickness = -thickness;
+                                clip.x0 = x0 + (int)(gpu_random() % (unsigned int)(w > 0 ? w : 1)) - w / 3, clip.y0 = y0 + (int)(gpu_random() % (unsigned int)(h > 0 ? h : 1)) - h / 3;
+                                clip.x1 = clip.x0 + (w > 0 ? w : 256) / 2 + (int)(gpu_random() % 4096), clip.y1 = clip.y0 + (h > 0 ? h : 256) / 2 + (int)(gpu_random() % 4096);
+                                clip.rx = (int)(gpu_random() % (20 * 256)), clip.ry = (int)(gpu_random() % (20 * 256));
+                                // every so often a wide box with a small clip in it: most of its patches miss the clip
+                                if (k % 16 == 0)
+                                        kind = 2, box = (struct ui_box){20 * 256, 20 * 256, 620 * 256, 170 * 256, 8 * 256, 8 * 256},
+                                        clip = (struct ui_box){300 * 256, 90 * 256, 340 * 256, 110 * 256, 4 * 256, 4 * 256};
+                                // the rectangles, the single pixels and the clear are the kit's other painters of the same picture
+                                if (k % 24 == 5)
+                                        ui_clear(&ui), ui_clear(&rec);
+                                else if (kind == 3)
+                                        ui_fill(&ui, x0 >> 8, y0 >> 8, w >> 8, h >> 8, argb), ui_fill(&rec, x0 >> 8, y0 >> 8, w >> 8, h >> 8, argb);
+                                else if (kind == 4)
+                                        ui_dot(&ui, x0 >> 8, y0 >> 8, argb), ui_dot(&rec, x0 >> 8, y0 >> 8, argb);
+                                else if (kind == 1)
+                                        ui_kit_ring(&ui, &box, thickness, argb), ui_kit_ring(&rec, &box, thickness, argb);
+                                else
+                                        ui_kit_fill(&ui, &box, argb, kind == 2 ? &clip : 0), ui_kit_fill(&rec, &box, argb, kind == 2 ? &clip : 0);
+                        }
+                        check("gpu rings: the records fit", !scene.lost && scene.count >= N / 2);
+                        check("gpu rings: an odd width is refused", !gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, 697, PH, 0, 0, 697, PH));
+                        if (!gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                        {
+                                check("gpu rings: the scene finishes", false);
+                                return test_report(null);
+                        }
+                        for (int y = 0; y < PH; y++)
+                                for (int x = 0; x < PW; x++)
+                                {
+                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++ring_bad) < 6)
+                                                string_format(log, "  FAIL gpu rings round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                }
+                }
+                ui.top = 0, ui.bottom = PH, ui.width = PW, ui.band_top = ui.band_bottom = 0, ui.opaque = 0;
+        }
+
+        check("gpu model kit: the rings, the clipped boxes, the fills, dots and clears of the kit (ui_kit_ring, ui_kit_fill with a clip, ui_fill, ui_dot, ui_clear) drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+        wrong_before = model_wrong;
+        // Images: pictures copied into the picture by the GPU, from two places: a buffer of the GPU's own, and the pages of a memfd mapped shared (what a
+        // window's pixels are), read by the GPU as a userptr buffer at an address of their own. The rectangles are cut at the picture's edges, the copies start
+        // anywhere in the source; against memory_copy_rect_u32 on the processor over a random picture.
+        {
+                enum { SW = 400, SH = 300, SP = 416, IMAGES = 40, IROUNDS = 12 };
+                positive img_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20), up_va = 0;
+                unsigned int address_to gpu_img = (unsigned int address_to)((p8 address_to)gpu.at + img_at), address_to shared;
+                long fd = system_call_2(syscall(memfd_create), (positive) "mw-window", 1), mapped = -1;
+                positive image_bad = 0;
+
+                if (fd >= 0 && system_call_2(syscall(ftruncate), (positive)fd, 1 << 20) == 0)
+                        mapped = system_call_6(syscall(mmap), 0, 1 << 20, 3, 1, (positive)fd, 0);
+                shared = (unsigned int address_to)mapped;
+                if (!(mapped < 0 && mapped > -4096) && gpu_map(shared, 1 << 20))
+                        up_va = gpu_va(shared);
+                check("gpu images: the memfd's pages are a userptr buffer", up_va != 0);
+                for (positive i = 0; i < (positive)SP * SH; i++)
+                        gpu_img[i] = gpu_random();
+                for (positive i = 0; up_va && i < (positive)SW * SH; i++)
+                        shared[i] = gpu_random();
+                PW = 696;
+                ui.width = PW;
+                for (int round = 0; round < IROUNDS; round++)
+                {
+                        positive count = 0;
+
+                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                pic[i] = gpu_kit_want[i] = gpu_random();
+                        for (int k = 0; k < IMAGES; k++)
+                        {
+                                unsigned int address_to q = ops + 8 * count;
+                                int from_shared = up_va && gpu_random() % 2, pitch = from_shared ? SW : SP;
+                                int sx = (int)(gpu_random() % 300), sy = (int)(gpu_random() % 200), w = 1 + (int)(gpu_random() % (unsigned int)(SW - sx)), h = 1 + (int)(gpu_random() % (unsigned int)(SH - sy));
+                                int x0 = (int)(gpu_random() % (PW + 100)) - 50, y0 = (int)(gpu_random() % (PH + 100)) - 50;
+                                int cx0, cy0, cx1, cy1;
+                                positive from, at;
+
+                                if (gpu_random() % 6 == 0)
+                                        x0 = y0 = 0; // the picture's top left corner
+                                cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x0 + w > PW ? PW : x0 + w, cy1 = y0 + h > PH ? PH : y0 + h;
+                                if (cx1 <= cx0 || cy1 <= cy0)
+                                        continue;
+                                from = (positive)(sy + cy0 - y0) * (positive)pitch + (positive)(sx + cx0 - x0); // the source's pixel at the cut rectangle's corner
+                                at = (from_shared ? up_va : GPU_VA + img_at) + 4ull * from;
+                                q[0] = 4, q[1] = (unsigned int)cx0, q[2] = (unsigned int)cy0, q[3] = (unsigned int)cx1, q[4] = (unsigned int)cy1, q[5] = (unsigned int)at, q[6] = (unsigned int)(at >> 32), q[7] = (unsigned int)pitch;
+                                memory_copy_rect_u32(gpu_kit_want + (positive)cy0 * PP + (positive)cx0, PP, (from_shared ? shared : gpu_img) + from, (positive)pitch,
+                                                     (positive)(cx1 - cx0), (positive)(cy1 - cy0));
+                                count++;
+                        }
+                        if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                        {
+                                check("gpu images: the scene finishes", false);
+                                return test_report(null);
+                        }
+                        for (int y = 0; y < PH; y++)
+                                for (int x = 0; x < PW; x++)
+                                {
+                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++image_bad) < 6)
+                                                string_format(log, "  FAIL gpu images round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                }
+                }
+                // Mixes: memory_mix_u32_row over rectangles (a corner's square or a line's end), the ink a colour or a picture, the covers a table of bytes in the
+                // buffer with a pitch of its own, a quarter of them none and a quarter whole.
+                {
+                        enum { CP = 96, CH = 80, MIXES = 48, MROUNDS = 12 };
+                        positive cov_at = img_at + (positive)SP * SH * 4 + 4096;
+                        unsigned char address_to table = (unsigned char address_to)((p8 address_to)gpu.at + cov_at);
+                        static unsigned int ink_row[CP];
+                        positive mix_bad = 0;
+
+                        for (int round = 0; round < MROUNDS; round++)
+                        {
+                                positive count = 0;
+                                int cp = CP - round % 5; // the table's rows are cp bytes apart in this round
+
+                                for (positive i = 0; i < (positive)cp * CH; i++)
+                                {
+                                        unsigned int r = gpu_random();
+
+                                        table[i] = (unsigned char)(r % 4 == 0 ? 0 : r % 4 == 1 ? 255 : r >> 8);
+                                }
+                                for (positive i = 0; i < (positive)PP * PH; i++)
+                                        pic[i] = gpu_kit_want[i] = gpu_random();
+                                for (int k = 0; k < MIXES; k++)
+                                {
+                                        unsigned int address_to q = ops + 8 * count;
+                                        int constant = gpu_random() % 3 == 0, from_shared = up_va && gpu_random() % 2, ink_pitch = from_shared ? SW : SP;
+                                        int w = 1 + (int)(gpu_random() % 80), h = 1 + (int)(gpu_random() % 70), tx = (int)(gpu_random() % (unsigned int)(cp - w - 4)), ty = (int)(gpu_random() % (unsigned int)(CH - h));
+                                        int sx = (int)(gpu_random() % 250), sy = (int)(gpu_random() % 200);
+                                        int x0 = (int)(gpu_random() % (PW + 60)) - 30, y0 = (int)(gpu_random() % (PH + 60)) - 30;
+                                        int cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x0 + w > PW ? PW : x0 + w, cy1 = y0 + h > PH ? PH : y0 + h;
+                                        unsigned int colour = gpu_random();
+                                        positive cover_place, ink_place;
+
+                                        if (cx1 <= cx0 || cy1 <= cy0)
+                                                continue;
+                                        cover_place = (positive)(ty + cy0 - y0) * (positive)cp + (positive)(tx + cx0 - x0);
+                                        ink_place = (positive)(sy + cy0 - y0) * (positive)ink_pitch + (positive)(sx + cx0 - x0);
+                                        q[0] = 5u | (unsigned int)cp << 8 | (constant ? 0u : (unsigned int)ink_pitch << 16);
+                                        q[1] = (unsigned int)cx0, q[2] = (unsigned int)cy0, q[3] = (unsigned int)cx1, q[4] = (unsigned int)cy1, q[5] = (unsigned int)(cov_at + cover_place);
+                                        if (constant)
+                                                q[6] = colour, q[7] = 0;
+                                        else
+                                        {
+                                                positive at = (from_shared ? up_va : GPU_VA + img_at) + 4ull * ink_place;
+
+                                                q[6] = (unsigned int)at, q[7] = (unsigned int)(at >> 32);
+                                        }
+                                        for (int y = cy0; y < cy1; y++)
+                                        {
+                                                const unsigned int address_to ink = constant ? ink_row : (from_shared ? shared : gpu_img) + ink_place + (positive)(y - cy0) * (positive)ink_pitch;
+
+                                                if (constant)
+                                                        memory_fill_u32(ink_row, (positive)(cx1 - cx0), colour);
+                                                memory_mix_u32_row(gpu_kit_want + (positive)y * PP + (positive)cx0, ink, table + cover_place + (positive)(y - cy0) * (positive)cp, (positive)(cx1 - cx0));
+                                        }
+                                        count++;
+                                }
+                                if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                                {
+                                        check("gpu mixes: the scene finishes", false);
+                                        return test_report(null);
+                                }
+                                for (int y = 0; y < PH; y++)
+                                        for (int x = 0; x < PW; x++)
+                                        {
+                                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++mix_bad) < 6)
+                                                        string_format(log, "  FAIL gpu mixes round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        }
+                        }
+                }
+                // Turns: a screen's rectangle of a picture turned a quarter, a half and three quarters into a panel's buffer (windows_rotate_u32, which Canvas turns a
+                // screen with), one op over the whole panel with a step along its rows and one down them, and a damage rectangle drawn alone: the rounded-out
+                // rectangle of it is the whole turn's and the rest of the buffer is as it was.
+                {
+                        enum { TP = 544, TH = 320, DP = 544, DH = 540, TROUNDS = 12 };
+                        positive tsrc_at = img_at + (1 << 20), tdst_at = img_at + (2 << 20);
+                        unsigned int address_to tsrc = (unsigned int address_to)((p8 address_to)gpu.at + tsrc_at), address_to tdst = (unsigned int address_to)((p8 address_to)gpu.at + tdst_at);
+                        static unsigned int turned_want[DP * DH];
+                        positive turn_bad = 0;
+
+                        for (int round = 0; round < TROUNDS; round++)
+                        {
+                                unsigned int degrees = round % 3 == 0 ? 90 : round % 3 == 1 ? 180 : 270;
+                                int lw = 4 * (60 + (int)(gpu_random() % 70)), lh = 4 * (40 + (int)(gpu_random() % 40)), ox = (int)(gpu_random() % 20), oy = (int)(gpu_random() % 10);
+                                int pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw, stepx, stepy;
+                                long first;
+                                positive at;
+                                unsigned int x0 = gpu_random() % (unsigned int)lw, y0 = gpu_random() % (unsigned int)lh, x1, y1, panel[4];
+                                unsigned int address_to q = ops;
+
+                                x1 = x0 + 1 + gpu_random() % (unsigned int)(lw - (int)x0), y1 = y0 + 1 + gpu_random() % (unsigned int)(lh - (int)y0);
+                                if (round % 4 == 3)
+                                        x0 = 0, y0 = 0, x1 = (unsigned int)lw, y1 = (unsigned int)lh;
+                                for (positive i = 0; i < (positive)TP * TH; i++)
+                                        tsrc[i] = gpu_random();
+                                for (positive i = 0; i < (positive)DP * DH; i++)
+                                        tdst[i] = turned_want[i] = 0;
+                                windows_rotate_u32(turned_want, DP, tsrc + (positive)oy * TP + (positive)ox, TP, (unsigned int)lw, (unsigned int)lh, degrees, 0, 0, (unsigned int)lw, (unsigned int)lh);
+                                if (degrees == 90)
+                                        stepx = -TP, stepy = 1, first = (long)(oy + lh - 1) * TP + ox;
+                                else if (degrees == 270)
+                                        stepx = TP, stepy = -1, first = (long)oy * TP + ox + lw - 1;
+                                else
+                                        stepx = -1, stepy = -TP, first = (long)(oy + lh - 1) * TP + ox + lw - 1;
+                                at = GPU_VA + tsrc_at + 4ull * (positive)first;
+                                q[0] = 7u | (unsigned int)(stepx + 0x800000) << 8, q[1] = 0, q[2] = 0, q[3] = (unsigned int)pw, q[4] = (unsigned int)ph;
+                                q[5] = (unsigned int)at, q[6] = (unsigned int)(at >> 32), q[7] = (unsigned int)stepy;
+                                windows_rotate_panel((unsigned int)lw, (unsigned int)lh, degrees, x0, y0, x1, y1, panel);
+                                if (!gpu_scene(ops_at, 1, bins_at, tdst_at, DP, (unsigned int)pw, (unsigned int)ph, panel[0], panel[1], panel[2], panel[3]))
+                                {
+                                        check("gpu turns: the scene finishes", false);
+                                        return test_report(null);
+                                }
+                                {
+                                        unsigned int rx0 = (panel[0] >> 6) << 6, rx1 = ((panel[2] + 63) >> 6) << 6, ry0 = (panel[1] >> 2) << 2, ry1 = ((panel[3] + 3) >> 2) << 2;
+
+                                        rx1 = rx1 > (unsigned int)pw ? (unsigned int)pw : rx1, ry1 = ry1 > (unsigned int)ph ? (unsigned int)ph : ry1;
+                                        for (unsigned int y = 0; y < (unsigned int)ph; y++)
+                                                for (unsigned int x = 0; x < (unsigned int)pw; x++)
+                                                {
+                                                        int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
+                                                        unsigned int want_pixel = inside ? turned_want[(positive)y * DP + x] : 0;
+
+                                                        if (tdst[(positive)y * DP + x] != want_pixel && (++model_wrong, ++turn_bad) < 6)
+                                                                string_format(log, "  FAIL gpu turns %p (%p degrees): pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)degrees, (positive)x, (positive)y,
+                                                                              (positive)tdst[(positive)y * DP + x], (positive)want_pixel);
+                                                }
+                                }
+                        }
+                }
+        }
+
+        check("gpu model kit: the images from the card's buffer and from a memfd's pages, the mixes and the turns drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+        wrong_before = model_wrong;
+        // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
+        // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
+        if (program_argument_count() > 3)
+        {
+                enum { TW = 696, TH = 220, TP = 700, RUNS = 40, TROUNDS = 30 };
+                static font_engine engine;
+                static p8 atlas[512 * 512];
+                static font_face face;
+                static unsigned int scratch[TW * UI_SCRATCH_ROWS], want_text[TP * TH];
+                static const char *const words[] = {"Settings", "Display and brightness", "The quick brown fox jumps over the lazy dog 0123456789",
+                                                    "Wi-Fi   Bluetooth   USB", "Zwischenablage \xc3\x9f \xc3\xbc \xc3\xb6 \xc3\xa9", "AaBbCc", "WWWW iiii llll", "[x] (y) {z} 100%"};
+                positive size = 0, bytes_of_face = compositor_map_file(program_argument(3), &size);
+                positive text_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), tpic_at = text_at, tops_at = tpic_at + (positive)TP * TH * 4,
+                         tcover_at = tops_at + (1 << 20), tbins_at = tcover_at + (8 << 20);
+                unsigned int address_to tpic = (unsigned int address_to)((p8 address_to)gpu.at + tpic_at), address_to tops = (unsigned int address_to)((p8 address_to)gpu.at + tops_at);
+                struct ui_scene scene;
+                struct ui cpu, rec;
+                const font_face address_to faces[2] = {&face, &face};
+                positive text_bad = 0;
+
+                if (bytes_of_face && font_load(&face, (const p8 address_to)bytes_of_face, size, 0) == 0)
+                {
+                        font_start(&engine, atlas, 512, 512);
+                        memory_zero(&cpu, sizeof(cpu));
+                        cpu.engine = &engine, cpu.regular = cpu.bold = &face, cpu.scratch = scratch, cpu.scratch_width = TW, cpu.scale = 100;
+                        cpu.width = TW, cpu.height = TH, cpu.top = 0, cpu.bottom = TH, cpu.pitch = TP, cpu.pixels = want_text;
+                        rec = cpu;
+                        rec.scene = &scene;
+                        for (int round = 0; round < TROUNDS; round++)
+                        {
+                                unsigned int ground = gpu_random() | 0xff000000u;
+
+                                memory_zero(&scene, sizeof(scene));
+                                scene.ops = tops + 8, scene.room = 512, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + tcover_at), scene.size = 8 << 20, scene.at = tcover_at;
+                                for (positive i = 0; i < (positive)TP * TH; i++)
+                                        want_text[i] = ground, tpic[i] = 0x12345678u;
+                                tops[0] = 0, tops[1] = tops[2] = 0, tops[3] = TW, tops[4] = TH, tops[5] = ground, tops[6] = tops[7] = 0;
+                                for (int k = 0; k < RUNS; k++)
+                                {
+                                        const char *word = words[gpu_random() % (sizeof(words) / sizeof(words[0]))];
+                                        int size_px = 10 + (int)(gpu_random() % 30), x = (int)(gpu_random() % (TW + 80)) - 60, baseline = (int)(gpu_random() % (TH + 30)) - 5;
+                                        int low = gpu_random() % 4 ? 0 : (int)(gpu_random() % (TW / 2)), high = gpu_random() % 4 ? TW : TW / 2 + (int)(gpu_random() % (TW / 2));
+                                        unsigned int colour = gpu_random() & 0xffffffu, alpha = gpu_random() % 3 ? 255 : gpu_random() & 255, stroke = gpu_random() % 4 ? 0 : 1 + gpu_random() % 255;
+
+                                        ui_run_in(&cpu, faces, x, baseline, (string_address)word, size_px, colour, alpha, low, high, stroke);
+                                        ui_run_in(&rec, faces, x, baseline, (string_address)word, size_px, colour, alpha, low, high, stroke);
+                                }
+                                check("gpu text: the runs were recorded", scene.count > 10);
+                                if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
+                                {
+                                        check("gpu text: the scene finishes", false);
+                                        break;
+                                }
+                                for (int y = 0; y < TH; y++)
+                                        for (int x = 0; x < TW; x++)
+                                        {
+                                                if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
+                                                        string_format(log, "  FAIL gpu text round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                      (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                        }
+                                // The same runs as a program's list: the ops read by the compositor's cut (compositor_gpu_list_ops), the cover bytes being the list's, its base
+                                // the buffer's start (base number 3) and its cover bytes [tcover_at, tcover_at + scene.used), and drawn from what the cut wrote.
+                                {
+                                        positive address_to bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT);
+                                        unsigned int address_to cut = tops + 8 * 600, made;
+
+                                        bases[3] = GPU_VA;
+                                        made = compositor_gpu_list_ops(tops, 1 + scene.count, tcover_at, scene.used, gpu.size, TW, TH, 3, cut, 1000);
+                                        check("gpu list: the runs of a frame are taken whole", made == 1 + scene.count);
+                                        for (positive i = 0; i < (positive)TP * TH; i++)
+                                                tpic[i] = 0x12345678u;
+                                        if (made == COMPOSITOR_GPU_LIST_REFUSED || !gpu_scene(tops_at + 32 * 600, made, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
+                                        {
+                                                check("gpu list: the scene finishes", false);
+                                                break;
+                                        }
+                                        for (int y = 0; y < TH; y++)
+                                                for (int x = 0; x < TW; x++)
+                                                {
+                                                        if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
+                                                                string_format(log, "  FAIL gpu list round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                              (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                }
+                                }
+                                // The same runs as a program's published list in a memfd of its own, drawn by compositor_gpu_list_render_bytes into a picture in another memfd: the
+                                // reader, the cut, the map of the cover bytes and the number of their base, the map of the picture the card writes, the damage; against the processor's pixels.
+                                {
+                                        static unsigned char address_to list_memory;
+                                        static unsigned int address_to list_picture;
+                                        enum { LIST_BYTES = 4 << 20 };
+                                        struct ui_draw_list list;
+                                        struct ui lui = rec;
+                                        int damage[4] = {-1, -1, -1, -1}, drawn;
+                                        positive picture_bytes = (positive)TP * TH * 4 + 8192;
+
+                                        if (!list_memory)
+                                        {
+                                                long lfd = system_call_2(syscall(memfd_create), (positive) "mw-list", 1), pfd = system_call_2(syscall(memfd_create), (positive) "mw-picture", 1);
+                                                long lm = -1, pm = -1;
+
+                                                if (lfd >= 0 && system_call_2(syscall(ftruncate), (positive)lfd, LIST_BYTES) == 0)
+                                                        lm = system_call_6(syscall(mmap), 0, LIST_BYTES, 3, 1, (positive)lfd, 0);
+                                                if (pfd >= 0 && system_call_2(syscall(ftruncate), (positive)pfd, picture_bytes) == 0)
+                                                        pm = system_call_6(syscall(mmap), 0, picture_bytes, 3, 1, (positive)pfd, 0);
+                                                if (!(lm < 0 && lm > -4096) && !(pm < 0 && pm > -4096))
+                                                        list_memory = (unsigned char address_to)lm, list_picture = (unsigned int address_to)pm;
+                                        }
+                                        check("gpu list render: the memory for a list and a picture", list_memory && list_picture);
+                                        if (!list_memory || !list_picture)
+                                                break;
+                                        lui.scene = null;
+                                        compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1;
+                                        compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_OPS_AT), compositor_gscene.room = (1 << 20) / 32;
+                                        check("gpu list render: the list is made", ui_draw_list_init(&list, list_memory, LIST_BYTES, 4096) && ui_scene_begin(&lui, &list));
+                                        if (1 + scene.count <= list.scene.room && scene.used <= list.scene.size)
+                                        {
+                                                memory_copy(list.scene.ops, tops, 32 * (1 + scene.count));
+                                                memory_copy(list.scene.cover, scene.cover, scene.used);
+                                                for (unsigned int k = 0; k < 1 + scene.count; k++)
+                                                        if ((list.scene.ops[8 * k] & 255) == 3)
+                                                                list.scene.ops[8 * k + 7] = (unsigned int)(list.scene.ops[8 * k + 7] - tcover_at + list.scene.at);
+                                                list.scene.count = 1 + scene.count, list.scene.used = scene.used;
+                                                list.scene.dx0 = 0, list.scene.dy0 = 0, list.scene.dx1 = TW, list.scene.dy1 = TH;
+                                        }
+                                        else
+                                                list.scene.lost = 1;
+                                        check("gpu list render: the frame is published", ui_scene_end(&lui, &list));
+                                        for (positive i = 0; i < picture_bytes / 4; i++)
+                                                list_picture[i] = 0x12345678u;
+                                        drawn = compositor_gpu_list_render_bytes(5, list_memory, LIST_BYTES, list_picture, TP, TW, TH, damage);
+                                        check("gpu list render: the frame is drawn, with the damage it had", drawn == 1 && damage[0] == 0 && damage[1] == 0 && damage[2] == TW && damage[3] == TH);
+                                        for (int y = 0; y < TH; y++)
+                                                for (int x = 0; x < TW; x++)
+                                                {
+                                                        if (list_picture[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
+                                                                string_format(log, "  FAIL gpu list render round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                              (positive)list_picture[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                }
+                                        // The same list again (the next frame of a window whose cover bytes are the same, or a few less): its cover bytes are in the map the
+                                        // first frame made, and no map is made for them (a map a frame was a userptr and a mapping of the card's each time).
+                                        {
+                                                unsigned int mapped = gpu_maps_user + gpu_maps_dma, held = gpu_map_count;
+                                                int again = compositor_gpu_list_render_bytes(5, list_memory, LIST_BYTES, list_picture, TP, TW, TH, damage);
+
+                                                check("gpu list render: the same list drawn again makes no map", again == 1 && gpu_maps_user + gpu_maps_dma == mapped && gpu_map_count == held);
+                                        }
+                                        if (round == 0)
+                                        {
+                                                positive began = clock_monotonic_nanoseconds();
+
+                                                for (unsigned int k = 0; k < 64; k++)
+                                                        compositor_gpu_list_render_bytes(5, list_memory, LIST_BYTES, list_picture, TP, TW, TH, damage);
+                                                string_format(log, "  gpu list render: 64 frames of one list took %p us, %p maps held\n", (clock_monotonic_nanoseconds() - began) / 1000, (positive)gpu_map_count);
+                                        }
+                                        gpu_trim();
+                                }
+                                // The same runs with their bitmaps named by a base of the table (a list's memfd is mapped at an address of its own): the text op's word 6 holds the
+                                // base's number and its word 7 the place from that base, which is the buffer's start plus 4096 here, so the place is 4096 less than it was.
+                                {
+                                        positive address_to bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT);
+
+                                        bases[1] = GPU_VA + 4096, bases[2] = GPU_VA + 1000000;
+                                        for (unsigned int k = 0; k < scene.count; k++)
+                                        {
+                                                unsigned int address_to q = tops + 8 + 8 * k;
+
+                                                if ((q[0] & 255) == 3)
+                                                        q[6] |= (k & 1 ? 2u : 1u) << 16, q[7] -= k & 1 ? 1000000u : 4096u;
+                                        }
+                                        for (positive i = 0; i < (positive)TP * TH; i++)
+                                                tpic[i] = 0x12345678u;
+                                        if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
+                                        {
+                                                check("gpu text bases: the scene finishes", false);
+                                                break;
+                                        }
+                                        for (int y = 0; y < TH; y++)
+                                                for (int x = 0; x < TW; x++)
+                                                {
+                                                        if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
+                                                                string_format(log, "  FAIL gpu text bases round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                              (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                }
+                                }
+                        }
+                }
+        }
+
+        check("gpu model kit: the text runs (ui_run_in), as a scene and as a program's list drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+
+        // The coverage of CHECK_gpu_kit's scenes: the scene kernel's instructions they ran, and the bytes in its code where each run of the ones they did not begins.
+        {
+                const p32 *code = gpu_kernels[6].words + 2;
+                unsigned int words = (unsigned int)(gpu_kernels[6].size / 4 - 2), ran = 0, of = 0;
+                b32 gap = false;
+
+                string_format(log, "gpu model kit coverage: the scene kernel's instructions not run by these blocks begin at the bytes:");
+                gpu_model.code_va = 0;
+                for (unsigned int at = 0; at < words;)
+                {
+                        struct gpu_model_insn in;
+                        b32 hit;
+
+                        if (gpu_model_decode(code + at, words - at, 4ull * at, &in))
+                                break;
+                        hit = at < GPU_MODEL_CARD_WORDS && gpu_model_card.hits[6][at] != 0, of++, ran += hit;
+                        if (!hit && !gap)
+                                string_format(log, " %p", (positive)(4 * at));
+                        gap = !hit, at += in.words;
+                }
+                string_format(log, "\ngpu model kit coverage: these blocks ran %p of the scene kernel's %p instructions, in %p jobs; %p pixels of them all differ from the processor's%s%s\n",
+                              (positive)ran, (positive)of, (positive)gpu_model_card.jobs, model_wrong, gpu_model.fault.code ? "; the model's failure: " : "", gpu_model.fault.text);
+        }
+        gpu_model_card_stop();
+        return test_report(null);
+}
+#endif /* CHECK_gpu_model_kit */
 
 #ifdef BENCH_routine
 /*
