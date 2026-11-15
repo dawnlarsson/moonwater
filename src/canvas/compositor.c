@@ -7508,6 +7508,32 @@ static int compositor_headless_flip(void)
                                (positive)compositor_spare_name, 2, 0) == 0;
 }
 
+/*
+        The card told what changed of a framebuffer (DIRTYFB), where it is wanted: a virtual card copies to its host only what it is told, and a card
+        whose framebuffer is scanned out as it is answers ENOSYS (amdgpu answers a program's every DIRTYFB so, and a driver with no dirty does), which
+        the same card, by its descriptor and its driver's name, is not asked again. A headless compositor has no card to tell. Asked anyway, the
+        headless present made one failed call a frame (EBADF on descriptor -1), and every present on amdgpu one that answered ENOSYS.
+*/
+static struct
+{
+        int card;        // the descriptor of the card that said it wants none, -1 for none
+        char driver[16]; // and its driver
+} compositor_dirty_none = {-1, {0}};
+
+static void compositor_dirty(unsigned int fb, const unsigned short (*clip)[4], unsigned int clips)
+{
+        struct compositor_dirty dirty = {fb, 0, 0, clips, (unsigned long)clip};
+
+        if (!clips || compositor.card < 0 ||
+            (compositor.card == compositor_dirty_none.card && !memory_compare(compositor.driver, compositor_dirty_none.driver, sizeof(compositor_dirty_none.driver))))
+                return;
+        if (system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty) == -38)
+        {
+                compositor_dirty_none.card = compositor.card;
+                memory_copy(compositor_dirty_none.driver, compositor.driver, sizeof(compositor_dirty_none.driver));
+        }
+}
+
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
 {
         struct
@@ -7975,7 +8001,6 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
         unsigned int which = compositor.front[row];
         unsigned int fb = lent ? compositor_lent_fb(row) : compositor_window_fb(row, which);
         unsigned short clip[COMPOSITOR_DAMAGE][4];
-        struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
 
         if (lent && compositor_tabs_rect(tabs, count, rect))
                 return 0;
@@ -8007,8 +8032,7 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
         for (unsigned int at = 0; at < compositor.damages; at++)
                 for (unsigned int side = 0; side < 4; side++)
                         clip[at][side] = (unsigned short)compositor.damage[at][side];
-        dirty.clip_count = compositor.damages;
-        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
         compositor.damages = 0;
         compositor.screen_stale = 1;
         return 1;
@@ -10224,7 +10248,6 @@ static void compositor_present_frames(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
         unsigned short clip[COMPOSITOR_DAMAGE][4];
-        struct compositor_dirty dirty = {compositor.fb, 0, 0, 0, (unsigned long)clip};
         struct compositor_frame band;
         struct compositor_frame preview;
         unsigned char rows[WINDOWS];
@@ -10597,12 +10620,10 @@ static void compositor_present_frames(void)
         }
         if (compositor_output_count() < 2 && compositor.plane_row < 0)
                 compositor_front_stale_any = 0;
-        // No clips at all would tell the card everything changed.
-        dirty.fb_id = compositor.fb;
-        dirty.clip_count = clips;
+        // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
         if (clips && compositor_output_count() < 2 && !turning)
-                system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
-        else if (clips)
+                compositor_dirty(compositor.fb, (const unsigned short (*)[4])clip, clips);
+        else if (clips && compositor.card >= 0)
                 compositor_dirty_screens((const unsigned short (*)[4])clip, clips);
         // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
         if (clips && turning)

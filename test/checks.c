@@ -128443,6 +128443,10 @@ static struct
         // A card whose first connector is a ghost: connected at the first look, with a list of modes that grew by the second (so none is read) and an
         // encoder that can have only a crtc the card has not, and whose second connector is the panel, with no encoder of its own yet.
         int ghost;
+        // Every DIRTYFB asked of any descriptor (a call on -1 is one too), and the errno the fake card answers them with while it is set (ENOSYS: a card
+        // that scans its framebuffer out as it is).
+        unsigned int dirty_asks;
+        int dirty_errno;
 } card_fake;
 
 static long card_fake_node(unsigned int minor)
@@ -128481,6 +128485,9 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
         static const char address_to const turns[4] = {"rotate-0", "rotate-90", "rotate-180", "rotate-270"};
         unsigned int listed = card_fake.connectors_after > card_fake.connectors ? card_fake.connectors_after : card_fake.connectors;
 
+        card_fake.dirty_asks += request == COMPOSITOR_DIRTYFB;
+        if (request == COMPOSITOR_DIRTYFB && card_fake.on && (bipolar)handle == card_fake.fd && card_fake.dirty_errno)
+                return -card_fake.dirty_errno;
         if (!card_fake.on || (bipolar)handle != card_fake.fd)
                 return (bipolar)system_call_3(syscall(ioctl), handle, request, argument);
         switch (request)
@@ -241225,6 +241232,45 @@ static void gpu_async_rows(void)
         gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_fault[0] = 0;
 }
 
+/*
+        The card told what changed (compositor_dirty): never by a headless compositor (it made one failed call a present, EBADF on descriptor -1), once by a
+        card that answers ENOSYS (amdgpu answers every program's DIRTYFB so) and not again while it is that card, and always by one that takes it.
+*/
+static void dirty_rows(void)
+{
+        const unsigned short clip[1][4] = {{0, 0, 64, 64}};
+        int kept_card = compositor.card;
+        char kept_driver[sizeof(compositor.driver)];
+        unsigned int asks;
+
+        memory_copy(kept_driver, compositor.driver, sizeof(kept_driver));
+        compositor.card = -1, asks = card_fake.dirty_asks;
+        compositor_dirty(100, clip, 1);
+        check("dirty: a headless compositor asks no card what changed", card_fake.dirty_asks == asks);
+        if (card_fake_open(64, 64))
+        {
+                asks = card_fake.dirty_asks; // the card made afresh counts from nothing
+                string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+                compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1);
+                check("dirty: a card that takes it is told every time", card_fake.dirty_asks == asks + 2);
+                compositor_dirty(100, clip, 0);
+                check("dirty: and nothing with nothing changed", card_fake.dirty_asks == asks + 2);
+                string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+                card_fake.dirty_errno = 38;
+                compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1);
+                check("dirty: a card that answers ENOSYS is asked once, and not again", card_fake.dirty_asks == asks + 3);
+                string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+                card_fake.dirty_errno = 0;
+                compositor_dirty(100, clip, 1);
+                check("dirty: another driver on the same descriptor is asked again", card_fake.dirty_asks == asks + 4);
+                card_fake_close();
+        }
+        else
+                check("dirty: the fake card is made", false);
+        memory_zero(&compositor_dirty_none, sizeof(compositor_dirty_none)), compositor_dirty_none.card = -1;
+        compositor.card = kept_card, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -242085,6 +242131,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        dirty_rows();
         close_ask_rows();
         grab_protocol_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
