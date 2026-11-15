@@ -14429,18 +14429,33 @@ __asm__(
     "90: " ASM_RET
     ASM_END(memory_lerp_u32_row)
 
+    //
+    //       memory_over_u32_rect -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words, r8 width
+    //       in words, r9 height. Four pixels a turn, and one at a time for the rest of a row. A source pixel of alpha
+    //       255 is the answer whole (through is none, so each colour is its own and the alpha 255), so a turn whose
+    //       four sources are all alpha 255 (each word or 0x00ffffff all ones: pcmpeqd, pmovmskb) is stored as it is,
+    //       with no load of the target and no arithmetic, and so is such a pixel of the rest: the window of a client
+    //       that is ARGB and opaque (Steam's, under XWayland) is a copy. Any other is the blend, alpha 0 too (its
+    //       colours are added to the target's and its alpha made 255, so it is not the target left as it was).
+    //
     ASM_FUNC(memory_over_u32_rect)
     "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    "push %rbx\n"
     "shl $2, %rsi\n   shl $2, %rcx\n"
-    "pxor %xmm7, %xmm7\n"
+    "pxor %xmm7, %xmm7\n   pcmpeqd %xmm10, %xmm10\n"
     "" ASM_RODATA_PUSH "\n   .p2align 4\n"
     "" ASM_LABEL(over_words255) ": .long 0x00ff00ff, 0x00ff00ff, 0x00ff00ff, 0x00ff00ff\n"
     "" ASM_LABEL(over_words128) ": .long 0x00800080, 0x00800080, 0x00800080, 0x00800080\n"
-    "" ASM_LABEL(over_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n.popsection\n"
+    "" ASM_LABEL(over_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n"
+    "" ASM_LABEL(over_colours) ": .long 0x00ffffff, 0x00ffffff, 0x00ffffff, 0x00ffffff\n.popsection\n"
     "movdqa " ASM_LABEL(over_words255) "(%rip), %xmm6\n   movdqa " ASM_LABEL(over_words128) "(%rip), %xmm5\n   movdqa " ASM_LABEL(over_alpha) "(%rip), %xmm8\n"
+    "movdqa " ASM_LABEL(over_colours) "(%rip), %xmm11\n"
     "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
     "cmp $4, %rax\n   jb 80f\n"
-    "40: movdqu (%rdx), %xmm0\n   movdqu (%rdi), %xmm1\n"
+    "40: movdqu (%rdx), %xmm0\n"
+    "movdqa %xmm0, %xmm9\n   por %xmm11, %xmm9\n   pcmpeqd %xmm10, %xmm9\n   pmovmskb %xmm9, %ebx\n   cmp $0xffff, %ebx\n   jne 41f\n"
+    "movdqu %xmm0, (%rdi)\n   jmp 42f\n"
+    "41: movdqu (%rdi), %xmm1\n"
     "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
     "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n"
     "movdqa %xmm1, %xmm4\n   punpcklbw %xmm7, %xmm4\n   punpckhbw %xmm7, %xmm1\n"
@@ -14448,15 +14463,17 @@ __asm__(
     "pmullw %xmm2, %xmm4\n   paddw %xmm5, %xmm4\n   movdqa %xmm4, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm4\n   psrlw $8, %xmm4\n"
     "pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
     "packuswb %xmm1, %xmm4\n   paddusb %xmm4, %xmm0\n   por %xmm8, %xmm0\n   movdqu %xmm0, (%rdi)\n"
-    "add $16, %rdi\n   add $16, %rdx\n   sub $4, %rax\n   cmp $4, %rax\n   jae 40b\n"
+    "42: add $16, %rdi\n   add $16, %rdx\n   sub $4, %rax\n   cmp $4, %rax\n   jae 40b\n"
     "80: test %rax, %rax\n   jz 89f\n"
-    "81: movd (%rdx), %xmm0\n   movd (%rdi), %xmm1\n"
+    "81: movl (%rdx), %ebx\n   cmp $0xff000000, %ebx\n   jb 83f\n   movl %ebx, (%rdi)\n   jmp 84f\n"
+    "83: movd (%rdx), %xmm0\n   movd (%rdi), %xmm1\n"
     "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
     "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n   punpckldq %xmm3, %xmm3\n"
     "punpcklbw %xmm7, %xmm1\n   pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
     "packuswb %xmm7, %xmm1\n   paddusb %xmm1, %xmm0\n   por %xmm8, %xmm0\n   movd %xmm0, (%rdi)\n"
-    "add $4, %rdi\n   add $4, %rdx\n   dec %rax\n   jnz 81b\n"
+    "84: add $4, %rdi\n   add $4, %rdx\n   dec %rax\n   jnz 81b\n"
     "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
+    "pop %rbx\n"
     "90: " ASM_RET
     ASM_END(memory_over_u32_rect)
 
@@ -26548,7 +26565,11 @@ __asm__(
     "ins v29.d[0], x9\n   ins v29.d[1], x10\n"
     "0: mov x11, x0\n   mov x12, x2\n   mov x13, x4\n"
     "1: cmp x13, #4\n   b.lo 2f\n"
-    "ld1 {v0.16b}, [x12], #16\n   ld1 {v1.16b}, [x11]\n"
+    "ld1 {v0.16b}, [x12], #16\n"
+    //       The x86_64 block says why: four sources all alpha 255 are the answer, stored with no load of the target.
+    "ushr v6.4s, v0.4s, #24\n   uminv s6, v6.4s\n   fmov w14, s6\n   cmp w14, #255\n   b.ne 4f\n"
+    "st1 {v0.16b}, [x11], #16\n   sub x13, x13, #4\n   b 1b\n"
+    "4: ld1 {v1.16b}, [x11]\n"
     "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
     "umull v3.8h, v1.8b, v2.8b\n   umull2 v4.8h, v1.16b, v2.16b\n"
     "add v3.8h, v3.8h, v31.8h\n   add v4.8h, v4.8h, v31.8h\n"
@@ -26557,7 +26578,9 @@ __asm__(
     "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
     "st1 {v0.16b}, [x11], #16\n   sub x13, x13, #4\n   b 1b\n"
     "2: cbz x13, 3f\n"
-    "ld1 {v0.s}[0], [x12]\n   ld1 {v1.s}[0], [x11]\n"
+    "ldr w14, [x12]\n   lsr w15, w14, #24\n   cmp w15, #255\n   b.ne 5f\n"
+    "str w14, [x11], #4\n   add x12, x12, #4\n   sub x13, x13, #1\n   b 2b\n"
+    "5: ld1 {v0.s}[0], [x12]\n   ld1 {v1.s}[0], [x11]\n"
     "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
     "umull v3.8h, v1.8b, v2.8b\n   add v3.8h, v3.8h, v31.8h\n   usra v3.8h, v3.8h, #8\n   shrn v5.8b, v3.8h, #8\n"
     "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
@@ -36988,8 +37011,10 @@ __asm__(
     "slli a1, a1, 2\n   slli a3, a3, 2\n"
     "li a6, 255\n"
     "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
-    "1: lwu t3, 0(t1)\n   lwu t4, 0(t0)\n"
-    "srli t5, t3, 24\n   sub t5, a6, t5\n"
+    //       The x86_64 block says why: a source of alpha 255 is the answer, stored with no load of the target.
+    "1: lwu t3, 0(t1)\n   srli t5, t3, 24\n   bne t5, a6, 5f\n   sw t3, 0(t0)\n   j 6f\n"
+    "5: lwu t4, 0(t0)\n"
+    "sub t5, a6, t5\n"
     "andi t6, t4, 255\n   mul t6, t6, t5\n   addi t6, t6, 127\n   divu t6, t6, a6\n"
     "andi a7, t3, 255\n   add t6, t6, a7\n   ble t6, a6, 2f\n   mv t6, a6\n"
     "2: mv a7, t6\n"
@@ -37000,7 +37025,7 @@ __asm__(
     "srli t5, t3, 16\n   andi t5, t5, 255\n   add t4, t4, t5\n   ble t4, a6, 4f\n   mv t4, a6\n"
     "4: slli t4, t4, 16\n   or a7, a7, t4\n"
     "li t6, 0xff000000\n   or a7, a7, t6\n   sw a7, 0(t0)\n"
-    "addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, -1\n   bnez t2, 1b\n"
+    "6: addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, -1\n   bnez t2, 1b\n"
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
     "9: " ASM_RET
     ASM_END(memory_over_u32_rect)
@@ -54855,7 +54880,8 @@ fn memory_mix_u32_row(p32 address_to into, const p32 address_to ink, const p8 ad
 fn memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 address_to b, positive count, positive t);
 // height rows of width premultiplied ARGB32 pixels of from laid over into (Porter-Duff OVER, opaque result):
 // through = 255 - (over >> 24), each colour channel clamp255(over_ch + (under_ch * through + 127) / 255), alpha 0xff.
-// Zero width or height touches nothing.
+// A source pixel of alpha 255 is stored as it is, and a run of them is a copy that reads nothing of into. Zero width or
+// height touches nothing.
 fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
 // height rows of width bytes of from saturating-added into into (into[i] = min(255, into[i] + from[i])),

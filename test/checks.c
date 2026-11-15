@@ -16290,6 +16290,61 @@ static fn pixel_over(void)
         }
 }
 
+/*
+        memory_over_u32_rect's opaque path: a source of alpha 255 is stored as it is, four pixels a turn where all four
+        are and one at a time in the rest of a row. Over every shape and place the other rows walk, the source made all
+        opaque; opaque and not by turns of four; opaque but one pixel, at each place of a turn of sixteen in turn; an opaque
+        run from every start to every tail inside a row of noise; and runs of three, with every pixel between them alpha 0
+        and colour (premultiplied it cannot be, and it must answer as the reference does). That the target is not read on
+        the opaque path is argued from the bodies (no page can be made writable and not readable on x86_64), not held here.
+*/
+static fn pixel_over_opaque(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gf;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gf))
+                        continue;
+                positive is = width + gi, fs = width + gf;
+                positive into_span = height ? 4 * ((height - 1) * is + width) : 0, from_span = height ? 4 * ((height - 1) * fs + width) : 0;
+
+                PIXEL_EACH(k, width)
+                        for (positive kind = 0; kind < 5; kind++)
+                        {
+                                struct pixel_window out, in[1];
+                                p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape + kind, k, 4));
+                                p8 address_to from = pixel_place(&pixel_rooms[1], from_span, 0, k < 8, pixel_residue(shape * 3 + kind, k, 4));
+                                p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
+                                p32 address_to over = (p32 address_to)from;
+                                positive lone = (shape + k) % 16, start = shape % 7, tail = k % 5;
+
+                                pixel_in(&in[0], 0, 1, from, from_span, 0, PIXEL_WORDS);
+                                for (positive r = 0; r < height; r++)
+                                        for (positive c = 0; c < width; c++)
+                                        {
+                                                positive i = r * width + c;
+                                                p32 address_to at = over + r * fs + c;
+                                                p8 opaque = kind == 0   ? true
+                                                            : kind == 1 ? i / 4 % 2 == 0
+                                                            : kind == 2 ? i % 16 != lone
+                                                            : kind == 3 ? c >= start && c + tail < width
+                                                                        : i / 3 % 2 == 0;
+
+                                                if (opaque)
+                                                        *at |= 0xff000000u;
+                                                else if (kind == 4)
+                                                        *at = (*at & 0x00ffffffu) | 1u;
+                                        }
+                                memory_copy(pixel_kept[0], in[0].from, in[0].size);
+                                reference_memory_over_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs, width, height);
+                                PIXEL_CALL();
+                                (memory_over_u32_rect)((p32 address_to)into, is, (const p32 address_to)from, fs, width, height);
+                                pixel_after("memory_over_u32_rect", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gf, k), kind);
+                        }
+        }
+}
+
 static fn pixel_scale(void)
 {
         static const p32 scales[] = {0, 1, 2, 127, 128, 180, 254, 255, 256, 257, 511, 0x80000000u, 0xffffffffu};
@@ -16739,6 +16794,7 @@ fn check_pixel_rows(void)
         PIXEL_ROUTINE(pixel_words);
         PIXEL_ROUTINE(pixel_over_cover);
         PIXEL_ROUTINE(pixel_over);
+        PIXEL_ROUTINE(pixel_over_opaque);
         PIXEL_ROUTINE(pixel_scale);
         PIXEL_ROUTINE(pixel_transpose);
         PIXEL_ROUTINE(pixel_either);
