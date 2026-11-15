@@ -28995,6 +28995,16 @@ def canvas_assembly(library, arch):
     return "\n".join(out) + "\n"
 
 
+def compositor_text(root):
+    """src/canvas/compositor.c as one text, each of its parts (src/canvas/compositor/*.c, which it includes in its order) put
+       back in the place of its #include: the text the sections below are read from, as it was before the file was cut in
+       parts (test/compositor_split.py)."""
+    def part(match):
+        text = (root / "src/canvas/compositor" / match.group(1)).read_text()
+        return re.sub(r'^(\s*#\s*include\s+")\.\./', r'\1', text, flags=re.M)
+    return re.sub(r'^#include "compositor/([\w.]+)".*\n', part, (root / "src/canvas/compositor.c").read_text(), flags=re.M)
+
+
 def harness_core_state(argv):
     """Kernel snapshot allocation and Canvas geometry, with syscall/DRM-free mocks."""
     root = HARNESS_ROOT
@@ -29042,16 +29052,16 @@ def harness_core_state(argv):
             + section(window, "#define WINDOW_KEYS 64", "struct window_key\n")
             + section(window, "#define WINDOWS_TABLE", "// Row row's buffer")
             + section(window, "// from, moved amount 256ths", "#define window_at(") + section(
-            (root / "src/canvas/compositor.c").read_text(),
+            compositor_text(root),
             "/* ---- backend: the look on the CPU ---- */",
             "/* ---- end of the backend ---- */") + section(
-            (root / "src/canvas/compositor.c").read_text(),
+            compositor_text(root),
             "/* ---- keymap: what a key means ---- */",
             "/* ---- end of the keymap ---- */") + section(
-            (root / "src/canvas/compositor.c").read_text(),
+            compositor_text(root),
             "/* ---- pointer: what a hand means ---- */",
             "/* ---- end of the pointer ---- */") + section(
-            (root / "src/canvas/compositor.c").read_text(),
+            compositor_text(root),
             "/* ---- outputs: the screens one desktop spans ---- */",
             "/* ---- end of the outputs ---- */"))
         (canvas_work / "ui" / "ui.c").write_text((root / "src/canvas/ui/ui.c").read_text())
