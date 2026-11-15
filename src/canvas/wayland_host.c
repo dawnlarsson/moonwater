@@ -3980,6 +3980,18 @@ static void compositor_wl_wake(void)
         compositor_wl_flush_all();
 }
 
+/* Resume clients whose frame-barrier hold cleared when wayland_frame() advanced the frame count. */
+static void compositor_wl_resume_stalled(void)
+{
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
+                {
+                        wayland_resume(slot);
+                        if (wayland_dead(slot))
+                                compositor_wl_flush(slot);
+                }
+}
+
 /* A frame was drawn: the callbacks that waited for it are answered, and sent. */
 static void compositor_wl_frame(void)
 {
@@ -3990,6 +4002,7 @@ static void compositor_wl_frame(void)
         busy_row = compositor.direct_row >= 0 ? compositor.direct_row : compositor.plane_row;
         wayland_drawn_composed(busy_row);
         wayland_frame();
+        compositor_wl_resume_stalled();
         compositor_wl_flush_all();
 }
 
@@ -4005,6 +4018,7 @@ static void compositor_wl_idle(void)
         wayland_frame();
         if (!compositor.flip_pending)
                 wayland_presented_idle((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++);
+        compositor_wl_resume_stalled();
         compositor_wl_flush_all();
 }
 

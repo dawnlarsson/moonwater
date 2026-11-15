@@ -189270,7 +189270,7 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
 static void test_syncobj_viewporter_and_formats(void)
 {
         struct wayland_host host = fake_host;
-        struct wayland_syncobj_host shost = {0, fake_sync_available, fake_sync_import, fake_sync_drop, fake_sync_ready, fake_sync_signal};
+        struct wayland_syncobj_host shost = {0, fake_sync_available, fake_sync_import, fake_sync_drop, fake_sync_ready, fake_sync_signal, 0};
         struct session s;
         struct wlc *c;
         unsigned long vp_mgr, vp, params, buf, drm, sync_mgr, sync_surf, tl;
@@ -189342,10 +189342,7 @@ static void test_syncobj_viewporter_and_formats(void)
                         wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_default_feedback, fbs[i]);
                 }
                 for (int round = 0; round < 6; round++)
-                {
-                        wayland_flush();
                         wlc_pump(c);
-                }
                 done_count = wlc_count(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_done);
                 WLCHECK(done_count == WAYLAND_OUT_FDS + 2,
                         "dmabuf feedback sends past WAYLAND_OUT_FDS flush queued feedbacks (%ld)", done_count);

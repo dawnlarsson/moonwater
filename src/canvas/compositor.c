@@ -22209,8 +22209,9 @@ static b32 compositor_main()
 
                         if (stamp - compositor.presented >= period)
                         {
-                                compositor.presented = compositor_frame_dated(compositor.presented, period, stamp);
                                 compositor_wl_idle();
+                                if (!compositor.damages)
+                                        compositor.presented = compositor_frame_dated(compositor.presented, period, stamp);
                         }
                 }
 #endif
