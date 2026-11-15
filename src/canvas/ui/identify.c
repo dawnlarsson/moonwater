@@ -131,16 +131,13 @@ static fn identify_draw(unsigned int address_to pixels)
         identify_paint(&identify.ui, pixels, identify.own.table->stride, identify.width, identify.height);
 }
 
-static b32 identify_frame(void)
-{
-        return ui_app_present(&identify.own, &identify.buffers.shown, &identify.dirty, identify.width, identify.height, identify_draw);
-}
-
 /*
         The window's start: the badge fitted to its screen, the window placed at the badge's corner of that screen and sized
         as the badge (WINDOW_PLACE_AT with the screen and the size; the compositor reads the placement with the first
         picture), and its time set. The picture is the frame's own.
 */
+static struct ui_app identify_app;
+
 static int identify_open(void)
 {
         struct windows address_to table = identify.own.table;
@@ -164,7 +161,7 @@ static int identify_open(void)
         }
         identify_size((unsigned int)identify.width, (unsigned int)identify.height);
         identify.until = (positive)ui_kit.now + (positive)IDENTIFY_SECONDS * 1000000000ull;
-        identify_frame();
+        ui_app_frame(&identify_app);
         return -1;
 }
 
@@ -203,11 +200,14 @@ static struct ui_app identify_app = {
         .focused = &identify.focused,
         .ground = &identify.ground,
         .open = identify_open,
-        .frame = identify_frame,
         .event = identify_event,
         .size = identify_size,
         .tick = identify_tick,
         .done = identify_done,
+        .width = &identify.width,
+        .height = &identify.height,
+        .shown = &identify.buffers.shown,
+        .draw = identify_draw,
 };
 
 // The screen's index is the argument, in decimal; anything that is not one is the primary's.

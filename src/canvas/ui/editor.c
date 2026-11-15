@@ -63,7 +63,7 @@ static struct
         struct ui_popup menu;
         struct ui_confirm confirm; // the kit's press again to confirm: Ctrl+W of a file with changes, Ctrl+S of one changed on disk
         b32 leaving; // the window may go: asked to, and nothing in it unsaved
-} editor = {.shown = -1};
+} editor;
 
 static struct editor_tab address_to editor_now(void)
 {
@@ -729,11 +729,6 @@ static fn editor_draw(unsigned int address_to pixels)
         ui_text_overlay(ui, &tab->view);
 }
 
-static b32 editor_frame(void)
-{
-        return ui_app_present(&editor.own, &editor.shown, &editor.dirty, editor.width, editor.height, editor_draw);
-}
-
 // A command the view answered the app's: the files, the find bar, the tabs.
 static fn editor_command(p32 command)
 {
@@ -835,13 +830,6 @@ static b32 editor_focus(b32 focused)
         return true;
 }
 
-static fn editor_size(unsigned int width, unsigned int height)
-{
-        editor.width = (int)width;
-        editor.height = (int)height;
-        editor.dirty = true;
-}
-
 // The caret's blink and a thrown finger's scroll: the next frame they need, and none for an idle window.
 static long editor_tick(long timeout, long address_to other)
 {
@@ -896,17 +884,19 @@ static struct ui_app editor_app = {
     .focused = &editor.focused,
     .ground = &editor.ground,
     .open = editor_start,
-    .frame = editor_frame,
     .language = editor_language,
     .event = editor_event,
     .focus = editor_focus,
-    .size = editor_size,
     .tick = editor_tick,
     .popup = &editor.menu,
     .chose = editor_chose,
     .closing = editor_closing,
     .done = editor_done,
     .mono = true,
+    .width = &editor.width,
+    .height = &editor.height,
+    .shown = &editor.shown,
+    .draw = editor_draw,
 };
 
 static b32 editor_main()

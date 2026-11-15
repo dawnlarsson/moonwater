@@ -320,11 +320,6 @@ static void osk_draw(unsigned int address_to pixels)
                         ui_control_draw(ui, &osk.alts[at]);
 }
 
-static b32 osk_frame(void)
-{
-        return ui_app_present(&osk.own, &osk.shown, &osk.dirty, osk.width, osk.height, osk_draw);
-}
-
 // A capital or a symbol that is a shifted key on the US keyboard: its key is sent with Shift, so a client that makes its character from
 // the key and the modifiers (a Wayland client) makes the same one. The kit's windows take the character as it is.
 static b32 osk_shifted(unsigned int ch)
@@ -901,6 +896,8 @@ static void osk_trace(void)
         }
 }
 
+static struct ui_app osk_app;
+
 static int osk_open(void)
 {
         // A second keyboard lifts the one up (it is none of a person's keys): its window goes on as it is, and this one stops.
@@ -909,7 +906,7 @@ static int osk_open(void)
         osk_layout_take();
         osk_purpose_take();
         osk_metrics();
-        osk_frame();
+        ui_app_frame(&osk_app); // the first picture before the trace, which says where the keys are as the keyboard opens
         osk_trace();
         return -1;
 }
@@ -933,13 +930,16 @@ static struct ui_app osk_app = {
         .focused = &osk.focused,
         .ground = &osk.ground,
         .open = osk_open,
-        .frame = osk_frame,
         .language = osk_language,
         .event = osk_event,
         .changed = osk_changed,
         .size = osk_size,
         .tick = osk_tick,
         .moving = osk_moving,
+        .width = &osk.width,
+        .height = &osk.height,
+        .shown = &osk.shown,
+        .draw = osk_draw,
 };
 
 static b32 osk_main()
@@ -949,7 +949,6 @@ static b32 osk_main()
         memory_zero(&osk, sizeof(osk));
         osk.layout = ~0u; // no layout yet: the first take builds the letters
         osk.purpose = ~0u; // no purpose yet: the first take picks the page
-        osk.shown = -1;
         osk.held = -1;
         osk.repeat = -1;
         osk.page = OSK_PAGE_LETTERS;
