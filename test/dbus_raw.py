@@ -7,6 +7,8 @@ would hide: when a portal Response arrives against the answer it follows, and ho
 
 ADDRESS is the bus (unix:path=...). Rows of "ok NAME" or "FAIL NAME detail"; the exit status is the number of failures.
 """
+import mmap
+import os
 import socket
 import statistics
 import struct
@@ -255,6 +257,19 @@ serial = a.call(*NOTIFY, "CloseNotification", "u", struct.pack("<I", nid))
 closed = a.wait(lambda m: m["type"] == 4 and m["fields"].get(3) == "NotificationClosed")
 row(closed is not None and struct.unpack_from("<II", closed["body"]) == (nid, 3) and closed["fields"].get(6) == a.unique,
     "and CloseNotification of it is NotificationClosed(id, 3) to the poster", repr(closed))
+board = "/run/moonwater/windows"  # the compositor's table as a plain file, when the e2e made one (a headless compositor's form)
+if os.path.exists(board):
+    serial = a.call(*NOTIFY, "Notify", "susssasa{sv}i", notify_body("Raw", "On the board", "\x1b[31mred\u202e"))
+    m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+    def on_board(words):
+        with open(board, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as table:  # a sparse 1 GiB: mapped, never read whole
+            return table.find(words) >= 0
+
+    row(on_board(b"Raw\0") and on_board("On the board - \u241b[31mred\ufffd".encode()),
+        "a notification is on the board under its program's name, its escape a picture and its override U+FFFD")
+    a.call(*NOTIFY, "CloseNotification", "u", struct.pack("<I", struct.unpack_from("<I", m["body"])[0] if m and m["type"] == 2 else 0))
+    a.wait(lambda m: m["type"] == 4 and m["fields"].get(3) == "NotificationClosed")
+    row(not on_board(b"On the board"), "and its poster's CloseNotification takes it off the board")
 heard = listener.wait(lambda m: m["type"] == 4 and m["fields"].get(3) == "NotificationClosed", 0.3)
 row(heard is None, "and a client listening for every signal does not hear it", repr(heard))
 serial = a.call(*NOTIFY, "GetCapabilities")

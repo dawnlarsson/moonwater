@@ -80,6 +80,9 @@ if command -v gdbus > /dev/null 2>&1; then
         echo dark > /root/canvas.theme
         sleep 1.5
 fi
+# The board: the compositor's table as a plain file (as a headless compositor leaves it), large and sparse, which the bus maps when
+# a notification comes and writes the program's issue into; the notices popup and the tray's dot read it there.
+truncate -s 1G /run/moonwater/windows
 # The wire alone (no library): a portal request's Response against its answer, and how long a refusal takes.
 python3 "$(dirname "$0")/dbus_raw.py" "$address" > "$work/raw.out" 2>&1
 result=$?
@@ -97,7 +100,9 @@ if command -v gdbus > /dev/null 2>&1; then
         "(uint32 "*",)") row ok "gdbus: Notify is answered an id: $out" ;;
         *) row FAIL "gdbus: Notify is answered an id" "$out" ;;
         esac
+        if grep -aq "Hello - from gdbus" /run/moonwater/windows; then row ok "and its words are on the desktop's board, under the program's name"; else row FAIL "and its words are on the desktop's board"; fi
 fi
+rm -f /run/moonwater/windows
 if python3 -c 'import gi' 2> /dev/null; then
         python3 "$(dirname "$0")/dbus_gio.py" "$address" /root > "$work/gio.out" 2>&1
         result=$?

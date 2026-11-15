@@ -92,10 +92,8 @@ That is accepted: lighting the dot is what a notification is for.
 in another's name ("Chromium"), as on any desktop. The board files it under the
 program's name, so a program named as a Settings option's row (`canvas gpu`)
 would be listed under that option until Settings leaves notifications out of
-its rows (the change was sent to the architect for the UI agent, with the board
-code `WINDOWS_ISSUE_NOTIFICATION` window.c does not have yet: until it lands the
-board refuses the code and nothing is shown, which is NOT a test of the board's
-side). Actions, icons and markup are not offered (GetCapabilities is `body`
+its rows (the change was sent to the architect for the UI agent; the board's
+code, `WINDOWS_ISSUE_NOTIFICATION`, is window.c's since 1833071d). Actions, icons and markup are not offered (GetCapabilities is `body`
 alone), so a click does nothing.
 
 ### MW-2026-197: any program could own the session bus's accessibility, secrets and notifications names and be sent every bowl's keys, passwords and notices

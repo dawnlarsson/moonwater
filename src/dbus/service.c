@@ -137,16 +137,14 @@ static void sessionbus_trace(void *context, const char *line)
         that the notices popup and the tray's dot read (window.c's windows_issue_set): one issue for each program's name, filed under
         that name, with the newest of its notifications as the detail, and cleared when the program has none left. Each is a
         warning, a critical one too: the tray's dot is lit by a notification as by any issue, and only its amber, so the red stays
-        what the system says of itself (a program cannot make the desktop say it has an error).
+        what the system says of itself (a program cannot make the desktop say it has an error). The code is
+        WINDOWS_ISSUE_NOTIFICATION, a program's notification, whose message is its detail as it is.
         The table is root's (a memfd of the compositor's reached through its /proc, or /dev/spark's ioctl for a program of the
-        desktop), and this process is root: a program of a bowl reaches the board only through the bus, and the bus's caps. The bus keeps DBUS_NOTICES, so the notifications take that many of the board's
-        WINDOWS_ISSUES at most, whatever is posted. The table is made anew by a compositor that starts again, so it is mapped again
-        when the file at its path is not the one mapped (by its inode), and nothing is written while there is none.
-
-        The code is window.c's WINDOWS_ISSUE_NOTIFICATION, a program's notification, whose message is its detail as it is; until
-        window.c names it, this is the number it takes after WINDOWS_ISSUE_RADIO, which the board refuses as past its codes.
+        desktop), and this process is root: a program of a bowl reaches the board only through the bus, and the bus's caps. The
+        bus keeps DBUS_NOTICES, so the notifications take that many of the board's WINDOWS_ISSUES at most, whatever is posted. The
+        table is made anew by a compositor that starts again, so it is mapped again when the file at its path is not the one
+        mapped (by its inode), and nothing is written while there is none.
 */
-#define SESSIONBUS_NOTICE_CODE ((unsigned int)WINDOWS_ISSUE_RADIO + 1)
 
 static struct
 {
@@ -214,7 +212,7 @@ static void sessionbus_notices(void *context, const struct dbus_notice *notice, 
                 if (!first)
                         continue;
                 string_copy_bounded((p8 *)shown[k], (string_address)notice[k].app, WINDOWS_ISSUE_KEY);
-                windows_issue_set(table, shown[k], WINDOWS_ISSUE_WARNING, SESSIONBUS_NOTICE_CODE, (unsigned int)newest->id, of, newest->text);
+                windows_issue_set(table, shown[k], WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_NOTIFICATION, (unsigned int)newest->id, of, newest->text);
         }
         // a program that had notifications on the board and has none now
         for (long k = 0; k < DBUS_NOTICES; k++)
@@ -224,7 +222,7 @@ static void sessionbus_notices(void *context, const struct dbus_notice *notice, 
                 for (long j = 0; j < DBUS_NOTICES && sessionbus_board.key[k][0]; j++)
                         still |= string_equals((string_address)shown[j], (string_address)sessionbus_board.key[k]);
                 if (sessionbus_board.key[k][0] && !still)
-                        windows_issue_clear(table, sessionbus_board.key[k], SESSIONBUS_NOTICE_CODE);
+                        windows_issue_clear(table, sessionbus_board.key[k], WINDOWS_ISSUE_NOTIFICATION);
         }
         memory_copy(sessionbus_board.key, shown, sizeof shown);
 }
