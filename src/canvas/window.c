@@ -519,7 +519,7 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "cooling down after hangs", "a scanout pitch not 16 bytes", "a job given up on may still run",
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
-    "other frames, or empty damage"};
+    "other frames, or empty damage", "a window with alpha and round corners (the card does not draw it yet)"};
 // The GPU's prerequisites, in the order the path needs them (gpu.c's enum gpu_req, the same order): their names, and what to do about each one, in words.
 // moonwater debug shows them, and the issue board's detail for a failed one.
 #define WINDOWS_GPU_REQS 10
@@ -1120,6 +1120,21 @@ struct windows
         // A client's (Wayland) picture: the committed pictures the compositor read where the client's buffer is (client_in_place) and the
         // ones it copied into the table (client_copied), and the presents the card drew with such a picture in place (client_card).
         unsigned int client_in_place, client_copied, client_card;
+        // The last refusal of a client's buffer as a scan-out framebuffer (compositor_lent_fb): its fourcc, modifier, pitch, offset, width
+        // and height, the ioctl's errno or a refusal made before the ioctl (-1 a pitch not a multiple of 256, -2 an offset not a multiple of
+        // 256, -3 PRIME_FD_TO_HANDLE refused), and how many times a buffer was refused.
+        unsigned int client_scan_fourcc;
+        unsigned long long client_scan_modifier;
+        unsigned int client_scan_pitch, client_scan_offset, client_scan_width, client_scan_height;
+        int client_scan_errno;
+        unsigned int client_scan_refused;
+        // The card's copy of a commit's damage refused (compositor_wl_card_rect), by reason: 0 small (under COMPOSITOR_WL_CARD_COPY_PIXELS or a
+        // rectangle under 32768 pixels), 1 the card not ready, 2 the card busy (gpu_idle false), 3 a blended picture, 4 a picture that needs a
+        // transform, 5 the pool cut, 6 the card's map or import refused, 7 the blit failed.
+        unsigned int client_card_refused[8];
+        // A row whose processor reads a lent dma-buf in place: the rows copied once into the table because the card did not draw two
+        // presents running (client_wc_seeded), and the presents whose processor read a lent dma-buf in place (client_wc_presents).
+        unsigned int client_wc_seeded, client_wc_presents;
         /*
                 The metrics (moonwater debug, and Settings' line under the GPU row), the compositor's: metric_card_* and metric_processor_* are the mean
                 and the worst, in microseconds, of the last WINDOWS_METRIC_RUN presents the card drew and the processor drew (a whole present each);
@@ -1135,6 +1150,15 @@ struct windows
         // metric_loop_by: the same turns a second by what returned events: signals, the watch, inputs, doors, done, card, uevents, clip,
         // wayland (xwm too), other (WINDOWS_LOOP_SOURCES of them).
         unsigned int metric_loop_by[WINDOWS_LOOP_SOURCES];
+        // The present's timing in the last second, the compositor's (compositor_metric_publish):
+        unsigned int metric_late;           // the presents made late in their period
+        unsigned int metric_missed;         // of those, the ones whose flip landed a vblank after the one aimed for
+        unsigned int metric_lead;           // the lead in use at the last present, microseconds (0: the old rule)
+        unsigned int metric_present_most;   // the longest the loop spent inside one present, microseconds
+        unsigned int metric_flip_jobs;      // the flips committed while a job of the card's was still running
+        unsigned int metric_flip_jobs_most; // the most jobs in flight at one such flip (0 to 2)
+        // The maps of the compositor's own memory that fell back to userptr, and the errno of the last fallback.
+        unsigned int metric_maps_own_user, metric_maps_own_errno;
         // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
