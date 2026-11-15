@@ -184026,14 +184026,39 @@ static void check_compositor_keymap(void) {
              ck_one(&m,51,0)==0x5EA&&ck_one(&m,46,KEY_CTRL)==3);
     ck_ok(ck_layout(&m,"ir")>0&&ck_one(&m,32,0)==0x6CC&&ck_one(&m,27,0)==0x686&&ck_one(&m,50,0)==0x67E&&ck_one(&m,40,0)==0x6AF&&
              ck_one(&m,35,0)==0x627);
-    /* Every layout, every key: a character that is not a letter of Latin-1, an accent, or the euro is a bug. */
-    for(unsigned l=0;l<sizeof(compositor_layouts)/sizeof(compositor_layouts[0]);l++)
+    /* Every layout, every key, every level: a character of the layout's own scripts and of nothing else is a bug's absence. A Latin
+       layout's are Latin-1, the euro and the dead accents; Arabic's are those, the Arabic block (U+0600 to U+06FF) and the lam-alef
+       ligatures of Presentation Forms-B (U+FEF5 to U+FEFC); Persian's are those and the Arabic block (its pe, che, ke, ge and ye are
+       in it), without the ligatures; Hebrew's are those and the Hebrew block (U+0590 to U+05FF). The three were held to the Latin
+       set, which they are right to leave; a Latin layout is held to what it was. */
+    for(unsigned l=0;l<sizeof(compositor_layouts)/sizeof(compositor_layouts[0]);l++) {
+        const char *name=compositor_layouts[l].name;
+        int arabic=!strcmp(name,"ar")||!strcmp(name,"ir"),forms=!strcmp(name,"ar"),hebrew=!strcmp(name,"il");
         for(unsigned code=0;code<CK_TABLE;code++)
             for(unsigned mods=0;mods<4;mods++) {
                 struct compositor_keymap k={0};k.layout=(unsigned char)l;
                 unsigned c=compositor_keymap_character(&k,code,(mods&1?KEY_SHIFT:0)|(mods&2?KEY_ALTGR:0));
-                ck_ok(c<0x100||c==0x20AC||(c&CK_DEAD&&(c&~CK_DEAD)<0x100));
+                ck_ok(c<0x100||c==0x20AC||(c&CK_DEAD&&(c&~CK_DEAD)<0x100)||(arabic&&c>=0x600&&c<=0x6FF)||
+                      (forms&&c>=0xFEF5&&c<=0xFEFC)||(hebrew&&c>=0x590&&c<=0x5FF));
             }
+    }
+    /* And the three have no hole: every letter key of the US layout is a letter of the script plain (Hebrew's q and w are / and '
+       by SI 1452, as XKB's il has them), and no letter key answers a Latin letter plain or with Shift, which a key its table left
+       out would, falling back to the US one's. */
+    {
+        static const unsigned char letters[26]={16,17,18,19,20,21,22,23,24,25,30,31,32,33,34,35,36,37,38,44,45,46,47,48,49,50};
+        static const char *const scripts[3]={"ar","il","ir"};
+        for(unsigned s=0;s<3;s++) {
+            struct compositor_keymap k={0};k.layout=(unsigned char)compositor_layout_index(scripts[s]);
+            for(unsigned at=0;at<26;at++) {
+                unsigned plain=compositor_keymap_character(&k,letters[at],0),shifted=compositor_keymap_character(&k,letters[at],KEY_SHIFT);
+                int punctuation=s==1&&(letters[at]==16||letters[at]==17);
+                int letter=s==1?plain>=0x5D0&&plain<=0x5EA:(plain>=0x621&&plain<=0x64A)||(plain>=0x671&&plain<=0x6D3)||(s==0&&plain>=0xFEF5&&plain<=0xFEFC);
+                ck_ok(compositor_layout_index(scripts[s])>0&&(punctuation?plain<0x80:letter));
+                ck_ok(!((plain|0x20)>='a'&&(plain|0x20)<='z')&&!((shifted|0x20)>='a'&&(shifted|0x20)<='z'));
+            }
+        }
+    }
     /* What is held is a bit a key, and one keyboard letting go of Shift is not another's. */
     ck_ok(compositor_held_flags(compositor_held_bit(42)|compositor_held_bit(54))==WINDOW_KEY_SHIFT);
     ck_ok(compositor_held_flags(compositor_held_bit(97))==WINDOW_KEY_CONTROL&&compositor_held_flags(compositor_held_bit(29))==WINDOW_KEY_CONTROL);
