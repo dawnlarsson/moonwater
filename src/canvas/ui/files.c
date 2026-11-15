@@ -1058,26 +1058,6 @@ static fn files_draw(unsigned int address_to pixels)
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
-static b32 files_frame(void)
-{
-        return ui_app_present(&files.own, &files.shown, &files.dirty, files.width, files.height, files_draw);
-}
-
-static fn files_dirty(void)
-{
-        files.dirty = true;
-}
-
-static fn files_size(unsigned int width, unsigned int height)
-{
-        struct windows address_to table = files.own.table;
-
-        files.width = (int)(width > table->output_width ? table->output_width : width);
-        files.height = (int)(height > table->output_height ? table->output_height : height);
-        ui_scratch_fit(&files.ui, (unsigned int)files.width);
-        files.dirty = true;
-}
-
 /*
         The timer. While a folder is read, steps of it for FILES_TURN_NS and back to the events, the entries so far drawn every
         FILES_SHOW_NS and the whole listing when it is whole. Else the folder shown is looked at again every FILES_LOOK_NS (not while
@@ -1156,24 +1136,12 @@ static long files_tick(long timeout, long address_to other)
         return timeout < 0 || (b64)timeout > wait ? (long)(wait > 0 ? wait : 1) : timeout;
 }
 
-static fn files_language(void)
-{
-        files.dirty = true;
-}
+static struct ui_app files_app;
 
 static int files_open_window(void)
 {
-        struct windows address_to table = files.own.table;
-        int width = ui_px(&files.ui, FILES_WIDTH), height = ui_px(&files.ui, FILES_HEIGHT);
-        int room = (int)table->output_height - ui_px(&files.ui, 2 * (24 + 24));
-        long mapped = ui_map(sizeof(struct files_big));
-
-        if (mapped < 0 && mapped > -4096)
-        {
-                compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
+        if (!(files.big = ui_app_map(&files_app, sizeof(struct files_big))))
                 return 1;
-        }
-        files.big = (struct files_big address_to)mapped;
         if (!files_model_open(&files.big->model))
         {
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
@@ -1184,10 +1152,7 @@ static int files_open_window(void)
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
         files_trail_note(&files.trail, files.big->model.path, files.big->model.handle >= 0 ? &files.big->model.folder : null);
-        files_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
-                   (unsigned int)(height < room ? height : room > 0 ? room : height));
-        ui_centre(table, files.own.row, files.width, files.height, ui_px(&files.ui, 12));
-        files_frame();
+        ui_app_place(&files_app, ui_px(&files.ui, FILES_WIDTH), ui_px(&files.ui, FILES_HEIGHT));
         return -1;
 }
 
@@ -1210,32 +1175,23 @@ static struct ui_app files_app = {
         .focused = &files.focused,
         .ground = &files.ground,
         .open = files_open_window,
-        .frame = files_frame,
-        .language = files_language,
         .event = files_event,
-        .changed = files_dirty,
-        .size = files_size,
         .tick = files_tick,
         .popup = &files.menu,
         .chose = files_chose,
+        .width = &files.width,
+        .height = &files.height,
+        .shown = &files.shown,
+        .draw = files_draw,
 };
 
 static b32 files_main()
 {
         memory_zero(&files, sizeof(files));
-        files.shown = -1;
         files.start = getenv((string_address) "HOME");
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-        {
-                string_address value;
-
-                if (at + 1 < (positive)program_argument_count() && (value = ui_argument(at, (string_address) "-f")))
-                        files_app.font = value, at++;
-                else if (at + 1 < (positive)program_argument_count() && (value = ui_argument(at, (string_address) "-b")))
-                        files_app.bold = value, at++;
-                else if (program_argument(at)[0] == '/')
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
+                if (!(took = ui_app_option(&files_app, at)) && program_argument(at)[0] == '/')
                         files.start = program_argument(at);
-        }
         return ui_app_run(&files_app);
 }
 
