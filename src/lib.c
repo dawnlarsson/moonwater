@@ -16776,7 +16776,7 @@ __asm__(
     "mov 8(%rsp), %r10\n   test %r9, %r9\n   jz 9f\n   test %r10, %r10\n   jz 9f\n"
     "1: mov %rdi, %rax\n   mov %rdx, %r11\n   push %r10\n"
     "2: movzbl (%r11), %r10d\n   movb %r10b, (%rax)\n   add %rcx, %r11\n   inc %rax\n   decq (%rsp)\n   jnz 2b\n"
-    "pop %r10\n   add %rsi, %rdi\n   add %r8, %rdx\n   dec %r9\n   jnz 1b\n"
+    "add $8, %rsp\n   mov 8(%rsp), %r10\n   add %rsi, %rdi\n   add %r8, %rdx\n   dec %r9\n   jnz 1b\n"
     "9: " ASM_RET
     ASM_END(memory_transpose_u8)
 
