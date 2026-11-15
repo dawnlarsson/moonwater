@@ -182227,6 +182227,7 @@ static struct fake_host_state
         char clip_text[2][64];
         // dma-bufs: whether the fake takes any, how many pictures were read through a descriptor, whether the next is skipped
         long dmabuf_off, syncs, skip_next, dmabuf_maps, asked, pattern_at;
+        long dmabuf_bgr; // the table offers ABGR8888 and XBGR8888 as well, as the compositor's does (compositor_wl_dmabuf_info)
         const char *pattern; // what the GPU says each time it is asked: N for not done, R for done; done once it has no more to say
         long hold_row, hold_mode, holds; // the window that holds the pointer and how
         long clock_still; // the clock does not move by itself (each now() is 16 ms on otherwise)
@@ -182609,15 +182610,17 @@ static long fake_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
         if (fake.dmabuf_off)
                 return 0;
         info->device = (226UL << 8) | 128;
-        info->count = 2;
+        info->count = fake.dmabuf_bgr ? 4 : 2;
         info->entry[0].format = 0x34325241;
         info->entry[1].format = 0x34325258;
+        info->entry[2].format = (unsigned int)WAYLAND_FOURCC_ABGR8888;
+        info->entry[3].format = (unsigned int)WAYLAND_FOURCC_XBGR8888;
         info->tranches = 1;
         info->tranche[0].device = info->device;
         info->tranche[0].flags = 0;
-        info->tranche[0].count = 2;
-        info->tranche[0].index[0] = 0;
-        info->tranche[0].index[1] = 1;
+        info->tranche[0].count = info->count;
+        for (long at = 0; at < info->count; at++)
+                info->tranche[0].index[at] = (unsigned char)at;
         return 1;
 }
 
@@ -182628,14 +182631,14 @@ static long fake_dmabuf_table(void *context, long *size)
         {
                 char name[] = "/tmp/wltableXXXXXX";
                 int fd = mkstemp(name);
-                unsigned char table[32] = {0};
+                unsigned char table[64] = {0};
 
                 unlink(name);
                 if (fd < 0 || write(fd, table, sizeof table) != (ssize_t)sizeof table)
                         abort();
                 fake.dmabuf_table_fd = fd;
         }
-        *size = 32;
+        *size = fake.dmabuf_bgr ? 64 : 32; // sixteen bytes a pair the info names
         return fake.dmabuf_table_fd;
 }
 
@@ -187708,7 +187711,8 @@ static int feedback_in_order(struct wlc *c, unsigned long object, const long *wa
 
 /*
         A client's share of the copies (WAYLAND_BUDGET_*): one read of twenty commits of a window's buffer (52 bytes each) is made
-        only as far as two of the largest screen's pixels, then waits, stalled as a commit of a dma-buf whose GPU is not done does,
+        only as far as WAYLAND_BUDGET_SCREENS of the largest screen's pixels (a screen the window's size here, so that many pictures, eight
+        since e933763 raised the budget from two screens), then waits, stalled as a commit of a dma-buf whose GPU is not done does,
         and goes on in the next window of time (16 ms), the rest still in its order. A buffer larger than the budget is never
         refused: it is made in a window of its own. On the box, before this, one read of 1000 such commits of a 4K window held the
         compositor for 4.5 s.
@@ -187721,13 +187725,14 @@ static void test_budget(void)
         long fd, pictures, due, at = 0;
         unsigned long big;
 
+        _Static_assert(2 * WAYLAND_BUDGET_SCREENS < 20 && 3 * WAYLAND_BUDGET_SCREENS >= 20, "twenty commits are three windows of the budget");
         wl_reset();
-        fake.screen.width = 64;
-        fake.screen.height = 48;
+        fake.screen.width = 32;
+        fake.screen.height = 24;
         wayland_start(&fake_host);
         session_open(&s);
         c = s.c;
-        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        session_window(&s, 0xff123456); // 32 by 24 on a screen of 32 by 24: a budget of WAYLAND_BUDGET_SCREENS pictures
         fake.clock_still = 1;
         fake.now += WAYLAND_BUDGET_MS;
         for (int k = 0; k < 20; k++)
@@ -187750,21 +187755,21 @@ static void test_budget(void)
         pictures = fake.row[0].pictures;
         wayland_feed(c->slot, run, at, 0, 0);
         wlc_pump(c);
-        WLCHECK(fake.row[0].pictures - pictures == 8 && wayland_stalled(c->slot),
-                "twenty commits in one read: eight pictures, the budget, and the rest wait (%ld)", fake.row[0].pictures - pictures);
+        WLCHECK(fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS && wayland_stalled(c->slot),
+                "twenty commits in one read: the budget's pictures (%d), and the rest wait (%ld)", WAYLAND_BUDGET_SCREENS, fake.row[0].pictures - pictures);
         due = wayland_stall_due(c->slot, &fd);
         WLCHECK(due == fake.now + WAYLAND_BUDGET_MS && fd == -1, "the client is due again at the end of its window, with no buffer to poll");
-        WLCHECK(wayland_resume(c->slot) == 1 && fake.row[0].pictures - pictures == 8, "and nothing more is made before then");
+        WLCHECK(wayland_resume(c->slot) == 1 && fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS, "and nothing more is made before then");
         fake.now += WAYLAND_BUDGET_MS;
         wayland_resume(c->slot);
         wlc_pump(c);
-        WLCHECK(fake.row[0].pictures - pictures == 16 && wayland_stalled(c->slot), "the next window makes eight more (%ld)",
+        WLCHECK(fake.row[0].pictures - pictures == 2 * WAYLAND_BUDGET_SCREENS && wayland_stalled(c->slot), "the next window makes as many more (%ld)",
                 fake.row[0].pictures - pictures);
         fake.now += WAYLAND_BUDGET_MS;
         wayland_resume(c->slot);
         wlc_pump(c);
         WLCHECK(fake.row[0].pictures - pictures == 20 && !wayland_stalled(c->slot) && c->errors == 0,
-                "and the one after the last four, in their order, and the client goes on (%ld, %s)", fake.row[0].pictures - pictures,
+                "and the one after the rest, in their order, and the client goes on (%ld, %s)", fake.row[0].pictures - pictures,
                 c->error_text);
         // A picture larger than the budget: made, in a window of its own.
         big = wl_buffer_of(&s, 128, 96, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
@@ -187810,12 +187815,12 @@ static void test_stall_state(void)
         long pictures;
 
         wl_reset();
-        fake.screen.width = 64;
-        fake.screen.height = 48;
+        fake.screen.width = 32;
+        fake.screen.height = 24;
         wayland_start(&fake_host);
         session_open(&s);
         c = s.c;
-        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        session_window(&s, 0xff123456); // 32 by 24 on a screen of 32 by 24: a budget of WAYLAND_BUDGET_SCREENS pictures (e933763)
         fifos = wl_global(c, s.registry, WLI_wp_fifo_manager_v1, 1);
         timers = wl_global(c, s.registry, WLI_wp_commit_timing_manager_v1, 1);
         wlc_forget(c);
@@ -187828,17 +187833,17 @@ static void test_stall_state(void)
         // A commit with a wait and a time, past the budget: held, and made again in the next window with both.
         fake.now += WAYLAND_BUDGET_MS;
         pictures = fake.row[0].pictures;
-        for (int k = 0; k < 8; k++)
+        for (int k = 0; k < WAYLAND_BUDGET_SCREENS; k++)
                 stall_commit(c, &s);
-        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8, "eight commits spend the budget (%ld)",
+        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS, "the budget's commits spend it (%ld)",
                 fake.row[0].pictures - pictures);
         wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 0ul, 500000ul);
         stall_commit(c, &s);
-        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8,
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS,
                 "a commit with a wait and a time is held for the budget (%ld, %s)", fake.row[0].pictures - pictures, c->error_text);
         fake.now += WAYLAND_BUDGET_MS;
-        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 9,
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS + 1,
                 "in its window it is made (%ld, %s)", fake.row[0].pictures - pictures, c->error_text);
         wlc_pump(c);
         WLCHECK(wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1, "the commit made again still waits for the barrier (%lu)", wayland_row_hint(0, WAYLAND_HINT_FIFO));
@@ -187848,11 +187853,11 @@ static void test_stall_state(void)
         // frame it is made in, so the commit that waits for it after is held.
         fake.now += WAYLAND_BUDGET_MS;
         pictures = fake.row[0].pictures;
-        for (int k = 0; k < 8; k++)
+        for (int k = 0; k < WAYLAND_BUDGET_SCREENS; k++)
                 stall_commit(c, &s);
         wlc_send(c, fifo, WLQ_wp_fifo_v1_set_barrier);
         stall_commit(c, &s);
-        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8,
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == WAYLAND_BUDGET_SCREENS,
                 "a commit that sets a barrier is held for the budget (%ld)", fake.row[0].pictures - pictures);
         wayland_frame();
         fake.now += WAYLAND_BUDGET_MS;
@@ -189540,12 +189545,13 @@ static void test_window_scope(void)
         unsigned char run[16 * 52];
         long at = 0, first, second;
 
+        _Static_assert(WAYLAND_BUDGET_SCREENS <= 8, "the run below holds eight commits of each window");
         wl_reset();
-        fake.screen.width = 64;
-        fake.screen.height = 48;
+        fake.screen.width = 32;
+        fake.screen.height = 24;
         wayland_start(&fake_host);
         session_open(&s);
-        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        session_window(&s, 0xff123456); // 32 by 24 on a screen of 32 by 24: a budget of WAYLAND_BUDGET_SCREENS pictures (e933763)
         c = s.c;
         buffer = wl_buffer_of(&s, 32, 24, 0xff654321, WLN_wl_shm_format_xrgb8888);
         surface = wlc_id(c, WLI_wl_surface, 6);
@@ -189562,8 +189568,8 @@ static void test_window_scope(void)
         WLCHECK(c->errors == 0 && fake.row[0].used && fake.row[1].used, "one client has two windows (%s)", c->error_text);
         fake.clock_still = 1;
         fake.now += WAYLAND_BUDGET_MS;
-        // Eight copies of each window in one read, in turn: sixteen pictures, each window's own eight.
-        for (int k = 0; k < 16; k++)
+        // The budget's copies of each window in one read, in turn: twice as many pictures, each window's own.
+        for (int k = 0; k < 2 * WAYLAND_BUDGET_SCREENS; k++)
         {
                 wlc_put(run + at, k & 1 ? surface : s.surface);
                 wlc_put(run + at + 4, WLQ_wl_surface_attach | 20UL << 16);
@@ -189584,17 +189590,19 @@ static void test_window_scope(void)
         second = fake.row[1].pictures;
         wayland_feed(c->slot, run, at, 0, 0);
         wlc_pump(c);
-        WLCHECK(fake.row[0].pictures - first == 8 && fake.row[1].pictures - second == 8 && !wayland_stalled(c->slot) && c->errors == 0,
-                "eight copies of each of a client's two windows in one read are all made: the budget is a window's (%ld and %ld, stalled %ld)",
+        WLCHECK(fake.row[0].pictures - first == WAYLAND_BUDGET_SCREENS && fake.row[1].pictures - second == WAYLAND_BUDGET_SCREENS &&
+                    !wayland_stalled(c->slot) && c->errors == 0,
+                "a budget's copies of each of a client's two windows in one read are all made: the budget is a window's (%ld and %ld, stalled %ld)",
                 fake.row[0].pictures - first, fake.row[1].pictures - second, wayland_stalled(c->slot));
         // The ninth of one window waits, and is made in that window's next window of time.
         wayland_feed(c->slot, run, 52, 0, 0);
         wlc_pump(c);
-        WLCHECK(fake.row[0].pictures - first == 8 && wayland_stalled(c->slot), "the ninth of one of them waits (%ld)", fake.row[0].pictures - first);
+        WLCHECK(fake.row[0].pictures - first == WAYLAND_BUDGET_SCREENS && wayland_stalled(c->slot), "the one past the budget of one of them waits (%ld)",
+                fake.row[0].pictures - first);
         fake.now += WAYLAND_BUDGET_MS;
         wayland_resume(c->slot);
         wlc_pump(c);
-        WLCHECK(fake.row[0].pictures - first == 9 && !wayland_stalled(c->slot) && c->errors == 0, "and is made in its next window of time (%ld)",
+        WLCHECK(fake.row[0].pictures - first == WAYLAND_BUDGET_SCREENS + 1 && !wayland_stalled(c->slot) && c->errors == 0, "and is made in its next window of time (%ld)",
                 fake.row[0].pictures - first);
         fake.clock_still = 0;
 
@@ -189836,9 +189844,11 @@ static void test_syncobj_viewporter_and_formats(void)
         unsigned long vp_mgr, vp, params, buf, drm, sync_mgr, sync_surf, tl;
         unsigned char abgr_px[4 * 4 * 4];
 
-        /* 1. Non-mmapable dma-buf (WAYLAND_DMABUF_UNMAPPED) + ABGR8888/MODIFIER_INVALID + wp_viewporter */
+        /* 1. Non-mmapable dma-buf (WAYLAND_DMABUF_UNMAPPED) + ABGR8888/MODIFIER_INVALID + wp_viewporter. The table offers ABGR8888, as the
+              compositor's does: a pair not in it is refused (wayland_dmabuf_alloc_buffer, since 5f74af4), which the row was not told of. */
         wayland_stop();
         memset(&fake, 0, sizeof fake);
+        fake.dmabuf_bgr = 1;
         fake.screen.width = 1280;
         fake.screen.height = 720;
         fake.screen.scale = 100;
@@ -189866,12 +189876,13 @@ static void test_syncobj_viewporter_and_formats(void)
                 WLCHECK(c->errors == 0, "wl_shm accepts abgr8888 and xbgr8888 formats");
         }
 
-        /* wp_viewporter source crop & destination scale */
+        /* wp_viewporter source crop & destination scale: a source inside the 16 by 8 buffer below (one past its edge is the viewport's
+           out_of_buffer error, which 5f74af4 holds the commit to, and which a source of 16 by 12 at 2, 3 was) */
         vp_mgr = wl_global(c, s.registry, WLI_wp_viewporter, 1);
         WLCHECK(vp_mgr != 0, "wp_viewporter global is advertised");
         vp = wlc_id(c, WLI_wp_viewport, 1);
         wlc_send(c, vp_mgr, WLQ_wp_viewporter_get_viewport, vp, s.surface);
-        wlc_send(c, vp, WLQ_wp_viewport_set_source, (long)(2 * 256), (long)(3 * 256), (long)(16 * 256), (long)(12 * 256));
+        wlc_send(c, vp, WLQ_wp_viewport_set_source, (long)(2 * 256), (long)(3 * 256), (long)(12 * 256), (long)(4 * 256));
         wlc_send(c, vp, WLQ_wp_viewport_set_destination, 640L, 480L);
 
         /* non-mmapable dma-buf with ABGR8888 & MODIFIER_INVALID */
@@ -189886,7 +189897,8 @@ static void test_syncobj_viewporter_and_formats(void)
         wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 16L, 8L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(c->errors == 0 && cap_pic_seen && cap_pic.map == 0 && cap_pic.sync_fd >= 0 &&
-                    cap_pic.src_x == 2 * 256 && cap_pic.src_width == 16 * 256 && cap_pic.dst_width == 640 && cap_pic.dst_height == 480 &&
+                    cap_pic.src_x == 2 * 256 && cap_pic.src_y == 3 * 256 && cap_pic.src_width == 12 * 256 && cap_pic.src_height == 4 * 256 &&
+                    cap_pic.dst_width == 640 && cap_pic.dst_height == 480 &&
                     cap_pic.fourcc == WAYLAND_FOURCC_ABGR8888 && cap_pic.modifier == WAYLAND_MODIFIER_INVALID,
                 "unmapped dma-buf passes sync_fd with map==0, fourcc/modifier, and wp_viewporter crop+scale");
 
@@ -189907,6 +189919,26 @@ static void test_syncobj_viewporter_and_formats(void)
                 WLCHECK(done_count == WAYLAND_OUT_FDS + 2,
                         "dmabuf feedback sends past WAYLAND_OUT_FDS flush queued feedbacks (%ld)", done_count);
         }
+        wlc_end(c);
+        wayland_stop();
+
+        /* 1b. The same buffer where the table offers no ABGR8888: refused at create_immed, as the protocol says (invalid_wl_buffer) */
+        memset(&fake, 0, sizeof fake);
+        fake.screen.width = 1280;
+        fake.screen.height = 720;
+        fake.screen.scale = 100;
+        fake.screen.refresh = 60000;
+        wayland_start(&host);
+        session_open(&s);
+        c = s.c;
+        params = wlc_id(c, WLI_zwp_linux_buffer_params_v1, 4);
+        wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_create_params, params);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, dmabuf_file(16, 80, 8, 0), 0L, 0L, 80L,
+                 (unsigned long)(WAYLAND_MODIFIER_INVALID >> 32), (unsigned long)(WAYLAND_MODIFIER_INVALID & 0xffffffffUL));
+        buf = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, buf, 16L, 8L, (long)WAYLAND_FOURCC_ABGR8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer),
+                "a format and modifier the table does not offer is refused at create_immed (invalid_wl_buffer)");
         wlc_end(c);
         wayland_stop();
 
