@@ -15557,6 +15557,1032 @@ fn check_automaton()
 }
 
 /*
+        The eleven routines ba2387d..ae6e42b folded into the compositor, the
+        kit, the font engine and the shell's lexer, against the loops their
+        callers had before them:
+
+            memory_add_sat_u8_rect         font_cluster_plan's saturating add
+            memory_copy_rect_reverse_u32   windows_rotate_u32's half turn
+            memory_lerp_u32_row            ui_stretch_blend, a row at a time
+            memory_mix_const_u32_rect      compositor_chip_draw's cover * alpha
+                                           / 255 and compositor_mix
+            memory_or_u32                  the Wayland host's XRGB8888 made
+                                           opaque
+            memory_over_cover_u32_rect     ui_kit_covers' ui_over(ui_tone(ink,
+                                           cover), pixel)
+            memory_over_u32_rect           compositor_wl_over over a rectangle
+            memory_scale_u8                compositor_gpu_spots' cover * alpha
+                                           / 255
+            memory_swizzle_rb_u32          compositor_wl_convert_pixel's ABGR
+                                           and XBGR
+            memory_transpose_u8            font_blend_turned's turn of a
+                                           glyph's columns into rows
+            string_first_of_either_or_end  the lexer's walk to a quote, a
+                                           backslash or the end
+
+        Every input and every output is a room with a page that cannot be
+        touched on either side of it. A case is laid flush against the page
+        after it, then at residues that walk the start through every
+        alignment across the shapes (each byte for a byte pointer, each
+        word for a word pointer, sixty four bytes round, and every pair of
+        them for one shape), then flush against the page before it; a read
+        or a write past either end of what the routine was given faults and
+        ends the run. The output's neighbourhood -- sixty four bytes either
+        side, and every gap a stride leaves between rows -- is compared byte
+        for byte with the reference's copy, and each input with what it
+        held. Sizes run through every one to past the widest body's step (a
+        row to three hundred, a rectangle to seventy across and nine down),
+        then a few large ones. Values are the kinds that decide each: alpha
+        and cover of none, all and between, sums one short of saturating and
+        past it, pixels premultiplied and not, masks of nothing, the alpha
+        and every bit, and for the scan each byte, both, neither, the two
+        the same, a byte with its high bit set and the bytes a word-at-a-time
+        test is likeliest to mistake for them. In-place calls where a caller
+        makes them (memory_or_u32 and memory_swizzle_rb_u32). On x86-64 each
+        tier is walked down, AVX-512 and AVX2, AVX2 alone, then neither; on
+        riscv64 V as each call's first ask finds it, then said absent.
+
+        The references are the callers' C as it stood, renamed.
+*/
+static inline unsigned int reference_ui_div255(unsigned int x)
+{
+        return (x + 1 + (x >> 8)) >> 8;
+}
+
+// from, moved amount 256ths of the way to to.
+static inline unsigned int reference_window_mix(unsigned int from, unsigned int to, unsigned int amount)
+{
+        unsigned int mixed = 0;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+                mixed |= (((from >> shift & 255) * (256 - amount) + (to >> shift & 255) * amount + 128) >> 8) << shift;
+        return mixed;
+}
+
+static unsigned int reference_ui_tone(unsigned int colour, unsigned int alpha)
+{
+        alpha = alpha > 255 ? 255 : alpha;
+        return alpha << 24 | reference_window_mix(0, colour & 0xffffffu, alpha + (alpha >> 7));
+}
+
+static inline unsigned int reference_ui_over(unsigned int pixel, unsigned int under)
+{
+        unsigned int rest = 255 - (pixel >> 24), out = 0;
+
+        if (!(pixel >> 24))
+                return under;
+        if (!rest)
+                return pixel;
+        if (!under)
+                return pixel;
+        {
+                unsigned int v_rb = (under & 0x00ff00ffu) * rest + 0x007f007fu;
+                unsigned int v_ag = ((under >> 8) & 0x00ff00ffu) * rest + 0x007f007fu;
+                unsigned int sum_rb = (pixel & 0x00ff00ffu) + ((v_rb + 0x00010001u + ((v_rb >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
+                unsigned int sum_ag = ((pixel >> 8) & 0x00ff00ffu) + ((v_ag + 0x00010001u + ((v_ag >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
+
+                if (!((sum_rb | sum_ag) & 0x01000100u))
+                        return (sum_rb & 0x00ff00ffu) | (sum_ag & 0x00ff00ffu) << 8;
+        }
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+        {
+                unsigned int channel = (pixel >> shift & 255) + reference_ui_div255((under >> shift & 255) * rest + 127);
+
+                out |= (channel > 255 ? 255 : channel) << shift;
+        }
+        return out;
+}
+
+static unsigned int reference_compositor_mix(unsigned int ground, unsigned int ink, unsigned int cover)
+{
+        const unsigned long long low = 0xff00ff00ffull, one = 0x100010001ull;
+        unsigned long long g, i, x;
+
+        if (cover == 0)
+                return ground & 0xffffffu;
+        if (cover >= 255)
+                return ink & 0xffffffu;
+        g = (ground & 0xffu) | (unsigned long long)(ground & 0xff00u) << 8 | (unsigned long long)(ground & 0xff0000u) << 16;
+        i = (ink & 0xffu) | (unsigned long long)(ink & 0xff00u) << 8 | (unsigned long long)(ink & 0xff0000u) << 16;
+        x = g * (255 - cover) + i * cover + 127 * one;
+        x += one + ((x >> 8) & low);
+        x = (x >> 8) & low;
+        return (unsigned int)((x & 0xff) | (x >> 8 & 0xff00) | (x >> 16 & 0xff0000));
+}
+
+static unsigned int reference_compositor_wl_over(unsigned int over, unsigned int under)
+{
+        unsigned int through = 255u - (over >> 24), out = 0xff000000u;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int sum = ((over >> shift) & 255u) + ((((under >> shift) & 255u) * through + 127u) / 255u);
+
+                out |= (sum > 255u ? 255u : sum) << shift;
+        }
+        return out;
+}
+
+static inline unsigned int reference_ui_stretch_blend(unsigned int a, unsigned int b, unsigned int f)
+{
+        unsigned int green = ((((a >> 8) & 0x00ff00ffu) * (256 - f) + ((b >> 8) & 0x00ff00ffu) * f) >> 8) & 0x00ff00ffu;
+        unsigned int blue = (((a & 0x00ff00ffu) * (256 - f) + (b & 0x00ff00ffu) * f) >> 8) & 0x00ff00ffu;
+
+        return green << 8 | blue;
+}
+
+static fn reference_memory_add_sat_u8_rect(p8 address_to into, positive into_stride, const p8 address_to from,
+                                           positive from_stride, positive width, positive height)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p8 address_to at = into + r * into_stride + c;
+                        unsigned int sum = (unsigned int)*at + from[r * from_stride + c];
+
+                        *at = (p8)(sum > 255 ? 255 : sum);
+                }
+}
+
+static fn reference_memory_copy_rect_reverse_u32(p32 address_to into, bipolar into_pitch, const p32 address_to from,
+                                                 bipolar from_pitch, positive width, positive height)
+{
+        for (positive ly = 0; ly < height; ly++)
+        {
+                p32 address_to to = into + (bipolar)ly * into_pitch;
+                const p32 address_to row = from + (bipolar)ly * from_pitch;
+
+                for (positive each = 0; each < width; each++)
+                        to[each] = row[width - 1 - each];
+        }
+}
+
+static fn reference_memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 address_to b, positive count,
+                                        positive t)
+{
+        for (positive k = 0; k < count; k++)
+                into[k] = reference_ui_stretch_blend(a[k], b[k], (unsigned int)t);
+}
+
+static fn reference_memory_mix_const_u32_rect(p32 address_to into, positive into_stride, const p8 address_to cover,
+                                              positive cover_stride, positive width, positive height, p32 ink, p32 alpha)
+{
+        for (positive py = 0; py < height; py++)
+        {
+                p32 address_to at = into + py * into_stride;
+
+                for (positive px = 0; px < width; px++, at++)
+                {
+                        unsigned int share = (unsigned int)cover[py * cover_stride + px] * (alpha & 255) / 255;
+
+                        if (share)
+                                *at = reference_compositor_mix(*at, ink, share);
+                }
+        }
+}
+
+static fn reference_memory_or_u32(p32 address_to into, const p32 address_to from, positive count, p32 mask)
+{
+        for (positive i = 0; i < count; i++)
+                into[i] = from[i] | mask;
+}
+
+static fn reference_memory_over_cover_u32_rect(p32 address_to into, positive into_stride, const p8 address_to cover,
+                                               positive cover_stride, positive width, positive height, p32 ink)
+{
+        for (positive row = 0; row < height; row++)
+        {
+                p32 address_to pixels = into + row * into_stride;
+                const p8 address_to covers = cover + row * cover_stride;
+
+                for (positive column = 0; column < width; column++)
+                        if (covers[column])
+                                pixels[column] = reference_ui_over(reference_ui_tone(ink, covers[column]), pixels[column]);
+        }
+}
+
+static fn reference_memory_over_u32_rect(p32 address_to to, positive pitch, const p32 address_to pixels, positive stride,
+                                         positive width, positive height)
+{
+        for (positive r = 0; r < height; r++)
+        {
+                const p32 address_to from = pixels + r * stride;
+                p32 address_to into = to + r * pitch;
+
+                for (positive c = 0; c < width; c++)
+                        into[c] = reference_compositor_wl_over(from[c], into[c]);
+        }
+}
+
+static fn reference_memory_scale_u8(p8 address_to table, const p8 address_to cover, positive cells, unsigned int alpha)
+{
+        for (positive i = 0; i < cells; i++)
+                table[i] = (p8)(cover[i] * (alpha & 255) / 255);
+}
+
+static fn reference_memory_swizzle_rb_u32(p32 address_to into, const p32 address_to from, positive count, p32 or_mask)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                p32 v = from[i];
+
+                into[i] = ((v & 0xff00ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu)) | or_mask;
+        }
+}
+
+static fn reference_memory_transpose_u8(p8 address_to into, positive into_pitch, const p8 address_to from,
+                                        bipolar from_column, bipolar from_row, positive rows, positive cols)
+{
+        for (positive k = 0; k < rows; k++)
+        {
+                const p8 address_to column = from + (bipolar)k * from_row;
+                p8 address_to row = into + k * into_pitch;
+
+                for (positive r = 0; r < cols; r++)
+                        row[r] = column[(bipolar)r * from_column];
+        }
+}
+
+static string_address reference_string_first_of_either_or_end(string_address at, p8 first, p8 second)
+{
+        while (*at && *at != first && *at != second)
+                at++;
+        return at;
+}
+
+//      A room: PIXEL_ROOM bytes with a page that cannot be touched on either side.
+enum { PIXEL_ROOM = 1 << 20, PIXEL_NEAR = 64, PIXEL_ROOMS = 4 };
+struct pixel_room
+{
+        p8 address_to map, address_to low, address_to high;
+};
+struct pixel_window
+{
+        p8 address_to from;
+        positive size;
+};
+static struct pixel_room pixel_rooms[PIXEL_ROOMS];
+static p8 pixel_mirror[PIXEL_ROOM], pixel_kept[3][PIXEL_ROOM];
+static positive pixel_shown, pixel_tier;
+
+static b32 pixel_rooms_open(void)
+{
+        b32 fine = true;
+
+        for (positive k = 0; k < PIXEL_ROOMS; k++)
+        {
+                struct pixel_room address_to room = &pixel_rooms[k];
+
+                room->map = memory(PIXEL_ROOM + 8192);
+                if ((bipolar)(positive)room->map <= 0)
+                {
+                        room->map = null;
+                        fine = false;
+                        continue;
+                }
+                room->low = room->map + 4096, room->high = room->low + PIXEL_ROOM;
+                fine = fine && system_call_3(syscall(mprotect), (positive)room->map, 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)room->high, 4096, 0) == 0;
+        }
+        same("pixel rows", "a room with a page that cannot be touched either side, for each input and output", fine, 1);
+        return fine;
+}
+
+static fn pixel_rooms_close(void)
+{
+        for (positive k = 0; k < PIXEL_ROOMS; k++)
+                if (pixel_rooms[k].map)
+                        memory_free(pixel_rooms[k].map, PIXEL_ROOM + 8192), pixel_rooms[k].map = null;
+}
+
+//      Where a case's pointer goes: span bytes, the lowest of them lowest bytes from the pointer (below it when a pitch
+//      is negative), ending residue bytes short of the page after the room, or beginning residue bytes past the one
+//      before it.
+static p8 address_to pixel_place(const struct pixel_room address_to room, positive span, bipolar lowest, b32 late,
+                                 positive residue)
+{
+        p8 address_to first = late ? room->high - span - residue : room->low + residue;
+
+        return first - lowest;
+}
+
+//      The residue a shape's k-th case is laid at, of eight (0 flush, and k 8 flush against the page before): the
+//      seven between walk with the shape, so the shapes between them meet every residue a step apart.
+static positive pixel_residue(positive shape, positive k, positive step)
+{
+        return k == 0 || k >= 8 ? 0 : (shape * 7 + k * 9) % 64 / step * step;
+}
+
+//      What is compared round a span: PIXEL_NEAR bytes either side, cut to the room.
+static struct pixel_window pixel_near(const struct pixel_room address_to room, p8 address_to first, positive span)
+{
+        p8 address_to from = first - room->low < PIXEL_NEAR ? room->low : first - PIXEL_NEAR;
+        p8 address_to to = room->high - (first + span) < PIXEL_NEAR ? room->high : first + span + PIXEL_NEAR;
+
+        return (struct pixel_window){from, (positive)(to - from)};
+}
+
+//      A byte that decides a saturating add or a scale: the ends, either side of the middle, or noise.
+static p8 pixel_byte(positive v)
+{
+        static const p8 edges[] = {0, 1, 2, 127, 128, 129, 253, 254, 255};
+
+        return v & 1 ? (p8)(v >> 8) : edges[(v >> 8) % array_count(edges)];
+}
+
+//      A cover: none a quarter of the time, all a quarter, and the bytes above.
+static p8 pixel_cover(positive v)
+{
+        return v % 4 == 0 ? 0 : v % 4 == 1 ? 255 : pixel_byte(v >> 2);
+}
+
+//      A pixel of a kind that decides a blend: nothing, every bit, alpha none, alpha all, premultiplied (twice as
+//      often), one byte four times, four bytes of the kinds above, or noise -- which is a colour past its alpha.
+static p32 pixel_word(positive v)
+{
+        p32 r = (p32)(v >> 8), a = r >> 24;
+
+        switch (v % 10)
+        {
+        case 0:
+                return 0;
+        case 1:
+                return 0xffffffffu;
+        case 2:
+                return r & 0x00ffffffu;
+        case 3:
+                return r | 0xff000000u;
+        case 4:
+        case 5:
+                return a << 24 | (r & 255) * a / 255 | (r >> 8 & 255) * a / 255 << 8 | (r >> 16 & 255) * a / 255 << 16;
+        case 6:
+                return (p32)pixel_byte(v >> 4) * 0x01010101u;
+        case 7:
+                return (p32)pixel_byte(v >> 4) | (p32)pixel_byte(v >> 14) << 8 | (p32)pixel_byte(v >> 24) << 16 |
+                       (p32)pixel_byte(v >> 34) << 24;
+        default:
+                return r;
+        }
+}
+
+enum { PIXEL_BYTES, PIXEL_COVERS, PIXEL_WORDS };
+
+static fn pixel_fill(p8 address_to at, positive size, positive kind)
+{
+        for (positive i = 0; i < size; i += kind == PIXEL_WORDS ? 4 : 1)
+                if (kind == PIXEL_WORDS)
+                {
+                        p32 word = pixel_word(next());
+
+                        for (positive k = 0; k < 4 && i + k < size; k++)
+                                at[i + k] = (p8)(word >> 8 * k);
+                }
+                else
+                        at[i] = kind == PIXEL_COVERS ? pixel_cover(next()) : pixel_byte(next());
+}
+
+//      The output's window filled and the reference's copy of it made: answers where the copy of at is.
+static p8 address_to pixel_out(struct pixel_window address_to window, positive room, p8 address_to at, positive span,
+                               bipolar lowest, positive kind)
+{
+        *window = pixel_near(&pixel_rooms[room], at + lowest, span);
+        pixel_fill(window->from, window->size, kind);
+        memory_copy(pixel_mirror, window->from, window->size);
+        return pixel_mirror + (at - window->from);
+}
+
+//      An input's window filled and kept in slot.
+static fn pixel_in(struct pixel_window address_to window, positive slot, positive room, p8 address_to at, positive span,
+                   bipolar lowest, positive kind)
+{
+        *window = pixel_near(&pixel_rooms[room], at + lowest, span);
+        pixel_fill(window->from, window->size, kind);
+        memory_copy(pixel_kept[slot], window->from, window->size);
+}
+
+//      One window against what it should hold: a check, and a failure when a byte is not; the first two dozen say
+//      where, with the case's shape and values packed as the case wrote them.
+static fn pixel_same(string_address name, string_address detail, const p8 address_to got, const p8 address_to want,
+                     positive size, positive shape, positive values)
+{
+        checks++;
+        for (positive i = 0; i < size; i++)
+                if (got[i] != want[i])
+                {
+                        failures++;
+                        if (pixel_shown++ < 8)
+                                string_format(log, "  FAIL %s %s: byte %p of the window is %p want %p (shape %p, "
+                                                   "values %p, tier %p)\n",
+                                              name, detail, i, (positive)got[i], (positive)want[i], shape, values,
+                                              pixel_tier);
+                        return;
+                }
+}
+
+//      After a call: the output against the reference's copy, each input against what it held.
+static fn pixel_after(string_address name, const struct pixel_window address_to out,
+                      const struct pixel_window address_to in, positive inputs, positive shape, positive values)
+{
+        pixel_same(name, "the output and the bytes round it", out->from, pixel_mirror, out->size, shape, values);
+        for (positive k = 0; k < inputs; k++)
+                pixel_same(name, "an input as it was", in[k].from, pixel_kept[k], in[k].size, shape, values);
+}
+
+//      An answer against the reference's, as pixel_same counts it.
+static fn pixel_answer(string_address name, string_address detail, positive got, positive want, positive shape,
+                       positive values)
+{
+        checks++;
+        if (got != want)
+        {
+                failures++;
+                if (pixel_shown++ < 8)
+                        string_format(log, "  FAIL %s %s: got %p want %p (shape %p, values %p, tier %p)\n", name, detail,
+                                      got, want, shape, values, pixel_tier);
+        }
+}
+
+//      Before every call: on riscv64's first tier the call is the first the process makes, so a body that asks for V
+//      asks; nothing on the others.
+#define PIXEL_CALL() VECTOR_FIRST_CALL(pixel_tier == 0)
+
+/*
+        The rectangles: every width to forty and either side of 48 and 64 and
+        70, then the wide ones (three rows at most), every height in the
+        list, and four pairs of gaps after a row, one for each pointer.
+*/
+static const positive pixel_narrow[] = {41, 47, 48, 49, 63, 64, 65, 70};
+static const positive pixel_wide[] = {127, 128, 129, 255, 256, 257, 1000, 4097};
+static const positive pixel_heights[] = {0, 1, 2, 3, 5, 9};
+#define PIXEL_WIDTHS (41 + array_count(pixel_narrow) + array_count(pixel_wide))
+#define PIXEL_SHAPES (PIXEL_WIDTHS * array_count(pixel_heights) * 4)
+
+static b32 pixel_shape(positive index, positive address_to width, positive address_to height, positive address_to gap,
+                       positive address_to other)
+{
+        static const positive gaps[4][2] = {{0, 0}, {1, 5}, {3, 0}, {17, 33}};
+        positive w = index / (array_count(pixel_heights) * 4), g = index % 4;
+
+        *width = w < 41 ? w : w < 41 + array_count(pixel_narrow) ? pixel_narrow[w - 41] : pixel_wide[w - 41 - array_count(pixel_narrow)];
+        *height = pixel_heights[index / 4 % array_count(pixel_heights)];
+        *gap = gaps[g][0], *other = gaps[g][1];
+        return *width <= 300 || *height <= 3;
+}
+
+//      The cases a shape is laid at: all nine for a narrow one, the two flush for a wide one.
+#define PIXEL_EACH(k, width) for (positive k = 0; k <= 8; k += (width) > 300 ? 8 : 1)
+#define PIXEL_SHAPE_CODE(width, height, gap, other, k) ((width) << 32 | (height) << 24 | (gap) << 16 | (other) << 8 | (k))
+
+static fn pixel_add_sat(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gf;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gf))
+                        continue;
+                positive is = width + gi, fs = width + gf;
+                positive into_span = height ? (height - 1) * is + width : 0, from_span = height ? (height - 1) * fs + width : 0;
+
+                PIXEL_EACH(k, width)
+                {
+                        struct pixel_window out, in[1];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape, k, 1));
+                        p8 address_to from = pixel_place(&pixel_rooms[1], from_span, 0, k < 8, pixel_residue(shape * 3 + 1, k, 1));
+                        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_BYTES);
+
+                        pixel_in(&in[0], 0, 1, from, from_span, 0, PIXEL_BYTES);
+                        reference_memory_add_sat_u8_rect(want, is, from, fs, width, height);
+                        PIXEL_CALL();
+                        (memory_add_sat_u8_rect)(into, is, from, fs, width, height);
+                        pixel_after("memory_add_sat_u8_rect", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gf, k), 0);
+                }
+        }
+        //  Every pair of residues for one shape, three rows of 33 with gaps.
+        for (positive ri = 0; ri < 64; ri++)
+                for (positive rf = 0; rf < 64; rf++)
+                {
+                        struct pixel_window out, in[1];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], 2 * 36 + 33, 0, true, ri);
+                        p8 address_to from = pixel_place(&pixel_rooms[1], 2 * 40 + 33, 0, true, rf);
+                        p8 address_to want = pixel_out(&out, 0, into, 2 * 36 + 33, 0, PIXEL_BYTES);
+
+                        pixel_in(&in[0], 0, 1, from, 2 * 40 + 33, 0, PIXEL_BYTES);
+                        reference_memory_add_sat_u8_rect(want, 36, from, 40, 33, 3);
+                        PIXEL_CALL();
+                        (memory_add_sat_u8_rect)(into, 36, from, 40, 33, 3);
+                        pixel_after("memory_add_sat_u8_rect", &out, in, 1, ri << 8 | rf, 1);
+                }
+}
+
+static fn pixel_reverse(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gf;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gf))
+                        continue;
+                //  Each pitch either way: the half turn hands it the picture's pitch negative, into's rows rising.
+                for (positive sign = 0; sign < 4; sign++)
+                {
+                        bipolar ip = (bipolar)(width + gi) * (sign & 1 ? -1 : 1), fp = (bipolar)(width + gf) * (sign & 2 ? -1 : 1);
+                        positive into_span = height ? 4 * ((height - 1) * (width + gi) + width) : 0;
+                        positive from_span = height ? 4 * ((height - 1) * (width + gf) + width) : 0;
+                        bipolar into_lowest = height && ip < 0 ? 4 * (bipolar)(height - 1) * ip : 0;
+                        bipolar from_lowest = height && fp < 0 ? 4 * (bipolar)(height - 1) * fp : 0;
+
+                        PIXEL_EACH(k, width)
+                        {
+                                struct pixel_window out, in[1];
+                                p8 address_to into = pixel_place(&pixel_rooms[0], into_span, into_lowest, k < 8, pixel_residue(shape + sign, k, 4));
+                                p8 address_to from = pixel_place(&pixel_rooms[1], from_span, from_lowest, k < 8,
+                                                                 pixel_residue(shape * 3 + sign, k, 4));
+                                p8 address_to want = pixel_out(&out, 0, into, into_span, into_lowest, PIXEL_WORDS);
+
+                                pixel_in(&in[0], 0, 1, from, from_span, from_lowest, PIXEL_WORDS);
+                                reference_memory_copy_rect_reverse_u32((p32 address_to)want, ip, (const p32 address_to)from, fp, width, height);
+                                PIXEL_CALL();
+                                (memory_copy_rect_reverse_u32)((p32 address_to)into, ip, (const p32 address_to)from, fp, width, height);
+                                pixel_after("memory_copy_rect_reverse_u32", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gf, k), sign);
+                        }
+                }
+        }
+}
+
+/*
+        The rows: every count to three hundred, then the wide ones, each laid
+        at the nine places a shape is.
+*/
+static const positive pixel_long[] = {511, 512, 513, 1000, 4097, 65539};
+#define PIXEL_COUNTS (301 + array_count(pixel_long))
+#define PIXEL_COUNT(index) ((index) < 301 ? (index) : pixel_long[(index) - 301])
+
+static fn pixel_lerp(void)
+{
+        static const positive ts[] = {0, 1, 2, 127, 128, 129, 254, 255, 256};
+
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c), span = 4 * count;
+
+                PIXEL_EACH(k, count)
+                        for (positive turn = 0; turn < (count > 300 ? array_count(ts) : 2); turn++)
+                        {
+                                struct pixel_window out, in[2];
+                                positive t = count > 300 ? ts[turn] : turn ? next() % 257 : ts[(c + k) % array_count(ts)];
+                                p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c, k, 4));
+                                p8 address_to a = pixel_place(&pixel_rooms[1], span, 0, k < 8, pixel_residue(c * 3 + 1, k, 4));
+                                p8 address_to b = pixel_place(&pixel_rooms[2], span, 0, k < 8, pixel_residue(c * 5 + 2, k, 4));
+                                p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+
+                                pixel_in(&in[0], 0, 1, a, span, 0, PIXEL_WORDS);
+                                pixel_in(&in[1], 1, 2, b, span, 0, PIXEL_WORDS);
+                                reference_memory_lerp_u32_row((p32 address_to)want, (const p32 address_to)a, (const p32 address_to)b, count, t);
+                                PIXEL_CALL();
+                                (memory_lerp_u32_row)((p32 address_to)into, (const p32 address_to)a, (const p32 address_to)b, count, t);
+                                pixel_after("memory_lerp_u32_row", &out, in, 2, count << 8 | k, t);
+                        }
+        }
+}
+
+//      The alphas the chip's mix is handed: none, all, between, and past a byte (whose low byte is the alpha).
+static const p32 pixel_alphas[] = {0, 1, 2, 127, 128, 180, 254, 255, 256, 257, 511, 0xffffff80u, 0xffffffffu};
+
+static fn pixel_mix_const_one(positive shape, positive width, positive height, positive gi, positive gc, positive k,
+                              p32 ink, p32 alpha)
+{
+        struct pixel_window out, in[1];
+        positive is = width + gi, cs = width + gc;
+        positive into_span = height ? 4 * ((height - 1) * is + width) : 0, cover_span = height ? (height - 1) * cs + width : 0;
+        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape, k, 4));
+        p8 address_to cover = pixel_place(&pixel_rooms[1], cover_span, 0, k < 8, pixel_residue(shape * 3 + 1, k, 1));
+        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
+
+        pixel_in(&in[0], 0, 1, cover, cover_span, 0, PIXEL_COVERS);
+        reference_memory_mix_const_u32_rect((p32 address_to)want, is, cover, cs, width, height, ink, alpha);
+        PIXEL_CALL();
+        (memory_mix_const_u32_rect)((p32 address_to)into, is, cover, cs, width, height, ink, alpha);
+        pixel_after("memory_mix_const_u32_rect", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gc, k), (positive)ink << 32 | alpha);
+}
+
+static fn pixel_mix_const(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gc;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gc))
+                        continue;
+                PIXEL_EACH(k, width)
+                        pixel_mix_const_one(shape, width, height, gi, gc, k, pixel_word(next()),
+                                            pixel_alphas[(shape + k) % array_count(pixel_alphas)]);
+        }
+        //  Every cover under every alpha a byte holds and the ones past it: a row of the 256 covers, twice over.
+        for (positive alpha = 0; alpha < 512; alpha++)
+        {
+                struct pixel_window out;
+                p8 address_to into = pixel_place(&pixel_rooms[0], 4 * 512, 0, true, 0);
+                p8 address_to cover = pixel_place(&pixel_rooms[1], 512, 0, true, 0);
+                p8 address_to want = pixel_out(&out, 0, into, 4 * 512, 0, PIXEL_WORDS);
+                p32 ink = pixel_word(next());
+
+                for (positive i = 0; i < 512; i++)
+                        cover[i] = (p8)(i * 167);
+                reference_memory_mix_const_u32_rect((p32 address_to)want, 256, cover, 256, 256, 2, ink, (p32)alpha);
+                PIXEL_CALL();
+                (memory_mix_const_u32_rect)((p32 address_to)into, 256, cover, 256, 256, 2, ink, (p32)alpha);
+                pixel_after("memory_mix_const_u32_rect", &out, null, 0, 256, (positive)ink << 32 | alpha);
+        }
+}
+
+static fn pixel_over_cover(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gc;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gc))
+                        continue;
+                positive is = width + gi, cs = width + gc;
+                positive into_span = height ? 4 * ((height - 1) * is + width) : 0, cover_span = height ? (height - 1) * cs + width : 0;
+
+                PIXEL_EACH(k, width)
+                {
+                        struct pixel_window out, in[1];
+                        p32 ink = pixel_word(next());
+                        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape, k, 4));
+                        p8 address_to cover = pixel_place(&pixel_rooms[1], cover_span, 0, k < 8, pixel_residue(shape * 3 + 1, k, 1));
+                        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, cover, cover_span, 0, PIXEL_COVERS);
+                        reference_memory_over_cover_u32_rect((p32 address_to)want, is, cover, cs, width, height, ink);
+                        PIXEL_CALL();
+                        (memory_over_cover_u32_rect)((p32 address_to)into, is, cover, cs, width, height, ink);
+                        pixel_after("memory_over_cover_u32_rect", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gc, k), ink);
+                }
+        }
+        //  Every cover in the inks that decide a tone (black, white, grey, each channel alone, and noise) over every kind of pixel.
+        static const p32 inks[] = {0, 0xffffff, 0x808080, 0xff0000, 0x00ff00, 0x0000ff, 0xff000000u, 0x7f010203};
+        for (positive i = 0; i < array_count(inks) + 24; i++)
+        {
+                struct pixel_window out;
+                p32 ink = i < array_count(inks) ? inks[i] : pixel_word(next());
+                p8 address_to into = pixel_place(&pixel_rooms[0], 4 * 256 * 4, 0, true, 0);
+                p8 address_to cover = pixel_place(&pixel_rooms[1], 256 * 4, 0, true, 0);
+                p8 address_to want = pixel_out(&out, 0, into, 4 * 256 * 4, 0, PIXEL_WORDS);
+
+                for (positive at = 0; at < 256 * 4; at++)
+                        cover[at] = (p8)(at * 167);
+                reference_memory_over_cover_u32_rect((p32 address_to)want, 256, cover, 256, 256, 4, ink);
+                PIXEL_CALL();
+                (memory_over_cover_u32_rect)((p32 address_to)into, 256, cover, 256, 256, 4, ink);
+                pixel_after("memory_over_cover_u32_rect", &out, null, 0, 256, ink);
+        }
+}
+
+static fn pixel_over(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gf;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gf))
+                        continue;
+                positive is = width + gi, fs = width + gf;
+                positive into_span = height ? 4 * ((height - 1) * is + width) : 0, from_span = height ? 4 * ((height - 1) * fs + width) : 0;
+
+                PIXEL_EACH(k, width)
+                {
+                        struct pixel_window out, in[1];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape, k, 4));
+                        p8 address_to from = pixel_place(&pixel_rooms[1], from_span, 0, k < 8, pixel_residue(shape * 3 + 1, k, 4));
+                        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, from, from_span, 0, PIXEL_WORDS);
+                        reference_memory_over_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs, width, height);
+                        PIXEL_CALL();
+                        (memory_over_u32_rect)((p32 address_to)into, is, (const p32 address_to)from, fs, width, height);
+                        pixel_after("memory_over_u32_rect", &out, in, 1, PIXEL_SHAPE_CODE(width, height, gi, gf, k), 0);
+                }
+        }
+        //  Every alpha over every byte below it: a row of 256 alphas whose colours are each alpha's every fraction.
+        for (positive turn = 0; turn < 16; turn++)
+        {
+                struct pixel_window out, in[1];
+                p8 address_to into = pixel_place(&pixel_rooms[0], 4 * 256 * 256, 0, true, 0);
+                p8 address_to from = pixel_place(&pixel_rooms[1], 4 * 256 * 256, 0, true, 0);
+                p8 address_to want = pixel_out(&out, 0, into, 4 * 256 * 256, 0, PIXEL_WORDS);
+                p32 address_to over = (p32 address_to)from;
+
+                pixel_in(&in[0], 0, 1, from, 4 * 256 * 256, 0, PIXEL_WORDS);
+                for (positive at = 0; at < 256 * 256; at++)
+                {
+                        p32 a = (p32)(at >> 8), c = (p32)(at & 255) * (turn & 1 ? 255 : a) / 255;
+
+                        over[at] = a << 24 | c << ((turn >> 1) % 3 * 8) | (p32)(next() & (turn & 2 ? 0 : 0xff)) << ((turn >> 1) % 3 * 8 + 8) % 24;
+                }
+                memory_copy(pixel_kept[0], in[0].from, in[0].size);
+                reference_memory_over_u32_rect((p32 address_to)want, 256, over, 256, 256, 256);
+                PIXEL_CALL();
+                (memory_over_u32_rect)((p32 address_to)into, 256, over, 256, 256, 256);
+                pixel_after("memory_over_u32_rect", &out, in, 1, 256, turn);
+        }
+}
+
+static fn pixel_scale(void)
+{
+        static const p32 scales[] = {0, 1, 2, 127, 128, 180, 254, 255, 256, 257, 511, 0x80000000u, 0xffffffffu};
+
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c);
+
+                PIXEL_EACH(k, count)
+                {
+                        struct pixel_window out, in[1];
+                        p32 scale = k & 1 ? (p32)next() : scales[(c + k) % array_count(scales)];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], count, 0, k < 8, pixel_residue(c, k, 1));
+                        p8 address_to from = pixel_place(&pixel_rooms[1], count, 0, k < 8, pixel_residue(c * 3 + 1, k, 1));
+                        p8 address_to want = pixel_out(&out, 0, into, count, 0, PIXEL_BYTES);
+
+                        pixel_in(&in[0], 0, 1, from, count, 0, PIXEL_COVERS);
+                        reference_memory_scale_u8(want, from, count, scale);
+                        PIXEL_CALL();
+                        (memory_scale_u8)(into, from, count, scale);
+                        pixel_after("memory_scale_u8", &out, in, 1, count << 8 | k, scale);
+                }
+        }
+        //  Every byte at every scale a byte holds and the ones past it.
+        for (positive scale = 0; scale < 512; scale++)
+        {
+                struct pixel_window out, in[1];
+                p8 address_to into = pixel_place(&pixel_rooms[0], 256, 0, true, scale % 64);
+                p8 address_to from = pixel_place(&pixel_rooms[1], 256, 0, true, scale * 7 % 64);
+                p8 address_to want = pixel_out(&out, 0, into, 256, 0, PIXEL_BYTES);
+
+                pixel_in(&in[0], 0, 1, from, 256, 0, PIXEL_BYTES);
+                for (positive i = 0; i < 256; i++)
+                        from[i] = (p8)i;
+                memory_copy(pixel_kept[0], in[0].from, in[0].size);
+                reference_memory_scale_u8(want, from, 256, (unsigned int)scale);
+                PIXEL_CALL();
+                (memory_scale_u8)(into, from, 256, (unsigned int)scale);
+                pixel_after("memory_scale_u8", &out, in, 1, 256, scale);
+        }
+}
+
+//      memory_or_u32 and memory_swizzle_rb_u32: the same shapes, apart and in place.
+static const p32 pixel_masks[] = {0, 0xff000000u, 0xffffffffu, 0x00ff0000u, 0x000000ffu, 0x00ff00ffu, 0x80000001u};
+
+static fn pixel_words_one(b32 swizzle, positive c, positive count, positive k, b32 in_place, p32 mask)
+{
+        string_address name = swizzle ? "memory_swizzle_rb_u32" : "memory_or_u32";
+        struct pixel_window out, in[1];
+        positive span = 4 * count;
+        p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c + in_place, k, 4));
+        p8 address_to from = in_place ? into : pixel_place(&pixel_rooms[1], span, 0, k < 8, pixel_residue(c * 3 + 1, k, 4));
+        p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+        const p8 address_to source = in_place ? want : from;
+
+        if (!in_place)
+                pixel_in(&in[0], 0, 1, from, span, 0, PIXEL_WORDS);
+        if (swizzle)
+                reference_memory_swizzle_rb_u32((p32 address_to)want, (const p32 address_to)source, count, mask);
+        else
+                reference_memory_or_u32((p32 address_to)want, (const p32 address_to)source, count, mask);
+        PIXEL_CALL();
+        if (swizzle)
+                (memory_swizzle_rb_u32)((p32 address_to)into, (const p32 address_to)from, count, mask);
+        else
+                (memory_or_u32)((p32 address_to)into, (const p32 address_to)from, count, mask);
+        pixel_after(name, &out, in, in_place ? 0 : 1, count << 8 | k, (positive)in_place << 32 | mask);
+}
+
+static fn pixel_words(void)
+{
+        for (b32 swizzle = 0; swizzle < 2; swizzle++)
+                for (positive c = 0; c < PIXEL_COUNTS; c++)
+                {
+                        positive count = PIXEL_COUNT(c);
+
+                        PIXEL_EACH(k, count)
+                                for (b32 in_place = 0; in_place < 2; in_place++)
+                                        pixel_words_one(swizzle, c, count, k, in_place,
+                                                        k == 4 ? (p32)next() : pixel_masks[(c + k + in_place) % array_count(pixel_masks)]);
+                }
+}
+
+static fn pixel_transpose(void)
+{
+        static const positive sides[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                                         23, 24, 25, 31, 32, 33, 63, 64, 65};
+        positive shape = 0;
+
+        for (positive r = 0; r < array_count(sides); r++)
+                for (positive c = 0; c < array_count(sides); c++)
+                        for (positive kind = 0; kind < 8; kind++, shape++)
+                        {
+                                positive rows = sides[r], cols = sides[c], pitch = cols + (kind & 4 ? 5 : 0);
+                                bipolar fr = kind & 1 ? -1 : 1, step = (bipolar)rows + (kind & 4 ? 3 : 0), fc = kind & 2 ? -step : step;
+                                positive into_span = rows && cols ? (rows - 1) * pitch + cols : 0;
+                                bipolar lowest = 0, highest = 0;
+
+                                if (rows && cols)
+                                {
+                                        lowest = (fc < 0 ? (bipolar)(cols - 1) * fc : 0) + (fr < 0 ? -(bipolar)(rows - 1) : 0);
+                                        highest = (fc > 0 ? (bipolar)(cols - 1) * fc : 0) + (fr > 0 ? (bipolar)(rows - 1) : 0);
+                                }
+                                positive from_span = rows && cols ? (positive)(highest - lowest + 1) : 0;
+
+                                for (positive k = 0; k <= 8; k += 4)
+                                {
+                                        struct pixel_window out, in[1];
+                                        positive residue = k == 4 ? (shape * 13) % 64 : 0, other = k == 4 ? (shape * 29 + 7) % 64 : 0;
+                                        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, residue);
+                                        p8 address_to from = pixel_place(&pixel_rooms[1], from_span, lowest, k < 8, other);
+                                        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_BYTES);
+
+                                        pixel_in(&in[0], 0, 1, from, from_span, lowest, PIXEL_BYTES);
+                                        reference_memory_transpose_u8(want, pitch, from, fc, fr, rows, cols);
+                                        PIXEL_CALL();
+                                        (memory_transpose_u8)(into, pitch, from, fc, fr, rows, cols);
+                                        pixel_after("memory_transpose_u8", &out, in, 1, rows << 24 | cols << 8 | kind, k);
+                                }
+                        }
+}
+
+/*
+        The scan. Pairs of bytes as the lexer hands them (a quote and a
+        backslash), the two the same, either nought (which is the end's own
+        question), and bytes with the high bit set beside the ones without
+        it. Strings of bytes that are neither, with the first match at every
+        place in every string to eighty, then every length to three hundred
+        and a few long at the nine places: the terminator the last byte
+        before a page that cannot be read and at every distance short of it,
+        the bytes past the terminator the two bytes again and again (so a
+        body that read past the end and believed it answers wrong), the near
+        misses a word-at-a-time test is likeliest to take for a match (each
+        byte with its high bit or its low bit turned, one more, 0x01, 0x80,
+        0x7f and 0xff) and matches after the first.
+*/
+static const p8 either_pairs[][2] = {
+    {'"', '\\'}, {'\'', '\\'}, {'\\', '"'}, {'"', '"'}, {0, '\\'}, {'\'', 0}, {0, 0},
+    {0xe9, 0x5c}, {0x69, 0xe9}, {0x80, 0xff}, {0xff, 0x7f}, {0x01, 0x02}, {0xa2, 0x22},
+};
+
+static p8 either_other(p8 first, p8 second, positive v)
+{
+        p8 near[] = {first ^ 0x80, second ^ 0x80, first ^ 1, second ^ 1, (p8)(first + 1), (p8)(second - 1), 0x01, 0x80, 0x7f, 0xff};
+
+        for (;; v = next())
+        {
+                p8 byte = v & 1 ? near[(v >> 1) % array_count(near)] : (p8)(v >> 8);
+
+                if (byte && byte != first && byte != second)
+                        return byte;
+        }
+}
+
+//      A string of length bytes at at: neither byte before place, a match at place (when it is inside), and after it
+//      noise with more matches; the terminator; then the two bytes over and again to the end of the window.
+static fn either_lay(p8 address_to at, positive length, positive place, p8 first, p8 second, positive tail, positive kind)
+{
+        for (positive i = 0; i < length; i++)
+                at[i] = either_other(first, second, next());
+        if (place < length && (first || second))
+                at[place] = kind & 1 ? (second ? second : first) : (first ? first : second);
+        for (positive i = place + 1; i < length; i++)
+                if (next() % 5 == 0)
+                        at[i] = next() & 1 ? first : second, at[i] = at[i] ? at[i] : 'x';
+        at[length] = 0;
+        for (positive i = 1; i <= tail; i++)
+                at[length + i] = i & 1 ? (first ? first : 'q') : (second ? second : 'r');
+}
+
+static fn either_one(positive length, positive place, positive pair, positive k, positive residue, positive kind)
+{
+        p8 first = either_pairs[pair][0], second = either_pairs[pair][1];
+        const struct pixel_room address_to room = &pixel_rooms[0];
+        p8 address_to at = k < 8 ? room->high - (length + 1) - residue : room->low + residue;
+        positive tail = (positive)(room->high - at) - (length + 1);
+
+        either_lay(at, length, place, first, second, tail < 64 ? tail : 64, kind);
+        string_address want = reference_string_first_of_either_or_end((string_address)at, first, second);
+
+        PIXEL_CALL();
+        string_address got = (string_first_of_either_or_end)((string_address)at, first, second);
+        pixel_answer("string_first_of_either_or_end", "the first of either byte or the end", (positive)(got - (string_address)at),
+                     (positive)(want - (string_address)at), length << 16 | place, pair << 16 | k << 8 | residue);
+}
+
+static fn pixel_either(void)
+{
+        //  The first match at every place in every string to eighty, and nowhere.
+        for (positive length = 0; length <= 80; length++)
+                for (positive place = 0; place <= length; place++)
+                        for (positive kind = 0; kind < 2; kind++)
+                                either_one(length, place, (length + place + kind) % array_count(either_pairs), 0,
+                                           (length * 3 + place) % 64, kind);
+        //  Every length to three hundred and a few long, at the nine places, with every pair.
+        static const positive longer[] = {511, 512, 513, 1000, 4095, 4096, 4097, 65536};
+        for (positive l = 0; l < 301 + array_count(longer); l++)
+        {
+                positive length = l < 301 ? l : longer[l - 301];
+
+                for (positive k = 0; k <= 8; k++)
+                        for (positive pair = 0; pair < array_count(either_pairs); pair++)
+                        {
+                                positive kind = (l + k + pair) % 4, place = kind < 2 ? length : next() % (length + 1);
+
+                                either_one(length, place, pair, k, pixel_residue(l * 13 + pair, k, 1), kind);
+                        }
+        }
+}
+
+/*
+        The rows, on every body this machine has. A tier the machine does not
+        have is said, so a pass on it is not read as one.
+*/
+static fn pixel_each_tier(fn (*each)(void))
+{
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+
+        for (pixel_tier = 0; pixel_tier < 3; pixel_tier++)
+        {
+                cpu_has_avx512 = pixel_tier < 1 ? avx512 : 0;
+                cpu_has_avx2 = pixel_tier < 2 ? avx2 : 0;
+                each();
+        }
+        cpu_has_avx2 = avx2, cpu_has_avx512 = avx512;
+#elif RISCV64
+        p8 vector = cpu_has_vector;
+
+        for (pixel_tier = 0; pixel_tier < 2; pixel_tier++)
+        {
+                cpu_has_vector = pixel_tier ? 1 : 0;
+                each();
+        }
+        cpu_has_vector = vector;
+#else
+        pixel_tier = 0;
+        each();
+#endif
+}
+
+fn check_pixel_rows(void)
+{
+        positive had = checks;
+
+        pixel_shown = 0;
+        if (!pixel_rooms_open())
+        {
+                pixel_rooms_close();
+                return;
+        }
+#if X64
+        if (!cpu_has_avx512 || !cpu_has_avx2)
+                string_format(log, "  NOTE pixel rows: this machine has %s, so a tier above it ran the narrower body (NOT RUN)\n",
+                              cpu_has_avx2 ? "AVX2 without AVX-512" : "neither AVX2 nor AVX-512");
+#elif RISCV64
+        {
+                p8 vector = cpu_has_vector;
+
+                cpu_has_vector = 0;
+                (memory_or_u32)((p32 address_to)pixel_mirror, (const p32 address_to)pixel_mirror, 8, 0);
+                if (cpu_has_vector != 2)
+                        string_format(log, "  NOTE pixel rows: no V here, so the V tier ran the scalar bodies (NOT RUN)\n");
+                cpu_has_vector = vector;
+        }
+#endif
+        //  Each routine's cases say where its first eight disagreements are, and how many there were.
+#define PIXEL_ROUTINE(each)                                                                                             \
+        do                                                                                                              \
+        {                                                                                                               \
+                positive was = failures, asked = checks;                                                               \
+                                                                                                                        \
+                pixel_shown = 0;                                                                                        \
+                pixel_each_tier(each);                                                                                  \
+                if (failures != was)                                                                                    \
+                        string_format(log, "  %s: %p of %p cases disagreed\n", #each, failures - was, checks - asked); \
+        } while (0)
+        PIXEL_ROUTINE(pixel_add_sat);
+        PIXEL_ROUTINE(pixel_reverse);
+        PIXEL_ROUTINE(pixel_lerp);
+        PIXEL_ROUTINE(pixel_mix_const);
+        PIXEL_ROUTINE(pixel_words);
+        PIXEL_ROUTINE(pixel_over_cover);
+        PIXEL_ROUTINE(pixel_over);
+        PIXEL_ROUTINE(pixel_scale);
+        PIXEL_ROUTINE(pixel_transpose);
+        PIXEL_ROUTINE(pixel_either);
+#undef PIXEL_ROUTINE
+        pixel_rooms_close();
+        string_format(log, "  NOTE pixel rows: %p cases\n", checks - had);
+}
+
+/*
         wire_message, wire_slot and rects_clip against the C they stand for
         (the Wayland shim's own, src/canvas/wayland.c, as it read a head,
         looked an id up and cut a commit's damage before they were these).
@@ -17623,6 +18649,7 @@ fn check_span_byte()
         X(memory_search_prepare)                                              \
         X(memory_count_records_with_prepared) X(memory_count_words)           \
         X(string_first_of) X(string_first_of_or_end) X(string_first_of_max)   \
+        X(string_first_of_either_or_end)                                     \
         X(string_last_of) X(string_last_of_or_end) X(string_cut)              \
         X(string_replace_all) X(writer_fill) X(writer_field)                  \
         X(string_to_field) X(positive_to_padded) X(positive_into_padded)      \
@@ -17763,6 +18790,7 @@ static const string_address dirty_names[DIRTY_ROUTINES] = { DIRTY_LIST(DIRTY_NAM
 static address_any const dirty_addresses[DIRTY_ROUTINES] = { DIRTY_LIST(DIRTY_ADDRESS) };
 
 static positive dirty_compared[DIRTY_ROUTINES], dirty_wrong[DIRTY_ROUTINES];
+static positive dirty_either_compared, dirty_either_wrong;
 static positive dirty_tier;
 static p64 dirty_seed = 0x6a09e667f3bcc909ull;
 
@@ -18543,6 +19571,18 @@ static fn dirty_strings_one(positive size, positive residue, positive turn)
                       DIRTY_ROUTINE(string_first_of_or_end)(at, C8(value)),
                       DIRTY(2, string_first_of_or_end)(P(at), D8(value)),
                       where);
+        //      Two bytes, each with its own junk: the lexer's quote and backslash, and every pair the values make. The
+        //      clean answer is the lexer's loop's as well: under VERIFY_NARROW_KERNEL that is the one row that holds the
+        //      kernel's bodies (arm64's is a word-at-a-time body of its own) to it.
+        if (DIRTY_HAS(string_first_of_either_or_end))
+        {
+                string_address clean = DIRTY_ROUTINE(string_first_of_either_or_end)(at, C8(value), C8B(replace));
+
+                AGREE(string_first_of_either_or_end, clean,
+                      DIRTY(3, string_first_of_either_or_end)(P(at), D8(value), D8(replace)), where);
+                dirty_either_compared++;
+                dirty_either_wrong += clean != reference_string_first_of_either_or_end(at, value, replace);
+        }
         if (DIRTY_HAS(string_first_of_max))
                 AGREE(string_first_of_max,
                       DIRTY_ROUTINE(string_first_of_max)(at, bound, C8(value)),
@@ -19349,6 +20389,7 @@ fn check_dirty_arguments(void)
 {
         for (positive r = 0; r < DIRTY_ROUTINES; r++)
                 dirty_compared[r] = dirty_wrong[r] = 0;
+        dirty_either_compared = dirty_either_wrong = 0;
 
         dirty_tiers(dirty_hunts);
         dirty_tiers(dirty_fill);
@@ -19399,6 +20440,12 @@ fn check_dirty_arguments(void)
                                       dirty_compared[r]);
                 same(dirty_names[r], "asked with bits above a narrow argument",
                      dirty_compared[r] > 0, 1);
+        }
+        if (dirty_addresses[DIRTY_string_first_of_either_or_end])
+        {
+                same("string_first_of_either_or_end", "the strings it was asked of, against the lexer's loop",
+                     dirty_either_wrong, 0);
+                same("string_first_of_either_or_end", "asked of strings", dirty_either_compared > 0, 1);
         }
         string_format(log, "  NOTE narrow arguments: %p answers compared, "
                            "%p routines not in this library\n",
@@ -31923,6 +32970,10 @@ b32 main()
         // making a formatter change wait on unrelated platform tests when a
         // target is available only through a minimal linker and qemu-user.
         check_formatters();
+#elif defined(VERIFY_PIXELS_ONLY)
+        // The rows of the compositor's, the kit's, the font engine's and the lexer's eleven routines alone (check_pixel_rows):
+        // a change to one of them, and the breaks that show the rows fail, without the whole lane.
+        check_pixel_rows();
 #elif defined(VERIFY_BINS_ONLY)
         // The bins' and the word hash's rows alone: a few seconds on each machine, for a change to those routines
         // and for showing the rows fail when one of them is broken.
@@ -31982,6 +33033,7 @@ b32 main()
         check_translate();
         check_automaton();
         check_bins();
+        check_pixel_rows();
         check_wire();
         check_hand();
         check_wire_arguments();
