@@ -313,6 +313,11 @@ describe()
 #       and every file in the tree is in one, or is named below as in none;
 #       differential_oracle holds both to this list.
 #
+#       libdiff is lib's (it holds src/lib.c's memory routines to C) and
+#       modem is link's (src/waterlink/modem.c): both were added in no seam,
+#       as were the languages, src/dbus, the three files host.c includes and
+#       tools/, so --changed never ran them and the engine's seam check failed.
+#
 #       A seam's run list is what --seam and --changed run. Its apart list
 #       is the rest of its lanes: a lane that is the sum of others in the run
 #       list (net is net_fast .. net_http, one thread of them), and one that
@@ -324,10 +329,10 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged audiolib clang" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged audiolib clang" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
-        link) echo "waterlink link" ;;
+        link) echo "waterlink modem link" ;;
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
@@ -360,7 +365,7 @@ seam_of_path()
         case $1 in
         src/lib.c | src/lib.util.c | src/platform/*) echo lib ;;
         src/net/* | src/sh/net.c) echo net ;;
-        src/waterlink/*) echo link ;;
+        src/waterlink/* | tools/modem_rx.c | tools/push_dictionary.py) echo link ;;
         src/sh/gzip.c | src/sh/xz.c | src/sh/zstd.c | src/sh/tar.c) echo compress ;;
         src/sh/shell.c | src/sh/lex.c | src/sh/lex_line_floor.inc | src/sh/parse.c | \
         src/sh/exec.c | src/sh/expand.c | src/sh/builtin.c | src/sh/pty.c | \
@@ -371,8 +376,9 @@ seam_of_path()
         programs/utilities.c | programs/monitor.sh) echo tools ;;
         src/sh/registry.c) echo machine desktop ;;
         src/sh/host.c | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
-        main.moonwater.sh) echo machine ;;
-        src/sh/edit.c | src/canvas/* | src/audio/* | fonts/*) echo desktop ;;
+        src/sh/host_words.h | src/sh/splash_mark.c | main.moonwater.sh) echo machine ;;
+        src/sh/languages.c | languages/*) echo machine desktop ;;
+        src/sh/edit.c | src/canvas/* | src/audio/* | src/dbus/* | fonts/*) echo desktop ;;
         src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
         test/checks.c | test/run | test/differential.py) echo suite ;;
         test/codec_floor/*) echo compress ;;
