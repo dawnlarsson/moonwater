@@ -129023,7 +129023,36 @@ static long card_fake_node(unsigned int minor);
 #ifdef CHECK_draw_list
 #define COMPOSITOR_LIST_RENDER_EXTERNAL // the list rows below draw their own renderer (compositor_gpu_list_render, after this file)
 #endif
+#ifdef CHECK_terminal
+/*
+        A page no one may touch after every mapping the compositor makes, while a row asks for it (space_guarded, the size
+        rows of check_compositor_space_sizes): a buffer's own pages, rounded up, and then one with no access, so a store one
+        row past a buffer's end is a fault there and not a write into whatever the kernel mapped next to it. The guard page
+        is kept when the buffer is given back (the row runs in a child, which ends). Off, every call is the one it always is.
+*/
+static int space_guarded;
+
+static bipolar space_guard_call_6(positive number, positive a, positive b, positive c, positive d, positive e, positive f)
+{
+        positive length = (b + 4095) & ~4095ul;
+        bipolar room, mapped;
+
+        if (!space_guarded || number != syscall(mmap) || a || !b)
+                return system_call_6(number, a, b, c, d, e, f);
+        room = system_call_6(syscall(mmap), 0, length + 4096, 0, 0x22, (positive)-1, 0); // PROT_NONE, private and anonymous
+        if (room < 0 && room > -4096)
+                return room;
+        mapped = system_call_6(syscall(mmap), (positive)room, b, c, d | 0x10, e, f); // MAP_FIXED over the room's first pages
+        if (mapped < 0 && mapped > -4096)
+                system_call_2(syscall(munmap), (positive)room, length + 4096);
+        return mapped;
+}
+#define system_call_6(number, a, b, c, d, e, f) space_guard_call_6(number, a, b, c, d, e, f)
+#endif
 #include "../src/canvas/compositor.c"
+#ifdef CHECK_terminal
+#undef system_call_6
+#endif
 #undef system_control
 #define system_control(handle, request, argument)                            \
         system_call_3(syscall(ioctl), (positive)(handle),                    \
@@ -139335,6 +139364,195 @@ static void check_compositor_card_turn(void)
 
     card_fake_close();
     compositor_displays_path = SETTING_CANVAS_DISPLAYS_PATH;
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+}
+
+/*
+        The space taken again at another size under a running desktop: a screen swapped for a larger or a smaller one, a
+        game's mode, a scale, a turn. What the compositor keeps for the space (the scanout and its second plate, the
+        mirror and the slices it composes apart in, a turned screen's own buffer, the bands and their glass) has to be the
+        space's size by the next time anything is drawn into it: the owner's compositor died of a fill one row past a
+        buffer's end, a store into the page after it (accd044, the overlay's buffers kept at an older width, 2abdbf66).
+        Here the fake card's panel goes from 1280 by 720 to 1920 by 1080 and to 1024 by 768, the screen is asked for 200
+        percent and is turned a quarter by Canvas, and it comes back to 1280 by 720, with three windows and the band on
+        each of the four edges, written in a face, and after each a whole present as each kind of card has it (one that
+        scans its buffer out: the two plates; one that copies what it is told changed: composed apart; a screen turned:
+        the mirror). Every mapping the compositor makes has a page after it that nothing may touch (space_guarded), and it
+        all runs in a child, so a store past a buffer's end is the child's fault and this row's red, with the step it was
+        at. The overlay and a window shown straight need a plane and udmabuf the fake card has not: CHECK_gpu_kit's rows
+        hold those two buffers (gpu_overlay_rows, compositor_direct_under_ready's).
+*/
+#define SPACE_STEPS_NAMED 9
+
+static const char address_to const space_step_names[SPACE_STEPS_NAMED] = {
+    "the first take at 1280 by 720", "the windows and the band", "1280 by 720 drawn", "taken again at 1920 by 1080",
+    "1920 by 1080 drawn", "taken again at 1024 by 768", "1024 by 768 drawn", "200 percent, then turned a quarter, drawn",
+    "back at 1280 by 720, drawn"};
+
+static b32 space_displays(const char address_to path, const char address_to line)
+{
+    bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_CLOEXEC, 0600);
+    positive length = 0;
+
+    if (handle < 0)
+        return false;
+    while (line[length])
+        length++;
+    if (length)
+        system_write_once(handle, line, length);
+    system_close(handle);
+    return true;
+}
+
+// Every kind of card's present of the whole space, with the band on each edge: what the space's buffers are drawn into.
+static fn space_draw_all(void)
+{
+    static const char address_to const kinds[3] = {"fake", "virtio_gpu", "amdgpu"};
+    static const char address_to const edges[4] = {"bottom", "left", "top", "right"};
+
+    for (unsigned int edge = 0; edge < 4; edge++)
+    {
+        // What compositor_taskbar_settings_read does with a position read: the band laid there, its memory, its tabs and the room.
+        compositor_tabs_changed();
+        taskbar_settings_set(edges[edge], "primary", "");
+        compositor_band_room();
+        compositor_tabs_changed();
+        compositor_room_follow();
+        for (unsigned int kind = 0; kind < 3; kind++)
+        {
+            memory_zero(compositor.driver, sizeof(compositor.driver));
+            memory_copy(compositor.driver, kinds[kind], string_length((string_address)kinds[kind]));
+            compositor_apart_drop(); // the card's kind is asked again (compositor_changed_ready), as after a take
+            compositor_damage_space();
+            compositor_present();
+            compositor_flip_done();
+        }
+    }
+}
+
+// The child: the steps, each said in step before it is begun; 0 when every one was done.
+static int space_session(volatile unsigned int address_to step, const char address_to path)
+{
+    static const char face[] = "fonts/inter/Inter-Regular.ttf";
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul, buffer;
+    long mapped;
+    int rooms;
+
+    space_guarded = 1;
+    *step = 0;
+    if (!space_displays(path, "") || !card_fake_open(1280, 720))
+        return 10;
+    compositor_displays_path = path;
+    compositor.scale = 100;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
+    if (compositor_space_take(1) != 0 || compositor.width != 1280 || compositor.height != 720)
+        return 11;
+
+    // The table, its buffers the session's room (compositor_buffer_room), mapped as the compositor maps its own, and three windows in it.
+    *step = 1;
+    buffer = compositor_buffer_room();
+    mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    if (mapped < 0 && mapped > -4096)
+        return 12;
+    compositor.table = (struct windows address_to)mapped;
+    compositor.table->motion = 1;
+    compositor.pixels = compositor.table->pixels = header;
+    compositor.buffer = compositor.table->buffer = buffer;
+    compositor.table->stride = (unsigned int)compositor_stride();
+    compositor_table_outputs();
+    rooms = (int)(buffer / ((unsigned long)compositor_stride() * 4));
+    compositor.table->x[1] = 40, compositor.table->y[1] = 30;
+    life_paint(1, 400, 300, rooms);
+    compositor.table->x[2] = 900, compositor.table->y[2] = 400;
+    life_paint(2, 640, 480, rooms);
+    compositor.table->x[3] = 0, compositor.table->y[3] = 0;
+    life_paint(3, 1280, 720, rooms);
+    compositor_font((string_address)face);
+    if (!compositor.band)
+        return 13;
+
+    *step = 2;
+    space_draw_all();
+
+    *step = 3;
+    card_fake.width = 1920, card_fake.height = 1080;
+    if (compositor_space_take(0) != 0 || compositor.width != 1920 || compositor.height != 1080)
+        return 14;
+    *step = 4;
+    space_draw_all();
+
+    *step = 5;
+    card_fake.width = 1024, card_fake.height = 768;
+    if (compositor_space_take(0) != 0 || compositor.width != 1024 || compositor.height != 768)
+        return 15;
+    *step = 6;
+    space_draw_all();
+
+    *step = 7;
+    if (!space_displays(path, "eDP-1 scale=200\n") || compositor_space_take(0) != 0 || compositor.scale != 200)
+        return 16;
+    space_draw_all();
+    if (!space_displays(path, "eDP-1 scale=200 rotation=90\n") || compositor_space_take(0) != 0 ||
+        compositor.output[0].turned != 2 || compositor.width != 768 || compositor.height != 1024)
+        return 17;
+    space_draw_all();
+
+    *step = 8;
+    card_fake.width = 1280, card_fake.height = 720;
+    if (!space_displays(path, "") || compositor_space_take(0) != 0 || compositor.width != 1280 || compositor.height != 720 ||
+        compositor.output[0].turned)
+        return 18;
+    space_draw_all();
+    return 0;
+}
+
+static void check_compositor_space_sizes(void)
+{
+    static const char path[] = "compositor-space-sizes.tmp";
+    volatile unsigned int address_to step;
+    bipolar child, waited = 0;
+    positive status = 0;
+    long shared = (long)system_call_6(syscall(mmap), 0, 4096, 3, 0x21, (positive)-1, 0); // shared with the child, anonymous
+
+    if (shared < 0 && shared > -4096)
+    {
+        check("space sizes: the page the child says its step in is made", false);
+        return;
+    }
+    step = (volatile unsigned int address_to)shared;
+    *step = SPACE_STEPS_NAMED;
+    child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+    if (child == 0)
+        system_call_1(syscall(exit_group), (positive)space_session(step, path));
+    for (int tries = 0; child > 0 && tries < 6000 && waited != child; tries++)
+    {
+        timespec nap = {0, 10000000};
+
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 1, 0);
+        if (waited != child)
+            system_call_2(syscall(nanosleep), (positive)&nap, 0);
+    }
+    if (child > 0 && waited != child)
+    {
+        system_call_2(syscall(kill), (positive)child, 9);
+        system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    }
+    checks++;
+    if (child <= 0 || waited != child || (status & 0xffff) != 0)
+    {
+        failures++;
+        string_format(log, "  FAIL space sizes: the compositor taken again at 1920 by 1080, 1024 by 768, 200 percent, turned and back, "
+                           "and drawn whole each time with the band on every edge, stores nothing past a buffer it keeps for the space: "
+                           "stopped at %s, %s (the child's status %p)\n",
+                      (string_address)(*step < SPACE_STEPS_NAMED ? space_step_names[*step] : "its start"),
+                      (string_address)((status & 0x7f) == 11 ? "a fault, a store past a buffer's end"
+                                       : (status & 0x7f) ? "killed" : "a step that did not happen"), status);
+        log_flush();
+    }
+    system_call_2(syscall(munmap), (positive)shared, 4096);
     system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
 }
 
@@ -178049,6 +178267,7 @@ b32 main()
         check_compositor_touch_hold_gone();
         check_compositor_card_lists();
         check_compositor_card_turn();
+        check_compositor_space_sizes();
         check_compositor_card_edid();
         check_compositor_card_walk();
         check_compositor_screen_wait();
