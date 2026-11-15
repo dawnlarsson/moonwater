@@ -242219,6 +242219,9 @@ static void dl_app_rows(void)
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
         table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
         table->list_mode = 1;
+        // The row starts as one the compositor has not refused: the list rows before these share the table and end on a refused row (list_state 2, the
+        // partial list's), which ui_list_wanted rightly paints as pixels.
+        table->list_state[0] = 0;
         // The pictures start clear: the list rows before these wrote a marker into buffer 0.
         memory_zero(windows_buffer(table, 0, 0), DL_BUFFER);
         memory_zero(windows_buffer(table, 0, 1), DL_BUFFER);
