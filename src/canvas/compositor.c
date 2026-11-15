@@ -1,56 +1,42 @@
 /*
-        The compositor in userspace, and the smallest programs that draw on it.
+        The compositor in userspace, and the smallest program that draws on it.
 
-        `compositor` takes the display from Canvas the way any program can:
-        it opens the card, becomes its master, puts a buffer of its own on
-        the screen at the mode Canvas left, and reads the keyboard and the
-        pointer through evdev, the devices that are there and the ones that
-        are plugged in later. While it holds the card Canvas draws nothing
-        and keeps the console keyboard muted, and its own input handler
-        still hears Control-Alt-Backspace, which ends this program's session
-        if it ever stops answering. When it exits, the card's last file
-        closes and Canvas's restore hook draws its ground again at once.
+        `compositor` takes the display from Canvas the way any program can: it takes the card that has a screen and
+        makes it its master, drives every screen connected as one space across them, each at the mode Canvas left on it
+        (or its preferred one) and the rate its displays line asks, and reads keyboards, pointers, tablets and touch
+        screens through evdev, the ones that are there and the ones plugged in later. While it holds the card Canvas
+        draws nothing and keeps the console keyboard muted, and its own input handler still hears Control-Alt-Backspace,
+        which ends this program's session if it ever stops answering. When it exits, the card's last file closes and
+        Canvas's restore hook draws its ground again at once. With -H it draws into a file instead of a card.
 
-        What it draws is the desktop ink and each window's own pixels inside
-        a black line of one pixel, round at the corners, and over them the
-        panel: a row of tabs in the middle of the bottom edge -- one for each
-        window, as wide as its title, and the tray with the time -- whose rest
-        is off the output, with nothing between them.
+        A window is a row of one table (struct windows, window.c) that the compositor makes and every program maps: the
+        program writes its picture, its size and its title there and knocks on its row's door, and the compositor writes
+        where the window is, the size it asks for, which window has the keys and the events, and knocks back. A Wayland
+        client is given a row by the shim (wayland.c, wayland_host.c), and Xwayland's windows by its window manager
+        (xwm.c). What a person does with the keys, the hand and the fingers moves, arranges and closes windows here;
+        what a window shows is its program's.
 
-        A window is a row of one table (struct windows, window.c) that the
-        compositor makes and every program maps: the program writes its
-        picture, its size and its title there and knocks on its row's door,
-        and the compositor writes where the window is, the size it asks for,
-        which window has the keys and the events, and knocks back. A window
-        stacks, the press of a button raises it and gives it the keys, a press
-        on its top, whatever is drawn there, or with Alt anywhere on it drags
-        it, a press just outside its edges resizes it, its close button,
-        Alt-F4 or a middle press on its tab asks it to go, and it is kept on
-        the output, which a window filling it fills whole, the tabs lying over
-        it. When its program ends, its door closes and it is gone.
+        What it draws is each window in its frame, the theme's line and round corners, over the desktop's ground, and the
+        taskbar's band of tabs and tray on an edge of a screen, or of each, through glass (the kit draws the band:
+        ui/taskbar.c). Only what changed is drawn: on the processor or, where the card can, by its render node (gpu.c);
+        into the second of two plates and flipped to, where the card shows what its buffer holds, or in place and told
+        the rows that changed, where it copies them; and not at all for a window that fills its screen, which the card
+        shows straight from the window's own buffer, the tabs on a plane of their own where it has one.
 
-        Damage is the union of what the programs say changed, composed
-        straight onto the scanout, each pixel once but in the round corners.
+        The settings are the files under /root that `moonwater canvas` and the settings write: the theme and the look,
+        the ground and the pointer, the displays and their arrangement, the taskbar, the keyboard, the hand, touch and
+        the GPU, each read at the start and again whenever it is written.
 
-        What the kernel desktop did for a hand and a keyboard it does here:
-        keys are the characters of the layout `moonwater keyboard` set (every
-        layout the kernel had, AltGr as the third level, dead accents and
-        Caps Lock besides), Alt-Tab, Alt-F4 and Alt-F9 are the compositor's
-        and the machine script's key_ functions are its chords (key_ctrl_shift_t, a
-        terminal), the pointer is gained by the speed of the hand and
-        wears a shape for the edge it is over, a window is arranged to fill
-        the output or half of it by a double click on its top or with Alt
-        held, or by a drag to an edge, Alt and the right button resize it
-        from the corner nearest the hand, and a machine that slept has its
-        screen drawn again.
+        This file holds the switches, the kit's shared part and gpu.c, the kernel's interfaces, the compositor's state,
+        the table and its doors, the signals and uevents, a headless screen, the options, the startup and the loop. The
+        rest is in the thirteen parts it includes from compositor/, each of which says what it holds: compose.c,
+        keymap.c, pointer.c and outputs.c (the backend: the look, what a key and a hand mean, the rules of the space),
+        damage.c, glass.c, scanout.c, gpu_host.c and present.c (what changed, and how a frame reaches the screen), kms.c
+        (the card and its screens), session.c (a sleep, the settings, the devices, the doors), manage.c (the windows) and
+        input.c (what a person does).
 
-        The desktop's ink and the pointer's size and colours are what
-        `moonwater canvas background` and `moonwater canvas cursor` kept in
-        /root, read when it starts and again whenever one is written.
-
-        `surface` is a test client: a window of one colour, a line of text
-        drawn with font.c when it is given a TrueType file, and a report on
-        standard output of everything it is told.
+        `surface` is a test client: a window of one colour, a line of text drawn with font.c when it is given a TrueType
+        file, and a report on standard output of everything it is told.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
