@@ -34,6 +34,7 @@ a tool it rewrites differs from HEAD, or where src/canvas/compositor/ is already
 import argparse
 import ast
 import hashlib
+import os
 import pathlib
 import re
 import shutil
@@ -388,6 +389,7 @@ def rewrite_mutations(text, main, parts, original):
     where = re.search(r'^C = "src/canvas/compositor\.c"\n', text, re.M)
     if wanted and not where:
         raise Refused('%s: no line C = "src/canvas/compositor.c" to put the parts\' names beside' % MUTATIONS)
+    wanted = {name: path for name, path in wanted.items() if names.get(name) != path}
     if wanted:
         text = text[:where.end()] + ''.join('%s = "%s"\n' % item for item in sorted(wanted.items())) + text[where.end():]
     return text
@@ -488,17 +490,12 @@ def audit_count(tree, seal):
     return count.group(1)
 
 
-def check(tree):
-    """The split made in tree (a copy) and held to every check; answers what was written."""
-    before_count = audit_count(ROOT, False)
-    written, plan, original = outputs(tree)
-    for name, text in written.items():
-        write(tree, name, text)
-    say('the parts put back are compositor.c byte for byte')
-
-    sections = check_sections((ROOT / 'test/checks.c').read_text())
+def compare_views(before_tree, after_tree):
+    """gcc -E -P of every view in before_tree and in after_tree: byte-identical, or identical but for the indentation GCC gives
+       a line once it has stopped tracking columns."""
+    sections = check_sections((before_tree / 'test/checks.c').read_text())
     for source, flags in VIEWS + [('test/checks.c', FREESTANDING + ['-D' + name]) for name in sections]:
-        before, after = preprocessed(ROOT, source, flags), preprocessed(tree, source, flags)
+        before, after = preprocessed(before_tree, source, flags), preprocessed(after_tree, source, flags)
         label = 'gcc -E -P %s %s' % (' '.join(flags), source)
         if before == after:
             say('%s: byte-identical (%d bytes, sha256 %s)' % (label, len(after), hashlib.sha256(after).hexdigest()[:16]))
@@ -509,6 +506,17 @@ def check(tree):
             'column only while it still tracks columns, which it stops doing once a translation unit this large has used '
             'their room (LINE_MAP_MAX_LOCATION_WITH_COLS), and how soon depends on how the text is cut in files; every '
             'token and every line is the same' % (label, indented(before, after), first_line(before, after), len(after)))
+
+
+def check(tree):
+    """The split made in tree (a copy) and held to every check; answers what was written."""
+    before_count = audit_count(ROOT, False)
+    written, plan, original = outputs(tree)
+    for name, text in written.items():
+        write(tree, name, text)
+    say('the parts put back are compositor.c byte for byte')
+
+    compare_views(ROOT, tree)
 
     after_count = audit_count(tree, True)
     if after_count != before_count:
@@ -542,6 +550,129 @@ def check(tree):
     return written
 
 
+# ---- carrying a branch across the split ----
+
+def git(*args, env=None, data=None):
+    done = subprocess.run(['git'] + list(args), cwd=str(ROOT), capture_output=True, env=env, input=data)
+    if done.returncode:
+        raise Refused('git %s: %s' % (' '.join(args[:2]), done.stderr.decode(errors='replace').strip()[-1200:]))
+    return done.stdout.decode(errors='replace').strip()
+
+
+def shown(rev, path):
+    """A file's text at rev, or None where rev has no such file."""
+    done = subprocess.run(['git', 'show', '%s:%s' % (rev, path)], cwd=str(ROOT), capture_output=True)
+    return done.stdout.decode() if done.returncode == 0 else None
+
+
+def cut_at(rev):
+    """rev's compositor.c cut, with the tools rewritten for it: {path: text} for the split's files."""
+    text = shown(rev, SOURCE)
+    if text is None:
+        raise Refused('%s has no %s' % (rev, SOURCE))
+    try:
+        main, parts, _ = split(text)
+    except Refused as refusal:
+        raise Refused('%s: %s' % (rev[:12], refusal))
+    if flatten(main, parts) != text:
+        raise Refused('%s: the parts put back are not its compositor.c' % rev[:12])
+    files = {SOURCE: main}
+    files.update({'%s/%s' % (PARTS, part): body for part, body in parts.items()})
+    for tool, rewrite in ((DIFFERENTIAL, lambda t: rewrite_differential(t)), (PERFORMANCE, lambda t: rewrite_performance(t, main, parts)),
+                          (MUTATIONS, lambda t: rewrite_mutations(t, main, parts, text))):
+        before = shown(rev, tool)
+        if before is not None:
+            files[tool] = rewrite(before)
+    return files, text
+
+
+def tree_with(index, base, files, patch=None):
+    """A tree: base's, with patch applied three ways (the changes of a commit outside compositor.c) and then files written."""
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    git('read-tree', base, env=env)
+    if patch:
+        git('apply', '--cached', '--3way', '--whitespace=nowarn', env=env, data=patch)
+    for path, text in files.items():
+        blob = git('hash-object', '-w', '--stdin', data=text.encode())
+        git('update-index', '--add', '--cacheinfo', '100644,%s,%s' % (blob, path), env=env)
+    return git('write-tree', env=env)
+
+
+def functions_of(text):
+    return [name for name, _, _ in functions(text)]
+
+
+def ambiguous(old, new):
+    """The functions new has and old does not that sit between two old functions of different parts."""
+    main, parts, plan = split(new)
+    part_of = {name: index for index, (_, _, _, inside) in enumerate(plan) for name in inside}
+    known, order, found = set(functions_of(old)), functions_of(new), []
+    for at, name in enumerate(order):
+        if name in known:
+            continue
+        before = next((order[k] for k in range(at - 1, -1, -1) if order[k] in known), None)
+        after = next((order[k] for k in range(at + 1, len(order)) if order[k] in known), None)
+        # A function before the first cut is compositor.c's own prelude's (-1).
+        here, there = part_of.get(before, -1), part_of.get(after, -1)
+        if before and after and here != there:
+            found.append('%s (between %s of %s and %s of %s)' % (name, before, plan[here][0] if here >= 0 else 'the prelude',
+                                                                  after, plan[there][0] if there >= 0 else 'the prelude'))
+    return found
+
+
+def split_commit(rev, index):
+    """A commit on rev that is rev with its compositor.c cut (a scratch split, for --prove): its hash."""
+    files, _ = cut_at(rev)
+    tree = tree_with(index, rev + '^{tree}', files)
+    return git('commit-tree', tree, '-p', rev, '-m', 'canvas: compositor.c cut in parts (a scratch split, test/compositor_split.py)')
+
+
+def carry(branch, split_rev, index):
+    """branch's commits since split_rev's parent, cut the same way, as commits on split_rev: the last one's hash."""
+    parent = git('rev-parse', split_rev + '^')
+    tip = git('rev-parse', branch + '^{commit}')
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', parent, tip], cwd=str(ROOT)).returncode:
+        raise Refused('%s does not descend from %s, the commit the split was made on: rebase it onto %s (or onto main from '
+                      'before the split) and carry it again' % (branch, parent[:12], parent[:12]))
+    if tip == git('rev-parse', 'HEAD') and git('status', '--porcelain', '--untracked-files=no'):
+        raise Refused('%s is checked out here with edits not committed: commit them first, then carry' % branch)
+    commits = git('rev-list', '--reverse', '--topo-order', '%s..%s' % (parent, tip)).split()
+    if any(len(git('rev-list', '--parents', '-n', '1', commit).split()) != 2 for commit in commits):
+        raise Refused('%s has a merge since %s: rebase it into a line of commits and carry it again' % (branch, parent[:12]))
+    base_text = shown(parent, SOURCE)
+    carried, previous = git('rev-parse', split_rev), parent
+    for commit in commits:
+        files, text = cut_at(commit)
+        odd = ambiguous(base_text, text)
+        if odd:
+            raise Refused('%s adds functions at a cut, where the part they belong to is not known: %s. Move each after a function '
+                          'of the part it belongs to and carry again' % (commit[:12], '; '.join(odd)))
+        # The files the cut writes are the commit's own, cut and rewritten, and the seal is resealed after the carry, so neither is
+        # in the patch of the commit's other changes.
+        excluded = [':(exclude)' + path for path in list(files) + ['test/function_audit.seal']]
+        patch = subprocess.run(['git', 'diff', '--binary', '--full-index', previous, commit, '--', '.'] + excluded,
+                               cwd=str(ROOT), capture_output=True).stdout
+        tree = tree_with(index, carried + '^{tree}', files, patch)
+        author = git('log', '-1', '--format=%an%x00%ae%x00%aI%x00%B', commit).split('\0', 3)
+        env = dict(os.environ, GIT_AUTHOR_NAME=author[0], GIT_AUTHOR_EMAIL=author[1], GIT_AUTHOR_DATE=author[2])
+        carried = git('commit-tree', tree, '-p', carried, env=env, data=author[3].encode())
+        say('%s -> %s %s' % (commit[:12], carried[:12], author[3].split('\n')[0][:90]))
+        previous = commit
+    return carried, len(commits)
+
+
+def tree_dir(rev, into):
+    """rev's files in the directory into (and the built GPU kernels), for the preprocessor."""
+    into.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(['git', 'archive', rev], cwd=str(ROOT), capture_output=True)
+    if archive.returncode:
+        raise Refused('git archive %s failed' % rev)
+    subprocess.run(['tar', '-x', '-C', str(into)], input=archive.stdout, check=True)
+    (into / 'artifacts').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'artifacts/gpu_kernels.inc', into / 'artifacts/gpu_kernels.inc')
+    return into
+
+
 def say(text):
     print('  ' + text)
 
@@ -560,14 +691,48 @@ def print_plan(plan, text):
         print('  %s: %s' % (path, why))
 
 
+def carry_main(arguments):
+    """--carry and --prove."""
+    branch = arguments.carry or arguments.prove
+    with tempfile.TemporaryDirectory(prefix='compositor-carry-') as scratch:
+        scratch = pathlib.Path(scratch)
+        index = scratch / 'index'
+        if arguments.prove:
+            base = git('merge-base', branch, 'origin/main')
+            split_rev = split_commit(base, index)
+            print('a scratch split of %s, where %s left main: %s' % (base[:12], branch, split_rev[:12]))
+        else:
+            split_rev = arguments.split or git('log', '--diff-filter=A', '--format=%H', 'HEAD', '--', PARTS + '/compose.c').split('\n')[-1]
+            if not split_rev:
+                raise Refused('no commit on HEAD made %s: the split is not on this branch yet (name it with --split REV)' % PARTS)
+        print('carrying %s onto %s:' % (branch, split_rev[:12]))
+        carried, count = carry(branch, split_rev, index)
+        if arguments.prove:
+            print('%s unsplit against %s carried, preprocessed:' % (branch, carried[:12]))
+            compare_views(tree_dir(branch, scratch / 'unsplit'), tree_dir(carried, scratch / 'carried'))
+            print('the carry holds for %s (%d commits)' % (branch, count))
+            return 0
+    name = branch if not re.fullmatch(r'[0-9a-f]{7,40}', branch) else branch[:12]
+    git('update-ref', 'refs/heads/carried/' + name, carried)
+    print('carried/%s is %s, %d commits on %s; in the branch\'s worktree: git reset --hard carried/%s, then rebase onto main' %
+          (name, carried[:12], count, split_rev[:12], name))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true', help='make the split in a copy and hold it to its checks')
     mode.add_argument('--apply', action='store_true', help='--check, then write the split into this tree')
+    mode.add_argument('--carry', metavar='BRANCH', help="carry BRANCH's commits across the split: refs/heads/carried/BRANCH")
+    mode.add_argument('--prove', metavar='BRANCH', help='--carry onto a scratch split of where BRANCH left main, and hold the '
+                      'carried tree to the views of BRANCH unsplit; nothing is kept')
     parser.add_argument('--keep', metavar='DIR', help="make --check's copy in DIR (new or empty) and leave it there")
+    parser.add_argument('--split', metavar='REV', help='the split commit to carry onto (default: the one on HEAD that made the parts)')
     arguments = parser.parse_args()
     try:
+        if arguments.carry or arguments.prove:
+            return carry_main(arguments)
         text = (ROOT / SOURCE).read_text()
         _, _, plan = split(text)
         print_plan(plan, text)
