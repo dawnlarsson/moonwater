@@ -76,7 +76,10 @@ pool that moves moves its layers with it (`compositor_wl_remap`). A client's
 row closing or the client going lets go of the layers with the row. A layer
 is bounded: WAYLAND_LAYERS a window, COMPOSITOR_LAYERS in all, the window's
 rectangle, a buffer the processor reads at its own size, no transform. And
-`wayland_let_go` releases a buffer when its last hold goes.
+`wayland_let_go` releases a buffer when its last hold goes. Layers are off
+where `/run/moonwater/layers-off` is there when the compositor starts (every
+subsurface laid into its window's picture as before), for a comparison on a
+card in one restart.
 
 **Tests that fail without the fix.** CHECK_wayland (lane `wayland`),
 `test_layers`: "the buffer it replaced is not released before a frame is

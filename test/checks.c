@@ -241786,6 +241786,37 @@ static void gpu_scan_rows(void)
 }
 
 /*
+        Layers off (/run/moonwater/layers-off at the shim's start, compositor_wl_layers.off): the host keeps no subsurface as a layer, whatever it is
+        handed (row_layers answers 0, the shim's way to lay them into the window's picture as before), with the root's picture lent or not.
+*/
+static void gpu_layers_off_rows(void)
+{
+        static unsigned int pixels[8 * 8];
+        struct wayland_picture layer;
+        unsigned char kept_off = compositor_wl_layers.off;
+        struct windows *kept_table = compositor.table;
+        struct windows table;
+
+        memory_zero(&table, sizeof table);
+        compositor.table = &table;
+        memory_zero(&layer, sizeof layer);
+        // An 8 by 8 picture at (20, 20) of a 64 by 64 window: clear of its corners, a layer the host keeps when layers are on.
+        layer.pixels = layer.map = (const unsigned char *)pixels, layer.map_bytes = sizeof pixels, layer.stride = 32, layer.width = 8, layer.height = 8;
+        layer.dest_x = layer.dest_y = 20, layer.row_width = 64, layer.row_height = 64, layer.sync_fd = -1, layer.layer = 1, layer.changed = 1;
+        layer.full = 1, layer.last = 0;
+        compositor_wl_layers.off = 0;
+        check("gpu layers off: without the file, the window's subsurface handed with its picture is a layer",
+              compositor_wl_row_layers(0, 7, &layer, 1, 1) == WAYLAND_LAYERS_KEPT && compositor_wl_layers.count[7] == 1);
+        compositor_wl_layers_drop(7);
+        compositor_wl_layers.off = 1;
+        check("gpu layers off: with the file there, a window's subsurfaces are no layers, handed with its picture or alone",
+              compositor_wl_row_layers(0, 7, &layer, 1, 1) == 0 && compositor_wl_row_layers(0, 7, &layer, 1, 0) == 0 && !compositor_wl_layers.count[7]);
+        compositor_wl_layers_drop(7);
+        compositor_wl_layers.off = kept_off;
+        compositor.table = kept_table;
+}
+
+/*
         The overlay's buffers (compositor_overlay_buffers) are made at the output's width, and the band composed into them is the output's width
         at the present (compositor_present_overlaid): buffers made for a narrower output are made again, not composed into, and with no card to make
         them the overlay is refused (its tabs are patched into the window instead). Before, buffers with rows enough were kept at any width, and a
@@ -244513,6 +244544,7 @@ b32 main(void)
         // The rows of the shim's host that need no card (its state made by hand), before the card's.
         gpu_wc_rows();
         gpu_overlay_rows();
+        gpu_layers_off_rows();
         gpu_scan_rows();
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {

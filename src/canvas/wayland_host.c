@@ -209,6 +209,9 @@ static struct
         // y2 in the window's pixels, count -1 for more than there is room for (their box is damaged).
         int pending_row, pending_count, pending_box[4];
         int pending[WAYLAND_DAMAGE][4];
+        // /run/moonwater/layers-off was there when the shim started (compositor_wl_start): no subsurface is kept as a layer, every one laid
+        // into its window's picture as before, for the owner to compare one with the other in a restart.
+        unsigned char off;
 } compositor_wl_layers = {.pending_row = -1};
 
 // The layers of all rows together are held to COMPOSITOR_LAYERS (compositor_wl_layers.total), the frames a present has room for beside its
@@ -1731,7 +1734,7 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
                 return 0;
         // A window landing (drawn scaled) or of glass (composed over its backdrop) is drawn from one picture: its layers would be laid into it
         // at the next present (compositor_wl_settle), every present it is so, so they are refused here.
-        if (count < 0 || count > WAYLAND_LAYERS || (count && !layers) || compositor.landing[row] || compositor.glassy[row])
+        if (count < 0 || count > WAYLAND_LAYERS || (count && !layers) || compositor.landing[row] || compositor.glassy[row] || compositor_wl_layers.off)
         {
                 compositor_wl_layers_lay(row);
                 return 0;
@@ -4089,6 +4092,14 @@ static void compositor_wl_start(void)
 
         if (compositor_wl.started)
                 return;
+        // Layers off where the owner asks (/run/moonwater/layers-off), looked for once at the start: subsurfaces laid into their window as before.
+        {
+                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/layers-off", FILE_READ | O_CLOEXEC);
+
+                compositor_wl_layers.off = off >= 0;
+                if (off >= 0)
+                        system_close(off);
+        }
         memory_zero(address, sizeof address);
         address[0] = 1; // AF_UNIX
         while (COMPOSITOR_WL_PATH[length])
