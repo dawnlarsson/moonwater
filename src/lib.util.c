@@ -27921,6 +27921,53 @@ typedef char signal_kernel_action_is_the_size_the_kernel_reads
         [(sizeof(signal_kernel_action) == SIGNAL_KERNEL_ACTION_BYTES) ? 1 : -1];
 
 /*
+        The record as it is handed over: four words on every machine, and on
+        riscv64 the mask in the fourth word as well as in the third.
+
+        qemu-user before 10.0 gave riscv64 the restorer slot its kernel does
+        not have. Its generic/signal.h defined TARGET_SA_RESTORER for every
+        target that included it, so qemu-riscv64 reads and writes
+        rt_sigaction's records as four words -- handler, flags, a restorer it
+        stores and hands back and never uses, then the mask -- until QEMU
+        513823e7521a ("linux-user: Move TARGET_SA_RESTORER out of
+        generic/signal.h", February 2025) left it to the targets that have
+        one. Ubuntu 24.04's qemu 8.2.2 is one of those, and it is what runs
+        every riscv64 row of the lanes. Measured with a probe: an oldact of
+        eight marked words comes back from qemu-riscv64 8.2.2 with four
+        written; the riscv64 kernel writes three.
+
+        With the exact three-word record on riscv64, the eight bytes past it
+        were sigaction's saved s0, so the caller's s0 came back zero.
+        CHECK_stream's checked_write_errors keeps its verdict in s0 across
+        sigaction(SIGALRM, &wanted, &previous), so it answered false, main
+        returned 1 before the trace, and the stream lane's three riscv64 rows
+        (internal invariants, file trace, files produced) were red with no
+        trace and no files written. The mask was read from the fourth word,
+        which was zero, so no mask asked of riscv64 arrived under that qemu.
+
+        So the record is four words long and zeroed on all three, and riscv64
+        writes its mask into the fourth word too. What the riscv64 kernel gets
+        is unchanged: handler, flags and the mask in the third word, 24 bytes
+        read and 24 written. The fourth word is there only for qemu-user
+        before 10.0, and the kernel neither reads it nor writes it. That qemu
+        takes the third word as a restorer it never calls and the fourth as
+        the mask. Both block what the caller asked. On the way back the third word is the mask under
+        either: the kernel wrote it there, and that qemu handed back the
+        restorer it was given, which was the mask. The cost on a board is one
+        store and eight bytes of stack. A layout mutant that puts the mask in
+        the fourth word on riscv64 still fails on that kernel and on qemu 10,
+        but not on an older qemu, which reads the mask there.
+*/
+typedef union signal_kernel_record
+{
+        signal_kernel_action action;
+        positive words[4];
+} signal_kernel_record;
+
+typedef char signal_kernel_record_has_room_for_four_words
+        [(sizeof(signal_kernel_record) == 32) ? 1 : -1];
+
+/*
         The full disposition, in the caller's shape.
 
         Field for field this is glibc's struct sigaction: the handler union
@@ -27973,8 +28020,8 @@ typedef char signal_action_is_the_size_a_caller_believes
 KEEP b32 signal_action_change(b32 number, const signal_action address_to wanted,
                          signal_action address_to previous)
 {
-        signal_kernel_action asked;
-        signal_kernel_action had;
+        signal_kernel_record asked;
+        signal_kernel_record had;
         b32 outcome;
 
         memory_zero(address_of asked, sizeof asked);
@@ -27982,13 +28029,15 @@ KEEP b32 signal_action_change(b32 number, const signal_action address_to wanted,
 
         if (wanted)
         {
-                asked.handler = wanted->handler;
-                asked.flags = (positive)(p32)wanted->flags;
-                asked.mask = wanted->mask.words[0];
+                asked.action.handler = wanted->handler;
+                asked.action.flags = (positive)(p32)wanted->flags;
+                asked.action.mask = wanted->mask.words[0];
 
 #if X64 || ARM64
-                asked.flags |= (positive)SIGNAL_KERNEL_RESTORER;
-                asked.restorer = signal_return_trampoline;
+                asked.action.flags |= (positive)SIGNAL_KERNEL_RESTORER;
+                asked.action.restorer = signal_return_trampoline;
+#else
+                asked.words[3] = asked.action.mask;
 #endif
         }
 
@@ -28005,11 +28054,11 @@ KEEP b32 signal_action_change(b32 number, const signal_action address_to wanted,
         {
                 memory_zero(previous, sizeof(signal_action));
 
-                previous->handler = had.handler;
+                previous->handler = had.action.handler;
                 previous->flags =
-                        (b32)(p32)(had.flags &
+                        (b32)(p32)(had.action.flags &
                                    ~(positive)SIGNAL_KERNEL_RESTORER);
-                previous->mask.words[0] = had.mask;
+                previous->mask.words[0] = had.action.mask;
         }
 
         return 0;
