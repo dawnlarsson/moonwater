@@ -17166,25 +17166,50 @@ def shell_nesting_limits(farm):
 #       change. Without passwordless sudo both sides fail the same way.
 # ----------------------------------------------------------------------------
 
+#       uid 65534 has to reach the shell to start it: a candidate in a run's
+#       mktemp -d directory (mode 0700) could not be, and every case of the
+#       candidate died at the execve while the reference's /usr/bin/bash ran.
+#       Both sides are started from a link (or a copy) of themselves in a
+#       directory 65534 may enter, which the parent removes when it ends.
 shell_PRIVILEGE_DRIVER = r'''
-import os, sys
+import os, shutil, signal, sys, tempfile
 shell, name, identity, root, startup, probe = sys.argv[1:7]
 rest = sys.argv[7:]
 extra = rest[:rest.index("--")]
 flags = rest[rest.index("--") + 1:]
-if identity == "mismatch":
-    os.setresgid(65534, 0, 0)
-    os.setresuid(65534, 0, 0)
-elif identity == "saved":
-    os.setresgid(65534, 65534, 0)
-    os.setresuid(65534, 65534, 0)
 env = {"PATH": "/usr/bin:/bin", "HOME": root, "ROOT": root, "LC_ALL": "C",
        "BASH_ENV": startup, "CDPATH": root + "/search"}
 for item in extra:
     key, _, value = item.partition("=")
     env[key] = value
+reachable = None
+if identity != "plain":
+    reachable = tempfile.mkdtemp(prefix="privileged-", dir="/tmp" if os.path.isdir("/tmp") else None)
+    os.chmod(reachable, 0o755)
+    started = os.path.join(reachable, os.path.basename(shell))
+    try:
+        os.link(os.path.realpath(shell), started)
+    except OSError:
+        shutil.copy2(os.path.realpath(shell), started)
+        os.chmod(started, 0o755)
+    shell = started
 sys.stdout.flush()
-os.execve(shell, [name] + flags + ["-c", probe], env)
+child = os.fork()
+if child == 0:
+    if identity == "mismatch":
+        os.setresgid(65534, 0, 0)
+        os.setresuid(65534, 0, 0)
+    elif identity == "saved":
+        os.setresgid(65534, 65534, 0)
+        os.setresuid(65534, 65534, 0)
+    os.execve(shell, [name] + flags + ["-c", probe], env)
+_, status = os.waitpid(child, 0)
+if reachable:
+    shutil.rmtree(reachable, ignore_errors=True)
+if os.WIFSIGNALED(status):
+    signal.signal(os.WTERMSIG(status), signal.SIG_DFL)
+    os.kill(os.getpid(), os.WTERMSIG(status))
+sys.exit(os.WEXITSTATUS(status))
 '''
 
 shell_PRIVILEGE_SHOW = ('/usr/bin/python3 -c "import os; print(os.getresuid(), os.getresgid())"')
