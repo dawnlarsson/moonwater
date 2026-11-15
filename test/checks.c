@@ -166596,7 +166596,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.quick = true;
                 mixer.width = ui_strips_tree(&mixer.ui, s, 1, 0), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
                 mixer.shown = -1;
-                mixer.font = (string_address) "/fonts/ui.ttf";
+                mixer_app.font = (string_address) "/fonts/ui.ttf";
                 mixer_fixture_streams();
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false; // listed again whatever the page's number was
@@ -166699,21 +166699,21 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 }
 
                 // Beside the cell: the kit's anchor takes the rectangle the compositor left (the kit's own checks place a window beside it).
-                mixer.beside = true;
+                mixer_app.beside = true;
                 mixer_fixture_table.outputs = 2;
                 mixer_fixture_table.button_x = 2400, mixer_fixture_table.button_y = 1416, mixer_fixture_table.button_w = 40, mixer_fixture_table.button_h = 24;
                 mixer_fixture_table.button_edge = TASKBAR_BOTTOM, mixer_fixture_table.button_screen = 1;
                 mixer_fixture_table.output_x[0] = 0, mixer_fixture_table.output_y[0] = 0, mixer_fixture_table.output_w[0] = 2560, mixer_fixture_table.output_h[0] = 1440;
                 mixer_fixture_table.output_x[1] = 2560, mixer_fixture_table.output_y[1] = 0, mixer_fixture_table.output_w[1] = 1920, mixer_fixture_table.output_h[1] = 1080;
-                mixer.anchor.anchored = false;
-                ui_anchor_take(&mixer.anchor, &mixer_fixture_table, mixer.beside);
+                mixer_app.anchor.anchored = false;
+                ui_anchor_take(&mixer_app.anchor, &mixer_fixture_table, mixer_app.beside);
                 check("mixer popup: the rectangle the compositor left is taken once, with the screen it names",
-                      mixer.anchor.anchored && mixer.anchor.edge == TASKBAR_BOTTOM && mixer.anchor.number == 1 && mixer.anchor.button[0] == 2400 && mixer.anchor.button[2] == 40);
-                mixer.anchor.anchored = false;
+                      mixer_app.anchor.anchored && mixer_app.anchor.edge == TASKBAR_BOTTOM && mixer_app.anchor.number == 1 && mixer_app.anchor.button[0] == 2400 && mixer_app.anchor.button[2] == 40);
+                mixer_app.anchor.anchored = false;
                 mixer_fixture_table.button_w = 0;
-                ui_anchor_take(&mixer.anchor, &mixer_fixture_table, mixer.beside);
-                check("mixer popup: and a table with no press in it leaves it in the middle", !mixer.anchor.anchored);
-                mixer.beside = false;
+                ui_anchor_take(&mixer_app.anchor, &mixer_fixture_table, mixer_app.beside);
+                check("mixer popup: and a table with no press in it leaves it in the middle", !mixer_app.anchor.anchored);
+                mixer_app.beside = false;
                 mixer.quick = false;
                 mixer.width = 640, mixer.height = 400;
         }
@@ -166733,7 +166733,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.big->ctl.open = 1;
                 mixer.connected = true;
                 mixer.capture_path = capture_path;
-                mixer.font = (string_address) "/fonts/ui.ttf";
+                mixer_app.font = (string_address) "/fonts/ui.ttf";
                 system_remove_at(AT_FDCWD, capture_path, 0);
                 mixer_page(true);
                 check("mixer recording: the microphone, Chromium (two streams) and obs are three strips, and the program that records what plays is none",

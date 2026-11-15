@@ -86,15 +86,14 @@ static struct
         unsigned int ground;
         b32 focused, dirty, have, connected, listed, recording, capture_off;
         b64 next_poll, seen_at;
-        // The tray's popup (-q), and where it opens (-a).
-        b32 quick, beside;
-        struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
+        b32 quick;                           // the tray's popup (-q)
         struct ui_rect strips_box;           // what the tree gave the strips
         const char address_to note;          // what the window's foot says of the output that plays, or null: nothing is plugged into it
         struct ui_control tabs;              // the two pages: an element of the tree
         const char address_to capture_path;
-        string_address font;     // the face this is drawn in (-f), which the mixer it starts is drawn in too
 } mixer;
+
+static struct ui_app mixer_app; // the app, defined with its runner below: its face (-f) is the one the mixer it starts is drawn in
 
 /* ---- the page ---- */
 
@@ -360,7 +359,7 @@ static fn mixer_page(b32 recording)
 // the whole mixer is started, in the face this one is drawn in, and the popup goes (false) once it has.
 static b32 mixer_act(int which)
 {
-        string_address face = mixer.font ? mixer.font : (string_address)UI_FONT_REGULAR;
+        string_address face = mixer_app.font ? mixer_app.font : (string_address)UI_FONT_REGULAR;
         string_address words[5] = {(string_address) "/mixer", (string_address) "-f", face, null, null};
 
         if (!which)
@@ -413,11 +412,6 @@ static fn mixer_layout(void)
         ui_strips_place(ui, &mixer.big->strips, mixer.strips_box.x, mixer.strips_box.y, mixer.strips_box.w, mixer.strips_box.h);
 }
 
-static fn mixer_dirty(void)
-{
-        mixer.dirty = true;
-}
-
 static fn mixer_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &mixer.ui;
@@ -442,12 +436,6 @@ static fn mixer_draw(unsigned int address_to pixels)
                 ui_strips_message(ui, strips, WORDS(mixer_nobody), true);
         else if (!mixer.recording && !mixer.quick && strips->count <= 1)
                 ui_strips_message(ui, strips, WORDS(mixer_empty), true);
-}
-
-// One picture, into the buffer the compositor is not reading; false when there is none yet.
-static b32 mixer_frame(void)
-{
-        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw);
 }
 
 static b32 mixer_event(const struct window_event address_to event)
@@ -484,16 +472,6 @@ static b32 mixer_event(const struct window_event address_to event)
         return true;
 }
 
-static fn mixer_size(unsigned int width, unsigned int height)
-{
-        struct windows address_to table = mixer.own.table;
-
-        mixer.width = (int)(width > table->output_width ? table->output_width : width);
-        mixer.height = (int)(height > table->output_height ? table->output_height : height);
-        ui_scratch_fit(&mixer.ui, (unsigned int)mixer.width);
-        mixer.dirty = true;
-}
-
 // The timer: what is to be sent, then the page looked at as often as it is written, and the time to the next look.
 static long mixer_tick(long timeout, long address_to other)
 {
@@ -516,11 +494,6 @@ static long mixer_tick(long timeout, long address_to other)
         return timeout < 0 || (b64)timeout > wait ? (long)wait : timeout;
 }
 
-static fn mixer_language(void)
-{
-        mixer.dirty = true;
-}
-
 // How many strips wide the recording popup is: the microphone and up to three programs, and room for a line beside the microphone at least.
 static int mixer_quick_shown(int count)
 {
@@ -529,36 +502,20 @@ static int mixer_quick_shown(int count)
 
 static int mixer_open(void)
 {
-        struct windows address_to table = mixer.own.table;
-        unsigned int row = mixer.own.row;
         int width = ui_px(&mixer.ui, MIXER_WIDTH), height = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_H : MIXER_HEIGHT);
-        int room = (int)table->output_height - ui_px(&mixer.ui, 2 * (24 + 24));
-        long mapped;
 
         // The popup is not lifted by a second start: pressed again, the cell puts it away.
         // The same, and the other window is asked to show page (0 up) as well: the window's page hook (ui_app) is told.
         if (!mixer.quick && (mixer.recording ? ui_lift_row(&mixer.own, (string_address) "mixer", false, 1 + 1) : ui_lift_other(&mixer.own, (string_address) "mixer", false)))
                 return 0;
-        mapped = ui_map(sizeof(struct mixer_big));
-        if (mapped < 0 && mapped > -4096)
-        {
-                compositor_kmsg((string_address) "mixer: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
+        if (!(mixer.big = ui_app_map(&mixer_app, sizeof(struct mixer_big))))
                 return 1;
-        }
-        mixer.big = (struct mixer_big address_to)mapped;
         // The page is read first: the popup is as wide as the strips it shows come to in the kit's row (ui_strips_tree), the output's one, or on the
         // Recording page the microphone and up to three programs (room for a line beside one at least).
         mixer_poll((b64)ui_kit.now);
         if (mixer.quick)
                 width = ui_strips_tree(&mixer.ui, &mixer.big->strips, mixer.recording ? mixer_quick_shown(mixer.big->strips.count) : 1, 0);
-        mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
-                   (unsigned int)(height < room ? height : room > 0 ? room : height));
-        ui_anchor_take(&mixer.anchor, table, mixer.beside);
-        if (mixer.anchor.anchored)
-                ui_anchor_set(&mixer.anchor, table, row, mixer.width, mixer.height);
-        else
-                ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
-        mixer_frame();
+        ui_app_place(&mixer_app, width, height);
         return -1;
 }
 
@@ -581,58 +538,41 @@ static struct ui_app mixer_app = {
         .focused = &mixer.focused,
         .ground = &mixer.ground,
         .open = mixer_open,
-        .frame = mixer_frame,
-        .language = mixer_language,
         .event = mixer_event,
-        .changed = mixer_dirty,
-        .size = mixer_size,
         .tick = mixer_tick,
         .page = mixer_asked,
+        .width = &mixer.width,
+        .height = &mixer.height,
+        .shown = &mixer.shown,
+        .draw = mixer_draw,
 };
 
 static b32 mixer_main()
 {
         memory_zero(&mixer, sizeof(mixer));
-        mixer.shown = -1;
         mixer.page_path = AUDIO_STATE_PATH;
         mixer.socket_path = MIXER_SOCKET;
         mixer.capture_path = SETTING_AUDIO_CAPTURE_PATH;
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took)
         {
                 string_address value;
 
-                if (string_equals(program_argument(at), (string_address) "-i"))
-                {
-                        mixer.recording = true;
+                if ((took = ui_app_option(&mixer_app, at)))
                         continue;
-                }
-
-                if (string_equals(program_argument(at), (string_address) "-q"))
+                took = 1;
+                if (string_equals(program_argument(at), (string_address) "-i"))
+                        mixer.recording = true;
+                else if (string_equals(program_argument(at), (string_address) "-q"))
                 {
                         mixer.quick = true;
                         mixer_app.glass = WINDOW_GLASS | WINDOW_DISMISS | WINDOW_NO_TAB; // glass over what is under it, put away by a press anywhere but on it, and no tab
                         mixer_app.dismiss = true;                          // and by the keys going elsewhere
                         mixer_app.name = (string_address) "mixer-quick";
-                        continue;
                 }
-                if (string_equals(program_argument(at), (string_address) "-a"))
-                {
-                        mixer.beside = true;
-                        continue;
-                }
-                if (at + 1 >= (positive)program_argument_count())
-                        break;
-                if ((value = ui_argument(at, (string_address) "-f")))
-                        mixer_app.font = mixer.font = value;
-                else if ((value = ui_argument(at, (string_address) "-b")))
-                        mixer_app.bold = value;
                 else if ((value = ui_argument(at, (string_address) "-p")))
-                        mixer.page_path = (const char address_to)value;
+                        mixer.page_path = (const char address_to)value, took = 2;
                 else if ((value = ui_argument(at, (string_address) "-s")))
-                        mixer.socket_path = (const char address_to)value;
-                else
-                        continue;
-                at++;
+                        mixer.socket_path = (const char address_to)value, took = 2;
         }
         return ui_app_run(&mixer_app);
 }
