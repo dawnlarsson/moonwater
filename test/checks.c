@@ -146183,6 +146183,25 @@ static void check_glass_lift(void)
         check("glass lift: a window that is not glass keeps its own colour, corners and line", plain == 2 * 2);
 }
 
+// The per-pixel grain the glass's rows are made with (memory_glass_over_u32 is the same operation over a row), the
+// reference the rows below compare them against: whatever grain a pixel has, what memory_glass_over_u32 gives a clear
+// pixel over ground at x, y. It was glass.c's until nothing there called it.
+static unsigned int compositor_grained(unsigned int ground, unsigned int light, int x, int y)
+{
+        unsigned int out = 0;
+        const unsigned int *grain = compositor_grain_row(light, x, y);
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                int c = (int)(ground >> shift & 255) + (int)(grain[0] >> shift & 255);
+
+                c = c > 255 ? 255 : c;
+                c -= (int)(grain[64] >> shift & 255);
+                out |= (unsigned int)(c < 0 ? 0 : c) << shift;
+        }
+        return out;
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
