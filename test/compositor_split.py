@@ -1,34 +1,25 @@
 #!/usr/bin/env python3
-"""Cut src/canvas/compositor.c into the files of src/canvas/compositor/, at function boundaries.
+"""The split of src/canvas/compositor.c into the files of src/canvas/compositor/ (4d3b986a), and the carry of work across it.
 
-    python3 test/compositor_split.py             the plan: each file, where it starts and ends, its functions; nothing written
-    python3 test/compositor_split.py --check     the split made in a copy of the tree and held to the checks below; this tree
-                                                 is not touched
-    python3 test/compositor_split.py --apply     --check, and then the same split written into this tree, the tools that name
-                                                 compositor.c by path moved to the new paths, and the function audit resealed
+    python3 test/compositor_split.py --check            the split as it stands: compositor.c includes the parts there are, each once
+                                                        and in the cut list's order; put back, the parts are one text with no part's
+                                                        include left, which test/differential.py's compositor_text gives and in
+                                                        which the four sections the core_state lane cuts for CHECK_canvas_cells are
+                                                        each once; every mutation of test/ui_mutations.py that edits the compositor
+                                                        names the file its text is in
+    python3 test/compositor_split.py --carry BRANCH [--split REV]
+                                                        BRANCH's commits since the commit the split was made on, each cut the same
+                                                        way, as commits on the split: refs/heads/carried/BRANCH
+    python3 test/compositor_split.py --prove BRANCH     --carry onto a scratch split of where BRANCH left main, and the carried tree
+                                                        held to the views of BRANCH unsplit (gcc -E -P of the shell, the build tool
+                                                        and every check section that includes the compositor); nothing is kept
 
-compositor.c stays the one translation unit it is: each file holds one run of it, in its order, and compositor.c includes
-them where the runs were, so every static is where it was and nothing is declared again. The cut list (CUTS) is names, not
-line numbers: a file starts at a function (the statics, macros and comments between that function and the one before it
-go with it) or at a section's own opening line, so the list can be run on whatever main is that minute. What is not cut out
-(the prelude and its includes, the kernel's interfaces and the compositor's state, the table, the startup and the loop) is
-compositor.c's own text between the includes.
-
-The split is held to (--check, in a copy):
-  - compositor.c with each part's text put back where its #include is (and its includes' "../" taken off) is the file it
-    was, byte for byte;
-  - gcc -E -P of programs/shell.c (the types row's defines, and again without the Wayland shim and the card), of
-    src/build/build.c and of test/checks.c for every section that includes the compositor is byte-identical before and
-    after, or, for a unit so large that GCC stops tracking columns before its end (the shell with the shim, the build
-    tool), identical but for the indentation GCC lays its last lines out with, which moves with how the text is cut in
-    files: every token and every line break the same;
-  - the function audit's inventory has the same count of functions, and dropped_results, one_way_state,
-    performance_coverage and specialization_coverage pass;
-  - every mutation of test/ui_mutations.py that edits the compositor finds its text exactly once in the file it now
-    names, and test/differential.py's reading of the compositor gives the text it gave.
-
-The split must be applied when nobody has uncommitted edits in compositor.c: --apply refuses a tree where compositor.c or
-a tool it rewrites differs from HEAD, or where src/canvas/compositor/ is already there.
+compositor.c stays the one translation unit it was: each part holds one run of it, in its order, and compositor.c includes
+them where the runs were. The cut list (CUTS) is names, not line numbers: a run starts at a function (its name) or at a
+section's own opening line, and goes on to the next entry. The split was applied by this tool's --apply (4d3b986a), which,
+with the check it made in a copy of the tree before, is gone now that the parts are the source: what a branch from before
+the split needs is the carry, which cuts each of its commits' compositor.c by the same list. The general tool for the next
+splits is test/split.py.
 """
 
 import argparse
@@ -127,22 +118,14 @@ def check_sections(text):
 DIFFERENTIAL = 'test/differential.py'
 PERFORMANCE = 'test/performance_coverage.py'
 MUTATIONS = 'test/ui_mutations.py'
-REPORTED = [
-    ('test/checks.c', 'splash_check_source("src/canvas/compositor.c", ...) still passes, but looks at compositor.c alone: '
-     'the "no splash in the compositor" row should read the parts too'),
-    ('.github/SECURITY.md', 'names src/canvas/compositor.c for compositor_clip_*, which is manage.c after the split'),
-    ('test/function_audit.seal', 'the digest moves (resealed by --apply); the inventory count does not'),
-    ('test/run', 'src/canvas/* already covers src/canvas/compositor/*.c in the seams; gpu_kernels_wanted greps the includers '
-     'of gpu.c, which stay compositor.c'),
-    ('test/gpu_model/card.c', 'includes src/canvas/gpu.c, which the split does not move'),
-]
 
 
 class Refused(Exception):
     pass
 
 
-# The mutations of ui_mutations.py that edit compositor.c and do not apply before the split either.
+# The mutations of ui_mutations.py that edit compositor.c and did not apply before the split either (the carry leaves them naming
+# compositor.c).
 STALE = []
 
 
@@ -430,66 +413,6 @@ def first_difference(a, b):
     return 'one is a prefix of the other (%d and %d lines)' % (len(a), len(b))
 
 
-def tracked():
-    done = run(['git', 'ls-files', '-z'], ROOT)
-    if done.returncode:
-        raise Refused('git ls-files failed: %s' % done.stderr.decode(errors='replace'))
-    return [name for name in done.stdout.decode().split('\0') if name]
-
-
-def copy_tree(into):
-    """The tracked files as they are on disk, and the built GPU kernels gpu.c includes: copies and not links, since the tools
-       run in the copy write their seals where they stand."""
-    for name in tracked() + ['artifacts/gpu_kernels.inc']:
-        source, target = ROOT / name, into / name
-        if not source.is_file():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-
-
-def write(tree, name, text):
-    path = tree / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        path.unlink()
-    path.write_text(text)
-
-
-def outputs(tree):
-    """What the split writes into tree, from tree's own compositor.c and tools."""
-    text = (tree / SOURCE).read_text()
-    main, parts, plan = split(text)
-    if flatten(main, parts) != text:
-        raise Refused('the parts put back in their places are not compositor.c as it was')
-    written = {SOURCE: main}
-    written.update({'%s/%s' % (PARTS, part): body for part, body in parts.items()})
-    differential = (tree / DIFFERENTIAL).read_text()
-    written[DIFFERENTIAL] = rewrite_differential(differential)
-    written[PERFORMANCE] = rewrite_performance((tree / PERFORMANCE).read_text(), main, parts)
-    written[MUTATIONS] = rewrite_mutations((tree / MUTATIONS).read_text(), main, parts, text)
-    return written, plan, text
-
-
-def audit(tree, *flags):
-    done = run([sys.executable, 'test/function_audit.py'] + list(flags), tree)
-    out = done.stdout.decode(errors='replace') + done.stderr.decode(errors='replace')
-    if done.returncode:
-        raise Refused('function_audit.py %s failed in %s:\n%s' % (' '.join(flags), tree, out[-2000:]))
-    return out
-
-
-def audit_count(tree, seal):
-    """The inventory's count of C functions in tree; with seal, the seal written there first and held to it."""
-    if seal:
-        audit(tree, '--seal')
-        audit(tree, '--check')
-    count = re.search(r'^\s*(\d+)\s+TOTAL C FUNCTIONS', audit(tree, '--summary'), re.M)
-    if not count:
-        raise Refused('function_audit.py --summary in %s gave no total' % tree)
-    return count.group(1)
-
-
 def compare_views(before_tree, after_tree):
     """gcc -E -P of every view in before_tree and in after_tree: byte-identical, or identical but for the indentation GCC gives
        a line once it has stopped tracking columns."""
@@ -508,58 +431,63 @@ def compare_views(before_tree, after_tree):
             'token and every line is the same' % (label, indented(before, after), first_line(before, after), len(after)))
 
 
-def check(tree):
-    """The split made in tree (a copy) and held to every check; answers what was written."""
-    before_count = audit_count(ROOT, False)
-    written, plan, original = outputs(tree)
-    for name, text in written.items():
-        write(tree, name, text)
-    say('the parts put back are compositor.c byte for byte')
-
-    compare_views(ROOT, tree)
-
-    after_count = audit_count(tree, True)
-    if after_count != before_count:
-        raise Refused('the function audit counts %s functions before and %s after' % (before_count, after_count))
-    say('function audit: %s C functions before and after, the seal written in the copy' % after_count)
-    for tool in ('dropped_results', 'one_way_state', 'performance_coverage', 'specialization_coverage'):
-        done = run([sys.executable, 'test/%s.py' % tool], tree)
-        if done.returncode:
-            raise Refused('test/%s.py fails after the split:\n%s' % (tool, (done.stdout + done.stderr).decode(errors='replace')[-2000:]))
-        say('test/%s.py passes' % tool)
-
-    _, rows = mutations((tree / MUTATIONS).read_text())
-    held = 0
-    for _, path, old, name in rows:
-        if (path == SOURCE or path.startswith(PARTS + '/')) and name not in STALE:
-            if (tree / path).read_text().count(old) != 1:
-                raise Refused('%s: the mutation %r is not exactly once in %s' % (MUTATIONS, name, path))
-            held += 1
-    say('test/ui_mutations.py: each of its %d compositor mutations finds its text once in the file it names' % held)
-    for name in STALE:
-        say('test/ui_mutations.py: %r does not apply before the split either (its text is not once in compositor.c): '
-            'left naming compositor.c' % name)
-
+def compositor_text_of_differential():
+    """test/differential.py's own compositor_text, as that file defines it (read by its syntax tree, not imported)."""
+    import ast
+    source = (ROOT / DIFFERENTIAL).read_text()
+    tree = ast.parse(source)
+    found = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'compositor_text']
+    if len(found) != 1:
+        raise Refused('%s defines compositor_text %d times, not once' % (DIFFERENTIAL, len(found)))
     scope = {'re': re}
-    exec(compile(compositor_text_source(), DIFFERENTIAL, 'exec'), scope)
-    if scope['compositor_text'](tree) != original:
-        raise Refused('%s: compositor_text does not give the compositor as it was' % DIFFERENTIAL)
-    if 'compositor_text(root)' not in written[DIFFERENTIAL] and '"src/canvas/compositor.c"' in written[DIFFERENTIAL]:
-        raise Refused('%s still reads compositor.c alone' % DIFFERENTIAL)
-    say('test/differential.py reads the compositor through compositor_text, which gives it as it was')
-    # The core_state lane's canvas_sources (differential.py) cuts these sections out of that text for CHECK_canvas_cells: each is
-    # there once, and the same text, so compositor-backend.inc and CHECK_canvas_cells' preprocessed text are what they were.
-    flat = scope['compositor_text'](tree)
+    exec(compile(ast.Module(body=found, type_ignores=[]), DIFFERENTIAL, 'exec'), scope)
+    return scope['compositor_text']
+
+
+def check_now():
+    """The split as it stands, held to what the tools that read it need (the usage above says what)."""
+    main = (ROOT / SOURCE).read_text()
+    named = PART_LINE.findall(main)
+    order = [part for part, _, _ in CUTS if part != 'compositor.c']
+    there = sorted(path.name for path in (ROOT / PARTS).glob('*.c'))
+    if named != order:
+        raise Refused('%s includes %s, not the parts of the cut list in its order (%s)' % (SOURCE, ' '.join(named), ' '.join(order)))
+    if sorted(named) != there:
+        raise Refused('%s holds %s, and %s includes %s' % (PARTS, ' '.join(there), SOURCE, ' '.join(named)))
+    say('%s includes the %d parts there are, each once, in the cut list\'s order' % (SOURCE, len(named)))
+    parts = {name: (ROOT / PARTS / name).read_text() for name in named}
+    flat = flatten(main, parts)
+    if PART_LINE.search(flat) or any(PART_LINE.search(body) for body in parts.values()):
+        raise Refused('a part includes a part: the parts put back are not one text')
+    if compositor_text_of_differential()(ROOT) != flat:
+        raise Refused('%s: compositor_text does not give the parts put back in their places' % DIFFERENTIAL)
+    say('the parts put back are one text, %d lines, and %s\'s compositor_text gives it' % (flat.count('\n'), DIFFERENTIAL))
     for name in ('backend: the look on the CPU', 'keymap: what a key means', 'pointer: what a hand means',
                  'outputs: the screens one desktop spans'):
         start, end = '/* ---- %s ---- */' % name, '/* ---- end of the %s ---- */' % name.split(':')[0]
-        if original.count(start) != 1 or flat.count(start) != 1:
-            raise Refused('canvas_sources: the section line %r is not once in compositor.c before and after' % start)
-        if flat[flat.index(start):flat.index(end, flat.index(start))] != original[original.index(start):original.index(end, original.index(start))]:
-            raise Refused('canvas_sources: the %s section differs after the split' % name.split(':')[0])
-    say('test/differential.py canvas_sources: the backend, keymap, pointer and outputs sections it cuts for CHECK_canvas_cells are '
-        'each once and the same text after the split')
-    return written
+        if flat.count(start) != 1 or flat.count(end) != 1 or flat.index(end) < flat.index(start):
+            raise Refused('canvas_sources: the section %r is not once in the compositor, its end after it' % name.split(':')[0])
+    say('test/differential.py canvas_sources: the backend, keymap, pointer and outputs sections are each once, each ended')
+    _, rows = mutations((ROOT / MUTATIONS).read_text())
+    files = {SOURCE: main}
+    files.update({'%s/%s' % (PARTS, name): body for name, body in parts.items()})
+    held, stale = 0, []
+    for _, path, old, name in rows:
+        if path not in files:
+            if path.startswith(PARTS + '/'):
+                raise Refused('%s: the mutation %r names %s, which is no part' % (MUTATIONS, name, path))
+            continue
+        if files[path].count(old) == 1:
+            held += 1
+            continue
+        elsewhere = [other for other, body in files.items() if other != path and body.count(old) == 1]
+        if elsewhere:
+            raise Refused('%s: the mutation %r names %s, and its text is in %s' % (MUTATIONS, name, path, elsewhere[0]))
+        stale.append(name)
+    say('test/ui_mutations.py: %d of its compositor mutations find their text once in the file they name' % held)
+    for name in stale:
+        say('test/ui_mutations.py: %r finds its text in no file of the compositor (it says NOT APPLIED)' % name)
+    return 0
 
 
 # ---- carrying a branch across the split ----
@@ -689,20 +617,6 @@ def say(text):
     print('  ' + text)
 
 
-def print_plan(plan, text):
-    lines = text.count('\n')
-    print('%s, %d lines, cut in %d runs:' % (SOURCE, lines, len(plan)))
-    print('  %-14s %6s %6s %6s  %4s  %s' % ('file', 'from', 'to', 'lines', 'fns', 'first and last function'))
-    for part, first, last, inside in plan:
-        print('  %-14s %6d %6d %6d  %4d  %s .. %s' % (part, first, last, last - first + 1, len(inside),
-                                                     inside[0] if inside else '-', inside[-1] if inside else '-'))
-    tools = [tool for tool in (DIFFERENTIAL, PERFORMANCE, MUTATIONS) if SOURCE in (ROOT / tool).read_text()]
-    print('the tools that name %s now, which the split moves to the new paths: %s' % (SOURCE, ', '.join(tools) or 'none'))
-    print('the ones it does not, and why:')
-    for path, why in REPORTED:
-        print('  %s: %s' % (path, why))
-
-
 def carry_main(arguments):
     """--carry and --prove."""
     branch = arguments.carry or arguments.prove
@@ -733,53 +647,17 @@ def carry_main(arguments):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--check', action='store_true', help='make the split in a copy and hold it to its checks')
-    mode.add_argument('--apply', action='store_true', help='--check, then write the split into this tree')
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--check', action='store_true', help='hold the split as it stands to what the tools that read it need')
     mode.add_argument('--carry', metavar='BRANCH', help="carry BRANCH's commits across the split: refs/heads/carried/BRANCH")
     mode.add_argument('--prove', metavar='BRANCH', help='--carry onto a scratch split of where BRANCH left main, and hold the '
                       'carried tree to the views of BRANCH unsplit; nothing is kept')
-    parser.add_argument('--keep', metavar='DIR', help="make --check's copy in DIR (new or empty) and leave it there")
     parser.add_argument('--split', metavar='REV', help='the split commit to carry onto (default: the one on HEAD that made the parts)')
     arguments = parser.parse_args()
     try:
-        if arguments.carry or arguments.prove:
-            return carry_main(arguments)
-        text = (ROOT / SOURCE).read_text()
-        _, _, plan = split(text)
-        print_plan(plan, text)
-        if not (arguments.check or arguments.apply):
-            return 0
-        if arguments.apply:
-            changed = run(['git', 'status', '--porcelain', '--', SOURCE, PARTS, DIFFERENTIAL, PERFORMANCE, MUTATIONS,
-                           'test/function_audit.seal'], ROOT).stdout.decode()
-            if changed.strip() or (ROOT / PARTS).exists():
-                raise Refused('the tree has changes the split would write over, or %s is already there:\n%s' % (PARTS, changed))
-        if not (ROOT / 'artifacts/gpu_kernels.inc').is_file():
-            raise Refused('artifacts/gpu_kernels.inc is not built (sh build.sh gpu-kernels): gcc -E reaches gpu.c, which includes it')
-        print('checks, in a copy of the tree:')
-        if arguments.keep:
-            tree = pathlib.Path(arguments.keep).resolve()
-            if tree.exists() and any(tree.iterdir()):
-                raise Refused('%s is not empty' % tree)
-            copy_tree(tree)
-            written = check(tree)
-        else:
-            with tempfile.TemporaryDirectory(prefix='compositor-split-') as scratch:
-                tree = pathlib.Path(scratch)
-                copy_tree(tree)
-                written = check(tree)
-        print('the split holds')
-        if arguments.apply:
-            for name, body in written.items():
-                write(ROOT, name, body)
-            audit_count(ROOT, True)
-            print('written: %s, and test/function_audit.seal' % ', '.join(sorted(written)))
-            print('next: build and run CHECK_terminal (and the gate), then commit these files as one commit')
-            print('to do, by hand, which the split does not rewrite:')
-            for path, why in REPORTED[:2]:
-                print('  %s: %s' % (path, why))
-        return 0
+        if arguments.check:
+            return check_now()
+        return carry_main(arguments)
     except Refused as refusal:
         print('compositor_split: %s' % refusal, file=sys.stderr)
         return 1
