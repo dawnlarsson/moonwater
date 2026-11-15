@@ -257,7 +257,7 @@ static const struct settings_feed settings_feeds[] = {
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
 #define SETTINGS_STATE 24        // a device's state as the host says it: allowed, blocked or waiting for a port, view only for a drive
-#define SETTINGS_PORT 24         // a port's name, which device allow and device deny take (1-1, 3-2.4)
+#define SETTINGS_PORT_ROOM 24    // a port's name, which device allow and device deny take (1-1, 3-2.4)
 #define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
 #define SETTINGS_SEGMENT_NAME 40 // a partition's name as its row says it, cut where a character ends
 #define SETTINGS_ALIGNMENT 1048576ull // free room this small is the room a partition table and the partitions' alignment keep, and is not shown
@@ -275,7 +275,7 @@ struct settings_item
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
         unsigned long long total;                       // a drive's bytes: its line's size, or what its part lines add up to where that is more
         char state[SETTINGS_STATE];                     // a device's state, as the host says it
-        char port[SETTINGS_PORT];                       // a port's name; none for a drive
+        char port[SETTINGS_PORT_ROOM];                       // a port's name; none for a drive
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
         char segment_name[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
 };
