@@ -174702,7 +174702,7 @@ static fn check_field_hands(string_address regular)
                                   shown[(positive)dim_y * launcher.ui.pitch] != lit && shown[(positive)dim_y * launcher.ui.pitch + (positive)last] != lit);
                         check("launcher: the bar's margin beside a row is the row's to hover and press, and the words stay in from the margin",
                               ui_list_hit(&launcher.ui, &launcher.list, 0, lit_y) == launcher.list.id[0] &&
-                                  ui_list_hit(&launcher.ui, &launcher.list, last, dim_y) == launcher.list.id[1] && launcher.list.x == launcher.list_box.x &&
+                                  ui_list_hit(&launcher.ui, &launcher.list, last, dim_y) == launcher.list.id[1] && launcher.list.x == ui_px(&launcher.ui, UI_PAD) &&
                                   launcher.list.x >= ui_px(&launcher.ui, UI_PAD) && launcher.list.w <= launcher.width - 2 * ui_px(&launcher.ui, UI_PAD));
                 }
                 // A row runs on its release, where its press went down: a press shows the row pressed and runs nothing, a

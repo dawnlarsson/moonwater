@@ -189,10 +189,9 @@ static struct
         b32 asked_beside, moved;
         struct ui_anchor anchor;
 
-        // The bar as the view declares it (launcher_view): its tree and its buttons, the boxes it gave the field and the rows, and how many
-        // starts the power buttons made (what a check counts).
+        // The bar as the view declares it (launcher_view): its tree, its rows and its buttons, and how many starts the power buttons made
+        // (what a check counts).
         struct ui_view view;
-        struct ui_rect list_box;
         unsigned int power_runs;
         unsigned int session; // the session's buttons that are offered: LAUNCHER_SLEEP, LAUNCHER_LOG_OUT (launcher_session_read)
 } launcher;
@@ -726,7 +725,8 @@ static struct ui_text address_to launcher_field(void);
 // The bar as a tree, every size and look a class's: the field across the top, then the rows and the power row in from the margin.
 // The field is the kit's, bare (no label), an element: it runs edge to edge, as the list's rows do, from the panel's top to where
 // the list begins, and in it are the engine's text, selection and caret, which have the keys while the bar does (the caret is drawn
-// only with the keys, not before the window has them). The list is the old composite, so it is a host: the tree says where it is.
+// only with the keys, not before the window has them). The rows are the kit's list, an element: the view places, lays out, draws and
+// turns them, and their rows run from one edge of the bar to the other.
 static fn launcher_view(void)
 {
         struct ui_control address_to search = &launcher.search;
@@ -743,7 +743,7 @@ static fn launcher_view(void)
         {
                 long rows = ui_value(&launcher.entries);
 
-                ui_host(&launcher.list_box, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
+                ui_rows(&launcher.list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
                 launcher_power_row();
         }
 }
@@ -868,11 +868,9 @@ static fn launcher_damaged(int top, int bottom)
         launcher.dirty = true;
 }
 
-// The bar laid out: the tree says where the field and the rows are, and the rows (the kit's list) are put there.
+// The bar laid out: the rows the list has, and the tree, which puts the field and the rows where they go.
 static fn launcher_layout(void)
 {
-        struct ui address_to ui = &launcher.ui;
-
         if (!launcher.list.ids)
         {
                 launcher.list.ids = LAUNCHER_ROWS;
@@ -885,13 +883,8 @@ static fn launcher_layout(void)
                 launcher.list.id[at] = (unsigned short)at;
         // The words are asked each time (a language chosen while the bar is up is the next picture's), and the rows fill the window below
         // the field; a list longer than the window scrolls (the wheel, and the keys reveal).
+        launcher.list.lit = true;
         launcher_build(launcher.height);
-        ui_list_place(ui, &launcher.list, launcher.list_box.x, launcher.list_box.y, launcher.list_box.w, launcher.list_box.h);
-        // A row runs from one edge of the bar to the other, as a row of the settings window runs to its window's (the list's row_x and
-        // row_w, which the page sets there): the lit row, the hover and the press reach both sides, and the words stay in from the
-        // margin, where the list's own box is.
-        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;
-        ui_list_layout(ui, &launcher.list);
 }
 
 static b32 launcher_event(const struct window_event address_to event)
@@ -941,11 +934,6 @@ static b32 launcher_event(const struct window_event address_to event)
                         launcher.list.focus = row;
                         launcher.dirty = true;
                 }
-                break;
-        case WINDOW_EVENT_WHEEL:
-                // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
-                if (ui_wheel_turn(&launcher.ui, &launcher.list.scroll, event))
-                        launcher.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON:
                 // The kit's click: a press goes down where the pointer is and runs on its release there, a finger's or a mouse's alike.
@@ -1006,10 +994,7 @@ static fn launcher_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
         launcher_layout();
-        // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field). Then the view: the
-        // field and the power row.
-        launcher.list.lit = true;
-        ui_list_draw(ui, &launcher.list);
+        // The view: the field, the rows (the highlighted one the row the keys are on, the keys themselves staying in the field) and the power row.
         ui_view_draw(ui, &launcher.view, launcher.focused || !launcher_app.had_keys);
         // A finger's selection in the field: its handles and actions bar, over the rows and the buttons.
         ui_text_overlay(ui, launcher_field());
