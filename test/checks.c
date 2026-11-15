@@ -238733,7 +238733,14 @@ static void gpu_engine_and_render_regressions(void)
         }
         gpu_map_count = 2;
         gpu_maps[0].from = 0, gpu_maps[0].to = 0, gpu_maps[0].va = 0x50000000ull, gpu_maps[0].bytes = 4096, gpu_maps[0].handle = 1;
-        gpu_maps[1].from = 0x20000000ull, gpu_maps[1].to = 0x20001000ull, gpu_maps[1].va = 0x50010000ull, gpu_maps[1].bytes = 4096, gpu_maps[1].handle = 2;
+        {
+                // The second map's pages are there (a page of the check's own): gpu_drop_unmapped asks the kernel whether a map's range is mapped (msync), and an
+                // address nothing is mapped at, which this row gave it, is a map it is right to drop.
+                static unsigned char live[8192] __attribute__((aligned(4096)));
+
+                gpu_maps[1].from = (positive)live, gpu_maps[1].to = (positive)live + 4096;
+        }
+        gpu_maps[1].va = 0x50010000ull, gpu_maps[1].bytes = 4096, gpu_maps[1].handle = 2;
         gpu.fd = GPU_KERNEL_FD, gpu_kernel.on = 1, gpu_kernel.buffer[1] = 10, gpu_kernel.mapped[1] = 1, gpu_kernel.buffer[2] = 11, gpu_kernel.mapped[2] = 1;
         gpu_drop_unmapped();
         check("gpu_drop_unmapped drops only forgotten (from==0&&to==0) maps",

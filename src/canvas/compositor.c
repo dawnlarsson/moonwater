@@ -17729,6 +17729,13 @@ static int compositor_wl_hold_counts(int dx, int dy, positive now);
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
 static int compositor_wl_suspends(unsigned int code, int value, int super);
+#else
+// No Wayland shim in the build: no window holds the pointer, and the hand's counts are nobody's.
+static int compositor_wl_hold_counts(int dx, int dy, positive now)
+{
+        (void)dx, (void)dy, (void)now;
+        return 0;
+}
 #endif
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
