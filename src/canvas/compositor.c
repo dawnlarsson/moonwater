@@ -7453,19 +7453,33 @@ static positive compositor_frame_dated(positive last, positive period, positive 
         old (a headless compositor, an idle desktop, a card that stamps nothing), the rule is the one there was: a period
         after the last present, or at once when that has gone by.
 
-        It is asked for by the machine's owner (the file /run/moonwater/present-late, looked for at the start): what a card
-        and its driver make of a flip issued a millisecond or two before the vblank has been seen on no machine by the one
-        who wrote this, and a flip that misses its vblank is a frame a period late. A missed one (the flip's stamp half a
-        period or more past the vblank it was for) puts the next COMPOSITOR_LEAD_REST presents back on the old rule, and
-        both are counted and said as the compositor ends.
+        It is the rule wherever a card stamps its vblanks, and the machine's owner turns it off with the file
+        /run/moonwater/present-early (looked for at the start): every present is then made by the old rule. The lead is
+        measured, not guessed: the worst of the last COMPOSITOR_LEAD_FRAMES presents, each on the path it took (the card's
+        or the processor's, compositor_metric_card and compositor_metric_processor: a present's whole time, the card's job
+        in it), half as much again and a millisecond; a lead that does not fit in the period is none, the old
+        rule (a 4K frame whose job takes longer than a period is presented a period after the last, not at the start of
+        every period with a lead that grows). What a card and its driver make of a flip issued a few milliseconds before
+        the vblank is the card's, so each flip is checked: one that missed its vblank (its stamp half a period or more past
+        the vblank it was for) is a frame a period late, and widens the lead at once, for the very next present, by a
+        quarter of a period; a second miss while it is widened is a machine late presents do not suit, and the lead is the
+        whole period, which is none: the old rule. A calm (flips in a row that landed, COMPOSITOR_LEAD_CALM at first)
+        steps back, from the old rule to the quarter and from the quarter to nothing; every fall to the old rule doubles
+        the calm the next step back waits for, up to COMPOSITOR_LEAD_CALM_MOST, so a machine on which every late present
+        misses tries one about every two minutes, and a step back to nothing starts the calm again from the first. The
+        presents made late and the misses are counted and said as the compositor ends, and the misses are what says the
+        rule holds.
 */
 #define COMPOSITOR_LEAD_FRAMES 32
 #define COMPOSITOR_LEAD_SPARE 1000000ull
-#define COMPOSITOR_LEAD_REST 120
+#define COMPOSITOR_LEAD_CALM 120
+#define COMPOSITOR_LEAD_CALM_MOST (64 * COMPOSITOR_LEAD_CALM)
 static struct
 {
-        int asked;              // /run/moonwater/present-late was there at the start
-        unsigned int rest;      // presents still to be made by the old rule, after a vblank was missed
+        int early;              // /run/moonwater/present-early was there at the start: every present by the old rule
+        unsigned int calm;      // flips in a row that landed (late or not) since the lead was last widened or stepped back
+        unsigned int calm_need; // the calm the next step back waits for (0: COMPOSITOR_LEAD_CALM)
+        positive widen;         // what the misses added to the lead: 0, a quarter of a period, or the period (the old rule)
         positive aim;           // the vblank the last late present was for (0: it was not late)
         positive made, missed;  // presents made late in the period, and those whose flip landed a vblank after its aim
 } compositor_late;
@@ -7482,37 +7496,24 @@ static positive compositor_present_due(positive presented, positive period, posi
         return late > least ? late : least;
 }
 
-// What a present is given before its vblank: the longest of the last COMPOSITOR_LEAD_FRAMES presents, half as much again, and a
-// millisecond. 0 (the old rule) when it was not asked for, a missed vblank is being rested from, or fewer than four presents are timed.
-static positive compositor_lead_of(positive worst, unsigned int timed)
+// What a present is given before its vblank: the longest of the last presents timed (worst), half as much again, a millisecond, and what
+// misses widened it by. 0 (the old rule) when that does not fit in the period, with fewer than four presents timed, or with no period.
+static positive compositor_lead_of(positive worst, unsigned int timed, positive widen, positive period)
 {
-        return timed < 4 ? 0 : worst + worst / 2 + COMPOSITOR_LEAD_SPARE;
-}
+        positive lead = worst + worst / 2 + COMPOSITOR_LEAD_SPARE + widen;
 
-static positive compositor_present_lead(void)
-{
-        positive worst = 0;
-        unsigned int timed = 0;
-
-        if (!compositor_late.asked || compositor_late.rest || compositor.card < 0)
+        if (timed < 4 || !period || widen >= period || lead >= period)
                 return 0;
-        for (unsigned int back = 1; back <= COMPOSITOR_LEAD_FRAMES && back <= compositor_records_kept; back++, timed++)
-        {
-                const struct compositor_record *record =
-                    &compositor_records[(compositor_records_at + COMPOSITOR_RECORD_SIZE - back) % COMPOSITOR_RECORD_SIZE];
-
-                worst = record->compose_ns > worst ? record->compose_ns : worst;
-        }
-        return compositor_lead_of(worst, timed);
+        return lead;
 }
+
+static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 
 // A present is about to be made at `stamp`: whether it is one late in its period, and the vblank it is for.
 static void compositor_late_begin(positive lead, positive stamp)
 {
         positive vblank = compositor.flip_when;
 
-        if (compositor_late.rest)
-                compositor_late.rest--;
         compositor_late.aim = 0;
         if (lead && compositor.period && lead < compositor.period && vblank && stamp >= vblank && stamp - vblank < compositor.period)
         {
@@ -7521,13 +7522,28 @@ static void compositor_late_begin(positive lead, positive stamp)
         }
 }
 
-// A flip landed at the vblank `when`: one that was for the vblank before is a frame late, and the presents rest from it.
+// A flip landed at the vblank `when`: one that was for the vblank before is a frame late, and widens the lead at once, to a quarter of a period and
+// then to the period (the old rule, the next calm twice as long); a calm of flips that landed steps it back (compositor_late, above).
 static void compositor_late_landed(positive when)
 {
+        unsigned int need = compositor_late.calm_need ? compositor_late.calm_need : COMPOSITOR_LEAD_CALM;
+
         if (compositor_late.aim && when > compositor_late.aim && when - compositor_late.aim >= compositor.period / 2)
         {
                 compositor_late.missed++;
-                compositor_late.rest = COMPOSITOR_LEAD_REST;
+                compositor_late.calm = 0;
+                if (!compositor_late.widen)
+                        compositor_late.widen = compositor.period / 4;
+                else
+                        compositor_late.widen = compositor.period, compositor_late.calm_need = need * 2 < COMPOSITOR_LEAD_CALM_MOST ? need * 2 : COMPOSITOR_LEAD_CALM_MOST;
+        }
+        else if (compositor_late.widen && ++compositor_late.calm >= need)
+        {
+                compositor_late.calm = 0;
+                if (compositor_late.widen >= compositor.period)
+                        compositor_late.widen = compositor.period / 4;
+                else
+                        compositor_late.widen = 0, compositor_late.calm_need = 0;
         }
         compositor_late.aim = 0;
 }
@@ -9969,8 +9985,14 @@ static void compositor_loop_tick(unsigned long long now, b32 idle)
         }
 }
 
+// The paths of the last COMPOSITOR_LEAD_FRAMES presents noted, the newest in bit 0 (1: the card's), and how many there are of them: the lead is
+// measured on the presents as they were, the card's and the processor's (compositor_present_lead).
+static unsigned int compositor_metric_paths, compositor_metric_paths_count;
+
 static void compositor_metric_note(unsigned long long nanoseconds)
 {
+        compositor_metric_paths = compositor_metric_paths << 1 | (compositor_present_on_card ? 1u : 0u);
+        compositor_metric_paths_count += compositor_metric_paths_count < COMPOSITOR_LEAD_FRAMES;
         if (compositor_present_on_card)
                 compositor_metric_card[compositor_metric_card_at] = nanoseconds, compositor_metric_card_at = (compositor_metric_card_at + 1) % WINDOWS_METRIC_RUN,
                 compositor_metric_card_count++;
@@ -9980,6 +10002,42 @@ static void compositor_metric_note(unsigned long long nanoseconds)
         compositor_metric_presents++;
         if ((compositor_metric_presents & 15) == 1)
                 compositor_metric_publish();
+}
+
+// The worst of the last `last` times of a ring (at: its next slot; count: the times it was given, of which it holds WINDOWS_METRIC_RUN at the most).
+static positive compositor_metric_worst(const unsigned long long *ring, unsigned int at, unsigned int count, unsigned int last)
+{
+        positive worst = 0;
+
+        for (unsigned int back = 1; back <= last && back <= count && back <= WINDOWS_METRIC_RUN; back++)
+        {
+                positive time = ring[(at + WINDOWS_METRIC_RUN - back) % WINDOWS_METRIC_RUN];
+
+                worst = time > worst ? time : worst;
+        }
+        return worst;
+}
+
+/*
+        The lead of the next present (compositor_present_due): the worst of the last COMPOSITOR_LEAD_FRAMES presents, each on the path it took (so many of
+        the card's ring and so many of the processor's as there were of each among them): on one path that path's worst, and where the card and the processor
+        take turns the worse of the two, so that a card's short presents do not set the time for the processor's long one that comes next and misses. 0
+        headless, or where the owner asked for none.
+*/
+static positive compositor_present_lead(void)
+{
+        unsigned int cards = 0, processors;
+        positive worst, worst_processor;
+
+        if (compositor_late.early || compositor.card < 0)
+                return 0;
+        for (unsigned int back = 0; back < compositor_metric_paths_count; back++)
+                cards += compositor_metric_paths >> back & 1u;
+        processors = compositor_metric_paths_count - cards;
+        worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);
+        worst_processor = compositor_metric_worst(compositor_metric_processor, compositor_metric_processor_at, compositor_metric_processor_count, processors);
+        worst = worst_processor > worst ? worst_processor : worst;
+        return compositor_lead_of(worst, compositor_metric_paths_count, compositor_late.widen, compositor.period);
 }
 
 static void compositor_present(void)
@@ -21806,13 +21864,13 @@ static b32 compositor_main()
         }
 
         compositor_keys_read();
-        // A present late in its period, where the machine's owner asks for it (compositor_present_due).
+        // A present late in its period, unless the machine's owner asks for every present early (compositor_present_due).
         {
-                bipolar asked = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-late", FILE_READ | O_CLOEXEC);
+                bipolar early = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-early", FILE_READ | O_CLOEXEC);
 
-                compositor_late.asked = asked >= 0;
-                if (asked >= 0)
-                        system_close(asked);
+                compositor_late.early = early >= 0;
+                if (early >= 0)
+                        system_close(early);
         }
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
@@ -22235,7 +22293,7 @@ static b32 compositor_main()
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,
                       (positive)compositor.cursor.refused);
         string_format(log, "compositor: the processor was held %p times\n", (positive)(compositor.holds == ~0ul ? 0 : compositor.holds));
-        if (compositor_late.asked)
+        if (!compositor_late.early)
                 string_format(log, "compositor: %p presents were made late in their period, and %p of them missed the vblank they were for\n",
                               compositor_late.made, compositor_late.missed);
         string_format(log, "compositor: glass blurred again %p pixels and composed again %p\n", compositor.blurred,
