@@ -436,6 +436,12 @@ static struct
         int fd;
 } compositor_gpu_scaled_pool[COMPOSITOR_GPU_SCALED];
 
+#define COMPOSITOR_GPU_SCALE_TABLES (4ull * (16384 + 16384)) // a scaled frame's tables (its columns, then its rows), at the most
+// The scenes' bins without a wait: after the scaled frames' tables, which a scene's job may be submitted after, and before the self-test's megabyte.
+#define COMPOSITOR_GPU_SCENE_BINS_AT (COMPOSITOR_GPU_BINS_AT + COMPOSITOR_GPU_SCALED * COMPOSITOR_GPU_SCALE_TABLES)
+typedef char compositor_card_steps_fit[COMPOSITOR_GPU_SCALED + COMPOSITOR_DAMAGE <= COMPOSITOR_CARD_STEPS ? 1 : -1];
+static b32 compositor_card_add(const struct compositor_card_step *step); // the present's jobs (below)
+
 static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count)
 {
         const struct compositor_frame *frames = *io;
@@ -447,7 +453,9 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
         {
                 const struct compositor_frame *f = &frames[k];
                 struct compositor_frame source;
-                unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_BINS_AT);
+                // Each scaled frame's tables in a place of their own: a blit not waited for reads them when its turn comes.
+                positive tables_at = COMPOSITOR_GPU_BINS_AT + (positive)used * COMPOSITOR_GPU_SCALE_TABLES;
+                unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tables_at);
                 positive bytes, src_va, dst_va;
 
                 if (f->builtin || !f->pixels || !compositor_scaled(f))
@@ -521,7 +529,16 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         for (int y = 0; y < f->height; y++, fy += step_y)
                                 tables[f->width + y] = (unsigned int)(fy >> 24);
                 }
-                if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, 7, (unsigned int)f->width, (unsigned int)f->height))
+                if (compositor_card.nowait && compositor_card.looped)
+                {
+                        // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
+                        const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, (unsigned int)f->width, (unsigned int)f->height, (unsigned int)f->pitch,
+                                                                  (unsigned int)f->width, src_va, dst_va, GPU_VA + tables_at, {0, 0, 0, 0}};
+
+                        if (!compositor_card_add(&blit))
+                                return COMPOSITOR_GPU_WHY_SCALED;
+                }
+                else if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + tables_at, 7, (unsigned int)f->width, (unsigned int)f->height))
                 {
                         if (gpu_lost)
                                 compositor_gpu_recover();
@@ -536,6 +553,91 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 used++;
         }
         return COMPOSITOR_GPU_WHY_DRAWN;
+}
+
+// A step of the present's jobs; false when there is no room for one (the caller draws on the processor).
+static b32 compositor_card_add(const struct compositor_card_step *step)
+{
+        if (compositor_card.steps == COMPOSITOR_CARD_STEPS)
+                return false;
+        compositor_card.step[compositor_card.steps++] = *step;
+        return true;
+}
+
+/*
+        The present's jobs submitted in order while the card has room for them: 1 when every one is; 0 when the next waits for one before it (a slot, or a side of
+        the bins, that a job running holds: gpu_end LATE); -1 when one was refused (gpu_end and gpu_last_error say why, as a job's that failed). The jobs after a
+        refused one are not submitted.
+*/
+static int compositor_card_go(void)
+{
+        while (compositor_card.next < compositor_card.steps)
+        {
+                const struct compositor_card_step *s = &compositor_card.step[compositor_card.next];
+                positive sequence = 0;
+
+                gpu_last_error = 0, gpu_end = GPU_END_NONE;
+                if (s->kind == COMPOSITOR_CARD_SCALE)
+                {
+                        if (!gpu_lost && gpu_slot_take() < 0)
+                                gpu_end = GPU_END_LATE;
+                        else if (!gpu_lost)
+                        {
+                                struct gpu_args address_to a = GPU_ARGS;
+
+                                // gpu_blit's arguments, in the slot taken: the scale (op 7) through the tables at tab.
+                                a->s = s->src, a->d = s->dst, a->g = s->tab, a->sp = s->sp, a->dp = s->dp, a->gp = 0, a->w = s->w, a->op = 7, a->v = 0;
+                                a->x0 = a->y0 = 0, a->rows = s->h, a->tab = GPU_VA + GPU_BASES_AT;
+                                sequence = gpu_go();
+                        }
+                }
+                else
+                        sequence = gpu_scene_submit(COMPOSITOR_GPU_OPS_AT, compositor_card.records, COMPOSITOR_GPU_SCENE_BINS_AT, compositor_card.out, compositor_card.pitch,
+                                                    compositor_card.width, compositor_card.height, (unsigned int)s->rect[0], (unsigned int)s->rect[1],
+                                                    (unsigned int)s->rect[2], (unsigned int)s->rect[3]);
+                if (!sequence)
+                {
+                        if (gpu_end == GPU_END_LATE && !gpu_lost)
+                                return 0;
+                        compositor_card.next = compositor_card.steps;
+                        return -1;
+                }
+                compositor_card.last = sequence, compositor_card.next++, compositor_card.submitted++;
+        }
+        return 1;
+}
+
+// The sync_file the loop is to poll closed (the job is done, or given up).
+static void compositor_card_fence_close(void)
+{
+        if (compositor_card.fence > 0)
+                system_close(compositor_card.fence - 1);
+        compositor_card.fence = 0, compositor_card.fence_of = 0;
+}
+
+// The sync_file of a job, made when it is another job's than the one held: the descriptor, or -1 for none (the loop then looks again in a millisecond).
+static int compositor_card_fence_for(positive sequence)
+{
+        int fd;
+
+        if (compositor_card.fence && compositor_card.fence_of == sequence)
+                return compositor_card.fence - 1;
+        compositor_card_fence_close();
+        fd = sequence ? gpu_fence_fd(sequence) : -1;
+        if (fd < 0)
+                return -1;
+        compositor_card.fence = fd + 1, compositor_card.fence_of = sequence;
+        return fd;
+}
+
+// The job the loop waits for: the last of the present when all are submitted, else the one before the newest (it holds the slot and the side the next one
+// needs), and with no present in flight a job still pending (a list's given up on as late); 0 for none.
+static positive compositor_card_awaited(void)
+{
+        if (compositor_card.on)
+                return compositor_card.next < compositor_card.steps && gpu_before.sequence ? gpu_before.sequence : compositor_card.next < compositor_card.steps ? gpu.pending
+                                                                                                                                                         : compositor_card.last;
+        return gpu.pending;
 }
 
 // A job of the card is a submit and a wait (tens of microseconds and a kernel entry, more than the card spends on a few tens of thousand pixels), so two
@@ -611,6 +713,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_DRAWN;
         if (!(out = compositor_gpu_output()))
                 return COMPOSITOR_GPU_WHY_OUTPUT;
+        compositor_card.steps = compositor_card.next = compositor_card.submitted = 0, compositor_card.failed = compositor_card.fenced = 0, compositor_card.last = 0;
         {
                 enum compositor_gpu_why scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
 
@@ -626,6 +729,31 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return g->why;
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
                 return g->why;
+        if (compositor_card.nowait && compositor_card.looped)
+        {
+                // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
+                for (unsigned int at = 0; at < rects; at++)
+                {
+                        const struct compositor_card_step scene = {COMPOSITOR_CARD_SCENE, 0, 0, 0, 0, 0, 0, 0, {rect[at][0], rect[at][1], rect[at][2], rect[at][3]}};
+
+                        if (!compositor_card_add(&scene))
+                                return COMPOSITOR_GPU_WHY_OTHER;
+                }
+                compositor_card.records = g->count, compositor_card.out = out, compositor_card.pitch = (unsigned int)(compositor.scanout_pitch / 4);
+                compositor_card.width = g->width, compositor_card.height = (unsigned int)compositor.height;
+                if (compositor_card_go() < 0)
+                {
+                        if (gpu_lost) // the card lost its state, and what ran on it with it: started again, so the next present draws on it
+                                compositor_gpu_recover();
+                        compositor_gpu_job_failed();
+                        // Refused before a job of it ran: the processor draws the present. Refused after: the frame is drawn again once those are done.
+                        if (!compositor_card.submitted)
+                                return compositor_gpu_job_why();
+                        compositor_card.failed = 1;
+                }
+                compositor_card.on = 1;
+        }
+        else
         {
                 for (unsigned int at = 0; at < rects; at++)
                 {
@@ -646,7 +774,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
-        compositor_gpu_state.failures = 0;
+        if (!compositor_card.failed)
+                compositor_gpu_state.failures = 0;
         return COMPOSITOR_GPU_WHY_DRAWN;
 }
 
@@ -1006,7 +1135,8 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
         if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
-        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || !compositor_gpu_up() || !gpu_idle())
+        // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done.
+        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || compositor_card.on || !compositor_gpu_up() || !gpu_idle())
                 return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
         if (ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;

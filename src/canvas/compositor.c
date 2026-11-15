@@ -2098,7 +2098,8 @@ static int compositor_picture_poll(int row)
 
 /*
         The loop's poll list, sized by what can be in it: the loop's own (COMPOSITOR_POLLS_OWN: the signals, the watch of the input
-        directory, the doors' threads' knock, the card while a flip is in flight, the uevents and the clipboard's door), every
+        directory, the doors' threads' knock, the card while a flip is in flight, the sync_file of a job of the card's the loop waits
+        on, the uevents and the clipboard's door), every
         input device, every window's door, and what the Wayland shim adds (COMPOSITOR_WL_POLLS, wayland_host.c, which counts the X
         window manager's with its own). The size was a sum of numbers written beside the loop, which the X window manager's two
         were left out of when they came: with every input, every client stalled and a flip in flight the list was written two
@@ -2107,7 +2108,7 @@ static int compositor_picture_poll(int row)
 #ifndef COMPOSITOR_WL_POLLS
 #define COMPOSITOR_WL_POLLS 0
 #endif
-#define COMPOSITOR_POLLS_OWN 6
+#define COMPOSITOR_POLLS_OWN 7
 #define COMPOSITOR_POLLS (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + WINDOWS + COMPOSITOR_WL_POLLS)
 // The compositor's own descriptors fit the share kept for them: the poll list's (but the clients'), a wake for every door, the table,
 // the card, the render node and the buffers given to it, the sound server's socket, the selections and their history, and each transfer's pipe.
@@ -2209,6 +2210,67 @@ static void compositor_up_say(int descriptor)
         system_close(descriptor);
 }
 
+/*
+        The loop's poll list for a turn, where compositor_loop_source reads it: the signals, the watch of the input directory, every input device, every
+        window's door (a door its thread has, a drain or a reopen out, is not polled until the thread is done with it), the doors' threads' knock, the card
+        while a flip is in flight, the sync_file of the card's job a present waits for, the uevents, the clipboard's door, and what the Wayland shim adds.
+        held (compositor_card_clients_held): a present's jobs read the programs' pictures where they are, so no door, no doors' knock and no Wayland socket
+        is read, which is everything a program could be told its picture is free by; the input devices are read whatever it says, and what they say is
+        forwarded (compositor_inputs_turn, compositor_wl_wake), the doors' slots kept in their places (none polled).
+*/
+static void compositor_loop_wanted(struct compositor_poll *wanted, struct compositor_slots *slots, b32 held)
+{
+        unsigned int count = 0;
+
+        memory_zero(slots, sizeof(*slots));
+        wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
+        wanted[count++] = (struct compositor_poll){compositor.watch, COMPOSITOR_POLLIN, 0};
+        slots->inputs = count;
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
+        slots->doors = count;
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                wanted[count++] = (struct compositor_poll){held || compositor_doors.busy >> row & 1 ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
+                                                           COMPOSITOR_POLLIN, 0};
+        if (compositor_doors.done >= 0 && !held)
+        {
+                slots->done_at = count;
+                wanted[count++] = (struct compositor_poll){compositor_doors.done, COMPOSITOR_POLLIN, 0};
+        }
+        // A flip in flight: its event says the card has let go of the buffer it showed before.
+        if (compositor.flip_pending)
+        {
+                slots->card_at = count;
+                wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
+        }
+#ifdef MOONWATER_GPU_C
+        // A job of the card's the loop waits for: its sync_file is readable once the job is done (-1, polled for nothing, when there is none to have).
+        if (compositor_card_awaits())
+        {
+                slots->fence_at = count;
+                wanted[count++] = (struct compositor_poll){compositor_card_poll(), COMPOSITOR_POLLIN, 0};
+        }
+#endif
+        if (compositor.uevents >= 0)
+        {
+                slots->uevents_at = count;
+                wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
+        }
+        if (compositor_clip.door >= 0 && !(compositor_doors.busy >> COMPOSITOR_DOOR_MISC & 1))
+        {
+                slots->clip_at = count;
+                wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
+        }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (!held)
+        {
+                slots->wayland_at = count;
+                count = compositor_wl_poll(wanted, count);
+        }
+#endif
+        slots->count = count;
+}
+
 static b32 compositor_main()
 {
         b32 status;
@@ -2279,6 +2341,17 @@ static b32 compositor_main()
                 if (early >= 0)
                         system_close(early);
         }
+#ifdef MOONWATER_GPU_C
+        // The card's present without a wait where the owner asks for it (/run/moonwater/present-nowait); every job waited for in place otherwise, as it was,
+        // until what the programs are told of their pictures waits for the jobs that read them in every part of the tree (compositor_card_reads).
+        {
+                bipolar nowait = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-nowait", FILE_READ | O_CLOEXEC);
+
+                compositor_card.nowait = nowait >= 0;
+                if (nowait >= 0)
+                        system_close(nowait);
+        }
+#endif
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
         if (!headless && !compositor.layout_given)
@@ -2357,54 +2430,26 @@ static b32 compositor_main()
         while (running)
         {
                 struct compositor_poll wanted[COMPOSITOR_POLLS]; // every part of it is counted where it is added (COMPOSITOR_POLLS)
+                struct compositor_slots slots;
                 static unsigned int turns;
-                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
+                unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, done_at;
                 positive now = 0, until = 0;
-                b32 idle_turn = 0;
+                b32 idle_turn = 0, held;
                 long awaited, wait[2];
 
                 // The look at the screens the first take owes (compositor_space_first), once the loop has made its first turn and
-                // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card.
-                if (compositor.probe_owed && turns++)
+                // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card (nor a
+                // present's job: the take waits for it).
+                if (compositor.probe_owed && turns++ && !compositor_card.on)
                 {
                         compositor.probe_owed = 0;
                         compositor_space_retake();
                 }
-                wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
-                wanted[count++] = (struct compositor_poll){compositor.watch, COMPOSITOR_POLLIN, 0};
-                inputs = count;
-                for (unsigned int at = 0; at < compositor.input_count; at++)
-                        wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
-                // A door its thread has (a drain or a reopen out) is not polled until the thread is done with it.
-                doors = count;
-                for (unsigned int row = 0; row < WINDOWS; row++)
-                        wanted[count++] = (struct compositor_poll){compositor_doors.busy >> row & 1 ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
-                                                                   COMPOSITOR_POLLIN, 0};
-                if (compositor_doors.done >= 0)
-                {
-                        done_at = count;
-                        wanted[count++] = (struct compositor_poll){compositor_doors.done, COMPOSITOR_POLLIN, 0};
-                }
-                // A flip in flight: its event says the card has let go of the buffer it showed before.
-                if (compositor.flip_pending)
-                {
-                        card_at = count;
-                        wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
-                }
-                if (compositor.uevents >= 0)
-                {
-                        uevents_at = count;
-                        wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
-                }
-                if (compositor_clip.door >= 0 && !(compositor_doors.busy >> COMPOSITOR_DOOR_MISC & 1))
-                {
-                        clip_at = count;
-                        wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
-                }
-#ifdef CONFIG_MOONWATER_WAYLAND
-                wayland_at = count;
-                count = compositor_wl_poll(wanted, count);
-#endif
+                // The clients wait while a present's jobs read their pictures, GPU_LATE_NS at the most (compositor_card_clients_held).
+                held = compositor_card_clients_held(clock_monotonic_nanoseconds());
+                compositor_loop_wanted(wanted, &slots, held);
+                count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at, fence_at = slots.fence_at;
+                uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
 
                 // With nothing to show or time the wait is for ever. With
                 // something to show it is until a frame has gone by since the
@@ -2470,8 +2515,9 @@ static b32 compositor_main()
                 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn.
-                if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages)
+                // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn (a present's jobs
+                // on the card answer it when they are done).
+                if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
                 {
                         positive period = compositor.period ? compositor.period : 16666667ull;
                         positive frame = now - compositor.presented < period ? compositor.presented + period : now;
@@ -2498,7 +2544,9 @@ static b32 compositor_main()
                                 compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
                         until = !until || compositor.screens_look < until ? compositor.screens_look : until;
                 }
-                if (compositor.damages)
+                // While the card holds the present (its jobs, or a job given up on still running) its fence wakes the loop, and the card's own
+                // times below: the present is not due before.
+                if (compositor.damages && !compositor_card_holds())
                 {
                         positive frame, waiting = compositor_flip_wait(now);
 
@@ -2508,6 +2556,22 @@ static b32 compositor_main()
                                                                  compositor_present_lead(), now);
                         until = !until || frame < until ? frame : until;
                 }
+#ifdef MOONWATER_GPU_C
+                // A job the loop waits on: its deadline, the next look for its fault, a millisecond with no sync_file to poll; and the clients' hold ends
+                // GPU_LATE_NS after the present began, whether or not the job has.
+                if (fence_at)
+                {
+                        positive due = compositor_card_due(now);
+
+                        until = !until || due < until ? due : until;
+                }
+                if (held)
+                {
+                        positive due = compositor_card.began + GPU_LATE_NS;
+
+                        until = !until || due < until ? due : until;
+                }
+#endif
 #ifdef MOONWATER_GPU_C
                 // The GPU's late probe: a card that is not there is looked for again when its time comes. Nothing is waited for while the card is up or off.
                 {
@@ -2541,7 +2605,7 @@ static b32 compositor_main()
 
                 for (unsigned int at = 0; awaited > 0 && at < count; at++)
                         if (wanted[at].returned)
-                                compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, uevents_at, clip_at, wayland_at)]++;
+                                compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at)]++;
 
                 // A signal: /root again for SIGUSR1, and the end for any other (and for a descriptor that cannot be read).
                 if (wanted[0].returned)
@@ -2583,15 +2647,21 @@ static b32 compositor_main()
 #endif
                 if (card_at && wanted[card_at].returned)
                         compositor_card_read();
+#ifdef MOONWATER_GPU_C
+                // The card's jobs: the next of a present submitted, its flip committed, its end once they are done, or the hang path (compositor_card_tick).
+                // Asked every turn one is awaited, the sync_file readable or not: a deadline is the clock's, and a fence's error is a done answer.
+                if (fence_at)
+                        compositor_card_tick();
+#endif
                 if (clip_at && wanted[clip_at].returned)
                         compositor_clip_cli();
 
-                // A screen came or went, or the screens are taken now that a flip that held them back has landed.
+                // A screen came or went, or the screens are taken now that a flip that held them back has landed (and a present's jobs are done).
                 if (uevents_at && wanted[uevents_at].returned)
                         compositor_uevents_read();
-                if (compositor.space_wanted && !compositor.flip_pending)
+                if (compositor.space_wanted && !compositor.flip_pending && !compositor_card.on)
                         compositor_space_retake();
-                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look)
+                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look && !compositor_card.on)
                 {
                         compositor.screens_look = 0;
                         compositor_space_retake();
@@ -2638,7 +2708,7 @@ static b32 compositor_main()
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.
-                if (compositor.damages && !compositor.flip_pending)
+                if (compositor.damages && !compositor.flip_pending && !compositor_card_holds())
                 {
                         positive stamp = clock_monotonic_nanoseconds(), lead = compositor_present_lead();
 
@@ -2651,11 +2721,15 @@ static b32 compositor_main()
                                 // A present late in its period is paced by the card's vblank and is dated as made; any other when it was due.
                                 compositor_late_begin(lead, stamp);
                                 compositor.presented = compositor_late.aim ? stamp : compositor_frame_dated(compositor.presented, compositor.period, stamp);
+                                compositor_card.looped = 1; // the loop's present: its jobs may go without a wait (compositor_card)
                                 compositor_present();
+                                compositor_card.looped = 0;
                                 after_present = clock_monotonic_nanoseconds();
 #ifdef CONFIG_MOONWATER_WAYLAND
-                                // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
-                                compositor_wl_presented();
+                                // The frame is on its way to the screen: the presentation feedbacks its commits took are answered. A frame the card
+                                // still draws answers them, and its callbacks, when its jobs are done (compositor_card_done).
+                                if (!compositor_card.on)
+                                        compositor_wl_presented();
 #endif
                                 compositor_land_keep();
                                 compositor_glide_keep();
@@ -2668,13 +2742,15 @@ static b32 compositor_main()
                                         compositor.motion_ts = 0;
                                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
-                                compositor_wl_frame();
+                                if (!compositor_card.on)
+                                        compositor_wl_frame();
 #endif
                         }
                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // Callbacks or feedbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
-                else if (!compositor.damages && compositor_wl.started && wayland_frame_wanted())
+                // Callbacks or feedbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same. Not while
+                // a present's jobs are on the card: its end answers them.
+                else if (!compositor.damages && compositor_wl.started && wayland_frame_wanted() && !compositor_card.on)
                 {
                         positive stamp = clock_monotonic_nanoseconds();
                         positive period = compositor.period ? compositor.period : 16666667ull;

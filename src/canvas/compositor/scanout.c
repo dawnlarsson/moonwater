@@ -173,16 +173,64 @@ static int compositor_shows_row(int row)
 }
 
 /*
+        A present the card draws, without a wait (gpu.c's gpu_submit and gpu_scene_submit). Its jobs, in order: the pictures of the frames drawn at less than
+        their size, a blit each (compositor_gpu_scale_frames), then a scene for each rectangle of the damage, each binned on its own in the side of the bins no
+        running job reads, all into the buffer the present composes into. The card holds two jobs at a time (a slot each), so the jobs of a present of more
+        are submitted as the ones before them end, the loop woken by the sync_file of the one it waits for (compositor_card_tick). The last job's sync_file is
+        the frame's: the flip of the plate composed into is committed with it as the primary plane's IN_FENCE_FD (compositor_flip_fenced), so the kernel
+        flips once the card is done, and the loop polls it too, for what comes once the pixels are there (compositor_card_done): the screens told what
+        changed, the flip where the card takes no fence (the legacy flip, a headless scan image's names), the present's time (the metric the lead is measured
+        on), and what the clients are told of their pictures: nothing while a job may read them (the loop reads no client while compositor_card.on). Nothing
+        waits for the card in place. A job not done GPU_HANG_NS after its submit is the hang path there was (compositor_gpu_job_failed: the cool-down, the
+        processor draws), and the frame it was for is drawn again (compositor_card_abandon); a flip whose event never comes is compositor_flip_lost.
+
+        It is the owner's to ask for, for now (the file /run/moonwater/present-nowait, looked for at the start: compositor_card.nowait); without it every
+        job of a present is waited for in place as it was (gpu_scene and gpu_blit, a tick each), until what the programs are told of their pictures waits
+        for the jobs that read them wherever it is told (compositor_card_reads: the doors' taken, the shim's releases).
+*/
+enum
+{
+        COMPOSITOR_CARD_SCALE, // a frame's picture at the size it is drawn (gpu.asm's op 7)
+        COMPOSITOR_CARD_SCENE  // a rectangle of the scene (op 6)
+};
+#define COMPOSITOR_CARD_STEPS (8 + COMPOSITOR_DAMAGE) // the scaled frames' blits (COMPOSITOR_GPU_SCALED of them) and a scene a rectangle
+struct compositor_card_step
+{
+        unsigned int kind, w, h, sp, dp;
+        positive src, dst, tab;
+        int rect[4];
+};
+static struct
+{
+        b32 nowait;                 // /run/moonwater/present-nowait was there at the start: the loop's presents' jobs go without a wait
+        b32 looped;                 // the present in hand is the loop's (compositor_main): one made anywhere else, the take of the screens' own before
+                                    // its mode set, waits for its jobs in place
+        b32 on;                     // a present's jobs are on the card, or waiting for their turn
+        b32 failed;                 // one was refused after one before it was submitted: the frame is drawn again once those are done
+        b32 fenced;                 // the flip was committed with the last job's sync_file
+        unsigned int steps, next, submitted; // the jobs, the next to submit, and how many were
+        struct compositor_card_step step[COMPOSITOR_CARD_STEPS];
+        unsigned int records, pitch, width, height; // the scene's records and the picture they are drawn into (pitch in pixels)
+        positive out, began, last;  // the picture's address for the card, when the present began, and the last job submitted
+        int fence;                  // the sync_file the loop polls, plus one (0: none), and the job it is of
+        positive fence_of;
+        unsigned short clip[COMPOSITOR_DAMAGE][4]; // the present's rectangles, as the screens are told them
+        unsigned int clips;
+        int turning, composed, flip_own, back, plane_off; // how the present ends (compositor_present_tell)
+        unsigned int rows;          // the rows whose pictures the present's jobs read (bit row)
+} compositor_card;
+
+/*
         Whether a job of the card that reads a row's picture where it is (a window's table buffer, a client's lent buffer) may still run: while it does,
         nothing that program is told may let it draw into what the job reads (the door's "taken", the shim's release of a buffer a commit replaced), and
-        both wait for it to be over: its fence signalled, or the hang path's end of it. Every present's jobs are waited for in place for now, so no job
-        reads a picture once its present is over: none.
+        both wait for it to be over: its fence signalled, or the hang path's end of it. A present whose jobs are waited for in place (the default) has no
+        job left once it is over.
 */
-__attribute__((unused)) static int compositor_card_reads(int row)
+static int compositor_card_reads(int row)
 {
-        (void)row;
-        return 0;
+        return compositor_card.on && row >= 0 && row < WINDOWS && (compositor_card.rows >> row & 1u);
 }
+
 
 // A flip to fb, done at the next vertical blank, with its event; false when the card refuses it.
 /*

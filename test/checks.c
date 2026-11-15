@@ -128800,7 +128800,8 @@ static unsigned int gpu_fake_waits; // the waits answered as still running befor
 static int gpu_fake_errno;          // a wait the kernel refuses is answered as failed while it is set (the fence has an error)
 static unsigned int gpu_fake_wait_calls, gpu_fake_submits, gpu_fake_requests; // the waits asked, the submits made, and every request made of the kernel's DRM (GPU_CONTROL)
 static positive gpu_fake_until; // the time the last wait was asked to wait until (0: it looks and does not wait)
-#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_until = (wait)[1], gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_wait_asked(wait))
+static unsigned int gpu_fake_blocking; // the waits asked to wait until a time (a wait in place), as against a look
+#define GPU_WAIT_CS(wait) (gpu_fake_wait_calls++, gpu_fake_until = (wait)[1], gpu_fake_blocking += (wait)[1] != 0, gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_wait_asked(wait))
 // The fake card with no hardware under it: the submit is taken (its sequence number 1) without a call, and the kernel's log has a page fault in it while gpu_fake_fault is set.
 static int gpu_fake_card, gpu_fake_fault;
 #define GPU_LOG_FAKE(since, out) do { if (gpu_fake_fault) (out)->have_at = 1, (out)->at = 0x2000000100ull; } while (0)
@@ -129078,6 +129079,12 @@ static struct
         // that scans its framebuffer out as it is).
         unsigned int dirty_asks;
         int dirty_errno;
+        // The primary plane lists IN_FENCE_FD (in_fence); the last commit's IN_FENCE_FD (-1 for none), its flags and user data; the legacy flips taken while
+        // page_flips is set (refused otherwise, EINVAL, as the fake card always did), the last one's framebuffer, and the errno the card answers commits with
+        // while it is set (EBUSY for a commit still in flight).
+        int in_fence, atomic_in_fence, atomic_errno, page_flips;
+        unsigned int atomic_flags, flips, flip_fb;
+        unsigned long atomic_user;
 } card_fake;
 
 static long card_fake_node(unsigned int minor)
@@ -129231,6 +129238,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                                 ids[n] = id, values[n++] = id == 11 ? 1 : 0; // type: Primary
                         if (card_fake.rotation)
                                 ids[n] = 12, values[n++] = card_fake.plane_rotation;
+                        if (card_fake.in_fence)
+                                ids[n] = 13, values[n++] = (unsigned long)-1;
                 }
                 else if (g->object == CARD_FAKE_CONNECTOR + 0 && card_fake.edid_length)
                         ids[n] = CARD_FAKE_EDID, values[n++] = CARD_FAKE_BLOB;
@@ -129262,6 +129271,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
 
                 if (id == CARD_FAKE_EDID)
                         string_copy((string_address)p->name, (string_address) "EDID");
+                else if (id == 13 && card_fake.in_fence)
+                        string_copy((string_address)p->name, (string_address) "IN_FENCE_FD"), values = 2; // a signed range
                 else if (id >= 1 && id <= 12 && (id < 12 || card_fake.rotation))
                 {
                         string_copy((string_address)p->name, (string_address)names[id - 1]);
@@ -129430,16 +129441,32 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                         return -95; // EOPNOTSUPP: the client did not ask for commits
                 if (card_fake.refuse_atomic)
                         return -22;
+                if (card_fake.atomic_errno)
+                        return -card_fake.atomic_errno;
+                card_fake.atomic_in_fence = -1, card_fake.atomic_flags = a->flags, card_fake.atomic_user = a->user_data;
                 for (unsigned int object = 0; object < a->count; object++)
                         for (unsigned int each = 0; each < counts[object]; each++, at++)
                                 if (objects[object] == CARD_FAKE_PLANE && props[at] == 1)
                                         fb = values[at];
                                 else if (objects[object] == CARD_FAKE_PLANE && props[at] == 12)
                                         rotation = values[at];
+                                else if (objects[object] == CARD_FAKE_PLANE && props[at] == 13 && card_fake.in_fence)
+                                        card_fake.atomic_in_fence = (int)(long)values[at];
+                                else if (objects[object] == CARD_FAKE_PLANE && props[at] == 13)
+                                        return -22; // a property the plane has not
                 if (fb)
                         card_fake.atomic_fb = card_fake.crtc_fb = (unsigned int)fb;
                 if (rotation)
                         card_fake.plane_rotation = rotation;
+                return 0;
+        }
+        case COMPOSITOR_PAGE_FLIP:
+        {
+                const unsigned int address_to f = (const unsigned int address_to)argument; // crtc, fb, flags
+
+                if (!card_fake.page_flips)
+                        return -22;
+                card_fake.flips++, card_fake.flip_fb = f[1];
                 return 0;
         }
         case COMPOSITOR_RMFB:
@@ -242389,7 +242416,7 @@ static void gpu_late_rows(void)
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_late_buffer + ops_at);
         unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0};
         struct compositor_frame f;
-        int drew;
+        int drew, kept_waits;
 
         memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state));
         memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene)), memory_copy(kept_map, &gpu_maps[0], sizeof(gpu_maps[0]));
@@ -242404,6 +242431,8 @@ static void gpu_late_rows(void)
         memory_zero(&f, sizeof(f));
         gpu_late_reset();
         compositor_gpu_layout();
+        // These rows hold the present whose jobs are waited for in place (compositor_card.nowait 0, the default); gpu_card_rows hold the one that is not.
+        kept_waits = compositor_card.nowait, compositor_card.nowait = 0;
 
         // 1. A job the fence ends within the cap: the wait goes on in slices, three of them answered running, and the job is done: nothing pending, no end.
         memory_copy(ops, q, 32);
@@ -242477,6 +242506,7 @@ static void gpu_late_rows(void)
         gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_fault[0] = 0;
         compositor.card = kept_card, compositor_gpu = kept_gpu_on, compositor.width = kept_width, compositor.height = kept_height, compositor.damages = kept_damages;
         compositor.scanout = kept_scanout, compositor.scanout_pitch = kept_pitch, compositor.scanout_bytes = kept_bytes;
+        compositor_card.nowait = kept_waits;
 }
 
 /*
@@ -242762,6 +242792,196 @@ static void gpu_async_rows(void)
         gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
         memory_copy(&gpu, kept_gpu, sizeof(gpu));
         gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_fault[0] = 0;
+}
+
+/*
+        The card's present without a wait (compositor_card: present-nowait), on the fake card and the fake fence (gpu_fake_busy: every job running, gpu_fake_idle:
+        every job done), on a headless 2048 by 64 scanout held by a written map: a present's jobs are submitted and none is waited for; the present is held,
+        the clients' doors and sockets are not read while the jobs are younger than GPU_LATE_NS and are read again after, the input devices read whatever;
+        what the jobs read stays theirs (compositor_card_reads) until the fence says done or the hang path ends it; a present of three rectangles has its
+        third submitted when the first is done; its end is the present's (the native rows held for it given back, its time noted); and on a card whose
+        primary plane takes IN_FENCE_FD the flip is committed with the job's sync_file, on one that does not (or refuses it) flipped the legacy way at the end.
+*/
+static unsigned int gpu_card_buffer[(GPU_DATA + (6 << 20)) / 4]; // the fake card's buffer: the ops, the tables, the scaled tables and both sides of the bins
+static unsigned int gpu_card_screen[2048 * 64];                  // and the scanout
+static struct windows gpu_card_table;
+
+static positive gpu_card_present(const int (*rect)[4], unsigned int rects)
+{
+        struct compositor_frame f;
+
+        memory_zero(&f, sizeof(f));
+        compositor.damages = rects;
+        for (unsigned int at = 0; at < rects; at++)
+                memory_copy(compositor.damage[at], rect[at], sizeof(compositor.damage[at]));
+        return (positive)compositor_gpu_present(&f, 0);
+}
+
+static void gpu_card_rows(void)
+{
+        static unsigned char kept_comp[sizeof(compositor)], kept_gpu[sizeof(gpu)], kept_state[sizeof(compositor_gpu_state)], kept_gscene[sizeof(compositor_gscene)];
+        static unsigned char kept_map[sizeof(gpu_maps[0])], kept_card[sizeof(compositor_card)];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, kept_metric = compositor_metric_card_count, submits, flips, atomics;
+        int kept_gpu_on = compositor_gpu;
+        const int one[1][4] = {{0, 0, 64, 64}}, three[3][4] = {{0, 0, 64, 64}, {1024, 0, 1088, 64}, {1984, 0, 2048, 64}};
+        const unsigned char rows[1] = {3};
+        const unsigned short clip[1][4] = {{0, 0, 64, 64}};
+        struct compositor_poll wanted[COMPOSITOR_POLLS];
+        struct compositor_slots held, open;
+        positive now, drew;
+
+        memory_copy(kept_comp, &compositor, sizeof(compositor)), memory_copy(kept_gpu, &gpu, sizeof(gpu));
+        memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene));
+        memory_copy(kept_map, &gpu_maps[0], sizeof(gpu_maps[0])), memory_copy(kept_card, &compositor_card, sizeof(compositor_card));
+        memory_zero(&gpu_card_table, sizeof(gpu_card_table));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_card_buffer, gpu.size = sizeof(gpu_card_buffer), gpu.imports = 0;
+        gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        gpu_fake_card = 1, gpu_tick = 100, gpu_map_count = 1;
+        gpu_maps[0].from = (positive)gpu_card_screen, gpu_maps[0].to = (positive)gpu_card_screen + sizeof(gpu_card_screen), gpu_maps[0].va = GPU_VA_MAPS;
+        gpu_maps[0].bytes = sizeof(gpu_card_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
+        compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
+        compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = 0, compositor.woken = 0;
+        memory_zero(&compositor_card, sizeof(compositor_card));
+        compositor_card.nowait = 1, compositor_card.looped = 1; // the loop's present, without a wait
+        gpu_late_reset();
+        compositor_gpu_layout();
+
+        // 1. A present of one rectangle: its job submitted and not waited for, the present the card's, the job on the card.
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_fake_blocking = 0, submits = gpu_fake_submits;
+        drew = gpu_card_present(one, 1);
+        check("gpu card: a present's job is submitted and not waited for, and the present is the card's", drew == 1 && compositor_card.on && gpu.pending &&
+              gpu_fake_submits == submits + 1 && gpu_fake_blocking == 0 && compositor_card.steps == 1 && compositor_card.next == 1);
+        now = clock_monotonic_nanoseconds();
+        compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(now);
+        check("gpu card: the next present is held while its job runs", compositor_card_holds());
+        check("gpu card: and the picture of the row it reads is the job's, no other's", compositor_card_reads(3) && !compositor_card_reads(4));
+        check("gpu card: the clients are held while the job is younger than GPU_LATE_NS, and not after",
+              compositor_card_clients_held(now + 1000000ull) && compositor_card_clients_held(now + GPU_LATE_NS - 1) && !compositor_card_clients_held(now + GPU_LATE_NS));
+        {
+                int kept_door = compositor.door[2], kept_input = compositor.inputs[0];
+                unsigned int kept_inputs = compositor.input_count;
+                unsigned long kept_busy = compositor_doors.busy;
+
+                compositor.door[2] = 5, compositor.inputs[0] = 6, compositor.input_count = 1, compositor_doors.busy = 0;
+                compositor_loop_wanted(wanted, &held, 1);
+                check("gpu card: while the clients are held no door and no Wayland socket is polled, the input devices are, and the job's sync_file is",
+                      wanted[held.inputs].handle == 6 && wanted[held.doors + 2].handle == -1 && held.doors == held.inputs + 1 && !held.wayland_at && !held.done_at &&
+                          held.fence_at && wanted[held.fence_at].handle >= 0 && wanted[held.fence_at].handle == compositor_card.fence - 1);
+                compositor_loop_wanted(wanted, &open, 0);
+                check("gpu card: with them not held the doors and the sockets are polled again, in the same places", wanted[open.inputs].handle == 6 &&
+                      wanted[open.doors + 2].handle == 5 && open.doors == held.doors && open.wayland_at && open.fence_at);
+                compositor.door[2] = kept_door, compositor.inputs[0] = kept_input, compositor.input_count = kept_inputs, compositor_doors.busy = kept_busy;
+        }
+
+        // 2. A fence that never signals: the turn asks without a wait, the clients are read again past GPU_LATE_NS, what the job reads stays the job's until the
+        // hang path ends it, and then the frame is drawn again (the whole space damaged), the present the processor's.
+        compositor_card_tick();
+        check("gpu card: a turn while the job runs asks the card without a wait and leaves the present on it", compositor_card.on && gpu_fake_blocking == 0);
+        now = clock_monotonic_nanoseconds();
+        compositor_card.began = now - GPU_LATE_NS - 1, gpu_job_began = now - (GPU_HANG_NS - 500000000ull);
+        compositor_card_tick();
+        check("gpu card: a job late past GPU_LATE_NS has the clients read again, and what it reads still its own", !compositor_card_clients_held(now) &&
+              compositor_card.on && compositor_card_reads(3) && compositor_card_holds());
+        gpu_job_began = now - GPU_HANG_NS;
+        compositor_card_tick();
+        check("gpu card: at its deadline the hang path ends it: the card cools down, the frame is given up and drawn again whole, and nothing is the job's",
+              !compositor_card.on && !compositor_card_reads(3) && gpu_end == GPU_END_HUNG && compositor_gpu_state.cool_until > now && compositor.damages == 1 &&
+                  compositor.damage[0][2] == 2048 && compositor.damage[0][3] == 64 && !compositor_card.fence);
+        check("gpu card: after it the processor draws, the hung job pending or not", !compositor_card_holds() && gpu_fake_blocking == 0);
+
+        // 3. A job that ends: the present's end when the fence says so, the native row held for it given back, its time the card's.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_card_table.shown[3] = 0;
+        drew = gpu_card_present(one, 1);
+        compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds() - 1000000ull);
+        compositor.held_rows = 1u << 3, compositor.taken_held[3] = 77, compositor.woken = 0; // its door's taken held for the job (compositor_take)
+        kept_metric = compositor_metric_card_count;
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        compositor_card_tick();
+        check("gpu card: once the fence says done the present ends: nothing on the card, its time noted as the card's, a millisecond or more",
+              drew == 1 && !compositor_card.on && !compositor_card_reads(3) && compositor_metric_card_count == kept_metric + 1 &&
+                  compositor_metric_card[(compositor_metric_card_at + WINDOWS_METRIC_RUN - 1) % WINDOWS_METRIC_RUN] >= 1000000ull && !compositor_card.fence);
+        check("gpu card: and the window held for the job is told its picture was taken", gpu_card_table.shown[3] == 77 && !(compositor.held_rows & (1u << 3)) &&
+              (compositor.woken & (1u << 3)));
+
+        // 4. Three rectangles: two jobs on the card, the third submitted once the first is done, none waited for.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_fake_blocking = 0, submits = gpu_fake_submits;
+        drew = gpu_card_present(three, 3);
+        check("gpu card: a present of three rectangles has two jobs on the card and the third waiting for the first", drew == 1 && compositor_card.on &&
+              compositor_card.steps == 3 && compositor_card.next == 2 && gpu_fake_submits == submits + 2 && compositor_card_awaited() == gpu_before.sequence &&
+              gpu_before.sequence);
+        compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds());
+        compositor_card_tick();
+        check("gpu card: while both run the third waits", compositor_card.next == 2 && gpu_fake_submits == submits + 2);
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        compositor_card_tick();
+        check("gpu card: when they are done it is submitted, and the present ends when it is, nothing waited for", !compositor_card.on &&
+              gpu_fake_submits == submits + 3 && gpu_fake_blocking == 0);
+
+        // 5. A card whose primary plane takes IN_FENCE_FD: the flip of the plate composed into is committed with the job's sync_file, does not wait, has its event;
+        // at the end nothing is flipped again.
+        if (card_fake_open(2048, 64))
+        {
+                compositor.card = -1, compositor.overlay_state = 0, compositor.primary = 0, compositor.crtc_index = 0, compositor.crtc = CARD_FAKE_CRTC;
+                compositor_fence_prop = 0, card_fake.in_fence = 1, card_fake.page_flips = 1;
+                gpu_late_reset();
+                gpu_fake_idle = 0, gpu_fake_busy = 1;
+                drew = gpu_card_present(one, 1);
+                compositor.card = card_fake.fd, compositor.fb = 100, compositor.on_screen = 101, compositor.flip_pending = 0;
+                submits = (unsigned int)compositor_metric_flips_jobs;
+                compositor_card_after(clip, 1, 0, 1, 1, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds());
+                check("gpu card: the flip is committed with the job's sync_file as the primary plane's IN_FENCE_FD, not waiting, with its event",
+                      drew == 1 && compositor_card.fenced && compositor_card.fence && card_fake.atomic_in_fence == compositor_card.fence - 1 &&
+                          card_fake.atomic_fb == 100 && (card_fake.atomic_flags & COMPOSITOR_ATOMIC_NONBLOCK) && (card_fake.atomic_flags & COMPOSITOR_FLIP_EVENT) &&
+                          card_fake.atomic_user == compositor.flip_serial && compositor.flip_pending && compositor.on_screen == 100);
+                check("gpu card: and it is counted as a flip with a job in flight", compositor_metric_flips_jobs == submits + 1 && compositor_metric_flip_jobs_most >= 1);
+                gpu_fake_busy = 0, gpu_fake_idle = 1, flips = card_fake.flips;
+                compositor_card_tick();
+                check("gpu card: at the end of its jobs the fenced flip is not flipped again", !compositor_card.on && card_fake.flips == flips);
+
+                // 6. A commit the card refuses for a flip in flight (EBUSY): this present is flipped the legacy way when its jobs are done, the fence kept for the next.
+                compositor.flip_pending = 0, compositor.on_screen = 101, card_fake.atomic_errno = 16;
+                gpu_late_reset();
+                gpu_fake_idle = 0, gpu_fake_busy = 1;
+                compositor.card = -1, drew = gpu_card_present(one, 1), compositor.card = card_fake.fd;
+                compositor_card_after(clip, 1, 0, 1, 1, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds());
+                check("gpu card: a commit refused as busy is no fenced flip, and the property is kept", !compositor_card.fenced && !compositor.flip_pending &&
+                      compositor_fence_prop == 13);
+                gpu_fake_busy = 0, gpu_fake_idle = 1, flips = card_fake.flips;
+                compositor_card_tick();
+                check("gpu card: and the frame is flipped the legacy way once its jobs are done", !compositor_card.on && card_fake.flips == flips + 1 &&
+                      card_fake.flip_fb == 100 && compositor.flip_pending);
+
+                // 7. A plane with no IN_FENCE_FD: no commit is tried, and the end flips the legacy way.
+                compositor.flip_pending = 0, compositor.on_screen = 101, card_fake.atomic_errno = 0, card_fake.in_fence = 0, compositor_fence_prop = 0;
+                compositor.overlay_state = 0, compositor.primary = 0;
+                gpu_late_reset();
+                gpu_fake_idle = 0, gpu_fake_busy = 1;
+                compositor.card = -1, drew = gpu_card_present(one, 1), compositor.card = card_fake.fd;
+                atomics = card_fake.atomics;
+                compositor_card_after(clip, 1, 0, 1, 1, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds());
+                check("gpu card: a primary plane with no IN_FENCE_FD has no commit tried", !compositor_card.fenced && card_fake.atomics == atomics &&
+                      compositor_fence_prop == -1 && !compositor.flip_pending);
+                gpu_fake_busy = 0, gpu_fake_idle = 1, flips = card_fake.flips;
+                compositor_card_tick();
+                check("gpu card: and its frame is flipped the legacy way at the end", !compositor_card.on && card_fake.flips == flips + 1 && compositor.flip_pending);
+                card_fake_close();
+        }
+        else
+                check("gpu card: the fake card is made", false);
+
+        gpu_late_reset();
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_fake_busy = 0, gpu_lost = 0, gpu_handed_clear();
+        gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        if (compositor_card.fence)
+                system_close(compositor_card.fence - 1);
+        compositor_fence_prop = 0;
+        memory_copy(&compositor, kept_comp, sizeof(compositor)), memory_copy(&gpu, kept_gpu, sizeof(gpu));
+        memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state)), memory_copy(&compositor_gscene, kept_gscene, sizeof(compositor_gscene));
+        memory_copy(&gpu_maps[0], kept_map, sizeof(gpu_maps[0])), memory_copy(&compositor_card, kept_card, sizeof(compositor_card));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_fault[0] = 0, compositor_gpu = kept_gpu_on;
 }
 
 /*
@@ -243786,6 +244006,7 @@ b32 main(void)
         gpu_engine_and_render_regressions();
         gpu_late_rows();
         gpu_async_rows();
+        gpu_card_rows();
         gpu_own_rows();
         gpu_bench_rows();
         flip_wait_rows();

@@ -1392,6 +1392,14 @@ architecture gate above.
   update usb` and `setup rollback` now share, and no image could be built
   where they were written, so neither that lane nor a guest scene of the update
   from a stick has run on them.
+- **The card's present without a wait** (opt-in, `/run/moonwater/present-nowait`,
+  MW-2026-200): a job of the card reads the windows' pictures in place after
+  its present returns. The loop reads no client while a present's jobs are
+  younger than 16 ms, and the doors' taken waits on `compositor_card_reads`;
+  the Wayland shim's release of a buffer a second commit replaced does not yet
+  (its `row_busy` is open), so a client that commits twice while a job later
+  than 16 ms reads its first buffer can be handed it and tear that frame. It
+  stays opt-in until it does; the default present waits for its jobs in place.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.

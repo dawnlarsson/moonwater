@@ -82,8 +82,14 @@ static unsigned long long compositor_loop_turns, compositor_loop_idle, composito
 
 static unsigned int compositor_loop_by[WINDOWS_LOOP_SOURCES], compositor_loop_by_second[WINDOWS_LOOP_SOURCES];
 
-// The source of a poll slot that returned events (the same order compositor_main builds the slots in).
-static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, unsigned int done_at, unsigned int card_at,
+// Where each part of the loop's poll list is (compositor_loop_wanted builds it): 0 for a part that is not in it this turn.
+struct compositor_slots
+{
+        unsigned int count, inputs, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at;
+};
+
+// The source of a poll slot that returned events (the same order compositor_main builds the slots in). The card's job's fence is the card's.
+static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, unsigned int done_at, unsigned int card_at, unsigned int fence_at,
                                            unsigned int uevents_at, unsigned int clip_at, unsigned int wayland_at)
 {
         if (at == 0)
@@ -96,7 +102,7 @@ static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, 
                 return 3;
         if (done_at && at == done_at)
                 return 4;
-        if (card_at && at == card_at)
+        if ((card_at && at == card_at) || (fence_at && at == fence_at))
                 return 5;
         if (uevents_at && at == uevents_at)
                 return 6;
@@ -181,19 +187,337 @@ static positive compositor_present_lead(void)
         return compositor_lead_of(worst, compositor_metric_paths_count, compositor_late.widen, compositor.period);
 }
 
+/*
+        A present's end, once its pixels are in compositor.fb: the screens told what changed (one DIRTYFB, or each screen's), the screens Canvas
+        turns given their part (compositor_turn_frame), the overlay taken off where the frame is the compositor's own screen again, and the frame
+        shown: the plate composed into flipped to (flip_own), or the compositor's own screen flipped back to (back), with what a refused flip does.
+        At the present for one the processor drew; when its jobs are done for one the card drew (compositor_card_done).
+*/
+static void compositor_present_tell(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off)
+{
+        // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
+        if (clips && compositor_output_count() < 2 && !turning)
+                compositor_dirty(compositor.fb, clip, clips);
+        else if (clips && compositor.card >= 0)
+                compositor_dirty_screens(clip, clips);
+        // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
+        if (clips && turning)
+                compositor_turn_frame(clip, clips, gpu_composed);
+
+        // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
+        if ((back || plane_off) && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
+                compositor_overlay_off();
+        if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
+        {
+                compositor_record_refuse();
+                if (compositor.card < 0)
+                {
+                        // The scan image was not exchanged: the composed frame is not shown, so the buffers are both whole again from the next present.
+                        compositor_plate_swap();
+                        compositor_stale_all(compositor_front_stale, &compositor_front_stale_any, &compositor_front_parts);
+                        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
+                }
+                else if (++compositor_flip_refused >= 3)
+                {
+                        // Refused three presents running: the crtc is set to the buffer composed into, which shows it at once (a modeset, so it tears).
+                        struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
+                                                      0, 0, 0, 1, compositor.mode};
+
+                        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                        compositor.on_screen = compositor.fb;
+                        compositor_flip_refused = 0;
+                        compositor_flip_done();
+                }
+                else
+                {
+                        // Refused once (the card is still on the flip before, EBUSY): the screen keeps the buffer it shows and the frame is
+                        // composed again into the other from the next present. Each buffer's stale holds what it misses (the damage of this
+                        // present is in the one the screen shows), so nothing is lost; a modeset on every refusal would flicker the screen.
+                        compositor_plate_swap();
+                }
+        }
+        else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
+        {
+                compositor_record_refuse();
+                struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
+                                              0, 0, 0, 1, compositor.mode};
+
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                compositor.on_screen = compositor.fb;
+                compositor_flip_done();
+        }
+}
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_presented(void); // wayland_host.c: a drawn frame's feedbacks, answered (or held for its flip)
+static void compositor_wl_frame(void);     // and its callbacks, and the buffers its pictures replaced given back
+#endif
+
+#ifdef MOONWATER_GPU_C
+static void compositor_damage_space(void);
+
+/*
+        The flip of the plate composed into, committed with the sync_file of the job that draws it as the primary plane's IN_FENCE_FD (an atomic
+        commit that does not wait, with the flip's event): the kernel flips once the card is done. The property is looked for once, on the primary
+        plane of this crtc (compositor_overlay_ready finds it and asks for commits); a card with none, or one that refuses such a commit for any
+        reason but a flip still in flight (EBUSY), is flipped the legacy way once its jobs are done (compositor_card_done), from then on. False
+        when it was not committed.
+*/
+static int compositor_fence_prop; // the primary plane's IN_FENCE_FD (0: not looked for yet; -1: none, or refused)
+
+static unsigned int compositor_in_fence(void)
+{
+        if (!compositor_fence_prop)
+        {
+                struct compositor_enum none[1];
+                unsigned int id = 0;
+
+                compositor_fence_prop = -1;
+                if (compositor.card >= 0)
+                        compositor_overlay_ready();
+                if (compositor.card >= 0 && compositor.primary && compositor.primary_props[COMPOSITOR_PLANE_FB])
+                        compositor_enums_of(compositor.primary, COMPOSITOR_OBJECT_PLANE, "IN_FENCE_FD", &id, none, 1);
+                if (id)
+                        compositor_fence_prop = (int)id;
+        }
+        return compositor_fence_prop > 0 ? (unsigned int)compositor_fence_prop : 0;
+}
+
+static int compositor_flip_fenced(unsigned int fb, int fence)
+{
+        unsigned int prop = compositor_in_fence(), objects[1] = {compositor.primary}, counts[1] = {2}, props[2];
+        unsigned long values[2] = {fb, (unsigned long)(long)fence};
+        struct
+        {
+                unsigned int flags, count;
+                unsigned long objects, counts, props, values, reserved, user_data;
+        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, 1, (unsigned long)objects, (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
+        long refused;
+
+        if (!prop || fence < 0 || compositor.card < 0)
+                return 0;
+        props[0] = compositor.primary_props[COMPOSITOR_PLANE_FB], props[1] = prop;
+        commit.user_data = compositor.flip_serial + 1;
+        if ((refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit)) != 0)
+        {
+                if (refused != -16) // not a flip still in flight: no fenced commit on this card
+                        compositor_fence_prop = -1;
+                return 0;
+        }
+        compositor.flip_serial++;
+        compositor_flip_refused = 0;
+        compositor.flip_pending = 1;
+        compositor.flip_issued = clock_monotonic_nanoseconds();
+        compositor.flip_row = -1;
+        compositor.flip_buffer = 0;
+        compositor.on_screen = fb;
+        {
+                // The jobs not yet seen done as it was committed (moonwater debug's flips with jobs in flight).
+                unsigned int jobs = (gpu.pending != 0) + (gpu_before.sequence != 0);
+
+                compositor_metric_flips_jobs += jobs != 0;
+                compositor_metric_flip_jobs_most = jobs > compositor_metric_flip_jobs_most ? jobs : compositor_metric_flip_jobs_most;
+        }
+        return 1;
+}
+
+// Whether a present is held for the card: a present's jobs on it, or a job still pending with its end not said (one given up on as late). Only without
+// a wait (present-nowait): with one the waits are in place, as they were.
+static b32 compositor_card_holds(void)
+{
+        if (!compositor_card.nowait)
+                return false;
+        return compositor_card.on || (gpu.pending && !gpu_end_said && compositor_gpu_state.up && !gpu_idle());
+}
+
+// The windows held for the present's jobs (their door's "taken": compositor_card_reads) told their picture was taken, as compositor_flip_done tells
+// the ones held for a flip; a row held for a flip still in flight (the one shown straight) is left to it.
+static void compositor_card_release(void)
+{
+        for (int row = 0; row < WINDOWS && compositor.table; row++)
+                if ((compositor.held_rows & compositor_card.rows & (1u << row)) && !(compositor.flip_pending && row == compositor.flip_row))
+                {
+                        __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
+                        compositor.held_rows &= ~(1u << row);
+                        compositor.woken |= 1u << row;
+                }
+        compositor_card.rows = 0;
+}
+
+// Whether the loop reads no client this turn: a present's jobs are on the card and it began less than GPU_LATE_NS ago. Past that the clients are read
+// again (a client not read for a hung job's two seconds is ended by its toolkit's watchdog, its pings unanswered), and what the jobs read is kept from
+// them by compositor_card_reads (the doors' taken, the shim's releases) until they are done or the hang path ends them. The input devices are read
+// whatever this says.
+static b32 compositor_card_clients_held(positive now)
+{
+        return compositor_card.on && now - compositor_card.began < GPU_LATE_NS;
+}
+
+// The present whose jobs are on the card began at `began`: its time is noted when they are done, and the clients' hold is counted from it.
+static void compositor_card_began(positive began)
+{
+        compositor_card.began = began;
+}
+
+// The present's frame given up (a job of it refused, hung or its fence an error): not shown, and drawn again whole by the next present.
+static void compositor_card_abandon(void)
+{
+        compositor_card_fence_close();
+        compositor_card.on = 0;
+        compositor_card_release();
+        if (compositor_card.flip_own && compositor_spare.fb)
+        {
+                if (compositor.on_screen == compositor.fb) // committed: the kernel shows it once the card is done with it, whatever is in it
+                        compositor_stale_all(compositor_front_stale, &compositor_front_stale_any, &compositor_front_parts);
+                else // not shown: the screen keeps the buffer it shows, and the other is to be composed whole
+                        compositor_plate_swap(), compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
+        }
+        compositor_damage_space();
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_frame(); // the callbacks the frame was to answer are answered: the clients draw on
+#endif
+}
+
+// The present's jobs are done: its end (compositor_present_tell, the flip a fenced commit made already left as it is), its time as the card's present,
+// and what its clients are told of the frame, held till now: no job reads their pictures any more.
+static void compositor_card_done(void)
+{
+        compositor_card_fence_close();
+        compositor_card.on = 0;
+        if (compositor_card.failed)
+        {
+                compositor_card_abandon();
+                return;
+        }
+        compositor_card_release();
+        compositor_present_tell((const unsigned short (*)[4])compositor_card.clip, compositor_card.clips, compositor_card.turning, compositor_card.composed,
+                                compositor_card.flip_own, compositor_card.back, compositor_card.plane_off);
+        compositor_present_on_card = 1;
+        compositor_metric_note(clock_monotonic_nanoseconds() - compositor_card.began);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_presented();
+        compositor_wl_frame();
+#endif
+}
+
+// The flip committed with the last job's sync_file, where the present ends in one and its jobs are all submitted.
+static void compositor_card_commit(void)
+{
+        int fence;
+
+        if (compositor_card.fenced || compositor_card.failed || compositor_card.next < compositor_card.steps || !compositor_card.flip_own || compositor_card.turning ||
+            ((compositor_card.back || compositor_card.plane_off) && compositor.overlay_on) || compositor.card < 0 || compositor.on_screen == compositor.fb ||
+            compositor.flip_pending || !compositor_in_fence())
+                return;
+        fence = compositor_card_fence_for(compositor_card.last);
+        compositor_card.fenced = fence >= 0 && compositor_flip_fenced(compositor.fb, fence);
+}
+
+// A present the card draws, at its end in compositor_present_frames: the rows whose pictures it reads, how it ends kept for when its jobs are done, and
+// its flip committed now where it can be.
+static void compositor_card_after(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off,
+                                  const unsigned char *rows, unsigned int windows)
+{
+        compositor_card.rows = 0;
+        for (unsigned int at = 0; at < windows; at++)
+                compositor_card.rows |= rows[at] < WINDOWS ? 1u << rows[at] : 0;
+        memory_copy(compositor_card.clip, clip, (positive)clips * sizeof(clip[0]));
+        compositor_card.clips = clips, compositor_card.turning = turning, compositor_card.composed = gpu_composed;
+        compositor_card.flip_own = flip_own, compositor_card.back = back, compositor_card.plane_off = plane_off;
+        compositor_card_commit();
+}
+
+/*
+        The loop's turn with a job on the card: a deadline passed or a fence's error is the hang path, and the frame is drawn again; the next jobs of the present
+        submitted as their turn comes, and its flip committed once the last is; and once every job is done, the present's end. A job pending with no present in
+        flight (a list's given up on as late) is let go of when it is done, or its end said. Nothing here waits.
+*/
+static void compositor_card_tick(void)
+{
+        if (!compositor_card.on && !gpu.pending)
+        {
+                compositor_card_fence_close();
+                return;
+        }
+        if (gpu_late_end() != GPU_END_NONE) // past its deadline, a page fault in the kernel's log, or its fence an error: the hang path
+        {
+                compositor_gpu_job_failed();
+                compositor_card_fence_close();
+                if (compositor_card.on)
+                        compositor_card_abandon();
+                return;
+        }
+        if (compositor_card.on && compositor_card.next < compositor_card.steps)
+        {
+                if (compositor_card_go() < 0)
+                {
+                        compositor_gpu_job_failed();
+                        compositor_card.failed = 1;
+                }
+                compositor_card_commit();
+        }
+        if (compositor_card.on && compositor_card.next == compositor_card.steps && gpu_done(compositor_card.last) != 0)
+                compositor_card_done();
+        else if (!compositor_card.on && gpu_idle())
+                compositor_card_fence_close();
+}
+
+// The descriptor the loop polls for the card (-1 for none: then it looks again in a millisecond, compositor_card_due), and when it is next to look at
+// the card whatever the descriptor says: the oldest pending job's deadline, or the next look for a fault in the kernel's log.
+static int compositor_card_poll(void)
+{
+        return compositor_card_fence_for(compositor_card_awaited());
+}
+
+static positive compositor_card_due(positive now)
+{
+        positive began = gpu_before.sequence ? gpu_before.began : gpu_job_began, due = began + GPU_HANG_NS;
+
+        if (!compositor_card.fence)
+                due = now + 1000000ull < due ? now + 1000000ull : due;
+        due = gpu_fault_poll && gpu_fault_poll < due ? gpu_fault_poll : due;
+        return due > now ? due : now + 1000000ull; // a time gone by is looked at a millisecond on, not in a loop that spins
+}
+
+// Whether the loop waits on the card this turn.
+static b32 compositor_card_awaits(void)
+{
+        return compositor_card.nowait && (compositor_card.on || (gpu.pending && !gpu_end_said));
+}
+#else
+static b32 compositor_card_holds(void)
+{
+        return false;
+}
+static b32 compositor_card_clients_held(positive now)
+{
+        (void)now;
+        return false;
+}
+static void compositor_card_began(positive began)
+{
+        (void)began;
+}
+#endif
+
 static void compositor_present(void)
 {
         unsigned long long began = clock_monotonic_nanoseconds(), ended;
         enum compositor_record_path path;
+        b32 jobs_before = compositor_card.on; // a present made while one's jobs are on the card draws nothing (compositor_card_holds)
 
         compositor_record_begin();
         compositor_present_on_card = 0;
         compositor_present_frames();
         compositor_wl_lent_sync(0);
         ended = clock_monotonic_nanoseconds();
-        // The loop's own time in a present, the longest of each second (what a present costs the loop).
+        // The loop's own time in a present, the longest of each second (what a present costs the loop, its jobs on the card or not).
         compositor_metric_loop_most = ended - began > compositor_metric_loop_most ? ended - began : compositor_metric_loop_most;
-        compositor_metric_note(ended - began);
+        // A present whose jobs are on the card is timed when they are done (compositor_card_done): its time is the card's too, which the lead is measured on.
+        if (compositor_card.on && !jobs_before)
+                compositor_card_began(began);
+        else if (!compositor_card.on)
+                compositor_metric_note(ended - began);
         path = compositor_present_on_card ? COMPOSITOR_RECORD_CARD : compositor.plane_row >= 0 ? COMPOSITOR_RECORD_PLANE : COMPOSITOR_RECORD_PROCESSOR;
         compositor_record_present(began, ended, path);
 }
@@ -208,7 +532,8 @@ static void compositor_present_frames(void)
         unsigned int count = 0, windows;
         int tinted;
 
-        if (!compositor.damages || compositor.flip_pending)
+        // Not while a flip is in flight, nor while the card still has jobs that write or read what this present would (compositor_card_holds).
+        if (!compositor.damages || compositor.flip_pending || compositor_card_holds())
                 return;
         compositor_bands_follow();
 
@@ -463,7 +788,9 @@ static void compositor_present_frames(void)
 
         if (gpu_drawn)
                 compositor_wl_count_card(rows, windows); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
-        else if (gpu.pending && !gpu_finish())
+        // The processor draws: a job given up on is waited for here, as it was, but without a wait (present-nowait) none is pending but one whose end was
+        // said (the hang path, which draws on the processor regardless), since the present was held while one ran (compositor_card_holds).
+        else if (!(compositor_card.nowait && compositor_card.looped) && gpu.pending && !gpu_finish())
         {
                 if (gpu_lost)
                         compositor_gpu_recover();
@@ -574,57 +901,16 @@ static void compositor_present_frames(void)
         }
         if (compositor_output_count() < 2 && compositor.plane_row < 0)
                 compositor_front_stale_any = 0;
-        // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
-        if (clips && compositor_output_count() < 2 && !turning)
-                compositor_dirty(compositor.fb, (const unsigned short (*)[4])clip, clips);
-        else if (clips && compositor.card >= 0)
-                compositor_dirty_screens((const unsigned short (*)[4])clip, clips);
-        // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
-        if (clips && turning)
-                compositor_turn_frame((const unsigned short (*)[4])clip, clips, gpu_composed);
         compositor.damages = 0;
-
-        // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
-        if ((back || plane_off) && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
-                compositor_overlay_off();
-        if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
+        // The screens told, turned and shown (compositor_present_tell): now for the processor's present; for the card's, when its jobs are done, its flip
+        // committed now where the card takes the job's fence with it (compositor_card_after).
+#ifdef MOONWATER_GPU_C
+        if (gpu_drawn && compositor_card.on)
         {
-                compositor_record_refuse();
-                if (compositor.card < 0)
-                {
-                        // The scan image was not exchanged: the composed frame is not shown, so the buffers are both whole again from the next present.
-                        compositor_plate_swap();
-                        compositor_stale_all(compositor_front_stale, &compositor_front_stale_any, &compositor_front_parts);
-                        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
-                }
-                else if (++compositor_flip_refused >= 3)
-                {
-                        // Refused three presents running: the crtc is set to the buffer composed into, which shows it at once (a modeset, so it tears).
-                        struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
-                                                      0, 0, 0, 1, compositor.mode};
-
-                        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
-                        compositor.on_screen = compositor.fb;
-                        compositor_flip_refused = 0;
-                        compositor_flip_done();
-                }
-                else
-                {
-                        // Refused once (the card is still on the flip before, EBUSY): the screen keeps the buffer it shows and the frame is
-                        // composed again into the other from the next present. Each buffer's stale holds what it misses (the damage of this
-                        // present is in the one the screen shows), so nothing is lost; a modeset on every refusal would flicker the screen.
-                        compositor_plate_swap();
-                }
+                compositor_card_after((const unsigned short (*)[4])clip, clips, turning, gpu_composed, flip_own, back, plane_off, rows, windows);
+                return;
         }
-        else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
-        {
-                compositor_record_refuse();
-                struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
-                                              0, 0, 0, 1, compositor.mode};
-
-                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
-                compositor.on_screen = compositor.fb;
-                compositor_flip_done();
-        }
+#endif
+        compositor_present_tell((const unsigned short (*)[4])clip, clips, turning, gpu_composed, flip_own, back, plane_off);
 }
 

@@ -41,6 +41,55 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-200: a client could be told its buffer was free while a card job still read it, and tear the desktop's frame
+
+| | |
+|---|---|
+| Status | Contained for the card's present without a wait, which is opt-in (`/run/moonwater/present-nowait`) until both release points wait on `compositor_card_reads`; the present that waits for its jobs in place, the default, has no job reading a picture once it is over. The commit that adds this entry (`git log -S 'MW-2026-200' -- incident_response.md`), with P5's compositor_take hold, 2f46b9dd; the Wayland shim's hold (`row_busy`) is open |
+| Class | A release race: a program is told a buffer is free (a native window's "taken", a Wayland wl_buffer.release) while a job of the card that composes the desktop still reads it in place |
+| Attacker | Any window program, native or Wayland, in any bowl: it only draws into a buffer the compositor said it may draw into. It reads nothing and runs nothing of the compositor's; the harm is the desktop's frame, which can show half its new picture over half its old one, or anything it writes into the buffer then, for the frame the job drew |
+| Reachable | src/canvas/compositor.c `compositor_card` (the present's jobs, `compositor_card_go`, `compositor_card_done`), `compositor_take` (the door's taken), src/canvas/wayland.c `wayland_gone_let`, `wayland_drawn_rows`, `wayland_presented_rows` (the releases) |
+
+**What it is.** A present the card draws reads every window's picture where it
+is: a native window's front buffer in the window table, a Wayland client's
+own buffer (shm or dma-buf) where the compositor lent it. With every job
+waited for in place (the present until now) no job reads a picture once its
+present returns, so what the loop then tells a program is true. The present
+without a wait returns while its job runs, about a millisecond on the owner's
+card (its debug: the card's present 711 us mean, its jobs 934 us), and the
+loop goes on reading the programs: a native window that shows its next frame
+is told at once that its old front is taken (`compositor_take`), a Wayland
+client that commits twice has the buffer the first commit replaced let go at
+the second (`wayland_gone_let`), and each then draws into the buffer the job
+is reading.
+
+**The fix.** While a present's jobs are on the card and younger than
+`GPU_LATE_NS` (16 ms) the loop reads no client: no door, no doors' knock, no
+Wayland socket (`compositor_loop_wanted`, `compositor_card_clients_held`); the
+input devices are read and forwarded all the same. The frame's callbacks and
+presentation feedbacks, and the shim's releases at a drawn frame
+(`compositor_wl_frame`, `compositor_wl_presented`), wait for the jobs' end
+(`compositor_card_done`). Past 16 ms the clients are read again, since a
+client not read for a hung job's two seconds is ended by its toolkit's own
+watchdog; from then until the fence signals or the hang path ends the job,
+`compositor_card_reads(row)` says the row's picture is the job's: the door's
+taken is held for it (P5's 2f46b9dd, given back by `compositor_card_release`),
+and the shim's release of a buffer a commit replaced is to be queued on it
+(P4's `row_busy`, not landed). Held by CHECK_gpu_kit `gpu_card_rows`: on the
+fake card's fence that never signals, the present is held, the poll list has
+the input devices and the job's sync_file but no door and no Wayland socket
+while the job is younger than 16 ms and has them after, `compositor_card_reads`
+is the row's until the hang path runs and nothing after it, and a native row
+held for the job is told its picture was taken when the fence says done.
+
+**Still open.** The Wayland shim's hold: until `row_busy` is on main, a Wayland
+client that commits twice while a job later than 16 ms reads its first buffer
+can be handed that buffer at its second commit. That is why the present
+without a wait stays opt-in. The extra wait of a client's request under the
+hold is the job's time, about 0.7 to 0.9 ms mean on the owner's card, against
+none were the clients read during the job; computed from that card's debug,
+not measured on it.
+
 ### MW-2026-199: `setup update usb` wrote whatever disk had the install's name when the answer came
 
 | | |
