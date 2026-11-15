@@ -582,7 +582,8 @@ static b32 sessionbus_main()
         {
                 struct sessionbus_poll watch[3 + DBUS_CLIENTS];
                 long owner[3 + DBUS_CLIENTS], count = 0;
-                positive timeout[2] = {1, 0}; // a second
+                long wait = dbus_wait(1000); // a second, or less when the bus has a deadline sooner (a portal Response it holds)
+                positive timeout[2] = {(positive)(wait / 1000), (positive)(wait % 1000) * 1000000};
                 long now;
 
                 watch[count] = (struct sessionbus_poll){sessionbus.listen, SESSIONBUS_POLLIN, 0};

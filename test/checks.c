@@ -190652,6 +190652,7 @@ int main(void)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../src/dbus/dbus.c"
 
@@ -194162,12 +194163,305 @@ static void db_test_grammar_fuzz(long rounds)
                mutated, mutated_ended);
 }
 
+/*
+        The portal's requests (2026-11-15): a method that answers a request's path owes its caller the request's Response, and
+        before this none was sent for CreateMonitor (GTK 4 in a sandbox waited on it for ever), and OpenFile, SaveFile and
+        SaveFiles of the FileChooser the portal claims were UnknownMethod. Each now answers the specification's path and a
+        Response(2, {}) the caller can read: at once when it has a rule for it, at its AddMatch when it subscribes after (as Qt
+        does), at DBUS_RESPONSE_MS whatever it has, and to it alone.
+*/
+static void db_portal_call(long slot, const char *iface, const char *member, const char *token, unsigned flags)
+{
+        struct db_call c;
+        int two = !strcmp(member, "CreateMonitor");
+        struct dbus_fields f = {DBUS_PATH_PORTAL, iface, member, "", DBUS_NAME_PORTAL, "", two ? "sa{sv}" : "ssa{sv}", 0, 0};
+        long length_at, first;
+
+        db_begin(&c, DBUS_CALL, flags, &f);
+        dbus_o_string(&c.w, "");
+        if (!two)
+                dbus_o_string(&c.w, "Open a file");
+        dbus_o_u32(&c.w, 0);
+        length_at = c.w.length - 4;
+        dbus_o_pad(&c.w, 8);
+        first = c.w.length;
+        // an option before the token, of another type, so the token is found past it
+        dbus_o_pad(&c.w, 8);
+        dbus_o_string(&c.w, "modal");
+        dbus_o_sig(&c.w, "b");
+        dbus_o_u32(&c.w, 1);
+        if (token)
+        {
+                dbus_o_pad(&c.w, 8);
+                dbus_o_string(&c.w, "handle_token");
+                dbus_o_sig(&c.w, "s");
+                dbus_o_string(&c.w, token);
+        }
+        dbus_o_patch32(&c.w, length_at, (unsigned long)(c.w.length - first));
+        db_send(slot, &c);
+}
+
+// The path the specification makes for a caller's request: the prefix, its unique name without the colon and with underscores, the token.
+static void db_request_path(long slot, const char *token, char *into, long room)
+{
+        char sender[32];
+        long n = 0;
+
+        for (const char *u = db_unique(slot) + 1; *u; u++)
+                sender[n++] = *u == '.' ? '_' : *u;
+        sender[n] = 0;
+        snprintf(into, (size_t)room, "/org/freedesktop/portal/desktop/request/%s/%s", sender, token);
+}
+
+// Whether s is the Response of path with code to the client slot from the portal: destination, sender, signature and body.
+static int db_is_response(const struct db_seen *s, long slot, const char *path, unsigned long code)
+{
+        return s->ok && s->m.type == DBUS_SIGNAL && !strcmp(s->m.path, path) && !strcmp(s->m.interface, "org.freedesktop.portal.Request") &&
+               !strcmp(s->m.member, "Response") && !strcmp(s->m.destination, db_unique(slot)) && !strcmp(s->m.sender, ":1.1") &&
+               !strcmp(s->m.signature, "ua{sv}") && s->m.body_length == 8 && db_u32_body(s) == code && !dbus_get32(s->bytes + s->m.body_at + 4);
+}
+
+static void db_test_requests(void)
+{
+        long a, b;
+        struct db_seen s;
+        char path[200], rule[400], text[200];
+
+        db_reset();
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+        db_rule(b, "type='signal'"); // b listens for every signal it may have: it must see nobody's Response
+        db_drain(b);
+
+        // subscribed first, as GDBus, libportal and Chromium do: the path back is the one subscribed to, and the Response follows at once
+        db_request_path(a, "upload1", path, sizeof path);
+        snprintf(rule, sizeof rule, "type='signal',sender='org.freedesktop.portal.Desktop',interface='org.freedesktop.portal.Request',member='Response',path='%s'", path);
+        db_rule(a, rule);
+        db_drain(a);
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", "upload1", 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && s.m.reply == db_last_serial() && !strcmp(s.m.signature, "o") && db_string_arg(&s, 0, text, sizeof text) &&
+                    !strcmp(text, path),
+                "FileChooser.OpenFile answers the path the specification makes of the caller's name and its handle_token: %s", s.ok ? text : "nothing");
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "and the request's Response(2, {}) follows it at once, to the caller, from the portal, with no tick and no time gone");
+        DBCHECK(!db_queued(b), "a client listening for every signal is sent no other's Response (%ld bytes queued)", db_queued(b));
+
+        // subscribed after the answer, as Qt does: held until its AddMatch, then sent after the AddMatch's own answer
+        db_request_path(a, "save1", path, sizeof path);
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "SaveFile", "save1", 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, path), "SaveFile answers its path");
+        DBCHECK(!db_queued(a), "and a caller with no rule for its Response is not sent it yet, where it would not read it (%ld bytes)", db_queued(a));
+        DBCHECK(dbus_wait(60000) <= DBUS_RESPONSE_MS && dbus_wait(60000) > 0, "the bus asks to be woken by the time the Response is due (%ld ms)", dbus_wait(60000));
+        snprintf(rule, sizeof rule, "type='signal',interface='org.freedesktop.portal.Request',member='Response',path='%s'", path);
+        db_rule(a, rule);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN, "a caller that subscribes after is answered its AddMatch");
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "and then sent the Response its new rule matches");
+
+        // no rule at all: sent at the deadline, not before
+        db_request_path(a, "save2", path, sizeof path);
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "SaveFiles", "save2", 0);
+        db_next(a, &s);
+        db_time += DBUS_RESPONSE_MS - 1;
+        dbus_tick();
+        DBCHECK(!db_queued(a), "a Response no rule matches waits out its time (%ld bytes after %d ms)", db_queued(a), DBUS_RESPONSE_MS - 1);
+        db_time += 2;
+        dbus_tick();
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "and is sent at DBUS_RESPONSE_MS all the same: SaveFiles' too");
+        DBCHECK(dbus_wait(60000) == 60000, "and nothing is due after it (%ld)", dbus_wait(60000));
+
+        // a handle_token that is not one element of a path is the bus's own
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", "a-b/c", 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && db_string_arg(&s, 0, text, sizeof text) && strstr(text, "/moonwater") && !strchr(strrchr(text, '/'), '-'),
+                "a handle_token with a dash or a slash is not put in a path: %s", s.ok ? text : "nothing");
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", 0, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && db_string_arg(&s, 0, path, sizeof path) && dbus_valid_path(path, (long)strlen(path)) && strcmp(path, text),
+                "and a call with none has a path of its own: %s", s.ok ? path : "nothing");
+        {
+                char token[80];
+
+                memset(token, 'x', 70);
+                token[70] = 0;
+                db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", token, 0);
+                db_next(a, &s);
+                DBCHECK(s.ok && db_string_arg(&s, 0, text, sizeof text) && !strstr(text, "xxxxxxxx"), "nor one past %d bytes: %s", DBUS_TOKEN, s.ok ? text : "");
+        }
+        db_time += DBUS_RESPONSE_MS + 1;
+        dbus_tick();
+        for (int k = 0; k < 3; k++)
+        {
+                db_next(a, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_SIGNAL && !strcmp(s.m.member, "Response") && db_u32_body(&s) == 2, "each of them has its Response");
+        }
+
+        // Close before the Response: none is sent (a closed request emits none)
+        db_request_path(a, "closed", path, sizeof path);
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", "closed", 0);
+        db_next(a, &s);
+        db_call(a, DBUS_NAME_PORTAL, path, "org.freedesktop.portal.Request", "Close", "", 0, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN, "Request.Close is answered");
+        db_time += DBUS_RESPONSE_MS + 1;
+        dbus_tick();
+        DBCHECK(!db_queued(a), "and the request it closed sends no Response at its time (%ld bytes)", db_queued(a));
+
+        // more than a client may be owed: the one past them is sent at once, the others at their time
+        for (int k = 0; k <= DBUS_RESPONSES; k++)
+        {
+                char token[16];
+
+                snprintf(token, sizeof token, "many%d", k);
+                db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", token, 0);
+        }
+        {
+                int answers = 0, responses = 0;
+
+                while (db_next(a, &s), s.ok)
+                        answers += s.m.type == DBUS_RETURN, responses += s.m.type == DBUS_SIGNAL;
+                DBCHECK(answers == DBUS_RESPONSES + 1 && responses == 1, "%d requests at once: each answered, the one past the %d held sent at once (%d, %d)",
+                        DBUS_RESPONSES + 1, DBUS_RESPONSES, answers, responses);
+                db_time += DBUS_RESPONSE_MS + 1;
+                dbus_tick();
+                responses = 0;
+                while (db_next(a, &s), s.ok)
+                        responses += s.m.type == DBUS_SIGNAL && !strcmp(s.m.member, "Response");
+                DBCHECK(responses == DBUS_RESPONSES, "and the %d held at their time (%d)", DBUS_RESPONSES, responses);
+        }
+
+        // Inhibit.CreateMonitor: its request is answered and ends at once, as there is no session to monitor
+        db_request_path(a, "monitor", path, sizeof path);
+        snprintf(rule, sizeof rule, "type='signal',interface='org.freedesktop.portal.Request',path='%s'", path);
+        db_rule(a, rule);
+        db_drain(a);
+        db_portal_call(a, "org.freedesktop.portal.Inhibit", "CreateMonitor", "monitor", 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, path), "CreateMonitor answers its request's path");
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "and the Response GTK 4 waits for, at once (before, it was never sent)");
+
+        // a call that asks for no reply still has its Response: the caller made the path of its token itself
+        db_request_path(a, "quiet", path, sizeof path);
+        db_portal_call(a, "org.freedesktop.portal.FileChooser", "OpenFile", "quiet", DBUS_FLAG_NO_REPLY);
+        DBCHECK(!db_queued(a), "a request with NO_REPLY_EXPECTED is not answered");
+        db_time += DBUS_RESPONSE_MS + 1;
+        dbus_tick();
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "and its Response is sent all the same");
+
+        // a request's Response goes with its caller: nothing is left of it when the caller goes
+        db_portal_call(b, "org.freedesktop.portal.FileChooser", "OpenFile", "gone", 0);
+        dbus_drop(b);
+        db_time += DBUS_RESPONSE_MS + 1;
+        dbus_tick();
+        DBCHECK(!db_queued(a), "a caller that goes takes its held Response with it");
+        dbus_drop(a);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/*
+        Deadlines on the bus's waits (2026-11-15): a call routed to a client that never answers held its caller's row for ever,
+        so a callee could take every row of a caller (DBUS_PENDING_PER) and have each later call of it refused LimitsExceeded.
+        Now the caller is told NoReply at DBUS_REPLY_MS and its row let go; a late answer goes nowhere. And a call to a name
+        nobody owns, or StartServiceByName of one, is ServiceUnknown in the call: there is nothing to start and nothing waits.
+*/
+static void db_test_deadlines(void)
+{
+        long callee, caller;
+        struct db_seen s;
+        unsigned long serial;
+        int refused = 0;
+
+        db_reset();
+        callee = db_connect(1000);
+        caller = db_connect(1000);
+        db_hello(callee);
+        db_hello(caller);
+        db_request(callee, "org.example.Silent", 0);
+        db_drain(callee);
+        db_drain(caller);
+        for (int k = 0; k < DBUS_PENDING_PER; k++)
+                db_call(caller, "org.example.Silent", "/o", "org.example.I", "Hang", "", 0, 0);
+        serial = db_last_serial();
+        db_call(caller, "org.example.Silent", "/o", "org.example.I", "Hang", "", 0, 0);
+        db_next(caller, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.LimitsExceeded"),
+                "a callee that answers none of %d calls fills the caller's rows: the next is refused", DBUS_PENDING_PER);
+        db_time += DBUS_REPLY_MS - 1;
+        dbus_tick();
+        DBCHECK(!db_queued(caller) && dbus.client[caller]->pending == DBUS_PENDING_PER, "and the calls wait out DBUS_REPLY_MS (%ld bytes, %ld waiting)",
+                db_queued(caller), dbus.client[caller]->pending);
+        DBCHECK(dbus_wait(60000) == 1, "the bus asks to be woken when the first is due (%ld ms)", dbus_wait(60000));
+        db_time += 2;
+        dbus_tick();
+        while (db_next(caller, &s), s.ok)
+                refused += s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.NoReply") && !strcmp(s.m.sender, DBUS_NAME_BUS);
+        DBCHECK(refused == DBUS_PENDING_PER && dbus.client[caller]->pending == 0, "at DBUS_REPLY_MS each is answered NoReply and its row let go (%d, %ld waiting)",
+                refused, dbus.client[caller]->pending);
+        {
+                struct db_call reply;
+                struct dbus_fields f = {"", "", "", "", db_unique(caller), "", "", serial, 1};
+
+                db_begin(&reply, DBUS_RETURN, 0, &f);
+                db_send(callee, &reply);
+                DBCHECK(!db_queued(caller) && !dbus_dead(callee), "a late answer goes nowhere, and is no fault of its sender");
+        }
+        db_drain(callee);
+        db_call(caller, "org.example.Silent", "/o", "org.example.I", "Hang", "", 0, 0);
+        DBCHECK(db_find(callee, &s, DBUS_CALL, "Hang") && dbus.client[caller]->pending == 1, "and the caller's next call is routed again");
+
+        // a name nobody owns: the error is in the queue when the call is read, with no tick and no time gone, and in well under a millisecond
+        {
+                struct timespec t0, t1;
+                long worst = 0;
+
+                db_drain(caller);
+                for (int k = 0; k < 64; k++)
+                {
+                        long ns;
+
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        db_call(caller, "org.freedesktop.secrets", "/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "OpenSession", "", 0, 0);
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        ns = (t1.tv_sec - t0.tv_sec) * 1000000000L + t1.tv_nsec - t0.tv_nsec;
+                        worst = ns > worst ? ns : worst;
+                        db_next(caller, &s);
+                        if (!(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown") && s.m.reply == db_last_serial()))
+                                worst = 1L << 40;
+                }
+                DBCHECK(worst < 1000000, "a call to a name nobody owns, auto-start allowed, is ServiceUnknown within the call: the slowest of 64 in %ld ns", worst);
+        }
+        db_su(caller, "StartServiceByName", "org.a11y.Bus", 0);
+        db_next(caller, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown"), "StartServiceByName of a name nobody owns is ServiceUnknown at once");
+        db_su(caller, "StartServiceByName", DBUS_NAME_PORTAL, 0);
+        db_next(caller, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_u32_body(&s) == 2, "and of the portal, 2: it is running");
+        // a callee that goes answers its callers NoReply at once, and leaves no deadline behind
+        dbus_drop(callee);
+        db_next(caller, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.NoReply"), "a callee that goes is NoReply to its caller at once");
+        dbus_drop(caller);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
 
         if (argc > 3)
                 db_seed = strtoul(argv[3], 0, 0) | 1;
+        db_test_requests();
+        db_test_deadlines();
         db_test_auth();
         db_test_hello_and_names();
         db_test_routing();

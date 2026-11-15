@@ -80,6 +80,19 @@ if command -v gdbus > /dev/null 2>&1; then
         echo dark > /root/canvas.theme
         sleep 1.5
 fi
+# The wire alone (no library): a portal request's Response against its answer, and how long a refusal takes.
+python3 "$(dirname "$0")/dbus_raw.py" "$address" > "$work/raw.out" 2>&1
+result=$?
+cut -c1-500 "$work/raw.out"
+grep -q "^ok \|^FAIL " "$work/raw.out" || { row FAIL "the raw client ran" "$(tail -3 "$work/raw.out")"; result=0; }
+failures=$((failures + result))
+if command -v gdbus > /dev/null 2>&1; then
+        out=$(timeout 5 gdbus call --address "$address" --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.FileChooser.OpenFile "" "Upload" "{'handle_token': <'cli'>}" 2>&1)
+        case $out in
+        "(objectpath '/org/freedesktop/portal/desktop/request/"*"/cli',)") row ok "gdbus: FileChooser.OpenFile answers the path of its handle_token at once" ;;
+        *) row FAIL "gdbus: FileChooser.OpenFile answers the path of its handle_token at once" "$out" ;;
+        esac
+fi
 if python3 -c 'import gi' 2> /dev/null; then
         python3 "$(dirname "$0")/dbus_gio.py" "$address" /root > "$work/gio.out" 2>&1
         result=$?

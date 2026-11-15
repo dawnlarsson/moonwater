@@ -105,6 +105,47 @@ row(not isinstance(r, GLib.Error) and r.unpack()[0] is False, "and a name nobody
 r = call(a, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", None, "(s)")
 row(isinstance(r, GLib.Error) and "ServiceUnknown" in str(r), "a call to a service that is not there is ServiceUnknown, not a hang", str(r))
 
+
+# A portal request, as GTK 4 and libportal make one (2026-11-15): subscribe to the path the handle_token makes, call, and wait for the
+# Response. Before, OpenFile was UnknownMethod and CreateMonitor's Response never came, so a client waiting on it waited for ever.
+def request(connection, interface, method, parameters, token, subscribe_after=False):
+    handle = "/org/freedesktop/portal/desktop/request/%s/%s" % (connection.get_unique_name()[1:].replace(".", "_"), token)
+    got = []
+
+    def on_response(c, sender, path, interface_name, name, values, data):
+        got.append((path, values.unpack()))
+
+    def subscribe(path):
+        return connection.signal_subscribe(PORTAL[0], "org.freedesktop.portal.Request", "Response", path, None, Gio.DBusSignalFlags.NONE, on_response,
+                                           None)
+
+    if not subscribe_after:
+        subscribe(handle)
+    began = time.time()
+    r = call(connection, *PORTAL, interface, method, parameters, "(o)")
+    if subscribe_after and not isinstance(r, GLib.Error):
+        subscribe(r.unpack()[0])
+    for _ in range(200):
+        pump(5)
+        if got:
+            break
+    return r, handle, got, (time.time() - began) * 1000
+
+
+for method in ("OpenFile", "SaveFile", "SaveFiles"):
+    r, handle, got, ms = request(a, "org.freedesktop.portal.FileChooser", method,
+                                 GLib.Variant("(ssa{sv})", ("", "Upload", {"handle_token": GLib.Variant("s", "gio" + method)})), "gio" + method)
+    row(not isinstance(r, GLib.Error) and r.unpack()[0] == handle and got == [(handle, (2, {}))],
+        "GDBus: FileChooser.%s answers the handle_token's path and Response(2, {}) %d ms after the call" % (method, ms), "%s %s" % (r, got))
+r, handle, got, ms = request(a, "org.freedesktop.portal.FileChooser", "OpenFile",
+                             GLib.Variant("(ssa{sv})", ("", "Upload", {"handle_token": GLib.Variant("s", "giolate")})), "giolate", True)
+row(not isinstance(r, GLib.Error) and got == [(handle, (2, {}))],
+    "GDBus subscribed only after the answer, as Qt does: the Response is sent at its AddMatch, %d ms after the call" % ms, "%s %s" % (r, got))
+r, handle, got, ms = request(a, "org.freedesktop.portal.Inhibit", "CreateMonitor",
+                             GLib.Variant("(sa{sv})", ("", {"handle_token": GLib.Variant("s", "giomonitor")})), "giomonitor")
+row(not isinstance(r, GLib.Error) and got == [(handle, (2, {}))], "GDBus: Inhibit.CreateMonitor's request ends with Response(2, {}) %d ms after the call" % ms,
+    "%s %s" % (r, got))
+
 # a second connection listens for a change and is told
 b = connect()
 seen = []

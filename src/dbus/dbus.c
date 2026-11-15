@@ -15,10 +15,11 @@
 
         WHAT IT IS NOT
 
-        There is no activation, no policy files, no monitoring, no eavesdropping, no file descriptors passed (the
-        negotiation is refused, as a bus may), no byte order but the machine's (a message in the other one drops the
-        client), no queue of owners of a name. A call to a name nobody owns is an error, as it is on a bus with no
-        services installed.
+        There is no activation, no policy files, no monitoring, no eavesdropping, no byte order but the machine's (a
+        message in the other one drops the client), no queue of owners of a name. File descriptors are passed only where
+        the host gives the bus its descriptor operations (dbus_set_fd_ops; the sessionbus does, SCM_RIGHTS), and the
+        negotiation is refused where it does not. A call to a name nobody owns, and StartServiceByName of one, is
+        ServiceUnknown in the call, as it is on a bus with no services installed: nothing is started and nothing waits.
 
         THREAT MODEL
 
@@ -40,7 +41,9 @@
            sent it unasked (calls, signals) only up to DBUS_UNASKED, so a flood is refused (a call so refused is an
            error to its caller) and the client's own answers still have room. A client whose queue refuses a message
            and that then reads nothing for DBUS_STALL_MS is dropped. A connection that has not said Hello in a few
-           seconds is dropped.
+           seconds is dropped. No wait is without its end: a call routed to a client that does not answer in
+           DBUS_REPLY_MS is answered NoReply and its caller's row let go, and a portal Response the bus holds for its
+           caller's rule is sent after DBUS_RESPONSE_MS whatever the caller has.
         5. A name is a client's only while it is connected; the bus's own names, and the service's, are not for taking.
 
         It is freestanding C with no allocator, in ring 3, the same way the Wayland shim is, with the host behind a small
@@ -73,6 +76,10 @@
 #define DBUS_HELLO_MS 5000       // how long a connection has to authenticate and say Hello
 #define DBUS_SERVICE DBUS_CLIENTS // the slot of the portal service, which has no socket
 #define DBUS_FDS 32              // most file descriptors queued per direction on a client or per message
+#define DBUS_REPLY_MS 25000      // how long a call routed to a client waits for its answer: the client libraries' own default (libdbus, GDBus, sd-bus, Qt)
+#define DBUS_RESPONSES 4         // portal Responses one client is owed and not yet sent (one past them is sent at once)
+#define DBUS_RESPONSE_MS 1000    // how long a portal Response waits for its caller's rule before it is sent all the same
+#define DBUS_REQUEST_PATH 160    // a portal request's path: the prefix, the caller's name, a token of DBUS_TOKEN
 
 #define DBUS_CALL 1
 #define DBUS_RETURN 2
@@ -107,6 +114,14 @@ struct dbus_rule
         unsigned sender_hash;           // dbus_hash of sender, made once: a broadcast asks who owns it of every rule that names it
 };
 
+// A portal Response the bus owes a client (dbus_portal_request): its request's path and its code, held until due (0: none).
+struct dbus_response
+{
+        long due;
+        unsigned long code;
+        char path[DBUS_REQUEST_PATH];
+};
+
 struct dbus_client
 {
         long live, dead, slot, pid, uid, state; // state: 0 awaits the first byte, 1 the authentication, 2 messages
@@ -126,6 +141,8 @@ struct dbus_client
         {
                 long at, count;
         } out_fd_run[DBUS_FDS];
+        long responses;                         // of response[], the ones held
+        struct dbus_response response[DBUS_RESPONSES];
         unsigned char in[DBUS_MESSAGE + 16];
         unsigned char out[DBUS_OUT];
 };
@@ -151,6 +168,7 @@ struct dbus_name
 struct dbus_pending
 {
         unsigned long serial;           // the caller's serial
+        long due;                       // when the caller is told NoReply and the row is let go
         short caller, callee;
         unsigned char used;
 };
@@ -167,6 +185,8 @@ static struct
         struct dbus_setting setting[DBUS_SETTINGS];
         long next_id, clients;
         unsigned long serial;
+        long due;                        // the earliest deadline of a pending call or a held Response (0: none), which dbus_tick acts on
+        unsigned long requests;          // portal requests made, for the token of one that names none
         char guid[33];
         unsigned char scratch[DBUS_STAMPED];
         unsigned char stamped[DBUS_STAMPED];
@@ -1420,6 +1440,8 @@ static void dbus_name_changed(const char *name, const char *old_owner, const cha
 
 /* ---- the bus's own methods ---- */
 
+static void dbus_responses_send(struct dbus_client *c, long now, const struct dbus_rule *only);
+
 // An error reply to a call.
 static void dbus_error_reply(struct dbus_client *to, const struct dbus_message *m, const char *name, const char *text, const char *from)
 {
@@ -1819,6 +1841,9 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                                 from->rules--;
                 }
                 dbus_reply_empty(from, m, DBUS_NAME_BUS);
+                // a portal Response held for want of a rule goes once there is one: the client subscribed after its call (Qt)
+                if (member[0] == 'A' && from->responses)
+                        dbus_responses_send(from, dbus.host->now(dbus.host->context), &from->rule[free_at]);
                 return;
         }
         if (dbus_equal(member, "GetId"))
@@ -1853,6 +1878,12 @@ static const char dbus_introspect_portal[] =
     "<interface name=\"org.freedesktop.portal.Inhibit\">\n"
     "<method name=\"Inhibit\"><arg type=\"s\" direction=\"in\"/><arg type=\"u\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<method name=\"CreateMonitor\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
+    "</interface>\n"
+    "<interface name=\"org.freedesktop.portal.FileChooser\">\n"
+    "<method name=\"OpenFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<method name=\"SaveFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<method name=\"SaveFiles\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
     "</interface>\n</node>\n";
 
@@ -1980,8 +2011,9 @@ static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_mes
         portal at startup to learn whether there is a portal, and reads the Settings (the color-scheme, and with it
         prefers-color-scheme) only once that has been answered. It uses the portal for its file dialogs only from
         version 3, so at 1 its dialogs stay the toolkit's, and it never calls a method of this interface; a program
-        that does is told the method is not there. (test/wayland_chromium.py holds both: the theme follows, and a click
-        on a file input calls no OpenFile.)
+        that does (GTK 4 asked to use the portal, Qt's portal theme) is answered a request that ends at once as
+        cancelled, until there is a chooser (dbus_portal_request). (test/wayland_chromium.py holds Chromium's side: the
+        theme follows, and a click on a file input calls no OpenFile.)
 */
 static struct
 {
@@ -2015,6 +2047,215 @@ DBUS_API int dbus_interface_claim(const char *name, unsigned version)
         return -1;
 }
 
+/*
+        The portal's requests (org.freedesktop.portal.Request). A portal method that would ask the person something (a
+        file to open, a monitor of the session) answers at once with the path of a request object, and its outcome comes
+        after, as that object's Response signal: (u response, a{sv} results), 0 done, 1 cancelled by the person, 2 ended
+        another way. A client that is answered a path and never sent the Response waits on it for ever: an upload dialog
+        that never opens and never closes. So every request this portal answers has its Response, and the request's path
+        is the one the specification makes, /org/freedesktop/portal/desktop/request/SENDER/TOKEN (SENDER the caller's
+        unique name, its colon taken off and its dots made underscores; TOKEN the handle_token of the call's options),
+        because a client subscribes to that path before it calls (GDBus, libportal, Chromium) or once the path is back to
+        it (Qt): a Response sent before the client has a rule for it is one it never reads. So a Response is sent to its
+        caller alone (a signal with a destination: no other client learns what it asked) when the caller has a rule it
+        matches: at once when it has one already, at its AddMatch when it subscribes after, and after DBUS_RESPONSE_MS
+        whatever it has. A client holds DBUS_RESPONSES of them; one past that is sent at once.
+*/
+#define DBUS_REQUEST_PREFIX "/org/freedesktop/portal/desktop/request/"
+#define DBUS_TOKEN 64 // the longest handle_token taken (one longer, or not a path's element, is replaced by the bus's own)
+
+// When the bus has something to do at `due`: dbus_tick acts at the earliest.
+static void dbus_due_at(long due)
+{
+        if (!dbus.due || due < dbus.due)
+                dbus.due = due;
+}
+
+// The string value of `key` in the a{sv} that is argument `index` of a message (the arguments before it skipped by their types,
+// the body valid as the parser held it): its length, or -1 when there is no such key holding a string, or it does not fit room.
+static long dbus_option_string(const struct dbus_message *m, long index, const char *key, char *into, long room)
+{
+        const unsigned char *p = m->bytes + m->body_at;
+        const char *sig = m->signature;
+        long at = 0, s = 0, n = dbus_length(sig), limit = m->body_length, stop;
+
+        for (long k = 0; k < index; k++)
+                if (s >= n || !dbus_value(p, &at, limit, sig, n, &s, 0))
+                        return -1;
+        if (s + 4 > n || sig[s] != 'a' || sig[s + 1] != '{' || sig[s + 2] != 's' || sig[s + 3] != 'v')
+                return -1;
+        at = DBUS_ALIGN(at, 4);
+        if (at + 4 > limit)
+                return -1;
+        stop = (long)dbus_get32(p + at); // the elements' bytes, from the first one's start (after the padding to 8)
+        at = DBUS_ALIGN(at + 4, 8);
+        stop += at;
+        if (stop > limit)
+                return -1;
+        while (at < stop)
+        {
+                long key_at, sig_at, ks = 0, vs = 0, value_at, length;
+
+                at = DBUS_ALIGN(at, 8);
+                key_at = at;
+                if (!dbus_value(p, &at, stop, "s", 1, &ks, 0))
+                        return -1;
+                sig_at = at;
+                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0))
+                        return -1;
+                if (p[sig_at] != 1 || p[sig_at + 1] != 's' || !dbus_equal((const char *)p + key_at + 4, key))
+                        continue;
+                value_at = DBUS_ALIGN(sig_at + 3, 4);
+                length = (long)dbus_get32(p + value_at);
+                if (length + 1 > room)
+                        return -1;
+                dbus_copy(into, p + value_at + 4, length);
+                into[length] = 0;
+                return length;
+        }
+        return -1;
+}
+
+// A request's path for a caller: the specification's, with the caller's token when it is one element of a path (letters, digits
+// and underscores, at most DBUS_TOKEN), else the bus's own (moonwater and a number).
+static void dbus_request_path(const struct dbus_client *c, const char *token, char *into)
+{
+        long n = 0, length = dbus_length(token);
+        int ok = length > 0 && length <= DBUS_TOKEN;
+
+        for (long k = 0; ok && k < length; k++)
+                ok = dbus_letter(token[k]) || dbus_digit(token[k]);
+        for (long k = 0; DBUS_REQUEST_PREFIX[k]; k++)
+                into[n++] = DBUS_REQUEST_PREFIX[k];
+        for (long k = 1; c->unique[k]; k++)
+                into[n++] = c->unique[k] == '.' ? '_' : c->unique[k];
+        into[n++] = '/';
+        if (ok)
+                for (long k = 0; k < length; k++)
+                        into[n++] = token[k];
+        else
+        {
+                char digits[24];
+                long d = 0;
+                unsigned long number = ++dbus.requests;
+
+                for (long k = 0; "moonwater"[k]; k++)
+                        into[n++] = "moonwater"[k];
+                do
+                        digits[d++] = (char)('0' + number % 10);
+                while ((number /= 10) > 0);
+                while (d)
+                        into[n++] = digits[--d];
+        }
+        into[n] = 0;
+}
+
+// The Response of a request to its caller, written to dbus.scratch and parsed into m: its length, or -1.
+static long dbus_response_write(const struct dbus_client *c, const struct dbus_response *r, struct dbus_message *m)
+{
+        struct dbus_out w = {dbus.scratch, 0, DBUS_MESSAGE, 0};
+        struct dbus_fields f = {r->path, "org.freedesktop.portal.Request", "Response", "", c->unique, dbus.service.unique, "ua{sv}", 0, 0};
+        long body;
+
+        dbus_o_header(&w, DBUS_SIGNAL, DBUS_FLAG_NO_REPLY, dbus_next_serial(), &f);
+        body = w.length;
+        dbus_o_u32(&w, r->code);
+        dbus_o_u32(&w, 0); // the results: none
+        dbus_o_pad(&w, 8);
+        dbus_o_end(&w, body);
+        return w.bad || dbus_parse(w.at, w.length, m) < 0 ? -1 : w.length;
+}
+
+// Whether one of a client's rules (or the one rule given) is a rule the Response matches.
+static int dbus_response_ruled(const struct dbus_client *c, const struct dbus_message *m, const struct dbus_rule *only)
+{
+        if (only)
+                return dbus_rule_matches(only, DBUS_SERVICE, m);
+        for (long k = 0; k < c->rules; k++)
+                if (c->rule[k].used && dbus_rule_matches(&c->rule[k], DBUS_SERVICE, m))
+                        return 1;
+        return 0;
+}
+
+// The held Responses of a client sent where they are due (now >= due), or where a rule matches them (all of them, or `only` given).
+static void dbus_responses_send(struct dbus_client *c, long now, const struct dbus_rule *only)
+{
+        for (long k = 0; c->responses && k < DBUS_RESPONSES; k++)
+        {
+                struct dbus_response *r = &c->response[k];
+                struct dbus_message m;
+                long n;
+
+                if (!r->due)
+                        continue;
+                n = dbus_response_write(c, r, &m);
+                if (n > 0 && now < r->due && !dbus_response_ruled(c, &m, only))
+                {
+                        dbus_due_at(r->due);
+                        continue;
+                }
+                if (n > 0)
+                        dbus_deliver(c, dbus.scratch, n, DBUS_ASKED_FOR);
+                r->due = 0;
+                c->responses--;
+        }
+}
+
+// A request's Response owed to its caller: sent now when a rule of the caller matches it or there is no room to hold it, else held.
+static void dbus_response_owe(struct dbus_client *c, const char *path, unsigned long code)
+{
+        struct dbus_response fresh, *r = 0;
+        struct dbus_message m;
+        long n;
+
+        fresh.due = dbus.host->now(dbus.host->context) + DBUS_RESPONSE_MS;
+        fresh.due += !fresh.due;
+        fresh.code = code;
+        dbus_text(fresh.path, sizeof fresh.path, path);
+        for (long k = 0; k < DBUS_RESPONSES && !r; k++)
+                if (!c->response[k].due)
+                        r = &c->response[k];
+        n = dbus_response_write(c, &fresh, &m);
+        if (n <= 0)
+                return;
+        if (!r || dbus_response_ruled(c, &m, 0))
+        {
+                dbus_deliver(c, dbus.scratch, n, DBUS_ASKED_FOR);
+                return;
+        }
+        *r = fresh;
+        c->responses++;
+        dbus_due_at(fresh.due);
+}
+
+// A portal method that is a request: answered with its request's path (from the handle_token of its options, argument `options`), and
+// the request's Response with `code` after it, when the caller can read it.
+static void dbus_portal_request(struct dbus_client *from, const struct dbus_message *m, long options, unsigned long code)
+{
+        char token[DBUS_TOKEN + 8], path[DBUS_REQUEST_PATH];
+        struct dbus_out w;
+        long body;
+
+        if (dbus_option_string(m, options, "handle_token", token, sizeof token) < 0)
+                token[0] = 0;
+        dbus_request_path(from, token, path);
+        dbus_reply_begin(&w, from, m, "o", dbus.service.unique, &body);
+        dbus_o_string(&w, path);
+        dbus_reply_end(&w, from, m, body);
+        dbus_response_owe(from, path, code);
+}
+
+// Request.Close of a request: its Response, held, is not sent (the specification: a closed request emits none).
+static void dbus_request_close(struct dbus_client *from, const char *path)
+{
+        for (long k = 0; from->responses && k < DBUS_RESPONSES; k++)
+                if (from->response[k].due && dbus_equal(from->response[k].path, path))
+                {
+                        from->response[k].due = 0;
+                        from->responses--;
+                }
+}
+
 // A call to the portal (the service's own).
 static void dbus_service_call(struct dbus_client *from, const struct dbus_message *m)
 {
@@ -2035,6 +2276,7 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 if (!req_prefix[p] && dbus_equal(m->interface, "org.freedesktop.portal.Request") && dbus_equal(m->member, "Close"))
                 {
                         dbus_reply_empty(from, m, dbus.service.unique);
+                        dbus_request_close(from, m->path);
                         return;
                 }
                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownObject", "No such object", dbus.service.unique);
@@ -2117,12 +2359,26 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 dbus_reply_empty(from, m, dbus.service.unique);
                 return;
         }
-        if (dbus_equal(m->interface, "org.freedesktop.portal.Inhibit") &&
-            (dbus_equal(m->member, "Inhibit") || dbus_equal(m->member, "CreateMonitor")))
+        if (dbus_equal(m->interface, "org.freedesktop.portal.Inhibit") && dbus_equal(m->member, "Inhibit"))
         {
+                // the request is the inhibition itself, which the caller ends with Close: no Response while it holds
                 dbus_reply_begin(&w, from, m, "o", dbus.service.unique, &body);
                 dbus_o_string(&w, "/org/freedesktop/portal/desktop/request/moonwater/1");
                 dbus_reply_end(&w, from, m, body);
+                return;
+        }
+        /*
+                A monitor of the session would be told when it ends and asked whether it may (StateChanged, QueryEndResponse),
+                and the desktop asks no program that: so the request ends at once, 2 (another way), and the program goes on with
+                no monitor, as it does under a portal that has none. A file chooser is not here yet: its requests end at once
+                as cancelled (1 is the person's; 2 is what a program takes for "no dialog"), so an upload is never left open.
+        */
+        if ((dbus_equal(m->interface, "org.freedesktop.portal.Inhibit") && dbus_equal(m->member, "CreateMonitor") && dbus_equal(m->signature, "sa{sv}")) ||
+            (dbus_equal(m->interface, "org.freedesktop.portal.FileChooser") &&
+             (dbus_equal(m->member, "OpenFile") || dbus_equal(m->member, "SaveFile") || dbus_equal(m->member, "SaveFiles")) &&
+             dbus_equal(m->signature, "ssa{sv}")))
+        {
+                dbus_portal_request(from, m, m->signature[1] == 'a' ? 1 : 2, 2);
                 return;
         }
         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", dbus.service.unique);
@@ -2261,6 +2517,9 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m, c
                                 p->caller = (short)from->slot;
                                 p->callee = (short)to;
                                 p->serial = m->serial;
+                                p->due = dbus.host->now(dbus.host->context) + DBUS_REPLY_MS;
+                                p->due += !p->due;
+                                dbus_due_at(p->due);
                                 from->pending++;
                         }
                 }
@@ -2902,8 +3161,12 @@ DBUS_API long dbus_dead(long slot)
         return c ? c->dead : 1;
 }
 
-// Connections that have not said Hello in DBUS_HELLO_MS are ended, and those whose queue refused a message and that have read
-// nothing for DBUS_STALL_MS since; called now and then.
+/*
+        Connections that have not said Hello in DBUS_HELLO_MS are ended, and those whose queue refused a message and that have read
+        nothing for DBUS_STALL_MS since; a call that has waited DBUS_REPLY_MS for its callee is answered NoReply and its row let go
+        (a late answer then goes nowhere), and a portal Response held DBUS_RESPONSE_MS is sent. Called now and then, and by
+        dbus_wait's time at the latest.
+*/
 DBUS_API void dbus_tick(void)
 {
         long now;
@@ -2922,6 +3185,47 @@ DBUS_API void dbus_tick(void)
                 else if (c->full_since && now - c->full_since > DBUS_STALL_MS)
                         c->dead = 2, c->why = "it did not read what it was sent";
         }
+        if (!dbus.due || now < dbus.due)
+                return;
+        dbus.due = 0;
+        for (long at = 0; at < DBUS_CLIENTS; at++)
+        {
+                struct dbus_client *c = dbus.client[at];
+                struct dbus_pending *row = &dbus.pending[at * DBUS_PENDING_PER];
+
+                if (!c || c->dead)
+                        continue;
+                for (long k = 0; c->pending && k < DBUS_PENDING_PER; k++)
+                {
+                        struct dbus_message fake;
+
+                        if (!row[k].used)
+                                continue;
+                        if (now < row[k].due)
+                        {
+                                dbus_due_at(row[k].due);
+                                continue;
+                        }
+                        row[k].used = 0;
+                        c->pending--;
+                        fake.serial = row[k].serial;
+                        fake.flags = 0;
+                        dbus_error_reply(c, &fake, "org.freedesktop.DBus.Error.NoReply", "The recipient did not answer in time", DBUS_NAME_BUS);
+                }
+                if (c->responses)
+                        dbus_responses_send(c, now, 0);
+        }
+}
+
+// Milliseconds until dbus_tick has a deadline to act on (a held Response, a call's answer), at most `most`: a host's longest sleep.
+DBUS_API long dbus_wait(long most)
+{
+        long left;
+
+        if (!dbus.host || !dbus.due)
+                return most;
+        left = dbus.due - dbus.host->now(dbus.host->context);
+        return left < 0 ? 0 : left < most ? left : most;
 }
 
 // What ended a client, for the log (or "").
