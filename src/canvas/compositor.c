@@ -15913,8 +15913,9 @@ static void compositor_take(int row)
                 }
         }
         // A window the card shows straight is told the picture was taken once the card has let go of the buffer
-        // it showed before, at the flip's event; any other at once.
-        if (row == compositor.direct_row)
+        // it showed before, at the flip's event, and one a job of the card may still be reading in place once that job is
+        // over (compositor_card_reads; the late present gives those back); any other at once.
+        if (row == compositor.direct_row || compositor_card_reads(row))
         {
                 compositor.taken_held[row] = frame;
                 compositor.held_rows |= 1u << row;

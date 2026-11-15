@@ -130479,6 +130479,13 @@ static void check_compositor_held(void)
     check("held: and one that changed no pixel still asks for that present", compositor.damages > 0);
     compositor.direct_row = -1;
     compositor.held_rows = 0;
+    // Not shown straight, and no job of the card reading it in place (compositor_card_reads): the next picture is taken at once.
+    table->buffer_index[1] = 0;
+    table->frame[1]++;
+    compositor_take(1);
+    check("held: a picture no card job reads in place is said taken at once, and not held",
+          !compositor_card_reads(1) && table->shown[1] == table->frame[1] && !(compositor.held_rows & 2u));
+    compositor.held_rows = 0;
 }
 
 /*
