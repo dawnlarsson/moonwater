@@ -341,8 +341,10 @@ class Shape:
         for name, head, close in self.bodies:
             self.named[name].append(head)
         self.closes = collections.defaultdict(list)
-        for _, _, close in self.bodies:
+        self.unit_of = {}       # a line a unit ends or opens a branch on: the function's name or the conditional's line
+        for name, _, close in self.bodies:
             self.closes[self.stacks[close]].append(close)
+            self.unit_of[close] = name
         self.ends = collections.defaultdict(list)       # the lines a unit at a level ends on: an #endif back to it
         self.openers = collections.defaultdict(list)    # the lines a branch of a level opens on
         count = len(self.lines)
@@ -351,8 +353,12 @@ class Shape:
             after = self.stacks[at + 1] if at + 1 <= count else ()
             if word == 'endif':
                 self.ends[after].append(at)
+                if self.stacks[at]:
+                    self.unit_of[at] = self.lines[self.stacks[at][-1][0] - 1].strip()
             elif word in ('if', 'ifdef', 'ifndef', 'elif', 'else'):
                 self.openers[after].append(at)
+                if after:
+                    self.unit_of[at] = self.lines[after[-1][0] - 1].strip()
 
     def branch_end(self, start):
         """The line of the directive that ends the branch the line start is in (its #elif, #else or #endif), or the line
@@ -388,21 +394,28 @@ class Shape:
             raise Refused('%s: the function %s is defined %d times, not once' % (part, anchor, len(heads)))
         return heads[0]
 
-    def start(self, part, anchor, stays, lift=None):
+    def ends_before(self, level, head, known):
+        """The lines before head where a unit at level ends (a function's close, an #endif back to level, a branch of it
+           opening); with known (names and conditional lines), only those of units known."""
+        lines = self.closes[level] + self.ends[level] + self.openers[level]
+        return [line for line in lines if line < head and (known is None or self.unit_of.get(line) in known)]
+
+    def start(self, part, anchor, stays, lift=None, known=None):
         """The line an entry's run starts at: after the function or section before its anchor at the anchor's level, and
            the blank lines and end markers after that, so the statics, macros and comments between go with it. With lift
            (the level of the part before, which must not end inside a conditional it did not open), an anchor deeper than
-           that which is the first thing in its conditional's first branch starts the run at the conditional's own line."""
+           that which is the first thing in its conditional's first branch starts the run at the conditional's own line.
+           With known (the units of the file before a branch changed it), only those count as the thing before, so what a
+           branch added between them and the anchor goes with the anchor."""
         head = self.head(part, anchor)
         level = self.stacks[head]
         while lift is not None and len(level) > len(lift) and level[:len(lift)] == lift:
             opened = level[-1][0]
-            if level[-1][1] != 0 or \
-                    [line for line in self.closes[level] + self.ends[level] + self.openers[level] if opened < line < head]:
+            if level[-1][1] != 0 or [line for line in self.ends_before(level, head, known) if opened < line]:
                 raise Refused('%s: %s is inside a conditional (line %d) that has more than it, so the part before would '
                               "end inside it: name the conditional's own line instead" % (part, anchor, opened))
             head, level = opened, self.stacks[opened]
-        before = max([line for line in self.closes[level] + self.ends[level] + self.openers[level] if line < head] or [0])
+        before = max(self.ends_before(level, head, known) or [0])
         at = before + 1
         while at < head and (not self.lines[at - 1].strip() or END_MARKER.match(self.lines[at - 1])):
             at += 1
@@ -417,7 +430,7 @@ class Shape:
 Run = collections.namedtuple('Run', 'part first after what level notes')
 
 
-def runs(source, shape, cuts):
+def runs(source, shape, cuts, known=None):
     """The runs of the cut: each entry's (part, its first line, the line after its last, its words), with the text that
        stays between a run's branch end and the next entry as runs of the file itself."""
     name = own(source)
@@ -426,7 +439,7 @@ def runs(source, shape, cuts):
         lift = None
         if index and cuts[index - 1][0] != name:
             lift = shape.stacks[starts[-1]]
-        starts.append(shape.start(part, anchor, part == name, lift))
+        starts.append(shape.start(part, anchor, part == name, lift, known))
     for (part, anchor, *_), at, (next_part, next_anchor, *_), next_at in zip(cuts, starts, cuts[1:], starts[1:]):
         anchor, next_anchor = anchor if isinstance(anchor, str) else anchor[0], next_anchor if isinstance(next_anchor, str) else next_anchor[0]
         if next_at <= at:
@@ -498,11 +511,11 @@ def moved_includes(source, run, exists):
     return INCLUDE_LINE.sub(one, run)
 
 
-def split(source, text, exists):
+def split(source, text, exists, known=None):
     """The new source and {part: text}, and the plan: (part, first line, last line, functions, sections)."""
     target = TARGETS[source]
     shape = Shape(text)
-    first, cut = runs(source, shape, target.cuts)
+    first, cut = runs(source, shape, target.cuts, known)
     lines = text.splitlines(keepends=True)
     main, parts, plan = [''.join(lines[:first - 1])], {}, []
     for run in cut:
@@ -1294,7 +1307,7 @@ def views(tree, source, stubs):
         out.append(('src/build/build.c', ['-O2', '-DCONFIG_MOONWATER_WAYLAND']))
     every = source == CHECKS
     for name in checks_sections(tree, source, every):
-        flags = FREESTANDING + ['-I' + str(stubs), '-D' + name]
+        flags = FREESTANDING + ['-I' + str(stubs), '-D' + name] + SECTION_FLAGS.get(name, [])
         if name.startswith('SHARED_'):
             flags = ['-O2', '-I' + str(stubs), '-D' + name]
         out.append((CHECKS, flags))
@@ -1304,6 +1317,9 @@ def views(tree, source, stubs):
                 (CHECKS, ['-O2', '-D_GNU_SOURCE', '-DCHECK_dbus'])]
     return out
 
+
+# The defines a section needs to preprocess at all, as its builder gives them (the coverage hook's record, build.c's).
+SECTION_FLAGS = {'COVERAGE_hook': ['-DCOVERAGE_PATH="coverage.record"']}
 
 INDENT = re.compile(rb'^[ \t]+', re.M)
 NAMES = ['-Wno-builtin-macro-redefined', '-D__LINE__=__SPLIT_LINE__', '-D__FILE__=__SPLIT_FILE__']
@@ -1330,8 +1346,9 @@ def compare_view(before_tree, after_tree, source, flags):
     after, failed_after = preprocessed(after_tree, source, flags)
     label = 'gcc -E -P %s %s' % (' '.join(f for f in flags if not f.startswith('-I/')), source)
     if before is None or after is None:
-        if before is None and after is None and failed.split('error:')[-1] == failed_after.split('error:')[-1]:
-            return label, 'does not preprocess, before or after, with the same error', 0
+        said, said_after = re.findall(r'error: (.*)', failed or ''), re.findall(r'error: (.*)', failed_after or '')
+        if before is None and after is None and said == said_after:
+            return label, 'does not preprocess, before or after, with the same error: %s' % (said[:1] or ['?'])[0][:80], 0
         raise Refused('%s: preprocesses %s before and %s after:\n%s' % (label, 'not' if before is None else 'well',
                                                                          'not' if after is None else 'well',
                                                                          failed or failed_after))
@@ -1592,14 +1609,15 @@ def rev_files(rev):
     return set(name for name in git('ls-tree', '-r', '--name-only', '-z', rev).split('\0') if name)
 
 
-def cut_at(rev, source):
-    """rev's file cut, with its tools rewritten for it: {path: text} for the split's files, and the file's text."""
+def cut_at(rev, source, known=None):
+    """rev's file cut, with its tools rewritten for it: {path: text} for the split's files, and the file's text. With known
+       (the units of the file the split was made on), the cut is made by those, as a carry makes it."""
     text = shown(rev, source)
     if text is None:
         raise Refused('%s has no %s' % (rev, source))
     files_there = rev_files(rev)
     try:
-        main, parts, _ = split(source, text, lambda name: name in files_there)
+        main, parts, _ = split(source, text, lambda name: name in files_there, known)
     except Refused as refusal:
         raise Refused('%s: %s' % (rev[:12], refusal))
     if flatten(source, main, parts) != text:
@@ -1642,24 +1660,44 @@ def units(text):
     return sorted(out)
 
 
-def ambiguous(source, known, new, files_there):
-    """The functions and sections new has and the file before the split did not (known: their names) that sit between
-       two that it had, at their own level, which are in different runs: which part each was meant for is not known."""
-    _, _, plan = split(source, new, lambda name: name in files_there)
+def ambiguous(source, known, base, new, files_there):
+    """The functions and sections new has and base (the file the split was made on; known, its units) did not that sit
+       between two of base's, at their own level, in different runs, where the part they belong to is not known. A carry
+       cuts by base's units, so what a branch put between a part's leading comment (or statics) and its first function
+       is that part's; what it put between the last of one part and the opening lines the next part had is either's."""
+    _, _, base_plan = split(source, base, lambda name: name in files_there)
+    _, _, plan = split(source, new, lambda name: name in files_there, known)
+    if [run[0] for run in base_plan] != [run[0] for run in plan]:
+        return ['the runs of the cut are not the ones the split made (%s)' % ', '.join(run[0] for run in plan)]
+    base_lines, new_lines = base.split('\n'), new.split('\n')
+    base_order = units(base)
     order = units(new)
 
     def run_of(line):
         return next((k for k, (_, first, last, _, _) in enumerate(plan) if first <= line <= last), -1)
+
+    def opening(k):
+        """The lines run k opened with in base, before its first unit: what tells a unit put in it from one put
+           before it."""
+        first = base_plan[k][1]
+        head = next((line for line, _, _ in base_order if line >= first), first)
+        return base_lines[first - 1:min(head - 1, first + 2)]
     found = []
     for at, (line, name, level) in enumerate(order):
         if name in known:
             continue
         before = next((order[k] for k in range(at - 1, -1, -1) if order[k][1] in known and order[k][2] == level), None)
         after = next((order[k] for k in range(at + 1, len(order)) if order[k][1] in known and order[k][2] == level), None)
-        if before and after and run_of(before[0]) != run_of(after[0]):
-            where = lambda unit: plan[run_of(unit[0])][0] if run_of(unit[0]) >= 0 else own(source)
-            found.append('%s (line %d, between %s of %s and %s of %s)' % (name, line, before[1], where(before), after[1],
-                                                                         where(after)))
+        if not before or not after or run_of(before[0]) == run_of(after[0]):
+            continue
+        k = run_of(after[0])
+        lead = opening(k) if k >= 0 else []
+        first = plan[k][1] if k >= 0 else 0
+        if lead and first < line and new_lines[first - 1:first - 1 + len(lead)] == lead:
+            continue
+        where = lambda unit: plan[run_of(unit[0])][0] if run_of(unit[0]) >= 0 else own(source)
+        found.append('%s (line %d, between %s of %s and %s of %s)' % (name, line, before[1], where(before), after[1],
+                                                                     where(after)))
     return found
 
 
@@ -1674,11 +1712,12 @@ def carry(branch, split_rev, index, source):
     commits = git('rev-list', '--reverse', '--topo-order', '%s..%s' % (parent, tip)).split()
     if any(len(git('rev-list', '--parents', '-n', '1', commit).split()) != 2 for commit in commits):
         raise Refused('%s has a merge since %s: rebase it into a line of commits and carry it again' % (branch, parent[:12]))
-    known = set(name for _, name, _ in units(shown(parent, source)))
+    base = shown(parent, source)
+    known = set(name for _, name, _ in units(base))
     carried, previous = git('rev-parse', split_rev), parent
     for commit in commits:
-        files, text = cut_at(commit, source)
-        odd = ambiguous(source, known, text, rev_files(commit))
+        files, text = cut_at(commit, source, known)
+        odd = ambiguous(source, known, base, text, rev_files(commit))
         if odd:
             raise Refused('%s adds functions or sections at a cut, where the part they belong to is not known: %s. Move each '
                           'after something of the part it belongs to and carry again' % (commit[:12], '; '.join(odd)))
