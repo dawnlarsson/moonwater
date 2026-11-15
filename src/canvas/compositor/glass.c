@@ -1,3 +1,15 @@
+/*
+        The glass under the panel and the tabs, and under a glass window: the grain, the frost, the blur and the scene
+        it is made from, the band drawn through it and slid, and a close button's mean.
+
+        A pipeline over pixels already composed: it does not decide what changed (damage.c), what the band holds or where
+        it is (the taskbar, ui/taskbar.c, through compositor_taskbar_view), or how large the band's and the glass's
+        memory is (compositor_band_room, compositor.c). It reads the compositor's state, compose.c's scene and damage.c's
+        rectangles and views, so it comes after them. Called by present.c (the glass pass, the band, the close button's
+        mean), session.c and manage.c (a window's side of the glass, compositor_glass_drop) and compositor.c's loop (the
+        band's slide).
+*/
+
 // How far the blur reaches, at the scale: a power of two, which the passes' steps add up to less one.
 static int compositor_glass_reach(int logical)
 {

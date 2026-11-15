@@ -1,3 +1,16 @@
+/*
+        What a person does: the latency of a report, the keys and the chords, the volume keys and the tray's sound,
+        the hand's motion, buttons and wheel, a pad's gestures, the prediction a frame ahead, the launcher opened, the
+        chip that names a key, and touch: fingers on a screen, their marks and their gestures.
+
+        Input read and turned into what the windows and the desktop do: what a key means is keymap.c's, what the hand's
+        counts are pointer.c's, where a window goes manage.c's and the rules of the space outputs.c's; the devices are
+        found and their settings read by session.c. It is the last part, after every one it calls, and declares the
+        few it calls before they are defined. compositor_launcher_open is the kit's. Called by compositor.c's loop (a
+        device's reports, the keys, the prediction's tick), present.c and scanout.c (the marks drawn), manage.c, kms.c
+        and damage.c (the preview, the pointer's sync, the snap) and wayland_host.c (a client's pointer and touch).
+*/
+
 // How long a report took to be on its way to the screen or the window, which `moonwater latency`
 // of the kernel desktop was for: a count, a total and the worst, in nanoseconds.
 static void compositor_latency(unsigned int which, positive reported, positive now)

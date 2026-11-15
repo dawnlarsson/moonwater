@@ -1,3 +1,17 @@
+/*
+        The windows: the stack and which has the keys, the grips and the edges, the dividers windows share, tiles, the
+        grid and the snap's overlays, the room the bands leave and a window fitted to it, the places kept for a program's
+        windows, a row taken and let go (compositor_take, compositor_leave), the keyboard on the screen, the clipboard and
+        the popups a window opens.
+
+        What a window is and where; not what a person did (input.c turns a press, a drag or a key into the calls here),
+        not how it is drawn (compose.c, present.c) and not what changed (damage.c, which it tells). It reads the
+        compositor's state and nearly every part before it; what it asks of input.c is declared before the call.
+        compositor_identity_take is the kit's. Called by input.c above all, by kms.c (a space taken again carries the
+        windows and fits them), session.c (the keyboard's and the clipboard's settings), damage.c and present.c (the
+        overlays), compositor.c's table and loop (a row's door, the clipboard's socket) and wayland_host.c.
+*/
+
 static void compositor_stack_remove(int row)
 {
         unsigned int at = 0;

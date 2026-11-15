@@ -213,6 +213,25 @@ static inline void compositor_reading(const struct compositor_target *t)
                 __atomic_fetch_add(&compositor_out_reads, 1, __ATOMIC_RELAXED);
 }
 
+/*
+        The compositor is one translation unit: this file and the thirteen parts it includes, in two runs, each part in
+        the place its text had when it was all one file, so every static is defined where it was and nothing is declared
+        twice. The order is load-bearing, for two reasons.
+
+        The first four (compose.c, keymap.c, pointer.c, outputs.c) are the backend and come before the kernel's
+        interfaces and the compositor's state below: the core_state lane cuts them out of this text by their section
+        lines and builds them for CHECK_canvas_cells with no card and no compositor, so they name nothing declared after
+        them, and the state itself is made of their types (struct compositor_frame, compositor_keymap, compositor_pointer,
+        the pointer's sizes).
+
+        The other nine come after the state, each after the parts whose types, macros and functions it uses: damage.c
+        (what changed, which every later part says), glass.c, scanout.c (with record.h), gpu_host.c, present.c (which
+        ties them together), kms.c (a take presents), session.c, manage.c and input.c. A call to a part later in the
+        order is made through a declaration before it, so moving an include moves definitions past their callers and
+        each such call needs one; a macro or a type cannot be declared ahead, and must stay above its first use. The
+        table, the startup and the loop below the second run call into all of them, and the Wayland shim (wayland.c,
+        wayland_host.c) is included after them for the same reason.
+*/
 #include "compositor/compose.c" // the look on the processor and the card's frames: windows, lines, corners, the panel's tabs, the scene and its plan
 #include "compositor/keymap.c" // what a key means: the layouts, dead keys and the held modifiers
 #include "compositor/pointer.c" // what a hand means: the gain, the repeat, the shake, the pointer's shapes and its picture
@@ -1268,6 +1287,7 @@ static void *compositor_map_zeroed(unsigned long bytes)
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
 
+// The nine parts that read the state, in the order their uses need (the comment before the first run says why).
 #include "compositor/damage.c" // what changed: rectangles and damage, landings and glides, the snap preview's state, a row's pixels and runs, the frames and the bands
 #include "compositor/glass.c" // the glass under the panel and the tabs: the grain, the frost, the blur and its scene
 #include "compositor/scanout.c" // what the card scans out: a window straight from its buffer, the record, the flip and its time, the planes, a turned screen

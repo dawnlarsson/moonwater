@@ -1,4 +1,21 @@
 /*
+        The card and its screens: the displays file's lines (a screen's scale, rate, turn and place), the connectors and
+        their modes and names, the space the screens are laid in and its scanout and second plate, a turned screen's own
+        buffer, the screens taken at the start and again (compositor_space_take), the card found and opened, and the
+        pointer's plane.
+
+        The pointer's plane (compositor_sway_*, compositor_pointer_dynamic, _now and _press, compositor_cursor_* and
+        compositor_drawn_x and _y) is here because it is set up with the card and moved across its crtcs, but it is
+        the pointer's: what it shows is pointer.c's and where the hand is, input.c's. What a window does when the space
+        changes is manage.c's (compositor_space_carry asks it), the rules of the space are outputs.c's, and the uevent
+        that says a screen came is read in compositor.c's loop. It needs the compositor's state and the kernel's
+        interfaces, outputs.c and pointer.c, and scanout.c and present.c, since a take drops what was shown and presents
+        the new space at once; what it asks of session.c, manage.c, input.c and compositor.c's tail is declared before
+        the call. Called by compositor.c's startup and loop (the card, the take, the pointer's tick), damage.c and
+        manage.c (a screen's scale), input.c and session.c (the pointer moved) and wayland_host.c.
+*/
+
+/*
         The card, and every screen it has connected, at the mode Canvas left
         on each.
 

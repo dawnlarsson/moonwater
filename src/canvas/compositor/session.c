@@ -1,4 +1,18 @@
 /*
+        The session around the desktop: a machine that slept and woke, the kernel's log, the settings under /root read
+        (the look, the theme and its inks, the hand, the taskbar, the input devices' settings) and published to the
+        table, the input devices found and opened as they come, and the doors: the threads that wait on the programs'
+        knocks and the posts the compositor sends a row.
+
+        What is read here is what a setting says, not what a key or the hand means (keymap.c, pointer.c, input.c) or what
+        a window does (manage.c). It reads the compositor's state and the parts before it; what it asks of manage.c and
+        input.c (the keyboard on the screen, the clipboard's and the GPU's settings, touch and the prediction) is
+        declared before the call. Called by compositor.c's startup and loop (the settings, the devices, the doors, the
+        wake), by kms.c, manage.c and input.c (the log, a setting's word, a door's question, a post), and for the inks by
+        damage.c and the taskbar (ui/taskbar.c), through compositor.c's declarations of them.
+*/
+
+/*
         What a sleep does to the screen. The card is left to the compositor and
         nothing tells it the machine slept, so it works it out from the clocks:
         CLOCK_BOOTTIME runs through a sleep and CLOCK_MONOTONIC does not, and

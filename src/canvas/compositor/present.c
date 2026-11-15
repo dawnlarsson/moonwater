@@ -1,4 +1,18 @@
 /*
+        A present: the metrics the table is told, the loop's tick and its sources, and one frame from the damage to the
+        screen (compositor_present), which picks the way to the screen (a window shown straight, the overlay, the card,
+        the processor in place or apart), lists the frames (a client's layers among them), composes, and flips or tells
+        the card what changed; and the present the card draws without a wait (compositor_card_*): its jobs' fence the
+        loop polls, the flip committed with it, the clients held until the jobs are done, and the frame given up and
+        drawn again when one fails.
+
+        It is the one caller that ties the parts before it together, so it comes after all of them: compose.c's scene,
+        damage.c's list and frames, glass.c's pass, scanout.c's ways to the screen and gpu_host.c's present. It makes no
+        buffer (scanout.c and kms.c do) and reads no input. Called by kms.c (a take presents the new space at once),
+        scanout.c (the lead of a present) and compositor.c's loop.
+*/
+
+/*
         The damage, composed straight onto the scanout and then announced.
         The scanout is a mapping of the card's memory, so it is only ever
         written: every pixel of the damage once, by the stores of

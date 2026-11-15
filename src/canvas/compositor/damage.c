@@ -1,4 +1,22 @@
 /*
+        What changed, and what each window is as a frame.
+
+        The damage list and its rectangles (compositor_area, compositor_union, compositor_meet), a window's landing and
+        its glide, the snap preview's state, a lent buffer's state as the shim keeps it (compositor_lent_*, compositor_wl_*),
+        a row's pixels and the runs of one colour learned in them, the frame each window is drawn as (compositor_frame_of),
+        the windows that have a tab, and the bands: how many, and the view of each the taskbar is given
+        (compositor_taskbar_view and compositor_band_view, which are the kit's to change).
+
+        What changed is said here and drawn elsewhere: no pixel of the scanout is written here (present.c composes the
+        damage), and no window is moved or raised (manage.c, input.c). It reads the compositor's state, so it comes after
+        compositor.c's state and helpers, and after compose.c and outputs.c; the few things it asks of parts that come
+        later (the overlays and popups of manage.c, the scale of kms.c, the theme's inks of session.c, the snap of input.c)
+        are declared before their first call, here or in compositor.c's prelude. compositor_damage is called from every
+        part after it (glass.c, scanout.c, present.c, kms.c, session.c, manage.c, input.c), compositor.c's startup and
+        loop and wayland_host.c; compose.c calls compositor_taskbar_view, which compositor.c declares.
+*/
+
+/*
         What changed, as a few rectangles that do not overlap. A rectangle
         joins one it overlaps or lines up with, which costs nothing, and
         stays apart from the rest, so two windows at opposite corners are

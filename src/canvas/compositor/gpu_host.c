@@ -1,3 +1,17 @@
+/*
+        The card's part of a present: the render node's state as the compositor keeps it, the scene and the window
+        lists drawn on it, a present's jobs put on it and their fences (compositor_card_add, _go, _fence_for), the turn of
+        a screen on it, the issues it says in the table, its refusals and hangs, and its wake after a sleep.
+
+        The host side only: the driver of the render node, its buffers and its jobs are gpu.c's, which compositor.c
+        includes before everything (or stands in for when the build has no GPU, so nearly all of this file is inside
+        MOONWATER_GPU_C), and the records it draws are made by compose.c. It needs the compositor's state, compose.c's
+        records and scanout.c's pins and turns, so it comes after scanout.c; what it asks of session.c and input.c is
+        declared before the call. Called by present.c (compositor_gpu_present and its failures), scanout.c (a refusal,
+        the turn), kms.c, session.c (the resume), manage.c (the lists), input.c (the wake), compositor.c's loop (the late
+        job) and wayland_host.c.
+*/
+
 // Whether the present in hand was drawn by the card (set by compositor_gpu_present, read by compositor_metric_note; cleared at each present).
 static int compositor_present_on_card;
 

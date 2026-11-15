@@ -1,3 +1,26 @@
+/*
+        The look: what a frame is drawn as, on the processor and as the card's records.
+
+        A frame (struct compositor_frame) is a window's picture, its line and round corners, its close and minimise
+        buttons and lit edges, a tab drawn without a font, or a finger's mark. This file draws frames into a target (struct
+        compositor_target, compositor.c), copies a picture by the runs of one colour it was learned to have, cuts a present's
+        scene in bands and plans it, composes aside the rows a scene reads of a target that is only written (a scanout:
+        compositor_scene_reads), and makes the records a present on the card is drawn from (compositor_gpu_*, inside
+        MOONWATER_GPU_C).
+
+        It is the start of the backend: the core_state lane cuts compositor.c's text from its "backend" line to this file's
+        end line, and keymap.c, pointer.c and outputs.c after it, and builds them for CHECK_canvas_cells with no card, no
+        table and no compositor. So nothing here names the compositor's state (struct compositor, which compositor.c
+        declares after these four files) or the kernel's interfaces: what it draws is handed to it, as a target and frames.
+        Which window is where is manage.c's; what changed, damage.c's; the band's glass, glass.c's.
+
+        It needs what compositor.c has above its includes: the inks and sizes, ui/ui.c's shared part, gpu.c or its stand-ins,
+        struct compositor_target and compositor_reading; window.c before that. compositor_map_zeroed and
+        compositor_taskbar_view are declared before their use and defined later (compositor.c, damage.c). It is called by
+        nearly every part after it: damage.c (a frame's outline, its close box), glass.c, scanout.c and present.c (the scene),
+        gpu_host.c (the records), manage.c and input.c (the arrangement's names, a blit, a corner's mask, a mark).
+*/
+
 // A scale in percent as the whole device pixels of one logical pixel, never less than one.
 static int compositor_px1(int percent)
 {

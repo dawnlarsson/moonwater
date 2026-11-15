@@ -1,3 +1,17 @@
+/*
+        What a hand means, and what the pointer looks like: the gain on speed, a key's repeat, a shake, a tablet's
+        reach, the shapes for an edge, and the pointer's picture made and drawn (its cover table, inside a target, and
+        as the card's records inside MOONWATER_GPU_C).
+
+        It is part of the backend CHECK_canvas_cells builds without a compositor (the section between its two lines
+        below), so it names nothing of struct compositor: the compositor's state holds its structs (compositor_pointer,
+        compositor_shake, compositor_sway) and passes them in. Where the pointer is and when it moves are input.c's; its
+        plane on the card is kms.c's (compositor_cursor_*). It needs compositor.c's prelude (the lit edges, struct
+        compositor_target), compose.c's GPU records and window.c's pointer shapes. Called by kms.c (the plane's picture),
+        present.c and scanout.c (drawn in the scene), gpu_host.c, input.c (the gain, the shake), manage.c (an edge's
+        shape), session.c (the repeat) and wayland_host.c (a client's shape).
+*/
+
 /* ---- pointer: what a hand means ---- */
 
 /*

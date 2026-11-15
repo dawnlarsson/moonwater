@@ -1,3 +1,14 @@
+/*
+        What a key means: the layouts' tables, the levels and dead keys over them, and the modifiers held.
+
+        Tables and pure functions of a key and the held state only: no device is read here and no window told (input.c
+        reads the keys and asks this what each one is; wayland_host.c asks it for a client's keymap and its dead keys). It
+        is part of the backend CHECK_canvas_cells builds without a compositor (the section between its two lines below,
+        which the core_state lane cuts by their text), so it names nothing of struct compositor, which keeps one struct
+        compositor_keymap of the held state from here. It needs only window.c's WINDOW_KEY_* flags. Called by compositor.c
+        (its state, the layout read at the start), session.c (compositor_layout_index), input.c and wayland_host.c.
+*/
+
 /* ---- keymap: what a key means ---- */
 
 /*

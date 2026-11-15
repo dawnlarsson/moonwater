@@ -1,3 +1,16 @@
+/*
+        The rules of the space the screens make, as functions of rectangles alone: where a screen is laid, which one a
+        point or a window belongs to, a point and a window kept on them, carried to a screen that changed, the snap's
+        zones and the cells of a screen.
+
+        No card and no state: kms.c takes the screens and lays them by these rules, manage.c and input.c keep and snap
+        windows by them, and CHECK_canvas_cells holds them without a card (the section between its two lines below is the
+        last part of the backend the core_state lane cuts). So nothing here names struct compositor or a descriptor; a
+        rule that needs the compositor's state is its caller's. It needs compose.c's names of the arrangement
+        (COMPOSITOR_LEFT and the rest) and window.c's WINDOWS_OUTPUT_NAME. Called by kms.c, damage.c, scanout.c,
+        manage.c and input.c.
+*/
+
 /* ---- outputs: the screens one desktop spans ---- */
 
 /*

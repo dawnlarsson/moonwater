@@ -1,3 +1,22 @@
+/*
+        What the card scans out, and how a frame gets there: a window shown straight from its buffer (its framebuffer,
+        the tabs patched over it and what they covered kept, compositor_direct_under_ready), the card's present that
+        nothing waits for in place (struct compositor_card, its steps and the pictures its jobs read, compositor_card_reads),
+        the stale of the two plates and their swap, the flip and its event, the present's time and the frames it was late,
+        the one way to the screen for each kind of card (compositor_copies_damage, compositor_plate_wanted), the
+        processor's mirror and slices, the overlay and its buffers (compositor_overlay_width) and the planes, a screen
+        turned by the card or by Canvas, and the damage cut to what each screen shows. It includes record.h, the present
+        record, which reads the flips refused and the lists drawn.
+
+        It shows and flips what was composed; it does not compose (compose.c, present.c) and does not take the screens
+        or make the scanout (kms.c). It reads the compositor's state and the kernel's interfaces in compositor.c and
+        comes after compose.c, pointer.c, outputs.c and damage.c, whose frames, cursor, clips and damage it uses; what it
+        calls of gpu_host.c, present.c, kms.c and input.c is declared before the call. Called by present.c above all,
+        and by kms.c (the overlay off, the plates, the turns), gpu_host.c (the pins, the turn), session.c and manage.c
+        (a row's framebuffer, the card's reads), compositor.c's loop (the flip's event, the late present) and
+        wayland_host.c (the planes' properties).
+*/
+
 /* ---- a window shown straight from its buffer ---- */
 
 /*
