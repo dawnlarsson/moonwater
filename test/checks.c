@@ -244906,6 +244906,103 @@ static b32 model_seen(unsigned int handle)
 
 static unsigned int model_source[64 * 4];
 
+// gpu.asm assembled here by gpuasm, for its labels: a kernel's label's first and last word in gpuasm_words.
+static b32 model_asm_ready;
+static b32 model_kernel_span(const char address_to name, positive address_to first, positive address_to stop)
+{
+        for (positive at = 0; model_asm_ready && at < gpuasm_label_count; at++)
+                if (gpuasm_labels[at].sized && gpuasm_labels[at].length == string_length((string_address)name) &&
+                    !memory_compare(gpuasm_pool + gpuasm_labels[at].name, name, gpuasm_labels[at].length))
+                        return *first = gpuasm_labels[at].at, *stop = gpuasm_labels[at].stop, true;
+        return false;
+}
+
+// The label of gpu.asm a word of a kernel is under (the last one at or before it in the kernel's span), appended to into.
+static void model_label_of(positive first, positive stop, positive word, char address_to into, unsigned int room)
+{
+        positive best = first, length = 0;
+        const p8 *name = (const p8 *)"";
+        char text[48];
+
+        for (positive at = 0; at < gpuasm_label_count; at++)
+                if (gpuasm_labels[at].defined && gpuasm_labels[at].at >= best && gpuasm_labels[at].at <= first + word && gpuasm_labels[at].at < stop)
+                        best = gpuasm_labels[at].at, name = gpuasm_pool + gpuasm_labels[at].name, length = gpuasm_labels[at].length;
+        length = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
+        memory_copy(text, name, length), text[length] = 0;
+        string_append_bounded((string_address)into, (string_address)text, room);
+}
+
+static void model_say_number(char address_to into, unsigned int room, const char address_to before, positive value)
+{
+        p8 number[24];
+
+        memory_zero(number, sizeof(number));
+        positive_into_string(number, value);
+        string_append_bounded((string_address)into, (string_address)before, room);
+        string_append_bounded((string_address)into, (string_address)number, room);
+}
+
+/*
+        What of a kernel the card ran since its reset (gpu_model_card.hits): its instructions that ran and its instructions, and in the log each run
+        of instructions that did not, by the label of gpu.asm it begins under, its byte in the kernel's code and its count.
+*/
+static void model_coverage(const char address_to name, unsigned int k, unsigned int address_to ran, unsigned int address_to of)
+{
+        const p32 *code = gpu_kernels[k].words + 2;
+        unsigned int words = (unsigned int)(gpu_kernels[k].size / 4 - 2), gaps = 0, from = 0, missed = 0;
+        positive first = 0, stop = 0;
+        b32 labelled = model_kernel_span(name, &first, &stop), in_gap = false;
+        static char said[2048];
+
+        *ran = *of = 0, said[0] = 0;
+        gpu_model.code_va = 0;
+        for (unsigned int at = 0; at <= words;)
+        {
+                struct gpu_model_insn in;
+                b32 hit = true;
+
+                in.words = 1;
+                if (at < words && !gpu_model_decode(code + at, words - at, 4ull * at, &in))
+                        hit = at < GPU_MODEL_CARD_WORDS && gpu_model_card.hits[k][at], (*of)++, *ran += hit;
+                if (!hit && !in_gap)
+                        in_gap = true, from = at, missed = 0;
+                missed += !hit;
+                if (hit && in_gap)
+                {
+                        in_gap = false, gaps++;
+                        string_append_bounded((string_address)said, (string_address) " ", sizeof(said));
+                        if (labelled)
+                                model_label_of(first, stop, from, said, sizeof(said));
+                        model_say_number(said, sizeof(said), "@", 4ull * from);
+                        model_say_number(said, sizeof(said), ":", missed);
+                }
+                if (at == words)
+                        break;
+                at += in.words;
+        }
+        string_format(log, "gpu model coverage: %s: %p of %p instructions run; %p runs not (label@byte:instructions):%s\n", name, (positive)*ran, (positive)*of,
+                      (positive)gaps, said);
+}
+
+// One scene of records over a w by h picture at pic_at (pitch w), its cost: the counts of what the model ran, said per 64 by 64 cell and per pixel.
+static b32 model_cost(const char address_to what, const unsigned int address_to records, unsigned int n, unsigned int w, unsigned int h)
+{
+        positive ops_at = GPU_DATA, bins_at = GPU_DATA + 65536, pic_at = GPU_DATA + (1 << 20), cells = ((w + 63) / 64) * ((h + 63) / 64), pixels = (positive)w * h;
+        b32 done;
+
+        memory_copy((p8 address_to)gpu.at + ops_at, records, 32ull * n);
+        memory_zero(&gpu_model.fault, sizeof(gpu_model.fault)), memory_zero(&gpu_model.cost, sizeof(gpu_model.cost)); // (the coverage goes on counting)
+        done = gpu_scene(ops_at, n, bins_at, pic_at, w, w, h, 0, 0, w, h) && !gpu_model.fault.code;
+        string_format(log, "gpu model cost: %s: %p instructions a cell (%p scalar, %p vector, %p vector lanes), %p.%p loads and %p.%p stores of a lane a pixel, %p.%p bytes "
+                           "loaded and %p.%p stored a pixel, %p scalar bytes a wave\n",
+                      what, gpu_model.cost.instructions / cells, gpu_model.cost.salu / cells, gpu_model.cost.valu / cells, gpu_model.cost.lanes / cells,
+                      gpu_model.cost.lane_loads / pixels, gpu_model.cost.lane_loads * 100 / pixels % 100, gpu_model.cost.lane_stores / pixels,
+                      gpu_model.cost.lane_stores * 100 / pixels % 100, gpu_model.cost.bytes_loaded / pixels, gpu_model.cost.bytes_loaded * 100 / pixels % 100,
+                      gpu_model.cost.bytes_stored / pixels, gpu_model.cost.bytes_stored * 100 / pixels % 100,
+                      gpu_model.cost.waves ? gpu_model.cost.scalar_bytes / gpu_model.cost.waves : 0);
+        return done;
+}
+
 b32 main()
 {
         static const struct
@@ -245080,6 +245177,167 @@ b32 main()
                 check("gpu model: a store into a map bound to be read is refused: the job may read it and not write it",
                       gpu_model.fault.code == GPU_MODEL_BOUNDS && gpu_model.fault.address == GPU_VA_MAPS && model_has(gpu_model.fault.text, "may read and not write"));
                 gpu_map_count = 0, gpu_handed_clear();
+        }
+
+        // Coverage: which instructions of each kernel the self-test runs (the words GPU_TEST_HASH holds) and which the scenes of every kind below and the
+        // copy and scale rows run. gpu.asm is assembled here too, for its labels, and what gpuasm makes of it is the arrays the build wrote.
+        {
+                static p8 text[1 << 20];
+                bipolar got = file_slurp((string_address) "src/canvas/gpu.asm", text, sizeof(text));
+                unsigned int ran = 0, of = 0;
+
+                model_asm_ready = false;
+                if (got > 0 && (positive)got + 1 < sizeof(text))
+                {
+                        text[got] = 0;
+                        model_asm_ready = gpuasm_assemble((string_address) "src/canvas/gpu.asm", text) &&
+                                          string_find((string_address)gpuasm_output, (string_address)"gpu_k_scene") != 0;
+                }
+                if (model_asm_ready)
+                {
+                        positive first = 0, stop = 0;
+
+                        same = model_kernel_span("scene", &first, &stop) && stop - first == sizeof(gpu_k_scene) / 4 - 2 &&
+                               !memory_compare(gpuasm_words + first, gpu_k_scene + 2, sizeof(gpu_k_scene) - 8);
+                        check("gpu model: gpu.asm as gpuasm makes it here is the scene kernel the build wrote (artifacts/gpu_kernels.inc is the source's)", same);
+                }
+                else
+                        string_format(log, "gpu model coverage: the labels of gpu.asm NOT RUN -- src/canvas/gpu.asm does not read or assemble from here\n");
+                model_hash();
+                model_coverage("scene", 6, &ran, &of);
+                string_format(log, "gpu model coverage: the self-test runs %p of the scene kernel's %p instructions (%p percent): the words GPU_TEST_HASH holds\n", (positive)ran,
+                              (positive)of, (positive)(100 * ran / (of ? of : 1)));
+                check("gpu model: the self-test's coverage of the scene kernel is counted, instruction by instruction", ran > 0 && ran <= of);
+        }
+
+        // The cost of each kind of record, and of a scene like a desktop's, on the model: a 256 by 256 picture over a ground, said per 64 by 64 cell.
+        {
+                enum { W = 256, H = 256 };
+                positive src_at = GPU_DATA + (2 << 20), cover_at = GPU_DATA + (3 << 20), tones_at = cover_at + (W + 2) * (H + 2) + 64;
+                positive src = GPU_VA + src_at;
+                unsigned int address_to pixels = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to tones = (unsigned int address_to)((p8 address_to)gpu.at + tones_at);
+                p8 address_to cover = (p8 address_to)gpu.at + cover_at;
+                unsigned int seed = 2463534242u, ok = 1, ran = 0, of = 0;
+                const unsigned int ground[8] = {0, 0, 0, W, H, 0xff203040u, 0, 0};
+                unsigned int kinds[][2][8] = {
+                    {{1, 0, 0, W, H, 0x80c0a020u, 0, 0}},
+                    {{2, 16 * 256, 16 * 256, 240 * 256, 240 * 256, 0xc0ff4020u, 24 * 256, 24 * 256}},
+                    {{2, 0, 0, W * 256, H * 256, 0xffff4020u, 0, 0}},
+                    {{2 | 1 << 8, 16 * 256, 16 * 256, 240 * 256, 240 * 256, 0xe0ffffffu, 30 * 256, 30 * 256}, {9, 40 * 256, 40 * 256, 216 * 256, 216 * 256, 0, 12 * 256, 12 * 256}},
+                    {{3 | (W + 2) << 8, 0, 0, W, H, 0xff102030u, 180 | 64 << 8, (unsigned int)(cover_at + W + 3)}},
+                    {{4, 0, 0, W, H, (unsigned int)src, (unsigned int)(src >> 32), W}},
+                    {{11, 0, 0, W, H, (unsigned int)src, (unsigned int)(src >> 32), W}},
+                    {{5 | (W + 2) << 8 | W << 16, 0, 0, W, H, (unsigned int)(cover_at + W + 3), (unsigned int)src, (unsigned int)(src >> 32)}},
+                    {{7 | (0x800000u + W) << 8, 0, 0, W, H, (unsigned int)(src + 4ull * (W - 1)), (unsigned int)(src >> 32), (unsigned int)-1}},
+                    {{10 | (W + 2) << 8, 0, 0, W, H, (unsigned int)tones_at, 0, (unsigned int)(cover_at + W + 3)}},
+                    {{6 | W << 8 | W << 16, 0, 0, W, H, (unsigned int)(cover_at + W + 3), (unsigned int)src, (unsigned int)(src >> 32 & 0xff) | 0xe0e0e0u << 8}}};
+                static const char *const names[] = {"tone", "box with corners", "box whole", "box with a clip", "text run", "image", "image over", "mix", "turn", "translate", "close button"};
+                unsigned int records[16 * 8];
+
+                for (unsigned int i = 0; i < W * H; i++)
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, pixels[i] = seed;
+                for (unsigned int i = 0; i < (W + 2) * (H + 2); i++)
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, cover[i] = (p8)(seed % 3 == 0 ? 0 : seed % 3 == 1 ? 255 : seed >> 24);
+                for (unsigned int i = 0; i < 256; i++)
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, tones[i] = seed | 0xff000000u;
+                gpu_model_card_reset();
+                ok = ok && model_cost("ground (a fill)", ground, 1, W, H);
+                for (unsigned int k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+                {
+                        unsigned int n = 1 + 1 + (kinds[k][0][0] == (2 | 1 << 8));
+
+                        memory_copy(records, ground, 32), memory_copy(records + 8, kinds[k], 32ull * (n - 1));
+                        ok = ok && model_cost(names[k], records, n, W, H);
+                }
+                check("gpu model: the cost of every kind of record is counted on a scene the model draws to its end", ok);
+                model_coverage("scene", 6, &ran, &of);
+                string_format(log, "gpu model coverage: the scenes of every kind run %p of the scene kernel's %p instructions\n", (positive)ran, (positive)of);
+        }
+
+        // The copy (op 0, wayland_host's) and the scale (op 7, the compositor's landings) on the model against the processor's memory_copy_rect_u32 and
+        // memory_resample_u32_rect, from a seed: a differential against the processor only, for no card hash holds these two kernels.
+        {
+                enum { ROUNDS = 40 };
+                positive from_at = GPU_DATA + (2 << 20), into_at = GPU_DATA + (3 << 20), tab_at = GPU_DATA + (1 << 20);
+                unsigned int address_to from = (unsigned int address_to)((p8 address_to)gpu.at + from_at), address_to into = (unsigned int address_to)((p8 address_to)gpu.at + into_at);
+                unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tab_at);
+                static unsigned int want[512 * 512];
+                unsigned int seed = 0x9e3779b9u, wrong = 0, ran = 0, of = 0;
+                positive pixels = 0;
+
+                gpu_model_card_reset();
+                for (unsigned int i = 0; i < 512 * 512; i++)
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, from[i] = seed;
+                for (unsigned int round = 0; round < 2 * ROUNDS; round++)
+                {
+                        unsigned int w, h, sp, dp, fw, fh;
+                        b32 scaled = round >= ROUNDS;
+
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, w = 1 + seed % 300;
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, h = 1 + seed % 200;
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, fw = 1 + seed % 400, sp = fw + seed % 7;
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, fh = 1 + seed % 300, dp = w + seed % 5;
+                        if (!scaled)
+                                fw = w, fh = h, sp = w + sp % 9;
+                        for (unsigned int i = 0; i < 512 * 512; i++)
+                                into[i] = want[i] = 0x5a5a5a5au;
+                        if (scaled)
+                        {
+                                // The compositor's tables (compositor_gpu_scale_frames): half a cell in, the floored step in 24-bit fractions.
+                                positive step_x = ((positive)fw << 24) / w, fx = ((positive)fw << 23) / w, step_y = ((positive)fh << 24) / h, fy = ((positive)fh << 23) / h;
+
+                                for (unsigned int x = 0; x < w; x++, fx += step_x)
+                                        tables[x] = (unsigned int)(fx >> 24);
+                                for (unsigned int y = 0; y < h; y++, fy += step_y)
+                                        tables[w + y] = (unsigned int)(fy >> 24);
+                                memory_resample_u32_rect(want, dp, w, h, from, sp, fw, fh, w, h, 0, 0);
+                        }
+                        else
+                                memory_copy_rect_u32(want, dp, from, sp, w, h);
+                        if (!gpu_blit(GPU_VA + from_at, sp, GPU_VA + into_at, dp, GPU_VA + tab_at, scaled ? 7 : 0, w, h) || gpu_model.fault.code)
+                        {
+                                wrong++;
+                                break;
+                        }
+                        for (unsigned int i = 0; i < 512 * 512; i++)
+                                wrong += into[i] != want[i];
+                        pixels += (positive)w * h;
+                }
+                string_format(log, "gpu model: copy and scale, %p rounds each from the seed 0x9e3779b9, %p pixels: %p differ from the processor's%s%s\n", (positive)ROUNDS, pixels,
+                              (positive)wrong, gpu_model.fault.code ? ": " : "", gpu_model.fault.text);
+                check("gpu model: the copy and scale kernels on the model are memory_copy_rect_u32 and memory_resample_u32_rect, pixel for pixel (against the processor only: no card hash holds them)",
+                      !wrong && pixels > 0);
+                model_coverage("copy", 0, &ran, &of);
+                model_coverage("scale", 7, &ran, &of);
+        }
+
+        // The scene kernels a compiler made (gpu_cp and gpu_bx, ops 4 and 5, for widths that are not a multiple of 4) are in forms gpuasm does not make: the model does not run them.
+        {
+                const struct
+                {
+                        const char *name;
+                        const unsigned int *words;
+                        unsigned int size;
+                } blobs[] = {{"gpu_cp", gpu_cp, sizeof(gpu_cp)}, {"gpu_bx", gpu_bx, sizeof(gpu_bx)}};
+
+                for (unsigned int b = 0; b < 2; b++)
+                {
+                        unsigned int refused = 0, words = blobs[b].size / 4 - 2;
+                        struct gpu_model_insn in;
+
+                        for (unsigned int at = 0; at < words;)
+                        {
+                                memory_zero(&gpu_model.fault, sizeof(gpu_model.fault));
+                                if (gpu_model_decode(blobs[b].words + 2 + at, words - at, 4ull * at, &in))
+                                        refused++, at++;
+                                else
+                                        at += in.words;
+                        }
+                        memory_zero(&gpu_model.fault, sizeof(gpu_model.fault));
+                        gpu_model_decode(blobs[b].words + 2, words, 0, &in);
+                        string_format(log, "gpu model: the clang scene kernel %s on the model NOT RUN -- %p of its %p words are not of gpuasm's forms, the first %s\n", blobs[b].name,
+                                      (positive)refused, (positive)words, gpu_model.fault.text);
+                }
         }
         gpu_model_card_stop();
         return test_report(null);
