@@ -1221,7 +1221,7 @@ def checks_sections(tree, source, every):
     reach = reachers(tree, source)
     for match in INCLUDE_LINE.finditer(text):
         path = posixpath.normpath(posixpath.join('test', match.group(2)))
-        if path not in reach:
+        if path not in reach or path == CHECKS:
             continue
         line = text.count('\n', 0, match.start()) + 1
         for opened, _ in reversed(shape.stacks[line]):
@@ -1250,6 +1250,8 @@ def views(tree, source, stubs):
     if 'programs/shell.c' in reach:
         out += [('programs/shell.c', ['-O2', '-DCONFIG_MOONWATER_WAYLAND']),
                 ('programs/shell.c', ['-O2', '-DSHELL_NO_WAYLAND', '-DSHELL_NO_GPU'])]
+    for program in sorted(name for name in reach if name.startswith('programs/') and name != 'programs/shell.c'):
+        out.append((program, ['-O2', '-DCONFIG_MOONWATER_WAYLAND']))
     if 'src/build/build.c' in reach:
         out.append(('src/build/build.c', ['-O2', '-DCONFIG_MOONWATER_WAYLAND']))
     every = source == CHECKS
@@ -1297,15 +1299,21 @@ def compare_view(before_tree, after_tree, source, flags):
                                                                          failed or failed_after))
     if before == after:
         return label, 'byte-identical (%d bytes, sha256 %s)' % (len(after), hashlib.sha256(after).hexdigest()[:16]), 1
-    lined = sum(x != y for x, y in zip(before.split(b'\n'), after.split(b'\n')))
+    def lines_differing(a, b):
+        return sum(x != y for x, y in zip(a.split(b'\n'), b.split(b'\n')))
+    indented = 'GCC lays a line out at its column only while it still tracks columns (LINE_MAP_MAX_LOCATION_WITH_COLS)'
+    if INDENT.sub(b'', before) == INDENT.sub(b'', after):
+        return label, ('identical but for the indentation of %d lines (%s): every token and line the same'
+                       % (lines_differing(before, after), indented)), 3
     named_before, _ = preprocessed(before_tree, source, flags + NAMES)
     named_after, _ = preprocessed(after_tree, source, flags + NAMES)
+    lined = lines_differing(INDENT.sub(b'', before), INDENT.sub(b'', after))
     if named_before == named_after:
-        return label, ('identical once __LINE__ and __FILE__ are names (%d lines carry their values, which are the part\'s '
-                       'line and name)' % lined), 2
+        return label, ('identical once __LINE__ and __FILE__ are names: %d lines carry their values, which are now the '
+                       "part's line and name" % lined), 2
     if INDENT.sub(b'', named_before) == INDENT.sub(b'', named_after):
-        return label, ('identical but for the indentation of lines GCC lays out once it stops tracking columns '
-                       '(LINE_MAP_MAX_LOCATION_WITH_COLS), and %d lines that carry __LINE__ or __FILE__' % lined), 3
+        return label, ('identical once __LINE__ and __FILE__ are names (%d lines carry their values) but for the '
+                       'indentation of %d lines (%s)' % (lined, lines_differing(named_before, named_after), indented)), 4
     raise Refused('%s differs after the split: %s' % (label, first_difference(INDENT.sub(b'', named_before),
                                                                              INDENT.sub(b'', named_after))))
 
@@ -1321,8 +1329,8 @@ def compare_views(before_tree, after_tree, source, stubs, jobs=2):
             tally[kind] += 1
             if kind != 1 or len(every) < 12:
                 say('%s: %s' % (label, what))
-    say('%d views: %d byte-identical, %d identical once __LINE__ and __FILE__ are names, %d identical but for '
-        'indentation, %d preprocess neither before nor after' % (len(every), tally[1], tally[2], tally[3], tally[0]))
+    say('%d views: %d byte-identical, %d identical but for indentation, %d identical once __LINE__ and __FILE__ are names, '
+        '%d both, %d preprocess neither before nor after' % (len(every), tally[1], tally[3], tally[2], tally[4], tally[0]))
 
 
 def audit(tree, *flags):
@@ -1434,11 +1442,58 @@ def hold_layout(tree, source):
             os.symlink(str(tree / parts_dir(source) / part), str(d / parts_dir(source) / part))
         flags = FREESTANDING + ['-DCHECK_terminal']
         a, _ = preprocessed(tree, source, flags)
-        b, failed = preprocessed(d, str(d / source), flags)
+        b, failed = preprocessed(d, source, flags)
         if b is None or a != b:
             raise Refused('a scratch tree of links does not preprocess CHECK_terminal as the tree does: %s' % (failed or ''))
         say('a scratch tree of links (the file and each part linked, src copied as links) preprocesses CHECK_terminal '
             'as the tree does')
+
+
+# The builds a worker types, made before and after (test/checks.c only; the rest of its sections are preprocessed and not
+# compiled): the hosted bus check with gcc and with clang at -Werror, and a freestanding section by the line every worker
+# uses, from the repository root, each run and its output compared.
+BUILDS = {
+    CHECKS: [
+        ('hosted CHECK_dbus (gcc)', ['gcc', '-std=gnu11', '-O2', '-DCHECK_dbus', 'test/checks.c', '-o', '{out}'], True),
+        ('hosted CHECK_dbus (clang -Wall -Wextra -Werror)',
+         ['clang', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-DCHECK_dbus', 'test/checks.c', '-o', '{out}'], True),
+        ('freestanding CHECK_issues', ['gcc', '-O2', '-static', '-nostdlib', '-nostartfiles', '-march=x86-64', '-w',
+                                       '-DCHECK_issues', '-fwhole-program', '-o', '{out}', 'test/checks.c'], True),
+    ],
+}
+
+
+def hold_builds(before_tree, after_tree, source):
+    """Each of BUILDS made in both trees: the same verdict, and a binary that runs as the one before did."""
+    for label, command, runs in BUILDS.get(source, []):
+        if not shutil.which(command[0]):
+            say('%s: NOT RUN, no %s here' % (label, command[0]))
+            continue
+        results = []
+        for tree in (before_tree, after_tree):
+            with tempfile.TemporaryDirectory(prefix='split-build-') as scratch:
+                out = os.path.join(scratch, 'check')
+                built = run([word.replace('{out}', out) for word in command], tree)
+                ran = None
+                if built.returncode == 0 and runs:
+                    try:
+                        ran = subprocess.run([out], cwd=str(tree), capture_output=True, timeout=600)
+                        ran = (ran.returncode, re.sub(rb'line \d+', b'line N', ran.stdout + ran.stderr))
+                    except subprocess.TimeoutExpired:
+                        ran = ('timed out', b'')
+                results.append((built.returncode, built.stderr.decode(errors='replace')[-400:], ran))
+        (code, error, ran), (code_after, error_after, ran_after) = results
+        if (code == 0) != (code_after == 0):
+            raise Refused('%s: builds %s before and %s after:\n%s' % (label, 'well' if code == 0 else 'not',
+                                                                       'well' if code_after == 0 else 'not', error or error_after))
+        if code:
+            say('%s: does not build, before or after: %s' % (label, error.strip().split('\n')[-1][:120]))
+            continue
+        if ran != ran_after:
+            raise Refused('%s: runs to %r before and %r after' % (label, ran[0] if ran else None, ran_after[0] if ran_after else None))
+        last = ran[1].decode(errors='replace').strip().split('\n')[-1][:100] if ran else ''
+        say('%s: builds before and after, and runs to the same exit (%s) and output (line numbers aside): %s'
+            % (label, ran[0] if ran else '-', last))
 
 
 def check(tree, source, jobs):
@@ -1455,6 +1510,7 @@ def check(tree, source, jobs):
     hold_tools(ROOT, tree, source, original, edits, written)
     with tempfile.TemporaryDirectory(prefix='split-stubs-') as stubs:
         compare_views(ROOT, tree, source, stub_includes(ROOT, pathlib.Path(stubs)), jobs)
+    hold_builds(ROOT, tree, source)
     after_count = audit_count(tree, True)
     if after_count != before_count:
         raise Refused('the function audit counts %s functions before and %s after' % (before_count, after_count))
