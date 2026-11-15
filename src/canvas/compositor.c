@@ -4861,8 +4861,8 @@ static struct
         // button_x, button_y keep where the left button went down inside a window, before a client asks to move.
         int resize_w, resize_h, press_x, press_y, button_x, button_y;
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
-        // one), the low side's and the high side's (left or top), whether the edge runs down, and the size each had.
-        int shared_row, shared_lo, shared_hi, shared_vertical, shared_size[2];
+        // one), the low side's and the high side's (left or top), and whether the edge runs down; the size each had is shared_sizes'.
+        int shared_row, shared_lo, shared_hi, shared_vertical;
         // All the windows of a divider's resize (compositor_divider), a bit each, the low side's and the high side's, and the
         // size each had across the line at the press.
         unsigned int shared_lo_set, shared_hi_set;
@@ -14132,9 +14132,6 @@ static int compositor_shared_begin(int row, unsigned int edge)
                 compositor.far_y[each] = compositor.y[each] + (int)compositor.h[each];
                 compositor_damage_row(each);
         }
-        if (compositor.shared_lo >= 0 && compositor.shared_hi >= 0)
-                compositor.shared_size[0] = compositor.shared_sizes[compositor.shared_lo],
-                compositor.shared_size[1] = compositor.shared_sizes[compositor.shared_hi];
         compositor_mark_shared(&d);
         return 1;
 }
