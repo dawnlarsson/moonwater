@@ -29003,13 +29003,22 @@ def harness_core_state(argv):
 
     def canvas_sources(work, arch):
         window = (root / "src/canvas/window.c").read_text()
+        # The extract is laid out as the tree is, work/canvas beside work/audio,
+        # so what it includes by a relative name is found where it would be:
+        # ui/ui.c (its list half, as window.c takes it, and its shared part,
+        # as the backend takes it) and the sound server's page and socket
+        # (../audio), which the tray's volume cell and the volume keys read.
+        canvas_work = work / "canvas"
+        (canvas_work / "ui").mkdir(parents=True, exist_ok=True)
         # The userspace compositor's CPU backend, its scene held to its own
         # draw and its golden scenes to their own hashes, with
         # what of window.c it reads: the keys' flags, the table's rows and
         # the contrast the close button's X is drawn in; and the rules of
         # the space its screens make (the outputs section).
-        (work / "compositor-backend.inc").write_text(
+        (canvas_work / "compositor-backend.inc").write_text(
             canvas_abi_region(root)
+            + section(window, "#define UI_LIST_ONLY\n", "// O_RDWR | O_CLOEXEC")
+            + section(window, "#define WINDOW_COORD_MAX ", "\n") + "\n"
             + section(window, "#define WINDOW_KEYS 64", "struct window_key\n")
             + section(window, "#define WINDOWS_TABLE", "// Row row's buffer")
             + section(window, "// from, moved amount 256ths", "#define window_at(") + section(
@@ -29025,14 +29034,13 @@ def harness_core_state(argv):
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- outputs: the screens one desktop spans ---- */",
             "/* ---- end of the outputs ---- */"))
-        # The backend's taskbar constants come from ui/ui.c (its shared part), which the extract includes.
-        (work / "ui").mkdir(exist_ok=True)
-        (work / "ui" / "ui.c").write_text((root / "src/canvas/ui/ui.c").read_text())
+        (canvas_work / "ui" / "ui.c").write_text((root / "src/canvas/ui/ui.c").read_text())
+        shutil.copytree(root / "src/audio", work / "audio", dirs_exist_ok=True)
         # The renderer's own assembly bodies. lib.c assembles them only into
         # a kernel build with Canvas, so they are lifted out of it rather than linked.
         target = work / "canvas.S"
         target.write_text(canvas_assembly(root / "src/lib.c", arch))
-        return ["-DCHECK_canvas_cells", str(root / "test/checks.c"), str(target)]
+        return ["-I", str(canvas_work), "-DCHECK_canvas_cells", str(root / "test/checks.c"), str(target)]
 
 
     source = r'''

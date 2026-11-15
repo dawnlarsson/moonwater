@@ -181991,6 +181991,43 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+/* The library's own names the cut spells (src/lib.c): its integers, a routine
+   that answers nothing, a string, an address and null. */
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef signed char b8;
+typedef short b16;
+typedef int b32;
+typedef long long b64;
+typedef __int128 b128;
+typedef float f32;
+typedef double f64;
+typedef void fn;
+typedef p8 *string_address;
+typedef const p8 *const_string;
+#define address_to *
+#define address_of &
+#define null ((void *)0)
+/* The backend is the CPU's, so the card's part is its stubs (SHELL_NO_GPU),
+   and the sound server's page is read with no socket to the server
+   (CTL_NO_SYSTEM, as the audio rows' own check takes control.c). */
+#define SHELL_NO_GPU
+#define CTL_NO_SYSTEM
+/* And the kit is not in it (ui/ui.c's windows are built after the compositor,
+   and only its shared part is here), so every switch of the kit is off, as a
+   build without them has it: the taskbar's and the language's answers are the
+   shared part's own stubs. */
+#define MOONWATER_UI_LAUNCHER 0
+#define MOONWATER_UI_SETTINGS 0
+#define MOONWATER_UI_IDENTIFY 0
+#define MOONWATER_UI_TASKBAR 0
+#define MOONWATER_UI_EDITOR 0
+#define MOONWATER_UI_MIXER 0
+#define MOONWATER_UI_KEYBOARD 0
+#define MOONWATER_UI_NOTICES 0
+#define MOONWATER_UI_FILES 0
 #define HOT
 #define noinline __attribute__((noinline))
 #define PURE
@@ -182034,8 +182071,10 @@ void canvas_cells_wide(u32 *,unsigned long,const u8 *,const struct window_cell *
 void canvas_rect_fill_wide(u32 *,unsigned long,unsigned long,unsigned long,u32);
 void canvas_glyph_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
 void canvas_glyph2_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
-static unsigned checks;
-static void check(int okay) {checks++;assert(okay);}
+/* Every row is counted and the failed ones too, so a red row is a tally and not the end of the run: the rows after it are
+   run, and the program answers 1 when any failed. */
+static unsigned checks,failures;
+static void check(int okay) {checks++;failures+=!okay;}
 static u32 pixels[1024*64+2];
 static u32 expected[1024*64+2];
 
@@ -182082,6 +182121,10 @@ static u32 golden_screen[1024*768];
    recorded from the backend
    that made them and pinned so a later change to the look is as
    deliberate. */
+/* That black line is the scene's: the frame is given its ink, which the
+   compositor no longer names itself (a window's line is the theme's now,
+   compositor_chrome). */
+#define COMPOSITOR_INK_LINE 0x000000u
 static unsigned long compositor_written;
 static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long width,
                                  unsigned long height,u32 value) {
@@ -182103,6 +182146,57 @@ static void *compositor_map_zeroed(unsigned long bytes) { return calloc(1,bytes)
 #ifndef memory_copy
 #define memory_copy memmove
 #endif
+/* The library's pixel routines the backend calls, each written out as its
+   contract at its declaration in src/lib.c says (CHECK_verify holds lib.c's
+   bodies to the same rules): the compositor's mix a row at a time, a picture
+   laid OVER, the nearest-neighbour resample of a landing window, a rectangle
+   copied row by row as memory_copy copies, and one copied with each row
+   reversed. memory_compare is memcmp, which lib.c names it. */
+static void memory_mix_u32_row(u32 *into,const u32 *ink,const u8 *cover,positive count) {
+    for(positive i=0;i<count;i++) {
+        u32 c=cover[i],out=0;
+        if(!c)continue;
+        if(c==255){into[i]=ink[i];continue;}
+        for(unsigned shift=0;shift<24;shift+=8)
+            out|=((into[i]>>shift&255)*(255-c)+(ink[i]>>shift&255)*c+127)/255<<shift;
+        into[i]=out;
+    }
+}
+static void memory_over_u32_rect(u32 *into,positive into_stride,const u32 *from,positive from_stride,
+                                 positive width,positive height) {
+    for(positive y=0;y<height;y++)for(positive x=0;x<width;x++) {
+        u32 over=from[y*from_stride+x],under=into[y*into_stride+x],through=255-(over>>24),out=0xff000000u;
+        for(unsigned shift=0;shift<24;shift+=8) {
+            u32 ch=(over>>shift&255)+((under>>shift&255)*through+127)/255;
+            out|=(ch>255?255:ch)<<shift;
+        }
+        into[y*into_stride+x]=out;
+    }
+}
+static void memory_resample_u32_rect(u32 *into,positive into_stride,positive visible_width,positive visible_height,
+                                     const u32 *from,positive from_stride,positive from_width,positive from_height,
+                                     positive width,positive height,positive left,positive top) {
+    positive step_x=(from_width<<24)/width,step_y=(from_height<<24)/height;
+    positive fy=((2*top+1)*from_height<<23)/height;
+    if(!visible_width||!visible_height)return;
+    for(positive row=0;row<visible_height;row++,fy+=step_y) {
+        const u32 *source=from+(fy>>24)*from_stride;
+        u32 *to=into+row*into_stride;
+        positive fx=((2*left+1)*from_width<<23)/width;
+        for(positive col=0;col<visible_width;col++,fx+=step_x)*to++=source[fx>>24];
+    }
+}
+static void memory_copy_rect_u32(u32 *into,positive into_stride,const u32 *from,positive from_stride,
+                                 positive width,positive height) {
+    if(!width)return;
+    for(positive y=0;y<height;y++)memmove(into+y*into_stride,from+y*from_stride,width*4);
+}
+static void memory_copy_rect_reverse_u32(u32 *into,long into_pitch,const u32 *from,long from_pitch,
+                                         positive width,positive height) {
+    for(positive r=0;r<height;r++)for(positive c=0;c<width;c++)
+        into[(long)r*into_pitch+(long)c]=from[(long)r*from_pitch+(long)(width-1-c)];
+}
+#define memory_compare memcmp
 /* ui/ui.c holds the face and engine the tabs are written in by
    pointer; the backend's cut never looks inside them. */
 typedef struct font_face font_face;
@@ -183228,9 +183322,10 @@ int main(void) {
     check_compositor_display_verb();
     check_compositor_scene();
     check_compositor_touch_backend();
-    printf("  canvas-cells %u of %u\n",checks,checks);
+    printf("  canvas-cells %u of %u\n",checks-failures,checks);
     const char *tally=getenv("TEST_TALLY");
-    if(tally){FILE *f=fopen(tally,"a");assert(f);fprintf(f,"canvas-cells %u %u\n",checks,checks);assert(!fclose(f));}
+    if(tally){FILE *f=fopen(tally,"a");assert(f);fprintf(f,"canvas-cells %u %u\n",checks-failures,checks);assert(!fclose(f));}
+    return failures!=0;
 }
 #endif /* CHECK_canvas_cells */
 
