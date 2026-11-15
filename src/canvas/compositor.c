@@ -2342,14 +2342,13 @@ static b32 compositor_main()
                         system_close(early);
         }
 #ifdef MOONWATER_GPU_C
-        // The card's present without a wait where the owner asks for it (/run/moonwater/present-nowait); every job waited for in place otherwise, as it was,
-        // until what the programs are told of their pictures waits for the jobs that read them in every part of the tree (compositor_card_reads).
+        // The card's present without a wait, unless the owner asks for every job waited for in place, as it was (/run/moonwater/present-wait).
         {
-                bipolar nowait = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-nowait", FILE_READ | O_CLOEXEC);
+                bipolar wait = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-wait", FILE_READ | O_CLOEXEC);
 
-                compositor_card.nowait = nowait >= 0;
-                if (nowait >= 0)
-                        system_close(nowait);
+                compositor_card.nowait = wait < 0;
+                if (wait >= 0)
+                        system_close(wait);
         }
 #endif
         if (compositor.scale < 25 || compositor.scale > 800)

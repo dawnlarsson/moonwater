@@ -96,7 +96,7 @@ card here, NOT RUN.
 
 | | |
 |---|---|
-| Status | Contained for the card's present without a wait, which is opt-in (`/run/moonwater/present-nowait`) until both release points wait on `compositor_card_reads`; the present that waits for its jobs in place, the default, has no job reading a picture once it is over. The commit that adds this entry (`git log -S 'MW-2026-200' -- incident_response.md`), with P5's compositor_take hold, 2f46b9dd; the Wayland shim's hold (`row_busy`) is open |
+| Status | Contained: both release points wait on `compositor_card_reads`, the door's taken (compositor_take, 2f46b9dd) and the Wayland shim's releases (`row_busy`, 54cbc391), and the card's present goes without a wait by default since the commit that says so (`git log -S 'present-wait' -- src/canvas/compositor.c`); the entry was added with the present (`git log -S 'MW-2026-200' -- incident_response.md`), when it was opt-in |
 | Class | A release race: a program is told a buffer is free (a native window's "taken", a Wayland wl_buffer.release) while a job of the card that composes the desktop still reads it in place |
 | Attacker | Any window program, native or Wayland, in any bowl: it only draws into a buffer the compositor said it may draw into. It reads nothing and runs nothing of the compositor's; the harm is the desktop's frame, which can show half its new picture over half its old one, or anything it writes into the buffer then, for the frame the job drew |
 | Reachable | src/canvas/compositor.c `compositor_card` (the present's jobs, `compositor_card_go`, `compositor_card_done`), `compositor_take` (the door's taken), src/canvas/wayland.c `wayland_gone_let`, `wayland_drawn_rows`, `wayland_presented_rows` (the releases) |
@@ -133,10 +133,10 @@ while the job is younger than 16 ms and has them after, `compositor_card_reads`
 is the row's until the hang path runs and nothing after it, and a native row
 held for the job is told its picture was taken when the fence says done.
 
-**Still open.** The Wayland shim's hold: until `row_busy` is on main, a Wayland
-client that commits twice while a job later than 16 ms reads its first buffer
-can be handed that buffer at its second commit. That is why the present
-without a wait stays opt-in. The extra wait of a client's request under the
+**Still open.** Nothing of the race: the Wayland shim's hold (`row_busy`, 54cbc391)
+queues a release of a buffer read in place while `compositor_card_reads` says
+the row is busy, and lets it go at the next drawn or presented frame, the
+client's socket read all along. The extra wait of a client's request under the
 hold is the job's time, about 0.7 to 0.9 ms mean on the owner's card, against
 none were the clients read during the job; computed from that card's debug,
 not measured on it.

@@ -184,9 +184,9 @@ static int compositor_shows_row(int row)
         waits for the card in place. A job not done GPU_HANG_NS after its submit is the hang path there was (compositor_gpu_job_failed: the cool-down, the
         processor draws), and the frame it was for is drawn again (compositor_card_abandon); a flip whose event never comes is compositor_flip_lost.
 
-        It is the owner's to ask for, for now (the file /run/moonwater/present-nowait, looked for at the start: compositor_card.nowait); without it every
-        job of a present is waited for in place as it was (gpu_scene and gpu_blit, a tick each), until what the programs are told of their pictures waits
-        for the jobs that read them wherever it is told (compositor_card_reads: the doors' taken, the shim's releases).
+        It is the present there is; the owner's file /run/moonwater/present-wait (looked for at the start: compositor_card.nowait 0) has every job of a
+        present waited for in place as it was (gpu_scene and gpu_blit, a tick each), for a comparison. What the programs are told of their pictures waits
+        for the jobs that read them wherever it is told (compositor_card_reads: the doors' taken, compositor_take; the shim's releases, row_busy).
 */
 enum
 {
@@ -202,7 +202,7 @@ struct compositor_card_step
 };
 static struct
 {
-        b32 nowait;                 // /run/moonwater/present-nowait was there at the start: the loop's presents' jobs go without a wait
+        b32 nowait;                 // the loop's presents' jobs go without a wait (0: /run/moonwater/present-wait was there at the start)
         b32 looped;                 // the present in hand is the loop's (compositor_main): one made anywhere else, the take of the screens' own before
                                     // its mode set, waits for its jobs in place
         b32 on;                     // a present's jobs are on the card, or waiting for their turn
