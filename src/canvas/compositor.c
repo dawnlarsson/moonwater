@@ -4848,7 +4848,7 @@ static struct
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
         unsigned int assist_how, assist_rows[COMPOSITOR_ASSIST_MAX], assist_zone[COMPOSITOR_ASSIST_MAX];
         int assist_rect[COMPOSITOR_ASSIST_MAX][4];
-        // The top edge's grid (compositor_grid_at): up on a screen, and the tile the pointer is over; when a drag's pointer
+        // The top edge's grid (compositor_overlays_drag): up on a screen, and the tile the pointer is over (compositor_grid_under); when a drag's pointer
         // came to rest in the top band of screen grid_since_screen, which brings it up after COMPOSITOR_GRID_DWELL_NS (0: not there).
         int grid_on, grid_screen, grid_since_screen;
         unsigned int grid_hover;
@@ -14391,8 +14391,9 @@ static void compositor_tile_others(int row, unsigned int how, int screen)
         The snap assist and the top edge's grid. A drag over a snap target shows the windows floating on its screen as
         thumbnails in the space the target leaves (compositor_assist_refresh). A drop there keeps them up, armed, until a
         click on one of them places that window in the tile it is over (compositor_assist_at), or a click elsewhere, or Escape,
-        takes them away. A drag at the top edge of a screen shows the grid of regions along it (compositor_grid_at): a drop on a
-        region takes it, and a region a window already fills is shown taken and is no target (compositor_target).
+        takes them away. A drag at the top edge of a screen shows the grid of regions along it (compositor_grid_tile, and the one
+        under the pointer compositor_grid_under): a drop on a region takes it, and a region a window already fills is shown
+        taken and is no target (compositor_target).
 */
 
 // The grid's regions, in the order of its tiles, left to right.
@@ -20889,10 +20890,6 @@ static long compositor_table_memfd(unsigned long bytes)
 }
 
 /*
-        What the table says of the screens, at the start and whenever they change: the list, the primary first, each
-        one's rectangle and connector name, and that it changed (layout).
-*/
-/*
         What a screen's displays line asks for, and what the compositor did not do of it, for the table (WINDOWS_REFUSED_*):
         the rate asked, when the mode it is at is not that rate; the turn asked, when it is not turned; and a place whose x or
         y the file does not read. A screen with no line asks for nothing and is refused nothing.
@@ -20914,6 +20911,10 @@ static void compositor_table_refusals(struct windows *table, unsigned int at, co
         table->output_refused[at] = refused;
 }
 
+/*
+        What the table says of the screens, at the start and whenever they change: the list, the primary first, each
+        one's rectangle and connector name, and that it changed (layout).
+*/
 static void compositor_table_outputs(void)
 {
         struct windows *table = compositor.table;
@@ -21586,10 +21587,12 @@ static void compositor_band_room(void)
 }
 
 /*
-        compositor [-s SCALE] [-l LAYOUT] [-t] [-f FONT.ttf] [-u DESCRIPTOR] [-H WIDTHxHEIGHT FILE] [-i FILE]
+        compositor [-s SCALE] [-l LAYOUT] [-t] [-T] [-G] [-f FONT.ttf] [-u DESCRIPTOR] [-H WIDTHxHEIGHT FILE] [-i FILE]
 
         Takes the card, or with -H maps FILE as the screen instead and takes
-        none. -s is the desktop scale when Canvas is not there to say, -t puts
+        none, and then -G has the render node compose all the same (a build with the GPU; without -G a compositor with no
+        card composes on the processor). -T says the -i device is a tablet, a virtual machine's pointer, whose wheel can be
+        a trackpad's stream. -s is the desktop scale when Canvas is not there to say, -t puts
         the tabs on the top edge and not the bottom, -f is the face the tabs'
         titles and the time are written in (without one the tabs are only
         shapes), -l is the keyboard layout when Canvas is not there to say (it
