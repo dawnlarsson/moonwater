@@ -3520,7 +3520,17 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
-        // A row's list is its new program's from the first frame: the generation the compositor took last is the old program's.
+        // A row's list is its new program's from the first frame: the generation the compositor took last is the old program's, and so is
+        // the list it left in the row, which is no list now (its header zero, as ui_draw_list_init leaves it, and its generation 0 the one
+        // taken last). Its header left as it was, the new program's first pictures, of pixels or before its own list was made, were read as a
+        // list of its own: one of another size refused as not the window's (a 560 by 256 list on a window taken at 1920 by 1080) and one of
+        // the same size drawn into the new window as its picture. No publish of the new program's is under way here: its pid is not stored yet.
+        {
+                unsigned char *list = window_list_of(table, (int)row);
+
+                if (list)
+                        memory_zero(list, UI_DRAW_LIST_HEADER);
+        }
         __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->list_seen[row], 0u, __ATOMIC_RELEASE);
 }

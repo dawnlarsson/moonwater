@@ -249384,6 +249384,35 @@ static void dl_list_rows(void)
                               table->list_state[0] == 2 && compositor_list_why == COMPOSITOR_LIST_PARTIAL);
                 }
         }
+        /*
+                A row the program before left a list in, taken by the next (windows_reset_row): the new window's first pictures, of pixels or
+                before its own list is made, are not read as a list of its own, at another size (refused and counted as the size's: on the
+                owner's machine 8 of them, a 560 by 256 list on a window taken at 1920 by 1080) or at the same (drawn into the new window as
+                its picture); and the list the new program makes is drawn.
+        */
+        {
+                unsigned int refused, sized;
+
+                dl_publish();
+                windows_reset_row(table, 0);
+                refused = table->list_refused, sized = table->list_invalid[WINDOW_LIST_SIZE];
+                calls = dl_render_calls;
+                dl_render_answer = 1;
+                compositor_lists_take(0, DL_W + 64, DL_H + 32, damage);
+                check("compositor list: a row's next window, larger, is not held to the list the one before left: nothing refused or counted",
+                      table->list_refused == refused && table->list_invalid[WINDOW_LIST_SIZE] == sized && table->list_state[0] == 0 &&
+                          dl_render_calls == calls);
+                dl_publish();
+                windows_reset_row(table, 0);
+                compositor_lists_take(0, DL_W, DL_H, damage);
+                check("compositor list: and one of the same size is not drawn from that list as its picture",
+                      dl_render_calls == calls && table->list_state[0] == 0 && table->list_refused == refused);
+                ui_draw_list_init(&ui_app_list, (unsigned char address_to)head, WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
+                dl_publish();
+                check("compositor list: the list the row's new program makes is drawn",
+                      compositor_lists_take(0, DL_W, DL_H, damage) == 1 && dl_render_calls == calls + 1 && table->list_state[0] == 1);
+                dl_render_answer = 0;
+        }
         table->list_mode = 1;
 }
 
