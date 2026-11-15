@@ -1290,6 +1290,14 @@ struct taskbar_view
         const unsigned char *marks;      // each tab's mark: lit, put away
         const unsigned char *lengths;    // each tab's title, in characters
         const char *titles[WINDOWS];     // each tab's title
+        // Who each tab's window is (the window table's identity, the compositor's own copy of it): the row of the table it is, its
+        // app_id ("" or none for a window that has said none), and its icon, WINDOWS_ICON each way and premultiplied, with the
+        // sequence that picture is (none and 0 for a window with no icon: its tab draws the kit's symbol for a kit program, the
+        // lettered tile for any other program that says an app_id, and the window symbol for one that says nothing).
+        const unsigned char *rows;
+        const char *apps[WINDOWS];
+        const unsigned int *icons[WINDOWS];
+        unsigned int icon_seqs[WINDOWS];
 };
 
 // The glass the band's tabs are made of over a rectangle of the output: the compositor blurs it into
@@ -18986,6 +18994,314 @@ static fn ui_microphone(struct ui address_to ui, int left, int top, int size, b3
                         ui_speaker_span(ui, left, size, top + row, 8.0, 16.0, argb);
                 if (struck && y >= -10.0 && y <= 10.0)
                         ui_speaker_span(ui, left, size, top + row, 12.0 + y * 0.8 - reach, 12.0 + y * 0.8 + reach, argb);
+        }
+}
+
+/* ---- the kit's symbols: a program's mark, a tray cell's, and the tile of a program that has none ---- */
+/*
+        The symbols (ui_icon): a small set of marks in one colour, the tree's own, drawn as the kit draws its other marks, from shapes and
+        not from a file: each is a few parts on a grid of 24 written in halves of it (a filled box with round corners, a box's outline, a
+        stroke between two points), so the whole face is the table below and a symbol is read off it. A part's edges are put on whole device
+        pixels at the size asked, so a symbol 16 to a side is as sharp as one of 48, and the strokes are a pixel at 16, two at 24 and 32.
+        It is one colour, the caller's (a tab's ink, a role), so it follows the theme. Two take a value: the network's bars (how many of
+        the four are lit, the rest drawn faint) and the battery (how full, in percent).
+
+        A face in fonts/ was weighed against this and not made: the tree has no tool that writes a TrueType file, so the face would be
+        bytes nobody here can read or change, and its outlines would be held by nothing; the table is twelve short rows that the rows
+        of CHECK_terminal draw and measure.
+*/
+enum
+{
+        UI_ICON_APPS,     // nine dots: the launcher's mark
+        UI_ICON_WINDOW,   // a window: a program the kit has no mark for
+        UI_ICON_SETTINGS, // three sliders
+        UI_ICON_FILES,    // a folder
+        UI_ICON_TERMINAL, // a prompt in a frame
+        UI_ICON_EDITOR,   // a page of lines
+        UI_ICON_MIXER,    // three faders
+        UI_ICON_MORE,     // three dots in a row: the tabs there is no room for
+        UI_ICON_NETWORK,  // four bars, value of them lit: a radio link
+        UI_ICON_WIRED,    // three boxes joined: a wired link
+        UI_ICON_BATTERY,  // a cell, value percent full
+        UI_ICON_NOTE,     // a log: lines in a frame
+        UI_ICON_COUNT
+};
+
+#define UI_ICON_BOX 1  // x0, y0, x1, y1 filled, its corners r
+#define UI_ICON_RING 2 // the outline of that box, a stroke thick
+#define UI_ICON_LINE 3 // a stroke from x0, y0 to x1, y1
+#define UI_ICON_PARTS 8
+
+struct ui_icon_part
+{
+        unsigned char kind, x0, y0, x1, y1, r; // halves of a 24th of the symbol's side
+};
+
+static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
+        [UI_ICON_WINDOW] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_BOX, 8, 15, 40, 18, 0}},
+        [UI_ICON_SETTINGS] = {{UI_ICON_LINE, 8, 14, 40, 14, 0}, {UI_ICON_BOX, 14, 9, 24, 19, 5}, {UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_BOX, 26, 19, 36, 29, 5},
+                              {UI_ICON_LINE, 8, 34, 40, 34, 0}, {UI_ICON_BOX, 12, 29, 22, 39, 5}},
+        [UI_ICON_FILES] = {{UI_ICON_BOX, 6, 9, 22, 18, 3}, {UI_ICON_RING, 6, 14, 42, 38, 4}},
+        [UI_ICON_TERMINAL] = {{UI_ICON_RING, 4, 8, 44, 40, 5}, {UI_ICON_LINE, 12, 18, 19, 24, 0}, {UI_ICON_LINE, 19, 24, 12, 30, 0}, {UI_ICON_LINE, 24, 31, 34, 31, 0}},
+        [UI_ICON_EDITOR] = {{UI_ICON_RING, 10, 6, 38, 42, 4}, {UI_ICON_LINE, 16, 16, 32, 16, 0}, {UI_ICON_LINE, 16, 24, 32, 24, 0}, {UI_ICON_LINE, 16, 32, 26, 32, 0}},
+        [UI_ICON_MIXER] = {{UI_ICON_LINE, 12, 8, 12, 40, 0}, {UI_ICON_LINE, 24, 8, 24, 40, 0}, {UI_ICON_LINE, 36, 8, 36, 40, 0}, {UI_ICON_BOX, 7, 26, 17, 32, 2},
+                           {UI_ICON_BOX, 19, 12, 29, 18, 2}, {UI_ICON_BOX, 31, 22, 41, 28, 2}},
+        [UI_ICON_MORE] = {{UI_ICON_BOX, 6, 20, 14, 28, 4}, {UI_ICON_BOX, 20, 20, 28, 28, 4}, {UI_ICON_BOX, 34, 20, 42, 28, 4}},
+        [UI_ICON_WIRED] = {{UI_ICON_BOX, 18, 6, 30, 16, 2}, {UI_ICON_LINE, 24, 16, 24, 24, 0}, {UI_ICON_LINE, 10, 24, 38, 24, 0}, {UI_ICON_LINE, 10, 24, 10, 32, 0},
+                           {UI_ICON_LINE, 38, 24, 38, 32, 0}, {UI_ICON_BOX, 4, 32, 16, 42, 2}, {UI_ICON_BOX, 32, 32, 44, 42, 2}},
+        [UI_ICON_BATTERY] = {{UI_ICON_RING, 4, 14, 40, 34, 4}, {UI_ICON_BOX, 40, 20, 44, 28, 2}},
+        [UI_ICON_NOTE] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_LINE, 12, 18, 36, 18, 0}, {UI_ICON_LINE, 12, 24, 36, 24, 0}, {UI_ICON_LINE, 12, 30, 28, 30, 0}},
+};
+
+// A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.
+static inline b32 ui_icon_at(int origin, int size, int halves)
+{
+        return (b32)((origin + (halves * size + 24) / 48) * 256);
+}
+
+// How thick a symbol's strokes are at a size, in 256ths: a pixel at 16, two at 24 and at 32, never under one.
+static inline b32 ui_icon_stroke(int size)
+{
+        int thick = (size * 3 + 24) / 48;
+
+        return (b32)((thick < 1 ? 1 : thick) * 256);
+}
+
+// The apps mark: three rows of three round dots, each dot across and pitch from one to the next (device pixels), from left, top.
+static fn ui_icon_dots(struct ui address_to ui, int left, int top, int pitch, int dot, unsigned int argb)
+{
+        for (int row = 0; row < 3; row++)
+                for (int column = 0; column < 3; column++)
+                {
+                        int x = left + column * pitch, y = top + row * pitch;
+
+                        ui_kit_fill(ui, &(struct ui_box){x * 256, y * 256, (x + dot) * 256, (y + dot) * 256, dot * 128, dot * 128}, argb, null);
+                }
+}
+
+/*
+        The symbol which, size to a side with its top left at left, top (device pixels), in argb. value is the network's lit bars (0 to
+        4) or the battery's percent, and nothing to the others. A symbol the table has not got draws nothing.
+*/
+static fn ui_icon(struct ui address_to ui, int which, int left, int top, int size, int value, unsigned int argb)
+{
+        b32 thick = ui_icon_stroke(size);
+
+        if (which < 0 || which >= UI_ICON_COUNT || size <= 0)
+                return;
+        if (which == UI_ICON_APPS)
+        {
+                int dot = (size * 5 + 12) / 24, pitch;
+
+                dot = dot < 1 ? 1 : dot, pitch = (size - dot) / 2, pitch = pitch < dot + 1 ? dot + 1 : pitch;
+                ui_icon_dots(ui, left, top, pitch, dot, argb);
+                return;
+        }
+        if (which == UI_ICON_NETWORK)
+        {
+                // Four bars, each taller than the one before it, standing on one line: the lit ones whole, the others at a third.
+                unsigned int faint = (argb & 0x00ffffffu) | (argb >> 24) / 3 << 24;
+
+                for (int bar = 0; bar < 4; bar++)
+                        ui_kit_fill(ui, &(struct ui_box){ui_icon_at(left, size, 6 + bar * 10), ui_icon_at(top, size, 32 - bar * 7 - (bar == 3)),
+                                                        ui_icon_at(left, size, 12 + bar * 10), ui_icon_at(top, size, 40), 0, 0},
+                                    bar < value ? argb : faint, null);
+                return;
+        }
+        for (int at = 0; at < UI_ICON_PARTS && ui_icon_parts[which][at].kind; at++)
+        {
+                const struct ui_icon_part address_to part = &ui_icon_parts[which][at];
+                struct ui_box box = {ui_icon_at(left, size, part->x0), ui_icon_at(top, size, part->y0), ui_icon_at(left, size, part->x1), ui_icon_at(top, size, part->y1),
+                                     (b32)(part->r * size * 256 / 48), (b32)(part->r * size * 256 / 48)};
+
+                if (part->kind == UI_ICON_BOX)
+                        ui_kit_fill(ui, &box, argb, null);
+                else if (part->kind == UI_ICON_RING)
+                        ui_kit_ring(ui, &box, thick, argb);
+                else if (box.x0 == box.x1 || box.y0 == box.y1)
+                {
+                        // A stroke along the grid is one box, its ends square: the stroke's width about the line.
+                        b32 x0 = box.x0 < box.x1 ? box.x0 : box.x1, x1 = box.x0 < box.x1 ? box.x1 : box.x0, y0 = box.y0 < box.y1 ? box.y0 : box.y1, y1 = box.y0 < box.y1 ? box.y1 : box.y0;
+
+                        if (box.y0 == box.y1)
+                                ui_kit_fill(ui, &(struct ui_box){x0, y0 - thick / 512 * 256, x1, y0 - thick / 512 * 256 + thick, 0, 0}, argb, null);
+                        else
+                                ui_kit_fill(ui, &(struct ui_box){x0 - thick / 512 * 256, y0, x0 - thick / 512 * 256 + thick, y1, 0, 0}, argb, null);
+                }
+                else
+                        ui_chevron_stroke(ui, box.x0 - thick / 2, box.y0 - thick / 2, box.x1 - thick / 2, box.y1 - thick / 2, thick, argb);
+        }
+        if (which == UI_ICON_BATTERY)
+        {
+                // What is in the cell: a bar from its left, as much of the room inside the outline as the percent says, and none for none.
+                int percent = value < 0 ? 0 : value > 100 ? 100 : value;
+                b32 x0 = ui_icon_at(left, size, 4) + 2 * thick, x1 = ui_icon_at(left, size, 40) - 2 * thick;
+
+                if (percent && x1 > x0)
+                        ui_kit_fill(ui, &(struct ui_box){x0, ui_icon_at(top, size, 14) + 2 * thick, x0 + ((x1 - x0) / 256 * percent + 99) / 100 * 256,
+                                                        ui_icon_at(top, size, 34) - 2 * thick, 0, 0}, argb, null);
+        }
+}
+
+// The symbol of a kit program, by the app_id it says (its name: ui_app_run), or -1 for a program that is none of the kit's.
+static int ui_icon_of(const char *app_id)
+{
+        static const struct { const char *name; int which; } known[] = {
+                {"settings", UI_ICON_SETTINGS}, {"files", UI_ICON_FILES}, {"terminal", UI_ICON_TERMINAL}, {"editor", UI_ICON_EDITOR},
+                {"mixer", UI_ICON_MIXER}, {"mixer-quick", UI_ICON_MIXER}, {"launcher", UI_ICON_APPS}, {"klog", UI_ICON_NOTE},
+                {"notices", UI_ICON_NOTE}, {"gallery", UI_ICON_WINDOW},
+        };
+
+        for (unsigned int at = 0; app_id && at < sizeof(known) / sizeof(known[0]); at++)
+                if (string_equals((string_address)app_id, (string_address)known[at].name))
+                        return known[at].which;
+        return -1;
+}
+
+/*
+        The tile of a program with no icon: a square with round corners in a colour that is the program's own, worked out from its name
+        (ui_icon_tone: the same name is the same colour on every machine and at every start, and two names are seldom alike), with the
+        name's letter on it in white. The letter (ui_icon_letter) is the first letter or digit of the last word of an app_id that is words
+        with dots between ("org.mozilla.firefox" is F), a small letter made a capital, or the whole character where it is not ASCII; a
+        name with neither is a question mark. The colours are of one lightness, dark enough for the white letter on either theme.
+*/
+static unsigned int ui_icon_tone(const char *name)
+{
+        unsigned int hash = 2166136261u, hue, x;
+
+        for (unsigned int at = 0; name && name[at] && at < 256; at++)
+                hash = (hash ^ (unsigned char)name[at]) * 16777619u;
+        // Around the wheel at half the colour's strength: chroma 100 about a lightness of 90, so the least of a colour is 40 and the most 140: white on any of them is over three to one.
+        hue = hash % 360u, x = 100u * (60u - (hue % 120u > 60u ? hue % 120u - 60u : 60u - hue % 120u)) / 60u;
+        switch (hue / 60u)
+        {
+        case 0: return (40u + 100u) << 16 | (40u + x) << 8 | 40u;
+        case 1: return (40u + x) << 16 | (40u + 100u) << 8 | 40u;
+        case 2: return 40u << 16 | (40u + 100u) << 8 | (40u + x);
+        case 3: return 40u << 16 | (40u + x) << 8 | (40u + 100u);
+        case 4: return (40u + x) << 16 | 40u << 8 | (40u + 100u);
+        default: return (40u + 100u) << 16 | 40u << 8 | (40u + x);
+        }
+}
+
+// The tile's letter for a name, written into into (5 bytes: a UTF-8 character and its null).
+static fn ui_icon_letter(const char *name, char *into)
+{
+        unsigned int word = 0, at;
+
+        for (at = 0; name && name[at] && at < 256; at++)
+                if (name[at] == '.' && name[at + 1])
+                        word = at + 1;
+        into[0] = '?', into[1] = 0;
+        for (at = word; name && name[at] && at < 256; at++)
+        {
+                unsigned char byte = (unsigned char)name[at];
+
+                if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9'))
+                {
+                        into[0] = (char)(byte >= 'a' && byte <= 'z' ? byte - 32 : byte);
+                        return;
+                }
+                if (byte >= 0xc2 && byte <= 0xf4)
+                {
+                        // A character past ASCII, whole and well made, or none of it.
+                        unsigned int length = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : 2, more = 1;
+
+                        while (more < length && ((unsigned char)name[at + more] & 0xc0) == 0x80)
+                                more++;
+                        if (more != length)
+                                return;
+                        memory_copy(into, name + at, length);
+                        into[length] = 0;
+                        return;
+                }
+        }
+}
+
+static fn ui_icon_tile(struct ui address_to ui, int left, int top, int size, const char *name)
+{
+        unsigned int tone = ui_icon_tone(name);
+        char letter[5];
+
+        if (size <= 0)
+                return;
+        ui_kit_fill(ui, &(struct ui_box){left * 256, top * 256, (left + size) * 256, (top + size) * 256, size * 256 / 4, size * 256 / 4}, tone | 0xff000000u, null);
+        ui_icon_letter(name, letter);
+        if (ui->engine && ui->regular && left >= 0 && top >= ui->top && top + size <= ui->bottom)
+        {
+                // The letter is the picture's (the font blend on its ground), not the list's, as a cell's text is.
+                const font_face address_to faces[1] = {ui->regular};
+                p32 em = (p32)(size * 13 / 20) << 6;
+                font_metrics grid = font_metrics_at(ui->regular, em);
+                font_target here = {ui->pixels + (long)top * (long)ui->pitch + left, (positive)ui->pitch, size, size};
+                unsigned int scratch[1] = {0};
+                font_target nowhere = {scratch, 1, 1, 1};
+                positive length = string_length((string_address)letter);
+                int pad;
+
+                if (ui->scene)
+                        ui->scene->lost = UI_LOST_CELL_TEXT;
+                pad = (size - (int)(font_draw(ui->engine, faces, 1, (const p8 address_to)letter, length, em, 0, &nowhere, 0, 0, 0xffffff, tone) >> 16)) / 2;
+                font_draw(ui->engine, faces, 1, (const p8 address_to)letter, length, em, 0, &here, (b32)(pad > 0 ? pad : 0) << 16,
+                          (size - grid.cell_height) / 2 + grid.baseline, 0xffffff, tone);
+        }
+}
+
+/*
+        A program's own picture (the window table's icon: WINDOWS_ICON each way, premultiplied) at the size a tab draws it. ui_icon_scale makes
+        the picture size to a side once, when the icon or the size changes: smaller, each pixel the mean of those under it; the same, a
+        copy; larger, the nearest (memory_resample_u32_rect). ui_icon_picture lays one such over the picture a row at a time, each row the
+        library's premultiplied over (memory_glass_over_u32 with no grain), cut to the rows and columns the ui may write.
+*/
+#define UI_ICON_MOST 64 // the largest a picture is drawn, each way
+
+static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned int address_to from)
+{
+        if (size <= 0 || size > UI_ICON_MOST)
+                return;
+        if (size >= WINDOWS_ICON)
+        {
+                memory_resample_u32_rect(into, (positive)size, (positive)size, (positive)size, from, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON, (positive)size, (positive)size, 0, 0);
+                return;
+        }
+        for (int y = 0; y < size; y++)
+        {
+                int y0 = y * WINDOWS_ICON / size, y1 = (y + 1) * WINDOWS_ICON / size;
+
+                for (int x = 0; x < size; x++)
+                {
+                        int x0 = x * WINDOWS_ICON / size, x1 = (x + 1) * WINDOWS_ICON / size;
+                        unsigned int sum[4] = {0, 0, 0, 0}, count = (unsigned int)((x1 - x0) * (y1 - y0));
+
+                        for (int sy = y0; sy < y1; sy++)
+                                for (int sx = x0; sx < x1; sx++)
+                                {
+                                        unsigned int pixel = from[sy * WINDOWS_ICON + sx];
+
+                                        sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
+                                }
+                        into[y * size + x] = (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
+                }
+        }
+}
+
+static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, const unsigned int address_to picture)
+{
+        static const unsigned int plain[128]; // no grain
+        unsigned int under[UI_ICON_MOST];
+
+        if (size <= 0 || size > UI_ICON_MOST || left < 0 || left + size > ui->width)
+                return;
+        if (ui->scene)
+                ui->scene->lost = UI_LOST_CELL_TEXT;
+        for (int row = 0; row < size; row++)
+        {
+                unsigned int address_to into = ui->pixels + (long)(top + row) * (long)ui->pitch + left;
+
+                if (top + row < ui->top || top + row >= ui->bottom)
+                        continue;
+                memory_copy(under, into, (positive)size * 4);
+                memory_glass_over_u32(into, picture + row * size, under, (positive)size, plain);
         }
 }
 

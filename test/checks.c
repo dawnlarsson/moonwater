@@ -133184,6 +133184,25 @@ static void check_taskbar_fullscreen(void)
         every scale. The formula is written out here again, as it was before the button, so a layout that moves with the button off
         is a red row.
 */
+// A tab's length, written out again: the padding, the icon (16 logical pixels, or what the tab's height leaves with two above and below),
+// the kit's gap and the title's characters at a width each, or the icon and the padding alone for no title; never under the tab's height.
+static int tab_oracle(int high, int pad, int scale, int characters)
+{
+    int icon = 16 * scale / 100 > high - 4 * scale / 100 ? high - 4 * scale / 100 : 16 * scale / 100, wide;
+
+    icon = icon < 1 ? 1 : icon;
+    wide = 2 * pad + icon + (characters ? UI_GAP1 * scale / 100 + characters * high * 308 / 1000 : 0);
+    return wide < high ? high : wide;
+}
+
+// The longest a tab may be: its icon, the gap and eight times the band's thickness.
+static int tab_longest(int high, int thick, int scale)
+{
+    int icon = 16 * scale / 100 > high - 4 * scale / 100 ? high - 4 * scale / 100 : 16 * scale / 100;
+
+    return 8 * thick + (icon < 1 ? 1 : icon) + UI_GAP1 * scale / 100;
+}
+
 static void launcher_oracle(unsigned int position, int scale, int count, const unsigned char *lengths, int length, int origin, int lead,
                             int *start, int *wide, int *tray_at, int *tray_length)
 {
@@ -133193,12 +133212,11 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
     tray = tray < high ? high : tray;
     room = length - lead - tray - (count + 2) * gap;
     most = count && room > 0 ? room / count : 0;
-    most = most > 8 * thick ? 8 * thick : most;
+    most = most > tab_longest(high, thick, scale) ? tab_longest(high, thick, scale) : most;
     for (int at = 0; at < count; at++)
     {
-        int width = lengths[at] * high * 308 / 1000 + 2 * pad;
+        int width = tab_oracle(high, pad, scale, lengths[at]);
 
-        width = width < high ? high : width;
         wide[at] = width < most ? width : most;
         windows += wide[at] + gap;
     }
@@ -133548,7 +133566,7 @@ static void check_taskbar_tree(void)
     lengths[0] = 30;
     grew = taskbar_slot(&view, 0, &x, &y, &w, &h) && w > first && !tree->node[0].spare;
     lengths[0] = 5, view.lengths = null, tree->node[0].spare = 77;
-    bare = taskbar_slot(&view, 0, &x, &y, &w, &h) && w == 8 * COMPOSITOR_PANEL && !tree->node[0].spare;
+    bare = taskbar_slot(&view, 0, &x, &y, &w, &h) && w == 8 * COMPOSITOR_PANEL + 16 + UI_GAP1 && !tree->node[0].spare;
     view.lengths = lengths;
     taskbar_band(&view, &bx, &by, &bw, &bh);
     view.x = 2560, view.y = 100, tree->node[0].spare = 77;
@@ -133616,9 +133634,7 @@ static void check_taskbar_scale(void)
                 struct taskbar_view view;
                 int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1, kx, ky, kw, kh, tx, ty, tw, th;
                 int eff = screens[screen] * scales[each] / 100, high = COMPOSITOR_PANEL * eff / 100 - 3 * eff / 100, gap = TASKBAR_GAP * eff / 100;
-                int wide = 5 * high * 308 / 1000 + 2 * (paddings[pad] * eff / 100);
-
-                wide = wide < high ? high : wide;
+                int wide = tab_oracle(high, paddings[pad] * eff / 100, eff, 5);
 
                 memory_zero(&view, sizeof(view));
                 view.width = BAND_W, view.height = BAND_H, view.scale = screens[screen], view.position = TASKBAR_BOTTOM;
@@ -133660,7 +133676,7 @@ static void check_taskbar_scale(void)
             taskbar_padding_set(bad_paddings[at]);
             taskbar_slot(&view, 0, &x0, &y0, &w0, &h0);
             taskbar_slot(&view, 1, &x1, &y1, &w1, &h1);
-            standard_ok &= w0 == 5 * 21 * 308 / 1000 + 2 * TASKBAR_PADDING_STANDARD && x1 - (x0 + w0) == TASKBAR_GAP;
+            standard_ok &= w0 == 5 * 21 * 308 / 1000 + 2 * TASKBAR_PADDING_STANDARD + 16 + UI_GAP1 && x1 - (x0 + w0) == TASKBAR_GAP;
         }
     }
 
@@ -133719,10 +133735,10 @@ static void check_taskbar_scale(void)
     check("taskbar scale: a whole band at 200 percent, the widest padding and every cell is drawn inside its memory", drawn);
 }
 
-/* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
-   the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
-   its table at start. */
-#define BAND_UPRIGHT 0x45215a46b2ffe9b9ull
+/* A bottom and a top band in the standard theme (dark, with white) are the bytes pinned here: three tabs, each the window
+   symbol and its title (pinned again when a tab took an icon before its title; before that the tabs were their titles alone).
+   The unthemed table had a tint of its own, which no shell draws: the compositor themes its table at start. */
+#define BAND_UPRIGHT 0xb00f5dd533096ca1ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -133751,6 +133767,354 @@ static int band_fit_ok(const struct taskbar_view *view, const char *title, int r
     memory_copy(longer + n, "...", 3);
     return n < length && !memory_compare(fitted, title, n) &&
            (int)(font_extent(view->engine, faces, 1, (const p8 address_to)longer, n + 3, em, 0) >> 16) > room;
+}
+
+/*
+        The kit's symbols (ui_icon), the lettered tile (ui_icon_tile) and a program's own picture (ui_icon_scale, ui_icon_picture), drawn
+        into a picture of their own: every symbol of the table draws at every size the band asks, inside its square and in the ink it is
+        given, and no two are the same marks; the network's bars and the battery's bar follow their value; a tile's colour is its
+        name's and takes a white letter; a picture is made the size asked and laid over what is under it by its alpha, inside the rows
+        and columns the picture has.
+*/
+#define ICON_FIELD 96
+static unsigned int icon_field[ICON_FIELD * ICON_FIELD], icon_other[ICON_FIELD * ICON_FIELD];
+
+static struct ui icon_ui(unsigned int *pixels)
+{
+    struct ui ui;
+
+    memory_zero(&ui, sizeof(ui));
+    for (unsigned int at = 0; at < ICON_FIELD * ICON_FIELD; at++)
+        pixels[at] = 0x101010u;
+    ui.pixels = pixels, ui.pitch = ICON_FIELD, ui.width = ICON_FIELD, ui.height = ICON_FIELD, ui.top = 0, ui.bottom = ICON_FIELD, ui.scale = 100;
+    return ui;
+}
+
+// How many pixels of a field are not the ground, how many are the ink whole, and whether any is outside the square size to a side at 16, 16.
+static int icon_count(const unsigned int *pixels, int size, unsigned int ink, int *whole, int *outside)
+{
+    int drawn = 0;
+
+    *whole = *outside = 0;
+    for (int y = 0; y < ICON_FIELD; y++)
+        for (int x = 0; x < ICON_FIELD; x++)
+        {
+            unsigned int pixel = pixels[y * ICON_FIELD + x] & 0xffffffu;
+
+            if (pixel == 0x101010u)
+                continue;
+            drawn++, *whole += pixel == (ink & 0xffffffu);
+            *outside += x < 16 || y < 16 || x >= 16 + size || y >= 16 + size;
+        }
+    return drawn;
+}
+
+static void check_icons(void)
+{
+    static const int sizes[5] = {8, 16, 24, 32, 48};
+    static unsigned int picture[WINDOWS_ICON * WINDOWS_ICON], scaled[UI_ICON_MOST * UI_ICON_MOST];
+    struct ui ui, other;
+    int whole, outside, drawn, every = 1, inside = 1, inked = 1, apart = 1, bars = 1, cell = 1, last = -1, same = 1;
+    char letter[5];
+
+    for (int which = 0; which < UI_ICON_COUNT; which++)
+        for (int each = 0; each < 5; each++)
+        {
+            ui = icon_ui(icon_field);
+            ui_icon(&ui, which, 16, 16, sizes[each], which == UI_ICON_BATTERY ? 60 : 3, 0xff3a8f5cu);
+            drawn = icon_count(icon_field, sizes[each], 0xff3a8f5cu, &whole, &outside);
+            every &= drawn >= sizes[each] / 2, inside &= !outside, inked &= whole > 0 || sizes[each] < 16;
+            // No two symbols are the same marks at 16, the size a tab draws them.
+            for (int against = 0; sizes[each] == 16 && against < which; against++)
+            {
+                int differ = 0;
+
+                other = icon_ui(icon_other);
+                ui_icon(&other, against, 16, 16, 16, against == UI_ICON_BATTERY ? 60 : 3, 0xff3a8f5cu);
+                for (unsigned int at = 0; at < ICON_FIELD * ICON_FIELD; at++)
+                    differ += icon_field[at] != icon_other[at];
+                apart &= differ >= 8;
+            }
+        }
+    check("icons: every symbol of the table draws at 8, 16, 24, 32 and 48 pixels", every);
+    check("icons: and nothing of any is outside its square", inside);
+    check("icons: from 16 pixels up each has pixels that are the ink it was given whole, so it is the theme's colour and no other (at 8 a dot is two pixels across and all edge)", inked);
+    check("icons: no two symbols are the same marks at the size a tab draws them", apart);
+    ui = icon_ui(icon_field);
+    ui_icon(&ui, UI_ICON_COUNT, 16, 16, 16, 0, 0xffffffffu), ui_icon(&ui, -1, 16, 16, 16, 0, 0xffffffffu), ui_icon(&ui, UI_ICON_FILES, 16, 16, 0, 0, 0xffffffffu);
+    check("icons: a symbol the table has not got, and a size of nothing, draw nothing", icon_count(icon_field, 16, 0xffffffffu, &whole, &outside) == 0);
+    for (int value = 0; value <= 4; value++)
+    {
+        ui = icon_ui(icon_field);
+        ui_icon(&ui, UI_ICON_NETWORK, 16, 16, 32, value, 0xffffffffu);
+        drawn = icon_count(icon_field, 32, 0xffffffffu, &whole, &outside);
+        bars &= whole > last && (value || !whole) && (drawn > whole) == (value < 4), last = whole;
+    }
+    check("icons: the network's bars are lit one more for each of its four levels, the others faint, none lit at none and none faint at four", bars);
+    last = -1;
+    for (int value = 0; value <= 100; value += 20)
+    {
+        ui = icon_ui(icon_field);
+        ui_icon(&ui, UI_ICON_BATTERY, 16, 16, 32, value, 0xffffffffu);
+        icon_count(icon_field, 32, 0xffffffffu, &whole, &outside);
+        cell &= whole > last && !outside, last = whole;
+    }
+    ui = icon_ui(icon_field), other = icon_ui(icon_other);
+    ui_icon(&ui, UI_ICON_BATTERY, 16, 16, 32, 100, 0xffffffffu), ui_icon(&other, UI_ICON_BATTERY, 16, 16, 32, 250, 0xffffffffu);
+    for (unsigned int at = 0; at < ICON_FIELD * ICON_FIELD; at++)
+        same &= icon_field[at] == icon_other[at];
+    check("icons: the battery's bar is longer for every twenty percent more, inside its cell, and a percent past a hundred is a hundred", cell && same);
+    check("icons: the kit's programs have their symbols by the app_id they say, and a program that is none of the kit's has none",
+          ui_icon_of("settings") == UI_ICON_SETTINGS && ui_icon_of("files") == UI_ICON_FILES && ui_icon_of("terminal") == UI_ICON_TERMINAL &&
+          ui_icon_of("editor") == UI_ICON_EDITOR && ui_icon_of("mixer") == UI_ICON_MIXER && ui_icon_of("launcher") == UI_ICON_APPS &&
+          ui_icon_of("org.mozilla.firefox") < 0 && ui_icon_of("") < 0 && ui_icon_of(null) < 0 && ui_icon_of("Settings") < 0);
+
+    // The tile: its colour is the name's, dark enough for white; its letter is the last word's first letter or digit.
+    {
+        static const char *const names[6] = {"org.mozilla.firefox", "org.gnome.Nautilus", "steam", "a", "com.example.App-2", "z.z.z"};
+        int toned = 1, distinct = 0, lettered;
+
+        for (int at = 0; at < 6; at++)
+        {
+            unsigned int tone = ui_icon_tone(names[at]);
+
+            toned &= tone == ui_icon_tone(names[at]) && (tone >> 16 & 255) >= 40 && (tone >> 16 & 255) <= 140 && (tone >> 8 & 255) >= 40 && (tone >> 8 & 255) <= 140 &&
+                     (tone & 255) >= 40 && (tone & 255) <= 140 && look_luma(tone) < 140;
+            for (int against = 0; against < at; against++)
+                distinct += tone != ui_icon_tone(names[against]);
+        }
+        check("icons: a tile's colour is its name's, the same each time, every colour of it between 40 and 140 so a white letter stands on it, and six names are six colours",
+              toned && distinct == 15);
+        ui_icon_letter("org.mozilla.firefox", letter), lettered = letter[0] == 'F' && !letter[1];
+        ui_icon_letter("steam", letter), lettered &= letter[0] == 'S' && !letter[1];
+        ui_icon_letter("org.kde.3dviewer", letter), lettered &= letter[0] == '3' && !letter[1];
+        ui_icon_letter("org.example.\xc3\xa9" "diteur", letter), lettered &= string_equals((string_address)letter, (string_address) "\xc3\xa9");
+        ui_icon_letter("trailing.", letter), lettered &= letter[0] == 'T';
+        ui_icon_letter("...", letter), lettered &= letter[0] == '?' && !letter[1];
+        ui_icon_letter("org.example.\xe2\x82", letter), lettered &= letter[0] == '?' && !letter[1];
+        ui_icon_letter("", letter), lettered &= letter[0] == '?';
+        ui_icon_letter(null, letter), lettered &= letter[0] == '?';
+        check("icons: a tile's letter is the first letter or digit of the last word of the name, a small letter made a capital, a character past ASCII whole or not at all, and a question mark for a name with none",
+              lettered);
+        ui = icon_ui(icon_field);
+        ui.engine = &band_engine, ui.regular = &band_face;
+        ui_icon_tile(&ui, 16, 16, 32, "org.mozilla.firefox");
+        drawn = icon_count(icon_field, 32, 0xff000000u | ui_icon_tone("org.mozilla.firefox"), &whole, &outside);
+        last = 0;
+        for (unsigned int at = 0; at < ICON_FIELD * ICON_FIELD; at++)
+            last += (icon_field[at] & 0xffffffu) == 0xffffffu;
+        check("icons: a tile is a square of its name's colour with round corners, nothing outside it, and its letter on it in white",
+              !outside && whole > 32 * 32 / 2 && drawn < 32 * 32 && (icon_field[16 * ICON_FIELD + 16] & 0xffffffu) == 0x101010u && last > 8 && last < whole);
+    }
+
+    // A program's picture: made the size asked, and laid over what is under it.
+    {
+        int halved = 1, copied = 1, doubled = 1, over, kept = 1;
+
+        for (unsigned int y = 0; y < WINDOWS_ICON; y++)
+            for (unsigned int x = 0; x < WINDOWS_ICON; x++)
+                picture[y * WINDOWS_ICON + x] = 0xff000000u | ((x & 1) ? 0x640000u : 0xc80000u) | (y / 2) << 8 | ((y & 1) ? 10u : 20u);
+        ui_icon_scale(scaled, 16, picture);
+        for (unsigned int at = 0; at < 16 * 16; at++)
+            halved &= scaled[at] == (0xff96000fu | (at / 16) << 8);
+        ui_icon_scale(scaled, 32, picture);
+        for (unsigned int at = 0; at < 32 * 32; at++)
+            copied &= scaled[at] == picture[at];
+        ui_icon_scale(scaled, 64, picture);
+        for (unsigned int y = 0; y < 64; y++)
+            for (unsigned int x = 0; x < 64; x++)
+                doubled &= scaled[y * 64 + x] == picture[(y / 2) * WINDOWS_ICON + x / 2];
+        scaled[0] = 0x12345678u;
+        ui_icon_scale(scaled, 0, picture), ui_icon_scale(scaled, UI_ICON_MOST + 1, picture);
+        check("icons: a picture made 16 to a side is the mean of each two by two, made 32 it is itself, made 64 each pixel is four, and a size of nothing or past the largest writes nothing",
+              halved && copied && doubled && scaled[0] == 0x12345678u);
+        // Over: an opaque pixel is itself, a clear one leaves what is under it, a half one is the two mixed.
+        for (unsigned int at = 0; at < 16 * 16; at++)
+            scaled[at] = at % 3 == 0 ? 0xffff0000u : at % 3 == 1 ? 0u : 0x80008000u;
+        ui = icon_ui(icon_field);
+        ui_icon_picture(&ui, 16, 16, 16, scaled);
+        over = (icon_field[16 * ICON_FIELD + 16] & 0xffffffu) == 0xff0000u && (icon_field[16 * ICON_FIELD + 17] & 0xffffffu) == 0x101010u &&
+               (icon_field[16 * ICON_FIELD + 18] & 0xffffffu) == 0x088808u;
+        icon_count(icon_field, 16, 0, &whole, &outside);
+        check("icons: a picture is laid over what is under it by its alpha, an opaque pixel whole, a clear one not at all, a half one half, and nothing outside its square", over && !outside);
+        // Cut to the rows the ui may write, and not drawn at all where it would pass the picture's width.
+        ui = icon_ui(icon_field);
+        ui.top = 20, ui.bottom = 24;
+        ui_icon_picture(&ui, 16, 16, 16, scaled);
+        for (int y = 0; y < ICON_FIELD; y++)
+            for (int x = 0; x < ICON_FIELD; x++)
+                kept &= (y >= 20 && y < 24) || icon_field[y * ICON_FIELD + x] == 0x101010u;
+        drawn = icon_count(icon_field, 16, 0, &whole, &outside);
+        ui = icon_ui(icon_other);
+        ui_icon_picture(&ui, ICON_FIELD - 8, 16, 16, scaled), ui_icon_picture(&ui, -1, 16, 16, scaled), ui_icon_picture(&ui, 16, 16, UI_ICON_MOST + 1, scaled);
+        check("icons: a picture is cut to the rows the ui may write, and one that would pass the picture's side or is too large is not drawn",
+              kept && drawn > 0 && icon_count(icon_other, 16, 0, &whole, &outside) == 0);
+    }
+}
+
+/*
+        A tab is its window's icon and then its title. The icon's element is the padding in from the tab's leading end, in the middle
+        of the tab across the band, the side its scale gives, and the title has what is left; reading from the right the icon is at
+        the tab's right end. What is drawn there is the window's own picture where it has one, the kit's symbol in the tab's ink for
+        a kit program, the lettered tile for another program that says who it is, and the window symbol for one that says nothing;
+        a picture that changes is drawn again, and a tab too short for its icon draws none outside itself.
+*/
+static void check_taskbar_identity(void)
+{
+    static unsigned int first[BAND_W * COMPOSITOR_PANEL], second[BAND_W * COMPOSITOR_PANEL], picture[WINDOWS_ICON * WINDOWS_ICON], again[WINDOWS_ICON * WINDOWS_ICON];
+    static const char *const words[4] = {"bottom", "top", "left", "right"};
+    static const int scales[3] = {100, 150, 200};
+    static const unsigned char rows[3] = {4, 9, 17};
+    static struct windows standard_table;
+    struct windows address_to kept_table = compositor.table;
+    struct taskbar_view view;
+    int placed = 1, mirrored = 1, rect[4], x, y, w, h, bx, by, bw, bh, had_launcher = taskbar.launcher;
+
+    memory_zero(&standard_table, sizeof(standard_table));
+    standard_table.themed = 1, standard_table.theme = 1, standard_table.accent = 0xffffffu;
+    compositor.table = &standard_table;
+    taskbar_launcher_set(0);
+    for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position++)
+        for (int each = 0; each < 3; each++)
+            for (int rtl = 0; rtl < 2; rtl++)
+            {
+                int m = position >= TASKBAR_LEFT, scale = scales[each], thick = COMPOSITOR_PANEL * scale / 100, high = thick - 3 * scale / 100;
+                int pad = TASKBAR_PADDING_STANDARD * scale / 100, side = 16 * scale / 100 > high - 4 * scale / 100 ? high - 4 * scale / 100 : 16 * scale / 100;
+                const struct ui_tree address_to t;
+
+                language_take(rtl ? ('a' | 'r' << 8) : 0);
+                taskbar_settings_set(words[position], "primary", "battery none\n");
+                view = band_view(position, null);
+                view.scale = scale;
+                t = taskbar_tree(&view);
+                for (int tab = 0; tab < 3; tab++)
+                {
+                    const struct ui_node address_to n = taskbar_node(&view, tab), address_to icon = n && n->first >= 0 ? &t->node[n->first] : null;
+                    const struct ui_node address_to label = icon && icon->next >= 0 ? &t->node[icon->next] : null;
+                    int turned = rtl && !m;
+
+                    if (!n || !icon || !label)
+                    {
+                        placed = 0;
+                        continue;
+                    }
+                    // Across the band the icon is in the middle of the tab; along it, the padding in from the leading end, which is the far end reading from the right.
+                    placed &= icon->w == side && icon->h == side && (m ? icon->x - n->x : icon->y - n->y) == (high - side) / 2 &&
+                              (m ? icon->y - n->y == pad : turned ? n->x + n->w - (icon->x + icon->w) == pad : icon->x - n->x == pad);
+                    // The title has all the icon leaves, to the tab's other end, and the tab's whole height.
+                    placed &= m ? label->y == icon->y + icon->h && label->y + label->h == n->y + n->h && label->w == high
+                                : turned ? label->x == n->x && label->x + label->w == icon->x && label->h == high
+                                         : label->x == icon->x + icon->w && label->x + label->w == n->x + n->w && label->h == high;
+                    mirrored &= !turned || icon->x > label->x;
+                }
+            }
+    language_take(0);
+    check("taskbar identity: a tab's icon is the padding in from its leading end and in its middle across the band, 16 pixels at the scale, and its title has the rest, on every edge at 100 to 200 percent",
+          placed);
+    check("taskbar identity: reading from the right the icon is at the right end of its tab and the title to its left", mirrored);
+
+    // What is drawn in the icon's element, on a bottom band: a picture, a tile, a kit symbol, the window symbol.
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
+        picture[at] = 0xffe66000u, again[at] = 0xff0060e6u;
+    {
+        const struct ui_tree address_to t;
+        const struct ui_node address_to icon;
+        unsigned int tone = ui_icon_tone("org.mozilla.firefox");
+        int pictured = 1, tiled = 0, symbol, plain, changed = 0, ix, iy, differ = 0, labelled = 0;
+
+        view = band_view(TASKBAR_BOTTOM, null);
+        view.rows = rows, view.icons[0] = picture, view.icon_seqs[0] = 2, view.apps[0] = "org.example.Pictured";
+        view.apps[1] = "org.mozilla.firefox", view.apps[2] = "settings";
+        taskbar_draw(&view, 7, band_glass, null, rect);
+        memory_copy(first, band_pixels, sizeof(first));
+        taskbar_band(&view, &bx, &by, &bw, &bh);
+        t = taskbar_tree(&view);
+        icon = &t->node[taskbar_node(&view, 0)->first], ix = icon->x - bx, iy = icon->y - by;
+        for (int row = 0; row < icon->h; row++)
+            for (int column = 0; column < icon->w; column++)
+                pictured &= (first[(iy + row) * bw + ix + column] & 0xffffffu) == 0xe66000u;
+        icon = &t->node[taskbar_node(&view, 1)->first];
+        for (int row = 0; row < icon->h; row++)
+            for (int column = 0; column < icon->w; column++)
+                tiled += (first[(icon->y - by + row) * bw + icon->x - bx + column] & 0xffffffu) == tone;
+        check("taskbar identity: a window with a picture has it in its tab's icon, every pixel of it", pictured);
+        check("taskbar identity: a program with an app_id and no picture has its lettered tile, in its name's colour", tiled > icon->w * icon->h / 2 && tiled < icon->w * icon->h);
+        // The kit's program: the symbol ui_icon draws, in the tab's own ink, where the tab with no identity draws the window symbol.
+        view = band_view(TASKBAR_BOTTOM, null);
+        taskbar_draw(&view, 7, band_glass, null, rect);
+        memory_copy(second, band_pixels, sizeof(second));
+        icon = &t->node[taskbar_node(&view, 2)->first];
+        for (int row = 0; row < icon->h; row++)
+            for (int column = 0; column < icon->w; column++)
+                differ += first[(icon->y - by + row) * bw + icon->x - bx + column] != second[(icon->y - by + row) * bw + icon->x - bx + column];
+        symbol = differ > 4;
+        taskbar_slot(&view, 2, &x, &y, &w, &h);
+        // A tab with no title is its icon alone: the same tab drawn with no titles differs from the titled one only past the icon.
+        view = band_view(TASKBAR_BOTTOM, null);
+        for (unsigned int at = 0; at < 3; at++)
+            view.titles[at] = "";
+        taskbar_draw(&view, 7, band_glass, null, rect);
+        plain = 1;
+        for (int tab = 0; tab < 3; tab++)
+        {
+            const struct ui_node address_to n = taskbar_node(&view, tab);
+
+            icon = &t->node[n->first];
+            for (int row = 0; row < n->h; row++)
+                for (int column = 0; column < n->w; column++)
+                {
+                    int px = n->x - bx + column, py = n->y - by + row, in_icon = px >= icon->x - bx && px < icon->x - bx + icon->w;
+                    int same = band_pixels[py * bw + px] == second[py * bw + px];
+
+                    plain &= !in_icon || same, labelled += !in_icon && !same;
+                }
+        }
+        check("taskbar identity: a kit program's tab draws its own symbol where a window that says nothing draws the window symbol", symbol);
+        check("taskbar identity: the title is written past the icon and never on it", plain && labelled > 30);
+        // The picture changes: a new sequence is a new picture in the tab, and the old sequence with other pixels is the one kept.
+        view = band_view(TASKBAR_BOTTOM, null);
+        view.rows = rows, view.icons[0] = again, view.icon_seqs[0] = 4;
+        taskbar_draw(&view, 7, band_glass, null, rect);
+        icon = &t->node[taskbar_node(&view, 0)->first];
+        changed = (band_pixels[(icon->y - by + 2) * bw + icon->x - bx + 2] & 0xffffffu) == 0x0060e6u;
+        check("taskbar identity: a window's new picture, a sequence on, is the one its tab draws next", changed);
+        // A window whose picture has no sequence has none: its tab is its tile or its symbol.
+        view = band_view(TASKBAR_BOTTOM, null);
+        view.rows = rows, view.icons[0] = again, view.icon_seqs[0] = 0;
+        taskbar_draw(&view, 7, band_glass, null, rect);
+        check("taskbar identity: a picture with no sequence is no picture", (band_pixels[(icon->y - by + 2) * bw + icon->x - bx + 2] & 0xffffffu) != 0x0060e6u);
+    }
+
+    // A band too short for its tabs' icons: nothing of a tab is drawn outside it, at any length.
+    {
+        int held = 1, slots[4][4];
+
+        for (int length = 40; length < 400; length += 7)
+        {
+            view = band_view(TASKBAR_BOTTOM, null);
+            view.width = length, view.rows = rows, view.icons[0] = picture, view.icon_seqs[0] = 2, view.apps[1] = "org.mozilla.firefox";
+            for (unsigned int at = 0; at < BAND_W * COMPOSITOR_PANEL; at++)
+                band_pixels[at] = 0x00abcdefu;
+            taskbar_draw(&view, 7, band_glass, null, rect);
+            taskbar_band(&view, &bx, &by, &bw, &bh);
+            for (int slot = 0; slot < 4; slot++)
+                if (!taskbar_slot(&view, slot < 3 ? slot : -2, &slots[slot][0], &slots[slot][1], &slots[slot][2], &slots[slot][3]))
+                    slots[slot][2] = slots[slot][3] = 0;
+            for (int row = 0; row < bh; row++)
+                for (int column = 0; column < bw; column++)
+                {
+                    int in = 0;
+
+                    for (int slot = 0; slot < 4; slot++)
+                        in |= column >= slots[slot][0] - bx && column < slots[slot][0] - bx + slots[slot][2] && row >= slots[slot][1] - by && row < slots[slot][1] - by + slots[slot][3];
+                    held &= in || band_pixels[row * bw + column] == 0x00abcdefu;
+                }
+        }
+        check("taskbar identity: on a band from 40 to 400 pixels long nothing of a tab, its icon or its title is drawn outside the tab", held);
+    }
+    compositor.table = kept_table;
+    taskbar_launcher_set(had_launcher);
 }
 
 static void check_taskbar_text(string_address face_path)
@@ -137518,7 +137882,7 @@ static void check_compositor_volume(void)
         window's close and minimise buttons, all in one scene, which is pinned by a hash of the whole output so that a
         changed default pixel is seen. The tabs' inks the band takes for a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x5719b41du
+#define CHROME_SCENE_HASH 0x713c0c91u
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -177504,6 +177868,8 @@ b32 main()
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
+        check_icons();
+        check_taskbar_identity();
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
         check_taskbar_scale();
 #if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR

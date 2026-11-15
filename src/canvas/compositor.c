@@ -5115,6 +5115,11 @@ static struct
         int saved_x[WINDOWS], saved_y[WINDOWS]; // where it was floating, and how large
         unsigned int saved_w[WINDOWS], saved_h[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
+        // Who the window is, the compositor's own copy of the row's identity (compositor_identity_take), which its tab is drawn from:
+        // its app_id, and its icon with the sequence that picture is (0: none).
+        char app_id[WINDOWS][WINDOWS_APP_ID];
+        unsigned int icon_seq[WINDOWS];
+        unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
         char name[WINDOWS][WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
         unsigned int moved[WINDOWS];      // the row's moved, as it was last taken
         unsigned char stack[WINDOWS];   // bottom first
@@ -6506,8 +6511,10 @@ static unsigned int compositor_windows(void)
         {
                 unsigned int place = count;
 
-                // A popup has no tab: it is its window's. Nor has a window that asked for none (WINDOW_NO_TAB).
+                // A popup has no tab: it is its window's. Nor has a window that asked for none (WINDOW_NO_TAB), nor the launcher, whose tab
+                // is the band's launcher button, lit while it is up (compositor_launcher_row's test: a window that is dismissed and has no close).
                 if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 || (compositor.asks[row] & WINDOW_NO_TAB) ||
+                    (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE) ||
                     (bands > 1 && compositor_screen_of(row) != compositor.band_at))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
@@ -6550,8 +6557,16 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.launcher_lit = compositor_launcher_row() >= 0;
         view.marks = compositor.marks;
         view.lengths = compositor.lengths;
+        view.rows = compositor.listed;
         for (unsigned int at = 0; at < compositor.listing; at++)
-                view.titles[at] = compositor.title[compositor.listed[at]];
+        {
+                int row = compositor.listed[at];
+
+                view.titles[at] = compositor.title[row];
+                view.apps[at] = compositor.app_id[row];
+                view.icons[at] = compositor.icon_seq[row] ? compositor.icon[row] : null;
+                view.icon_seqs[at] = compositor.icon_seq[row];
+        }
         return view;
 }
 
@@ -16116,6 +16131,43 @@ static b32 compositor_osk_is(unsigned int pid)
 static int compositor_wl_parts(int row, const int (**rects)[4]); // wayland_host.c: the rectangles the commit being taken changed, beside their box
 #endif
 
+/*
+        Who the window in a row is, read from the table into the compositor's own columns: its app_id and its icon (window.c's
+        windows_app_id_read and windows_icon_read, which hold whatever the row says to its bounds). A row whose icon a writer is in
+        the middle of keeps the one it had until the next knock. Either changing is a change to its tab. It runs at every knock
+        (compositor_take), so a program that sets either and knocks, and the Wayland host that sets them for a client and takes the
+        row, are both seen at once.
+*/
+static void compositor_identity_take(int row)
+{
+        struct windows *table = compositor.table;
+        unsigned int seq = __atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE), changed = 0;
+        char app_id[WINDOWS_APP_ID];
+
+        memory_zero(app_id, sizeof(app_id));
+        windows_app_id_read(table, (unsigned int)row, app_id);
+        if (memory_compare(app_id, compositor.app_id[row], WINDOWS_APP_ID))
+        {
+                memory_copy(compositor.app_id[row], app_id, WINDOWS_APP_ID);
+                changed = 1;
+        }
+        if (!seq && compositor.icon_seq[row])
+                compositor.icon_seq[row] = 0, changed = 1;
+        else if (seq && !(seq & 1u) && seq != compositor.icon_seq[row])
+        {
+                static unsigned int picture[WINDOWS_ICON * WINDOWS_ICON];
+                unsigned int read = windows_icon_read(table, (unsigned int)row, picture);
+
+                if (read)
+                {
+                        memory_copy(compositor.icon[row], picture, sizeof(picture));
+                        compositor.icon_seq[row] = read, changed = 1;
+                }
+        }
+        if (changed && compositor.showing[row])
+                compositor_tabs_changed();
+}
+
 static void compositor_take(int row)
 {
         struct windows *table = compositor.table;
@@ -16134,6 +16186,7 @@ static void compositor_take(int row)
                 if (compositor.showing[row])
                         compositor_tabs_changed();
         }
+        compositor_identity_take(row);
 
         // Lifted: brought back, raised and given the keys, as its tab would.
         if (compositor.showing[row] && table->lift[row] != compositor.lifted[row])
@@ -16456,6 +16509,7 @@ static void compositor_leave(int row)
         compositor.asks[row] = 0;
         compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.title[row][0] = 0;
+        memory_zero(compositor.app_id[row], WINDOWS_APP_ID), compositor.icon_seq[row] = 0;
         compositor.name[row][0] = 0;
         compositor_glass_drop(row);
         compositor_runs_drop(row);

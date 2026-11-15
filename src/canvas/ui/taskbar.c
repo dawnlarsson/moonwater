@@ -3,8 +3,10 @@
         it is and what the compositor gives it).
 
         Along the edge the band runs in (its length) the tabs come first, in the
-        order the windows showed, each as long as its title needs at a width a
-        character has, and the tray is at the far end: the clock, and the battery
+        order the windows showed, each its window's icon and then its title, as
+        long as the two need at a width a character has (a tab is no longer
+        than its icon and eight times the band's thickness, and a title with
+        no room in it is cut with dots), and the tray is at the far end: the clock, and the battery
         beside it when the settings name one, and the volume, microphone and notices
         cells when they are there. Across the band a tab is its
         thickness less an inset, and it hangs off the output's edge it is along, so
@@ -186,6 +188,33 @@ static int taskbar_text(int high, int pad, int characters)
 }
 
 /*
+        A window's tab: its icon and then its title. The icon is TASKBAR_ICON logical pixels to a side at the band's scale, or as much
+        as a tab's height leaves with two pixels above and below; the title is what a run of its characters takes (taskbar_text's
+        width of a character); between the two is TASKBAR_ICON_GAP, and the padding (`taskbar padding`) is before the icon and
+        after the title. A window with no title is its icon and the padding. Never shorter than the tab is high. taskbar_lay holds
+        a tab to what the band has for each and to its icon, the gap and eight times the band's thickness, the room a title had
+        before there was an icon, and a title that does not fit what is left is cut with dots where it is drawn (taskbar_say).
+*/
+#define TASKBAR_ICON 16
+#define TASKBAR_ICON_GAP UI_GAP1 // the kit's gap between pieces that go together
+
+static int taskbar_icon_side(int high, int scale)
+{
+        int side = TASKBAR_ICON * scale / 100, room = high - 4 * scale / 100;
+
+        side = side > room ? room : side;
+        return side < 1 ? 1 : side > UI_ICON_MOST ? UI_ICON_MOST : side;
+}
+
+static int taskbar_tab_length(int high, int pad, int scale, int characters)
+{
+        int text = characters * high * 308 / 1000;
+        int wanted = 2 * pad + taskbar_icon_side(high, scale) + (characters > 0 ? TASKBAR_ICON_GAP * scale / 100 + text : 0);
+
+        return wanted < high ? high : wanted;
+}
+
+/*
         The standard tray's cells, each written once, from the tray's start along the edge to its far end: the slot it answers to,
         what says it is there now, the side of the mark in its middle (0 for a cell of text; taskbar_lay's names: the scale, and
         glyph, the side of the speaker and the microphone) and what draws it (taskbar_draw's names: the view, the tree t, the cell's
@@ -206,8 +235,8 @@ static int taskbar_text(int high, int pad, int characters)
         start or the end of the output across the edge, as thick as its scale makes it and as long as the output, with the inset
         on its side toward the middle of the output. The band holds three boxes along the edge:
 
-            the lead    the launcher's button, its mark in its middle: three rows of three dots
-            the tabs    a tab for each window, as long as its title needs
+            the lead    the launcher's button, its mark in its middle: three rows of three dots (ui_icon_dots)
+            the tabs    a tab for each window: the padding, its icon, a gap, its title in what is left, the padding
             the tail    the tray, at the far end: its cells, the speaker, the microphone and the dot each with its mark in its
                         middle, or the one text of a format of the person's
 
@@ -223,7 +252,8 @@ static int taskbar_text(int high, int pad, int characters)
         long as the three of a row and the padding either side, never under its height (as a tab of text is: taskbar_text). The
         tray, held to half the band (the tabs keep the rest) and to what the launcher and its gaps leave of it: a format of the
         person's is one text, cut to that, and the standard tray's cells are each narrower when they would not all fit. And a tab,
-        no longer than an equal share of what the button and the tray leave, nor than eight times the band's thickness.
+        no longer than an equal share of what the button and the tray leave, nor than its icon, the gap after it and eight times the
+        band's thickness.
 
         An element is named for its slot, the slot plus one, so that 0, the name of an element given none, is no slot. A slot is
         a tab's number (0 up), TASKBAR_TRAY (-2) for the tray as a whole, -3 the clock, -4 the battery, TASKBAR_LAUNCHER (-5),
@@ -260,7 +290,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         int scale = taskbar_scaled(view->scale), length = m ? view->height : view->width, thick = taskbar_thick(view->scale);
         int gap = TASKBAR_GAP * scale / 100; // not a setting: the kit's gap between pieces that go together (TASKBAR_GAP), scaled like the rest
         int pad = taskbar.padding * scale / 100; // `taskbar padding`: the room round the text inside a tab
-        int inset = 3 * scale / 100, high = thick - inset, count = (int)view->count, pitch = 0, dot = 0, button = 0, lead, items = 0, icons = 0, tray, tray_w, cell, text_w = 0, glyph, room, most;
+        int inset = 3 * scale / 100, high = thick - inset, count = (int)view->count, pitch = 0, dot = 0, button = 0, lead, items = 0, icons = 0, tray, tray_w, cell, text_w = 0, glyph, room, most, longest;
         const struct ui_size gives = {UI_PERCENT, 100, 0, UI_TREE_MOST, 1};
         struct ui_node address_to n;
 
@@ -301,7 +331,8 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         glyph = (cell < high ? cell : high) * 70 / 100;
         room = length - lead - tray_w - (count + 2) * gap;
         most = count && room > 0 ? room / count : 0;
-        most = most > 8 * thick ? 8 * thick : most;
+        longest = 8 * thick + taskbar_icon_side(high, scale) + TASKBAR_ICON_GAP * scale / 100;
+        most = most > longest ? longest : most;
 
         // The output and the band.
         ui_tree_begin(t);
@@ -319,19 +350,9 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                 n->size[m] = gives, n->size[m].min = lead;
         if (button)
         {
+                // Its mark is one element in its middle, the nine dots' whole grid: two pitches and a dot to a side (taskbar_launcher_glyph draws them in it).
                 n = taskbar_open(t, TASKBAR_LAUNCHER, m, gap, button);
-                n->justify = n->align = UI_CENTER;
-                n = ui_tree_open(t);
-                n->dir = 1, n->gap = pitch - dot;
-                for (int row = 0; row < 3; row++)
-                {
-                        n = ui_tree_open(t);
-                        n->gap = pitch - dot;
-                        for (int column = 0; column < 3; column++)
-                                taskbar_mark(t, n, dot);
-                        ui_tree_close(t);
-                }
-                ui_tree_close(t);
+                taskbar_mark(t, n, 2 * pitch + dot);
                 ui_tree_close(t);
         }
         ui_tree_close(t);
@@ -341,9 +362,20 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         n->dir = m;
         for (int at = 0; most && at < count; at++)
         {
-                int wanted = view->lengths ? taskbar_text(high, pad, view->lengths[at]) : most;
+                int wanted = view->lengths ? taskbar_tab_length(high, pad, scale, view->lengths[at]) : most, side = taskbar_icon_side(high, scale);
+                struct ui_node address_to part;
 
-                taskbar_open(t, at, m, gap, wanted < most ? wanted : most);
+                // The tab: the padding, then the icon, in the middle of the tab across the band, and the title's element is all the icon leaves, the gap
+                // after the icon and the padding at the tab's end with it, as a title's room was the whole tab's before there was an icon; the title
+                // is written in the middle of it (taskbar_say).
+                n = taskbar_open(t, at, m, gap, wanted < most ? wanted : most);
+                n->pad[2 * m] = pad, n->align = UI_CENTER;
+                part = ui_tree_open(t);
+                part->size[0] = part->size[1] = (struct ui_size){UI_FIXED, side, 0, UI_TREE_MOST, 0};
+                ui_tree_close(t);
+                part = ui_tree_open(t);
+                part->size[m] = (struct ui_size){UI_GROW, 1, 0, UI_TREE_MOST, 0}, part->size[c] = (struct ui_size){UI_FIXED, high, 0, UI_TREE_MOST, 0};
+                ui_tree_close(t);
                 ui_tree_close(t);
         }
         ui_tree_close(t);
@@ -965,18 +997,60 @@ static void taskbar_battery_refresh(void)
 static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, unsigned int ink)
 {
         struct ui ui;
-        int x, y;
+        int x, y, scale = taskbar_scaled(view->scale), high = taskbar_thick(view->scale) - 3 * scale / 100, pitch, dot;
         const struct ui_node address_to grid = taskbar_ui(&ui, view, t, n, &x, &y);
 
-        for (int row = grid->first; row >= 0; row = t->node[row].next)
-                for (int at = t->node[row].first; at >= 0; at = t->node[at].next)
-                {
-                        const struct ui_node address_to dot = &t->node[at];
-                        int at_x = x + dot->x - grid->x, at_y = y + dot->y - grid->y;
+        // The numbers the band was laid out with (taskbar_lay): the dots' pitch and a dot, whose grid the mark's element is.
+        pitch = (high * 28 + 50) / 100, dot = (pitch * 65 + 50) / 100;
+        dot = dot < 1 ? 1 : dot, pitch = pitch < dot + 1 ? dot + 1 : pitch;
+        if (grid->w >= 2 * pitch + dot)
+                ui_icon_dots(&ui, x, y, pitch, dot, ink | 0xff000000u);
+}
 
-                        ui_kit_fill(&ui, &(struct ui_box){at_x * 256, at_y * 256, (at_x + dot->w) * 256, (at_y + dot->w) * 256, dot->w * 128, dot->w * 128},
-                                    ink | 0xff000000u, null);
+/*
+        A tab's icon, in the element the band's tree has for it (the first in the tab): the window's own picture where it has one, made
+        the element's size once and kept until the picture or the size changes (taskbar_pictures, by the window's row of the table;
+        ui_icon_scale), and laid over the tab's glass a row at a time by the library's over (ui_icon_picture); for a kit program with
+        none, the kit's symbol for it in the tab's ink, so it follows the theme and dims with a tab put away; for any other program
+        that says who it is, its lettered tile; and for a window that says nothing, the window symbol.
+*/
+static struct taskbar_picture
+{
+        const unsigned int *from; // the picture it was made from
+        unsigned int seq;         // and that picture's sequence
+        int side;                 // how large it was made
+        unsigned int pixels[UI_ICON_MOST * UI_ICON_MOST];
+} taskbar_pictures[WINDOWS];
+
+static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int which, unsigned int ink)
+{
+        const struct ui_node address_to band = &t->node[1];
+        const char *app = view->apps[which];
+        int x = n->x - band->x, y = n->y - band->y, side = n->w < n->h ? n->w : n->h, symbol;
+        struct ui ui;
+
+        if (side <= 0 || x < 0 || y < 0 || x + side > band->w || y + side > band->h)
+                return;
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
+        ui.scale = taskbar_scaled(view->scale), ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
+        if (view->icons[which] && view->icon_seqs[which] && side <= UI_ICON_MOST)
+        {
+                struct taskbar_picture address_to kept = &taskbar_pictures[view->rows && view->rows[which] < WINDOWS ? view->rows[which] : which];
+
+                if (kept->from != view->icons[which] || kept->seq != view->icon_seqs[which] || kept->side != side)
+                {
+                        ui_icon_scale(kept->pixels, side, view->icons[which]);
+                        kept->from = view->icons[which], kept->seq = view->icon_seqs[which], kept->side = side;
                 }
+                ui_icon_picture(&ui, x, y, side, kept->pixels);
+                return;
+        }
+        symbol = ui_icon_of(app);
+        if (symbol < 0 && app && app[0])
+                ui_icon_tile(&ui, x, y, side, app);
+        else
+                ui_icon(&ui, symbol < 0 ? UI_ICON_WINDOW : symbol, x, y, side, 0, ink | 0xff000000u);
 }
 
 /*
@@ -1104,8 +1178,18 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 #define TASKBAR_CELL(slot, shown, mark, paint) case slot: paint; break;
                 TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
-                default: // a window's tab: a band on a side writes its titles turned, a bottom or top one upright
-                        taskbar_say(view, t, n, view->titles[which], ink, ground);
+                default: // a window's tab: its icon, then its title, which a band on a side writes turned and a bottom or top one upright
+                {
+                        const struct ui_node address_to icon = n->first >= 0 ? &t->node[n->first] : null;
+                        const struct ui_node address_to label = icon && icon->next >= 0 ? &t->node[icon->next] : null;
+
+                        // Each only where the tab has the room for it whole: a tab too short for its icon and its padding draws none of what does not fit.
+                        if (icon && icon->x >= n->x && icon->y >= n->y && icon->x + icon->w <= n->x + n->w && icon->y + icon->h <= n->y + n->h)
+                                taskbar_tab_icon(view, t, icon, which, ink);
+                        if (label && label->w > 0 && label->h > 0 && label->x >= n->x && label->y >= n->y && label->x + label->w <= n->x + n->w &&
+                            label->y + label->h <= n->y + n->h && view->titles[which] && view->titles[which][0])
+                                taskbar_say(view, t, label, view->titles[which], ink, ground);
+                }
                 }
         }
         return 1;
