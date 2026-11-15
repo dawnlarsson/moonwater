@@ -646,7 +646,7 @@ static void compositor_plate_drop(void)
 
 // Another framebuffer of the scanout, as large and over the same buffer, for a screen of its own; 0 when the card will
 // not make one, and that screen shares the scanout's.
-static unsigned int compositor_screen_fb(void)
+static unsigned int compositor_scanout_fb(void)
 {
         struct compositor_fb fb = {0, (unsigned int)compositor.width, (unsigned int)compositor.height,
                                    (unsigned int)compositor.scanout_pitch, 32, 24, compositor.scanout_handle};
@@ -1039,7 +1039,7 @@ static b32 compositor_space_take(int first)
                 // The primary shows the scanout's framebuffer, and each other screen one of its own over it.
                 for (unsigned int at = 0; at < lit; at++)
                         compositor.output[at].fb = compositor.output[at].turned == 2 ? compositor_turns[at].fb :
-                                                   at ? compositor_screen_fb() : compositor.fb;
+                                                   at ? compositor_scanout_fb() : compositor.fb;
                 if (!first)
                 {
                         carried = 1;
