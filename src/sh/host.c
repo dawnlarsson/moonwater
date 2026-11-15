@@ -2571,8 +2571,11 @@ static b32 host_splash_place(string_address system, const p8 address_to bytes, p
                         system_make_directory_at(AT_FDCWD, directory, 0755);
         }
 
+        //      Made new and never through a name already there: the system partition is FAT, which has no links, but a
+        //      system that is a directory (the checks', a session's) can have one planted at the name between the remove
+        //      and the open, and the picture would be written wherever it pointed.
         system_remove_at(AT_FDCWD, next, 0);
-        handle = system_open_at_mode(AT_FDCWD, next, FILE_WRITE | O_CLOEXEC, 0644);
+        handle = system_open_at_mode(AT_FDCWD, next, FILE_WRITE | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
         return_if(handle < 0, host_fail(next, handle));
 
         failed = storage_write(handle, (p8 address_to)bytes, length, 0) == (bipolar)length
