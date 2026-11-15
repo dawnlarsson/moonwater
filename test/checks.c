@@ -56732,6 +56732,74 @@ static b32 injected_write_stop(b32 expected)
         return correct ? 0 : 1;
 }
 
+/*
+        Read-ahead given back to a descriptor whose seek fails. The filter
+        answers lseek(descriptor, ..., SEEK_CUR) with EIO for the memfd
+        alone, so a pipe still answers its own ESPIPE. fflush of an input
+        stream is EOF with errno EIO and the stream still reads on from where
+        its caller was; a write after reading is refused rather than landing
+        past the read-ahead; a pipe's ESPIPE is let go, as glibc's
+        _IO_new_file_sync lets it go. stream_drop_input dropped the refusal
+        with the buffer, so fflush answered 0, the next fgetc read past the
+        end and the X landed after "abcdef". 2 when this kernel takes no
+        filter, which the lane says and does not pass.
+*/
+static b32 injected_seek_stop(void)
+{
+        b32 descriptor = (b32)system_call_2(syscall(memfd_create),
+                                            (positive)"seek-stop", 1);
+        b32 ends[2];
+        p8 seen[16];
+
+        if (descriptor < 0 || pipe2(ends, 0)) return 1;
+        if (system_call_4(syscall(pwrite64), (positive)descriptor, (positive)"abcdef", 6, 0) != 6 ||
+            write(ends[1], "uv", 2) != 2)
+                return 1;
+
+        write_stop_step steps[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 5, (p32)syscall(lseek)},
+            {0x20, 0, 0, 16},
+            {0x15, 0, 3, (p32)descriptor},
+            {0x20, 0, 0, 32},
+            {0x15, 0, 1, 1},
+            {0x06, 0, 0, 0x00050000u | 5u},
+            {0x06, 0, 0, 0x7fff0000u}};
+        struct
+        {
+                p16 count;
+                write_stop_step address_to steps;
+        } filter = {array_count(steps), steps};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0 ||
+            system_call_3(syscall(seccomp), 1, 0, (positive)address_of filter) < 0)
+                return 2;
+
+        FILE *file = fdopen(descriptor, "r+");
+        FILE *pipe = fdopen(ends[0], "r");
+        if (!file || !pipe) return 1;
+
+        p8 okay = fgetc(file) == 'a';
+        errno = 0;
+        okay &= fflush(file) == EOF && errno == EIO && ferror(file);
+        clearerr(file);
+        okay &= fgetc(file) == 'b';
+        errno = 0;
+        okay &= fputc('X', file) == EOF && errno == EIO && ferror(file);
+        okay &= fflush(file) == EOF;
+        okay &= pread(descriptor, seen, 16, 0) == 6 &&
+                memory_compare(seen, "abcdef", 6) == 0;
+        clearerr(file);
+        okay &= fgetc(file) == 'c';
+
+        okay &= fgetc(pipe) == 'u' && fflush(pipe) == 0 && !ferror(pipe);
+
+        fclose(pipe);
+        close(ends[1]);
+        fclose(file);
+        return okay ? 0 : 1;
+}
+
 static p8 bounded_stream_positions(void)
 {
         b32 descriptor = (b32)system_call_2(syscall(memfd_create),
@@ -56753,6 +56821,9 @@ static p8 bounded_stream_positions(void)
 
 b32 main(void)
 {
+        if (program_argument_count() > 1 &&
+            string_equals(program_argument(1), "--seek-stop"))
+                return injected_seek_stop();
         if (program_argument_count() > 2)
                 return injected_write_stop((b32)string_to_positive(program_argument(2)));
         if (program_argument_count() > 1)

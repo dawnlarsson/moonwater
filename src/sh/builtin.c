@@ -15012,8 +15012,11 @@ COLD fn shell_read(writer write)
 
                 if (read_length == positive_max || !read_reserve(read_length + 2))
                 {
+                        //      The read fails here anyway, with "no room" and
+                        //      2, so a give-back that fails too has nothing
+                        //      to add to what is said.
                         if (block_used > block_at)
-                                system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
+                                (void)system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
                         if (quieted)
                                 system_control(descriptor, PTY_TCSETS,
                                                address_of quiet_held);
@@ -15152,8 +15155,28 @@ COLD fn shell_read(writer write)
                 }
         }
 
+        /*
+                What was read past the line goes back to the descriptor, and a
+                seekable one that will not take it leaves the next reader --
+                this shell's next read, the command after it -- past bytes no
+                one has had. Bash keeps them in its buffer for its own next
+                read and says nothing; here they are gone, so the read says
+                so in the words of a read error and fails as one, where the
+                refusal was dropped and a `while read` loop lost lines.
+        */
         if (block_used > block_at)
-                system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
+        {
+                bipolar back = system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)),
+                                           FILE_SEEK_CUR);
+
+                if (back < 0)
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error, "read: %p: read error: %s\n",
+                                      (positive)descriptor, file_reason(back));
+                        failed = true;
+                }
+        }
 
         bool missing = ended &&
                        (!limited ||
@@ -15572,8 +15595,17 @@ COLD fn shell_mapfile(writer write)
                 if (failed)
                         break;
         }
+        //      What -n read past its count goes back, as read's does, and a
+        //      descriptor that refuses it is said and answers 1: the next
+        //      reader would start past lines nobody has had.
         if (seekable && used > at)
-                system_seek(from, (positive)(-(bipolar)(used - at)), FILE_SEEK_CUR);
+        {
+                bipolar back = system_seek(from, (positive)(-(bipolar)(used - at)), FILE_SEEK_CUR);
+
+                if (back < 0 && !failed)
+                        return shell_answered(1, "mapfile: %p: read error: %s\n",
+                                              (positive)from, file_reason(back));
+        }
         return_if(failed, shell_answered(2, "%s: no room\n", "mapfile"));
         shell_answer(0);
 }

@@ -10888,10 +10888,13 @@ finish:
         }
         else
         {
+                //      Advice, as GNU's invalidate_cache after a copy is:
+                //      a cache left standing changes no byte copied, and
+                //      GNU's dd does not look at the answer either.
                 if (iflags & DD_NOCACHE)
-                        system_call_4(syscall(fadvise64), in_handle, 0, 0, 4);
+                        (void)system_call_4(syscall(fadvise64), in_handle, 0, 0, 4);
                 if (oflags & DD_NOCACHE)
-                        system_call_4(syscall(fadvise64), out_handle, 0, 0, 4);
+                        (void)system_call_4(syscall(fadvise64), out_handle, 0, 0, 4);
         }
 
         if (out_handle != 1 && system_close(out_handle) < 0)
@@ -13060,14 +13063,21 @@ static bool dump_input_is_directory(string_address name)
         glibc's fclose moves a seekable descriptor back to where the reader
         stopped, so `(od -N3 -c; od -N3 -c) < file` shows abc and then def.
         A pipe cannot be put back and is not asked to be.
+
+        A refusal is left unsaid, as both references leave it: od asks for
+        no byte past -N (text_fill_amount_od), so it has nothing here to give
+        back, and util-linux's hexdump gives back through glibc's fclose and
+        does not look at what it answers (measured with the seek failed by a
+        seccomp filter: hexdump -n3 says nothing, exits 0 and leaves the
+        descriptor at 4096).
 */
 static fn dump_close()
 {
         positive unread = text_input.filled - text_input.position;
 
         if (unread && text_input.opened == false && !text_input.failed)
-                system_seek(text_input.handle, (positive)-(bipolar)unread,
-                            FILE_SEEK_CUR);
+                (void)system_seek(text_input.handle, (positive)-(bipolar)unread,
+                                  FILE_SEEK_CUR);
 
         text_close();
 }
@@ -19681,6 +19691,9 @@ typedef struct
 
 static bool ul_flock_taken;
 static b32 ul_flock_conflict;
+//      What ul_flock_wait answers when its timer would not be set, which it
+//      has said: no errno is this far down.
+#define UL_FLOCK_NO_TIMER (-(bipolar)0x10000)
 static bool ul_flock_verbose;
 
 static fn ul_flock_expired(b32 number)
@@ -19720,8 +19733,21 @@ static bipolar ul_flock_wait(b32 handle, p8 kind, positive timeout, bool fcntl,
                 return -ERROR_ACCESS;
         system_signal_mask(UL_SIGNAL_UNBLOCK, address_of unblock,
                            previous_mask, 8);
-        system_call_3(syscall(setitimer), UL_ITIMER_REAL,
-                      (positive)address_of span, 0);
+
+        //      A timer that was not set would wait for the lock for ever, so
+        //      a refusal ends flock as util-linux's setup_timer refusal does:
+        //      "cannot set up timer" and EX_OSERR, where it used to wait on.
+        bipolar armed = system_call_3(syscall(setitimer), UL_ITIMER_REAL,
+                                      (positive)address_of span, 0);
+
+        if (armed < 0)
+        {
+                system_signal_mask(UL_SIGNAL_SETMASK, previous_mask, null, 8);
+                system_signal_action(UL_SIGALRM, previous_action, null, 8);
+                string_format(log_error, "flock: cannot set up timer: %s\n",
+                              file_reason(armed));
+                return UL_FLOCK_NO_TIMER;
+        }
 
         for (;;)
         {
@@ -19731,9 +19757,12 @@ static bipolar ul_flock_wait(b32 handle, p8 kind, positive timeout, bool fcntl,
         }
         ul_flock_taken = answer >= 0;
 
+        //      Disarmed as util-linux's cancel_timer disarms it, without a
+        //      look at the answer: a timer that was set can be cleared, and
+        //      nothing is left to do about one that would not be.
         memory_zero(address_of span, sizeof span);
-        system_call_3(syscall(setitimer), UL_ITIMER_REAL,
-                      (positive)address_of span, 0);
+        (void)system_call_3(syscall(setitimer), UL_ITIMER_REAL,
+                            (positive)address_of span, 0);
         system_signal_mask(UL_SIGNAL_SETMASK, previous_mask, null, 8);
         system_signal_action(UL_SIGALRM, previous_action, null, 8);
         return answer;
@@ -19758,6 +19787,8 @@ static b32 ul_flock_acquire(b32 handle, p8 kind, bool nonblocking,
                 if (answer == -UL_ERROR_AGAIN || answer == -ERROR_ACCESS)
                         answer = ul_flock_wait(handle, kind, timeout, fcntl,
                                                start, length, conflict, verbose);
+                if (answer == UL_FLOCK_NO_TIMER)
+                        return 71;
                 if (answer >= 0)
                 {
                         address_to blocked = false;

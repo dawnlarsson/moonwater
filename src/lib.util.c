@@ -11939,7 +11939,10 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
         run.open_flags = open_flags;
         run.started = clock_monotonic_nanoseconds();
 
-        system_call_4(syscall(prlimit64), 0, 7, 0, (positive)limits);
+        //      A limit that cannot be read leaves both at zero, and the cap is
+        //      then the floor of sixteen below: fewer descriptors at once than
+        //      there may be room for, never more.
+        (void)system_call_4(syscall(prlimit64), 0, 7, 0, (positive)limits);
         run.cap = limits[0] / 2;
 
         if (run.cap < 16)
@@ -28870,29 +28873,47 @@ static b32 stream_flush_output(stream address_to handle)
         the caller is entitled to see again and the kernel has already passed.
 
         A pipe or a terminal cannot seek and does not need to: there is no
-        position to be wrong about. The seek is attempted and its failure
-        ignored, which is one syscall on a stream that is being abandoned
-        anyway.
+        position to be wrong about, and its ESPIPE is let go, as glibc's
+        _IO_new_file_sync lets it go. Any other refusal is the offset left
+        past bytes the caller has not had: the buffer is kept, so the stream
+        still reads them, the error indicator is set with errno, and false
+        tells the caller, which is glibc's EOF from fflush and its refused
+        write after reading. The refusal used to be dropped with the buffer,
+        and the bytes read ahead were lost to the stream and to the next
+        reader of the descriptor alike.
 */
-static fn stream_drop_input(stream address_to handle, bool restore_position)
+static bool stream_drop_input(stream address_to handle, bool restore_position)
 {
         positive unread = (handle->read_tail - handle->read_head) +
                           handle->pushback_used;
 
         if (restore_position && unread != 0)
-                system_seek(handle->descriptor, -(bipolar)unread, SEEK_CUR);
+        {
+                bipolar moved = system_seek(handle->descriptor, -(bipolar)unread, SEEK_CUR);
+
+                if (moved < 0 && moved != -ESPIPE)
+                {
+                        handle->flags |= STREAM_FAILED;
+                        errno = (b32)-moved;
+                        return false;
+                }
+        }
 
         handle->read_head = 0;
         handle->read_tail = 0;
         handle->pushback_used = 0;
+        return true;
 }
 
 // Turn the buffer around to face the kernel. Anything read ahead is given
-// back before the first byte is staged, or the write lands past it.
-static fn stream_face_writing(stream address_to handle)
+// back before the first byte is staged, or the write lands past it; false
+// when it could not be, and nothing may be written.
+static bool stream_face_writing(stream address_to handle)
 {
         if (handle->read_head != handle->read_tail || handle->pushback_used != 0)
-                stream_drop_input(handle, true);
+                return stream_drop_input(handle, true);
+
+        return true;
 }
 
 // And the other way. Staged output has to reach the file before a read can
@@ -29260,8 +29281,9 @@ b32 stream_flush(stream address_to handle)
 
                 if ((handle->flags & STREAM_READABLE) &&
                     (handle->read_head != handle->read_tail ||
-                     handle->pushback_used != 0))
-                        stream_drop_input(handle, true);
+                     handle->pushback_used != 0) &&
+                    !stream_drop_input(handle, true))
+                        return EOF;
 
                 return 0;
         }
@@ -29443,7 +29465,9 @@ stream_put_bytes_general(stream address_to handle, address_any data,
                 return 0;
 
         stream_ready(handle);
-        stream_face_writing(handle);
+
+        if (!stream_face_writing(handle))
+                return 0;
 
         if (handle->flags & STREAM_UNBUFFERED)
         {
@@ -30683,7 +30707,9 @@ static bool format_stream_begin(format_sink address_to sink)
                 return false;
 
         stream_ready(handle);
-        stream_face_writing(handle);
+
+        if (!stream_face_writing(handle))
+                return false;
 
         if (handle->flags & STREAM_UNBUFFERED)
         {

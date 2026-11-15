@@ -5050,6 +5050,14 @@ stream_one()
                         *) lost "$target write stop $stop" 'checked result, errno or spool descriptor leak' ;;
                         esac
                 done
+                #       Read-ahead given back to a descriptor whose seek the
+                #       filter fails (injected_seek_stop in checks.c).
+                timeout 10 "$work/t.$target" --seek-stop
+                case $? in
+                0) won ;;
+                2) printf '  %-10s %s\n' stream "seek stop NOT RUN -- no seccomp filter here" ;;
+                *) lost "$target seek stop" 'fflush or a write after reading dropped a failed give-back' ;;
+                esac
         fi
 
         if ! target_build freestanding_check stream_standard "$work/s.$target" "$target"; then
@@ -8402,6 +8410,23 @@ text_grep_tree_race()
         esac
 }
 
+#       The text tools on a descriptor whose seeks a seccomp filter fails,
+#       where the answer depends on them (harness_seek_faults): what is
+#       printed, the status and what the next reader of a shared descriptor
+#       gets, against GNU at the pins where it has the tool.
+text_seek_faults()
+{
+        need_shell || return 1
+        python3 test/differential.py --harness seek_faults \
+                --binary "ours=$shell_binary"
+        case $? in
+        0) return 0 ;;
+        2) note "seek_faults: NOT RUN -- no seccomp filter here"
+           return 0 ;;
+        *) return 1 ;;
+        esac
+}
+
 lane_text()
 {
         differential_domain text
@@ -8409,6 +8434,7 @@ lane_text()
         text_sort_widths || [ "$text_lane_status" != 0 ] || text_lane_status=1
         text_parallel_checks || [ "$text_lane_status" != 0 ] || text_lane_status=1
         text_grep_tree_race || [ "$text_lane_status" != 0 ] || text_lane_status=1
+        text_seek_faults || [ "$text_lane_status" != 0 ] || text_lane_status=1
         [ "$text_lane_status" = 0 ] || return "$text_lane_status"
 
         #       wc's characters, words and widths follow LC_CTYPE. Its pinned

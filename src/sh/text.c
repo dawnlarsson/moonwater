@@ -941,6 +941,89 @@ static inline INLINE bool text_fill()
 }
 
 /*
+        A read of the input that failed outside the reader (a pread of its
+        own), said and kept as the reader keeps one: the reason in the
+        program's words, the input ended, and the status a failed read leaves.
+*/
+static fn text_input_read_failed(bipolar reason)
+{
+        if (!text_quiet_read)
+                text_file_failed(text_input.name, reason, true);
+        text_input.finished = true;
+        text_input.failed = true;
+        text_input.error = reason;
+        text_status = text_status ? text_status : 1;
+}
+
+/*
+        The input taken on by count bytes, what the reader holds first and
+        then read through, asking for no byte past the last of them: what a
+        seek forward does, for a descriptor that refused one. An end short of
+        count is where reading through stops too; false only at a failed
+        read, which the reader has said.
+*/
+static bool text_read_through(positive count)
+{
+        while (count)
+        {
+                if (text_input.position == text_input.filled &&
+                    !text_fill_amount(min(count, (positive)TEXT_READ_MAX)))
+                        return !text_input.failed;
+
+                positive take = min(count, text_input.filled - text_input.position);
+
+                text_input.position += take;
+                count -= take;
+        }
+
+        return true;
+}
+
+/*
+        The descriptor put at to, from from where it stands with the reader
+        empty, for whoever reads it next: the serial loop after a pool that
+        read the bytes between with pread and so did not move it, or the
+        command after this one on a shared descriptor. A seek; or where the
+        descriptor will not take one, the bytes between read through, which
+        is where reading would have left it. A failed seek used to be dropped
+        here, and the next reader started again from from: wc -l of a file
+        counted twice, tr's output came twice to the command after it.
+*/
+static fn text_input_move(positive from, positive to)
+{
+        if (to == from ||
+            system_seek(text_input.handle, to, FILE_SEEK_SET) == (bipolar)to)
+                return;
+
+        text_read_through(to - from);
+}
+
+/*
+        A seek the input refused where what is printed or read next depends
+        on it, in GNU's words, which head's elseek and tail's xlseek share:
+        the name through quoteaf, standard input by that name, the offset as
+        it was asked for, and the reason.
+*/
+static fn text_seek_failed(bipolar offset, p8 whence, bipolar reason)
+{
+        string_address shown = text_input.name;
+        p8 digits[24];
+
+        digits[bipolar_into_string(digits, offset)] = 0;
+
+        if (!shown || string_equals(shown, "-"))
+                shown = (string_address) "standard input";
+
+        text_flush();
+        string_format(writer_stderr, "%s: %w: cannot seek to %soffset %s: %s\n", text_name,
+                      writer_shell_quoted_name, shown,
+                      whence == FILE_SEEK_SET   ? (string_address) ""
+                      : whence == FILE_SEEK_CUR ? (string_address) "relative "
+                                                : (string_address) "end-relative ",
+                      digits, file_reason(reason));
+}
+
+/*
         Room for a record longer than the fixed stores hold.
 
         GNU's line tools keep a line of any length -- cut, fold, paste, pr,
@@ -1562,9 +1645,10 @@ static HOT bool text_lines_open(parallel_lines address_to run, p8 delimiter)
                                               delimiter, 0);
 }
 
+// The pieces read with pread, so the descriptor is still where they began.
 static fn text_lines_done(parallel_lines address_to run)
 {
-        system_seek(text_input.handle, run->resume, FILE_SEEK_SET);
+        text_input_move(run->start, run->resume);
         parallel_lines_close(run);
 }
 
@@ -6678,8 +6762,10 @@ static bool cat_splice_through(positive input)
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
                 return false;
 
-        system_call_3(syscall(fcntl), (positive)ends[1], CAT_SETPIPE_SIZE,
-                      CAT_SPLICE_BLOCK);
+        //      A pipe that stays at its first size carries less a move and
+        //      no byte differently, so a refusal is left as it is.
+        (void)system_call_3(syscall(fcntl), (positive)ends[1], CAT_SETPIPE_SIZE,
+                            CAT_SPLICE_BLOCK);
 
         for (;;)
         {
@@ -6761,8 +6847,8 @@ static bool cat_kernel_copy(const file_facts address_to in)
                 // each move carries half a megabyte instead of one page
                 // ring's worth; a refusal leaves the pipe as it was.
                 if (to == MODE_PIPE)
-                        system_call_3(syscall(fcntl), text_out_handle,
-                                      CAT_SETPIPE_SIZE, CAT_SPLICE_BLOCK);
+                        (void)system_call_3(syscall(fcntl), text_out_handle,
+                                            CAT_SETPIPE_SIZE, CAT_SPLICE_BLOCK);
 
                 return cat_splice_all(input);
         }
@@ -8066,14 +8152,19 @@ static b32 text_wc()
                 {
                         positive size = 0;
 
+                        //      The count stands only once the descriptor is at
+                        //      the end, where reading would have left it for
+                        //      the command after wc; one that will not go
+                        //      there is read through and counted, as GNU's
+                        //      falls back to reading when its seek fails.
                         if (text_regular_size(text_input.handle, address_of size))
                         {
                                 bipolar at = system_seek(text_input.handle, 0, 1);
 
-                                if (at >= 0 && (positive)at <= size)
+                                if (at >= 0 && (positive)at <= size &&
+                                    system_seek(text_input.handle, 0, 2) >= 0)
                                 {
                                         bytes = size - (positive)at;
-                                        system_seek(text_input.handle, 0, 2);
                                         text_input.finished = true;
                                         goto counted;
                                 }
@@ -8973,23 +9064,26 @@ static p8 address_to utility_arena_hold_rest(positive address_to have)
         return held;
 }
 
-static bool text_read_at(positive handle, positive offset, p8 address_to into, positive want)
+/*
+        want bytes of the input from offset, with pread: the descriptor stays
+        where the reader left it, which text_stream_seek counts on. A seek and
+        a read used to be asked, and a seek that failed went unseen, so the
+        window was read from wherever the descriptor stood and tail printed
+        lines that were not the last ones. 1 when every byte came, 0 at an
+        end short of them, and -1 at a failed read, which has been said.
+*/
+static b32 text_read_at(positive handle, positive offset, p8 address_to into, positive want)
 {
         positive have = 0;
+        bipolar status = text_pread_full(handle, into, want, offset, true, address_of have);
 
-        system_seek(handle, offset, FILE_SEEK_SET);
-
-        while (have < want)
+        if (status < 0)
         {
-                bipolar got = system_read_retry(handle, into + have, want - have);
-
-                if (got <= 0)
-                        return false;
-
-                have += (positive)got;
+                text_input_read_failed(status);
+                return -1;
         }
 
-        return true;
+        return have == want;
 }
 
 /*
@@ -9276,13 +9370,25 @@ static bool text_files_from(string_address path)
         return true;
 }
 
-static positive text_stream_floor()
+/*
+        Where the reader stands in a regular input: the descriptor's offset
+        less what the reader holds, so the descriptor is at the floor and the
+        bytes held. -1 when the descriptor will not say, and the input is
+        then read through as a pipe is, as GNU's tail reads one whose
+        lseek (fd, 0, SEEK_CUR) failed.
+*/
+static bipolar text_stream_floor()
 {
         bipolar at = system_seek(text_input.handle, 0, FILE_SEEK_CUR);
         positive held = text_input.filled - text_input.position;
 
-        return at > 0 && (positive)at > held ? (positive)at - held : 0;
+        if (at < 0)
+                return -1;
+
+        return (positive)at > held ? at - (bipolar)held : 0;
 }
+
+#define TEXT_TAIL_FAILED positive_max
 
 static positive text_tail_start(positive handle, positive size, positive count,
                                 positive floor)
@@ -9301,8 +9407,14 @@ static positive text_tail_start(positive handle, positive size, positive count,
 
                 at -= take;
 
-                if (!text_read_at(handle, at, window, take))
-                        return 0;
+                //      A read that failed has been said, and nothing is
+                //      printed; an end short of the size is a file cut
+                //      shorter while it was looked at, and it is read on
+                //      from the floor.
+                b32 read = text_read_at(handle, at, window, take);
+
+                if (read <= 0)
+                        return read < 0 ? TEXT_TAIL_FAILED : floor;
 
                 positive usable = take;
 
@@ -9343,26 +9455,47 @@ static fn text_stream_count(positive left)
         }
 }
 
-static fn text_stream_seek(positive start)
+/*
+        The input put at start, a byte at or past floor (text_stream_floor):
+        a seek, or where the descriptor refuses one, what the reader holds of
+        it and the rest read through, which leave the input where the seek
+        would have. A refused seek used to be dropped, and tail printed from
+        wherever the descriptor stood.
+*/
+static fn text_stream_seek(positive floor, positive start)
 {
-        system_seek(text_input.handle, start, FILE_SEEK_SET);
-        text_input.filled = 0;
-        text_input.position = 0;
-        text_input.finished = false;
+        positive held = text_input.filled - text_input.position;
+
+        if (system_seek(text_input.handle, start, FILE_SEEK_SET) == (bipolar)start)
+        {
+                text_input.filled = 0;
+                text_input.position = 0;
+                text_input.finished = false;
+                return;
+        }
+
+        if (start - floor <= held)
+        {
+                text_input.position += start - floor;
+                return;
+        }
+
+        text_input.position = text_input.filled;
+        text_read_through(start - floor - held);
 }
 
-static fn text_stream_from(positive start)
+static fn text_stream_from(positive floor, positive start)
 {
-        text_stream_seek(start);
+        text_stream_seek(floor, start);
         text_put_rest();
 }
 
 // Everything from start up to but not including stop, which is where head
 // stops when the count it was given was counted from the end.
-static fn text_stream_span(positive start, positive stop)
+static fn text_stream_span(positive floor, positive stop)
 {
-        text_stream_seek(start);
-        text_stream_count(difference_or_zero(stop, start));
+        text_stream_seek(floor, floor);
+        text_stream_count(difference_or_zero(stop, floor));
 }
 
 /*
@@ -9555,8 +9688,23 @@ static bool text_tail_device(positive count)
 
         bipolar start = at < stop && want < stop - at ? stop - want : at;
 
+        //      The descriptor is at from, past start when start is where it
+        //      was: a seek back that fails leaves nothing to read the answer
+        //      from, and it is said as GNU's xlseek says it, with nothing
+        //      printed, where the count was read from the end instead.
         if (start != from)
-                system_seek(text_input.handle, start, FILE_SEEK_SET);
+        {
+                bipolar moved = system_seek(text_input.handle, start, FILE_SEEK_SET);
+
+                if (moved != start)
+                {
+                        text_seek_failed(start, FILE_SEEK_SET, moved < 0 ? moved : -ERROR_INPUT_OUTPUT);
+                        text_input.finished = true;
+                        text_input.failed = true;
+                        text_status = 1;
+                        return true;
+                }
+        }
 
         text_stream_count(count);
         return true;
@@ -9659,6 +9807,31 @@ static fn text_stream_skip(positive skip, bool by_bytes)
 }
 
 /*
+        What was read past the last byte used, handed back to a seekable input
+        so the command after this one on the descriptor reads on from there.
+        A pipe or a terminal cannot take it back and is not asked to say so.
+        A regular file that refuses is said in GNU's words, as head_lines
+        says it after asking fstat, where the refusal went unseen and the
+        next reader started past the line; the status stays as GNU leaves
+        it, since what was printed is right.
+*/
+static fn text_give_back(positive unread)
+{
+        bipolar moved = system_seek(text_input.handle, (positive)-(bipolar)unread,
+                                    FILE_SEEK_CUR);
+        file_facts facts;
+
+        if (moved >= 0)
+                return;
+
+        if (text_handle_facts(text_input.handle, address_of facts) &&
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+                return;
+
+        text_seek_failed(-(bipolar)unread, FILE_SEEK_CUR, moved);
+}
+
+/*
         head -n: a read holding fewer delimiters than are still wanted goes
         out whole, and only the read that holds the last one is walked.
         What was read past that line is handed back to a seekable input, as
@@ -9690,8 +9863,7 @@ static fn text_head_records(positive count)
         positive unread = text_input.filled - text_input.position;
 
         if (unread)
-                system_seek(text_input.handle, (positive)-(bipolar)unread,
-                            FILE_SEEK_CUR);
+                text_give_back(unread);
 }
 
 /*
@@ -9724,16 +9896,20 @@ static fn text_head_short(positive count, bool by_bytes)
 
         utility_arena.used = 0;
 
-        if (!head_tail_pipe_presumed &&
-            text_regular_size(text_input.handle, address_of size))
-        {
-                positive floor = text_stream_floor();
+        bipolar at = -1;
 
-                text_stream_span(floor,
-                                 by_bytes ? (count < difference_or_zero(size, floor) ? size - count
-                                                                  : floor)
-                                          : text_tail_start(text_input.handle,
-                                                            size, count, floor));
+        if (!head_tail_pipe_presumed &&
+            text_regular_size(text_input.handle, address_of size) &&
+            (at = text_stream_floor()) >= 0)
+        {
+                positive floor = (positive)at;
+                positive stop = by_bytes ? (count < difference_or_zero(size, floor) ? size - count
+                                                                       : floor)
+                                         : text_tail_start(text_input.handle,
+                                                           size, count, floor);
+
+                if (stop != TEXT_TAIL_FAILED)
+                        text_stream_span(floor, stop);
                 return;
         }
 
@@ -10180,18 +10356,21 @@ static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
         utility_arena.used = 0;
 
         positive size = 0;
+        bipolar at = -1;
         bool seekable = !marked && !head_tail_pipe_presumed &&
-                        text_regular_size(text_input.handle, address_of size);
+                        text_regular_size(text_input.handle, address_of size) &&
+                        (at = text_stream_floor()) >= 0;
 
         if (seekable)
         {
-                positive floor = text_stream_floor();
+                positive floor = (positive)at;
+                positive start = by_bytes ? (count < difference_or_zero(size, floor) ? size - count
+                                                                        : floor)
+                                          : text_tail_start(text_input.handle, size,
+                                                            count, floor);
 
-                text_stream_from(
-                    by_bytes ? (count < difference_or_zero(size, floor) ? size - count
-                                                     : floor)
-                             : text_tail_start(text_input.handle, size,
-                                               count, floor));
+                if (start != TEXT_TAIL_FAILED)
+                        text_stream_from(floor, start);
                 return true;
         }
 
@@ -20634,10 +20813,11 @@ static b32 text_line_command()
                         positive unread = text_input.filled -
                                           text_input.position;
 
+                        //      util-linux reads a byte at a time and has
+                        //      nothing to give back; a refusal here is said
+                        //      as head says it.
                         if (seekable && unread)
-                                system_seek(text_input.handle,
-                                            (positive)(-(bipolar)unread),
-                                            FILE_SEEK_CUR);
+                                text_give_back(unread);
 
                         return text_done(0);
                 }
@@ -24092,15 +24272,17 @@ static bool text_tr_parallel(bool remove, p8 address_to table)
                 written did not cover is left to the serial loop, which
                 needs no memory past its buffers.
         */
+        //      The chunks read with pread, so the descriptor is still at the
+        //      start: text_input_move puts it where they stop, by a seek or
+        //      by reading through.
         if (!whole && !text_status && !text_out_failed)
         {
-                system_seek(text_input.handle, run.start + run.written * TR_CHUNK,
-                            FILE_SEEK_SET);
+                text_input_move(run.start, run.start + run.written * TR_CHUNK);
                 return false;
         }
 
         // The descriptor ends where reading through would have left it.
-        system_seek(text_input.handle, run.start + run.size, FILE_SEEK_SET);
+        text_input_move(run.start, run.start + run.size);
         text_input.finished = true;
         return true;
 }
@@ -27750,19 +27932,32 @@ static fn grep_binary_zap(p8 address_to at, positive size)
         memory_translate(first, size - (positive)(first - at), table);
 }
 
-// Whether a regular file has a hole anywhere past where reading begins.
-static bool grep_binary_holes(const grep_binary address_to binary,
-                              const file_facts address_to facts, positive handle)
+/*
+        Whether a regular file has a hole anywhere past where reading begins:
+        1 or 0, or the negated errno of a seek back to where reading begins
+        that failed. SEEK_HOLE moves the descriptor, and one left at the hole
+        would be read from there: GNU's file_must_have_nulls says that
+        failure with suppressible_error, and so do the callers here, where it
+        was dropped and grep searched the file from its hole on.
+*/
+static b32 grep_binary_holes(const grep_binary address_to binary,
+                             const file_facts address_to facts, positive handle)
 {
         // Blocks enough for every byte leave no room for one, and asking
         // costs two seeks.
         if (facts->blocks * 512 >= facts->size)
-                return false;
+                return 0;
 
         // SEEK_HOLE, then back with SEEK_SET.
         bipolar hole = system_call_3(syscall(lseek), handle, binary->origin, 4);
 
-        system_call_3(syscall(lseek), handle, binary->origin, 0);
+        if (hole >= 0)
+        {
+                bipolar back = system_call_3(syscall(lseek), handle, binary->origin, 0);
+
+                if (back != (bipolar)binary->origin)
+                        return back < 0 ? (b32)back : -ERROR_INPUT_OUTPUT;
+        }
 
         return hole >= 0 && (positive)hole < facts->size;
 }
@@ -29225,9 +29420,16 @@ static bool grep_one(grep_run address_to run, string_address name)
                                   ? input_facts.size - binary.origin
                                   : 0;
 
-                if (binary.seekable &&
-                    grep_binary_holes(address_of binary, address_of input_facts,
-                                      text_input.handle))
+                b32 holes = binary.seekable
+                                ? grep_binary_holes(address_of binary, address_of input_facts,
+                                                    text_input.handle)
+                                : 0;
+
+                //      A descriptor left at the hole is not read: the failure
+                //      is said as a read of it that failed, and ends it.
+                if (holes < 0)
+                        text_input_read_failed(holes);
+                else if (holes)
                         binary.from = 0;
         }
 
@@ -30485,8 +30687,16 @@ static bool grep_leaf_file(grep_run address_to run, string_address path,
         if (grep_tabbed && text_regular_size(handle, address_of size))
                 column = positive_digits(size);
 
-        if (binary_regions &&
-            grep_binary_holes(address_of binary, address_of facts, handle))
+        //      A descriptor the hole search could not put back is handed
+        //      back, and the serial loop opens the file again and says it.
+        b32 holed = binary_regions
+                        ? grep_binary_holes(address_of binary, address_of facts, handle)
+                        : 0;
+
+        if (holed < 0)
+                return false;
+
+        if (holed)
                 binary.from = 0;
 
         grep_plan plan = grep_plan_of(
@@ -30612,8 +30822,19 @@ static bool grep_leaf_file(grep_run address_to run, string_address path,
                                                 (positive)data % GREP_BINARY_REGION;
 
                                 next = next > past ? next : past;
-                                system_call_3(syscall(lseek), handle, (bipolar)next,
-                                              FILE_SEEK_SET);
+
+                                //      SEEK_DATA left the descriptor at data
+                                //      and this asks for next, a region's
+                                //      edge at or before it. One refused
+                                //      reads on from data counted as next:
+                                //      only the hole's NULs between the two
+                                //      go unread, and a pattern here matches
+                                //      no NUL (grep_nul_free) and nothing
+                                //      here prints an offset, so no count,
+                                //      line or verdict can change, and the
+                                //      answer is not looked at.
+                                (void)system_call_3(syscall(lseek), handle, (bipolar)next,
+                                                    FILE_SEEK_SET);
                                 read_to = next - 1;
                                 got = 1;
                         }
@@ -39681,10 +39902,26 @@ static bool sort_compress_open(sort_source address_to source, sort_entry address
         bipolar input = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         bool own = input >= 0;
 
+        //      Without /proc the temporary's own descriptor is read from its
+        //      start, and one that will not go back there is a temporary
+        //      that cannot be read: said as a failed read of one is, where
+        //      the decompressor used to start at its end and the lines it
+        //      held were left out of the output without a word.
         if (!own)
         {
                 input = entry->handle;
-                system_seek((positive)input, 0, FILE_SEEK_SET);
+
+                bipolar rewound = system_seek((positive)input, 0, FILE_SEEK_SET);
+
+                if (rewound != 0)
+                {
+                        text_complain("%s: read failed: %s: %s\n", text_name,
+                                      sort_temporary_place ? sort_temporary_place
+                                                           : (string_address) "temporary file",
+                                      file_reason(rewound < 0 ? rewound : -ERROR_INPUT_OUTPUT));
+                        sort_failed = true;
+                        return false;
+                }
         }
 
         bipolar result = system_pipe(pair, O_CLOEXEC);
@@ -41112,7 +41349,11 @@ static positive sort_read_pieces(positive handle, positive offset, p8 address_to
         while (taken < blocks && run.got[taken] == SORT_READ)
                 taken++;
 
-        system_seek(handle, offset + taken * SORT_READ, FILE_SEEK_SET);
+        //      The blocks read with pread, and handle is text_input's (the
+        //      one caller hands it over), still at offset: put where they end
+        //      by a seek or by reading through, or the serial reads after
+        //      them sorted the same lines twice when the seek failed.
+        text_input_move(offset, offset + taken * SORT_READ);
         return taken * SORT_READ;
 }
 
@@ -41218,6 +41459,11 @@ static bool sort_gather(positive handle, string_address name)
                         pooled = taken != 0;
                         read_at += taken;
                         sort_text_used += taken;
+
+                        //      A read through that failed has been said, as
+                        //      the serial read below says one.
+                        if (text_input.failed)
+                                break;
 
                         if (sort_text_used - sort_scanned >= sort_split_batch() && !sort_split())
                                 return false;
@@ -43294,12 +43540,35 @@ static positive cmp_length(text_reader address_to side)
 {
         bipolar here = system_seek(side->handle, 0, FILE_SEEK_CUR);
         bipolar last;
+        file_facts facts;
 
         if (here < 0)
                 return 0;
 
+        //      A regular file's length is its size, as GNU's usable_st_size
+        //      takes it, and the descriptor is not moved to learn it. Only a
+        //      device is measured by going to its end and back, and a side
+        //      that will not come back would be compared from its end: said
+        //      as a read of it that failed, which ends cmp with 2.
+        if (text_handle_facts(side->handle, address_of facts) &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE)
+                return facts.size > (positive)here ? facts.size - (positive)here : 0;
+
         last = system_seek(side->handle, 0, FILE_SEEK_END);
-        system_seek(side->handle, here, FILE_SEEK_SET);
+
+        if (last >= 0)
+        {
+                bipolar back = system_seek(side->handle, here, FILE_SEEK_SET);
+
+                if (back != here)
+                {
+                        text_file_failed(side->name, back < 0 ? back : -ERROR_INPUT_OUTPUT, true);
+                        side->failed = true;
+                        side->finished = true;
+                        side->error = back < 0 ? back : -ERROR_INPUT_OUTPUT;
+                        return 0;
+                }
+        }
 
         return last < 0 || last < here ? 0 : (positive)(last - here);
 }
@@ -43621,6 +43890,9 @@ static b32 text_cmp()
                 positive one = cmp_length(address_of cmp_left);
                 positive two = cmp_length(address_of cmp_right);
                 positive smaller = min(one, two);
+
+                if (cmp_left.failed || cmp_right.failed)
+                        return cmp_ends(2);
 
                 if (limit != TEXT_UNSET && limit < smaller)
                         smaller = limit;

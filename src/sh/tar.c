@@ -2842,10 +2842,12 @@ static bool tar_codec_end_write(void)
         return ok;
 }
 
+// Advice: a pipe refuses it with ESPIPE, and a refusal reads every byte the
+// same, so the answer is not looked at.
 static fn tar_advise(bipolar handle)
 {
-        system_call_4(syscall(fadvise64), (positive)handle, 0, 0,
-                      TAR_ADVISE_SEQUENTIAL);
+        (void)system_call_4(syscall(fadvise64), (positive)handle, 0, 0,
+                            TAR_ADVISE_SEQUENTIAL);
 }
 
 /* One read into the compacted record: the bytes it added, 0 at the end of

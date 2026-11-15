@@ -81215,6 +81215,299 @@ def harness_grep_tree_race(argv):
     return checks.verdict("grep tree race", "grep-tree-race")
 
 
+def harness_seek_faults(argv):
+    """The text tools on a descriptor whose seeks fail, where the answer depends on them.
+
+    A seek a tool drops is a failure nobody hears of: tail read its window
+    from wherever the descriptor stood, wc -l of a big file counted it twice,
+    tr's output came twice to the command after it, grep searched a sparse
+    file from its hole on, head -n1 handed nothing back and said nothing.
+    Each row runs one tool of the binary on a file it shares with whoever
+    reads the descriptor next, with a seccomp filter failing the calls the
+    row names (EIO), and holds what is printed, the status and what the next
+    reader of the descriptor gets. A row is held one of three ways:
+
+        right   as with nothing failing: GNU 9.11's answer (--reference),
+                or the binary's own where GNU has no such tool
+        gnu     the refusal GNU says under the same filter: the output, the
+                status and the first line said, digits read as N
+        (out, status, said)   given here, for a tool with no GNU twin
+
+    On the tree before these were checked (1833071d) every row but the
+    controls is red.
+
+        python3 test/differential.py --harness seek_faults --binary ours=PATH \\
+            [--reference DIR]
+
+    Returns 2 (NOT RUN) where no seccomp filter can be installed.
+    """
+    import argparse
+    import ctypes
+    import re
+    import struct
+    import tempfile
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="seek_faults")
+    parser.add_argument("--binary", action="append", required=True,
+                        metavar="LABEL=PATH")
+    parser.add_argument("--reference", default="/opt/moonwater-reference/bin",
+                        help="GNU's tools at the pins (default "
+                             "/opt/moonwater-reference/bin)")
+    opts = parser.parse_args(argv)
+    binaries = []
+    for specification in opts.binary:
+        label, sep, binary = specification.partition("=")
+        if not sep or not label or not Path(binary).is_file():
+            parser.error("--binary requires LABEL=existing-file")
+        binaries.append((label, str(Path(binary).resolve())))
+
+    machine = os.uname().machine
+    #   audit arch, lseek, setitimer, openat, seccomp
+    numbers = {"x86_64": (0xC000003E, 8, 38, 257, 317),
+               "aarch64": (0xC00000B7, 62, 103, 56, 277),
+               "riscv64": (0xC00000F3, 62, 103, 56, 277)}.get(machine)
+    if numbers is None:
+        print("seek faults: NOT RUN -- no system call numbers for %s" % machine)
+        return 2
+    audit, nr_lseek, nr_setitimer, nr_openat, nr_seccomp = numbers
+    EIO, ENOENT = 5, 2
+
+    def program(rules):
+        """A filter answering each rule's call with its errno: the call, and the
+        whence, the sign of the offset or the flags it must have."""
+        code, labels = [], {}
+
+        def op(o, k=0, jt=0, jf=0):
+            code.append([o, jt, jf, k])
+
+        def label(name):
+            code.append(("label", name))
+        LD, JEQ, JSET, RET = 0x20, 0x15, 0x45, 0x06
+        op(LD, 4)
+        op(JEQ, audit, 0, "allow")
+        for i, rule in enumerate(rules):
+            fail, nxt = "fail%d" % i, "rule%d" % (i + 1)
+            label("rule%d" % i)
+            op(LD, 0)
+            op(JEQ, {"lseek": nr_lseek, "setitimer": nr_setitimer,
+                     "openat": nr_openat}[rule["call"]], 0, nxt)
+            if rule.get("whence") is not None:
+                op(LD, 32)
+                op(JEQ, rule["whence"], 0, nxt)
+            if rule.get("offset") == "negative":
+                op(LD, 28)
+                op(JSET, 0x80000000, 0, nxt)
+            if rule.get("flags") is not None:
+                op(LD, 32)
+                op(JEQ, rule["flags"], 0, nxt)
+            label(fail)
+            op(RET, 0x00050000 | rule.get("errno", EIO))
+        label("rule%d" % len(rules))
+        label("allow")
+        op(RET, 0x7fff0000)
+        out = []
+        for item in code:
+            if item[0] == "label":
+                labels[item[1]] = len(out)
+            else:
+                out.append(item)
+        blob = b""
+        for at, (o, jt, jf, k) in enumerate(out):
+            jt, jf = (labels[x] - at - 1 if isinstance(x, str) else x for x in (jt, jf))
+            blob += struct.pack("<HBBI", o, jt, jf, k)
+        return blob, len(out)
+
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def confine(rules):
+        """A preexec_fn installing the filter, which the exec keeps."""
+        blob, count = program(rules)
+
+        def install():
+            body = ctypes.create_string_buffer(blob, len(blob))
+            header = ctypes.create_string_buffer(
+                struct.pack("<HxxxxxxQ", count, ctypes.addressof(body)), 16)
+            if libc.prctl(38, 1, 0, 0, 0) != 0 or \
+                    libc.syscall(nr_seccomp, 1, 0, header) != 0:
+                os._exit(125)
+        return install
+
+    if subprocess.run(["true"], preexec_fn=confine([{"call": "lseek"}])).returncode == 125:
+        print("seek faults: NOT RUN -- this kernel takes no seccomp filter")
+        return 2
+
+    def lines(first, last):
+        return b"".join(b"%d\n" % n for n in range(first, last + 1))
+
+    small = lines(1, 5000)
+    #   Past the eight megabytes below which the pools do not start.
+    big = b"".join(b"%07d %s\n" % (n, b"abcdefghij"[n % 10:] * 3) for n in range(1, 330001))
+    other = small.replace(b"4999\n", b"4989\n").replace(b"12\n", b"21\n", 1)
+    shuffled = b"".join(b"%07d x\n" % ((n * 7919) % 200000) for n in range(200000))
+
+    SET = {"call": "lseek", "whence": 0}
+    END = {"call": "lseek", "whence": 2}
+    BACK = {"call": "lseek", "whence": 1, "offset": "negative"}
+    TIMER = {"call": "setitimer"}
+    #   An open for reading alone, which is what sort's /proc/self/fd/N is.
+    NO_PROC = {"call": "openat", "flags": 0x80000, "errno": ENOENT}
+
+    #   name, words (@name is a file of the work), input, filter, held, and
+    #   lines of the input read before the tool starts.
+    rows = [
+        ("wc -l of a big file, the pool's pieces put back by a seek",
+         ["wc", "-l"], big, [SET], "right"),
+        ("wc -w of a big file, likewise", ["wc", "-w"], big, [SET], "right"),
+        ("cut -c1-7 of a big file, likewise", ["cut", "-c1-7"], big, [SET], "right"),
+        ("rev of a big file, likewise", ["rev"], big, [SET], "right"),
+        ("grep -c of a big file, likewise", ["grep", "-c", "7"], big, [SET], "right"),
+        ("sed s/a/A/ of a big file, likewise", ["sed", "s/a/A/"], big, [SET], "right"),
+        ("tr of a big file, the descriptor put at its end by a seek",
+         ["tr", "a", "A"], big, [SET], "right"),
+        ("sort -r of a big file, its pooled reads put back by a seek",
+         ["sort", "-r"], big, [SET], "right"),
+        ("wc -c, the descriptor sent to the end by a seek", ["wc", "-c"], small,
+         [END], "right"),
+        ("tail -n 2, the window read and the start sought", ["tail", "-n", "2"],
+         small, [SET], "right"),
+        ("tail -c 3, likewise", ["tail", "-c", "3"], small, [SET], "right"),
+        ("tail -n 3 of a descriptor 2000 lines in", ["tail", "-n", "3"], small,
+         [SET], "right", 2000),
+        ("head -n -2, likewise", ["head", "-n", "-2"], small, [SET], "right"),
+        ("cmp -l of two files, measured with a seek back",
+         ["cmp", "-l", "@small", "@other"], b"", [SET], "right"),
+        ("grep of a sparse file, put back after SEEK_HOLE by a seek",
+         ["grep", "^1999$"], "sparse", [SET], "gnu"),
+        ("grep -r of a sparse file, likewise", ["grep", "-r", "^1999$", "@tree"], b"",
+         [SET], "gnu"),
+        ("head -n1, the read past the line given back by a seek",
+         ["head", "-n1"], small, [BACK], "gnu"),
+        ("line, likewise", ["line"], small, [BACK],
+         (b"1\n", 0, rb"line: 'standard input': cannot seek to relative offset "
+                     rb"-N: Input/output error\n")),
+        ("read in a while loop, likewise",
+         ["sh", "-c", 'while read -r l; do echo "$l"; done'], small, [BACK],
+         (b"", 0, rb"sh: N: read: N: read error: Input/output error\n")),
+        ("mapfile -n 2, likewise", ["bash", "-c", 'mapfile -n 2 a; echo "$?${a[1]}"'],
+         small, [BACK], (b"12\n\n", 0, rb"bash: (line N: )?mapfile: N: read error: "
+                                       rb"Input/output error\n")),
+        ("sort --compress-program without /proc, its temporary rewound by a seek",
+         ["sort", "-S", "256K", "--compress-program=gzip"], shuffled, [NO_PROC, SET],
+         (b"", 2, rb"sort: read failed: /tmp: Input/output error\n")),
+        ("flock -w, its timer set by setitimer", ["flock", "-w", "1", "@lock", "true"],
+         b"", [TIMER], (b"", 71, rb"flock: cannot set up timer: Input/output error\n")),
+        ("control: head -n1 with nothing failing", ["head", "-n1"], small, [], "right"),
+        ("control: tail -n 2 with nothing failing", ["tail", "-n", "2"], small, [],
+         "right"),
+        ("control: head -c -2, the descriptor already where it is sent",
+         ["head", "-c", "-2"], small, [SET], "right"),
+    ]
+
+    checks = Checks()
+
+    def digits(text):
+        return re.sub(rb"\d+", b"N", text)
+
+    def run(words, data, faults, work, path_extra, executable=None, skip=0):
+        """words on a descriptor to data that the next reader shares: what is
+        printed, what is said, the status, and what the next reader gets."""
+        path = work / "input"
+        if data == "sparse":
+            if path.exists():
+                path.unlink()
+            with open(path, "wb") as sparse:
+                sparse.write(lines(1, 19999))
+                sparse.seek(4 << 20)
+                sparse.write(lines(20000, 39999))
+        else:
+            path.write_bytes(data)
+        environment = dict(os.environ, LC_ALL="C", TMPDIR="/tmp",
+                           PATH=path_extra + ":" + os.environ.get("PATH", ""))
+        environment.pop("POSIXLY_CORRECT", None)
+        handle = os.open(path, os.O_RDONLY)
+        try:
+            if skip:
+                os.read(handle, len(lines(1, skip)))
+            try:
+                ran = subprocess.run(words, executable=executable, stdin=handle,
+                                     capture_output=True, env=environment, timeout=30,
+                                     cwd=work, preexec_fn=confine(faults) if faults else None)
+                answer = (ran.stdout, ran.stderr, ran.returncode)
+            except subprocess.TimeoutExpired:
+                answer = (b"", b"(no answer in 30 seconds)", -1)
+            rest = []
+            while True:
+                piece = os.read(handle, 1 << 20)
+                if not piece:
+                    break
+                rest.append(piece)
+            return answer + (b"".join(rest),)
+        finally:
+            os.close(handle)
+
+    def shown(answer):
+        return "printed %r, status %s, said %r, the next reader had %d bytes" % (
+            answer[0][:48], answer[2], answer[1][:160], len(answer[3]))
+
+    reference = Path(opts.reference)
+    with tempfile.TemporaryDirectory(prefix="seek-faults-") as temporary:
+        root = Path(temporary)
+        (root / "small").write_bytes(small)
+        (root / "other").write_bytes(other)
+        (root / "tree").mkdir()
+        with open(root / "tree" / "sparse", "wb") as sparse:
+            sparse.write(lines(1, 19999))
+            sparse.seek(4 << 20)
+            sparse.write(lines(20000, 39999))
+        (root / "lock").write_bytes(b"")
+        #   Held while flock waits for it.
+        holder = os.open(root / "lock", os.O_RDONLY)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            for label, binary in binaries:
+                farm = root / ("bin-" + label)
+                farm.mkdir()
+                for tool in {row[1][0] for row in rows} | {"gzip"}:
+                    (farm / tool).symlink_to(binary)
+                work = root / ("w-" + label)
+                work.mkdir()
+                for row in rows:
+                    name, words, data, faults, held = row[:5]
+                    skip = row[5] if len(row) > 5 else 0
+                    words = [str(root / w[1:]) if w.startswith("@") else w for w in words]
+                    ours = run(words, data, faults, work, str(farm), str(farm / words[0]), skip)
+                    if isinstance(held, tuple):
+                        out, status, said = held
+                        checks(ours[0] == out and ours[2] == status and
+                               re.fullmatch(said, digits(ours[1])) is not None,
+                               "%s: %s: %s; wanted %r, %s and %r" %
+                               (label, name, shown(ours), out, status, said))
+                        continue
+                    gnu = reference / words[0]
+                    if held == "gnu":
+                        if not gnu.exists():
+                            print("  %s: %s: NOT RUN -- no %s" % (label, name, gnu))
+                            continue
+                        want = run(words, data, faults, work, str(farm), str(gnu), skip)
+                        first = lambda a: (a[0], a[2], digits(a[1].split(b"\n")[0]))
+                        checks(first(ours) == first(want) and ours[1] != b"",
+                               "%s: %s: %s; GNU under the same filter %s" %
+                               (label, name, shown(ours), shown(want)))
+                        continue
+                    if gnu.exists():
+                        want = run(words, data, [], work, str(farm), str(gnu), skip)
+                        whose = "GNU's"
+                    else:
+                        want = run(words, data, [], work, str(farm), str(farm / words[0]), skip)
+                        whose = "its own"
+                    checks(ours == want, "%s: %s: %s; %s with nothing failing %s" %
+                           (label, name, shown(ours), whose, shown(want)))
+        finally:
+            os.close(holder)
+    return checks.verdict("seek faults", "seek-faults")
+
+
 def harness_machine_scan(argv):
     """The kernel's machine-script scanner against bash, over generated scripts.
 
@@ -101130,6 +101423,7 @@ HARNESS_CHECKS = {
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
     "grep_tree_race": harness_grep_tree_race,
+    "seek_faults": harness_seek_faults,
     "protected_links": harness_protected_links,
     "hostile_strings": harness_hostile_strings,
     "state_cuts": harness_state_cuts,
