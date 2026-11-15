@@ -145,7 +145,7 @@ static int gpu_model_valu(const struct gpu_model_insn address_to in, const struc
         }
         // The lane mask a compare or a carry writes: the bits of the lanes exec has, the others 0.
         if (carry_at || row->form == GM_VOPC)
-                return gpu_model_swrite(in->op[carry_at], 2, mask);
+                return gpu_model_swrite(in->op[carry_at], 2, gpu_model.doubt & GPU_MODEL_DOUBT_INACTIVE ? mask | ~exec : mask);
         return 0;
 }
 
@@ -169,6 +169,8 @@ static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struc
                 if (!(exec >> lane & 1))
                         continue;
                 va = (off ? gpu_model.v[address][lane] | (p64)gpu_model.v[address + 1][lane] << 32 : base + gpu_model.v[address][lane]) + (positive)(b64)in->imm;
+                if (gpu_model.doubt & GPU_MODEL_DOUBT_ALIGN && !store && bytes > 1)
+                        va &= ~3ull;
                 if (store)
                 {
                         for (unsigned int r = 0; r < regs; r++)
@@ -211,7 +213,7 @@ static int gpu_model_ds(const struct gpu_model_insn address_to in)
                         continue;
                 if ((from ^ lane) & 32)
                         return gpu_model_unmodelled("a permute that reads across the halves of the wave");
-                taken[lane] = exec >> from & 1 ? gpu_model.v[data][from] : 0;
+                taken[lane] = exec >> from & 1 || gpu_model.doubt & GPU_MODEL_DOUBT_PERMUTE ? gpu_model.v[data][from] : 0;
         }
         for (unsigned int lane = 0; lane < 64; lane++)
                 if (exec >> lane & 1)

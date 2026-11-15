@@ -33,7 +33,12 @@ static struct
         p32 hits[GPU_KERNELS][GPU_MODEL_CARD_WORDS]; // each kernel's code words' runs, every job since the reset
         p8 address_to buffer;
         positive bytes;
+        // a staged kernel (gpu_model_stage): its code at staged_at in the buffer, its resource words, which a dispatch of that code is given
+        positive staged_at;
+        p32 staged_rsrc[2];
+        unsigned int staged_words;
 } gpu_model_card;
+#define GPU_MODEL_STAGE (128u << 10) // the room for a staged kernel's code, below the self-test's megabyte
 
 static void gpu_model_card_reset(void)
 {
@@ -89,8 +94,11 @@ static void gpu_model_card_dispatch(const p32 address_to grid)
                 gpu_model_card_refuse("a dispatch of code where the card may not run: ", code);
                 return;
         }
-        gpu_model_dispatch((const p32 address_to)host, (unsigned int)(room / 4 < GPU_MODEL_CODE ? room / 4 : GPU_MODEL_CODE), code, sh[0x212], sh[0x213], sh + 0x240, grid[0],
-                           grid[1]);
+        if (gpu_model_card.staged_words && code == GPU_VA + gpu_model_card.staged_at)
+                room = 4ull * gpu_model_card.staged_words; // a staged kernel is run with its own resource words, as a gpu.c built with it would send them
+        gpu_model_dispatch((const p32 address_to)host, (unsigned int)(room / 4 < GPU_MODEL_CODE ? room / 4 : GPU_MODEL_CODE), code,
+                           gpu_model_card.staged_words && code == GPU_VA + gpu_model_card.staged_at ? gpu_model_card.staged_rsrc[0] : sh[0x212],
+                           gpu_model_card.staged_words && code == GPU_VA + gpu_model_card.staged_at ? gpu_model_card.staged_rsrc[1] : sh[0x213], sh + 0x240, grid[0], grid[1]);
         for (unsigned int k = 0; k < GPU_KERNELS; k++)
                 if (code == GPU_VA + gpu_kernel_at[k])
                         for (unsigned int at = 0; at < GPU_MODEL_CARD_WORDS; at++)
@@ -132,12 +140,12 @@ static void gpu_model_card_submit(positive ib_va, unsigned int ib_bytes, const p
 // The card's buffer as gpu_start makes it for bytes of the caller's (and the self-test's megabyte), with the kernels copied in.
 static b32 gpu_model_card_start(positive bytes)
 {
-        positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull;
+        positive size = (GPU_DATA + bytes + GPU_MODEL_STAGE + (1 << 20) + 4095) & ~4095ull;
         long at = system_call_6(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
 
         if (at < 0 && at > -4096)
                 return false;
-        gpu_model_card.buffer = (p8 address_to)at, gpu_model_card.bytes = size;
+        gpu_model_card.buffer = (p8 address_to)at, gpu_model_card.bytes = size, gpu_model_card.staged_at = size - (1 << 20) - GPU_MODEL_STAGE, gpu_model_card.staged_words = 0;
         gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)at, gpu.size = size, gpu.pending = 0, gpu.imports = 0, gpu.broken = 0, gpu_map_count = 0;
         for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
         {

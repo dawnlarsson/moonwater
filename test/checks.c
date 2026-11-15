@@ -245105,6 +245105,7 @@ static b32 model_seen(unsigned int handle)
 }
 
 static unsigned int model_source[64 * 4];
+static unsigned int model_mutant_word, model_mutant[sizeof(gpu_k_scene) / 4];
 
 // gpu.asm assembled here by gpuasm, for its labels: a kernel's label's first and last word in gpuasm_words.
 static b32 model_asm_ready;
@@ -245291,7 +245292,7 @@ b32 main()
                 check("gpu model: its cost says what ran: four waves, the stores of 200 lanes", gpu_model.cost.waves == 4 && gpu_model.cost.lane_stores == 200);
         }
 
-        if (!gpu_model_card_start(4 << 20))
+        if (!gpu_model_card_start(8 << 20))
         {
                 check("gpu model: the model card's buffer is made", false);
                 return test_report(null);
@@ -245312,7 +245313,32 @@ b32 main()
         for (unsigned int way = 1; way <= 3; way++)
                 gpu_model.nudge = way, same = same && model_hash() == GPU_TEST_HASH && !gpu_model.fault.code;
         gpu_model.nudge = 0;
-        check("gpu model: the same with v_rcp_f32 and v_sqrt_f32 an ulp up, an ulp down, and either or neither lane by lane (the box corners correct both to the integer)", same);
+        check("gpu model: GPU_TEST_HASH does NOT pin the last bits of v_rcp_f32 and v_sqrt_f32: the hash is the same with them an ulp up, an ulp down, and either or "
+              "neither lane by lane (the box corners correct both to the integer), so the model's correctly rounded ones are the documentation's, not the card's",
+              same);
+        // Each other behaviour the model takes from the documentation, the other way: one the hash moves with is pinned by the card's picture, one it does not is not.
+        {
+                static const char *const doubts[GPU_MODEL_DOUBTS] = {"a compare's and a carry's bit of a lane exec has off is 0",
+                                                                     "ds_bpermute_b32 from a lane exec has off reads 0",
+                                                                     "the float ops round to nearest even (the float mode 0xc0)",
+                                                                     "v_cvt_u32_f32 rounds toward zero",
+                                                                     "a global dword load at an address not of 4 reads its bytes where they lie",
+                                                                     "s_and_saveexec_b64's SCC is the new exec's being nonzero"};
+
+                for (unsigned int k = 0; k < GPU_MODEL_DOUBTS; k++)
+                {
+                        gpu_model.doubt = 1u << k, hash = model_hash();
+                        if (hash != GPU_TEST_HASH || gpu_model.fault.code)
+                                string_format(log, "gpu model doubt: %s: pinned by GPU_TEST_HASH (the other way the self-test hashes to %p%s%s)\n", doubts[k], (positive)hash,
+                                              gpu_model.fault.code ? ", or the model fails: " : "", gpu_model.fault.text);
+                        else
+                                string_format(log, "gpu model doubt: %s: NOT pinned by GPU_TEST_HASH (the self-test is the same the other way): the model's is the documentation's\n",
+                                              doubts[k]);
+                }
+                gpu_model.doubt = 0;
+                check("gpu model: each behaviour the model takes from the documentation is asked of GPU_TEST_HASH the other way (the log says which it pins), and the model put back is the card's",
+                      model_hash() == GPU_TEST_HASH && !gpu_model.fault.code);
+        }
 
         // One bit of one word of the card's copy of the scene kernel flipped (premulv's v_lshrrev_b32 v35, 12, v35 made 13): the model runs it to its end and the hash is another.
         {
@@ -245331,10 +245357,40 @@ b32 main()
                         at += in.words;
                 }
                 if (found)
-                        code[found - 1] ^= 1, hash = model_hash(), code[found - 1] ^= 1;
+                        code[found - 1] ^= 1, hash = model_hash(), code[found - 1] ^= 1, model_mutant_word = found - 1;
                 string_format(log, "gpu model: the mutant (word %p of scene, bit 0) hashes to %p\n", (positive)(found - 1), (positive)hash);
                 check("gpu model: a scene kernel with one bit of one instruction word flipped runs to its end and its hash is not GPU_TEST_HASH", found && !gpu_model.fault.code && hash != GPU_TEST_HASH);
                 check("gpu model: and the kernel put back is GPU_TEST_HASH again", model_hash() == GPU_TEST_HASH);
+        }
+
+        // The differential the changes to the scene kernel and to the binning are held to (test/gpu_model/differ.c): the same random scenes drawn by two
+        // drawers, here the scene kernel the build made and a staged kernel in its place, compared pixel for pixel. A staged copy of the kernel draws every
+        // scene the same; one with the mutant's bit flipped does not, and the first pixel that differs is named.
+        {
+                struct gpu_model_difference d;
+                positive wrong;
+                b32 staged;
+
+                gpu_model_card_reset();
+                staged = gpu_model_stage(gpu_k_scene, sizeof(gpu_k_scene) / 4);
+                wrong = gpu_model_card_differential(gpu_model_draw_shipped, gpu_model_draw_staged, 0x2545f491u, 200, &d);
+                string_format(log, "gpu model differential: the scene kernel against a staged copy of it, %p scenes from the seed 0x2545f491, %p records, %p pixels: %p differ, %p failed%s%s\n",
+                              (positive)d.scenes, d.records, d.pixels, wrong, (positive)d.failed, d.failed ? ": " : "", gpu_model.fault.text);
+                check("gpu model: gpu_model_card_differential draws 200 random scenes of every kind of record with the shipped scene kernel and with a staged copy of it the same, pixel for pixel",
+                      staged && !wrong && !d.failed && d.records > 1000);
+                {
+                        unsigned int ran = 0, of = 0;
+
+                        model_coverage("scene", 6, &ran, &of); // what the differential's scenes run
+                }
+                memory_copy(model_mutant, gpu_k_scene, sizeof(gpu_k_scene));
+                model_mutant[2 + model_mutant_word] ^= 1;
+                staged = model_mutant_word && gpu_model_stage(model_mutant, sizeof(model_mutant) / 4);
+                wrong = gpu_model_card_differential(gpu_model_draw_shipped, gpu_model_draw_staged, 0x2545f491u, 200, &d);
+                string_format(log, "gpu model differential: against the mutant staged, %p pixels differ, the first in scene %p at %p,%p: %p shipped, %p staged\n", wrong, (positive)d.scene,
+                              (positive)d.x, (positive)d.y, (positive)d.one, (positive)d.two);
+                check("gpu model: and with the mutant staged in its place, pixels differ and the first is named", staged && wrong > 0 && !d.failed);
+                gpu_model_card.staged_words = 0;
         }
 
         // Bounds: a record that reaches past every buffer the job named is refused with the address, and no wave past it runs.

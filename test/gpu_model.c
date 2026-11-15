@@ -67,6 +67,14 @@ struct gpu_model_cost
         positive waves, instructions, salu, valu, smem, vmem_loads, vmem_stores, ds, branches, lanes, lane_loads, lane_stores, bytes_loaded, bytes_stored, scalar_bytes;
 };
 
+// The doubts (gpu_model.doubt), each the other way from the documentation's.
+#define GPU_MODEL_DOUBT_INACTIVE 1u // a compare's and a carry's bit of a lane exec has off is 1 (gfx10: 0)
+#define GPU_MODEL_DOUBT_PERMUTE 2u  // ds_bpermute_b32 from a lane exec has off reads its register (gfx10: 0)
+#define GPU_MODEL_DOUBT_ROUND 4u    // the float ops round toward zero (the float mode 0xc0: to nearest even)
+#define GPU_MODEL_DOUBT_TRUNC 8u    // v_cvt_u32_f32 rounds to nearest (gfx10: toward zero)
+#define GPU_MODEL_DOUBT_ALIGN 16u   // a global dword load at an address not of 4 reads the aligned dword under it (amdgpu sets unaligned access: byte for byte)
+#define GPU_MODEL_DOUBT_SCC 32u     // s_and_saveexec_b64's SCC is the old exec's being nonzero (gfx10: the new one's)
+#define GPU_MODEL_DOUBTS 6
 #define GPU_MODEL_CODE 16384      // words of a kernel's code its decoding and its counts are kept for
 #define GPU_MODEL_BUDGET 4000000u // instructions a wave may run
 
@@ -83,9 +91,10 @@ static struct
         p32 v[256][64];
         unsigned int scc, x, y;
         positive pc;
-        // what the caller sets: the registers' poison at a wave's start, the nudge of v_rcp_f32 and v_sqrt_f32 (float.c)
+        // what the caller sets: the registers' poison at a wave's start, the nudge of v_rcp_f32 and v_sqrt_f32 (float.c), and the doubts: behaviours
+        // the model takes from the documentation, each of which a row turns the other way to ask whether GPU_TEST_HASH decides it
         p32 poison;
-        unsigned int nudge;
+        unsigned int nudge, doubt;
         // what was run, each code word's count (an instruction's first word), and the failure
         struct gpu_model_cost cost;
         p32 hits[GPU_MODEL_CODE];
@@ -169,6 +178,7 @@ static int gpu_model_unknown(p32 word, positive pc, const char *why)
 
 #ifdef GPU_MODEL_CARD
 #include "gpu_model/card.c"
+#include "gpu_model/differ.c"
 #endif
 
 #endif

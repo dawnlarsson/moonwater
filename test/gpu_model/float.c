@@ -25,7 +25,7 @@ static p32 gpu_model_pack(p32 sign, p64 value, b32 scale, b32 sticky)
 
                 mantissa = (p32)(value >> shift);
                 sticky = sticky || (rest & (half - 1)) != 0;
-                if ((rest & half) && (sticky || (mantissa & 1)))
+                if ((rest & half) && (sticky || (mantissa & 1)) && !(gpu_model.doubt & GPU_MODEL_DOUBT_ROUND))
                         mantissa++;
                 if (mantissa == 1u << 24)
                         mantissa >>= 1, exponent++;
@@ -144,6 +144,8 @@ static p32 gpu_model_cvt_u32_f32(p32 a)
                 return 0;
         if (kind == 2 || e >= 9)
                 return 0xffffffffu;
+        if (gpu_model.doubt & GPU_MODEL_DOUBT_TRUNC && e < 0)
+                return e > -25 ? (p32)((m + (1ull << (-e - 1))) >> -e) : 0;
         return e >= 0 ? (p32)(m << e) : e > -24 ? (p32)(m >> -e) : 0;
 }
 

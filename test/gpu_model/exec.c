@@ -167,7 +167,7 @@ static int gpu_model_salu(const struct gpu_model_insn address_to in, const struc
         case GM_KEY(GM_SOP1, 0x04): d = a; break;
         case GM_KEY(GM_SOP1, 0x24):
                 d = exec = gpu_model.s[126] | (p64)gpu_model.s[127] << 32, exec &= a;
-                gpu_model.s[126] = (p32)exec, gpu_model.s[127] = (p32)(exec >> 32), scc = exec != 0;
+                gpu_model.s[126] = (p32)exec, gpu_model.s[127] = (p32)(exec >> 32), scc = gpu_model.doubt & GPU_MODEL_DOUBT_SCC ? d != 0 : exec != 0;
                 break;
         case GM_KEY(GM_SOP2, 0x00): d = (p64)x + y, scc = (unsigned int)(d >> 32), d = (p32)d; break;
         case GM_KEY(GM_SOP2, 0x01): d = (p32)(x - y), scc = y > x; break;
