@@ -1296,6 +1296,28 @@ static COLD bipolar system_make_directory_exact_at(
             (positive)(string_address)"", (mode & 01777) | inherited,
             AT_EMPTY_PATH);
 
+        //      fchmodat2 is Linux 6.6's, and a kernel before it or qemu-user
+        //      8.2 answers ENOSYS (38 on every Linux machine), which made every
+        //      exact directory a failure there: the directory itself, opened
+        //      through the pinned handle and never by its name again, takes
+        //      the same mode with fchmod. Opening it to read takes the owner's
+        //      read bit, so there a mode without it is still refused, as all
+        //      of them were.
+        if (set == -38)
+        {
+                bipolar opened = system_open_at(
+                    handle, (string_address)".",
+                    FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+                set = opened;
+                if (opened >= 0)
+                {
+                        set = system_call_2(syscall(fchmod), (positive)opened,
+                                            (mode & 01777) | inherited);
+                        system_close(opened);
+                }
+        }
+
         system_close(handle);
         if (set < 0)
                 (void)system_remove_at(directory, path, AT_REMOVEDIR);
