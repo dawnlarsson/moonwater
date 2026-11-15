@@ -123559,6 +123559,7 @@ static fn check_copy_rect_stream()
 #endif
 }
 
+
 /*
         memory_runs_u32 is the contract in its comment, written out: a row is chunks of 16 words, the last short one and any
         past the 4095th left out, a chunk is flat when its words are its first, a run is two or more flat chunks in a row of one
@@ -134050,7 +134051,7 @@ static void check_compositor_click(void)
             struct compositor_pointer at = {.shape = shape, .scale = sizes[size]};
             int hot_x, hot_y, span = compositor_pointer_span(&at, &hot_x, &hot_y);
 
-            compositor_pointer_row(&at, hot_y, span, hot_x, hot_y, fill, edge);
+            compositor_pointer_rows(&at, span, hot_x, hot_y, hot_y, 1, fill, edge, CP_SPAN_MOST);
             hot &= span <= CP_PLANE && hot_x < span && hot_y < span && (fill[hot_x] || edge[hot_x]);
         }
     check("press: at a half (50 percent), three quarters, four fifths (80 percent), once, one and a quarter (125 percent), one and a half, twice "
@@ -134139,7 +134140,7 @@ static void check_compositor_cursor_style(void)
                             whole = 0;
                             continue;
                         }
-                        compositor_pointer_row(&p, py, span, hot_x, hot_y, covers[0], covers[1]);
+                        compositor_pointer_rows(&p, span, hot_x, hot_y, py, 1, covers[0], covers[1], CP_SPAN_MOST);
                         whole &= covers[0][px] || covers[1][px];
                     }
             }
@@ -134162,13 +134163,13 @@ static void check_compositor_cursor_style(void)
             span = compositor_pointer_span(&p, &hot_x, &hot_y);
             for (int row = 1; row < 12 * scale / 256; row++)
             {
-                compositor_pointer_row(&p, row, span, hot_x, hot_y, covers[0], covers[1]);
+                compositor_pointer_rows(&p, span, hot_x, hot_y, row, 1, covers[0], covers[1], CP_SPAN_MOST);
                 lined &= covers[1][0] == 255;
             }
         }
         p = (struct compositor_pointer){.dyn = 1, .scale = 128, .hw = 8 * 256, .hh = 8 * 256, .c = 8 * 256};
         span = compositor_pointer_span(&p, &hot_x, &hot_y);
-        compositor_pointer_row(&p, hot_y, span, hot_x, hot_y, covers[0], covers[1]);
+        compositor_pointer_rows(&p, span, hot_x, hot_y, hot_y, 1, covers[0], covers[1], CP_SPAN_MOST);
         for (int column = hot_x; column < span; column++)
             ink += covers[1][column];
         check("cursor style: below a whole scale the arrow's outline, a cell wide, is a whole pixel of its ink at four fifths and a half", lined);
@@ -134268,6 +134269,179 @@ static void check_compositor_cursor_style(void)
     check("cursor style: the style row is dynamic when nothing is kept, and the squeeze row is 25 percent",
           style_row >= 0 && squeeze_row >= 0 && string_equals((string_address)settings_rows[style_row].standard, (string_address)"dynamic") &&
               string_equals((string_address)settings_rows[squeeze_row].standard, (string_address)"25"));
+}
+
+/*
+        The pointer's picture as it was drawn before its covers were a table: compositor_pointer_row, a row at a time with its divides
+        a pixel, and the draw that mixed each row's fill and edge by memory_mix_u32_row. The table (compositor_pointer_cover), the rows
+        made without a divide a pixel (compositor_pointer_rows) and the draw from them (compositor_cursor_draw, by
+        memory_mix_const_u32_rect) are held to it bit for bit.
+*/
+static void pointer_row_reference(const struct compositor_pointer *p, int row, int span, int hot_x, int hot_y, unsigned char *fill, unsigned char *edge)
+{
+    int n = p->dyn ? 1 : p->scale < 4 * 256 ? 4 : 2, all = n * n;
+    long long step = (32768ll << 16) / (all * p->scale);
+    long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
+    long long oy = hot_y * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][1]);
+
+    for (int column = 0; column < span; column++)
+    {
+        int inks[3] = {0, 0, 0};
+
+        if (p->dyn)
+        {
+            compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
+            continue;
+        }
+        for (int j = 0; j < n; j++)
+            for (int i = 0; i < n; i++)
+            {
+                long long u = ((2ll * ((column * n + i) * n + j) + 1) * step >> 16) - ox, v = ((2ll * ((row * n + j) * n + i) + 1) * step >> 16) - oy;
+                char ink = u >= 0 && v >= 0 && u < CP_CELL * 256 && v < CP_CELL * 256 ? compositor_cursor_art[p->shape][v >> 8][u >> 8] : '.';
+
+                inks[ink == '#' ? 2 : ink == 'o']++;
+            }
+        if (p->scale < 256)
+        {
+            int lined = inks[2] * 255 * 256 / (all * p->scale), filled = inks[1] * 255 * 256 / (all * p->scale);
+
+            lined = lined < 255 ? lined : 255;
+            filled = filled < 255 - lined ? filled : 255 - lined;
+            edge[column] = (unsigned char)lined;
+            fill[column] = (unsigned char)(filled ? filled * 255 / (255 - lined) : 0);
+            continue;
+        }
+        edge[column] = (unsigned char)(inks[2] * 255 / all);
+        fill[column] = (unsigned char)(inks[1] ? inks[1] * 255 / (all - inks[2]) : 0);
+    }
+}
+
+// The draw a row at a time, each row's covers the reference's (made once a picture into covers, the fill's span rows then the edge's).
+static void cursor_draw_reference(const struct compositor_target *t, int x, int y, const struct compositor_pointer *p, unsigned int fill, unsigned int edge,
+                                  const unsigned char *made)
+{
+    unsigned int inks[2][CP_SPAN_MOST];
+    int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
+    int x1 = left > t->x1 ? left : t->x1, x2 = left + span < t->x2 ? left + span : t->x2;
+    int y1 = top > t->y1 ? top : t->y1, y2 = top + span < t->y2 ? top + span : t->y2;
+
+    if (x2 <= x1 || y2 <= y1)
+        return;
+    memory_fill_u32_rect(inks[0], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, fill & 0xffffffu);
+    memory_fill_u32_rect(inks[1], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, edge & 0xffffffu);
+    for (int row = y1; row < y2; row++)
+    {
+        unsigned int *pixels = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+        const unsigned char *covers[2] = {made + (unsigned long)(row - top) * span, made + (unsigned long)span * span + (unsigned long)(row - top) * span};
+
+        for (int ink = 0; ink < 2; ink++)
+            memory_mix_u32_row(pixels, inks[ink], covers[ink] + (x1 - left), (positive)(x2 - x1));
+        for (int at = x1 - left; (fill >> 24) && at < x2 - left; at++)
+            pixels[at - (x1 - left)] |= (covers[1][at] + (covers[0][at] * (255u - covers[1][at]) + 127) / 255) << 24;
+    }
+}
+
+/*
+        Every picture the settings make, at every size the slider gives (50 to 300 percent in steps of 5) at a desktop of 100 and of
+        200 and shaken at 100, and pressed (a quarter smaller): each classic shape, the dynamic circle, its rectangle over text and the
+        circle stretched its most. Its covers, made once into the table and read by the GPU's tables, are compositor_pointer_row's, and
+        drawn over a ground of every colour, part of it past the target's edge, in both looks and as the plane's picture with its
+        alpha, the pixels are what the row at a time drew. A band that finds the table being made draws from its own rows, the same
+        pixels; and a picture drawn after another is its own and not the table's last.
+*/
+#define POINTER_TABLE_SIDE (CP_SPAN_MOST + 32)
+static void check_compositor_pointer_table(void)
+{
+    static unsigned int ground[POINTER_TABLE_SIDE * POINTER_TABLE_SIDE], got[POINTER_TABLE_SIDE * POINTER_TABLE_SIDE],
+        want[POINTER_TABLE_SIDE * POINTER_TABLE_SIDE];
+    static unsigned char reference[2 * CP_SPAN_MOST * CP_SPAN_MOST];
+    static const int desktop[][2] = {{1, 0}, {2, 0}, {1, 1}}; // whole pixels a logical one, shaken
+    static const unsigned int inks[3][2] = {{0xffffffu, 0u}, {0u, 0xffffffu}, {0xffffffffu, 0xff000000u}};
+    unsigned long pictures = 0, covers_wrong = 0, pixels_wrong = 0, own_wrong = 0, tables = 0, owns = 0;
+
+    for (unsigned int at = 0; at < POINTER_TABLE_SIDE * POINTER_TABLE_SIDE; at++)
+        ground[at] = (at * 2654435761u) ^ (at << 7);
+    for (unsigned int d = 0; d < sizeof(desktop) / sizeof(desktop[0]); d++)
+        for (int percent = 50; percent <= 300; percent += 5)
+            for (unsigned int kind = 0; kind < CP_SHAPES + 3; kind++)
+                for (int pressed = 0; pressed < 2; pressed++)
+                {
+                    int base = (desktop[d][0] * 256 * percent + 50) / 100, scale = desktop[d][1] ? 3 * base : base, hot_x, hot_y, span;
+                    struct compositor_pointer p = {.shape = kind < CP_SHAPES ? kind : 0, .dyn = kind >= CP_SHAPES};
+                    const unsigned char *table;
+
+                    scale = pressed ? scale * 192 / 256 : scale;
+                    if (p.dyn)
+                    {
+                        p.hw = p.hh = p.c = CP_DYN_RADIUS * 256;
+                        if (kind == CP_SHAPES + 1)
+                            p.hw = CP_DYN_TEXT_W * 256, p.hh = CP_DYN_TEXT_H * 256, p.c = CP_DYN_TEXT_R * 256;
+                        if (kind == CP_SHAPES + 2)
+                            p.grow = CP_DYN_STRETCH, p.ux = -51, p.uy = 38;
+                        scale = scale < CP_SPAN_MOST / CP_DYN_CELL * 256 ? scale : CP_SPAN_MOST / CP_DYN_CELL * 256;
+                    }
+                    else
+                        scale = scale < CP_SPAN_MOST / CP_CELL * 256 ? scale : CP_SPAN_MOST / CP_CELL * 256;
+                    p.scale = scale;
+                    span = compositor_pointer_span(&p, &hot_x, &hot_y);
+                    for (int row = 0; row < span; row++)
+                        pointer_row_reference(&p, row, span, hot_x, hot_y, reference + (unsigned long)row * span,
+                                              reference + (unsigned long)span * span + (unsigned long)row * span);
+                    table = compositor_pointer_cover(&p);
+                    pictures++;
+                    tables += table != 0;
+                    covers_wrong += !table || memory_compare(table, reference, 2 * (positive)span * (positive)span) != 0;
+                    // Drawn a third of it past the target's top left, so the clip cuts it, in each look and as the plane's picture.
+                    for (unsigned int look = 0; look < 3; look++)
+                    {
+                        struct compositor_target t = {got, POINTER_TABLE_SIDE, POINTER_TABLE_SIDE, POINTER_TABLE_SIDE, 0, 0, POINTER_TABLE_SIDE,
+                                                      POINTER_TABLE_SIDE, 0, 0, 0};
+                        struct compositor_target r = t;
+                        int x = hot_x - span / 3, y = hot_y - span / 3;
+
+                        r.pixels = want;
+                        memory_copy(got, ground, sizeof(ground));
+                        memory_copy(want, ground, sizeof(ground));
+                        compositor_cursor_draw(&t, x, y, &p, inks[look][0], inks[look][1]);
+                        cursor_draw_reference(&r, x, y, &p, inks[look][0], inks[look][1], reference);
+                        pixels_wrong += memory_compare(got, want, sizeof(got)) != 0;
+                        // As a band that finds the table being made, at every twenty fifth percent: its own rows, the same pixels.
+                        if (percent % 25)
+                            continue;
+                        memory_copy(got, ground, sizeof(ground));
+                        __atomic_store_n(&compositor_pointer_table.busy, 1, __ATOMIC_RELEASE);
+                        __atomic_store_n(&compositor_pointer_table.made, 0, __ATOMIC_RELEASE);
+                        compositor_cursor_draw(&t, x, y, &p, inks[look][0], inks[look][1]);
+                        __atomic_store_n(&compositor_pointer_table.busy, 0, __ATOMIC_RELEASE);
+                        own_wrong += memory_compare(got, want, sizeof(got)) != 0;
+                        owns++;
+                    }
+                }
+    check("pointer table: every picture the slider makes (50 to 300 percent, three desktops, pressed, every shape) is made into the table",
+          pictures == 3 * 51 * (CP_SHAPES + 3) * 2 && tables == pictures);
+    check("pointer table: its covers, the fill's and then the edge's, are compositor_pointer_row's, bit for bit", covers_wrong == 0);
+    check("pointer table: drawn from it over a ground of every colour and cut by the target, in both looks and as the plane's, the pixels are the row at a time's",
+          pixels_wrong == 0);
+    check("pointer table: and a band that finds it being made draws the same pixels from its own rows", owns > 0 && own_wrong == 0);
+    {
+        struct compositor_pointer arrow = {.shape = CP_ARROW, .scale = 512}, hand = {.shape = CP_HAND, .scale = 512};
+        const unsigned char *first = compositor_pointer_cover(&arrow), *again, *other;
+        unsigned char was = first ? first[1] : 0;
+        int hot_x, hot_y, span = compositor_pointer_span(&hand, &hot_x, &hot_y);
+
+        // A mark in the table, which it keeps while the picture asked for is the one it holds, and loses when another is made.
+        if (first)
+            ((unsigned char *)first)[1] = (unsigned char)(was ^ 0x5a);
+        again = compositor_pointer_cover(&arrow);
+        check("pointer table: a picture asked for again is the table as it was, not made again", first && again == first && again[1] == (unsigned char)(was ^ 0x5a));
+        other = compositor_pointer_cover(&hand);
+        for (int row = 0; row < span; row++)
+            pointer_row_reference(&hand, row, span, hot_x, hot_y, reference + (unsigned long)row * span,
+                                  reference + (unsigned long)span * span + (unsigned long)row * span);
+        check("pointer table: and another picture is made anew, its own covers", other && !memory_compare(other, reference, 2 * (positive)span * (positive)span));
+        again = compositor_pointer_cover(&arrow);
+        check("pointer table: and the first, asked for after it, is made again without the mark", again && again[1] == was);
+    }
 }
 
 /*
@@ -177036,6 +177210,7 @@ b32 main()
         check_compositor_look();
         check_compositor_click();
         check_compositor_cursor_style();
+        check_compositor_pointer_table();
         check_taskbar_geometry();
         check_rtl_chrome();
         check_taskbar_tray();

@@ -3121,7 +3121,7 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
         CP_DYN_IDLE_NS after the last motion. Its cell is CP_DYN_CELL square with the pointer at its middle, so the plane holds it at twice
         its size with the longest stretch.
 
-        Either picture is made a pixel at a time from samples of its cell (compositor_pointer_row), so it is drawn at any scale: a whole
+        Either picture is made a pixel at a time from samples of its cell (compositor_pointer_rows), so it is drawn at any scale: a whole
         scale gives the classic bitmaps pixel for pixel, and a scale between is smooth. That is what a held button uses: the left one
         shrinks the pointer by the squeeze the settings give and the right one grows it by half that, over CP_SWAY_NS on the kit's ease.
 */
@@ -3595,7 +3595,7 @@ static void compositor_picture_draw(const struct compositor_target *t, int left,
 
 /*
         A picture's square: its side in pixels, and the pixel of it the pointer is on (the dynamic shape's middle). A bitmap's hot pixel
-        starts at its hot cell's corner (compositor_pointer_row), so it is as many pixels in as the cells before the hot cell take, rounded
+        starts at its hot cell's corner (compositor_pointer_rows), so it is as many pixels in as the cells before the hot cell take, rounded
         up, and the square reaches as many past it as the cells after it take, rounded up: the whole cell is in it at any scale. At a
         whole scale that is the cell's own side times the scale; at a scale between, the cells before the hot cell rounded down would
         start the square inside the first column, and the tip of a resize arrow there (CP_RESIZE_H's, CP_MOVE's) was left out.
@@ -3690,67 +3690,143 @@ static void compositor_dyn_cover(const struct compositor_pointer *p, long long u
 }
 
 /*
-        One row of a picture, span pixels from its left: the cover of its fill ink a pixel, and of its edge ink over that. The fill's
-        cover is of what the edge leaves, so that mixing the fill and then the edge gives each ink its own share. The dynamic shape's
-        are worked out at the pixel's middle (compositor_dyn_cover). A bitmap's pixel is n by n samples of its cell, each at its place
-        (from the hot pixel's corner, over the scale) and no two in one row or one column of the pixel, so at a whole scale every sample
-        of a pixel is in one cell and the covers are all or none, and at a scale between an edge along the rows is as smooth as one
-        across them. Below a whole scale a pixel is more than a cell, and the bitmaps' lines are a cell wide: each ink's samples count 256
-        over the scale times (the edge's first, the fill's out of what the edge leaves, neither past the whole pixel), so a line of one
-        cell is a pixel's worth of its ink wherever it falls. Counted once each, the outline of the arrow at 80 percent was a grey of 80
-        percent at best and two greys of 40 where it fell between two pixels, and at 50 percent a line was half grey all along.
+        Rows first to first + rows of a picture, span pixels from its left, a row pitch bytes after the one before it: the cover of its
+        fill ink a pixel, and of its edge ink over that. The fill's cover is of what the edge leaves, so that mixing the fill and then
+        the edge gives each ink its own share. The dynamic shape's are worked out at the pixel's middle (compositor_dyn_cover). A
+        bitmap's pixel is n by n samples of its cell, each at its place (from the hot pixel's corner, over the scale) and no two in one
+        row or one column of the pixel, so at a whole scale every sample of a pixel is in one cell and the covers are all or none, and at
+        a scale between an edge along the rows is as smooth as one across them. Below a whole scale a pixel is more than a cell, and the
+        bitmaps' lines are a cell wide: each ink's samples count 256 over the scale times (the edge's first, the fill's out of what the
+        edge leaves, neither past the whole pixel), so a line of one cell is a pixel's worth of its ink wherever it falls. Counted once
+        each, the outline of the arrow at 80 percent was a grey of 80 percent at best and two greys of 40 where it fell between two
+        pixels, and at 50 percent a line was half grey all along.
+
+        What depends on the picture alone is made once a call: the place of each column's samples, as the cell across they fall in (-1
+        off the bitmap), and the two covers of every count of edge and fill samples a pixel can have, so a pixel is its samples looked up
+        and counted, and nothing is divided for it.
 */
-static void compositor_pointer_row(const struct compositor_pointer *p, int row, int span, int hot_x, int hot_y, unsigned char *fill, unsigned char *edge)
+static void compositor_pointer_rows(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
+                                    unsigned char *fill, unsigned char *edge, int pitch)
 {
         int n = p->dyn ? 1 : p->scale < 4 * 256 ? 4 : 2, all = n * n;
         long long step = (32768ll << 16) / (all * p->scale); // half a sample's column, in 256ths of a cell, Q16
         long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
         long long oy = hot_y * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][1]);
+        signed char across[CP_SPAN_MOST * 16], down[16];
+        unsigned char share[17 * 17][2]; // [edge samples * (all + 1) + fill samples]: the fill's cover, the edge's
 
-        for (int column = 0; column < span; column++)
+        for (int e = 0; !p->dyn && e <= all; e++)
+                for (int f = 0; e + f <= all; f++)
+                {
+                        int lined = e * 255 / all, filled = f ? f * 255 / (all - e) : 0;
+
+                        if (p->scale < 256)
+                        {
+                                lined = e * 255 * 256 / (all * p->scale), filled = f * 255 * 256 / (all * p->scale);
+                                lined = lined < 255 ? lined : 255;
+                                filled = filled < 255 - lined ? filled : 255 - lined;
+                                filled = filled ? filled * 255 / (255 - lined) : 0;
+                        }
+                        share[e * (all + 1) + f][0] = (unsigned char)filled, share[e * (all + 1) + f][1] = (unsigned char)lined;
+                }
+        for (int k = 0; !p->dyn && k < span * all; k++)
         {
-                int inks[3] = {0, 0, 0};
+                long long u = ((2ll * k + 1) * step >> 16) - ox;
 
+                across[k] = (signed char)(u >= 0 && u < CP_CELL * 256 ? u >> 8 : -1);
+        }
+        for (int row = first; row < first + rows; row++, fill += pitch, edge += pitch)
+        {
                 if (p->dyn)
                 {
-                        compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
+                        for (int column = 0; column < span; column++)
+                                compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
                         continue;
                 }
-                for (int j = 0; j < n; j++)
-                        for (int i = 0; i < n; i++)
-                        {
-                                long long u = ((2ll * ((column * n + i) * n + j) + 1) * step >> 16) - ox, v = ((2ll * ((row * n + j) * n + i) + 1) * step >> 16) - oy;
-                                char ink = u >= 0 && v >= 0 && u < CP_CELL * 256 && v < CP_CELL * 256 ? compositor_cursor_art[p->shape][v >> 8][u >> 8] : '.';
-
-                                inks[ink == '#' ? 2 : ink == 'o']++;
-                        }
-                if (p->scale < 256)
+                for (int k = 0; k < all; k++)
                 {
-                        int lined = inks[2] * 255 * 256 / (all * p->scale), filled = inks[1] * 255 * 256 / (all * p->scale);
+                        long long v = ((2ll * (row * all + k) + 1) * step >> 16) - oy;
 
-                        lined = lined < 255 ? lined : 255;
-                        filled = filled < 255 - lined ? filled : 255 - lined;
-                        edge[column] = (unsigned char)lined;
-                        fill[column] = (unsigned char)(filled ? filled * 255 / (255 - lined) : 0);
-                        continue;
+                        down[k] = (signed char)(v >= 0 && v < CP_CELL * 256 ? v >> 8 : -1);
                 }
-                edge[column] = (unsigned char)(inks[2] * 255 / all);
-                fill[column] = (unsigned char)(inks[1] ? inks[1] * 255 / (all - inks[2]) : 0);
+                for (int column = 0; column < span; column++)
+                {
+                        const signed char *at = across + column * all;
+                        int inks[3] = {0, 0, 0};
+
+                        // Sample i, j of the pixel is the cell across of its column's sample i n + j, down of its row's sample j n + i.
+                        for (int j = 0; j < n; j++)
+                                for (int i = 0; i < n; i++)
+                                {
+                                        int u = at[i * n + j], v = down[j * n + i];
+                                        char ink = u >= 0 && v >= 0 ? compositor_cursor_art[p->shape][v][u] : '.';
+
+                                        inks[ink == '#' ? 2 : ink == 'o']++;
+                                }
+                        fill[column] = share[inks[2] * (all + 1) + inks[1]][0];
+                        edge[column] = share[inks[2] * (all + 1) + inks[1]][1];
+                }
         }
 }
 
+// One row of a picture, span bytes of each cover: the settings' try-out of the pointer makes its picture a row at a time.
+static void compositor_pointer_row(const struct compositor_pointer *p, int row, int span, int hot_x, int hot_y, unsigned char *fill, unsigned char *edge)
+{
+        compositor_pointer_rows(p, span, hot_x, hot_y, row, 1, fill, edge, span);
+}
+
 /*
-        A pointer's picture with the pointer at x, y, cut to the target's damage: each row's covers mix the fill ink and then the edge ink
-        over it (memory_mix_u32_row, which is what the GPU's records do). A fill ink with an alpha is the plane's: its pixels take the
-        cover of both inks as their alpha, over colours the mixes have already multiplied by it.
+        The covers of the pointer's picture, made once a picture and read by every present that draws it (compositor_cursor_draw, and
+        the GPU's cover tables, compositor_gpu_cursor): the fill's span rows of span bytes, then the edge's, for the picture key is of.
+        A picture that has not changed is not made again, so a pointer moved costs its mixes and no more; one that changes every
+        frame (the dynamic shape on its way, a held button's sway) is made once a frame, which is what its rows cost before. Mapped
+        once, at the largest picture's size.
+
+        One picture at a time is drawn: the bands of a present all draw the pointer drawn into it, and nothing else draws one while
+        they run. A band that finds another making it makes its own rows (compositor_pointer_rows) and does not wait.
+*/
+static struct
+{
+        struct compositor_pointer key;
+        unsigned char *cover;
+        int made, busy;
+} compositor_pointer_table;
+
+static const unsigned char *compositor_pointer_cover(const struct compositor_pointer *p)
+{
+        int hot_x, hot_y, span;
+
+        if (__atomic_load_n(&compositor_pointer_table.made, __ATOMIC_ACQUIRE) && !memory_compare(&compositor_pointer_table.key, p, sizeof(*p)))
+                return compositor_pointer_table.cover;
+        if (__atomic_exchange_n(&compositor_pointer_table.busy, 1, __ATOMIC_ACQUIRE))
+                return 0;
+        __atomic_store_n(&compositor_pointer_table.made, 0, __ATOMIC_RELAXED);
+        if (!compositor_pointer_table.cover)
+                compositor_pointer_table.cover = (unsigned char *)compositor_map_zeroed(2ul * CP_SPAN_MOST * CP_SPAN_MOST);
+        if (compositor_pointer_table.cover)
+        {
+                span = compositor_pointer_span(p, &hot_x, &hot_y);
+                compositor_pointer_rows(p, span, hot_x, hot_y, 0, span, compositor_pointer_table.cover, compositor_pointer_table.cover + span * span, span);
+                compositor_pointer_table.key = *p;
+                __atomic_store_n(&compositor_pointer_table.made, 1, __ATOMIC_RELEASE);
+        }
+        __atomic_store_n(&compositor_pointer_table.busy, 0, __ATOMIC_RELEASE);
+        return compositor_pointer_table.cover && compositor_pointer_table.made ? compositor_pointer_table.cover : 0;
+}
+
+/*
+        A pointer's picture with the pointer at x, y, cut to the target's damage: its covers mix the fill ink and then the edge ink over
+        it (memory_mix_const_u32_rect, a pixel at a time what the GPU's mix records do), from the picture's table, or a row at a time from
+        its own rows where the table is not there. A fill ink with an alpha is the plane's: its pixels take the cover of both inks as
+        their alpha, over colours the mixes have already multiplied by it.
 */
 static void compositor_cursor_draw(const struct compositor_target *t, int x, int y, const struct compositor_pointer *p, unsigned int fill, unsigned int edge)
 {
-        unsigned int inks[2][CP_SPAN_MOST];
-        unsigned char covers[2][CP_SPAN_MOST];
+        unsigned char rows[2][CP_SPAN_MOST];
         int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
         int x1 = left > t->x1 ? left : t->x1, x2 = left + span < t->x2 ? left + span : t->x2;
         int y1 = top > t->y1 ? top : t->y1, y2 = top + span < t->y2 ? top + span : t->y2;
+        const unsigned char *made;
 
         // A client's own picture is its pixels, mixed by their alpha (or the plane's, written as they are).
         if (p->picture)
@@ -3760,17 +3836,26 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
         }
         if (x2 <= x1 || y2 <= y1)
                 return;
-        memory_fill_u32_rect(inks[0], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, fill & 0xffffffu);
-        memory_fill_u32_rect(inks[1], CP_SPAN_MOST, (unsigned long)(x2 - x1), 1, edge & 0xffffffu);
-        for (int row = y1; row < y2; row++)
+        made = compositor_pointer_cover(p);
+        for (int row = y1, band; row < y2; row += band)
         {
                 unsigned int *pixels = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                const unsigned char *covers = made ? made + (unsigned long)(row - top) * span + (x1 - left) : rows[0] + (x1 - left);
+                int pitch = made ? span : CP_SPAN_MOST;
+                unsigned long plane = made ? (unsigned long)span * span : CP_SPAN_MOST;
 
-                compositor_pointer_row(p, row - top, span, hot_x, hot_y, covers[0], covers[1]);
-                for (int ink = 0; ink < 2; ink++)
-                        memory_mix_u32_row(pixels, inks[ink], covers[ink] + (x1 - left), (positive)(x2 - x1));
-                for (int at = x1 - left; (fill >> 24) && at < x2 - left; at++)
-                        pixels[at - (x1 - left)] |= (covers[1][at] + (covers[0][at] * (255u - covers[1][at]) + 127) / 255) << 24;
+                band = made ? y2 - row : 1;
+                if (!made)
+                        compositor_pointer_rows(p, span, hot_x, hot_y, row - top, 1, rows[0], rows[1], CP_SPAN_MOST);
+                memory_mix_const_u32_rect(pixels, t->pitch, covers, (positive)pitch, (positive)(x2 - x1), (positive)band, fill & 0xffffffu, 255);
+                memory_mix_const_u32_rect(pixels, t->pitch, covers + plane, (positive)pitch, (positive)(x2 - x1), (positive)band, edge & 0xffffffu, 255);
+                for (int down = 0; (fill >> 24) && down < band; down++)
+                        for (int at = 0; at < x2 - x1; at++)
+                        {
+                                unsigned int f = covers[(unsigned long)down * pitch + at], e = covers[plane + (unsigned long)down * pitch + at];
+
+                                pixels[(unsigned long)down * t->pitch + at] |= (e + (f * (255u - e) + 127) / 255) << 24;
+                        }
         }
 }
 
@@ -3788,6 +3873,7 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         unsigned char *table[2];
         int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
         unsigned int at[2];
+        const unsigned char *made = compositor_pointer_cover(p);
 
         // A client's own picture has colours a cover table cannot carry: the processor draws the present.
         if (p->picture)
@@ -3800,8 +3886,8 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         {
                 unsigned int kept = compositor_gscene.kept, used = compositor_gscene.tables_used;
 
-                at[0] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
-                at[1] = span > 255 ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
+                at[0] = span > 255 || !made ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
+                at[1] = span > 255 || !made ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
                 if (!at[0] || !at[1])
                 {
                         compositor_gscene.kept = kept, compositor_gscene.tables_used = used;
@@ -3809,15 +3895,10 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                         return false;
                 }
         }
-        if (table[0] || table[1])
-        {
-                unsigned char scratch[256];
-
-                for (int row = 0; row < span; row++)
-                        compositor_pointer_row(p, row, span, hot_x, hot_y,
-                                               table[0] ? table[0] + row * span : scratch,
-                                               table[1] ? table[1] + row * span : scratch);
-        }
+        // A table new to the pool is the picture's covers, the fill's or the edge's.
+        for (int ink = 0; ink < 2; ink++)
+                if (table[ink])
+                        memory_copy(table[ink], made + (unsigned long)ink * span * span, (positive)span * (positive)span);
         compositor_gpu_rect(5, left, top, left + span, top + span, fill, 0, at[0], span);
         compositor_gpu_rect(5, left, top, left + span, top + span, edge, 0, at[1], span);
         return true;
