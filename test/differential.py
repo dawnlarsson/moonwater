@@ -46543,6 +46543,37 @@ int main(int count, char **argument) {
     write_tally("terminfo-install", passed, total)
     return 1 if passed != total else 0
 
+def sandbox_usr_links(sandbox):
+    """/bin, /lib, /lib64 and /sbin of a chroot whose /usr is the host's.
+    The links are the host's own where it has them into its /usr: a loader
+    named /lib64/ld-linux-x86-64.so.2 is in usr/lib on Arch and in usr/lib64
+    on Debian and Ubuntu, where a lib64 linked to usr/lib had no loader and
+    no program started (the cli harness and the state cuts both).
+
+    Debian and Ubuntu also name programs through /etc/alternatives:
+    /usr/bin/python3 is a link to /etc/alternatives/python3, so in a chroot
+    with an /etc of its own the drivers' python3 was not there and every
+    harness that runs one inside answered "chroot: failed to run command
+    '/usr/bin/python3'". The host's alternatives that lead into /usr are
+    linked again in the chroot's etc/alternatives, and nothing else of the
+    host's /etc comes with them."""
+    for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
+                         ("sbin", "usr/bin")):
+        if os.path.islink("/" + name) and os.readlink("/" + name).startswith("usr/"):
+            target = os.readlink("/" + name)
+        (sandbox / name).symlink_to(target)
+    try:
+        alternatives = sorted(os.listdir("/etc/alternatives"))
+    except OSError:
+        alternatives = []
+    for name in alternatives:
+        link = os.path.join("/etc/alternatives", name)
+        if not os.path.islink(link) or not os.readlink(link).startswith("/usr/"):
+            continue
+        (sandbox / "etc/alternatives").mkdir(parents=True, exist_ok=True)
+        (sandbox / "etc/alternatives" / name).symlink_to(os.readlink(link))
+
+
 def moonwater_sandbox(shell, top):
     """A user, mount and network namespace with a chroot of scratch
     directories standing for the machine, the moonwater command copied to
@@ -46554,15 +46585,7 @@ def moonwater_sandbox(shell, top):
     for name in ("usr", "dev", "proc", "root", "run", "etc", "home", "tmp",
                  "bowls/one/etc", "bowls/two/etc"):
         (sandbox / name).mkdir(parents=True, exist_ok=True)
-    #       The links are the host's own where it has them into its /usr, since
-    #       /usr is the host's: a loader named /lib64/ld-linux-x86-64.so.2 is in
-    #       usr/lib on Arch and in usr/lib64 on Debian and Ubuntu, where a
-    #       lib64 linked to usr/lib had no loader and no program started.
-    for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
-                         ("sbin", "usr/bin")):
-        if os.path.islink("/" + name) and os.readlink("/" + name).startswith("usr/"):
-            target = os.readlink("/" + name)
-        (sandbox / name).symlink_to(target)
+    sandbox_usr_links(sandbox)
     for name in ("passwd", "group", "hosts"):
         if Path("/etc", name).exists():
             shutil.copy(Path("/etc", name), sandbox / "etc" / name)
@@ -51919,7 +51942,9 @@ def reset(template):
     nobody can remove nothing of root's and settles for what it can."""
     for top in ("/root", "/run", "/home"):
         wipe(top)
-    wipe("/etc")
+    #   etc/alternatives is the sandbox's way to its python3 (sandbox_usr_links):
+    #   wiped, the second drive (the ordinary user's) could not start at all.
+    wipe("/etc", keep=("alternatives",))
     for name, data in ETC.items():
         try:
             with open("/etc/" + name, "wb") as handle:
@@ -77952,9 +77977,7 @@ def harness_state_cuts(argv):
             sandbox = Path(temporary) / "root"
             for name in ("usr", "dev", "proc", "root", "run/moonwater", "etc", "home", "tmp"):
                 (sandbox / name).mkdir(parents=True, exist_ok=True)
-            for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
-                                 ("sbin", "usr/bin")):
-                (sandbox / name).symlink_to(target)
+            sandbox_usr_links(sandbox)
             for name in ("passwd", "group", "hosts"):
                 if Path("/etc", name).exists():
                     shutil.copy(Path("/etc", name), sandbox / "etc" / name)
