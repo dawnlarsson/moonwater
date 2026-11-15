@@ -53938,6 +53938,13 @@ def harness_moonwater_setup(argv):
     host_install_refresh and, where the tree has them, host_mounted_is and
     host_system_mount are the tree's own. A tree without the last two (the
     parent) builds as well, so it can be run there and shown to lose.
+
+    And boot, the first terminal and setup, lifted the same way, about a disk
+    whose install boot chose and whose data partition would not mount: the
+    session is live with a verdict that names the disk, the first terminal is
+    left a hint that names it and sends nobody to an install over it, and
+    setup says the same; a plain live session names a disk with Moonwater's
+    data on it as one an install would erase.
     """
     import subprocess
     import tempfile
@@ -54334,12 +54341,377 @@ int main(void)
         return bad != 0;
 }
 """
+    #   And boot's side: what a session says of a disk whose install boot chose
+    #   and could not keep (its data partition would not mount, host_take
+    #   said why). The verdict names the disk kept away from, the first
+    #   terminal is given a hint that names it and sends nobody to an install
+    #   over it, and setup says the same; a plain live session's words name a
+    #   disk that already holds Moonwater's data as one an install would erase.
+    #   The parent wrote "live" and no hint, and setup said install DISK.
+    boot_lifted = (section("static fn host_settle_live(void)", "#define RADIO_LOCK_EX 2") +
+                   section("static b32 host_boot(void)", "/*\n        The question, where somebody can see it.") +
+                   optional("static fn host_live_hint(string_address kept)",
+                            "/*\n        What a terminal does before it starts its shell") +
+                   section("fn host_terminal_opening(void)", "// Install ---") +
+                   section("static fn host_setup_state(void)", "/*\n        This session as one page"))
+    boot_source = r"""
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef int b32;
+typedef p8 *string_address;
+typedef void *address_any;
+#define address_of &
+#define address_to *
+#define fn void
+#define end 0
+#define null 0
+#define PURE
+#define HOST_NAME_ROOM 32
+#define HOST_PATH_ROOM 256
+#define HOST_BUILD_ROOM 160
+#define HOST_INSTALLS 8
+#define HOST_DATA_NAME "moonwater-data"
+#define HOST_STATE "/run/moonwater"
+#define HOST_VERDICT HOST_STATE "/verdict"
+#define HOST_HINT HOST_STATE "/hint"
+#define HOST_HINT_TAKEN HOST_STATE "/hint.taken"
+#define HOST_QUESTION HOST_STATE "/question"
+#define HOST_QUESTION_TAKEN HOST_STATE "/question.taken"
+#define HOST_MEDIUM HOST_STATE "/medium"
+#define HOST_SETTLE_FLOOR_NS ((p64)1000000000)
+#define HOST_SETTLE_MOST_NS ((p64)10000000000)
+#define HOST_POLL_NS ((p64)100000000)
+#define HOST_VERDICT_WAIT_NS ((p64)15000000000)
+#define HOST_LOOKING_NS ((p64)700000000)
+#define HOST_VERDICT_POLL_NS ((p64)100000000)
+#define HOST_CLOCK_BOOTTIME 7
+#define SPARK_SETTINGS_MOUNT_OFF 1
+#define MOONWATER_STRICT_HOST 1
+#define STRICT_TIGHT 2
+#define BOWL_ROOT_DIRECTORY "/bowls"
+#define AT_FDCWD (-100)
+#define host_label "[Moonwater] "
+#define log 1
+#define log_error 2
+
+static char said[16384];
+static void say(int where, const char *format, ...)
+{
+        va_list list;
+        size_t used = strlen(said);
+
+        (void)where;
+        va_start(list, format);
+        vsnprintf(said + used, sizeof(said) - used, format, list);
+        va_end(list);
+}
+#define string_format(where, ...) say(where, __VA_ARGS__)
+#define host_say(where, ...) say(where, __VA_ARGS__)
+#define host_refuse(...) (say(2, host_label), say(2, __VA_ARGS__), (b32)1)
+#define string_equals(a, b) (!strcmp((const char *)(a), (const char *)(b)))
+#define string_copy(a, b) strcpy((char *)(a), (const char *)(b))
+#define string_length(a) strlen((const char *)(a))
+#define string_has_prefix(text, literal) (!strncmp((const char *)(text), literal, sizeof(literal) - 1))
+#define memory_zero(at, size) memset(at, 0, size)
+#define string_first_of(text, byte) strchr((char *)(text), byte)
+//      As string_join: the first part may be into itself.
+static bool joined(p8 *into, positive room, ...)
+{
+        va_list list;
+        const char *part;
+        char whole[1024];
+        size_t used = 0;
+
+        whole[0] = 0;
+        va_start(list, room);
+        while ((part = va_arg(list, const char *)))
+        {
+                size_t length = strlen(part);
+
+                if (used + length >= room || used + length >= sizeof(whole))
+                {
+                        va_end(list);
+                        return false;
+                }
+                memcpy(whole + used, part, length + 1);
+                used += length;
+        }
+        va_end(list);
+        memcpy(into, whole, used + 1);
+        return true;
+}
+#define string_join(into, room, ...) joined((p8 *)(into), room, __VA_ARGS__, (const char *)0)
+#define host_join string_join
+
+/* The state directory: the verdict, and whether the hint and the question are there. */
+static char verdict_file[64];
+static bool have_verdict, have_hint, have_question;
+static bipolar host_read_word(string_address path, p8 *into, positive room)
+{
+        (void)room;
+        into[0] = 0;
+        if (strcmp((char *)path, HOST_VERDICT) || !have_verdict)
+                return -2;
+        strcpy((char *)into, verdict_file);
+        return (bipolar)strlen(verdict_file);
+}
+static b32 host_verdict_set(string_address kind, string_address disk)
+{
+        snprintf(verdict_file, sizeof(verdict_file), "%s%s", (char *)kind, (char *)disk);
+        have_verdict = true;
+        return 0;
+}
+static fn host_mark_set(string_address path)
+{
+        if (!strcmp((char *)path, HOST_HINT))
+                have_hint = true;
+        if (!strcmp((char *)path, HOST_QUESTION))
+                have_question = true;
+}
+static bipolar system_rename_at(int at, string_address from, int to_at, string_address to, int flags)
+{
+        (void)at;
+        (void)to_at;
+        (void)to;
+        (void)flags;
+        if (!strcmp((char *)from, HOST_HINT) && have_hint)
+                return have_hint = false, 0;
+        if (!strcmp((char *)from, HOST_QUESTION) && have_question)
+                return have_question = false, 0;
+        return -2;
+}
+static bipolar host_verdict_watch(void) { return -1; }
+static fn host_verdict_unwatch(bipolar notify) { (void)notify; }
+static fn host_verdict_pause(bipolar notify, p64 until, p64 poll) { (void)notify; (void)until; (void)poll; }
+static p64 now;
+static p64 system_clock_ns(int clock)
+{
+        (void)clock;
+        return now += 1000000;
+}
+static fn host_pause(p64 nanoseconds) { now += nanoseconds; }
+static fn host_question(string_address disk) { say(1, "QUESTION %s\n", (char *)disk); }
+
+/* The disks: sysfs's block names, and the one install boot finds. */
+typedef struct
+{
+        const char *name, *disk, *label;
+} block;
+static block blocks[] = {{"sdb", "sdb", ""}, {"sdb1", "sdb", "moonwater-boot"},
+                         {"sdb2", "sdb", "moonwater-data"}, {"sda", "sda", ""},
+                         {"sda1", "sda", "EFI"}, {0, 0, 0}};
+static bool data_disk_there = true;
+typedef bool (*host_entry_visitor)(string_address directory, string_address name, address_any opaque);
+static fn host_each_entry(string_address path, host_entry_visitor visit, address_any opaque)
+{
+        if (strcmp((char *)path, "/sys/class/block"))
+                return;
+        for (block *at = blocks; at->name; at++)
+                if (!visit(path, (string_address)at->name, opaque))
+                        break;
+}
+static bipolar file_slurp_once_at(int at, string_address path, p8 *into, positive room)
+{
+        char name[64];
+
+        (void)at;
+        if (sscanf((char *)path, "/sys/class/block/%63[^/]/uevent", name) != 1)
+                return -2;
+        for (block *one = blocks; one->name; one++)
+                if (!strcmp(one->name, name))
+                        return snprintf((char *)into, room, "MAJOR=8\nDEVNAME=%s\nDEVTYPE=%s\n%s%s%s", name,
+                                        strcmp(one->name, one->disk) ? "partition" : "disk",
+                                        one->label[0] ? "PARTNAME=" : "",
+                                        data_disk_there || strcmp(one->label, "moonwater-data")
+                                            ? one->label : "moonwater-gone",
+                                        one->label[0] ? "\n" : "");
+        return -2;
+}
+static bool host_parent(string_address name, p8 *into, positive room)
+{
+        (void)room;
+        for (block *one = blocks; one->name; one++)
+                if (!strcmp(one->name, (char *)name))
+                        return strcpy((char *)into, one->disk), true;
+        return false;
+}
+
+typedef struct
+{
+        p8 disk[HOST_NAME_ROOM];
+        p8 system[HOST_NAME_ROOM];
+        p8 data[HOST_NAME_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+        bool readable;
+} host_install;
+typedef struct
+{
+        host_install found[HOST_INSTALLS];
+        positive count;
+        positive dropped;
+} host_census;
+typedef struct
+{
+        positive flags;
+        p8 medium[16];
+} host_settings;
+typedef struct
+{
+        p8 name[HOST_NAME_ROOM];
+        bool found;
+} host_medium_search;
+static positive installs = 1;
+static fn host_census_take(host_census *census)
+{
+        memset(census, 0, sizeof(*census));
+        census->count = installs;
+        strcpy((char *)census->found[0].disk, "sdb");
+}
+static fn host_census_said(host_census *census) { (void)census; }
+static fn host_install_read(host_install *install)
+{
+        install->readable = true;
+        strcpy((char *)install->build, "THIS BUILD");
+}
+static bool host_running_build(p8 *into, positive room)
+{
+        (void)room;
+        strcpy((char *)into, "THIS BUILD");
+        return true;
+}
+static fn host_state_ready(void) {}
+static bool host_acquire(void) { return true; }
+static fn host_release(void) {}
+static bool host_settings_booted(host_settings *settings) { (void)settings; return false; }
+static fn host_settings_keep(host_settings *settings) { (void)settings; }
+static b32 security_publish_answer(host_settings *settings) { (void)settings; return 0; }
+static fn host_bind_apply(host_settings *settings) { (void)settings; }
+static bool host_storage_arriving(void) { return false; }
+static fn host_booted(host_settings *settings) { (void)settings; }
+static bool host_install_booted(host_install *install, p8 *running, host_settings *booted)
+{
+        (void)install;
+        (void)running;
+        (void)booted;
+        return true;
+}
+static host_install *host_census_booted(host_census *census, p8 *running, host_settings *booted)
+{
+        (void)running;
+        (void)booted;
+        return census->found;
+}
+static bool host_lone_taken(bool external, bool tight) { return !external && !tight; }
+static bool host_disk_external(p8 *disk) { (void)disk; return false; }
+static bool host_settings_install(host_install *install, host_settings *settings)
+{
+        (void)install;
+        (void)settings;
+        return false;
+}
+//      The take: the data partition will not mount, said as host_attach says it.
+static b32 host_take(host_install *install, bool update)
+{
+        (void)update;
+        return host_refuse("%s2 is the Moonwater data partition of %s, and it could not be "
+                           "mounted: Structure needs cleaning\n", (char *)install->disk,
+                           (char *)install->disk);
+}
+static bool bowl_is_root(void) { return true; }
+static bool host_medium_find(host_medium_search *search, p8 *build, p8 *skip)
+{
+        (void)build;
+        (void)skip;
+        search->found = false;
+        return false;
+}
+static bool host_unmount(string_address target) { (void)target; return true; }
+static fn host_sticks_said(p8 *running, string_address name, host_census *census)
+{
+        (void)running;
+        (void)name;
+        (void)census;
+}
+""" + boot_lifted + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name)
+{
+        total++;
+        if (!ok)
+        {
+                bad++;
+                printf("  FAIL %s\n    verdict: %s, hint %s\n    said: %s", name,
+                       have_verdict ? verdict_file : "none", have_hint ? "there" : "not there", said);
+        }
+}
+static void fresh(const char *verdict, bool hint, bool data)
+{
+        have_verdict = verdict != 0;
+        if (verdict)
+                strcpy(verdict_file, verdict);
+        have_hint = hint;
+        have_question = false;
+        data_disk_there = data;
+        now = (p64)20 * 1000000000;
+        said[0] = 0;
+}
+int main(void)
+{
+        fresh(0, false, true);
+        host_boot();
+        check(have_verdict && !strcmp(verdict_file, "live sdb"),
+              "a boot whose disk's data partition would not mount is live, and its verdict names the disk");
+        check(have_hint, "and it leaves the first terminal a hint");
+        //      Why is the take's to say (host_attach's words, which the stub repeats).
+        check(strstr(said, "this session is live, and sdb is not used") &&
+                  strstr(said, "moonwater setup use sdb tries it again"),
+              "and boot says after the take's reason what it did with the disk, and what tries it again");
+        said[0] = 0;
+        host_terminal_opening();
+        check(strstr(said, "sdb has Moonwater's data, which could not be mounted at boot") &&
+                  strstr(said, "moonwater setup use sdb tries it again") &&
+                  !strstr(said, "puts Moonwater on a disk"),
+              "the first terminal's hint names the disk, says use tries it again, and offers no install");
+        said[0] = 0;
+        host_setup_state();
+        check(strstr(said, "live session: sdb's Moonwater data could not be mounted at boot") &&
+                  !strstr(said, "setup install DISK keeps it"),
+              "and setup says the same, where it said moonwater setup install DISK keeps it");
+
+        fresh("live", true, true);
+        installs = 0;
+        host_terminal_opening();
+        check(strstr(said, "This is a live session: nothing is kept after power off.") &&
+                  strstr(said, "sdb already holds Moonwater's data, which moonwater setup install sdb "
+                               "would erase") &&
+                  !strstr(said, "puts Moonwater on a disk"),
+              "a plain live session's hint names a disk that holds Moonwater's data as one an install erases");
+        said[0] = 0;
+        host_setup_state();
+        check(strstr(said, "sdb already holds Moonwater's data") && !strstr(said, "install DISK keeps it"),
+              "and so does setup's line");
+        fresh("live", true, false);
+        host_terminal_opening();
+        check(strstr(said, "moonwater setup install DISK puts Moonwater on a disk."),
+              "with no such disk the hint is the one it was");
+        printf("moonwater boot %u/%u\n", total - bad, total);
+        return bad != 0;
+}
+"""
     passed = asked = 0
     failed = False
     with tempfile.TemporaryDirectory(prefix="moonwater-setup-") as temporary:
         work = Path(temporary)
         cc = os.environ.get("CC", "cc")
-        for name, text, rows in (("setup", source, 8),):
+        for name, text, rows in (("setup", source, 8), ("boot", boot_source, 8)):
             (work / (name + ".c")).write_text(text)
             built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize=bool",
                                "-w", "-o", str(work / name), str(work / (name + ".c"))],

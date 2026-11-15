@@ -657,6 +657,78 @@ static fn host_settle_live(void)
         host_verdict_set("live", "");
 }
 
+/*
+        A session that is live because the install boot chose could not be
+        kept (host_take has said why): its verdict is "live DISK", which names
+        the disk kept away from, so that the first terminal's hint and
+        moonwater setup say what happened to it and send nobody to an install
+        over it. It was a plain live verdict with no hint, and setup then said
+        moonwater setup install DISK keeps it, which erases the disk whose data
+        partition would not mount.
+*/
+static fn host_settle_kept_away(string_address disk)
+{
+        host_mark_set(HOST_HINT);
+        host_verdict_set("live ", disk);
+        host_say(log_error, host_label "this session is live, and %s is not used: its Moonwater "
+                                       "data is not kept this session. moonwater setup use %s "
+                                       "tries it again\n",
+                 disk, disk);
+}
+
+typedef struct
+{
+        p8 disk[HOST_NAME_ROOM];
+        bool found;
+} host_data_look;
+
+static bool host_parent(string_address name, p8 address_to into, positive room);
+
+static bool host_data_visit(string_address directory, string_address name, address_any opaque)
+{
+        host_data_look address_to look = (host_data_look address_to)opaque;
+        p8 path[HOST_PATH_ROOM];
+        p8 text[1024];
+        p8 address_to line;
+        bipolar got;
+
+        if (!host_join(path, sizeof(path), directory, "/") ||
+            !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/uevent"))
+                return true;
+        got = file_slurp_once_at(AT_FDCWD, path, text, sizeof(text));
+        for (line = got > 0 ? text : null; line;)
+        {
+                p8 address_to next = (p8 address_to)string_first_of(line, '\n');
+
+                if (next)
+                        *next = end;
+                if (string_equals(line, "PARTNAME=" HOST_DATA_NAME) &&
+                    host_parent(name, look->disk, sizeof(look->disk)) &&
+                    !string_equals(look->disk, name))
+                {
+                        look->found = true;
+                        return false;
+                }
+                line = next ? next + 1 : null;
+        }
+        return true;
+}
+
+/*
+        A disk with a Moonwater data partition on it, as sysfs names the
+        partitions (no device is opened): what a live session's words say
+        an install over would erase, where they suggested one to anybody.
+*/
+static bool host_data_disk(p8 address_to into, positive room)
+{
+        host_data_look look;
+
+        memory_zero(address_of look, sizeof(look));
+        host_each_entry("/sys/class/block", host_data_visit, address_of look);
+        return look.found && string_length(look.disk) < room && (string_copy(into, look.disk), true);
+}
+
 #define RADIO_LOCK_EX 2
 #define RADIO_LOCK_NB 4
 #define RADIO_LOCK_UN 8
@@ -2868,7 +2940,9 @@ static b32 host_attach(host_install address_to install)
 
         failed = host_mount(install->data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
 
-        return_if(failed < 0, host_fail(install->data, failed));
+        return_if(failed < 0, host_refuse("%s is the Moonwater data partition of %s, and it could "
+                                          "not be mounted: %s\n",
+                                          install->data, install->disk, file_reason(failed)));
 
         for (at = 0; at < array_count(host_kept); at++)
         {
@@ -3483,7 +3557,7 @@ static b32 host_boot(void)
                         return 0;
                 }
 
-                host_verdict_set("live", "");
+                host_settle_kept_away(chosen->disk);
                 host_booted(known ? address_of settings : null);
                 return 1;
         }
@@ -3582,6 +3656,36 @@ static fn host_question(string_address disk)
 }
 
 /*
+        What the first terminal of a live session says of it. kept is the disk
+        boot could not keep, from a "live DISK" verdict; else a disk with a
+        Moonwater data partition is looked for, and the hint names it as one an
+        install would erase, where it offered an install over any disk.
+*/
+static fn host_live_hint(string_address kept)
+{
+        p8 disk[HOST_NAME_ROOM];
+
+        if (kept && kept[0])
+        {
+                host_say(log, host_label "This is a live session: %s has Moonwater's data, which "
+                                         "could not be mounted at boot, so nothing is kept after "
+                                         "power off.\n"
+                              host_label "moonwater setup use %s tries it again; moonwater setup "
+                                         "install %s would erase it.\n",
+                         kept, kept, kept);
+                return;
+        }
+
+        host_say(log, host_label "This is a live session: nothing is kept after power off.\n");
+        if (host_data_disk(disk, sizeof(disk)))
+                host_say(log, host_label "%s already holds Moonwater's data, which moonwater setup "
+                                         "install %s would erase.\n",
+                         disk, disk);
+        else
+                host_say(log, host_label "moonwater setup install DISK puts Moonwater on a disk.\n");
+}
+
+/*
         What a terminal does before it starts its shell, in the pty's child,
         so what this prints and reads is the window.
 
@@ -3623,15 +3727,10 @@ fn host_terminal_opening(void)
             system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD, HOST_QUESTION_TAKEN,
                              0) >= 0)
                 host_question(verdict + 4);
-        else if (string_equals(verdict, "live") &&
+        else if ((string_equals(verdict, "live") || string_has_prefix(verdict, "live ")) &&
                  system_rename_at(AT_FDCWD, HOST_HINT, AT_FDCWD, HOST_HINT_TAKEN,
                                   0) >= 0)
-        {
-                host_say(log, host_label "This is a live session: nothing is kept "
-                                         "after power off.\n"
-                              host_label "moonwater setup install DISK puts "
-                                         "Moonwater on a disk.\n");
-        }
+                host_live_hint(verdict[4] == ' ' ? verdict + 5 : null);
 }
 
 // Install -------------------------------------------------------
@@ -27615,6 +27714,9 @@ static host_install address_to host_install_chosen(host_census address_to census
                 install = host_census_find(census, verdict + 5);
         else if (string_has_prefix(verdict, "ask "))
                 install = host_census_find(census, verdict + 4);
+        //      The disk a live session could not keep at boot (host_settle_kept_away).
+        else if (string_has_prefix(verdict, "live ") && host_census_find(census, verdict + 5))
+                install = host_census_find(census, verdict + 5);
         else if (census->count == 1)
                 install = census->found;
 
@@ -28018,6 +28120,7 @@ static fn host_setup_state(void)
 {
         p8 running[HOST_BUILD_ROOM];
         p8 verdict[HOST_NAME_ROOM + 16];
+        p8 disk[HOST_NAME_ROOM];
         host_census census;
         host_medium_search search;
 
@@ -28034,6 +28137,16 @@ static fn host_setup_state(void)
                 string_format(log, "  waiting: %s has another build; "
                                    "moonwater setup use, update or live\n",
                               verdict + 4);
+        else if (string_has_prefix(verdict, "live ") && verdict[5])
+                string_format(log, "  live session: %s's Moonwater data could not be mounted at "
+                                   "boot, so nothing is kept after power off; moonwater setup "
+                                   "use %s tries it again\n",
+                              verdict + 5, verdict + 5);
+        else if (host_data_disk(disk, sizeof(disk)))
+                string_format(log, "  live session: nothing is kept after power off; %s "
+                                   "already holds Moonwater's data, which moonwater setup "
+                                   "install %s would erase\n",
+                              disk, disk);
         else
                 string_format(log, "  live session: nothing is kept after power "
                                    "off; moonwater setup install DISK keeps it\n");
@@ -28169,6 +28282,10 @@ static b32 host_answer(bool update, string_address disk)
                 install = host_census_find(address_of census, disk);
         else if (string_has_prefix(verdict, "ask "))
                 install = host_census_find(address_of census, verdict + 4);
+        //      The disk a live session could not keep at boot (host_settle_kept_away).
+        else if (string_has_prefix(verdict, "live ") &&
+                 host_census_find(address_of census, verdict + 5))
+                install = host_census_find(address_of census, verdict + 5);
         else if (census.count == 1)
                 install = census.found;
 
