@@ -442,26 +442,19 @@ cover('direct_benchmark', 'test/checks.c#BENCH_tint', 'memory_tint_u32',
 cover('direct_benchmark', 'test/checks.c#BENCH_mix', 'memory_mix_u32_row',
       'paired timing against the per-pixel compositor_mix loop the round corners had, over runs of one to three '
       'hundred pixels with covers of zero, 255 and between, with SSE2, both riscv64 tiers and NEON')
-cover('correctness_only', 'src/canvas/ui/ui.c', 'memory_lerp_u32_row',
-      'bit-exact against ui_stretch_blend and paired-timed on arm64 NEON (1.22x speedup)')
-cover('correctness_only', 'src/canvas/wayland_host.c', 'memory_over_u32_rect',
-      'bit-exact against compositor_wl_over and paired-timed on arm64 NEON (2.88x speedup)')
-cover('correctness_only', 'src/canvas/font.c', 'memory_add_sat_u8_rect',
-      'bit-exact against font_cluster_plan scalar saturating add and paired-timed on arm64 NEON (2.05x speedup)')
-cover('correctness_only', 'src/canvas/ui/ui.c', 'memory_over_cover_u32_rect',
-      'bit-exact against ui_kit_covers loop and paired-timed on arm64 NEON (5.13x on 24x32 glyph, 4.63x on 256x48 rect)')
-cover('correctness_only', 'src/canvas/font.c', 'memory_transpose_u8',
-      'bit-exact against font_blend_turned nested loop and paired-timed on arm64 NEON (8.04x on 16x24 right=1, 5.23x on right=0)')
-cover('correctness_only', 'src/canvas/compositor.c', 'memory_scale_u8',
-      'bit-exact against compositor_gpu_spots scalar scale over 256x256 inputs and paired-timed on arm64 NEON (2.64x on 2048B)')
-cover('correctness_only', 'src/canvas/window.c', 'memory_copy_rect_reverse_u32',
-      'bit-exact against windows_rotate_u32 180-degree loop and paired-timed on arm64 NEON (6.15x on 224x48)')
-cover('correctness_only', 'src/canvas/compositor.c', 'memory_mix_const_u32_rect',
-      'bit-exact against compositor_chip_draw loop and paired-timed on arm64 NEON (3.16x alpha=180, 3.23x alpha=255 on 96x48)')
-cover('unmeasured', None, 'memory_or_u32 memory_swizzle_rb_u32 string_first_of_either_or_end',
-      'no row of their own yet, in correctness or in timing: the Wayland host makes a client\'s XRGB8888 opaque and '
-      'swaps ABGR8888\'s red and blue with the first two, the lexer finds a quote, a backslash or the end with the '
-      'third, and the CHECK_verify rows that hold them to the C they replaced are being written')
+# The eleven the compositor, the kit, the font engine and the lexer were folded onto in ba2387d..ae6e42b: held to their
+# callers' former loops (check_pixel_rows) and, for the scan, to the narrow-argument check (check_dirty_arguments).
+# No paired timing of any of them is in the tree, so none is claimed.
+cover('correctness_only', 'test/checks.c#CHECK_verify', '''
+memory_add_sat_u8_rect memory_copy_rect_reverse_u32 memory_lerp_u32_row memory_mix_const_u32_rect memory_or_u32
+memory_over_cover_u32_rect memory_over_u32_rect memory_scale_u8 memory_swizzle_rb_u32 memory_transpose_u8
+string_first_of_either_or_end
+''', 'against the loop each caller had (font_cluster_plan, windows_rotate_u32, ui_stretch_blend, compositor_chip_draw, '
+     'compositor_wl_convert_row, ui_kit_covers, compositor_wl_over, compositor_gpu_spots, compositor_wl_convert_pixel, '
+     'font_blend_turned, the lexer\'s quoted scans): every size to past each body\'s step and a few large, every '
+     'alignment, padded strides and negative pitches, value classes that decide each, in place where a caller is, '
+     'guard pages before and after every input and output, each x86-64 tier and riscv64 with V and without, on all '
+     'three machines; no timing claim')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '
