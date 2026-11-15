@@ -241271,6 +241271,38 @@ static void dirty_rows(void)
         compositor.card = kept_card, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
 }
 
+/*
+        The present's timing as the table says it, a second at a time (compositor_metric_publish, moonwater debug's presents line): the presents made late
+        in the last second and those that missed, the lead in use (none headless), the loop's longest present, and the flips with jobs in flight.
+*/
+static void metric_present_rows(void)
+{
+        static struct windows table;
+        struct windows *kept_table = compositor.table;
+        positive kept_made = compositor_late.made, kept_missed = compositor_late.missed, kept_since = compositor_metric_since, now;
+        unsigned long long kept_most = compositor_metric_loop_most, kept_flips = compositor_metric_flips_jobs;
+        unsigned int kept_jobs_most = compositor_metric_flip_jobs_most;
+        int kept_card = compositor.card;
+
+        memory_zero(&table, sizeof(table));
+        compositor.table = &table, compositor.card = -1;
+        compositor_metric_since = 0;
+        compositor_metric_publish(); // the mark
+        compositor_late.made += 60, compositor_late.missed += 2, compositor_metric_loop_most = 4321000ull;
+        compositor_metric_flips_jobs += 30, compositor_metric_flip_jobs_most = 2;
+        now = clock_monotonic_nanoseconds();
+        compositor_metric_since = now - 1000000000ull; // a second ago
+        compositor_metric_publish();
+        check("metrics: a second's presents made late and missed, the loop's longest present and the flips with jobs in flight are the table's",
+              table.metric_late >= 59 && table.metric_late <= 60 && table.metric_missed >= 1 && table.metric_missed <= 2 && table.metric_present_most == 4321 &&
+                  table.metric_flip_jobs >= 29 && table.metric_flip_jobs <= 30 && table.metric_flip_jobs_most == 2);
+        check("metrics: a headless compositor says no lead", table.metric_lead == 0);
+        check("metrics: and the next second starts from nothing", compositor_metric_loop_most == 0 && compositor_metric_flip_jobs_most == 0);
+        compositor.table = kept_table, compositor.card = kept_card;
+        compositor_late.made = kept_made, compositor_late.missed = kept_missed, compositor_metric_since = kept_since;
+        compositor_metric_loop_most = kept_most, compositor_metric_flips_jobs = kept_flips, compositor_metric_flip_jobs_most = kept_jobs_most;
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -242131,6 +242163,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        metric_present_rows();
         dirty_rows();
         close_ask_rows();
         grab_protocol_rows();
