@@ -11871,6 +11871,12 @@ static void ui_draw_list_publish(struct ui address_to ui, struct ui_draw_list ad
         struct ui_scene address_to scene = &list->scene;
         unsigned int gen = __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED);
 
+        // The damage is what changed in the picture: cut to the picture (a box's columns are its own, a shadow or a ripple past the
+        // window's edge among them, and the reader refuses a list whose damage leaves its picture), nothing where nothing of it is in.
+        scene->dx0 = scene->dx0 < 0 ? 0 : scene->dx0, scene->dy0 = scene->dy0 < 0 ? 0 : scene->dy0;
+        scene->dx1 = scene->dx1 > ui->width ? ui->width : scene->dx1, scene->dy1 = scene->dy1 > ui->height ? ui->height : scene->dy1;
+        if (scene->dx1 <= scene->dx0 || scene->dy1 <= scene->dy0)
+                scene->dx0 = scene->dy0 = scene->dx1 = scene->dy1 = 0;
         __atomic_store_n(&head[UI_DRAW_LIST_GEN], gen + 1, __ATOMIC_RELAXED);
         __atomic_thread_fence(__ATOMIC_RELEASE);
         head[UI_DRAW_LIST_COUNT] = scene->count;

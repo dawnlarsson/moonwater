@@ -134197,6 +134197,43 @@ static int band_guard_glass(void *context, int x, int y, int width, int height)
     return width;
 }
 
+/*
+        A frame recorded into a window's list says what changed (the header's damage) inside its picture: a box whose columns run
+        past the window's edges (a shadow, a ripple, a lit row's reach) is drawn cut to the picture, and the damage is cut with it, so
+        the compositor's reader (window_list_valid) takes the list. The owner's machine refused 31 lists for damage outside the picture.
+*/
+static void check_scene_damage_cut(void)
+{
+    static unsigned int picture[200 * 100];
+    static struct ui_draw_list scene_list;
+    struct ui ui;
+    long mapped = (long)system_call_6(syscall(mmap), 0, WINDOW_LIST_BYTES, 3, 0x22, (positive)-1, 0);
+    unsigned char address_to bytes = (unsigned char address_to)mapped;
+    const unsigned int address_to head;
+    b32 cut;
+
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("scene damage: the list's memory is mapped", false);
+        return;
+    }
+    memory_zero(&ui, sizeof(ui));
+    memory_zero(&scene_list, sizeof(scene_list));
+    ui.scale = 100;
+    ui_draw_list_init(&scene_list, bytes, WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
+    ui_begin(&ui, picture, 200, 200, 100);
+    ui_scene_begin(&ui, &scene_list);
+    ui_kit_fill(&ui, &(struct ui_box){-20 * 256, 10 * 256, 230 * 256, 30 * 256, 0, 0}, 0xff336699u, null);
+    ui_kit_fill(&ui, &(struct ui_box){50 * 256, 80 * 256, 90 * 256, 140 * 256, 8 * 256, 8 * 256}, 0x80ffffffu, null);
+    ui_scene_end(&ui, &scene_list);
+    head = (const unsigned int address_to)bytes;
+    cut = (int)head[UI_DRAW_LIST_DX0] >= 0 && (int)head[UI_DRAW_LIST_DY0] >= 0 && (int)head[UI_DRAW_LIST_DX1] <= 200 && (int)head[UI_DRAW_LIST_DY1] <= 100 &&
+          (int)head[UI_DRAW_LIST_DX1] > (int)head[UI_DRAW_LIST_DX0] && (int)head[UI_DRAW_LIST_DY1] > (int)head[UI_DRAW_LIST_DY0];
+    check("scene damage: a frame whose boxes run past its picture's edges says damage inside the picture, and the reader takes its list",
+          cut && window_list_valid(bytes, 200, 100));
+    system_call_2(syscall(munmap), (positive)mapped, WINDOW_LIST_BYTES);
+}
+
 static void check_taskbar_guard(void)
 {
     static const char *const long_titles[3] = {"A window whose title runs on well past any tab the band could ever give it, and then on again",
@@ -178428,6 +178465,7 @@ b32 main()
         check_icons();
         check_taskbar_identity();
         check_taskbar_guard();
+        check_scene_damage_cut();
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
         check_taskbar_scale();
 #if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
