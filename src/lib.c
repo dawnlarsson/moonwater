@@ -54804,10 +54804,12 @@ fn memory_mix_u32_rect(p32 address_to into, positive into_stride, const p8 addre
 fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
 // height rows of width 32-bit words copied from from to into with each row reversed (into[r*into_pitch + c] =
-// from[r*from_pitch + (width - 1 - c)]). into_pitch and from_pitch are signed word strides. Zero width or height touches nothing.
+// from[r*from_pitch + (width - 1 - c)]). into_pitch and from_pitch are signed word strides (a half turn hands it into's
+// pitch negative), into and from apart. Zero width or height touches nothing.
 fn memory_copy_rect_reverse_u32(p32 address_to into, long into_pitch, const p32 address_to from, long from_pitch,
                                 positive width, positive height);
-// Each byte of from scaled by (scale & 255) / 255 into into, for count bytes. A zero count touches nothing.
+// Each byte of from scaled by (scale & 255) / 255 into into, for count bytes: from[i] * (scale & 255) / 255 rounded down,
+// into and from apart. A zero count touches nothing.
 fn memory_scale_u8(p8 address_to into, const p8 address_to from, positive count, unsigned int scale);
 // memory_copy_rect_u32 for a source the processor does not cache (a GPU's buffer mapped write-combined) and for rectangles
 // that do not overlap: on x86_64 with AVX2 a row is read with 32-byte streaming loads, which read such memory nine times as
@@ -57017,6 +57019,11 @@ PURE address_any memory_first_of(address_any block, b8 value, positive size);
 PURE positive string_length_max(string_address source, positive bound);
 PURE b32 string_compare_max(const_string source, const_string input, positive bound);
 PURE string_address string_first_of_or_end(string_address source, p8 character);
+//      The first byte of source that is first, second or the terminator: strchrnul for two bytes, the shell
+//      lexer's walk to a quote, a backslash or the end. Either byte may be nought, which asks for no more than the
+//      terminator does, and the two may be the same. Nothing past the answer is read but in the aligned block that holds it
+//      (a word, or up to four vectors read together, never across a page), so a string whose terminator is the last
+//      byte before a page that cannot be read is safe.
 PURE string_address string_first_of_either_or_end(string_address source, p8 first,
                                                    p8 second);
 PURE string_address string_first_of_max(string_address source, positive bound,
