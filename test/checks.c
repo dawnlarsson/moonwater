@@ -243785,6 +243785,255 @@ void __sanitizer_cov_trace_pc(void)
 }
 #endif /* COVERAGE_hook */
 
+#ifdef CHECK_gpu_model
+#include "../src/lib.util.c"
+#include "../src/build/gpuasm.c"
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+#define GPU_MODEL_CARD
+#include "gpu_model.c"
+/*
+        The model of the card (test/gpu_model.c) held to the card and to itself, on a machine with no card. Its decoder is gpuasm's table
+        (the two are compared row by row) and takes every word gpuasm makes and nothing else: every instruction of the six kernels and of
+        test/gpu_stress.asm goes there and back unchanged, and words of forms gpuasm does not make are refused with their place. The row that
+        matters: gpu.c's self-test, gpu_test_hash, run by gpu.c's own path on the model card, gives GPU_TEST_HASH, the hash a Van Gogh card
+        gave for the same picture, whatever the registers nothing writes start as and with v_rcp_f32 and v_sqrt_f32 an ulp off either way;
+        and a kernel with one bit of one word flipped does not. A record that reaches outside every buffer its job named is refused with the
+        address, and gpu_model_run, the call the workers after this make, draws what the kernel says.
+*/
+
+// The instructions of count words decoded and made again: true when every one comes back as the words it was, with their number.
+static b32 model_round_trip(const p32 address_to words, unsigned int count, unsigned int address_to instructions, unsigned int address_to stop)
+{
+        *instructions = 0, *stop = 0;
+        gpu_model.code_va = 0;
+        for (unsigned int at = 0; at < count;)
+        {
+                struct gpu_model_insn in;
+                p32 again[3];
+
+                memory_zero(&gpu_model.fault, sizeof(gpu_model.fault));
+                *stop = at;
+                if (gpu_model_decode(words + at, count - at, 4ull * at, &in) || gpu_model_encode(&in, again) != in.words || memory_compare(again, words + at, 4ull * in.words))
+                        return false;
+                at += in.words, (*instructions)++;
+        }
+        return true;
+}
+
+// One word (and the one after it) refused by the decoder as a form gpuasm does not make, at pc.
+static b32 model_refuses(p32 w0, p32 w1)
+{
+        p32 words[3] = {w0, w1, 0};
+        struct gpu_model_insn in;
+
+        memory_zero(&gpu_model.fault, sizeof(gpu_model.fault));
+        gpu_model.code_va = 0;
+        return gpu_model_decode(words, 3, 0x40, &in) == GPU_MODEL_UNKNOWN && gpu_model.fault.word == w0 && gpu_model.fault.pc == 0x40;
+}
+
+static unsigned int model_hash(void)
+{
+        gpu_model_card_reset();
+        return gpu_test_hash();
+}
+
+static b32 model_has(const char address_to text, const char address_to words)
+{
+        return string_find((string_address)text, (string_address)words) != 0;
+}
+
+static b32 model_seen(unsigned int handle)
+{
+        for (unsigned int k = 0; k < gpu_model_seen_count; k++)
+                if (gpu_model_seen[k] == handle)
+                        return true;
+        return false;
+}
+
+static unsigned int model_source[64 * 4];
+
+b32 main()
+{
+        static const struct
+        {
+                const char *name;
+                const unsigned int *words;
+                unsigned int size;
+        } kernels[] = {{"copy", gpu_k_copy, sizeof(gpu_k_copy)}, {"fill", gpu_k_fill, sizeof(gpu_k_fill)},     {"tone", gpu_k_tone, sizeof(gpu_k_tone)},
+                       {"glass", gpu_k_glass, sizeof(gpu_k_glass)}, {"scene", gpu_k_scene, sizeof(gpu_k_scene)}, {"scale", gpu_k_scale, sizeof(gpu_k_scale)}};
+        unsigned int hash, instructions = 0, stop = 0, total = 0;
+        b32 same, all = true;
+
+        // The decoder's table is gpuasm's own, row for row, and its clamps are gpuasm's.
+        same = sizeof(gpuasm_ops) / sizeof(gpuasm_ops[0]) == GM_NAMED && GM_IDS == GM_NAMED + 1 && string_equals((string_address)gpu_model_names[GM_NAMED].name, (string_address) "s_nop");
+        for (unsigned int k = 0; same && k < GM_NAMED; k++)
+                same = string_equals((string_address)gpu_model_names[k].name, gpuasm_ops[k].name) && gpu_model_names[k].form == gpuasm_ops[k].form &&
+                       gpu_model_names[k].code == gpuasm_ops[k].code && string_equals((string_address)gpu_model_names[k].shape, gpuasm_ops[k].shape);
+        same = same && sizeof(gpu_model_clamps) / sizeof(gpu_model_clamps[0]) == sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]);
+        for (unsigned int k = 0; same && k < sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]); k++)
+                same = string_equals((string_address)gpu_model_clamps[k], gpuasm_clamps[k]);
+        check("gpu model: the decoder's table is gpuasm's, its 92 rows of mnemonic, encoding, opcode and operands and its clamps, and s_nop", same);
+
+        // Every instruction of every kernel gpuasm made (artifacts/gpu_kernels.inc) decodes, and is made again as the words it was.
+        for (unsigned int k = 0; k < sizeof(kernels) / sizeof(kernels[0]); k++)
+        {
+                b32 back = model_round_trip(kernels[k].words + 2, kernels[k].size / 4 - 2, &instructions, &stop);
+
+                if (!back)
+                        string_format(log, "  gpu model: %s stops at word %p: %s\n", kernels[k].name, (positive)stop, gpu_model.fault.text);
+                all = all && back && (kernels[k].words[0] & ~63u) == 0xe0ac0000u && kernels[k].words[1] == 0x18cu, total += instructions;
+        }
+        string_format(log, "gpu model: %p instructions of the six kernels decoded and made again\n", (positive)total);
+        check("gpu model: every word of copy, fill, tone, glass, scene and scale decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
+        {
+                static p8 text[1 << 20];
+                bipolar got = file_slurp((string_address) "test/gpu_stress.asm", text, sizeof(text));
+
+                if (got < 0 || (positive)got + 1 >= sizeof(text))
+                        string_format(log, "gpu model: test/gpu_stress.asm round trip NOT RUN -- the file does not read from here\n");
+                else
+                {
+                        text[got] = 0;
+                        same = gpuasm_assemble((string_address) "test/gpu_stress.asm", text) && model_round_trip(gpuasm_words, (unsigned int)gpuasm_position, &instructions, &stop);
+                        if (!same)
+                                string_format(log, "  gpu model: gpu_stress.asm stops at word %p: %s%s\n", (positive)stop, gpu_model.fault.text, gpuasm_message);
+                        string_format(log, "gpu model: %p instructions of test/gpu_stress.asm (every form gpuasm takes) decoded and made again\n", (positive)instructions);
+                        check("gpu model: every word gpuasm makes of test/gpu_stress.asm, every instruction in every operand form, goes there and back unchanged", same && instructions > 200);
+                }
+        }
+
+        // Words of forms gpuasm does not make are refused, with the word and its place: an opcode not in the table (s_cmov_b32), SDWA, a VOP3 with neg,
+        // a scalar load with glc, a global load with slc, a packed op with op_sel, SOPK, a VOP3 with abs, m0 as a source, a permute with an offset.
+        check("gpu model: a word not in gpuasm's table, or in a form gpuasm does not make, is refused with the word and its place",
+              model_refuses(0xbe800505u, 0) && model_refuses(0x7e0002f9u, 0x06060000u) && model_refuses(0xd76f0001u, 0x24010c06u) && model_refuses(0xf4090202u, 0xfa000000u) &&
+                  model_refuses(0xdc328000u, 0x04080002u) && model_refuses(0xcc0d4805u, 0x1a002d05u) && model_refuses(0xb0000000u, 0) &&
+                  model_refuses(0xd76f0101u, 0x04010c06u) && model_refuses(0x7e02027cu, 0) && model_refuses(0xdacc0004u, 0x2d003d2cu));
+        {
+                static const unsigned int bad[] = {0xe0ac0000u, 0x18cu, 0xbf800000u, 0xbe800505u, 0xbf810000u};
+                static unsigned int out[64];
+                struct gpu_model_region r = {0x10000, sizeof(out), (p8 address_to)out, GPU_MODEL_READ | GPU_MODEL_WRITE};
+                int failed = gpu_model_run(bad, 5, 0x10000, 1, 1, &r, 1);
+
+                string_format(log, "gpu model: %s\n", gpu_model.fault.text);
+                check("gpu model: a kernel with an unknown word is refused when the wave reaches it, the word and its byte in the code named",
+                      failed == GPU_MODEL_UNKNOWN && gpu_model.fault.word == 0xbe800505u && gpu_model.fault.pc == 4 && model_has(gpu_model.fault.text, "0xbe800505") &&
+                          model_has(gpu_model.fault.text, "byte 0x4 of the code"));
+        }
+
+        // gpu_model_run, the call P2 makes: fill (op 1) over a w of 100 of two rows of 128, the args block in the same region. Each pixel below w is v; the rest is as it was.
+        {
+                static unsigned int memory[64 + 2 * 128];
+                struct gpu_model_region r = {0x200000000ull, sizeof(memory), (p8 address_to)memory, GPU_MODEL_READ | GPU_MODEL_WRITE};
+                struct gpu_args address_to a = (struct gpu_args address_to)memory;
+                unsigned int address_to d = memory + 64;
+                b32 right = true;
+                int failed;
+
+                for (unsigned int i = 0; i < 2 * 128; i++)
+                        d[i] = 0x5a5a5a5au;
+                a->d = r.va + 256, a->dp = 128, a->w = 100, a->op = 1, a->v = 0xff102030u, a->rows = 2;
+                failed = gpu_model_run(gpu_k_fill, sizeof(gpu_k_fill) / 4, r.va, 2, 2, &r, 1);
+                for (unsigned int y = 0; y < 2; y++)
+                        for (unsigned int x = 0; x < 128; x++)
+                                right = right && d[y * 128 + x] == (x < 100 ? 0xff102030u : 0x5a5a5a5au);
+                check("gpu model: gpu_model_run runs a kernel of gpuasm's over its grid in the regions it is given (fill: w of 100 pixels in two rows of 128)", !failed && right);
+                check("gpu model: its cost says what ran: four waves, the stores of 200 lanes", gpu_model.cost.waves == 4 && gpu_model.cost.lane_stores == 200);
+        }
+
+        if (!gpu_model_card_start(4 << 20))
+        {
+                check("gpu model: the model card's buffer is made", false);
+                return test_report(null);
+        }
+
+        // The row that matters: the self-test on the model is the card's picture.
+        hash = model_hash();
+        string_format(log, "gpu model: the self-test's hash is %p (GPU_TEST_HASH %p), %p jobs, %p waves, %p instructions%s%s\n", (positive)hash, (positive)GPU_TEST_HASH,
+                      (positive)gpu_model_card.jobs, gpu_model.cost.waves, gpu_model.cost.instructions, gpu_model.fault.code ? ": " : "", gpu_model.fault.text);
+        check("gpu model: gpu_test_hash drawn by the model card is GPU_TEST_HASH, the hash an RDNA2 card drew the self-test's two scenes to", hash == GPU_TEST_HASH && !gpu_model.fault.code &&
+              gpu_model_card.jobs == 2);
+        gpu_model.poison = 0xdeadbeefu, hash = model_hash();
+        same = hash == GPU_TEST_HASH && !gpu_model.fault.code;
+        gpu_model.poison = 0xffffffffu, hash = model_hash();
+        gpu_model.poison = 0;
+        check("gpu model: the same with every register nothing writes started as 0xdeadbeef, and as all ones", same && hash == GPU_TEST_HASH && !gpu_model.fault.code);
+        same = true;
+        for (unsigned int way = 1; way <= 3; way++)
+                gpu_model.nudge = way, same = same && model_hash() == GPU_TEST_HASH && !gpu_model.fault.code;
+        gpu_model.nudge = 0;
+        check("gpu model: the same with v_rcp_f32 and v_sqrt_f32 an ulp up, an ulp down, and either or neither lane by lane (the box corners correct both to the integer)", same);
+
+        // One bit of one word of the card's copy of the scene kernel flipped (premulv's v_lshrrev_b32 v35, 12, v35 made 13): the model runs it to its end and the hash is another.
+        {
+                p32 address_to code = (p32 address_to)((p8 address_to)gpu.at + gpu_kernel_at[6]);
+                unsigned int words = (unsigned int)(gpu_kernels[6].size - 8) / 4, found = 0;
+
+                gpu_model.code_va = 0;
+                for (unsigned int at = 0; at < words && !found;)
+                {
+                        struct gpu_model_insn in;
+
+                        if (gpu_model_decode(code + at, words - at, 4ull * at, &in))
+                                break;
+                        if (in.id == gpu_model_find(GM_VOP2, 0x16) && !in.e64 && in.op[0] == 256 + 35 && in.op[1] == 128 + 12 && in.op[2] == 256 + 35)
+                                found = at + 1;
+                        at += in.words;
+                }
+                if (found)
+                        code[found - 1] ^= 1, hash = model_hash(), code[found - 1] ^= 1;
+                string_format(log, "gpu model: the mutant (word %p of scene, bit 0) hashes to %p\n", (positive)(found - 1), (positive)hash);
+                check("gpu model: a scene kernel with one bit of one instruction word flipped runs to its end and its hash is not GPU_TEST_HASH", found && !gpu_model.fault.code && hash != GPU_TEST_HASH);
+                check("gpu model: and the kernel put back is GPU_TEST_HASH again", model_hash() == GPU_TEST_HASH);
+        }
+
+        // Bounds: a record that reaches past every buffer the job named is refused with the address, and no wave past it runs.
+        {
+                positive ops_at = GPU_DATA, bins_at = GPU_DATA + 4096, pic_at = GPU_DATA + 65536, outside = GPU_VA + gpu.size;
+                unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+                unsigned int image[8] = {4, 0, 0, 64, 4, (unsigned int)outside, (unsigned int)(outside >> 32), 64};
+                unsigned int fill[8] = {0, 0, 0, 64, 4, 0xff00ff00u, 0, 0};
+
+                gpu_model_card_reset(), memory_copy(ops, image, 32);
+                gpu_scene(ops_at, 1, bins_at, pic_at, 64, 64, 4, 0, 0, 64, 4);
+                string_format(log, "gpu model: %s\n", gpu_model.fault.text);
+                check("gpu model: an image record whose picture is past the card's buffer is refused at its first lane, with the address",
+                      gpu_model.fault.code == GPU_MODEL_BOUNDS && gpu_model.fault.address == outside && gpu_model.fault.lane == 0 && gpu_model.fault.bytes == 4 &&
+                          model_has(gpu_model.fault.text, "outside every buffer the job named"));
+                gpu_model_card_reset(), memory_copy(ops, fill, 32);
+                gpu_scene(ops_at, 1, bins_at, outside - 3 * 256, 64, 64, 4, 0, 0, 64, 4);
+                string_format(log, "gpu model: %s\n", gpu_model.fault.text);
+                check("gpu model: a picture whose fourth row is past the buffer: the store of its first lane there is refused with the address",
+                      gpu_model.fault.code == GPU_MODEL_BOUNDS && gpu_model.fault.address == outside && gpu_model.fault.lane == 48 && gpu_model.fault.bytes == 16);
+
+                // A map the job does not name (not handed to a record, not used in this tick) is not the job's to read; handed, it is, and the picture is its pixels.
+                for (unsigned int i = 0; i < 64 * 4; i++)
+                        model_source[i] = 0xff000000u | i * 0x010203u;
+                gpu_tick = 100, gpu_map_count = 1;
+                gpu_maps[0].from = (positive)model_source, gpu_maps[0].to = (positive)model_source + sizeof(model_source), gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = sizeof(model_source);
+                gpu_maps[0].handle = 7, gpu_maps[0].used = 90, gpu_maps[0].written = 0, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
+                image[5] = (unsigned int)GPU_VA_MAPS, image[6] = (unsigned int)(GPU_VA_MAPS >> 32);
+                gpu_model_card_reset(), memory_copy(ops, image, 32);
+                gpu_scene(ops_at, 1, bins_at, pic_at, 64, 64, 4, 0, 0, 64, 4);
+                check("gpu model: an image record of a map the job's bo list does not name is refused, with the map's address",
+                      gpu_model.fault.code == GPU_MODEL_BOUNDS && gpu_model.fault.address == GPU_VA_MAPS && !model_seen(7));
+                gpu_model_card_reset(), memory_copy(ops, image, 32);
+                same = gpu_va_bytes(model_source, sizeof(model_source)) == GPU_VA_MAPS && gpu_scene(ops_at, 1, bins_at, pic_at, 64, 64, 4, 0, 0, 64, 4) && !gpu_model.fault.code && model_seen(7);
+                same = same && !memory_compare((p8 address_to)gpu.at + pic_at, model_source, sizeof(model_source));
+                check("gpu model: handed to the record, the map is named and read, and the picture is its pixels", same);
+                gpu_model_card_reset(), memory_copy(ops, fill, 32);
+                gpu_va_bytes(model_source, sizeof(model_source));
+                gpu_scene(ops_at, 1, bins_at, GPU_VA_MAPS, 64, 64, 4, 0, 0, 64, 4);
+                check("gpu model: a store into a map bound to be read is refused: the job may read it and not write it",
+                      gpu_model.fault.code == GPU_MODEL_BOUNDS && gpu_model.fault.address == GPU_VA_MAPS && model_has(gpu_model.fault.text, "may read and not write"));
+                gpu_map_count = 0, gpu_handed_clear();
+        }
+        gpu_model_card_stop();
+        return test_report(null);
+}
+#endif /* CHECK_gpu_model */
+
 #ifdef BENCH_routine
 /*
         One lib.c routine at a list of sizes, interleaved against named references.

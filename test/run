@@ -178,7 +178,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
 
@@ -266,6 +266,7 @@ describe()
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
         issues) echo "the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board, and a hostile copy (CHECK_issues)" ;;
         osk) echo "the on-screen keyboard: the headless compositor, a terminal with the keys and the keyboard, typed on by the pointer (a capital, the numbers page, a held Back), the shell's files are the proof (test/osk_e2e.sh)" ;;
+        gpumodel) echo "the model of the card, test/gpu_model.c: gpu.c's self-test drawn by it against GPU_TEST_HASH, the decoder against gpuasm, a mutant kernel, records past their buffers (CHECK_gpu_model, also a gate row)" ;;
         gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
         gpuanim)  echo "the animations sampled as the scan image is written: the headless card's screen in three sessions (lists on, lists off, the processor), each animation step counted for torn, foreign and flipflop frames (test/gpu_anim_flicker.sh)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
@@ -1216,7 +1217,7 @@ gpu_kernels_ready()
 gpu_kernels_wanted()
 {
         case " $* " in
-        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
+        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DCHECK_gpu_model "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
         esac
         case $source_file in
         programs/*)
@@ -7582,6 +7583,16 @@ gate_gpu_kit()
         "$work/gpu-kit-check"
 }
 
+#       CHECK_gpu_model: the model of the card (test/gpu_model.c, an interpreter of the words gpuasm makes) held to the card and to itself
+#       with no card: gpu.c's self-test drawn by it is GPU_TEST_HASH, a kernel with one bit flipped is not, a record past its buffers is refused.
+gate_gpu_model()
+{
+        freestanding_check gpu_model "$work/gpu-model-check" || return 1
+        "$work/gpu-model-check"
+}
+
+lane_gpumodel() { gate_row gpu-model gate_gpu_model; }
+
 gate_inventory()
 {
         mkdir -p "$work/gate-inventory" &&
@@ -7711,6 +7722,7 @@ lane_gate()
         job hard gate_row kit-frames gate_kit_frames
         job hard gate_row draw-list gate_draw_list
         job hard gate_row gpu-kit gate_gpu_kit
+        job hard gate_row gpu-model gate_gpu_model
         job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row types gate_types
