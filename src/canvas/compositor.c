@@ -3977,7 +3977,7 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         unsigned char *table[2];
         int hot_x, hot_y, span = compositor_pointer_span(p, &hot_x, &hot_y), left = x - hot_x, top = y - hot_y;
         unsigned int at[2];
-        const unsigned char *made = compositor_pointer_cover(p);
+        const unsigned char *made;
 
         // A client's own picture has colours a cover table cannot carry: the processor draws the present.
         if (p->picture)
@@ -3985,6 +3985,7 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_POINTER;
                 return false;
         }
+        made = compositor_pointer_cover(p);
         if (memory_compare(&last, p, sizeof(last)))
                 last = *p, count++;
         {
