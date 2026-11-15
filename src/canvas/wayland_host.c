@@ -4017,6 +4017,14 @@ static int compositor_wl_dmabuf_signaled(void *context, long fd)
         return (watch.returned & COMPOSITOR_POLLIN) != 0;
 }
 
+// Whether a job of the card may still read a row's pictures in place (the present's, which does not wait for its jobs): the shim keeps the buffers
+// such a picture was read from until a frame is drawn (wayland_host.row_busy).
+static int compositor_wl_row_busy(void *context, int row)
+{
+        (void)context;
+        return compositor_card_reads(row);
+}
+
 static const struct wayland_host compositor_wl_host = {
     0,
     compositor_wl_alloc,
@@ -4049,6 +4057,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_dmabuf_signaled,
     compositor_wl_random,
     compositor_wl_row_layers,
+    compositor_wl_row_busy,
 };
 
 /* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */

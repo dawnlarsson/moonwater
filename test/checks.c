@@ -185533,7 +185533,7 @@ static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
-    fake_clip_clear, fake_dmabuf_ready, fake_random, 0}; // no row_layers: every subsurface laid into its window (test_layers gives one)
+    fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0}; // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -190720,6 +190720,74 @@ static void test_layers(void)
         wayland_stop();
 }
 
+// The fake host's card: whether a job of it may still read the rows' pictures in place (row_busy).
+static int fake_busy;
+
+static int fake_row_busy(void *context, int row)
+{
+        (void)context;
+        (void)row;
+        return fake_busy;
+}
+
+/*
+        A buffer read in place while a job of the card may still read it (the present does not wait for its jobs, row_busy): a window's second
+        commit before a frame is drawn does not release the buffer two pictures back, nor does its window's close the ones it showed; the client is
+        read and answered all along; and they are released at the first frame drawn after the job is done.
+*/
+static void test_row_busy(void)
+{
+        struct wayland_host host = fake_host;
+        struct session s;
+        struct wlc *c;
+        unsigned long second, third, sync;
+
+        host.row_busy = fake_row_busy;
+        wl_reset();
+        fake.lend = 1;
+        fake_busy = 0;
+        wayland_start(&host);
+        session_open(&s);
+        session_window(&s, 0xff101010); // its buffer read in place
+        c = s.c;
+        second = wl_buffer_of(&s, 32, 24, 0xff202020, WLN_wl_shm_format_xrgb8888);
+        third = wl_buffer_of(&s, 32, 24, 0xff303030, WLN_wl_shm_format_xrgb8888);
+        fake_busy = 1;
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, third, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        sync = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, 1, WLQ_wl_display_sync, sync);
+        wlc_pump(c);
+        WLCHECK(fake.lends == 3 && releases_of(c, s.buffer) == 0 && wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1 && c->errors == 0,
+                "a second commit while the card may still read the first picture releases nothing, and the client is answered (%ld lends, %ld released)",
+                fake.lends, releases_of(c, s.buffer));
+        fake_busy = 0;
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, s.buffer) == 1 && releases_of(c, second) == 1 && releases_of(c, third) == 0,
+                "the frame drawn once the job is done releases both it held, and not the picture");
+        // The window's close while busy: its buffer is the client's again only at the frame after.
+        fake_busy = 1;
+        wlc_forget(c);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        wlc_pump(c);
+        WLCHECK(releases_of(c, third) == 0 && c->errors == 0, "a window closed while the card may read it releases nothing yet (%s)", c->error_text);
+        fake_busy = 0;
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, third) == 1, "and its buffer is released at the frame after");
+        wlc_end(c);
+        leak_check("row busy");
+        wayland_stop();
+}
+
 /* ---- dma-bufs ---- */
 
 #define DRM_ARGB8888 0x34325241L
@@ -193115,6 +193183,7 @@ int main(int argc, char **argv)
         test_cursor();
         test_cursor_picture();
         test_layers();
+        test_row_busy();
         test_budget();
         test_stall_state();
         test_dmabuf();

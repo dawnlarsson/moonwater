@@ -369,6 +369,10 @@ struct wayland_host
         // own picture follows at once (row_picture with last), and the layers are over it. A count of -1 is no layers: any kept are laid into
         // the picture. Optional, and last, so a host's positional initializer without it is one that lays every subsurface in its window.
         int (*row_layers)(void *context, int row, const struct wayland_picture *layers, long count, long root);
+        // row_busy: 1 while a job of the card that reads the row's pictures where their clients keep them may still run (the present does not wait
+        // for its jobs); a buffer such a picture was read from is then not released at a commit or a close but at the next frame drawn or presented
+        // (wayland_drawn, wayland_presented), which the host calls once its jobs are done. The client is read all along. Optional: none is never busy.
+        int (*row_busy)(void *context, int row);
 };
 
 #define WAYLAND_LAYERS 8        // the most subsurfaces a window is handed to the host with as layers (row_layers)
@@ -1721,6 +1725,7 @@ static void wayland_constraints_update(void);
 static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
 
 static void wayland_let_go(struct wayland_client *c, long index);
+static void wayland_lent_let(struct wayland_client *c, long row, unsigned short index1);
 static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s);
 
 static void wayland_texts_row_gone(struct wayland_client *c, long row);
@@ -1744,10 +1749,8 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         // are those of its subsurfaces' layers.
         s->lent = s->lent_gone = 0;
         s->layered = s->laying = 0;
-        if (lent)
-                wayland_let_go(c, lent - 1);
-        if (gone)
-                wayland_let_go(c, gone - 1);
+        wayland_lent_let(c, s->row, (unsigned short)lent);
+        wayland_lent_let(c, s->row, (unsigned short)gone);
         for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
         {
                 struct wayland_surface *child = &c->surfaces[wayland_first_bit(mask)];
@@ -1757,8 +1760,7 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
                         continue;
                 child->lent = child->lent_gone = 0;
                 for (long at = 0; at < 2; at++)
-                        if (held[at])
-                                wayland_let_go(c, held[at] - 1);
+                        wayland_lent_let(c, s->row, held[at]);
         }
         wayland.rows--;
         s->row = -1;
@@ -1923,8 +1925,26 @@ static void wayland_let_go(struct wayland_client *c, long index)
         }
 }
 
+// Whether a card's job may still read the pictures of a row in place (wayland_host.row_busy).
+static int wayland_row_busy(long row)
+{
+        return row >= 0 && wayland.host->row_busy && wayland.host->row_busy(wayland.host->context, (int)row);
+}
+
+// A buffer read in place let go of (index and one), or, while a job of the card may still read its row's pictures, kept until a frame is drawn
+// (the client's gone list, wayland_gone_drawn); let go of at once only past WAYLAND_GONE.
+static void wayland_lent_let(struct wayland_client *c, long row, unsigned short index1)
+{
+        if (!index1)
+                return;
+        if (wayland_row_busy(row) && c->gones < WAYLAND_GONE)
+                c->gone[c->gones++] = index1;
+        else
+                wayland_let_go(c, index1 - 1);
+}
+
 // The buffer a surface replaced while it was lent, let go of: unless it is the one the commit attaches (now), whose release the commit makes
-// itself, so it is only given up here (its hold is the commit's to end).
+// itself, so it is only given up here (its hold is the commit's to end). While a job of the card may still read it, it is kept (wayland_lent_let).
 static void wayland_gone_let(struct wayland_client *c, struct wayland_surface *s, struct wayland_buffer *now)
 {
         long index = s->lent_gone - 1;
@@ -1933,7 +1953,7 @@ static void wayland_gone_let(struct wayland_client *c, struct wayland_surface *s
         if (&c->buffers[index] == now)
                 c->buffers[index].held--;
         else
-                wayland_let_go(c, index);
+                wayland_lent_let(c, wayland_root_of(c, s)->row, (unsigned short)(index + 1));
 }
 
 // A held buffer let go: its record is freed if its object was destroyed while it was held, else its client is told.
