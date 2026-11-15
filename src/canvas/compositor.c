@@ -57,6 +57,8 @@
             present-early     compositor.c's start, once: every present by the old rule, early in its period (compositor_late.early)
             present-wait      compositor.c's start, once: every job of the card's present waited for in place (compositor_card.nowait 0)
             lists-off         gpu_host.c, compositor_lists_switch, every 512th present: while it is there no window is drawn from its list
+            lists-nowait      compositor.c's start, once: a list's render goes to the card without a wait (compositor_card.lists_nowait);
+                              without it the render is waited for in place
             gpu-nouserptr     gpu.c, gpu_start, at each start of the card: every map by the dma-buf route, never userptr
             gpu-own-userptr   gpu.c, gpu_start: the maps' old order, userptr first for the compositor's own memory too
             gpu-gfx10         gpu.c, gpu_start: the cards of family 143 (RDNA1 and 2) let in, which no one has run the kernels on
