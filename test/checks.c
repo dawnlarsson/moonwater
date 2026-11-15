@@ -183647,6 +183647,30 @@ static void memory_copy_rect_u32(u32 *into,positive into_stride,const u32 *from,
     if(!width)return;
     for(positive y=0;y<height;y++)memmove(into+y*into_stride,from+y*from_stride,width*4);
 }
+/* A copy into a scanout (lib.c streams its rows past the cache) is the same words as memory_copy_rect_u32's; a constant ink
+   mixed by a cover table is compositor_mix of the pixel by the share, a share of none leaving it whole; and the scratch a scene
+   composes the rows it reads in is grown as the glass's is. */
+static void memory_copy_rect_out_u32(u32 *into,positive into_stride,const u32 *from,positive from_stride,
+                                     positive width,positive height) {
+    memory_copy_rect_u32(into,into_stride,from,from_stride,width,height);
+}
+static void memory_mix_const_u32_rect(u32 *into,positive into_stride,const u8 *cover,positive cover_stride,
+                                      positive width,positive height,u32 ink,u32 alpha) {
+    for(positive y=0;y<height;y++)for(positive x=0;x<width;x++) {
+        u32 share=cover[y*cover_stride+x]*(alpha&255)/255,pixel=into[y*into_stride+x],out=0;
+        if(!share)continue;
+        for(unsigned shift=0;shift<24;shift+=8)
+            out|=((pixel>>shift&255)*(255-share)+(ink>>shift&255)*share+127)/255<<shift;
+        into[y*into_stride+x]=out;
+    }
+}
+static unsigned int *compositor_scratch(unsigned int **at,unsigned long *had,unsigned long bytes) {
+    if(bytes<=*had)return *at;
+    free(*at);
+    *at=calloc(1,bytes);
+    *had=*at?bytes:0;
+    return *at;
+}
 static void memory_copy_rect_reverse_u32(u32 *into,long into_pitch,const u32 *from,long from_pitch,
                                          positive width,positive height) {
     for(positive r=0;r<height;r++)for(positive c=0;c<width;c++)
@@ -184521,13 +184545,14 @@ static void check_compositor_scene(void) {
 }
 
 /* What the touch work added to the backend and the pointer's rules, on ordinary memory, by gcc and clang alike:
-   a finger's mark, a lit edge and corner, and the edges a point is on. */
+   a finger's mark, a lit edge and corner, and the edges a point is on. A scale is a percent of the logical size, as
+   compositor.scale is since a166974f (the rows took a multiplier, 1 to 4, before it). */
 static void check_compositor_touch_backend(void) {
     enum { W=200, H=150 };
     static u32 buffer[W*H];
     struct compositor_target t={buffer,W,W,H,0,0,W,H};
     int symmetric=1,outside=1,inside=1;
-    for(int scale=1;scale<=3;scale++) {
+    for(int scale=100;scale<=300;scale+=100) {
         int r=compositor_spot_radius(scale),cx=100,cy=75;
         compositor_fill(&t,0,0,W,H,0x303030u);
         compositor_spot_draw(&t,cx,cy,scale,255);
@@ -184539,18 +184564,18 @@ static void check_compositor_touch_backend(void) {
         inside&=buffer[cy*W+cx]==compositor_mix(0x303030u,COMPOSITOR_INK_LINE_HELD,COMPOSITOR_SPOT_FILL);
     }
     cc_check(symmetric&&outside&&inside);
-    cc_check(compositor_spot_radius(1)==COMPOSITOR_SPOT&&compositor_spot_radius(4)==COMPOSITOR_SPOT*4);
+    cc_check(compositor_spot_radius(100)==COMPOSITOR_SPOT&&compositor_spot_radius(400)==COMPOSITOR_SPOT*4);
     compositor_fill(&t,0,0,W,H,0x303030u);
-    compositor_spot_draw(&t,100,75,1,0);
+    compositor_spot_draw(&t,100,75,100,0);
     cc_check(buffer[75*W+100]==0x303030u);
-    compositor_spot_draw(&t,100,75,1,128);
+    compositor_spot_draw(&t,100,75,100,128);
     cc_check(buffer[75*W+100]==compositor_mix(0x303030u,COMPOSITOR_INK_LINE_HELD,COMPOSITOR_SPOT_FILL*128/255));
     /* A mark at the target's edge writes nothing outside its clip. */
     {
         struct compositor_target clip={buffer,W,W,H,50,50,60,60};
         int clean=1;
         compositor_fill(&t,0,0,W,H,0x303030u);
-        compositor_spot_draw(&clip,52,52,1,255);
+        compositor_spot_draw(&clip,52,52,100,255);
         for(int y=0;y<H;y++)for(int x=0;x<W;x++)
             if(x<50||x>=60||y<50||y>=60)clean&=buffer[y*W+x]==0x303030u;
         cc_check(clean&&buffer[52*W+52]!=0x303030u);
@@ -184561,13 +184586,13 @@ static void check_compositor_touch_backend(void) {
         static u32 body[120*80];
         struct compositor_frame frame;
         for(int p=0;p<120*80;p++)body[p]=0x404040u;
-        frame=(struct compositor_frame){50,50,60,40,1,body,120,0,0,0,8,1,0x4d4d4du,0};
+        frame=(struct compositor_frame){50,50,60,40,100,body,120,0,0,0,8,1,0x4d4d4du,0};
         frame.lit=COMPOSITOR_LIT_LEFT;frame.lit_ink=COMPOSITOR_INK_LINE_HELD;
         compositor_fill(&t,0,0,W,H,0x1e1e1eu);
         compositor_draw(&t,&frame);
         cc_check(buffer[70*W+49]==COMPOSITOR_INK_LINE_HELD&&buffer[49*W+80]==0x4d4d4du&&buffer[70*W+110]==0x4d4d4du&&
                  buffer[90*W+80]==0x4d4d4du);
-        frame=(struct compositor_frame){50,50,120,80,1,body,120,0,0,0,8,1,0x4d4d4du,0};
+        frame=(struct compositor_frame){50,50,120,80,100,body,120,0,0,0,8,1,0x4d4d4du,0};
         frame.lit=COMPOSITOR_LIT_LEFT|COMPOSITOR_LIT_TOP;frame.lit_ink=COMPOSITOR_INK_LINE_HELD;
         compositor_fill(&t,0,0,W,H,0x1e1e1eu);
         compositor_draw(&t,&frame);

@@ -2196,9 +2196,11 @@ static int compositor_scene_reads(const struct compositor_target *t, const struc
         return *bottom > *top;
 }
 
-// The slices of the rows a scene reads, COMPOSITOR_SLICE rows of the damage's width for each band, mapped when a scene first reads.
+// The slices of the rows a scene reads, COMPOSITOR_SLICE rows of the damage's width for each band, mapped when a scene first reads
+// and grown as the glass's scratch is (compositor_scratch, glass.c).
 static unsigned int *compositor_aside;
 static unsigned long compositor_aside_bytes;
+static unsigned int *compositor_scratch(unsigned int **at, unsigned long *had, unsigned long bytes);
 
 static void compositor_scene_band(address_any context, positive index)
 {
@@ -2289,15 +2291,8 @@ static void compositor_scene_banded(const struct compositor_target *t, const str
         // A target only written that the scene reads: room for each band's slice, as wide as the damage, made here before the bands.
         if (!apart && compositor_scene_reads(t, frames, count, &banding.read_top, &banding.read_bottom))
         {
-                unsigned long need = (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_SLICE * (unsigned long)(t->x2 - t->x1) * 4;
-
-                if (need > compositor_aside_bytes)
-                {
-                        if (compositor_aside)
-                                system_call_2(syscall(munmap), (positive)compositor_aside, compositor_aside_bytes);
-                        compositor_aside = (unsigned int *)compositor_map_zeroed(need);
-                        compositor_aside_bytes = compositor_aside ? need : 0;
-                }
+                compositor_scratch(&compositor_aside, &compositor_aside_bytes,
+                                   (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_SLICE * (unsigned long)(t->x2 - t->x1) * 4);
         }
         if (bytes >= PARALLEL_MINIMUM_BYTES && bands >= 2 && !compositor_band_scratch)
                 compositor_band_scratch = (unsigned int *)compositor_map_zeroed(
