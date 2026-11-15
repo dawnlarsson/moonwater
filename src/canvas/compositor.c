@@ -2384,6 +2384,15 @@ static b32 compositor_main()
                 if (wait >= 0)
                         system_close(wait);
         }
+        // A window's list drawn by a job of the card the loop does not wait for, where the owner asks for it (/run/moonwater/lists-nowait); waited for in
+        // place otherwise, as it was.
+        {
+                bipolar lists = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-nowait", FILE_READ | O_CLOEXEC);
+
+                compositor_card.lists_nowait = lists >= 0;
+                if (lists >= 0)
+                        system_close(lists);
+        }
 #endif
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
@@ -2473,7 +2482,7 @@ static b32 compositor_main()
                 // The look at the screens the first take owes (compositor_space_first), once the loop has made its first turn and
                 // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card (nor a
                 // present's job: the take waits for it).
-                if (compositor.probe_owed && turns++ && !compositor_card.on)
+                if (compositor.probe_owed && turns++ && !compositor_card.on && !compositor_card.list_rows)
                 {
                         compositor.probe_owed = 0;
                         compositor_space_retake();
@@ -2606,7 +2615,7 @@ static b32 compositor_main()
                 }
                 if (held)
                 {
-                        positive due = compositor_card.began + GPU_LATE_NS;
+                        positive due = compositor_card_held_until();
 
                         until = !until || due < until ? due : until;
                 }
@@ -2674,9 +2683,24 @@ static b32 compositor_main()
                 if (wanted[1].returned)
                         compositor_inputs_watch();
 
-                for (unsigned int row = 0; row < WINDOWS; row++)
-                        if (wanted[doors + row].returned)
+                // A list's job submitted without a wait leaves the doors after it for a later turn, read from the first of them then (the card holds one job of
+                // a list at a time, and the next list would be refused for want of it).
+                {
+                        b32 listing = compositor_card.list_rows != 0;
+
+                        for (unsigned int k = 0, row; k < WINDOWS; k++)
+                        {
+                                row = (compositor_card.door_from + k) % WINDOWS;
+                                if (!wanted[doors + row].returned)
+                                        continue;
+                                if (compositor_card_door_waits(listing))
+                                {
+                                        compositor_card.door_from = row;
+                                        break;
+                                }
                                 compositor_door((int)row, wanted[doors + row].returned);
+                        }
+                }
                 if (done_at && wanted[done_at].returned)
                         compositor_doors_done();
 
@@ -2698,9 +2722,9 @@ static b32 compositor_main()
                 // A screen came or went, or the screens are taken now that a flip that held them back has landed (and a present's jobs are done).
                 if (uevents_at && wanted[uevents_at].returned)
                         compositor_uevents_read();
-                if (compositor.space_wanted && !compositor.flip_pending && !compositor_card.on)
+                if (compositor.space_wanted && !compositor.flip_pending && !compositor_card.on && !compositor_card.list_rows)
                         compositor_space_retake();
-                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look && !compositor_card.on)
+                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look && !compositor_card.on && !compositor_card.list_rows)
                 {
                         compositor.screens_look = 0;
                         compositor_space_retake();

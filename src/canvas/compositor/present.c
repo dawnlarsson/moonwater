@@ -342,10 +342,13 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
         return 1;
 }
 
-// Whether a present is held for the card: a present's jobs on it, or a job still pending with its end not said (one given up on as late). Only without
-// a wait (present-nowait): with one the waits are in place, as they were.
+// Whether a present is held for the card: a list's job not waited for draws a picture the present reads (whether the present waits or not); and
+// without a wait (present-nowait), a present's jobs on it, or a job still pending with its end not said (one given up on as late). With one the waits
+// are in place, as they were.
 static b32 compositor_card_holds(void)
 {
+        if (compositor_card.list_rows)
+                return true;
         if (!compositor_card.nowait)
                 return false;
         return compositor_card.on || (gpu.pending && !gpu_end_said && compositor_gpu_state.up && !gpu_idle());
@@ -365,13 +368,20 @@ static void compositor_card_release(void)
         compositor_card.rows = 0;
 }
 
-// Whether the loop reads no client this turn: a present's jobs are on the card and it began less than GPU_LATE_NS ago. Past that the clients are read
-// again (a client not read for a hung job's two seconds is ended by its toolkit's watchdog, its pings unanswered), and what the jobs read is kept from
-// them by compositor_card_reads (the doors' taken, the shim's releases) until they are done or the hang path ends them. The input devices are read
-// whatever this says.
+// When the clients' hold ends: GPU_LATE_NS after the present whose jobs are on the card began, or after the first list's job not waited for did.
+static positive compositor_card_held_until(void)
+{
+        return (compositor_card.on ? compositor_card.began : compositor_card.list_began) + GPU_LATE_NS;
+}
+
+// Whether the loop reads no client this turn: a present's jobs are on the card, or a list's not waited for, and it began less than GPU_LATE_NS ago
+// (compositor_card_held_until; a list's holds them so that no other list asks for the card meanwhile). Past that the clients are read again (a client
+// not read for a hung job's two seconds is ended by its toolkit's watchdog, its pings unanswered), and what the jobs read is kept from them by
+// compositor_card_reads (the doors' taken, the shim's releases) until they are done or the hang path ends them. The input devices are read whatever
+// this says.
 static b32 compositor_card_clients_held(positive now)
 {
-        return compositor_card.on && now - compositor_card.began < GPU_LATE_NS;
+        return (compositor_card.on || compositor_card.list_rows) && now < compositor_card_held_until();
 }
 
 // The present whose jobs are on the card began at `began`: its time is noted when they are done, and the clients' hold is counted from it.
@@ -480,14 +490,53 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
 }
 
 /*
+        The rows whose list's job is over given back: the door's taken held for the job (compositor_take, while compositor_card_reads said the row was the
+        job's) said, as compositor_card_release says a present's. A job the hang path ended (hung), whose fence answered an error, or that a restart of the
+        card took with it is no drawn frame: its list is refused (list_state 2, so the program paints that frame in pixels, whole, and lists again after it)
+        and the window drawn again. Nothing waits for a job that will not end: its row is given back at its deadline.
+*/
+static void compositor_card_lists_settle(b32 hung)
+{
+        hung |= gpu_recovered != compositor_card.list_recovered;
+        for (int row = 0; row < WINDOWS && compositor_card.list_rows; row++)
+        {
+                int done;
+
+                if (!(compositor_card.list_rows >> row & 1u))
+                        continue;
+                done = hung ? -1 : gpu_done(compositor_card.list_seq[row]);
+                if (done == 0)
+                        continue;
+                compositor_card.list_rows &= ~(1u << row), compositor_card.list_seq[row] = 0;
+                if (!compositor.table)
+                        continue;
+                if ((compositor.held_rows >> row & 1u) && !(compositor.flip_pending && row == compositor.flip_row) &&
+                    !(compositor_card.on && (compositor_card.rows >> row & 1u)))
+                {
+                        __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
+                        compositor.held_rows &= ~(1u << row);
+                }
+                compositor.woken |= 1u << row;
+                if (done < 0)
+                {
+                        __atomic_store_n(&compositor.table->list_state[row], 2u, __ATOMIC_RELEASE);
+                        if (compositor.showing[row])
+                                compositor_damage(compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]);
+                }
+        }
+}
+
+/*
         The loop's turn with a job on the card: a deadline passed or a fence's error is the hang path, and the frame is drawn again; the next jobs of the present
         submitted as their turn comes, and its flip committed once the last is; and once every job is done, the present's end. A job pending with no present in
-        flight (a list's given up on as late) is let go of when it is done, or its end said. Nothing here waits.
+        flight (a list's given up on as late) is let go of when it is done, or its end said, and a list's drawn without a wait gives its row back then
+        (compositor_card_lists_settle). Nothing here waits.
 */
 static void compositor_card_tick(void)
 {
         if (!compositor_card.on && !gpu.pending)
         {
+                compositor_card_lists_settle(false); // no job pending: every list's done, or the card started again
                 compositor_card_fence_close();
                 return;
         }
@@ -495,10 +544,12 @@ static void compositor_card_tick(void)
         {
                 compositor_gpu_job_failed();
                 compositor_card_fence_close();
+                compositor_card_lists_settle(true);
                 if (compositor_card.on)
                         compositor_card_abandon();
                 return;
         }
+        compositor_card_lists_settle(false);
         if (compositor_card.on && compositor_card.next < compositor_card.steps)
         {
                 if (compositor_card_go() < 0)
@@ -531,10 +582,10 @@ static positive compositor_card_due(positive now)
         return due > now ? due : now + 1000000ull; // a time gone by is looked at a millisecond on, not in a loop that spins
 }
 
-// Whether the loop waits on the card this turn.
+// Whether the loop waits on the card this turn: a list's job not waited for, or without a wait a present's jobs or a job still pending.
 static b32 compositor_card_awaits(void)
 {
-        return compositor_card.nowait && (compositor_card.on || (gpu.pending && !gpu_end_said));
+        return compositor_card.list_rows || (compositor_card.nowait && (compositor_card.on || (gpu.pending && !gpu_end_said)));
 }
 #else
 static b32 compositor_card_holds(void)

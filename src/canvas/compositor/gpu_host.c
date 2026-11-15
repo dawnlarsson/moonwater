@@ -29,6 +29,10 @@ static positive compositor_slept_clock(void); // the boot clock's lead over the 
 static void compositor_gpu_restart_check(void); // started again after a sleep (below)
 static void compositor_say(string_address what, bipolar value);
 #define COMPOSITOR_GPU_OPS_AT GPU_DATA
+// A window's list drawn without a wait (compositor_card.lists_nowait) cuts its records into the second half of the ops' megabyte, a present into the first,
+// so neither writes records a job of the other may still read (a job given up on as late runs on).
+#define COMPOSITOR_GPU_LIST_OPS (512 << 10)
+#define COMPOSITOR_GPU_LIST_OPS_AT (COMPOSITOR_GPU_OPS_AT + COMPOSITOR_GPU_LIST_OPS)
 #define COMPOSITOR_GPU_TABLES_AT (GPU_DATA + (1 << 20))
 #define COMPOSITOR_GPU_BINS_AT (GPU_DATA + (2 << 20))
 static struct
@@ -125,7 +129,7 @@ static void compositor_gpu_layout(void)
 {
         struct compositor_gscene *g = &compositor_gscene;
 
-        g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
+        g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (compositor_card.lists_nowait ? COMPOSITOR_GPU_LIST_OPS : 1 << 20) / 32;
         g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
         g->kept = 0, g->tables_used = 0;
 }
@@ -1128,6 +1132,33 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
 }
 
 /*
+        A list's job submitted without a wait (compositor_card.lists_nowait): 1 submitted, the row's picture the job's until the loop's turn has seen it done
+        (compositor_card_lists_settle); 0 refused, compositor_list_why saying why. The card's slots or the bins' sides held by running jobs (gpu_end LATE)
+        is no failure of the card's: the frame is refused as the card's being busy (COMPOSITOR_LIST_CARD) and nothing is counted against the card.
+*/
+static int compositor_card_list_submit(int row, unsigned int made, positive picture_va, unsigned int pitch, unsigned int w4, unsigned int height, int x0, int y0,
+                                       int x1, int y1)
+{
+        positive sequence = gpu_scene_submit(COMPOSITOR_GPU_LIST_OPS_AT, made, COMPOSITOR_GPU_SCENE_BINS_AT, picture_va, pitch, w4, height, (unsigned int)x0,
+                                             (unsigned int)y0, (unsigned int)x1, (unsigned int)y1);
+
+        if (!sequence)
+        {
+                if (gpu_end == GPU_END_LATE && !gpu_lost)
+                        return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
+                if (gpu_lost)
+                        compositor_gpu_recover();
+                compositor_gpu_job_failed();
+                return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
+        }
+        if (!compositor_card.list_rows)
+                compositor_card.list_began = gpu_job_began;
+        compositor_card.list_seq[row] = sequence, compositor_card.list_rows |= 1u << row, compositor_card.list_recovered = gpu_recovered;
+        compositor_gpu_state.failures = 0;
+        return 1;
+}
+
+/*
         A program's list drawn into its row's picture by the card: the list (list_bytes of it, a program's shared memory), the picture (a half of the row in
         the window table, pitch pixels a row) and the damage of the frame answered in damage (x0, y0, x1, y1 in the picture). The program paints no pixels in
         this mode and the compositor is the only writer of the picture, so the card may write it; the card is given the picture as a map it may write and the
@@ -1147,14 +1178,17 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
 
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
-        if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
+        if (row < 0 || row >= WINDOWS || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
-        // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done.
+        // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done. Nor while any job runs, a
+        // list's drawn without a wait among them: its records, its row's base and its picture are that job's.
         if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || compositor_card.on || !compositor_gpu_up() || !gpu_idle())
                 return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
         if (ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
-        made = compositor_gpu_list_ops(view.ops, view.count, view.cover_at, view.cover_used, list_bytes, width, height, slot, g->ops, g->room);
+        made = compositor_gpu_list_ops(view.ops, view.count, view.cover_at, view.cover_used, list_bytes, width, height, slot,
+                                       compositor_card.lists_nowait ? (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_LIST_OPS_AT) : g->ops,
+                                       compositor_card.lists_nowait ? COMPOSITOR_GPU_LIST_OPS / 32 : g->room);
         if (made == COMPOSITOR_GPU_LIST_REFUSED)
                 return compositor_list_why = COMPOSITOR_LIST_CUT, 0;
         if (!ui_draw_list_still(list, &view)) // the generation moved under the read: the next present reads the new one
@@ -1195,8 +1229,13 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                         return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
                 }
         }
-        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0, (unsigned int)y0,
-                       (unsigned int)x1, (unsigned int)y1))
+        if (compositor_card.lists_nowait)
+        {
+                if (!compositor_card_list_submit(row, made, picture_va, (unsigned int)pitch, w4, (unsigned int)height, x0, y0, x1, y1))
+                        return 0;
+        }
+        else if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0,
+                            (unsigned int)y0, (unsigned int)x1, (unsigned int)y1))
         {
                 if (gpu.pending)
                         gpu_finish();

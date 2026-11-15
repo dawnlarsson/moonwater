@@ -206,6 +206,14 @@ static int compositor_shows_row(int row)
         It is the present there is; the owner's file /run/moonwater/present-wait (looked for at the start: compositor_card.nowait 0) has every job of a
         present waited for in place as it was (gpu_scene and gpu_blit, a tick each), for a comparison. What the programs are told of their pictures waits
         for the jobs that read them wherever it is told (compositor_card_reads: the doors' taken, compositor_take; the shim's releases, row_busy).
+
+        A window's list is drawn the same way where the owner asks for it (the file /run/moonwater/lists-nowait, looked for at the start:
+        compositor_card.lists_nowait), and waited for in place otherwise, as it was: its job is submitted (gpu_scene_submit, its records in their own half
+        of the ops' megabyte, COMPOSITOR_GPU_LIST_OPS_AT) and the row's picture is the job's until its fence says done (compositor_card_reads, so the door's
+        taken is held and the program writes nothing the job reads); a present is held while it runs (it reads that picture), the clients' doors and
+        sockets are not read while it is younger than GPU_LATE_NS (no other list asks for the card meanwhile, so none is refused for want of it), the doors
+        that knocked with it are read at a later turn from the first of them (compositor_card_door_waits), and the loop's turn gives the row back when it is
+        done (compositor_card_lists_settle), or with the hang path at its deadline, the list then refused (list_state 2: the program paints that frame).
 */
 enum
 {
@@ -237,17 +245,29 @@ static struct
         unsigned int clips;
         int turning, composed, flip_own, back, plane_off; // how the present ends (compositor_present_tell)
         unsigned int rows;          // the rows whose pictures the present's jobs read (bit row)
+        b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-nowait was there at the start)
+        unsigned int list_rows;     // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
+        positive list_seq[WINDOWS], list_began;
+        unsigned int list_recovered; // the card's restarts (gpu_recovered) when they were submitted: one since ends them, as a hang does
+        unsigned int door_from;     // the door read first at the next turn: the first of those a list's job left for later
 } compositor_card;
 
 /*
         Whether a job of the card that reads a row's picture where it is (a window's table buffer, a client's lent buffer) may still run: while it does,
         nothing that program is told may let it draw into what the job reads (the door's "taken", the shim's release of a buffer a commit replaced), and
-        both wait for it to be over: its fence signalled, or the hang path's end of it. A present whose jobs are waited for in place (the default) has no
-        job left once it is over.
+        both wait for it to be over: its fence signalled, or the hang path's end of it. A present whose jobs are waited for in place has no job left once it
+        is over; a window's list drawn without a wait is its row's job until the loop's turn has seen it done (compositor_card.list_rows).
 */
 static int compositor_card_reads(int row)
 {
-        return compositor_card.on && row >= 0 && row < WINDOWS && (compositor_card.rows >> row & 1u);
+        return row >= 0 && row < WINDOWS && ((compositor_card.on && (compositor_card.rows >> row & 1u)) || (compositor_card.list_rows >> row & 1u));
+}
+
+// Whether the doors still to be read this turn wait for a later one: a list's job not waited for was submitted in this turn (listing: one was on the card
+// before the doors were read, a job late past GPU_LATE_NS, which holds no door), and the next list would find the card busy and be refused.
+static b32 compositor_card_door_waits(b32 listing)
+{
+        return compositor_card.lists_nowait && !listing && compositor_card.list_rows;
 }
 
 
@@ -449,6 +469,8 @@ static void compositor_flip_done(void)
                 if (!(compositor.held_rows & (1u << row)))
                         continue;
                 if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
+                        continue;
+                if (compositor_card.list_rows >> row & 1u) // a list's job draws its picture: the loop's turn gives it back at the job's end
                         continue;
                 __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
                 compositor.held_rows &= ~(1u << row);

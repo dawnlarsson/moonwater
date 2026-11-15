@@ -244499,6 +244499,199 @@ static void gpu_card_rows(void)
 }
 
 /*
+        A window's list drawn without a wait (compositor_card.lists_nowait: /run/moonwater/lists-nowait), on the fake card and the fake fence, the list one
+        box over a 64 by 4 picture held by a written map: a list's records are cut into their own half of the ops' megabyte and a present's into the other;
+        its job is submitted and not waited for, the frame said drawn with its damage; the row's picture is the job's (compositor_card_reads, which the
+        door's taken and a flip's end wait on) and a present is held while it runs, the clients while it is younger than GPU_LATE_NS, and the doors that
+        knocked with it wait for a later turn; another list while it runs is refused as the card's being busy, for its row or another, nothing submitted
+        and nothing counted against the card; the loop's turn gives the row's door back once the fence says done; a job that never signals has its row
+        given back by the hang path at its deadline, and one whose fence answers an error or that a restart of the card took has it at once, the list
+        refused (list_state 2) so the program paints that frame. Without the file the list is drawn and waited for in place, as it was.
+*/
+static unsigned char gpu_lists_memory[64 << 10] __attribute__((aligned(4096)));
+static unsigned int gpu_lists_picture[64 * 4] __attribute__((aligned(4096)));
+
+// A frame of the program's: one box of argb over its whole picture, recorded into the list and published (ui_scene_end) as the kit publishes one.
+static b32 gpu_lists_publish(unsigned int argb)
+{
+        static struct ui lui;
+        static struct ui_draw_list list;
+        struct ui_box box = {0, 0, 64 << 8, 4 << 8, 0, 0};
+
+        memory_zero(&lui, sizeof(lui));
+        lui.width = 64, lui.height = 4, lui.pitch = 64, lui.top = 0, lui.bottom = 4;
+        if (!list.ready && !ui_draw_list_init(&list, gpu_lists_memory, sizeof(gpu_lists_memory), 64))
+                return false;
+        if (!ui_scene_begin(&lui, &list))
+                return false;
+        ui_scene_box(&lui, &box, argb, false, 0, null);
+        return ui_scene_end(&lui, &list);
+}
+
+static int gpu_lists_render(int row, int *damage)
+{
+        return compositor_gpu_list_render_bytes(row, gpu_lists_memory, sizeof(gpu_lists_memory), gpu_lists_picture, 64, 64, 4, damage);
+}
+
+static void gpu_lists_nowait_rows(void)
+{
+        static unsigned char kept_comp[sizeof(compositor)], kept_gpu[sizeof(gpu)], kept_state[sizeof(compositor_gpu_state)], kept_gscene[sizeof(compositor_gscene)];
+        static unsigned char kept_maps[2 * sizeof(gpu_maps[0])], kept_card[sizeof(compositor_card)];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, kept_recovered = gpu_recovered, submits, failures;
+        unsigned int address_to present_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_OPS_AT);
+        unsigned int address_to list_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_LIST_OPS_AT);
+        int kept_gpu_on = compositor_gpu, damage[4] = {-1, -1, -1, -1}, drawn;
+        struct compositor_poll wanted[COMPOSITOR_POLLS];
+        struct compositor_slots slots;
+        positive now, sequence;
+        b32 published;
+
+        memory_copy(kept_comp, &compositor, sizeof(compositor)), memory_copy(kept_gpu, &gpu, sizeof(gpu));
+        memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene));
+        memory_copy(kept_maps, gpu_maps, sizeof(kept_maps)), memory_copy(kept_card, &compositor_card, sizeof(compositor_card));
+        memory_zero(&gpu_card_table, sizeof(gpu_card_table));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_card_buffer, gpu.size = sizeof(gpu_card_buffer), gpu.imports = 0;
+        gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        gpu_fake_card = 1, gpu_tick = 100, gpu_map_count = 2;
+        gpu_maps[0].from = (positive)gpu_card_screen, gpu_maps[0].to = (positive)gpu_card_screen + sizeof(gpu_card_screen), gpu_maps[0].va = GPU_VA_MAPS;
+        gpu_maps[0].bytes = sizeof(gpu_card_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
+        gpu_maps[1].from = (positive)gpu_lists_picture, gpu_maps[1].to = (positive)gpu_lists_picture + sizeof(gpu_lists_picture), gpu_maps[1].va = GPU_VA_MAPS + (16 << 20);
+        gpu_maps[1].bytes = sizeof(gpu_lists_picture), gpu_maps[1].handle = 8, gpu_maps[1].used = gpu_tick, gpu_maps[1].written = 1, gpu_maps[1].dma = 0, gpu_maps[1].handed = 0;
+        compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
+        compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = 0, compositor.woken = 0;
+        compositor.dropping = 0, compositor.showing[5] = 1, compositor.x[5] = 100, compositor.y[5] = 10, compositor.w[5] = 64, compositor.h[5] = 4;
+        memory_zero(&compositor_card, sizeof(compositor_card));
+        compositor_card.nowait = 1, compositor_card.lists_nowait = 1;
+        gpu_late_reset();
+        compositor_gpu_layout();
+
+        // a. The ops' megabyte in two: a present's records the first half, a list's the second.
+        check("lists nowait: a present's records have the first half of the ops' megabyte, a list's the second",
+              compositor_gscene.room == (512 << 10) / 32 && COMPOSITOR_GPU_LIST_OPS_AT == COMPOSITOR_GPU_OPS_AT + (512 << 10));
+
+        // b. A list submitted and not waited for, its records in the list's half.
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_fake_blocking = 0, submits = gpu_fake_submits;
+        present_ops[0] = list_ops[0] = 0xdeadbeefu;
+        published = gpu_lists_publish(0xff336699u);
+        drawn = gpu_lists_render(5, damage);
+        check("lists nowait: a window's list is submitted and not waited for, the frame said drawn with its damage", published && drawn == 1 &&
+              gpu_fake_submits == submits + 1 && gpu_fake_blocking == 0 && gpu.pending && compositor_card.list_seq[5] == gpu.pending && damage[0] == 0 &&
+                  damage[1] == 0 && damage[2] == 64 && damage[3] == 4);
+        check("lists nowait: its records are cut into the list's half, none into the present's", list_ops[0] != 0xdeadbeefu && present_ops[0] == 0xdeadbeefu);
+
+        // d. and e. The row's picture is the job's; a present is held, the clients while it is young, the doors after it wait.
+        check("lists nowait: the row's picture is the job's, no other's", compositor_card_reads(5) && !compositor_card_reads(4) && compositor_card.list_rows == 1u << 5);
+        compositor_card.nowait = 0;
+        check("lists nowait: a present is held while it runs, the present waiting for its jobs or not", compositor_card_holds() && compositor_card_awaits());
+        compositor_card.nowait = 1;
+        check("lists nowait: (without a wait too)", compositor_card_holds() && compositor_card_awaits());
+        check("lists nowait: the clients are held while the job is younger than GPU_LATE_NS, and not after",
+              compositor_card_clients_held(compositor_card.list_began + 1000000ull) && compositor_card_clients_held(compositor_card.list_began + GPU_LATE_NS - 1) &&
+                  !compositor_card_clients_held(compositor_card.list_began + GPU_LATE_NS));
+        {
+                int kept_door = compositor.door[2];
+                unsigned long kept_busy = compositor_doors.busy;
+
+                compositor.door[2] = 5, compositor_doors.busy = 0;
+                compositor_loop_wanted(wanted, &slots, 1);
+                check("lists nowait: while it holds them no door is polled, and the job's sync_file is", wanted[slots.doors + 2].handle == -1 && slots.fence_at &&
+                      wanted[slots.fence_at].handle >= 0 && wanted[slots.fence_at].handle == compositor_card.fence - 1);
+                compositor.door[2] = kept_door, compositor_doors.busy = kept_busy;
+        }
+        check("lists nowait: the doors that knocked with it wait for a later turn; a job already on the card when the doors are read (one past GPU_LATE_NS) holds none",
+              compositor_card_door_waits(0) && !compositor_card_door_waits(1));
+
+        // c. Another list while it runs: refused as the card's being busy, nothing submitted, nothing counted.
+        failures = compositor_gpu_state.failures, submits = gpu_fake_submits, sequence = compositor_card.list_seq[5];
+        published = gpu_lists_publish(0xff112233u);
+        drawn = gpu_lists_render(5, damage);
+        check("lists nowait: the row's next list while its job runs is refused as the card's being busy, nothing submitted, the job still the row's", published &&
+              !drawn && compositor_list_why == COMPOSITOR_LIST_CARD && gpu_fake_submits == submits && compositor_card.list_seq[5] == sequence &&
+                  compositor_card_reads(5));
+        drawn = gpu_lists_render(6, damage);
+        check("lists nowait: and another row's, nothing counted against the card (its failures, a cool-down)", !drawn && compositor_list_why == COMPOSITOR_LIST_CARD &&
+              gpu_fake_submits == submits && compositor_gpu_state.failures == failures && !compositor_gpu_state.cool_until && !compositor_card_reads(6));
+
+        // d. The door's taken held for the job; a flip's end leaves it; a turn while the job runs leaves it; the fence's done gives it back.
+        gpu_card_table.shown[5] = 0, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 55, compositor.woken = 0, compositor.flip_pending = 1;
+        compositor_flip_done();
+        check("lists nowait: a flip that ends while the job runs leaves the row's door held", gpu_card_table.shown[5] == 0 && (compositor.held_rows >> 5 & 1u));
+        compositor_card_tick();
+        check("lists nowait: a turn while the job runs asks the card without a wait and leaves the row the job's", compositor_card_reads(5) && gpu_card_table.shown[5] == 0 &&
+              (compositor.held_rows >> 5 & 1u) && gpu_fake_blocking == 0);
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        compositor_card_tick();
+        check("lists nowait: once the fence says done the turn gives the row back: its door told the picture was taken, nothing the job's, the present free",
+              gpu_card_table.shown[5] == 55 && !(compositor.held_rows >> 5 & 1u) && (compositor.woken >> 5 & 1u) && !compositor_card.list_rows &&
+                  !compositor_card_reads(5) && !compositor_card_holds() && !compositor_card_awaits() && gpu_card_table.list_state[5] == 0 && gpu_fake_blocking == 0);
+
+        // A list job that never signals: its row the job's past GPU_LATE_NS (the clients read again), given back by the hang path at its deadline.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1;
+        gpu_lists_publish(0xff445566u);
+        drawn = gpu_lists_render(5, damage);
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 66, compositor.woken = 0;
+        compositor.damages = 0;
+        now = clock_monotonic_nanoseconds();
+        compositor_card.list_began = now - GPU_LATE_NS - 1, gpu_job_began = now - (GPU_HANG_NS - 500000000ull);
+        compositor_card_tick();
+        check("lists nowait: a list's job that never signals is the row's past GPU_LATE_NS, the clients read again", drawn == 1 && compositor_card_reads(5) &&
+              !compositor_card_clients_held(now) && gpu_card_table.shown[5] == 0);
+        gpu_job_began = now - GPU_HANG_NS;
+        compositor_card_tick();
+        check("lists nowait: at its deadline the hang path gives the row's door back, its list refused so the program paints the frame, its window drawn again",
+              gpu_end == GPU_END_HUNG && gpu_card_table.shown[5] == 66 && !(compositor.held_rows >> 5 & 1u) && (compositor.woken >> 5 & 1u) &&
+                  gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows && compositor.damages >= 1 && compositor_gpu_state.cool_until > now);
+        check("lists nowait: and nothing holds the present, the clients or the loop after it: the program is not stuck", !compositor_card_holds() &&
+              !compositor_card_clients_held(now) && !compositor_card_awaits() && !compositor_card_reads(5));
+
+        // A list job whose fence answers an error, and one a restart of the card took: given back the same way, at once.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0;
+        gpu_lists_publish(0xff778899u);
+        drawn = gpu_lists_render(5, damage);
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 77;
+        gpu_fake_busy = 0, gpu_fake_errno = 1;
+        compositor_card_tick();
+        gpu_fake_errno = 0;
+        check("lists nowait: a list's job whose fence answers an error gives its row back, its list refused", drawn == 1 && gpu_card_table.shown[5] == 77 &&
+              gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows);
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0, gpu.ctx = 1;
+        gpu_lists_publish(0xff998877u);
+        drawn = gpu_lists_render(5, damage);
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 88;
+        gpu_recovered++;
+        compositor_card_tick();
+        check("lists nowait: and one a restart of the card took, while the card says nothing of it", drawn == 1 && gpu_card_table.shown[5] == 88 &&
+              gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows);
+        gpu_recovered = kept_recovered;
+
+        // Without the file: drawn and waited for in place, as it was.
+        compositor_card.lists_nowait = 0;
+        compositor_gpu_layout();
+        gpu_late_reset();
+        gpu_fake_idle = 1, gpu_fake_busy = 0, gpu_fake_blocking = 0, gpu_before.sequence = 0, gpu.pending = 0;
+        present_ops[0] = list_ops[0] = 0xdeadbeefu;
+        gpu_lists_publish(0xff102030u);
+        drawn = gpu_lists_render(5, damage);
+        check("lists nowait: without the file a list is drawn and waited for in place, as it was: its records in the ops' first half, nothing left on the card",
+              drawn == 1 && gpu_fake_blocking > 0 && !compositor_card.list_rows && !gpu.pending && present_ops[0] != 0xdeadbeefu && list_ops[0] == 0xdeadbeefu &&
+                  compositor_gscene.room == (1 << 20) / 32 && !compositor_card_door_waits(0));
+
+        gpu_late_reset();
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_fake_busy = 0, gpu_lost = 0, gpu_handed_clear();
+        gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
+        if (compositor_card.fence)
+                system_close(compositor_card.fence - 1);
+        memory_copy(&compositor, kept_comp, sizeof(compositor)), memory_copy(&gpu, kept_gpu, sizeof(gpu));
+        memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state)), memory_copy(&compositor_gscene, kept_gscene, sizeof(compositor_gscene));
+        memory_copy(gpu_maps, kept_maps, sizeof(kept_maps)), memory_copy(&compositor_card, kept_card, sizeof(compositor_card));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_fault[0] = 0, compositor_gpu = kept_gpu_on;
+}
+
+/*
         The card told what changed (compositor_dirty): never by a headless compositor (it made one failed call a present, EBADF on descriptor -1), once by a
         card that answers ENOSYS (amdgpu answers every program's DIRTYFB so) and not again while it is that card, and always by one that takes it.
 */
@@ -245527,6 +245720,7 @@ b32 main(void)
         gpu_late_rows();
         gpu_async_rows();
         gpu_card_rows();
+        gpu_lists_nowait_rows();
         gpu_own_rows();
         gpu_round_rows();
         gpu_bench_rows();
