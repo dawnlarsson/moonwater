@@ -490,3 +490,16 @@ ui_field_full	fe02	więcej się nie zmieści
 =windows	26ea	okna
 =wired	bfb4	przewodowa
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	Serwer SSH
+=Root login	6cd4	Logowanie roota
+=Port	3cc6	Port
+=Listen address (any for every address)	d513	Adres nasłuchu (any dla każdego)
+=Time limit (minutes, or off)	d2cf	Limit czasu (minuty lub off)
+=Host key fingerprint	2398	Odcisk klucza hosta
+=Server files	5af9	Pliki serwera
+=Bowl tier	7b7f	Poziom bowli
+=Add a key (label, then the public key)	e2e3	Dodaj klucz (etykieta, potem klucz publiczny)
+=End every session	12e1	Zakończ wszystkie sesje
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Wpuszcza przez sieć klucze z listy; wyłączony zatrzymuje się i kończy wszystkie sesje
+=Root may log in by a key of the list, and by nothing else	a430	Root może się zalogować kluczem z listy i niczym innym

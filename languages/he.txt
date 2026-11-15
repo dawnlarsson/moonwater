@@ -491,3 +491,16 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =windows	26ea	חלונות
 =wired	bfb4	קווי
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	שרת SSH
+=Root login	6cd4	כניסת root
+=Port	3cc6	פורט
+=Listen address (any for every address)	d513	כתובת האזנה (any לכל הכתובות)
+=Time limit (minutes, or off)	d2cf	מגבלת זמן (דקות, או off)
+=Host key fingerprint	2398	טביעת אצבע של מפתח המארח
+=Server files	5af9	קובצי השרת
+=Bowl tier	7b7f	רמת bowl
+=Add a key (label, then the public key)	e2e3	הוספת מפתח (תווית, ואז המפתח הציבורי)
+=End every session	12e1	סיום כל ההפעלות
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	מאפשר למפתחות שברשימה להתחבר דרך הרשת; כבוי, הוא נעצר ומסיים כל הפעלה
+=Root may log in by a key of the list, and by nothing else	a430	root יכול להתחבר במפתח מהרשימה, ובשום דבר אחר

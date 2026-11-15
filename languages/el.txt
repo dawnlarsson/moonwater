@@ -490,3 +490,16 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =windows	26ea	παράθυρα
 =wired	bfb4	ενσύρματη
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	Διακομιστής SSH
+=Root login	6cd4	Σύνδεση root
+=Port	3cc6	Θύρα
+=Listen address (any for every address)	d513	Διεύθυνση ακρόασης (any για όλες)
+=Time limit (minutes, or off)	d2cf	Χρονικό όριο (λεπτά, ή off)
+=Host key fingerprint	2398	Αποτύπωμα κλειδιού διακομιστή
+=Server files	5af9	Αρχεία διακομιστή
+=Bowl tier	7b7f	Επίπεδο bowl
+=Add a key (label, then the public key)	e2e3	Προσθήκη κλειδιού (ετικέτα, μετά το δημόσιο κλειδί)
+=End every session	12e1	Τερματισμός όλων των συνεδριών
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Αφήνει τα κλειδιά της λίστας να συνδέονται μέσω δικτύου· κλειστός σταματά και τερματίζει κάθε συνεδρία
+=Root may log in by a key of the list, and by nothing else	a430	Ο root μπορεί να συνδεθεί με κλειδί της λίστας, και με τίποτε άλλο

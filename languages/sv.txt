@@ -490,3 +490,16 @@ ui_field_full	fe02	mer ryms inte
 =windows	26ea	fönster
 =wired	bfb4	trådbundet
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	SSH-server
+=Root login	6cd4	Root-inloggning
+=Port	3cc6	Port
+=Listen address (any for every address)	d513	Lyssningsadress (any för alla adresser)
+=Time limit (minutes, or off)	d2cf	Tidsgräns (minuter, eller off)
+=Host key fingerprint	2398	Fingeravtryck för värdnyckeln
+=Server files	5af9	Serverns filer
+=Bowl tier	7b7f	Bowl-nivå
+=Add a key (label, then the public key)	e2e3	Lägg till en nyckel (etikett, sedan den publika nyckeln)
+=End every session	12e1	Avsluta alla sessioner
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Låter listans nycklar logga in över nätverket; av stoppar den och avslutar alla sessioner
+=Root may log in by a key of the list, and by nothing else	a430	Root får logga in med en nyckel i listan, och med inget annat

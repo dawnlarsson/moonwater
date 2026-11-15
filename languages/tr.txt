@@ -490,3 +490,16 @@ ui_field_full	fe02	daha fazlası sığmaz
 =windows	26ea	pencereler
 =wired	bfb4	kablolu
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	SSH sunucusu
+=Root login	6cd4	Root girişi
+=Port	3cc6	Bağlantı noktası
+=Listen address (any for every address)	d513	Dinleme adresi (her adres için any)
+=Time limit (minutes, or off)	d2cf	Süre sınırı (dakika veya off)
+=Host key fingerprint	2398	Ana makine anahtarı parmak izi
+=Server files	5af9	Sunucu dosyaları
+=Bowl tier	7b7f	Bowl düzeyi
+=Add a key (label, then the public key)	e2e3	Anahtar ekle (etiket, sonra açık anahtar)
+=End every session	12e1	Tüm oturumları sonlandır
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Listedeki anahtarların ağ üzerinden girmesine izin verir; kapalıyken durur ve tüm oturumları bitirir
+=Root may log in by a key of the list, and by nothing else	a430	Root listedeki bir anahtarla girebilir, başka hiçbir şeyle değil

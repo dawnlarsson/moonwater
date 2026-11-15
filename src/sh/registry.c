@@ -210,6 +210,10 @@ struct settings_row
         // The window's again, last so that the places of the fields before stay.
         const char address_to part;  // the header of the part of its group this row starts, or none: it is in the part before it
         const char address_to about; // what it does, in plain words: the line under its label in the window
+        // A change that is a deliberate act of the person's (a server turned on, root let in, a key added), which the window is to
+        // run only for a press or a key from a device plugged into the machine and never for a virtual one (uinput, uhid). Nothing
+        // reads it yet: the compositor does not tell the window which a device is (.github/SECURITY.md, the ssh server).
+        unsigned char deliberate;
 };
 
 /*
@@ -714,6 +718,36 @@ static const struct settings_row settings_rows[] = {
     //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
     {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
      .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
+    //  OpenSSH's server, from bowl profile ssh, which Moonwater runs from these rows and nothing else (src/sh/ssh.c): the one
+    //  switch first, then who may log in and where it listens, what a client is to compare, and the keys. Every row reads
+    //  moonwater ssh, which says "this machine has no ssh server" until the profile is installed, so each is not here then.
+    //  Only root can log in: the machine's other account is the one every program of a bowl runs as.
+    {"SSH", "SSH server", SETTINGS_SWITCH, 1, 0, {"ssh"}, "ssh ", null, {"ssh"}, null, 0,
+     .usage = "ssh [on|off]",
+     .help = "OpenSSH from bowl profile ssh, keys only and no forwarding; on ends by itself after its limit, off stops it and ends every session [off]",
+     .about = "Lets the keys of the list log in over the network; off stops it and ends every session", .deliberate = 1},
+    {null, "Root login", SETTINGS_SWITCH, 1, 0, {"ssh"}, "root ", null, {"ssh", "root"}, null, 0,
+     .usage = "ssh root [on|off]", .help = "root may log in, by a key of the list only; it is the one account that can [off]",
+     .about = "Root may log in by a key of the list, and by nothing else", .deliberate = 1},
+    {null, "Port", SETTINGS_FIELD, 1, 0, {"ssh"}, "port ", null, {"ssh", "port"}, null, 0,
+     .usage = "ssh port [N|default]", .help = "the tcp port the server listens on, 1 to 65535 [22]"},
+    {null, "Listen address (any for every address)", SETTINGS_FIELD, 1, 0, {"ssh"}, "address ", null, {"ssh", "address"}, null, 0,
+     .usage = "ssh address [ADDRESS|any]", .help = "the one IPv4 or IPv6 address of this machine it listens on, or every address [any]"},
+    {null, "Time limit (minutes, or off)", SETTINGS_FIELD, 1, 0, {"ssh"}, "limit ", null, {"ssh", "limit"}, null, 0,
+     .usage = "ssh limit [MINUTES|off|default]",
+     .help = "an on ends by itself after this many minutes, 1 to 1440, and at the next boot whatever is left; off is no limit [60]"},
+    {null, "Host key fingerprint", SETTINGS_INFO, 1, SETTINGS_LINE, {"ssh"}, "host key ", null, {null}, null, 0,
+     .help = "what a client shows at its first connection: compare the two before the client is told yes"},
+    {null, "Server files", SETTINGS_INFO, 1, SETTINGS_LINE, {"ssh"}, "binaries ", null, {null}, null, 0,
+     .help = "whether each file sshd runs from is the one recorded at install, by its SHA-256; a changed one is not started"},
+    {null, "Bowl tier", SETTINGS_INFO, 1, SETTINGS_LINE, {"ssh"}, "bowl tier ", null, {null}, null, 0,
+     .help = "at the default tier a program of a bowl is root to the files of the machine, and these settings hold only against the others"},
+    {null, "Add a key (label, then the public key)", SETTINGS_FIELD, 1, SETTINGS_LINE | SETTINGS_SPLIT, {null}, null, null,
+     {"ssh", "key", "add"}, null, 0,
+     .usage = "ssh key add LABEL KEY", .help = "let an ssh-ed25519 or sk-ssh-ed25519 public key log in, by a label; - reads the key from standard input",
+     .deliberate = 1},
+    {null, "End every session", SETTINGS_ACTION, 1, 0, {null}, null, null, {"ssh", "end"}, null, 0,
+     .usage = "ssh end", .help = "end every session of the server now; it stays on"},
 };
 
 #define SETTINGS_ROWS (sizeof(settings_rows) / sizeof(settings_rows[0]))

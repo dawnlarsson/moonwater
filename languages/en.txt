@@ -490,3 +490,16 @@ ui_field_full	fe02	that is as much as it holds
 =windows	26ea	windows
 =wired	bfb4	wired
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	SSH server
+=Root login	6cd4	Root login
+=Port	3cc6	Port
+=Listen address (any for every address)	d513	Listen address (any for every address)
+=Time limit (minutes, or off)	d2cf	Time limit (minutes, or off)
+=Host key fingerprint	2398	Host key fingerprint
+=Server files	5af9	Server files
+=Bowl tier	7b7f	Bowl tier
+=Add a key (label, then the public key)	e2e3	Add a key (label, then the public key)
+=End every session	12e1	End every session
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Lets the keys of the list log in over the network; off stops it and ends every session
+=Root may log in by a key of the list, and by nothing else	a430	Root may log in by a key of the list, and by nothing else

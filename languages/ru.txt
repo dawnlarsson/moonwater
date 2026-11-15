@@ -490,3 +490,16 @@ ui_field_full	fe02	больше не помещается
 =windows	26ea	окна
 =wired	bfb4	проводная
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	SSH-сервер
+=Root login	6cd4	Вход для root
+=Port	3cc6	Порт
+=Listen address (any for every address)	d513	Адрес прослушивания (any для всех)
+=Time limit (minutes, or off)	d2cf	Ограничение времени (минуты или off)
+=Host key fingerprint	2398	Отпечаток ключа хоста
+=Server files	5af9	Файлы сервера
+=Bowl tier	7b7f	Уровень bowl
+=Add a key (label, then the public key)	e2e3	Добавить ключ (метка, затем открытый ключ)
+=End every session	12e1	Завершить все сеансы
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускает ключи из списка по сети; выключенный останавливается и завершает все сеансы
+=Root may log in by a key of the list, and by nothing else	a430	Root может войти по ключу из списка и больше никак

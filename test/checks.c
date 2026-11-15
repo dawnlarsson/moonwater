@@ -152708,7 +152708,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 static fn check_settings_groups(void)
 {
         static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
-                                                "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System"};
+                                                "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System", "SSH"};
         static const struct
         {
                 const char address_to words[3];
@@ -152722,7 +152722,7 @@ static fn check_settings_groups(void)
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"link"}, "Waterlink"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"device"}, "Devices"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
-            {{"cpu"}, "Power"}, {{"bind"}, "Boot"}};
+            {{"cpu"}, "Power"}, {{"bind"}, "Boot"}, {{"ssh"}, "SSH"}};
         static const struct
         {
                 const char address_to label;
@@ -152753,7 +152753,7 @@ static fn check_settings_groups(void)
         for (int at = 0; at < count && at < settings_groups(); at++)
                 order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
         order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
-        check("settings groups: Machine, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
+        check("settings groups: Machine, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, System, SSH, then All commands", order);
 
         // Each row in the group of its verb's family: the groups are what the rows do.
         for (positive at = 0; at < SETTINGS_ROWS; at++)

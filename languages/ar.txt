@@ -491,3 +491,16 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =windows	26ea	النوافذ
 =wired	bfb4	سلكي
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	خادم SSH
+=Root login	6cd4	دخول root
+=Port	3cc6	المنفذ
+=Listen address (any for every address)	d513	عنوان الاستماع (any لكل العناوين)
+=Time limit (minutes, or off)	d2cf	المهلة (دقائق، أو off)
+=Host key fingerprint	2398	بصمة مفتاح المضيف
+=Server files	5af9	ملفات الخادم
+=Bowl tier	7b7f	مستوى bowl
+=Add a key (label, then the public key)	e2e3	إضافة مفتاح (تسمية، ثم المفتاح العام)
+=End every session	12e1	إنهاء كل الجلسات
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	يسمح لمفاتيح القائمة بالدخول عبر الشبكة؛ إيقافه يوقفه وينهي كل الجلسات
+=Root may log in by a key of the list, and by nothing else	a430	يمكن لـ root الدخول بمفتاح من القائمة، ولا بشيء غيره

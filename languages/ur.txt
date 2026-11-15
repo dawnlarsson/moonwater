@@ -491,3 +491,16 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =windows	26ea	ونڈوز
 =wired	bfb4	وائرڈ
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	SSH سرور
+=Root login	6cd4	root لاگ ان
+=Port	3cc6	پورٹ
+=Listen address (any for every address)	d513	سننے کا پتہ (ہر پتے کے لیے any)
+=Time limit (minutes, or off)	d2cf	وقت کی حد (منٹ، یا off)
+=Host key fingerprint	2398	ہوسٹ کلید کا فنگر پرنٹ
+=Server files	5af9	سرور کی فائلیں
+=Bowl tier	7b7f	bowl کی سطح
+=Add a key (label, then the public key)	e2e3	کلید شامل کریں (لیبل، پھر عوامی کلید)
+=End every session	12e1	تمام سیشن ختم کریں
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	فہرست کی کلیدوں کو نیٹ ورک سے لاگ ان ہونے دیتا ہے؛ بند ہونے پر رک جاتا ہے اور ہر سیشن ختم کرتا ہے
+=Root may log in by a key of the list, and by nothing else	a430	root فہرست کی کسی کلید سے لاگ ان ہو سکتا ہے، اور کسی اور چیز سے نہیں

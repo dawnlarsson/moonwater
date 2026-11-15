@@ -164,7 +164,14 @@ moonwater link transport [network|modem]  how linked machines reach each other: 
 
 
 # SSH (bowl profile ssh)
+moonwater ssh [on|off]                 OpenSSH from bowl profile ssh, keys only and no forwarding; on ends by itself after its limit, off stops it and ends every session [off]
+moonwater ssh root [on|off]            root may log in, by a key of the list only; it is the one account that can [off]
+moonwater ssh port [N|default]         the tcp port the server listens on, 1 to 65535 [22]
+moonwater ssh address [ADDRESS|any]    the one IPv4 or IPv6 address of this machine it listens on, or every address [any]
+moonwater ssh limit [MINUTES|off|default]  an on ends by itself after this many minutes, 1 to 1440, and at the next boot whatever is left; off is no limit [60]
+moonwater ssh key add LABEL KEY        let an ssh-ed25519 or sk-ssh-ed25519 public key log in, by a label; - reads the key from standard input
 moonwater ssh key remove LABEL         take a key back by its label; every session ends
+moonwater ssh end                      end every session of the server now; it stays on
 moonwater ssh log [N]                  the last changes, starts, refusals and logins, the newest last [20]
 
 

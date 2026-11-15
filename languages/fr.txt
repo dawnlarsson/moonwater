@@ -490,3 +490,16 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =windows	26ea	fenêtres
 =wired	bfb4	filaire
 =ymd	faad	ymd
+=SSH	7b31	SSH
+=SSH server	9b60	Serveur SSH
+=Root login	6cd4	Connexion root
+=Port	3cc6	Port
+=Listen address (any for every address)	d513	Adresse d'écoute (any pour toutes)
+=Time limit (minutes, or off)	d2cf	Durée maximale (minutes, ou off)
+=Host key fingerprint	2398	Empreinte de la clé d'hôte
+=Server files	5af9	Fichiers du serveur
+=Bowl tier	7b7f	Niveau des bowls
+=Add a key (label, then the public key)	e2e3	Ajouter une clé (nom, puis la clé publique)
+=End every session	12e1	Terminer toutes les sessions
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Laisse les clés de la liste se connecter par le réseau ; éteint, il s'arrête et termine toutes les sessions
+=Root may log in by a key of the list, and by nothing else	a430	Root peut se connecter par une clé de la liste, et par rien d'autre
