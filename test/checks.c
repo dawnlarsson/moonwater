@@ -182274,6 +182274,14 @@ static void check_compositor_keymap(void) {
     ck_ok(ck_layout(&m,"es")>0&&ck_one(&m,39,0)==0xF1&&ck_one(&m,13,0)==0xA1&&ck_one(&m,43,0)==0xE7);
     ck_press(&m,40,0,out);ck_ok(ck_one(&m,30,0)==0xE1);
     ck_ok(ck_layout(&m,"it")>0&&ck_one(&m,26,0)==0xE8&&ck_one(&m,26,KEY_SHIFT)==0xE9&&ck_one(&m,39,0)==0xF2&&ck_one(&m,41,0)=='\\');
+    /* Arabic, Hebrew and Persian: the letters of their keys, the digits as they are, and a chord with Control is the Latin key. */
+    ck_ok(ck_layout(&m,"ar")>0&&ck_one(&m,35,0)==0x627&&ck_one(&m,30,0)==0x634&&ck_one(&m,16,0)==0x636&&ck_one(&m,53,0)==0x638&&
+             ck_one(&m,53,KEY_SHIFT)==0x61F&&ck_one(&m,2,0)=='1'&&ck_one(&m,16,KEY_SHIFT)==0x64E&&ck_one(&m,34,KEY_SHIFT)==0xFEF7);
+    ck_ok(ck_one(&m,46,KEY_CTRL)==3&&ck_one(&m,45,KEY_CTRL)==24&&ck_one(&m,47,KEY_CTRL)==22&&ck_one(&m,35,KEY_CTRL|KEY_SHIFT)==8);
+    ck_ok(ck_layout(&m,"il")>0&&ck_one(&m,20,0)==0x5D0&&ck_one(&m,20,KEY_SHIFT)==0x5D0&&ck_one(&m,30,0)==0x5E9&&ck_one(&m,53,0)=='.'&&
+             ck_one(&m,51,0)==0x5EA&&ck_one(&m,46,KEY_CTRL)==3);
+    ck_ok(ck_layout(&m,"ir")>0&&ck_one(&m,32,0)==0x6CC&&ck_one(&m,27,0)==0x686&&ck_one(&m,50,0)==0x67E&&ck_one(&m,40,0)==0x6AF&&
+             ck_one(&m,35,0)==0x627);
     /* Every layout, every key: a character that is not a letter of Latin-1, an accent, or the euro is a bug. */
     for(unsigned l=0;l<sizeof(compositor_layouts)/sizeof(compositor_layouts[0]);l++)
         for(unsigned code=0;code<CK_TABLE;code++)
@@ -182306,14 +182314,6 @@ static void check_compositor_pointer(void) {
         for(int sign=-1;sign<=1;sign+=2) {
             int remainder=0;long long pixels=0;
             for(int step=0;step<100;step++)pixels+=compositor_accel(sign,&remainder,gain);
-    /* Arabic, Hebrew and Persian: the letters of their keys, the digits as they are, and a chord with Control is the Latin key. */
-    ck_ok(ck_layout(&m,"ar")>0&&ck_one(&m,35,0)==0x627&&ck_one(&m,30,0)==0x634&&ck_one(&m,16,0)==0x636&&ck_one(&m,53,0)==0x638&&
-             ck_one(&m,53,KEY_SHIFT)==0x61F&&ck_one(&m,2,0)=='1'&&ck_one(&m,16,KEY_SHIFT)==0x64E&&ck_one(&m,34,KEY_SHIFT)==0xFEF7);
-    ck_ok(ck_one(&m,46,KEY_CTRL)==3&&ck_one(&m,45,KEY_CTRL)==24&&ck_one(&m,47,KEY_CTRL)==22&&ck_one(&m,35,KEY_CTRL|KEY_SHIFT)==8);
-    ck_ok(ck_layout(&m,"il")>0&&ck_one(&m,20,0)==0x5D0&&ck_one(&m,20,KEY_SHIFT)==0x5D0&&ck_one(&m,30,0)==0x5E9&&ck_one(&m,53,0)=='.'&&
-             ck_one(&m,51,0)==0x5EA&&ck_one(&m,46,KEY_CTRL)==3);
-    ck_ok(ck_layout(&m,"ir")>0&&ck_one(&m,32,0)==0x6CC&&ck_one(&m,27,0)==0x686&&ck_one(&m,50,0)==0x67E&&ck_one(&m,40,0)==0x6AF&&
-             ck_one(&m,35,0)==0x627);
             ck_ok(pixels*1024+remainder==(long long)sign*100*gain&&remainder>-1024&&remainder<1024);
         }
     { int remainder=0; ck_ok(compositor_accel(0,&remainder,2560)==0&&remainder==0); }
