@@ -280,10 +280,7 @@ static void compositor_stale_join(int *rect, int *any, const int *add)
                 *any = 1;
                 return;
         }
-        rect[0] = add[0] < rect[0] ? add[0] : rect[0];
-        rect[1] = add[1] < rect[1] ? add[1] : rect[1];
-        rect[2] = add[2] > rect[2] ? add[2] : rect[2];
-        rect[3] = add[3] > rect[3] ? add[3] : rect[3];
+        compositor_joined(rect, add, rect);
 }
 
 // A stale that is the whole screen: its box, and no parts (the box of parts that reached every edge is this box too, and is not this).
@@ -784,8 +781,9 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                 if (stage)
                 {
                         const int *old = compositor.under_rect[which];
-                        int u[4] = {old[0] < rect[0] ? old[0] : rect[0], old[1] < rect[1] ? old[1] : rect[1],
-                                    old[2] > rect[2] ? old[2] : rect[2], old[3] > rect[3] ? old[3] : rect[3]};
+                        int u[4];
+
+                        compositor_joined(old, rect, u);
 
                         memory_copy_rect_u32(stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
                                              pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
