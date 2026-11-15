@@ -22,7 +22,8 @@ static struct { int fd; unsigned char *at; positive bytes; void (*pin)(positive 
 #define GPU_MEMFDS 64
 static struct { int fd; void *at; positive bytes; void (*pin)(positive offset, b32 on); } gpu_memfds[GPU_MEMFDS];
 
-// Register or update an mmap'd memfd region for udmabuf fallback (gpu_map_dmabuf).
+// A memfd of the compositor's own, mapped shared at at for bytes, registered for the dma-buf route (gpu_map_as): a map asked inside it is made of all of it, by
+// udmabuf first where the memfd is sealed as udmabuf takes one (gpu_memfd_sealed), so every picture in it is one handle and one address range of the card's.
 __attribute__((unused)) static b32 gpu_register_memfd(int fd, void *at, positive bytes, void (*pin)(positive offset, b32 on))
 {
         int free_slot = -1;
@@ -78,6 +79,10 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #ifndef GPU_WIDE_FAKE
 #define GPU_WIDE_FAKE(fd) // a check answers for the file that lets the other gfx10 families in
 #endif
+#ifndef GPU_UDMABUF_OPEN
+#define GPU_UDMABUF_OPEN() system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC) // a check's fake kernel answers here
+#endif
+
 #ifndef GPU_SUBMIT_SEEN
 #define GPU_SUBMIT_SEEN(list, count) // a check's copy of the buffers a submit names (gpu_run_job's bos)
 #endif
@@ -440,7 +445,7 @@ static unsigned int gpu_userptr_error(positive at, unsigned int how)
 static long gpu_dmabuf_make(int memfd, positive offset, positive size)
 {
         struct { unsigned int memfd, flags; unsigned long offset, size; } create = {(unsigned int)memfd, 1, offset, size}; // UDMABUF_FLAGS_CLOEXEC
-        long udmabuf = system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC), made;
+        long udmabuf = GPU_UDMABUF_OPEN(), made;
 
         if (udmabuf < 0)
                 return udmabuf;
@@ -980,28 +985,48 @@ static void gpu_map_refused(positive from)
 
 #define gpu_map(addr, size) gpu_map_as(addr, size, 0)
 #define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
-// The dma-buf route (the fallback for a refused userptr): the pages [from, to) of the window table's memfd, made a dma-buf by udmabuf, imported into the render
-// node and mapped at at. False, with gpu_map_why: 5 the pages are not the table's (or there is no route), 6 udmabuf refused (the error above the first byte),
-// 7 the import refused, 8 the map refused. The pin goes on for the pages the card holds, and off when that map is let go of (gpu_drop).
-static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
+// The compositor's own memory the dma-buf route reaches that holds the pages [from, to): a registered memfd (gpu_register_memfd: whole, a map of any of it is
+// made of all of it) or the pictures of the window table's memfd (gpu_shared: a map is of its own pages, since the table's rows are made and given back apart).
+// Its descriptor, where its byte 0 is mapped, its bytes and its pin; false for none.
+struct gpu_region
 {
-        int fd = -1;
-        positive base = 0;
-        void (*pin)(positive offset, b32 on) = 0;
-        long made;
-        unsigned int e, handle;
-
+        int fd;
+        positive base, bytes;
+        void (*pin)(positive offset, b32 on);
+        b32 whole;
+};
+static b32 gpu_region_of(positive from, positive to, struct gpu_region address_to r)
+{
         for (unsigned int i = 0; i < GPU_MEMFDS; i++)
                 if (gpu_memfds[i].fd >= 0 && gpu_memfds[i].at && from >= (positive)gpu_memfds[i].at && to <= (positive)gpu_memfds[i].at + gpu_memfds[i].bytes)
                 {
-                        fd = gpu_memfds[i].fd, base = (positive)gpu_memfds[i].at, pin = gpu_memfds[i].pin;
-                        break;
+                        r->fd = gpu_memfds[i].fd, r->base = (positive)gpu_memfds[i].at, r->bytes = gpu_memfds[i].bytes, r->pin = gpu_memfds[i].pin, r->whole = true;
+                        return true;
                 }
-        if (fd < 0 && gpu_shared.fd >= 0 && gpu_shared.at && from >= (positive)gpu_shared.at && to <= (positive)gpu_shared.at + gpu_shared.bytes)
-                fd = gpu_shared.fd, base = (positive)gpu_shared.at, pin = gpu_shared.pin;
-        if (fd < 0 || !base)
-                return gpu_map_why = 5, false;
-        made = gpu_dmabuf_make(fd, from - base, to - from);
+        if (gpu_shared.fd >= 0 && gpu_shared.at && from >= (positive)gpu_shared.at && to <= (positive)gpu_shared.at + gpu_shared.bytes)
+        {
+                r->fd = gpu_shared.fd, r->base = (positive)gpu_shared.at, r->bytes = gpu_shared.bytes, r->pin = gpu_shared.pin, r->whole = false;
+                return true;
+        }
+        return false;
+}
+
+// Whether a memfd is sealed as udmabuf takes one (F_GET_SEALS: F_SEAL_SHRINK, and not F_SEAL_WRITE): its pages can then be the card's by the dma-buf route.
+static b32 gpu_memfd_sealed(int fd)
+{
+        long seals = (long)system_call_3(syscall(fcntl), (positive)fd, 1034, 0);
+
+        return seals >= 0 && (seals & 2) && !(seals & 8);
+}
+
+// The dma-buf route: the pages [from, to) of a region's memfd, made a dma-buf by udmabuf, imported into the render node and mapped at at. False, with
+// gpu_map_why: 6 udmabuf refused (the error above the first byte), 7 the import refused, 8 the map refused. The pin goes on for the pages the card holds,
+// and off when that map is let go of (gpu_drop).
+static b32 gpu_map_dmabuf(const struct gpu_region address_to r, positive from, positive to, positive at, b32 written)
+{
+        long made = gpu_dmabuf_make(r->fd, from - r->base, to - from);
+        unsigned int e, handle;
+
         if (made < 0)
                 return gpu_map_why = 6 | (unsigned int)-made << 8, false;
         made = gpu_dmabuf_in((int)made);
@@ -1012,22 +1037,32 @@ static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
                 return gpu_close(handle), gpu_map_why = 8 | e << 8, false;
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
         gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].bytes = to - from;
-        gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - base;
-        gpu_maps[gpu_map_count].pin = pin;
+        gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - r->base;
+        gpu_maps[gpu_map_count].pin = r->pin;
         gpu_map_count++, gpu_maps_dma++;
-        if (pin)
-                pin(from - base, 1);
+        if (r->pin)
+                r->pin(from - r->base, 1);
         gpu_map_next = at + (to - from);
         return true;
 }
 
+/*
+        A map of the pages that hold [addr, addr + size). The compositor's own memory (gpu_region_of) whose memfd is sealed goes by the dma-buf route first, userptr
+        second: a buffer of a dma-buf is one the kernel pinned when it was made, where it walks a userptr's pages at every submit that names it (80 to 400 us a
+        present for ten 1080p buffers) and answers EAGAIN when one moved; a registered memfd is mapped whole, so every picture in it is one handle in a job's
+        bo list. Any other memory goes by userptr, and by the dma-buf route only once userptr is refused for good or switched off (gpu-nouserptr).
+*/
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
         unsigned int handle = 0, e;
         unsigned int old = 0;
         long taken = 0;
+        struct gpu_region region;
+        b32 own = gpu_region_of(from, to, &region), first = own && gpu_memfd_sealed(region.fd);
 
+        if (first && region.whole && region.base + (region.bytes & ~4095ull) >= to && !(region.base & 4095))
+                from = region.base, to = region.base + (region.bytes & ~4095ull);
         // A map the card writes is the only map of its pages: neither read nor written may overlap an active handed map of opposite or written kind,
         // so a written map never lets read-only lookups write through, and a read map never aliases an in-flight written map.
         for (unsigned int i = 0; i < gpu_map_count; i++)
@@ -1055,6 +1090,8 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                 return gpu_map_why = 1, false;
         if (!(at = gpu_place(to - from)))
                 return gpu_map_why = 2, false;
+        if (first && gpu_map_dmabuf(&region, from, to, at, written))
+                return true;
         // The userptr, unless the kernel has refused it before or the file says not to ask: then the table's pages go by the dma-buf route, and the rest are refused.
         if (!gpu_userptr_off && !gpu_userptr_gone)
         {
@@ -1081,8 +1118,13 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                         return false;
                 }
         }
-        return gpu_map_dmabuf(from, to, at, written);
+        if (first) // the dma-buf route was asked first, and its refusal (gpu_map_why) stands
+                return false;
+        if (!own) // (5: the pages are none of the compositor's memfds the route reaches)
+                return gpu_map_why = 5, false;
+        return gpu_map_dmabuf(&region, from, to, at, written);
 }
+
 
 // (The map found last is looked at first: a present asks for the same few pictures over and over, and the table is up to 256 maps looked at in order. The
 // place kept is only where the looking starts: the map there is held to the pointer as any other is, so a table that has moved under it costs a look, not an answer.)

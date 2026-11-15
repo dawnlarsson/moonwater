@@ -128235,6 +128235,7 @@ static long gpu_fake_fence_error;
 #define GPU_KERNEL_CARD 1001
 #define GPU_KERNEL_DMABUF 2000
 #define GPU_KERNEL_HANDLES 128
+#define GPU_KERNEL_UDMABUF 1002
 
 static struct
 {
@@ -128247,6 +128248,12 @@ static struct
         unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
         char unique[40];              // the display node's bus as GET_UNIQUE says it
         unsigned int unique_length;
+        // The dma-buf route and userptr (gpu_map_as): /dev/udmabuf opens as GPU_KERNEL_UDMABUF while udmabuf is set; each UDMABUF_CREATE is counted with the
+        // memfd, offset and size of the last (refused with udmabuf_error while that is set), and each GEM_USERPTR is counted and given a handle.
+        int udmabuf;
+        long udmabuf_error;
+        unsigned int udmabufs, udmabuf_memfd, userptrs;
+        unsigned long udmabuf_offset, udmabuf_size;
 } gpu_kernel;
 
 static unsigned int gpu_kernel_live(void)
@@ -128282,7 +128289,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                 words[0] = (unsigned int)system_call_2(syscall(eventfd2), 0, 0x80000);
                 return 0;
         }
-        if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD))
+        if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD && fd != GPU_KERNEL_UDMABUF))
         {
                 if (gpu_fake_card && fd < 0 && request == 0xc0106442u && !gpu_kernel.no_context) // DRM_IOCTL_AMDGPU_CTX
                         return words[0] == 1 ? (words[0] = 2 + ++gpu_kernel.contexts, 0) : 0;
@@ -128303,6 +128310,25 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                 if (!h)
                         return -12;
                 words[0] = h;
+                return 0;
+        }
+        case 0x40187542u: // UDMABUF_CREATE on /dev/udmabuf: a dma-buf of a new buffer number (500 on)
+                if (fd != GPU_KERNEL_UDMABUF)
+                        return -25;
+                gpu_kernel.udmabuf_memfd = words[0], gpu_kernel.udmabuf_offset = longs[1], gpu_kernel.udmabuf_size = longs[2];
+                if (gpu_kernel.udmabuf_error)
+                        return -gpu_kernel.udmabuf_error;
+                return GPU_KERNEL_DMABUF + 500 + gpu_kernel.udmabufs++;
+        case 0xc0186451u: // DRM_IOCTL_AMDGPU_GEM_USERPTR: a handle of a new buffer number (900 on), written in the high half of the flags' word
+        {
+                unsigned int h = 0;
+
+                for (unsigned int free = 1; !h && free < GPU_KERNEL_HANDLES; free++)
+                        if (!gpu_kernel.buffer[free])
+                                h = free;
+                if (!h)
+                        return -12;
+                gpu_kernel.buffer[h] = 900 + ++gpu_kernel.userptrs + 1, gpu_kernel.mapped[h] = 0, words[5] = h;
                 return 0;
         }
         case 0x40086409u: // DRM_IOCTL_GEM_CLOSE
@@ -128347,6 +128373,7 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         return -22;
 }
 #define GPU_CONTROL(fd, request, a) gpu_kernel_control((int)(fd), (unsigned int)(request), (void *)(a))
+#define GPU_UDMABUF_OPEN() (gpu_kernel.on && gpu_kernel.udmabuf ? (long)GPU_KERNEL_UDMABUF : system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC))
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -238938,7 +238965,7 @@ static b32 gpu_route_rows(void)
         gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_dma = 0, gpu_pin_count = 0, gpu_pin_sum = 0;
 
         gpu_fake_userptr = 19; // ENODEV: the kernel without CONFIG_DRM_AMDGPU_USERPTR
-        check("gpu route: a userptr refused with ENODEV maps the table's pages by dma-buf", gpu_map_written(pic, W * W * 4) && gpu_userptr_gone && gpu_maps_dma == 1);
+        check("gpu route: the sealed table's pages map by dma-buf first, with no userptr asked", gpu_map_written(pic, W * W * 4) && !gpu_userptr_gone && gpu_maps_dma == 1);
         check("gpu route: the map is the table's pages (the pin goes on for their offset)", gpu_pin_count == 1 && gpu_pin_sum == 1 && gpu_pin_offset == 4096);
         dst = (positive)gpu_va_written(pic, W * W * 4);
         check("gpu route: the card's address for the picture", dst != 0);
@@ -240149,6 +240176,104 @@ static void gpu_late_rows(void)
 }
 
 /*
+        The compositor's own memory through one import (gpu.c's gpu_map_as and gpu_region_of), with the fake kernel's udmabuf, PRIME and userptr: a picture in a sealed
+        registered memfd is mapped by udmabuf first, the whole memfd in one dma-buf, so no userptr is made for it, a second picture in it is that map's, and a job's
+        bo list names one handle for both; an unsealed one goes by userptr as before; a picture of the sealed window table is a dma-buf of its own pages (the table's
+        rows are made and given back apart), pinned; and a udmabuf refused falls back to userptr.
+*/
+static long gpu_memfd_make(positive bytes, unsigned int seals, unsigned int address_to address_to at)
+{
+        long fd = system_call_2(syscall(memfd_create), (positive) "moonwater-gpu-own", 1 | 2), mapped;
+
+        *at = 0;
+        if (fd < 0)
+                return fd;
+        system_truncate_handle((int)fd, bytes);
+        if (seals)
+                system_call_3(syscall(fcntl), (positive)fd, 1033, seals);
+        mapped = system_call_6(syscall(mmap), 0, bytes, 3, 1, (positive)fd, 0);
+        if (mapped < 0 && mapped > -4096)
+                return system_close((int)fd), -12;
+        *at = (unsigned int address_to)mapped;
+        return fd;
+}
+
+static void gpu_own_rows(void)
+{
+        enum { BYTES = 256 << 10, PIC = 16 << 10 };
+        unsigned char kept_gpu[sizeof(gpu)];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, address_to sealed, address_to loose, address_to table, address_to refused, userptrs, udmabufs;
+        positive kept_next = gpu_map_next, base = GPU_DATA + 65536, ops_at = base, bins_at = base + 65536, d_at = base + 8192, va_a, va_b;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_late_buffer + ops_at);
+        long fd_sealed = gpu_memfd_make(BYTES, 2, &sealed), fd_open = gpu_memfd_make(BYTES, 0, &loose), fd_table = gpu_memfd_make(BYTES, 2, &table),
+             fd_refused = gpu_memfd_make(BYTES, 2, &refused);
+
+        if (fd_sealed < 0 || fd_open < 0 || fd_table < 0 || fd_refused < 0)
+        {
+                check("gpu own: memfds for the rows", false);
+                return;
+        }
+        memory_copy(kept_gpu, &gpu, sizeof(gpu));
+        gpu.fd = GPU_KERNEL_FD, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_late_buffer, gpu.size = sizeof(gpu_late_buffer), gpu.imports = 0, gpu.pending = 0, gpu.broken = 0;
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        gpu_kernel.on = 1, gpu_kernel.udmabuf = 1;
+        gpu_fake_card = 1, gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_fake_userptr = 0, gpu_lost = 0;
+        gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS, gpu_tick = 100, gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_user = 0, gpu_maps_dma = 0;
+        gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_pin_count = 0, gpu_pin_sum = 0;
+
+        // 1. A picture in a sealed registered memfd: one dma-buf of the whole memfd, no userptr.
+        gpu_register_memfd((int)fd_sealed, sealed, BYTES, 0);
+        check("gpu own: a picture in a sealed registered memfd is mapped by udmabuf of the whole memfd, and no userptr is made",
+              (gpu_va_bytes(sealed + 1024, PIC) || gpu_map(sealed + 1024, PIC)) && gpu_kernel.userptrs == 0 && gpu_kernel.udmabufs == 1 &&
+                  gpu_kernel.udmabuf_memfd == (unsigned int)fd_sealed && gpu_kernel.udmabuf_offset == 0 && gpu_kernel.udmabuf_size == BYTES && gpu_map_count == 1 &&
+                  gpu_maps_dma == 1 && gpu_maps_user == 0);
+        va_a = gpu_va_bytes(sealed + 1024, PIC), va_b = gpu_va_bytes(sealed + 32768, PIC);
+        check("gpu own: a second picture in it is found in that map: no map, no udmabuf, its address the same offset from the first",
+              va_a && va_b == va_a + (32768 - 1024) * 4 && gpu_map_count == 1 && gpu_kernel.udmabufs == 1 && gpu_kernel.userptrs == 0);
+        {
+                const unsigned int q[16] = {4, 0, 0, 32, 4, (unsigned int)va_a, (unsigned int)(va_a >> 32), 32, 4, 32, 0, 64, 4, (unsigned int)va_b, (unsigned int)(va_b >> 32), 32};
+
+                memory_copy(ops, q, sizeof(q));
+                gpu_seen_count = 0;
+                check("gpu own: a job drawing both names one handle in its bo list for them", gpu_scene(ops_at, 2, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) &&
+                      gpu_seen_count == 1 && gpu_seen_bos[0] == gpu_maps[0].handle);
+        }
+
+        // 2. An unsealed registered memfd: udmabuf would refuse it; userptr, as before.
+        gpu_register_memfd((int)fd_open, loose, BYTES, 0);
+        userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
+        check("gpu own: a picture in an unsealed registered memfd is mapped by userptr, with no udmabuf asked",
+              gpu_map(loose + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 && gpu_kernel.udmabufs == udmabufs && gpu_maps_user == 1);
+
+        // 3. The sealed window table: a picture is a dma-buf of its own pages, and its row's pin goes on.
+        gpu_shared.fd = (int)fd_table, gpu_shared.at = (unsigned char address_to)table, gpu_shared.bytes = BYTES, gpu_shared.pin = gpu_fake_pin;
+        userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
+        check("gpu own: a picture of the sealed window table is a dma-buf of its own pages first, pinned, and no userptr is made",
+              gpu_map(table + 2048, 8192) && gpu_kernel.udmabufs == udmabufs + 1 && gpu_kernel.udmabuf_offset == 8192 && gpu_kernel.udmabuf_size == 8192 &&
+                  gpu_kernel.userptrs == userptrs && gpu_pin_sum == 1 && gpu_pin_offset == 8192);
+
+        // 4. A sealed memfd udmabuf refuses: userptr after it.
+        gpu_register_memfd((int)fd_refused, refused, BYTES, 0);
+        gpu_kernel.udmabuf_error = 22, userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
+        check("gpu own: a sealed memfd udmabuf refuses is mapped by userptr after it", gpu_map(refused + 1024, PIC) && gpu_kernel.userptrs == userptrs + 1 &&
+              (gpu_map_why & 255) == 6);
+        gpu_kernel.udmabuf_error = 0;
+
+        while (gpu_map_count)
+                gpu_drop(0, GPU_GONE_RECOVER);
+        check("gpu own: the table's pin is let go of with its map", gpu_pin_sum == 0);
+        gpu_unregister_memfd(sealed), gpu_unregister_memfd(loose), gpu_unregister_memfd(refused);
+        gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
+        system_call_2(syscall(munmap), (positive)sealed, BYTES), system_call_2(syscall(munmap), (positive)loose, BYTES);
+        system_call_2(syscall(munmap), (positive)table, BYTES), system_call_2(syscall(munmap), (positive)refused, BYTES);
+        system_close((int)fd_sealed), system_close((int)fd_open), system_close((int)fd_table), system_close((int)fd_refused);
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_handed_clear();
+        memory_copy(&gpu, kept_gpu, sizeof(gpu));
+        gpu_map_count = kept_count, gpu_map_next = kept_next, gpu_tick = kept_tick, gpu_maps_user = 0, gpu_maps_dma = 0, gpu_last_error = 0, gpu_end = GPU_END_NONE;
+}
+
+/*
         The jobs without a wait (gpu.c's gpu_submit, gpu_scene_submit, gpu_scene_more_submit, gpu_done, gpu_fence_fd), on the fake card (no descriptor, a submit the
         fake takes and numbers, a fence it answers for every job alike): a scene is submitted and not waited for; the next is built in the other slot and the other
         side of the bins while it runs; a third waits for the first, and nothing of the first's is written; a job is asked after without a wait; its sync_file is
@@ -240973,6 +241098,7 @@ b32 main(void)
         gpu_engine_and_render_regressions();
         gpu_late_rows();
         gpu_async_rows();
+        gpu_own_rows();
         gpu_bench_rows();
         flip_wait_rows();
         descriptor_rows();
