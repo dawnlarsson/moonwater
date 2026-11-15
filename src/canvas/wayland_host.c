@@ -153,6 +153,17 @@ static struct
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
         } source[WINDOWS];
         int lent_synced;
+        /*
+                A lent dma-buf the processor composes is read where the client's card wrote it, through a mapping that is write-combined on a
+                card with memory of its own: a load from it is an uncached read across the bus, and a present of a whole 1920 by 1080 game the
+                processor drew so took 13 ms on the owner's machine against the card's 0.7 ms. A row whose lent dma-buf the processor read in
+                COMPOSITOR_WL_WC_PRESENTS presents running (wc_reads, counted at each present's first read, compositor_wl_lent_sync) is copied
+                into the table once, with the streaming loads (compositor_wl_seed), and its dma-bufs are not lent again (wc_copy) until the
+                card draws a present: each commit's damage is copied so (the copy path's memory_copy_rect_stream_u32), and the processor
+                composes from the machine's own memory. Counted: the presents read so and the rows copied (wc_presents, wc_seeded).
+        */
+        unsigned char wc_reads[WINDOWS], wc_copy[WINDOWS];
+        unsigned int wc_presents, wc_seeded;
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
 
 /*
@@ -934,10 +945,23 @@ static void compositor_wl_seed(int row, unsigned int which)
         stretched there, and the row is the table's. A lent picture that the pool was cut under is drawn from the zero pages the SIGBUS
         handler maps over it, and its card maps are let go of, so the card maps the zero pages too.
 */
+#define COMPOSITOR_WL_WC_PRESENTS 2
+
 static void compositor_wl_settle(int row)
 {
         if (!compositor_lent(row))
                 return;
+        // A dma-buf the processor read in place COMPOSITOR_WL_WC_PRESENTS presents running: copied once, and the row's copies made from here on.
+        if (row >= 0 && row < WINDOWS && compositor_wl.lent[row].fd >= 0 && compositor_wl.wc_reads[row] >= COMPOSITOR_WL_WC_PRESENTS)
+        {
+                compositor_wl.wc_reads[row] = 0;
+                compositor_wl.wc_copy[row] = 1;
+                compositor_wl.wc_seeded++;
+                if (compositor.table)
+                        compositor.table->client_wc_seeded = compositor_wl.wc_seeded;
+                compositor_wl_seed(row, compositor.front[row]);
+                return;
+        }
         if (compositor_wl_cut(compositor_wl.lent[row].pixels))
                 gpu_forget(compositor_wl.lent[row].pixels, (positive)compositor_wl.lent[row].height * compositor_wl.lent[row].pitch * 4);
         if (compositor.w[row] != (unsigned int)compositor_wl.lent[row].width || compositor.h[row] != (unsigned int)compositor_wl.lent[row].height)
@@ -1026,6 +1050,13 @@ static void compositor_wl_lent_sync(int start)
                                 compositor_wl.lent[row].synced =
                                         compositor_wl_dmabuf_ready(client, (int)compositor_wl.lent[row].fd) &&
                                         compositor_wl_sync_start(client, (int)compositor_wl.lent[row].fd);
+                                // A present the processor reads this dma-buf in, once a present (a card that draws the present after says so, and
+                                // the count is none again: compositor_wl_count_card).
+                                if (compositor_wl.wc_reads[row] < 255)
+                                        compositor_wl.wc_reads[row]++;
+                                compositor_wl.wc_presents++;
+                                if (compositor.table)
+                                        compositor.table->client_wc_presents = compositor_wl.wc_presents;
                         }
                         else if (compositor_wl.lent[row].synced)
                         {
@@ -1039,6 +1070,9 @@ static void compositor_wl_lent_sync(int start)
 // A present the card drew: counted once when it read a client's picture in place.
 static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows)
 {
+        // The card drew this present: the processor read no lent dma-buf for it, and a row copied for want of the card is lent again.
+        memory_zero(compositor_wl.wc_reads, sizeof compositor_wl.wc_reads);
+        memory_zero(compositor_wl.wc_copy, sizeof compositor_wl.wc_copy);
         for (unsigned int at = 0; at < windows && compositor.table; at++)
                 if (compositor_lent(rows[at]))
                 {
@@ -1067,6 +1101,9 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (compositor_wl_needs_xform(picture, width, height))
                 return 0;
         if (picture->fragile && !(picture->full || !picture->damages))
+                return 0;
+        // A row the processor composes is not lent a dma-buf (compositor_wl.wc_copy): its damage is copied with the streaming loads instead.
+        if (picture->sync_fd >= 0 && row >= 0 && row < WINDOWS && compositor_wl.wc_copy[row])
                 return 0;
         if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
                 return 0;

@@ -239650,6 +239650,100 @@ static void gpu_lent_rows(void)
 }
 
 /*
+        A lent dma-buf the processor composes (the card drew no present): read in place where its client's card wrote it, which on a card with memory of
+        its own is a write-combined mapping read with plain loads (13 ms a present of a 1080p game on the owner's machine). The processor reads it in two
+        presents running (compositor_wl_lent_sync counts the first read of each present) and the row is copied into the table once (compositor_wl_seed,
+        the streaming loads) and lent no dma-buf until the card draws a present (compositor_wl_count_card), which a present the card draws between two of
+        the processor's also is. The lent state is made by hand: a dma-buf is lent only to a card that is there (gpu_lent_rows), and a memfd stands in for
+        the buffer's descriptor (its sync is refused, as a file's is, and the read is counted all the same).
+*/
+static void gpu_wc_rows(void)
+{
+        enum { SIDE = 32, ROW = 5 };
+        struct windows *kept_table = compositor.table;
+        unsigned long kept_pixels = compositor.pixels, kept_buffer = compositor.buffer;
+        int kept_width = compositor.width, kept_stride = compositor.stride, kept_damage[4], kept_x = compositor.x[ROW], kept_y = compositor.y[ROW];
+        unsigned int kept_damages = compositor.damages, kept_w = compositor.w[ROW], kept_h = compositor.h[ROW], kept_front = compositor.front[ROW];
+        unsigned long table_bytes = ((sizeof(struct windows) + 4095) & ~4095ul) + (unsigned long)WINDOWS * 2 * SIDE * SIDE * 4;
+        long table = system_call_6(syscall(mmap), 0, table_bytes, 3, 0x22, (positive)-1, 0);
+        int fd = (int)system_call_2(syscall(memfd_create), (positive) "wc", 0);
+        static unsigned int pixels[SIDE * SIDE];
+        unsigned int seeded = compositor_wl.wc_seeded, presents = compositor_wl.wc_presents, *front;
+        unsigned char rows[1] = {ROW};
+
+        if ((table < 0 && table > -4096) || fd < 0)
+        {
+                check("gpu wc: a table and a descriptor for the rows", false);
+                return;
+        }
+        memory_copy(kept_damage, compositor.damage[0], sizeof kept_damage);
+        for (unsigned int at = 0; at < SIDE * SIDE; at++)
+                pixels[at] = 0xff000000u | at;
+        compositor.table = (struct windows *)table;
+        compositor.pixels = (sizeof(struct windows) + 4095) & ~4095ul;
+        compositor.buffer = SIDE * SIDE * 4;
+        compositor.width = SIDE, compositor.stride = SIDE;
+        compositor.x[ROW] = compositor.y[ROW] = 0, compositor.w[ROW] = compositor.h[ROW] = SIDE, compositor.front[ROW] = 0;
+        compositor.damages = 1, compositor.damage[0][0] = compositor.damage[0][1] = 0, compositor.damage[0][2] = compositor.damage[0][3] = SIDE;
+        memory_zero(compositor_wl.wc_reads, sizeof compositor_wl.wc_reads);
+        memory_zero(compositor_wl.wc_copy, sizeof compositor_wl.wc_copy);
+#define GPU_WC_LEND()                                                                                                                                   \
+        (memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]), compositor_wl.lent[ROW].pixels = pixels, compositor_wl.lent[ROW].pitch = SIDE, \
+         compositor_wl.lent[ROW].width = SIDE, compositor_wl.lent[ROW].height = SIDE, compositor_wl.lent[ROW].fd = fd,                                 \
+         compositor_wl.lent[ROW].map = (const unsigned char *)pixels, compositor_wl.lent[ROW].size = sizeof pixels)
+        GPU_WC_LEND();
+        // One present of the processor's: read in place, and lent still.
+        compositor_wl_lent_sync(1);
+        compositor_wl_lent_sync(1); // the glass and the band read it in the same present: one read of the present
+        compositor_wl_lent_sync(0);
+        compositor_wl_settle(ROW);
+        check("gpu wc: one present the processor read a lent dma-buf in leaves it lent", compositor_lent(ROW) && compositor_wl.wc_reads[ROW] == 1 &&
+                                                                                              compositor_wl.wc_presents == presents + 1);
+        // A present the card draws after it: the count is none again, and a second of the processor's leaves it lent.
+        compositor_wl_count_card(rows, 1);
+        compositor_wl_lent_sync(1);
+        compositor_wl_lent_sync(0);
+        compositor_wl_settle(ROW);
+        check("gpu wc: a present the card draws between two of the processor's keeps the dma-buf lent", compositor_lent(ROW) && compositor_wl.wc_reads[ROW] == 1);
+        // A second of the processor's running: copied into the table once, and lent no dma-buf.
+        compositor_wl_lent_sync(1);
+        compositor_wl_lent_sync(0);
+        compositor_wl_settle(ROW);
+        front = (unsigned int *)((char *)compositor.table + compositor.pixels + (unsigned long)ROW * 2 * compositor.buffer);
+        check("gpu wc: two presents running the processor read it, it is copied into the table once and not lent",
+              !compositor_lent(ROW) && compositor_wl.wc_copy[ROW] && compositor_wl.wc_seeded == seeded + 1 && front[0] == pixels[0] &&
+                      front[SIDE * SIDE - 1] == pixels[SIDE * SIDE - 1]);
+        {
+                struct wayland_picture picture;
+
+                memory_zero(&picture, sizeof picture);
+                picture.pixels = (const unsigned char *)pixels, picture.stride = SIDE * 4, picture.width = SIDE, picture.height = SIDE;
+                picture.full = 1, picture.last = 1, picture.sync_fd = fd, picture.map = picture.pixels, picture.map_bytes = sizeof pixels;
+                check("gpu wc: and the row is lent no dma-buf while the processor composes", !compositor_wl_lend(ROW, &picture, SIDE, SIDE));
+        }
+        compositor_wl_count_card(rows, 1);
+        check("gpu wc: until the card draws a present", !compositor_wl.wc_copy[ROW] && !compositor_wl.wc_reads[ROW]);
+        // A pool lent (no descriptor) is the machine's memory, and is not counted.
+        GPU_WC_LEND();
+        compositor_wl.lent[ROW].fd = -1;
+        compositor_wl_lent_sync(1);
+        compositor_wl_lent_sync(0);
+        compositor_wl_lent_sync(1);
+        compositor_wl_lent_sync(0);
+        compositor_wl_settle(ROW);
+        check("gpu wc: a lent pool is not counted, and stays lent", compositor_lent(ROW) && !compositor_wl.wc_reads[ROW]);
+#undef GPU_WC_LEND
+        memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
+        system_close(fd);
+        system_call_2(syscall(munmap), (positive)table, table_bytes);
+        compositor.table = kept_table, compositor.pixels = kept_pixels, compositor.buffer = kept_buffer;
+        compositor.width = kept_width, compositor.stride = kept_stride;
+        compositor.x[ROW] = kept_x, compositor.y[ROW] = kept_y, compositor.w[ROW] = kept_w, compositor.h[ROW] = kept_h, compositor.front[ROW] = kept_front;
+        compositor.damages = kept_damages;
+        memory_copy(compositor.damage[0], kept_damage, sizeof kept_damage);
+}
+
+/*
         A client's pool read by the card (compositor_wl_card_rect): the card maps the picture's own rows, not the pool. A pool of 64 MiB holds a picture
         of 1 MiB at a byte that is not a page's; two rectangles of it are copied by the card, the first at the picture's first pixel and the second
         ending at its last, and the read map the card holds must be the picture's pages (from the page of its first byte to the end of the page of its
@@ -241675,6 +241769,8 @@ b32 main(void)
                         check("gpu requirements: every step has its name and its fix in words", windows_gpu_req_names[code] && windows_gpu_req_names[code][0] && windows_gpu_req_fixes[code] && windows_gpu_req_fixes[code][0]);
                 check("gpu requirements: the userptr fix names the kernel option", string_find((string_address)windows_gpu_req_fixes[GPU_REQ_USERPTR], (string_address)"CONFIG_DRM_AMDGPU_USERPTR") != 0);
         }
+        // The rows of the shim's host that need no card (its state made by hand), before the card's.
+        gpu_wc_rows();
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
                 // A card that is there and draws the self-test wrong fails here; no card at all is no failure, and no pass either: every row after this one
