@@ -827,6 +827,17 @@ struct window_place
 #define WINDOWS_REFUSED_PLACE 4u
 
 #define WINDOWS_LOOP_SOURCES 10 // the compositor loop's wake sources (metric_loop_by)
+// Why a window's list may not be rendered (window_list_check), each counted apart in the table's list_invalid for moonwater debug.
+#define WINDOW_LIST_VALID 0u      // it may be rendered
+#define WINDOW_LIST_NONE 1u       // no list, or no picture to render it at
+#define WINDOW_LIST_PUBLISHING 2u // a publish is writing its header (an odd generation)
+#define WINDOW_LIST_HEADER 3u     // not the kit's list: its magic, version or lost flag, or its halves, room, count or cover out of bounds
+#define WINDOW_LIST_TORN 4u       // a publish began while it was read
+#define WINDOW_LIST_ROOM_OTHER 5u // a room other than WINDOW_LIST_ROOM
+#define WINDOW_LIST_SIZE 6u       // its picture is not the size the row's picture is taken at
+#define WINDOW_LIST_PITCH 7u      // a pitch narrower than its picture
+#define WINDOW_LIST_DAMAGE 8u     // damage that reaches outside its picture
+#define WINDOW_LIST_REASONS 9u
 struct windows
 {
         // The output: its pixels, how many of them one drawn pixel is, a frame in nanoseconds.
@@ -1096,6 +1107,10 @@ struct windows
         unsigned int list_seen[WINDOWS];
         unsigned int list_refused;
         unsigned int list_why[16]; // the compositor's: the lists drawn (0) and the lists refused by reason (compositor_list_why), for moonwater debug
+        // The compositor's: the lists window_list_check refused, by its reason (WINDOW_LIST_*), and of the last refused for its size the
+        // list's picture and the size the row's picture was taken at, width then height, for moonwater debug.
+        unsigned int list_invalid[WINDOW_LIST_REASONS];
+        unsigned int list_size_list[2], list_size_taken[2];
         // The app's: the frames it recorded into its list (list_tried) and, of them, the ones that did not record whole, by cause (enum ui_list_lost).
         unsigned int list_tried[WINDOWS];
         unsigned int list_lost[WINDOWS][UI_LOST_COUNT];
@@ -1297,23 +1312,38 @@ static inline unsigned char *window_list_of(const struct windows *table, int row
         (magic, version, a generation even and the same after the read, the halves, the room, the cover bytes inside the list, and no
         lost flag), its room is WINDOW_LIST_ROOM, its picture is the row's size and its pitch is at least the width, and the damage it
         names is inside the picture. A list a program wrote is not trusted: each word is read once, by the reader. The ops are read
-        after this, and the reader's ui_draw_list_still says whether they are the generation this answered for.
+        after this, and the reader's ui_draw_list_still says whether they are the generation this answered for. window_list_check
+        answers which test it failed (WINDOW_LIST_*, WINDOW_LIST_VALID for none), with the header's view where it was read.
 */
+static inline unsigned int window_list_check(unsigned char *list, int width, int height, struct ui_draw_view *view)
+{
+        int opened;
+
+        if (!list || width <= 0 || height <= 0)
+                return WINDOW_LIST_NONE;
+        opened = ui_draw_list_open(list, WINDOW_LIST_BYTES, view);
+        if (opened == 0)
+                return WINDOW_LIST_PUBLISHING;
+        if (opened != 1)
+                return WINDOW_LIST_HEADER;
+        if (!ui_draw_list_still(list, view))
+                return WINDOW_LIST_TORN;
+        if (view->room != WINDOW_LIST_ROOM)
+                return WINDOW_LIST_ROOM_OTHER;
+        if (view->width != (unsigned int)width || view->height != (unsigned int)height)
+                return WINDOW_LIST_SIZE;
+        if (view->pitch < (unsigned long)width)
+                return WINDOW_LIST_PITCH;
+        if (view->x1 > view->x0 && view->y1 > view->y0 && (view->x0 < 0 || view->y0 < 0 || view->x1 > width || view->y1 > height))
+                return WINDOW_LIST_DAMAGE;
+        return WINDOW_LIST_VALID;
+}
+
 static inline int window_list_valid(unsigned char *list, int width, int height)
 {
         struct ui_draw_view view;
 
-        if (!list || width <= 0 || height <= 0)
-                return 0;
-        if (ui_draw_list_open(list, WINDOW_LIST_BYTES, &view) != 1 || !ui_draw_list_still(list, &view))
-                return 0;
-        if (view.room != WINDOW_LIST_ROOM || view.width != (unsigned int)width || view.height != (unsigned int)height)
-                return 0;
-        if (view.pitch < (unsigned long)width)
-                return 0;
-        if (view.x1 > view.x0 && view.y1 > view.y0 && (view.x0 < 0 || view.y0 < 0 || view.x1 > width || view.y1 > height))
-                return 0;
-        return 1;
+        return window_list_check(list, width, height, &view) == WINDOW_LIST_VALID;
 }
 
 /*

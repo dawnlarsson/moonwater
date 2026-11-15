@@ -24763,6 +24763,21 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                          why == 7 ? (string_address) "the cover bytes or the picture could not be mapped" :
                                          why == 8 ? (string_address) "the card did not finish the scene" :
                                                     (string_address) "frames painted in pixels by a window the card drew from its list");
+                //      The lists whose header was not valid, by which of window_list_check's tests each failed.
+                for (unsigned int why = 1; why < WINDOW_LIST_REASONS; why++)
+                        if (table->list_invalid[why])
+                                host_say(log, "    not valid     %p, %s\n", (positive)table->list_invalid[why],
+                                         why == WINDOW_LIST_NONE ? (string_address) "no list, or no picture to render it at" :
+                                         why == WINDOW_LIST_PUBLISHING ? (string_address) "a publish was writing its header (an odd generation)" :
+                                         why == WINDOW_LIST_HEADER ? (string_address) "not the kit's list (magic, version, lost flag, or halves, room, count, cover)" :
+                                         why == WINDOW_LIST_TORN ? (string_address) "a publish began while it was read" :
+                                         why == WINDOW_LIST_ROOM_OTHER ? (string_address) "a room other than the window list's" :
+                                         why == WINDOW_LIST_SIZE ? (string_address) "its picture is not the size the window's was taken at" :
+                                         why == WINDOW_LIST_PITCH ? (string_address) "a pitch narrower than its picture" :
+                                                                    (string_address) "damage outside its picture");
+                if (table->list_invalid[WINDOW_LIST_SIZE])
+                        host_say(log, "    last size     the list %p by %p, the window's picture taken at %p by %p\n", (positive)table->list_size_list[0],
+                                 (positive)table->list_size_list[1], (positive)table->list_size_taken[0], (positive)table->list_size_taken[1]);
                 //      The frames each window recorded into its list that did not record whole (the program paints them as pixels), by cause.
                 for (unsigned int row = 0; row < WINDOWS; row++)
                 {

@@ -15792,12 +15792,27 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
         list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
 */
 static unsigned char compositor_listed[WINDOWS]; // the row's picture in buffer 0 is the card's drawing of its last list (so a partial list is a change over it)
+static unsigned int compositor_list_invalids[WINDOW_LIST_REASONS];
+
+// A list window_list_check refused, counted by its reason in the table's list_invalid, and for one of another size the list's picture and the
+// size the row's picture was taken at.
+static void compositor_list_invalid(struct windows *table, unsigned int why, const struct ui_draw_view *view, unsigned int width, unsigned int height)
+{
+        compositor_list_invalids[why]++;
+        table->list_invalid[why] = compositor_list_invalids[why];
+        if (why == WINDOW_LIST_SIZE)
+        {
+                table->list_size_list[0] = view->width, table->list_size_list[1] = view->height;
+                table->list_size_taken[0] = width, table->list_size_taken[1] = height;
+        }
+}
 
 static int compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
 {
         struct windows *table = compositor.table;
         unsigned char *list = window_list_of(table, row);
-        unsigned int gen;
+        struct ui_draw_view view;
+        unsigned int gen, invalid;
 
         if (!list)
                 return 0;
@@ -15816,22 +15831,24 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
                 return 0;
         }
         table->list_seen[row] = gen;
+        // A list that is not one to render is refused, and counted by which of window_list_check's tests it failed.
+        invalid = window_list_check(list, (int)width, (int)height, &view);
+        if (invalid != WINDOW_LIST_VALID)
+        {
+                compositor_list_invalid(table, invalid, &view, width, height);
+                compositor_list_why = COMPOSITOR_LIST_INVALID;
+                goto refused;
+        }
         // A list is the frame's changes over the picture the card drew from the last one. After a frame the program painted in pixels (a refused or lost frame)
         // buffer 0 is not that picture, so the first list after it has to be the whole frame; a partial one is refused (the program then paints that frame in
         // pixels, whole), or buffer 0 would show the old frame with this frame's band on it, and the window would flicker between the two.
-        if (!compositor_listed[row])
+        if (!compositor_listed[row] && (view.x0 > 0 || view.y0 > 0 || view.x1 < (int)width || view.y1 < (int)height))
         {
-                struct ui_draw_view view;
-
-                if (ui_draw_list_open(list, WINDOW_LIST_BYTES, &view) != 1 || view.x0 > 0 || view.y0 > 0 || view.x1 < (int)width || view.y1 < (int)height)
-                {
-                        compositor_list_why = COMPOSITOR_LIST_PARTIAL;
-                        goto refused;
-                }
+                compositor_list_why = COMPOSITOR_LIST_PARTIAL;
+                goto refused;
         }
         compositor_list_why = COMPOSITOR_LIST_INVALID;
-        if (window_list_valid(list, (int)width, (int)height) &&
-            compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
+        if (compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
         {
                 compositor_list_counts[COMPOSITOR_LIST_DRAWN]++;
                 table->list_why[COMPOSITOR_LIST_DRAWN] = compositor_list_counts[COMPOSITOR_LIST_DRAWN];

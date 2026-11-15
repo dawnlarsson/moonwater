@@ -62038,6 +62038,43 @@ static fn windows_lists(void)
         head[UI_DRAW_LIST_ROOM] = WINDOW_LIST_ROOM;
         head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + WINDOW_LIST_ROOM * UI_DRAW_LIST_OP);
         check("and the list is valid again once every word is the kit's", window_list_valid(list, 240, 160));
+
+        // Which test a list fails, as the compositor counts it (window_list_check). A torn read (a publish that begins between the open and
+        // the reader's still) takes a second writer, which these rows do not have.
+        {
+                struct ui_draw_view view;
+
+                check("list check: a list that may be rendered fails none", window_list_check(list, 240, 160, &view) == WINDOW_LIST_VALID);
+                check("list check: no list, or no picture, is none to render",
+                      window_list_check(null, 240, 160, &view) == WINDOW_LIST_NONE && window_list_check(list, 0, 160, &view) == WINDOW_LIST_NONE);
+                head[UI_DRAW_LIST_GEN] = 3;
+                check("list check: an odd generation is a publish writing it", window_list_check(list, 240, 160, &view) == WINDOW_LIST_PUBLISHING);
+                head[UI_DRAW_LIST_GEN] = 2;
+                head[UI_DRAW_LIST_MAGIC_AT] = 0;
+                check("list check: a list without the kit's magic is the header's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_HEADER);
+                head[UI_DRAW_LIST_MAGIC_AT] = UI_DRAW_LIST_MAGIC;
+                head[UI_DRAW_LIST_FLAGS] = 1;
+                check("list check: a lost frame is the header's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_HEADER);
+                head[UI_DRAW_LIST_FLAGS] = 0;
+                head[UI_DRAW_LIST_COUNT] = WINDOW_LIST_ROOM + 1;
+                check("list check: a count past the room is the header's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_HEADER);
+                head[UI_DRAW_LIST_COUNT] = 0;
+                head[UI_DRAW_LIST_ROOM] = 64;
+                head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + 64 * UI_DRAW_LIST_OP);
+                check("list check: a room other than the list's is the room's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_ROOM_OTHER);
+                head[UI_DRAW_LIST_ROOM] = WINDOW_LIST_ROOM;
+                head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + WINDOW_LIST_ROOM * UI_DRAW_LIST_OP);
+                check("list check: a list of another size is the size's, and its view has the list's own size",
+                      window_list_check(list, 239, 160, &view) == WINDOW_LIST_SIZE && view.width == 240 && view.height == 160 &&
+                          window_list_check(list, 240, 161, &view) == WINDOW_LIST_SIZE);
+                head[UI_DRAW_LIST_PITCH] = 100;
+                check("list check: a pitch narrower than the picture is the pitch's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_PITCH);
+                head[UI_DRAW_LIST_PITCH] = 240;
+                head[UI_DRAW_LIST_DX1] = 241, head[UI_DRAW_LIST_DY1] = 10;
+                check("list check: damage past the picture is the damage's", window_list_check(list, 240, 160, &view) == WINDOW_LIST_DAMAGE);
+                head[UI_DRAW_LIST_DX1] = 0, head[UI_DRAW_LIST_DY1] = 0;
+                check("list check: and the list fails none again", window_list_check(list, 240, 160, &view) == WINDOW_LIST_VALID);
+        }
 }
 
 /*
@@ -246172,6 +246209,7 @@ static void dl_list_rows(void)
         unsigned int address_to head;
         int damage[4] = {0, 0, 0, 0};
         int calls;
+        unsigned int invalid;
 
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
         table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
@@ -246207,20 +246245,35 @@ static void dl_list_rows(void)
         check("compositor list: a picture of the program's clears the refusal, and no list is drawn for it",
               dl_render_calls == calls && table->list_state[0] == 0 && table->list_refused == 1);
 
-        // A torn list (an odd generation) is refused without the renderer.
+        // A torn list (an odd generation) is refused without the renderer, and counted as a publish writing it.
         dl_publish();
         head[UI_DRAW_LIST_GEN] |= 1;
         calls = dl_render_calls;
+        invalid = table->list_invalid[WINDOW_LIST_PUBLISHING];
         compositor_lists_take(0, DL_W, DL_H, damage);
         check("compositor list: a torn list is refused without the renderer", dl_render_calls == calls && table->list_state[0] == 2);
+        check("compositor list: and counted as a publish writing its header", table->list_invalid[WINDOW_LIST_PUBLISHING] == invalid + 1);
         head[UI_DRAW_LIST_GEN] &= ~1u;
 
-        // A list whose count is past its room is refused without the renderer.
+        // A list whose count is past its room is refused without the renderer, and counted as the header's.
         dl_publish();
         head[UI_DRAW_LIST_COUNT] = WINDOW_LIST_ROOM + 1;
         calls = dl_render_calls;
+        invalid = table->list_invalid[WINDOW_LIST_HEADER];
         compositor_lists_take(0, DL_W, DL_H, damage);
         check("compositor list: a list past its room is refused without the renderer", dl_render_calls == calls && table->list_state[0] == 2);
+        check("compositor list: and counted as a header that is not the kit's", table->list_invalid[WINDOW_LIST_HEADER] == invalid + 1);
+
+        // A list of another size than the picture is taken at is refused, counted as the size's, and both sizes are kept.
+        dl_publish();
+        calls = dl_render_calls;
+        invalid = table->list_invalid[WINDOW_LIST_SIZE];
+        compositor_lists_take(0, DL_W - 8, DL_H, damage);
+        check("compositor list: a list of another size is refused without the renderer, counted as the size's",
+              dl_render_calls == calls && table->list_state[0] == 2 && table->list_invalid[WINDOW_LIST_SIZE] == invalid + 1);
+        check("compositor list: and the list's size and the size the picture was taken at are kept",
+              table->list_size_list[0] == DL_W && table->list_size_list[1] == DL_H && table->list_size_taken[0] == DL_W - 8 &&
+                  table->list_size_taken[1] == DL_H);
 
         // List mode 0: a new list is not drawn, its generation is taken as seen, and the refusal is over; with the mode back on it is not drawn again.
         dl_publish();
@@ -246238,7 +246291,7 @@ static void dl_list_rows(void)
                 dl_publish();
                 if (ui_draw_list_open((const unsigned char address_to)head, WINDOW_LIST_BYTES, &pv) == 1)
                 {
-                        head[3] = 4; /* narrow clip x0 > 0 */
+                        head[UI_DRAW_LIST_DX0] = 4; /* the damage's x0 past the picture's left: a partial list */
                         compositor_listed[0] = 0;
                         compositor_lists_take(0, DL_W, DL_H, damage);
                         check("compositor list: partial list right after pixel fallback is refused with COMPOSITOR_LIST_PARTIAL",
