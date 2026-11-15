@@ -106,7 +106,6 @@ static struct
         int width, height, shown;
         unsigned int ground;
         b32 focused, dirty;
-        struct ui_rect list_box; // what the tree gave the rows
         p32 seen;                // the model's revision as last drawn
         p32 clicked;             // the place a mouse last clicked, and when: a second click there in time opens it
         b64 clicked_at, next_look, next_show;
@@ -331,6 +330,10 @@ static fn files_layout(void)
         }
         files.path.focused = files.editing && files.focused;
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
+        // Every entry is a row of the list, the row the keys are on is the model's cursor, and an empty folder says what it is.
+        l->total = (int)files_model_count(m);
+        l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
+        l->empty = files_state_text(m);
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
         ui_row(.class = "pathbar")
         {
@@ -343,20 +346,12 @@ static fn files_layout(void)
                 else
                         ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
         }
+        // The rows: the kit's list, its words in from the window's margin and its rows from one edge to the other.
         ui_col(.class = "rows", .grow = 1)
-                ui_host(&files.list_box, .class = "list", .grow = 1);
+                ui_rows(l, .class = "list", .grow = 1);
         ui_row(.class = "bar")
                 ui_text(files.big->status, .class = "status");
         ui_view_end(&files.big->view);
-        // Every entry is a row of the list, and the row the keys are on is the model's cursor.
-        l->total = (int)files_model_count(m);
-        l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
-        ui_list_place(ui, l, files.list_box.x, files.list_box.y, files.list_box.w, files.list_box.h);
-        // A row runs from one edge of the window to the other, as the settings window's and the launcher's do: the words stay in
-        // from the margin, where the list's own box is.
-        l->row_x = 0, l->row_w = files.width;
-        l->empty = files_state_text(m);
-        ui_list_layout(ui, l);
         // A folder shown as it was left has its rows where they were; any other, from the top. And where they are now is the model's
         // to keep with the listing when the folder is left.
         if (files.reseat)
@@ -979,10 +974,6 @@ static b32 files_event(const struct window_event address_to event)
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 files.dirty = true;
                 break;
-        case WINDOW_EVENT_WHEEL:
-                if (ui_wheel_turn(ui, &l->scroll, event))
-                        files.dirty = true;
-                break;
         case WINDOW_EVENT_BUTTON:
                 files.dirty = true;
                 if (down)
@@ -1048,7 +1039,6 @@ static fn files_draw(unsigned int address_to pixels)
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
         files_layout();
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys;
-        ui_list_draw(ui, l);
         ui_view_draw(ui, &files.big->view, files.focused);
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_draw();
