@@ -158786,10 +158786,11 @@ static int pointer_as(struct ui address_to ui, struct ui_scroll address_to s, in
 }
 
 /*
-        A lit row (the one the keys are on, a hovered or pressed one, a hovered group of a column) is lighter than the ground it lies on in
-        either theme: on a light ground a step toward white, six tenths of it hovered and all of it pressed, so hover and press read apart,
-        and in a dark one the secondary container and the ink's layer, which are lighter there. A light glass (the launcher's, a menu's)
-        lifts toward white too; a dark glass keeps its wells. It is never a darker grey.
+        A lit row stands out from the ground it lies on in either theme. The row the keys are on is the highlight on a light opaque surface,
+        1.2 to 1 and more from it with every accent, its words and its quiet words readable on it (4.5 to 1 and more), and the secondary
+        container on a dark one. A hovered or pressed row is lighter than its ground: on a light ground a step toward white, six tenths of
+        it hovered and all of it pressed, so hover and press read apart, and in a dark one the ink's layer. A light glass (the launcher's, a
+        menu's) lifts toward white for all three; a dark glass keeps its wells. A hovered or pressed row is never a darker grey.
 */
 static unsigned int lit_lay(struct ui address_to ui, unsigned int address_to pixels, unsigned int ground, unsigned int layer)
 {
@@ -158811,7 +158812,21 @@ static fn check_kit_lit(void)
         ui.pixels = pixels, ui.pitch = 64, ui.width = 64, ui.height = 8, ui.top = 0, ui.bottom = 8, ui.scale = 100;
         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
         ground = ui_role(UI_SURFACE) | 0xff000000u;
-        light_keys = ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
+        light_keys = ui_kit_light(&ui);
+        {
+                static const unsigned int accents[3] = {UI_ACCENT_STANDARD, UI_ACCENT_DAWN, 0x1f5fd0u};
+
+                for (int at = 0; at < 3; at++)
+                {
+                        unsigned int lit;
+
+                        ui_kit_theme(UI_THEME_LIGHT, accents[at], 1);
+                        lit = ui_kit_lit(&ui) & 0xffffffu;
+                        light_keys = light_keys && ui_contrast(lit, ui_role(UI_SURFACE) & 0xffffffu) >= UI_LIT_CONTRAST &&
+                                     ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, lit) >= 450 && ui_contrast(ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu, lit) >= 450;
+                }
+                ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        }
         hover = lit_lay(&ui, pixels, ground, 6), press = lit_lay(&ui, pixels, ground, 10);
         light_hover = hover > ui_luminance(ground & 0xffffffu);
         light_apart = press > hover;
@@ -158831,7 +158846,7 @@ static fn check_kit_lit(void)
         dark_keys = !ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
         dark_hover = lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu);
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
-        check("kit lit: in the light theme the row the keys are on, a hovered row and a pressed one are lighter than their ground, never a darker grey",
+        check("kit lit: in the light theme the row the keys are on is the highlight, 1.2:1 and more from the surface with every accent and its words 4.5:1 on it, and a hovered row is lighter than its ground",
               light_keys && light_hover);
         check("kit lit: in the light theme a pressed row is lighter than a hovered one, so the two states read apart", light_apart);
         check("kit lit: on a light glass (the launcher's, a menu's) the row the keys are on, a hovered row and a pressed one are lighter than the tint, and a menu's hot item is the lit row's fill",
@@ -158843,7 +158858,7 @@ static fn check_kit_lit(void)
         The keys' focus, a field's placeholder and a disabled control, kept to the design (flat, no outline of its own): a button the
         keys are on has the focus ring, a gap out from its pill, 3:1 or more from its ground, and one the keys are not on has nothing
         round it; a click does not focus a button (the ring is the keys', as :focus-visible is); the ring's ink stands out 3:1 from the
-        surface and from a lit row's white with Dawn's orange too (2.4:1 on white as it is); a field's placeholder is the quiet ink at
+        surface and from the white of a raised face with Dawn's orange too (2.4:1 on white as it is); a field's placeholder is the quiet ink at
         full strength, 4.5:1 or more on the light surface where the ink at 36% was 2.2:1; and a disabled switch that is on is the ink's
         grey, not the accent.
 */
@@ -158986,7 +159001,6 @@ static fn check_kit_focus(void)
                 ui_list_draw(&ui, &rows);
                 top = bounds_span(&ui, &rows, 1, &height);
                 lit = ui_kit_lit(&ui) & 0xffffffu;
-                // (The surface is light here: the row's first three pixels are its edge, ui_list_row_edge, and the rest is the fill.)
                 row_bare = lit != ground && height > 12;
                 for (int y = top; y < top + height && row_bare; y++)
                         row_bare = focus_at(pixels, 103, y) == lit && focus_at(pixels, 104, y) == lit && focus_at(pixels, 105, y) == lit &&
@@ -158995,26 +159009,20 @@ static fn check_kit_focus(void)
                         row_bare = focus_at(pixels, x, top) == lit && focus_at(pixels, x, top + 2) == lit && focus_at(pixels, x, top + 3) == lit &&
                                    focus_at(pixels, x, top + height - 1) == lit && focus_at(pixels, x, top + height - 3) == lit;
                 check("kit focus: a list's row the keys are on is lit from edge to edge and has no ring, with the hand on the keys: the fill says where they are", row_bare);
-                // The edge: on a light surface, with the hand on the keys, the row's first three pixels are the focus ink, 3 to 1 from the
-                // surface and from the lit row, down its whole height; a press takes it away and leaves the row lit; a window read from
-                // the right has it at the row's right; and a dark surface has none, with the keys or without.
+                // No edge: on a light surface the fill alone says where the keys are (the highlight, ui_kit_lit), so the row is its fill to
+                // its first pixel at either side with the hand on the keys, in a window read from either way, and it stands 1.2 to 1 and
+                // more from the surface; a dark surface's row is its fill to its edges too.
                 {
-                        unsigned int edge = ui_kit_focus_ink(&ui) & 0xffffffu, dark_ground, dark_lit;
-                        b32 edged = ui_contrast(edge, ground) >= 300 && ui_contrast(edge, lit) >= 300, unedged, turned, dark;
+                        unsigned int dark_ground, dark_lit;
+                        b32 bare = ui_contrast(lit, ground) >= UI_LIT_CONTRAST, turned, dark;
 
-                        for (int y = top; y < top + height && edged; y++)
-                                edged = focus_at(pixels, 100, y) == edge && focus_at(pixels, 101, y) == edge && focus_at(pixels, 102, y) == edge;
-                        ui_kit.keyed = 0;
+                        for (int y = top; y < top + height && bare; y++)
+                                bare = focus_at(pixels, 100, y) == lit && focus_at(pixels, 101, y) == lit && focus_at(pixels, 102, y) == lit;
+                        ui_kit.rtl = 1;
                         for (int at = 0; at < 400 * 200; at++)
                                 pixels[at] = 0xff000000u | ground;
                         ui_list_draw(&ui, &rows);
-                        unedged = focus_at(pixels, 100, top + 5) == lit && focus_at(pixels, 102, top + 5) == lit && focus_at(pixels, 200, top + 2) == lit;
-                        ui_kit.keyed = 1, ui_kit.rtl = 1;
-                        for (int at = 0; at < 400 * 200; at++)
-                                pixels[at] = 0xff000000u | ground;
-                        ui_list_draw(&ui, &rows);
-                        turned = focus_at(pixels, 399, top + 5) == edge && focus_at(pixels, 397, top + 5) == edge && focus_at(pixels, 396, top + 5) == lit &&
-                                 focus_at(pixels, 100, top + 5) == lit;
+                        turned = focus_at(pixels, 399, top + 5) == lit && focus_at(pixels, 397, top + 5) == lit && focus_at(pixels, 100, top + 5) == lit;
                         ui_kit.rtl = 0;
                         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
                         dark_ground = ui_role(UI_SURFACE) & 0xffffffu, dark_lit = ui_kit_lit(&ui) & 0xffffffu;
@@ -159026,10 +159034,10 @@ static fn check_kit_focus(void)
                                 dark = focus_at(pixels, 100, y) == dark_lit && focus_at(pixels, 101, y) == dark_lit && focus_at(pixels, 102, y) == dark_lit &&
                                        focus_at(pixels, 399, y) == dark_lit;
                         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
-                        check("kit focus: on a light surface the row the keys are on has an edge three pixels wide in the focus ink, 3:1 from the surface and from the lit row, while the hand is on the keys",
-                              edged);
-                        check("kit focus: a press takes the edge away and leaves the row lit, a window read from the right has it at the row's right, and a dark surface has none",
-                              unedged && turned && dark);
+                        check("kit focus: on a light surface the row the keys are on is its fill to its first pixel, with the hand on the keys, and the fill stands 1.2:1 and more from the surface",
+                              bare);
+                        check("kit focus: reading from the right it is its fill to both ends too, and a dark surface's row the keys are on is its fill from edge to edge",
+                              turned && dark);
                 }
 
                 for (int at = 0; at < 400 * 200; at++)
@@ -159059,7 +159067,7 @@ static fn check_kit_focus(void)
         check("kit focus: a button the keys were on has no ring once a button of the pointer is pressed, anywhere: a click leaves none behind", unkeyed);
         check("kit focus: Tab and an arrow put the hand on the keys, a press and a finger take it off, and a letter, a mouse's nudge, a wheel and a release change nothing",
               modality);
-        check("kit focus: the ring's ink stands out 3:1 from the light surface and from a lit row's white with Dawn's orange too, which is 2.4:1 on white as it is",
+        check("kit focus: the ring's ink stands out 3:1 from the light surface and from the white of a raised face with Dawn's orange too, which is 2.4:1 on white as it is",
               dawn_ink);
         check("kit focus: a field's placeholder is the quiet ink at full strength, 4.5:1 or more from the light surface (the ink at 36 percent was 2.2:1)", placeholder);
         check("kit focus: a disabled switch that is on is the ink's grey, not the accent", disabled);

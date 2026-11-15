@@ -12603,7 +12603,7 @@ static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1)
         the row the keys are on is lit (ui_kit_lit) and the chosen group is under its pip, and those fills are what say it.
         Two logical pixels, on a control's face grown by UI_FOCUS_GAP.
         Its ink is the accent, deepened (toward black on a light surface, white on a dark one) until it stands out 3:1 from the
-        surface and from the white a lit row comes to, so Dawn's orange, 2.4:1 on white, is drawn a deeper orange; on glass
+        surface and from the white of a raised face, so Dawn's orange, 2.4:1 on white, is drawn a deeper orange; on glass
         it is the window's ink, which stands out from the tint.
 */
 #define UI_FOCUS_WIDTH 2
@@ -12760,12 +12760,32 @@ static inline fn ui_kit_lift_fill(struct ui address_to ui, const struct ui_box a
                 ui_kit_layer_fill(ui, box, ink, layer);
 }
 
-// The row the keys are on: the whole step toward white on a light ground (opaque or glass), the secondary container (lighter than
-// its ground) on a dark opaque one, and on dark glass a well of the ink (ui_glass_well). The focus ring over it is what says the keys
-// are there; the fill only says which row.
+/*
+        The row the keys are on, its fill being all that says where they are (a lit row has no ring): on a light opaque surface the
+        highlight, the selection's colour (the bright accent at 28 percent, as a menu's hot item is on that surface) laid over the
+        surface and taken toward the bright accent until it stands UI_LIT_CONTRAST from the surface; the secondary container on a
+        dark opaque one (1.32 to 1 from it); the whole step toward white on a light glass; and on a dark glass a well of the ink
+        (ui_glass_well). On the light surface white, the lightest a fill can be, is 1.07 to 1 from it and not found from across a
+        desk; the highlight is 1.2 to 1 with Dawn's orange and more with the other accents (1.59 with the standard one, whose
+        bright accent is a grey of the ink), the words on it 13 to 1 and more, and the quiet ones 4.5 to 1 and more.
+*/
+#define UI_LIT_CONTRAST 120 // a light surface's lit row is at least this far from the surface, as ui_contrast counts (1.2 to 1)
+
+static unsigned int ui_kit_highlight(void)
+{
+        unsigned int surface = ui_role(UI_SURFACE) & 0xffffffu, selection = ui_role(UI_SELECTION), bright = ui_role(UI_ACCENT_BRIGHT) | 0xff000000u;
+        unsigned int cover = selection >> 24, lit = 0xff000000u | window_mix(surface, selection & 0xffffffu, cover + (cover >> 7));
+
+        for (int step = 0; step < 24 && ui_contrast(lit & 0xffffffu, surface) < UI_LIT_CONTRAST; step++)
+                lit = ui_mix(lit, 85, bright);
+        return lit;
+}
+
 static inline unsigned int ui_kit_lit(const struct ui address_to ui)
 {
-        return ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
+        if (ui->glass)
+                return ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
+        return ui_kit_light(ui) ? ui_kit_highlight() : ui_role(UI_SECONDARY_CONTAINER);
 }
 
 // A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink,
@@ -21165,23 +21185,6 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 }
 
 /*
-        The edge of the row the keys are on, in the light theme: a strip UI_LIST_EDGE logical pixels wide down the side the row is read
-        from (its left, or its right in a window read from the right), in the focus ring's ink, which stands 3 to 1 from the surface and
-        from the lit row's white (ui_kit_focus_ink). It is there for the reason the ring is on a button: a lit row on a light surface is
-        white on near white, the lightest a fill can be and still too faint to find from across a desk. It is the keys' alone, as the
-        ring is (ui_kit.keyed): a click or a touch leaves a lit row and no edge. It is a mark at the row's side and not a tint of the
-        row, so the row still reads as lit and not as chosen. A dark surface has none: its lit row is 1.3 to 1 and more from its ground.
-*/
-#define UI_LIST_EDGE 3
-static fn ui_list_row_edge(struct ui address_to ui, int across, int across_w, int y, int height)
-{
-        int wide = ui_dev(ui, UI_LIST_EDGE) < 1 ? 1 : ui_dev(ui, UI_LIST_EDGE), x = ui_rtl() ? across + across_w - wide : across;
-        struct ui_box box = {x * 256, y * 256, (x + wide) * 256, (y + height) * 256, 0, 0};
-
-        ui_kit_fill(ui, &box, ui_kit_focus_ink(ui), null);
-}
-
-/*
         A row at its place, y its top: the row the keys are on, the whole row lit, square (the fill is the keys' mark:
         a row has no ring), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
@@ -21195,7 +21198,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
         int across, across_w, baseline, size = ui_dev(ui, 4);
         // Whether any of its rows may be written, with room for a run's rows round its line.
-        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4)), edged = false;
+        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
         ui_list_describe(l, id, &row);
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
@@ -21208,11 +21211,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
                 struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
+                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring), and on a light surface
+                // the fill is the highlight (ui_kit_lit), which reads there as the dark theme's does on its own.
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
-                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring).
-                // On a light surface the fill is white on a ground that is nearly white (1.07 to 1, and no fill lighter than white is
-                // there to be had), so while the hand is on the keys the row also has an edge (ui_list_row_edge), drawn last.
-                edged = l->keys && ui_kit.keyed && !ui->glass && ui_kit_light(ui);
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
                 // its quiet words are the ink too, which stands out from the well (ui_glass_well).
                 if (ui->glass && !row.tall)
@@ -21285,9 +21286,6 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_list_drive(ui, &row, seen, strong, quiet);
         else if (row.kind == UI_ROW_SHARE)
                 ui_list_share(ui, &row, seen, strong, quiet);
-        // The edge last, over the row's hover and press: the keys' mark on a light surface.
-        if (edged)
-                ui_list_row_edge(ui, across, across_w, y, height);
 }
 
 // Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which
