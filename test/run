@@ -4224,6 +4224,15 @@ lane_cli()
         2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
         *) cli_outcome=1 ;;
         esac
+        #       The verbs that write a disk's system partition, lifted out of
+        #       host.c and run against a machine of a few tables: the disk asked
+        #       about is the one written, and one swapped in under its names is not.
+        python3 test/differential.py --harness moonwater_setup
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
         return "$cli_outcome"
 }
 

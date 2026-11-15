@@ -1765,6 +1765,98 @@ static bool host_unmount(string_address target)
         return system_call_2(syscall(umount2), (positive)target, 0) >= 0;
 }
 
+/*
+        Whether the file system mounted at target is the partition whose
+        identity is uuid, on disk: the device the mount holds, by its numbers,
+        and what sysfs says of those numbers now, the disk its directory is in
+        and the PARTUUID in its uevent.
+
+        A name resolved before a question is only a name: a stick or disk
+        swapped while the answer waits is given the same sdb1, and that was
+        the partition mounted and written. Nor does a descriptor opened on the
+        node pin it, since mount(2) looks a block device up by its numbers,
+        which the next disk can be given. What a mount holds is the device it
+        opened, so it is that device, once mounted, that is asked about; one
+        taken away after this leaves the mount on it, and its writes fail.
+*/
+static bool host_mounted_is(string_address target, string_address uuid, string_address disk)
+{
+        file_facts facts;
+        p8 sysfs[64];
+        p8 path[80];
+        p8 link[HOST_PATH_ROOM * 2];
+        p8 text[2048];
+        p8 want[sizeof("PARTUUID=") + STORAGE_PARTUUID_ROOM];
+        p8 address_to slash;
+        p8 address_to line;
+        positive used = sizeof("/sys/dev/block/") - 1;
+        bipolar got;
+
+        if (!uuid[0] || !file_look(AT_FDCWD, target, 0, address_of facts))
+                return false;
+
+        memory_copy(sysfs, "/sys/dev/block/", used);
+        used += positive_into_string(sysfs + used, facts.device_major);
+        sysfs[used++] = ':';
+        used += positive_into_string(sysfs + used, facts.device_minor);
+        sysfs[used] = end;
+
+        //      .../block/DISK/PARTITION: the disk is the one asked about.
+        if (file_link_text(sysfs, link, sizeof(link)) <= 0 ||
+            !(slash = memory_last_of(link, '/', string_length(link))))
+                return false;
+        *slash = end;
+        slash = memory_last_of(link, '/', string_length(link));
+        if (!string_equals(slash ? slash + 1 : link, disk))
+                return false;
+
+        //      And its uevent names the identity asked about, on a line of its own.
+        if (!host_join(path, sizeof(path), sysfs, "/uevent") ||
+            !host_join(want, sizeof(want), "PARTUUID=", uuid))
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, path, text, sizeof(text));
+        for (line = got > 0 ? text : null; line;)
+        {
+                p8 address_to next = (p8 address_to)string_first_of(line, '\n');
+
+                if (next)
+                        *next = end;
+                if (string_equals(line, want))
+                        return true;
+                line = next ? next + 1 : null;
+        }
+        return false;
+}
+
+/*
+        An install's system partition mounted at HOST_SYSTEM to be written,
+        refused unless it is the partition of the disk asked about
+        (host_mounted_is). With again, after a question: the name is resolved
+        afresh from the identity the question was about, and a disk that is
+        not there by it, or is there under another disk's name, is not
+        written. setup update usb mounted the name it resolved before asking,
+        so a stick or disk swapped while the answer waited was written.
+*/
+static b32 host_system_mount(host_install address_to install, bool again)
+{
+        bipolar mounted;
+
+        if (again)
+                install->resolved = 0;
+        if (!host_install_refresh(install))
+                return host_refuse("%s is no longer here as the disk it was asked about, so "
+                                   "nothing was written\n", install->disk);
+
+        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+        return_if(mounted < 0, host_fail(install->system, mounted));
+        if (host_mounted_is(HOST_SYSTEM, install->system_partuuid, install->disk))
+                return 0;
+
+        host_unmount(HOST_SYSTEM);
+        return host_refuse("%s is not the partition of %s it was asked about, so nothing was "
+                           "written\n", install->system, install->disk);
+}
+
 typedef bool (*host_image_visitor)(string_address path, address_any opaque);
 
 /*
@@ -2945,7 +3037,6 @@ static b32 host_update_locked(host_install address_to install)
         host_settings disk;
         bool carried;
         bool lost;
-        bipolar mounted;
         b32 failed;
 
         if (!host_running_build(running, sizeof(running)))
@@ -2973,11 +3064,10 @@ static b32 host_update_locked(host_install address_to install)
                 return 1;
         }
 
-        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-        if (mounted < 0)
+        if (host_system_mount(install, false))
         {
                 host_unmount(HOST_MEDIUM);
-                return host_fail(install->system, mounted);
+                return 1;
         }
 
         host_say(log, host_label "writing this build to %s, from %s\n",
@@ -27719,11 +27809,11 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
                          build, summed ? ", and its bytes are the sum beside it" : "");
         }
 
-        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-        if (mounted < 0)
+        //      The install as it was asked about, and no other (host_system_mount).
+        if (host_system_mount(install, true))
         {
                 host_unmount(HOST_MEDIUM);
-                return host_fail(install->system, mounted);
+                return 1;
         }
 
         host_say(log, host_label "writing the build on %s to %s\n", stick->name,
@@ -27800,7 +27890,6 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
         p16 machine;
         host_place place;
         bool lost;
-        bipolar mounted;
         b32 fit;
         b32 failed;
 
@@ -27809,9 +27898,8 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                 return host_refuse("%s is no longer here\n", install->disk);
         host_install_read(install);
 
-        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-        if (mounted < 0)
-                return host_fail(install->system, mounted);
+        if (host_system_mount(install, false))
+                return 1;
 
         failed = 0;
         asked[0] = end;
@@ -27853,11 +27941,8 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                                                         "and the image it has now as the one to go "
                                                         "back to if that image can be read."))
                                 return 1;
-                        if (!host_install_refresh(install))
-                                return host_refuse("%s is no longer here\n", install->disk);
-                        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-                        if (mounted < 0)
-                                return host_fail(install->system, mounted);
+                        if (host_system_mount(install, true))
+                                return 1;
                         if (host_image_fit(path, back, sizeof(back), address_of machine) ||
                             !string_equals(back, asked))
                                 failed = host_refuse("the build %s keeps from before changed while "

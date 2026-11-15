@@ -53924,6 +53924,443 @@ def harness_moonwater_script(argv):
     return checks.verdict("moonwater script", "moonwater-script")
 
 
+def harness_moonwater_setup(argv):
+    """The setup verbs that write a disk's system partition, lifted out of
+    src/sh/host.c and run against a machine that is a few tables: which disk
+    is under which name, which identity each partition has, and the device
+    numbers sysfs gives each. It holds setup update usb and setup rollback to
+    writing the disk the question was about and no other: a stick or disk
+    swapped in under the same names while the answer waits, or between the
+    look after the answer and the mount, is not written. The parent mounted
+    the name it resolved before the question and wrote whatever was there.
+
+    Every function the verbs call that touches the machine is a stub here;
+    host_install_refresh and, where the tree has them, host_mounted_is and
+    host_system_mount are the tree's own. A tree without the last two (the
+    parent) builds as well, so it can be run there and shown to lose.
+    """
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_setup")
+    parser.add_argument("--root", default=str(HARNESS_ROOT),
+                        help="the tree whose src/sh/host.c is lifted (a parent's, to see it lose)")
+    args = parser.parse_args(argv)
+    host = (Path(args.root) / "src/sh/host.c").read_text()
+
+    def section(first, following):
+        return src_slice(host, first, following, "moonwater_setup")
+
+    def optional(first, following):
+        try:
+            return section(first, following)
+        except ValueError:
+            return ""
+
+    lifted = (section("static bool host_install_refresh(host_install address_to install)",
+                      "static bool host_unmount(") +
+              optional("static bool host_mounted_is(", "typedef bool (*host_image_visitor)") +
+              section("static b32 host_update_stick_locked(host_install address_to install, bool said_yes)",
+                      "\n/*\n        previous.efi made the image") +
+              section("static b32 host_rollback_locked(host_install address_to install, bool said_yes)",
+                      "/* setup update usb and setup rollback: the install chosen, under the lock. */"))
+    source = r"""
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef int b32;
+typedef p8 *string_address;
+typedef void *address_any;
+#define address_of &
+#define address_to *
+#define fn void
+#define end 0
+#define null 0
+#define return_if(condition, value) do { if (condition) return (value); } while (0)
+#define HOST_NAME_ROOM 32
+#define HOST_PATH_ROOM 256
+#define HOST_BUILD_ROOM 160
+#define HOST_STICKS 4
+#define STORAGE_PARTUUID_ROOM 40
+#define HOST_FRESH_NS ((p64)2000000000)
+#define HOST_CLOCK_BOOTTIME 7
+#define HOST_SYSTEM "/run/moonwater/system"
+#define HOST_MEDIUM "/run/moonwater/medium"
+#define HOST_KEPT_IMAGE "/EFI/moonwater/previous.efi"
+#define HOST_KEPT_IMAGE_NEXT "/EFI/moonwater/previous.new"
+#define HOST_READ_ONLY 1
+#define HOST_WRITABLE 0
+#define HOST_FIT_NONE 1
+#define AT_FDCWD (-100)
+#define host_label "[Moonwater] "
+#define log 1
+#define log_error 2
+
+static char said[16384];
+static void say(int where, const char *format, ...)
+{
+        va_list list;
+        size_t used = strlen(said);
+
+        (void)where;
+        va_start(list, format);
+        vsnprintf(said + used, sizeof(said) - used, format, list);
+        va_end(list);
+}
+#define string_format(where, ...) say(where, __VA_ARGS__)
+#define host_say(where, ...) say(where, __VA_ARGS__)
+#define host_refuse(...) (say(2, host_label), say(2, __VA_ARGS__), (b32)1)
+static b32 host_fail(string_address what, bipolar error)
+{
+        say(2, host_label "%s: error %ld\n", (char *)what, error);
+        return 1;
+}
+#define string_equals(a, b) (!strcmp((const char *)(a), (const char *)(b)))
+#define string_copy(a, b) strcpy((char *)(a), (const char *)(b))
+#define string_length(a) strlen((const char *)(a))
+#define memory_zero(at, size) memset(at, 0, size)
+#define memory_copy(to, from, size) memcpy(to, from, size)
+//      As string_join: the first part may be into itself.
+static bool joined(p8 *into, positive room, ...)
+{
+        va_list list;
+        const char *part;
+        char whole[1024];
+        size_t used = 0;
+
+        whole[0] = 0;
+        va_start(list, room);
+        while ((part = va_arg(list, const char *)))
+        {
+                size_t length = strlen(part);
+
+                if (used + length >= room || used + length >= sizeof(whole))
+                {
+                        va_end(list);
+                        return false;
+                }
+                memcpy(whole + used, part, length + 1);
+                used += length;
+        }
+        va_end(list);
+        memcpy(into, whole, used + 1);
+        return true;
+}
+#define string_join(into, room, ...) joined((p8 *)(into), room, __VA_ARGS__, (const char *)0)
+#define host_join string_join
+static positive positive_into_string(p8 *into, positive value)
+{
+        return (positive)sprintf((char *)into, "%lu", value);
+}
+static p8 *memory_last_of(p8 *text, int byte, positive length)
+{
+        while (length--)
+                if (text[length] == byte)
+                        return text + length;
+        return 0;
+}
+#define string_first_of(text, byte) strchr((char *)(text), byte)
+
+/* The machine: partitions by name, disk, identity and device numbers. */
+typedef struct
+{
+        const char *name;
+        const char *disk;
+        const char *uuid;
+        unsigned major, minor;
+} part;
+static part machine_asked[] = {{"sdb1", "sdb", "aaaa-1", 8, 17}, {"sdb2", "sdb", "aaaa-2", 8, 18},
+                       {"sdc1", "sdc", "cccc-1", 8, 33}, {0, 0, 0, 0, 0}};
+//      Another disk in its place, given its names and its numbers.
+static part machine_swapped[] = {{"sdb1", "sdb", "bbbb-1", 8, 17}, {"sdb2", "sdb", "bbbb-2", 8, 18},
+                         {"sdc1", "sdc", "cccc-1", 8, 33}, {0, 0, 0, 0, 0}};
+static part *world;
+static p64 now;
+static unsigned swap_at_question, swap_at_mount, system_mounts;
+static const part *on_system;
+static const char *written;
+
+static const part *by(int what, const char *word, unsigned major, unsigned minor)
+{
+        for (part *at = world; at->name; at++)
+                if ((what == 0 && !strcmp(at->name, word)) || (what == 1 && !strcmp(at->uuid, word)) ||
+                    (what == 2 && at->major == major && at->minor == minor))
+                        return at;
+        return 0;
+}
+static p64 system_clock_ns(int clock)
+{
+        (void)clock;
+        return now += 1000000;
+}
+static bool host_partition_uuid_resolve(string_address uuid, p8 *into)
+{
+        const part *found = by(1, (const char *)uuid, 0, 0);
+
+        return found && (strcpy((char *)into, found->name), true);
+}
+static bool host_parent(string_address name, p8 *into, positive room)
+{
+        const part *found = by(0, (const char *)name, 0, 0);
+
+        (void)room;
+        return found && (strcpy((char *)into, found->disk), true);
+}
+static bipolar host_mount(string_address name, string_address target, string_address type,
+                          positive flags)
+{
+        const part *found;
+
+        (void)type;
+        (void)flags;
+        if (!strcmp((char *)target, HOST_SYSTEM) && ++system_mounts == swap_at_mount)
+                world = machine_swapped;
+        found = by(0, (const char *)name, 0, 0);
+        if (!found)
+                return -6;
+        if (!strcmp((char *)target, HOST_SYSTEM))
+                on_system = found;
+        return 0;
+}
+static bool host_unmount(string_address target)
+{
+        if (!strcmp((char *)target, HOST_SYSTEM))
+                on_system = 0;
+        return true;
+}
+typedef struct
+{
+        p32 device_major, device_minor;
+} file_facts;
+static bool file_look(int at, string_address path, int flags, file_facts *facts)
+{
+        (void)at;
+        (void)flags;
+        if (strcmp((char *)path, HOST_SYSTEM) || !on_system)
+                return false;
+        facts->device_major = on_system->major;
+        facts->device_minor = on_system->minor;
+        return true;
+}
+//      sysfs as it is now, for the numbers asked about.
+static bipolar file_link_text(string_address path, p8 *into, positive room)
+{
+        unsigned major, minor;
+        const part *found;
+
+        if (sscanf((char *)path, "/sys/dev/block/%u:%u", &major, &minor) != 2 ||
+            !(found = by(2, 0, major, minor)))
+                return -2;
+        return snprintf((char *)into, room, "../../devices/pci0000:00/usb1/1-2/host0/block/%s/%s",
+                        found->disk, found->name);
+}
+static bipolar file_slurp_once_at(int at, string_address path, p8 *into, positive room)
+{
+        unsigned major, minor;
+        const part *found;
+
+        (void)at;
+        if (sscanf((char *)path, "/sys/dev/block/%u:%u/uevent", &major, &minor) != 2 ||
+            !(found = by(2, 0, major, minor)))
+                return -2;
+        return snprintf((char *)into, room, "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\nDEVTYPE=partition\n"
+                        "PARTN=1\nPARTUUID=%s\nPARTNAME=moonwater-boot\n", major, minor, found->name,
+                        found->uuid);
+}
+
+typedef struct
+{
+        p8 disk[HOST_NAME_ROOM];
+        p8 system[HOST_NAME_ROOM];
+        p8 data[HOST_NAME_ROOM];
+        p8 system_partuuid[STORAGE_PARTUUID_ROOM];
+        p8 data_partuuid[STORAGE_PARTUUID_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+        bool readable;
+        p64 resolved;
+} host_install;
+typedef struct
+{
+        p8 name[HOST_NAME_ROOM];
+        p8 disk[HOST_NAME_ROOM];
+        string_address file;
+        p8 build[HOST_BUILD_ROOM];
+        b32 fit;
+        p16 machine;
+        bool held;
+} host_stick;
+typedef struct
+{
+        host_stick found[HOST_STICKS];
+        positive count;
+} host_sticks;
+typedef struct
+{
+        int generation;
+} host_settings;
+typedef struct
+{
+        bool carried, unkept, stranded, switched;
+} host_place;
+static host_stick stick = {"sdc1", "sdc", (string_address) "/moonwater/update.efi",
+                           "NEW BUILD", 0, 0, false};
+static fn host_install_read(host_install *install)
+{
+        install->readable = true;
+        strcpy((char *)install->build, "OLD BUILD");
+}
+static fn host_sticks_take(host_sticks *sticks, p8 *skip)
+{
+        (void)skip;
+        sticks->count = 1;
+}
+static host_stick *host_stick_chosen(host_sticks *sticks, host_install *install)
+{
+        (void)sticks;
+        (void)install;
+        return &stick;
+}
+static bool host_stick_let(p8 *disk)
+{
+        (void)disk;
+        return true;
+}
+//      The stick's image is the new build; the image a rollback goes back to is the build before.
+static b32 host_image_fit(string_address path, p8 *build, positive room, p16 *machine)
+{
+        (void)room;
+        (void)machine;
+        strcpy((char *)build, strstr((char *)path, "previous") ? "BUILD BEFORE" : "NEW BUILD");
+        return 0;
+}
+static string_address host_fit_said(b32 fit, p16 machine)
+{
+        (void)fit;
+        (void)machine;
+        return (string_address) "";
+}
+static b32 host_stick_digest(string_address source, bool *summed)
+{
+        (void)source;
+        *summed = false;
+        return 0;
+}
+static string_address host_build_named(p8 *one, p8 *other)
+{
+        (void)one;
+        (void)other;
+        return (string_address) "a newer build";
+}
+static bool host_said_yes(bool said_yes, string_address question)
+{
+        (void)said_yes;
+        (void)question;
+        if (swap_at_question)
+                world = machine_swapped;
+        now += (p64)60 * 1000000000;
+        return true;
+}
+//      What is written is whatever partition is mounted at HOST_SYSTEM when the write is made.
+#define host_settings_carried(...) 0
+#define host_settings_landed(...) ((void)0)
+#define host_place_image(...) (written = on_system ? on_system->uuid : "a partition never mounted", (b32)0)
+#define host_back_image(...) (written = on_system ? on_system->uuid : "a partition never mounted", (b32)0)
+""" + lifted + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name)
+{
+        total++;
+        if (!ok)
+        {
+                bad++;
+                printf("  FAIL %s\n    written: %s\n    said: %s", name, written ? written : "nothing",
+                       said);
+        }
+}
+static b32 scene(bool rollback, bool said_yes, unsigned question, unsigned at_mount)
+{
+        host_install install;
+        b32 failed;
+
+        memset(&install, 0, sizeof(install));
+        strcpy((char *)install.disk, "sdb");
+        strcpy((char *)install.system_partuuid, "aaaa-1");
+        strcpy((char *)install.data_partuuid, "aaaa-2");
+        world = machine_asked;
+        now = (p64)100 * 1000000000;
+        swap_at_question = question;
+        swap_at_mount = at_mount;
+        system_mounts = 0;
+        on_system = 0;
+        written = 0;
+        said[0] = 0;
+        failed = rollback ? host_rollback_locked(&install, said_yes)
+                          : host_update_stick_locked(&install, said_yes);
+        return failed;
+}
+int main(void)
+{
+        b32 failed;
+
+        failed = scene(false, false, 0, 0);
+        check(!failed && written && !strcmp(written, "aaaa-1"),
+              "setup update usb writes the system partition of the disk it asked about");
+        failed = scene(false, false, 1, 0);
+        check(failed && !written,
+              "and not the disk swapped in under its names while the answer waited");
+        failed = scene(false, false, 0, 1);
+        check(failed && !written && !on_system,
+              "nor one swapped in between the look after the answer and the mount, which is let go of");
+        failed = scene(false, true, 0, 1);
+        check(failed && !written && !on_system, "nor with yes said in its words, and nothing asked");
+
+        failed = scene(true, false, 0, 0);
+        check(!failed && written && !strcmp(written, "aaaa-1"),
+              "setup rollback writes the system partition of the disk it asked about");
+        failed = scene(true, false, 1, 0);
+        check(failed && !written, "and not the disk swapped in while the answer waited");
+        failed = scene(true, false, 0, 2);
+        check(failed && !written && !on_system,
+              "nor one swapped in between the look after the answer and the mount");
+        failed = scene(true, true, 0, 1);
+        check(failed && !written && !on_system, "nor with yes said in its words");
+        printf("moonwater setup %u/%u\n", total - bad, total);
+        return bad != 0;
+}
+"""
+    passed = asked = 0
+    failed = False
+    with tempfile.TemporaryDirectory(prefix="moonwater-setup-") as temporary:
+        work = Path(temporary)
+        cc = os.environ.get("CC", "cc")
+        for name, text, rows in (("setup", source, 8),):
+            (work / (name + ".c")).write_text(text)
+            built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize=bool",
+                               "-w", "-o", str(work / name), str(work / (name + ".c"))],
+                              capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                asked += rows
+                failed = True
+                continue
+            ran = subprocess.run([str(work / name)], capture_output=True, text=True, timeout=120)
+            print(ran.stdout, end="")
+            found = re.search(r"moonwater %s (\d+)/(\d+)" % name, ran.stdout)
+            if ran.returncode not in (0, 1) or not found:
+                print(ran.stderr[-3000:])
+            passed += int(found.group(1)) if found else 0
+            asked += int(found.group(2)) if found else rows
+            failed |= ran.returncode != 0 or not found
+    write_tally("moonwater-setup", passed, asked)
+    return 1 if failed else 0
+
+
 def harness_machine_reap(argv):
     """The machine loop reaps the radio's join and nothing else of its own.
 
@@ -100052,6 +100489,7 @@ HARNESS_CHECKS = {
     "moonwater_lock": harness_moonwater_lock,
     "moonwater_races": harness_moonwater_races,
     "moonwater_script": harness_moonwater_script,
+    "moonwater_setup": harness_moonwater_setup,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
     "nts": harness_nts,

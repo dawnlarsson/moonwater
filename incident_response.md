@@ -41,6 +41,64 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-199: `setup update usb` wrote whatever disk had the install's name when the answer came
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-15, the commit that adds this entry (`git log -S 'MW-2026-199' -- incident_response.md`) |
+| Class | Time-of-check to time-of-use on a device name (a name resolved before a question, used after it); a disk the person did not name had its system partition written |
+| Attacker | 5: somebody at the machine who unplugs the install's disk or stick while the question waits and plugs in another, which the kernel gives the same names (`sdb`, `sdb1`) and the same device numbers |
+| Reachable | src/sh/host.c `host_update_stick_locked` (`moonwater setup update usb`), and the same mount in `host_rollback_locked` (`setup rollback`) and `host_update_locked` (`setup update`) |
+
+**What happened.** `setup update usb` resolved the install's partitions by
+their GPT identities (`host_install_refresh`) when it started, looked at the
+stick, and then asked for yes with nothing mounted, for as long as the person
+took. After the answer it looked at the stick again, by its bytes, and mounted
+the install's system partition by the name it had resolved before the
+question. A disk put in the install's place while the question waited is
+given the next free names, which are the ones the install had, so it was that
+disk's first partition that was mounted read-write and had
+`\EFI\BOOT\BOOTX64.EFI`, `\EFI\moonwater\previous.efi` and the copies beside
+them written over, with whatever it held there. `setup rollback` resolved the
+name again after its question, but within two seconds of the last look it took
+the cached name, and like the update it mounted the name and never asked what
+the mount was. Shown in the lifted harness below against the parent's host.c:
+a disk swapped in while the answer waited, and one swapped in between the look
+after the answer and the mount, were written (`written: bbbb-1`).
+
+**The fix.** After the question the install's names are resolved afresh from
+the partition identities the question was about (`host_system_mount`, which
+clears the cache first): a disk that has none of them, or has them under
+another disk's name, is refused and nothing is written. And what is mounted is
+asked about once it is mounted (`host_mounted_is`): the device numbers of the
+mount, the disk sysfs puts those numbers under, and the PARTUUID their uevent
+names, which must be the install's disk and system partition. A descriptor
+opened on the node would not have pinned it, since mount(2) looks a block
+device up by its numbers and the next disk can be given the same ones; the
+mount holds the device it opened, so that device is the one judged, and one
+taken away after the look leaves the mount on a device whose writes fail. The
+update from this session's own image and the rollback mount the same way.
+
+**Tests that fail without the fix.** `moonwater_setup` (test/differential.py,
+run by `sh test/run cli`): `host_update_stick_locked` and
+`host_rollback_locked` lifted out of host.c with `host_install_refresh`, and
+`host_mounted_is` and `host_system_mount` where the tree has them, against a
+machine of three tables in which a second disk takes the first's names and
+numbers. 8 of 8 on the fix; 3 of 8 on the parent (`--root` a parent tree),
+whose update wrote the disk swapped in while the answer waited, one swapped in
+between the look after the answer and the mount, and one swapped in with yes
+said in the command, and whose rollback wrote the second and the third.
+
+**Still open.** The harness stubs the mount and sysfs; the real kernel's
+device numbering on a swap and the install lane's guest scene of an update
+from a stick were not run where this was written (no image could be built).
+A disk made to carry the install's partition identities (they are in its GPT,
+which anybody who has read it can copy) and swapped in under the install's
+name is still the install as far as this can tell. `setup use` binds the data
+partition after its question by a name resolved afresh by identity
+(`host_attach`, past the two seconds the cache keeps), but does not ask what
+the mount is.
+
 ### MW-2026-198: any program may post to the desktop's notices, so every part of a notification is capped
 
 | | |
