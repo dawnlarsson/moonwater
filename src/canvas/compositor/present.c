@@ -47,6 +47,8 @@ static void compositor_metric_publish(void)
         table->metric_processor_mean = mean, table->metric_processor_worst = worst;
 #ifdef MOONWATER_GPU_C
         table->metric_maps = gpu_map_count, table->metric_map_hits = gpu_map_hits, table->metric_map_misses = gpu_map_misses;
+        // The compositor's own memory the dma-buf route refused, mapped by userptr instead, and the errno of the last refusal (gpu.c's).
+        table->metric_maps_own_user = gpu_maps_own_user, table->metric_maps_own_errno = gpu_maps_own_errno;
         table->metric_wakes = gpu_wakes, table->metric_jobs = gpu_jobs;
         table->metric_job_mean = gpu_jobs ? (unsigned int)(gpu_job_ns / gpu_jobs / 1000) : 0;
 #endif
