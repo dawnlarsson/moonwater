@@ -192228,7 +192228,7 @@ static void db_random(void *context, unsigned char *bytes, long count)
                 bytes[at] = (unsigned char)(0x10 + at * 7);
 }
 
-static const struct dbus_host db_host = {0, db_alloc, db_release, db_now, db_random, 0};
+static const struct dbus_host db_host = {0, db_alloc, db_release, db_now, db_random, 0, 0};
 
 /* ---- a client ---- */
 
@@ -192936,7 +192936,8 @@ static void db_test_portal(void)
         }
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Settings", "version");
         DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 2, "the Settings portal is version 2");
-        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Notification", "version");
+        // (the portal's Notification was this row's interface until the bus served it, 2026-11-15: db_test_notifications holds its version)
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.ScreenCast", "version");
         DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownProperty"), "a portal it does not have is an error, as a browser's check for it expects");
         db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.FileChooser", "version");
         DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
@@ -193418,7 +193419,7 @@ static void db_room_trace(void *context, const char *line)
 */
 static void db_test_trace_room(void)
 {
-        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_room_trace};
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_room_trace, 0};
         char path[260], member[256], interface[256], argument[200];
         long slot;
 
@@ -194299,7 +194300,7 @@ static void db_trace_take(void *context, const char *line)
 // The trace (sessionbus -t) puts what clients wrote on standard error, which is a terminal: no byte of theirs a terminal acts on.
 static void db_test_trace(void)
 {
-        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_trace_take};
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_trace_take, 0};
         long a;
         int clean = 1;
 
@@ -195990,9 +195991,11 @@ static void db_test_deadlines(void)
 static void db_test_kept(void)
 {
         static const char *const kept[] = {"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications"};
+        // OpenURI too: a browser started by the bus would be root's on the host, started for any client (the reason is in dbus.c)
         static const char *const unclaimed[] = {"org.freedesktop.portal.GlobalShortcuts", "org.freedesktop.portal.ScreenCast",
-                                                "org.freedesktop.portal.Screenshot", "org.freedesktop.portal.RemoteDesktop"};
-        static const char *const methods[] = {"CreateSession", "CreateSession", "Screenshot", "CreateSession"};
+                                                "org.freedesktop.portal.Screenshot", "org.freedesktop.portal.RemoteDesktop",
+                                                "org.freedesktop.portal.OpenURI"};
+        static const char *const methods[] = {"CreateSession", "CreateSession", "Screenshot", "CreateSession", "OpenURI"};
         long a, b;
         struct db_seen s;
 
@@ -196014,11 +196017,13 @@ static void db_test_kept(void)
                 DBCHECK(s.ok && s.m.type == DBUS_ERROR, "and asking to replace its owner does not make it so");
                 db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "NameHasOwner", "s", kept[k], 0);
                 db_find(b, &s, DBUS_RETURN, 0);
-                DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_u32_body(&s) == 0, "nobody owns %s", kept[k]);
+                // the notification server is the bus's own service (db_test_notifications); the others nobody's
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_u32_body(&s) == (k == 2), "%s %s", k == 2 ? "the bus's service owns" : "nobody owns", kept[k]);
                 db_call(b, kept[k], "/", "org.example.Any", "Any", "", 0, 0);
                 db_next(b, &s);
-                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown") && s.m.reply == db_last_serial(),
-                        "a call to %s is ServiceUnknown, in the call", kept[k]);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, k == 2 ? "org.freedesktop.DBus.Error.UnknownObject" : "org.freedesktop.DBus.Error.ServiceUnknown") &&
+                            s.m.reply == db_last_serial(),
+                        "a call to %s is %s, in the call", kept[k], k == 2 ? "the service's own error" : "ServiceUnknown");
                 db_drain(b);
         }
         db_request(a, "org.a11y.Bus2", 0);
@@ -196029,7 +196034,7 @@ static void db_test_kept(void)
         db_find(b, &s, DBUS_RETURN, 0);
         DBCHECK(s.ok && !db_holds(&s, "org.a11y.Bus\0") && !db_holds(&s, "org.freedesktop.secrets") && !db_holds(&s, "org.freedesktop.Notifications"),
                 "and no name kept is said to be one that can be started");
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < 5; k++)
         {
                 db_call(b, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", unclaimed[k], "version");
                 db_next(b, &s);
@@ -196054,6 +196059,322 @@ static void db_test_kept(void)
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
+/*
+        The desktop's notifications (MW-2026-198): org.freedesktop.Notifications and the portal's Notification, served by the bus into
+        the records its host is given, every cap with a row: the text's size and its foreign bytes, the records, the time, the rate of
+        a client and of the bus, and who may replace and close one and hear it close.
+*/
+static struct dbus_notice db_notices[DBUS_NOTICES];
+static long db_notices_told;
+
+static void db_notices_seen(void *context, const struct dbus_notice *notice, long count)
+{
+        (void)context;
+        memcpy(db_notices, notice, sizeof db_notices);
+        db_notices_told += count == DBUS_NOTICES;
+}
+
+static const struct dbus_host db_notice_host = {0, db_alloc, db_release, db_now, db_random, 0, db_notices_seen};
+
+static const struct dbus_notice *db_notice_of(unsigned long id)
+{
+        for (int k = 0; k < DBUS_NOTICES; k++)
+                if (id && db_notices[k].id == id)
+                        return &db_notices[k];
+        return 0;
+}
+
+static int db_notices_kept(void)
+{
+        int n = 0;
+
+        for (int k = 0; k < DBUS_NOTICES; k++)
+                n += db_notices[k].id != 0;
+        return n;
+}
+
+// Notify(app, replaces, "", summary, body, [], {urgency when it is 0 to 2}, expire) from a client: the id it is answered, 0 for an error.
+static unsigned long db_notify(long slot, const char *app, unsigned long replaces, const char *summary, const char *body, long expire, int urgency)
+{
+        static unsigned char bytes[16384]; // a summary may be long: more than a struct db_call's 4096
+        struct dbus_out w = {bytes, 0, sizeof bytes, 0};
+        struct dbus_fields f = {DBUS_PATH_NOTIFY, DBUS_NAME_NOTIFY, "Notify", "", DBUS_NAME_NOTIFY, "", "susssasa{sv}i", 0, 0};
+        long length_at, first, body_at;
+        struct db_seen s;
+        unsigned long id = 0;
+
+        dbus_o_header(&w, DBUS_CALL, 0, ++db_serial, &f);
+        body_at = w.length;
+        dbus_o_string(&w, app);
+        dbus_o_u32(&w, replaces);
+        dbus_o_string(&w, "");
+        dbus_o_string(&w, summary);
+        dbus_o_string(&w, body);
+        dbus_o_u32(&w, 0); // no actions
+        dbus_o_u32(&w, 0);
+        length_at = w.length - 4;
+        dbus_o_pad(&w, 8);
+        first = w.length;
+        if (urgency >= 0)
+        {
+                dbus_o_pad(&w, 8);
+                dbus_o_string(&w, "urgency");
+                dbus_o_sig(&w, "y");
+                dbus_o_u8(&w, (unsigned)urgency);
+        }
+        dbus_o_patch32(&w, length_at, (unsigned long)(w.length - first));
+        dbus_o_u32(&w, (unsigned long)expire & 0xffffffffUL);
+        dbus_o_end(&w, body_at);
+        db_feed(slot, bytes, w.length);
+        if (db_find(slot, &s, DBUS_RETURN, 0) && !strcmp(s.m.signature, "u"))
+                id = db_u32_body(&s);
+        return id;
+}
+
+// The next NotificationClosed queued for a client: its id and reason, or 0 when there is none.
+static unsigned long db_closed(long slot, unsigned long *reason)
+{
+        struct db_seen s;
+
+        *reason = 0;
+        while (db_next(slot, &s), s.ok)
+                if (s.m.type == DBUS_SIGNAL && !strcmp(s.m.member, "NotificationClosed") && !strcmp(s.m.destination, db_unique(slot)) &&
+                    !strcmp(s.m.sender, ":1.1") && !strcmp(s.m.path, DBUS_PATH_NOTIFY))
+                {
+                        *reason = dbus_get32(s.bytes + s.m.body_at + 4);
+                        return db_u32_body(&s);
+                }
+        return 0;
+}
+
+static void db_test_notifications(void)
+{
+        long a, b, c;
+        struct db_seen s;
+        unsigned long id, other, reason;
+        const struct dbus_notice *n;
+        char text[300];
+
+        db_reset();
+        dbus_stop();
+        dbus_start(&db_notice_host);
+        memset(db_notices, 0, sizeof db_notices);
+        db_notices_told = 0;
+        a = db_connect(1000);
+        b = db_connect(1000);
+        c = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_hello(c);
+        db_rule(b, "type='signal'");
+        db_drain(a);
+        db_drain(b);
+        db_drain(c);
+
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", DBUS_NAME_NOTIFY, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, ":1.1"), "org.freedesktop.Notifications is the bus's own: :1.1");
+        db_call(a, DBUS_NAME_NOTIFY, DBUS_PATH_NOTIFY, DBUS_NAME_NOTIFY, "GetCapabilities", "", 0, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && !strcmp(s.m.signature, "as") && dbus_get32(s.bytes + s.m.body_at) == 9 && db_holds(&s, "body"),
+                "GetCapabilities is body alone: no markup, no actions, no icons");
+        db_call(a, DBUS_NAME_NOTIFY, DBUS_PATH_NOTIFY, DBUS_NAME_NOTIFY, "GetServerInformation", "", 0, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && !strcmp(s.m.signature, "ssss") && db_string_arg(&s, 3, text, sizeof text) && !strcmp(text, "1.2"),
+                "GetServerInformation is four strings, the specification's version last");
+        db_call(a, DBUS_NAME_NOTIFY, DBUS_PATH_NOTIFY, "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
+        db_next(a, &s);
+        DBCHECK(s.ok && memmem(s.bytes, (size_t)s.size, "NotificationClosed", 18), "and its path introspects as the notification server");
+
+        id = db_notify(a, "Chromium", 0, "Hello", "World", -1, -1);
+        n = db_notice_of(id);
+        DBCHECK(id && n && !strcmp(n->app, "Chromium") && !strcmp(n->text, "Hello - World") && n->urgency == 1 && n->due == db_time + DBUS_NOTICE_MS && db_notices_told,
+                "Notify answers an id and the host is given the notice: its program, summary - body, normal, kept DBUS_NOTICE_MS");
+        DBCHECK(!db_queued(b), "a client listening for every signal hears nothing of another's notification");
+
+        // a stranger's bytes are put down as the kit draws them: control bytes as their pictures, reordering marks as U+FFFD
+        id = db_notify(a, "Evil\xe2\x80\xae" "app", 0, "a\x1b[2Jb\nc\x7f\xe2\x80\xae\xc2\x85\xe2\x81\xa6\xe2\x80\x8f" "d", "\xef\xbb\xbf", -1, 2);
+        n = db_notice_of(id);
+        DBCHECK(n && !strcmp(n->text, "a\xe2\x90\x9b[2Jb\xe2\x90\x8a" "c\xe2\x90\xa1\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" "d - \xef\xbf\xbd") &&
+                    !strcmp(n->app, "Evil\xef\xbf\xbd" "app") && n->urgency == 2,
+                "an escape, a newline and a delete are their pictures, and an override, a C1, an isolate, a mark and a BOM are U+FFFD: %s", n ? n->text : "none");
+        {
+                char big[3200];
+
+                memset(big, 'x', 300);
+                big[300] = 0;
+                for (int k = 0; k < 1400; k++)
+                        big[300 + 2 * k] = (char)0xc3, big[301 + 2 * k] = (char)0xa9;
+                big[300 + 2800] = 0;
+                big[0] = 'x';
+                id = db_notify(c, big + 2000, 0, big + 300, big + 300, -1, -1);
+                n = db_notice_of(id);
+                DBCHECK(n && strlen(n->text) <= DBUS_NOTICE_TEXT - 1 && strlen(n->text) >= DBUS_NOTICE_TEXT - 2 && dbus_utf8_walk((const unsigned char *)n->text, (long)strlen(n->text)) &&
+                            strlen(n->app) <= DBUS_NOTICE_APP - 1 && dbus_utf8_walk((const unsigned char *)n->app, (long)strlen(n->app)),
+                        "a summary and a body of 1400 two-byte letters each are cut to %d bytes and a program's name to %d, each at a letter's end (%zu, %zu)",
+                        DBUS_NOTICE_TEXT - 1, DBUS_NOTICE_APP - 1, n ? strlen(n->text) : 0, n ? strlen(n->app) : 0);
+                id = db_notify(c, "", 0, "", "", -1, -1);
+                n = db_notice_of(id);
+                DBCHECK(n && !strcmp(n->app, "a program") && !n->text[0], "a notification with no name and no words is a program's, with nothing said");
+        }
+
+        // replaced and closed by its poster alone, and its NotificationClosed to it alone
+        db_time += DBUS_NOTICE_SPAN_MS;
+        id = db_notify(a, "Chromium", 0, "One", "", -1, -1);
+        other = db_notify(a, "Chromium", id, "Two", "", -1, -1);
+        DBCHECK(other == id && db_notice_of(id) && !strcmp(db_notice_of(id)->text, "Two"), "replaces_id of the poster's own replaces it in place, with its id");
+        other = db_notify(b, "Other", id, "Three", "", -1, -1);
+        DBCHECK(other && other != id && !strcmp(db_notice_of(id)->text, "Two"), "and another client's replaces_id of it is a notification of its own");
+        db_drain(a); // (the records were full: a's oldest gave way to b's, and a was told)
+        db_drain(b);
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_NOTIFY, DBUS_NAME_NOTIFY, "CloseNotification", "", DBUS_NAME_NOTIFY, "", "u", 0, 0};
+
+                db_drain(b);
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_u32(&call.w, id);
+                db_send(b, &call);
+                db_next(b, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_notice_of(id) && !db_queued(a), "another client's CloseNotification of it is answered and closes nothing");
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_u32(&call.w, id);
+                db_send(a, &call);
+                db_next(a, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && !db_notice_of(id), "the poster's closes it");
+                DBCHECK(db_closed(a, &reason) == id && reason == 3, "and NotificationClosed(id, 3) is sent to the poster (%lu)", reason);
+                DBCHECK(!db_queued(b), "and to no one else");
+        }
+
+        // time: what it names, from DBUS_NOTICE_SHORTEST to DBUS_NOTICE_MS; 0 is until it is closed
+        db_time += DBUS_NOTICE_SPAN_MS;
+        id = db_notify(a, "Clock", 0, "Two seconds", "", 2000, -1);
+        DBCHECK(dbus_wait(60000) <= 2000, "the bus asks to be woken when a notification is due (%ld ms)", dbus_wait(60000));
+        db_time += 1999;
+        dbus_tick();
+        DBCHECK(db_notice_of(id) && !db_closed(a, &reason), "a notification of 2000 ms is kept 1999");
+        db_time += 2;
+        dbus_tick();
+        DBCHECK(!db_notice_of(id) && db_closed(a, &reason) == id && reason == 1, "and expires at 2000: NotificationClosed(id, 1) (%lu)", reason);
+        id = db_notify(a, "Clock", 0, "A moment", "", 10, -1);
+        DBCHECK(db_notice_of(id) && db_notice_of(id)->due == db_time + DBUS_NOTICE_SHORTEST, "10 ms is DBUS_NOTICE_SHORTEST");
+        other = db_notify(a, "Clock", 0, "For ever", "", 0, -1);
+        DBCHECK(db_notice_of(other) && !db_notice_of(other)->due, "and 0 is no time");
+        id = db_notify(a, "Clock", 0, "A week", "", 604800000, -1);
+        DBCHECK(db_notice_of(id) && db_notice_of(id)->due == db_time + DBUS_NOTICE_MS, "and a week is DBUS_NOTICE_MS");
+        db_time += DBUS_NOTICE_MS + 1;
+        dbus_tick();
+        DBCHECK(db_notice_of(other) && !db_notice_of(id), "after DBUS_NOTICE_MS the one of no time is kept and the one of a week is gone");
+
+        // the records: the oldest gives way, told 1
+        db_drain(a);
+        db_drain(b);
+        db_drain(c);
+        {
+                unsigned long ids[DBUS_NOTICES + 1];
+                int kept = 1;
+
+                for (int k = 0; k <= DBUS_NOTICES; k++)
+                        ids[k] = db_notify(k & 1 ? b : c, "Many", 0, "One of many", "", -1, -1);
+                for (int k = 1; k <= DBUS_NOTICES; k++)
+                        kept &= db_notice_of(ids[k]) != 0;
+                DBCHECK(kept && db_notices_kept() == DBUS_NOTICES && !db_notice_of(other), "%d notifications kept, every program's together: the oldest gives way",
+                        DBUS_NOTICES);
+                DBCHECK(db_closed(a, &reason) == other && reason == 1, "and its poster is told NotificationClosed(id, 1)");
+        }
+
+        // the rate: DBUS_NOTICE_BURST a client and DBUS_NOTICE_ALL the bus in DBUS_NOTICE_SPAN_MS
+        db_time += DBUS_NOTICE_SPAN_MS;
+        {
+                int posted = 0, all = 0;
+                long more[8];
+
+                for (int k = 0; k < DBUS_NOTICE_BURST + 1; k++)
+                        posted += db_notify(a, "Burst", 0, "Again", "", -1, -1) != 0;
+                db_drain(a);
+                DBCHECK(posted == DBUS_NOTICE_BURST, "a client posts %d in %d ms and is refused the next: LimitsExceeded (%d)", DBUS_NOTICE_BURST, DBUS_NOTICE_SPAN_MS, posted);
+                db_time += DBUS_NOTICE_SPAN_MS;
+                DBCHECK(db_notify(a, "Burst", 0, "Later", "", -1, -1) != 0, "and posts again once its span is over");
+                db_time += DBUS_NOTICE_SPAN_MS;
+                for (int k = 0; k < 8; k++)
+                {
+                        more[k] = db_connect(1000);
+                        db_hello(more[k]);
+                        db_drain(more[k]);
+                }
+                for (int k = 0; k < 8 * DBUS_NOTICE_BURST; k++)
+                        all += db_notify(more[k % 8], "Many", 0, "From many", "", -1, -1) != 0;
+                DBCHECK(all == DBUS_NOTICE_ALL, "and %d clients together post %d in a span, the bus's most (%d)", 8, DBUS_NOTICE_ALL, all);
+                for (int k = 0; k < 8; k++)
+                        dbus_drop(more[k]);
+        }
+
+        // the portal's
+        db_time += DBUS_NOTICE_SPAN_MS;
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Notification", "AddNotification", "", DBUS_NAME_PORTAL, "", "sa{sv}", 0, 0};
+                long length_at, first;
+                const struct dbus_notice *p = 0;
+                int same = 0;
+
+                db_drain(a);
+                for (int round = 0; round < 2; round++)
+                {
+                        db_begin(&call, DBUS_CALL, 0, &f);
+                        dbus_o_string(&call.w, "upload-done");
+                        dbus_o_u32(&call.w, 0);
+                        length_at = call.w.length - 4;
+                        dbus_o_pad(&call.w, 8);
+                        first = call.w.length;
+                        dbus_o_pad(&call.w, 8);
+                        dbus_o_string(&call.w, "title");
+                        dbus_o_sig(&call.w, "s");
+                        dbus_o_string(&call.w, round ? "Done again" : "Done");
+                        dbus_o_pad(&call.w, 8);
+                        dbus_o_string(&call.w, "body");
+                        dbus_o_sig(&call.w, "s");
+                        dbus_o_string(&call.w, "a.txt");
+                        dbus_o_pad(&call.w, 8);
+                        dbus_o_string(&call.w, "priority");
+                        dbus_o_sig(&call.w, "s");
+                        dbus_o_string(&call.w, "urgent");
+                        dbus_o_patch32(&call.w, length_at, (unsigned long)(call.w.length - first));
+                        db_send(a, &call);
+                        db_next(a, &s);
+                }
+                for (int k = 0; k < DBUS_NOTICES; k++)
+                        if (db_notices[k].portal && !strcmp(db_notices[k].key, "upload-done"))
+                                p = &db_notices[k], same++;
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && same == 1 && !strcmp(p->text, "Done again - a.txt") && p->urgency == 2,
+                        "the portal's AddNotification is a notice, the same id again replaces it, and urgent is critical");
+                db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Notification", "RemoveNotification", "s", "upload-done", 0);
+                db_next(a, &s);
+                p = 0;
+                for (int k = 0; k < DBUS_NOTICES; k++)
+                        if (db_notices[k].portal)
+                                p = &db_notices[k];
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && !p && !db_closed(a, &reason), "and RemoveNotification takes it away, with no NotificationClosed");
+                db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Notification", "version");
+                db_next(a, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && dbus_get32(s.bytes + s.m.body_at + 4) == 1, "and the portal's Notification is of version 1");
+        }
+
+        // a client that goes leaves its notices to their time, and their end goes to nobody
+        db_time += DBUS_NOTICE_SPAN_MS;
+        id = db_notify(c, "Gone", 0, "Left behind", "", 2000, -1);
+        dbus_drop(c);
+        DBCHECK(db_notice_of(id) != 0, "a poster that goes leaves its notification");
+        db_time += 2001;
+        dbus_tick();
+        DBCHECK(!db_notice_of(id), "and it expires all the same");
+        dbus_drop(a);
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+        dbus_stop();
+        dbus_start(&db_host);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
@@ -196063,6 +196384,7 @@ int main(int argc, char **argv)
         db_test_requests();
         db_test_deadlines();
         db_test_kept();
+        db_test_notifications();
         db_test_auth();
         db_test_hello_and_names();
         db_test_routing();
@@ -217965,7 +218287,7 @@ static void bd_random(void *context, unsigned char *bytes, long count)
                 bytes[at] = (unsigned char)(at * 37 + 11);
 }
 
-static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0};
+static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0, 0};
 static string_address bd_only; // a row to run alone (call, readone, setting), or every row
 
 static p8 bd_want(string_address row)

@@ -92,6 +92,11 @@ if command -v gdbus > /dev/null 2>&1; then
         "(objectpath '/org/freedesktop/portal/desktop/request/"*"/cli',)") row ok "gdbus: FileChooser.OpenFile answers the path of its handle_token at once" ;;
         *) row FAIL "gdbus: FileChooser.OpenFile answers the path of its handle_token at once" "$out" ;;
         esac
+        out=$(timeout 5 gdbus call --address "$address" --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "gdbus" 0 "" "Hello" "from gdbus" "[]" "{'urgency': <byte 1>}" "int32 -1" 2>&1)
+        case $out in
+        "(uint32 "*",)") row ok "gdbus: Notify is answered an id: $out" ;;
+        *) row FAIL "gdbus: Notify is answered an id" "$out" ;;
+        esac
 fi
 if python3 -c 'import gi' 2> /dev/null; then
         python3 "$(dirname "$0")/dbus_gio.py" "$address" /root > "$work/gio.out" 2>&1

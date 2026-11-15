@@ -11,7 +11,10 @@
         This is the smallest bus those programs can talk to: not a general one. It speaks the wire (the SASL
         authentication of a peer by its uid, Hello, and the bus's own methods), routes calls, replies and signals between
         the programs that connect (a program may own names and be called, as a media player is), and serves the
-        Settings from a table the host fills from Moonwater's settings and keeps current.
+        Settings from a table the host fills from Moonwater's settings and keeps current. Every other thing a desktop's
+        programs ask of it at their start is answered in the call: a portal's request with its Response, the desktop's
+        notifications into the records its host shows (org.freedesktop.Notifications, the portal's Notification), and
+        a service that is not here with ServiceUnknown, so no program waits on the bus.
 
         WHAT IT IS NOT
 
@@ -92,6 +95,31 @@
 #define DBUS_NAME_BUS "org.freedesktop.DBus"
 #define DBUS_NAME_PORTAL "org.freedesktop.portal.Desktop"
 #define DBUS_PATH_PORTAL "/org/freedesktop/portal/desktop"
+#define DBUS_NAME_NOTIFY "org.freedesktop.Notifications"
+#define DBUS_PATH_NOTIFY "/org/freedesktop/Notifications"
+
+#define DBUS_NOTICES 4                   // notifications kept at once, every program's together: the oldest gives way to a new one
+#define DBUS_NOTICE_APP 24               // a program's name kept, sanitized, its NUL with it (the board's key is as long)
+#define DBUS_NOTICE_TEXT 192             // the summary and the body kept, sanitized, together, their NUL with them (the board's detail)
+#define DBUS_NOTICE_MS (30L * 60 * 1000) // how long a notification that names no time is kept, and the longest one may name
+#define DBUS_NOTICE_SHORTEST 1000        // the shortest time one may name
+#define DBUS_NOTICE_BURST 8              // notifications one client may post in DBUS_NOTICE_SPAN_MS
+#define DBUS_NOTICE_ALL 32               // and every client together
+#define DBUS_NOTICE_SPAN_MS 10000
+
+// A notification the bus keeps, as its host is given it (dbus_host.notices): id 0 is none.
+struct dbus_notice
+{
+        unsigned long id;                // the id Notify answered (the portal's have one too, which no client sees)
+        unsigned long order;             // newer ones are larger
+        long due;                        // when it expires (0: never)
+        long owner;                      // the id (:1.N) of the client that posted it
+        unsigned char urgency;           // 0 low, 1 normal, 2 critical (the urgency hint, the portal's priority)
+        unsigned char portal;            // posted through org.freedesktop.portal.Notification, by `key`
+        char key[64];                    // the portal's own id of it
+        char app[DBUS_NOTICE_APP];       // the program's name, sanitized: never empty
+        char text[DBUS_NOTICE_TEXT];     // the summary, and " - " and the body after it when there is one, sanitized
+};
 
 /* What the bus asks of its host. now is milliseconds on a clock that only goes forward; random fills bytes with random ones. */
 struct dbus_host
@@ -102,6 +130,8 @@ struct dbus_host
         long (*now)(void *context);
         void (*random)(void *context, unsigned char *bytes, long count);
         void (*trace)(void *context, const char *line); // optional: one line for each message the bus routes, to read what a program asks
+        // optional: the notifications the bus keeps, every time they change (DBUS_NOTICES of them, id 0 where there is none)
+        void (*notices)(void *context, const struct dbus_notice *notice, long count);
 };
 
 /* A match rule, as AddMatch gave it. */
@@ -144,6 +174,7 @@ struct dbus_client
         } out_fd_run[DBUS_FDS];
         long responses;                         // of response[], the ones held
         struct dbus_response response[DBUS_RESPONSES];
+        long notice_span, notice_count;         // when its span of DBUS_NOTICE_SPAN_MS began, and the notifications it posted in it
         unsigned char in[DBUS_MESSAGE + 16];
         unsigned char out[DBUS_OUT];
 };
@@ -188,6 +219,10 @@ static struct
         unsigned long serial;
         long due;                        // the earliest deadline of a pending call or a held Response (0: none), which dbus_tick acts on
         unsigned long requests;          // portal requests made, for the token of one that names none
+        struct dbus_notice notice[DBUS_NOTICES];
+        unsigned long notice_ids;        // the last notification id given
+        unsigned long notice_order;      // the last notification posted, for which is the oldest
+        long notice_span, notice_count;  // when the bus's span of DBUS_NOTICE_SPAN_MS began, and the notifications posted in it
         char guid[33];
         unsigned char scratch[DBUS_STAMPED];
         unsigned char stamped[DBUS_STAMPED];
@@ -1910,6 +1945,11 @@ static const char dbus_introspect_portal[] =
     "<method name=\"SaveFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<method name=\"SaveFiles\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
+    "</interface>\n"
+    "<interface name=\"org.freedesktop.portal.Notification\">\n"
+    "<method name=\"AddNotification\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/></method>\n"
+    "<method name=\"RemoveNotification\"><arg type=\"s\" direction=\"in\"/></method>\n"
+    "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
     "</interface>\n</node>\n";
 
 // The variant of a setting: its signature and its value.
@@ -2047,7 +2087,8 @@ static struct
 } dbus_interfaces[8] = {{"org.freedesktop.portal.Settings", 2},
                         {"org.freedesktop.portal.FileChooser", 1},
                         {"org.freedesktop.host.portal.Registry", 1},
-                        {"org.freedesktop.portal.Inhibit", 1}};
+                        {"org.freedesktop.portal.Inhibit", 1},
+                        {"org.freedesktop.portal.Notification", 1}};
 
 static long dbus_interface_version(const char *name)
 {
@@ -2096,18 +2137,41 @@ static void dbus_due_at(long due)
                 dbus.due = due;
 }
 
-// The string value of `key` in the a{sv} that is argument `index` of a message (the arguments before it skipped by their types,
-// the body valid as the parser held it): its length, or -1 when there is no such key holding a string, or it does not fit room.
-static long dbus_option_string(const struct dbus_message *m, long index, const char *key, char *into, long room)
+// Where argument `index` of a message begins in its body (before its own padding; the arguments before it skipped by their types, the
+// body valid as the parser held it), with *s at its type in the signature: the offset, or -1 when there are not that many.
+static long dbus_arg_at(const struct dbus_message *m, long index, long *s)
+{
+        const unsigned char *p = m->bytes + m->body_at;
+        long at = 0, n = dbus_length(m->signature);
+
+        *s = 0;
+        for (long k = 0; k < index; k++)
+                if (*s >= n || !dbus_value(p, &at, m->body_length, m->signature, n, s, 0))
+                        return -1;
+        return *s < n ? at : -1;
+}
+
+// A string argument where it is (its bytes in the body, not copied): its length, or -1 when argument `index` is not a string.
+static long dbus_arg_text(const struct dbus_message *m, long index, const unsigned char **text)
+{
+        long s, at = dbus_arg_at(m, index, &s);
+
+        if (at < 0 || m->signature[s] != 's')
+                return -1;
+        at = DBUS_ALIGN(at, 4);
+        *text = m->bytes + m->body_at + at + 4;
+        return (long)dbus_get32(m->bytes + m->body_at + at);
+}
+
+// Where the value of `key` is in the a{sv} that is argument `index`, when the variant there holds one value of type `type`: its offset in
+// the body (aligned for the type), or -1.
+static long dbus_option_at(const struct dbus_message *m, long index, const char *key, char type)
 {
         const unsigned char *p = m->bytes + m->body_at;
         const char *sig = m->signature;
-        long at = 0, s = 0, n = dbus_length(sig), limit = m->body_length, stop;
+        long s, at = dbus_arg_at(m, index, &s), n = dbus_length(sig), limit = m->body_length, stop;
 
-        for (long k = 0; k < index; k++)
-                if (s >= n || !dbus_value(p, &at, limit, sig, n, &s, 0))
-                        return -1;
-        if (s + 4 > n || sig[s] != 'a' || sig[s + 1] != '{' || sig[s + 2] != 's' || sig[s + 3] != 'v')
+        if (at < 0 || s + 4 > n || sig[s] != 'a' || sig[s + 1] != '{' || sig[s + 2] != 's' || sig[s + 3] != 'v')
                 return -1;
         at = DBUS_ALIGN(at, 4);
         if (at + 4 > limit)
@@ -2119,7 +2183,7 @@ static long dbus_option_string(const struct dbus_message *m, long index, const c
                 return -1;
         while (at < stop)
         {
-                long key_at, sig_at, ks = 0, vs = 0, value_at, length;
+                long key_at, sig_at, ks = 0, vs = 0, size;
 
                 at = DBUS_ALIGN(at, 8);
                 key_at = at;
@@ -2128,17 +2192,28 @@ static long dbus_option_string(const struct dbus_message *m, long index, const c
                 sig_at = at;
                 if (!dbus_value(p, &at, stop, "v", 1, &vs, 0))
                         return -1;
-                if (p[sig_at] != 1 || p[sig_at + 1] != 's' || !dbus_equal((const char *)p + key_at + 4, key))
+                if (p[sig_at] != 1 || p[sig_at + 1] != (unsigned char)type || !dbus_equal((const char *)p + key_at + 4, key))
                         continue;
-                value_at = DBUS_ALIGN(sig_at + 3, 4);
-                length = (long)dbus_get32(p + value_at);
-                if (length + 1 > room)
-                        return -1;
-                dbus_copy(into, p + value_at + 4, length);
-                into[length] = 0;
-                return length;
+                size = dbus_fixed_size(type);
+                return DBUS_ALIGN(sig_at + 3, size ? size : type == 's' || type == 'o' ? 4 : 1);
         }
         return -1;
+}
+
+// The string value of `key` in the a{sv} that is argument `index` of a message: its length, or -1 when there is no such key holding
+// a string, or it does not fit room.
+static long dbus_option_string(const struct dbus_message *m, long index, const char *key, char *into, long room)
+{
+        long at = dbus_option_at(m, index, key, 's'), length;
+
+        if (at < 0)
+                return -1;
+        length = (long)dbus_get32(m->bytes + m->body_at + at);
+        if (length + 1 > room)
+                return -1;
+        dbus_copy(into, m->bytes + m->body_at + at + 4, length);
+        into[length] = 0;
+        return length;
 }
 
 // A request's path for a caller: the specification's, with the caller's token when it is one element of a path (letters, digits
@@ -2281,6 +2356,320 @@ static void dbus_request_close(struct dbus_client *from, const char *path)
                 }
 }
 
+/*
+        The desktop's notifications: org.freedesktop.Notifications (Chromium, Electron, libnotify, GLib's GNotification outside a
+        sandbox) and the portal's org.freedesktop.portal.Notification (GLib's inside one), served by the bus into DBUS_NOTICES
+        records its host is given (dbus_host.notices: the sessionbus puts them on the desktop's board, which the notices popup
+        reads). Any client may post one, so (MW-2026-198) everything of it is bounded: a program's name to DBUS_NOTICE_APP and its
+        summary and body together to DBUS_NOTICE_TEXT, each cut at a character's end; a client posts DBUS_NOTICE_BURST and the bus
+        DBUS_NOTICE_ALL in DBUS_NOTICE_SPAN_MS, and one past that is LimitsExceeded; the oldest of DBUS_NOTICES gives way to a new one;
+        a notification lives the time it names, from DBUS_NOTICE_SHORTEST to DBUS_NOTICE_MS (no time named is DBUS_NOTICE_MS), and
+        one that names 0 stays until it is closed or gives way. A notification is replaced and closed only by the client that
+        posted it, and NotificationClosed goes to that client alone: no other learns its id. The text is put down as the kit puts
+        down a stranger's words (ui_label_foreign): a control byte is its picture (U+2400 on, U+2421 for delete), so a newline or an
+        escape moves nothing; a C1 control, and every mark that reorders or hides text (the embeddings, overrides and isolates,
+        U+202A to U+202E and U+2066 to U+2069; U+200E, U+200F, U+061C; the line and paragraph separators; the zero width space, the
+        word joiner and the byte order mark) is U+FFFD, seen where it stands and without its effect. Only "body" is said among the
+        capabilities: no markup, no actions, no icons.
+*/
+
+// A stranger's text, whole and valid UTF-8 (a string the parser held so), written into room bytes with its NUL as the kit would draw
+// it, stopping at the last whole character that fits; its length.
+static long dbus_foreign(char *into, long room, const unsigned char *s, long n)
+{
+        long used = 0;
+
+        for (long at = 0; at < n && room > 0;)
+        {
+                unsigned long code = s[at];
+                long more = code < 0x80 ? 0 : code < 0xe0 ? 1 : code < 0xf0 ? 2 : 3, size;
+
+                code = more == 0 ? code : more == 1 ? code & 0x1f : more == 2 ? code & 0x0f : code & 0x07;
+                for (long k = 1; k <= more; k++)
+                        code = code << 6 | (s[at + k] & 0x3fu);
+                at += more + 1;
+                if (code < 0x20)
+                        code += 0x2400;
+                else if (code == 0x7f)
+                        code = 0x2421;
+                else if ((code >= 0x80 && code < 0xa0) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069) || code == 0x200e ||
+                         code == 0x200f || code == 0x061c || code == 0x2028 || code == 0x2029 || code == 0x200b || code == 0x2060 || code == 0xfeff)
+                        code = 0xfffd;
+                size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+                if (used + size + 1 > room)
+                        break;
+                if (size == 1)
+                        into[used] = (char)code;
+                else
+                {
+                        into[used] = (char)((size == 2 ? 0xc0 : size == 3 ? 0xe0 : 0xf0) | code >> (6 * (size - 1)));
+                        for (long k = 1; k < size; k++)
+                                into[used + k] = (char)(0x80 | ((code >> (6 * (size - 1 - k))) & 0x3f));
+                }
+                used += size;
+        }
+        if (room > 0)
+                into[used] = 0;
+        return used;
+}
+
+static void dbus_notices_told(void)
+{
+        if (dbus.host->notices)
+                dbus.host->notices(dbus.host->context, dbus.notice, DBUS_NOTICES);
+}
+
+// A notification ended: NotificationClosed(id, reason) to the client that posted it when it is still here (1 expired or gave way, 3 closed).
+static void dbus_notice_end(struct dbus_notice *n, unsigned long reason)
+{
+        long slot = -1;
+
+        for (long at = 0; at < DBUS_CLIENTS && slot < 0; at++)
+                if (dbus.client[at] && dbus.client[at]->hello && dbus.client[at]->id == n->owner)
+                        slot = at;
+        if (slot >= 0 && !n->portal)
+        {
+                struct dbus_out w = {dbus.scratch, 0, DBUS_MESSAGE, 0};
+                struct dbus_fields f = {DBUS_PATH_NOTIFY, DBUS_NAME_NOTIFY, "NotificationClosed", "", dbus.client[slot]->unique, dbus.service.unique, "uu", 0, 0};
+                long body;
+
+                dbus_o_header(&w, DBUS_SIGNAL, DBUS_FLAG_NO_REPLY, dbus_next_serial(), &f);
+                body = w.length;
+                dbus_o_u32(&w, n->id);
+                dbus_o_u32(&w, reason);
+                dbus_o_end(&w, body);
+                if (!w.bad)
+                        dbus_deliver(dbus.client[slot], w.at, w.length, DBUS_ASKED_FOR);
+        }
+        for (unsigned long k = 0; k < sizeof *n; k++)
+                ((unsigned char *)n)[k] = 0;
+}
+
+// Whether a client may post one more now: its span's count and the bus's, each started again when its span is over.
+static int dbus_notice_room(struct dbus_client *c, long now)
+{
+        if (!c->notice_count || now - c->notice_span >= DBUS_NOTICE_SPAN_MS)
+                c->notice_span = now, c->notice_count = 0;
+        if (!dbus.notice_count || now - dbus.notice_span >= DBUS_NOTICE_SPAN_MS)
+                dbus.notice_span = now, dbus.notice_count = 0;
+        if (c->notice_count >= DBUS_NOTICE_BURST || dbus.notice_count >= DBUS_NOTICE_ALL)
+                return 0;
+        c->notice_count++;
+        dbus.notice_count++;
+        return 1;
+}
+
+/*
+        A notification posted: in the place of the poster's own `replaces` (a Notify's replaces_id) or `key` (a portal's id) when it has
+        one by that, else in a free record, else in the oldest's (which is ended, 1). Its id, or 0 when the client may post no more now.
+*/
+static unsigned long dbus_notice_post(struct dbus_client *c, unsigned long replaces, const char *key, const unsigned char *app, long app_n,
+                                      const unsigned char *summary, long summary_n, const unsigned char *body, long body_n, unsigned urgency, long expire)
+{
+        long now = dbus.host->now(dbus.host->context), used;
+        struct dbus_notice *n = 0, *oldest = 0;
+
+        if (!dbus_notice_room(c, now))
+                return 0;
+        for (long k = 0; k < DBUS_NOTICES && !n; k++)
+        {
+                struct dbus_notice *e = &dbus.notice[k];
+
+                if (e->id && e->owner == c->id && ((key && e->portal && dbus_equal(e->key, key)) || (!key && !e->portal && replaces && e->id == replaces)))
+                        n = e;
+        }
+        for (long k = 0; k < DBUS_NOTICES && !n; k++)
+                if (!dbus.notice[k].id)
+                        n = &dbus.notice[k];
+                else if (!oldest || dbus.notice[k].order < oldest->order)
+                        oldest = &dbus.notice[k];
+        if (!n)
+        {
+                n = oldest;
+                dbus_notice_end(n, 1);
+        }
+        if (!n->id)
+        {
+                n->id = ++dbus.notice_ids;
+                n->id += !n->id;
+        }
+        n->order = ++dbus.notice_order;
+        n->owner = c->id;
+        n->urgency = (unsigned char)(urgency > 2 ? 1 : urgency);
+        n->portal = key != 0;
+        dbus_text(n->key, sizeof n->key, key ? key : "");
+        if (!dbus_foreign(n->app, sizeof n->app, app, app_n))
+                dbus_text(n->app, sizeof n->app, "a program");
+        used = dbus_foreign(n->text, sizeof n->text, summary, summary_n);
+        if (body_n > 0 && used + 4 < (long)sizeof n->text)
+        {
+                dbus_text(n->text + used, (long)sizeof n->text - used, " - ");
+                used += 3;
+                dbus_foreign(n->text + used, (long)sizeof n->text - used, body, body_n);
+        }
+        expire = expire < 0 ? DBUS_NOTICE_MS : expire > DBUS_NOTICE_MS ? DBUS_NOTICE_MS : expire > 0 && expire < DBUS_NOTICE_SHORTEST ? DBUS_NOTICE_SHORTEST : expire;
+        n->due = expire ? now + expire : 0;
+        n->due += expire && !n->due;
+        if (n->due)
+                dbus_due_at(n->due);
+        dbus_notices_told();
+        return n->id;
+}
+
+// The notifications whose time is over are ended (1), and the earliest left is the bus's next deadline.
+static void dbus_notices_due(long now)
+{
+        int ended = 0;
+
+        for (long k = 0; k < DBUS_NOTICES; k++)
+        {
+                struct dbus_notice *n = &dbus.notice[k];
+
+                if (!n->id || !n->due)
+                        continue;
+                if (now >= n->due)
+                        dbus_notice_end(n, 1), ended = 1;
+                else
+                        dbus_due_at(n->due);
+        }
+        if (ended)
+                dbus_notices_told();
+}
+
+// A text argument read for a notification: where it is and how long, or 0 bytes when it is none (dbus_foreign reads only what it keeps).
+static long dbus_notice_arg(const struct dbus_message *m, long index, const unsigned char **text)
+{
+        long n = dbus_arg_text(m, index, text);
+
+        return n < 0 ? 0 : n;
+}
+
+static const char dbus_introspect_notify[] =
+    "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" "
+    "\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n<node>\n"
+    "<interface name=\"org.freedesktop.Notifications\">\n"
+    "<method name=\"Notify\"><arg type=\"s\" direction=\"in\"/><arg type=\"u\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/>"
+    "<arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"as\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/>"
+    "<arg type=\"i\" direction=\"in\"/><arg type=\"u\" direction=\"out\"/></method>\n"
+    "<method name=\"CloseNotification\"><arg type=\"u\" direction=\"in\"/></method>\n"
+    "<method name=\"GetCapabilities\"><arg type=\"as\" direction=\"out\"/></method>\n"
+    "<method name=\"GetServerInformation\"><arg type=\"s\" direction=\"out\"/><arg type=\"s\" direction=\"out\"/><arg type=\"s\" direction=\"out\"/>"
+    "<arg type=\"s\" direction=\"out\"/></method>\n"
+    "<signal name=\"NotificationClosed\"><arg type=\"u\"/><arg type=\"u\"/></signal>\n"
+    "</interface>\n</node>\n";
+
+// A call to org.freedesktop.Notifications, at its path.
+static void dbus_notify_call(struct dbus_client *from, const struct dbus_message *m)
+{
+        struct dbus_out w;
+        long body;
+
+        if (dbus_common(from, m, dbus.service.unique, dbus_introspect_notify))
+                return;
+        if (m->interface[0] && !dbus_equal(m->interface, DBUS_NAME_NOTIFY))
+        {
+                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such interface", dbus.service.unique);
+                return;
+        }
+        if (dbus_equal(m->member, "Notify") && dbus_equal(m->signature, "susssasa{sv}i"))
+        {
+                const unsigned char *app, *summary, *text;
+                long app_n = dbus_notice_arg(m, 0, &app), summary_n = dbus_notice_arg(m, 3, &summary), text_n = dbus_notice_arg(m, 4, &text), s;
+                long urgency_at = dbus_option_at(m, 6, "urgency", 'y'), expire_at = dbus_arg_at(m, 7, &s), replaces_at = dbus_arg_at(m, 1, &s);
+                unsigned long id;
+
+                id = dbus_notice_post(from, dbus_get32(m->bytes + m->body_at + DBUS_ALIGN(replaces_at, 4)), 0, app, app_n, summary, summary_n, text, text_n,
+                                      urgency_at < 0 ? 1 : m->bytes[m->body_at + urgency_at],
+                                      (long)(int)dbus_get32(m->bytes + m->body_at + DBUS_ALIGN(expire_at, 4)));
+                if (!id)
+                {
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "Too many notifications at once", dbus.service.unique);
+                        return;
+                }
+                dbus_reply_u32(from, m, id, dbus.service.unique);
+                return;
+        }
+        if (dbus_equal(m->member, "CloseNotification") && dbus_equal(m->signature, "u"))
+        {
+                unsigned long id = dbus_get32(m->bytes + m->body_at);
+
+                // answered alike whether there is such a notification of the caller's or not: another's ids are not told
+                dbus_reply_empty(from, m, dbus.service.unique);
+                for (long k = 0; k < DBUS_NOTICES; k++)
+                        if (id && dbus.notice[k].id == id && dbus.notice[k].owner == from->id && !dbus.notice[k].portal)
+                        {
+                                dbus_notice_end(&dbus.notice[k], 3);
+                                dbus_notices_told();
+                        }
+                return;
+        }
+        if (dbus_equal(m->member, "GetCapabilities") && !m->signature[0])
+        {
+                dbus_reply_begin(&w, from, m, "as", dbus.service.unique, &body);
+                dbus_o_u32(&w, 9); // the array's bytes: "body", one string of 4 + 4 + 1
+                dbus_o_string(&w, "body");
+                dbus_reply_end(&w, from, m, body);
+                return;
+        }
+        if (dbus_equal(m->member, "GetServerInformation") && !m->signature[0])
+        {
+                dbus_reply_begin(&w, from, m, "ssss", dbus.service.unique, &body);
+                dbus_o_string(&w, "Moonwater");
+                dbus_o_string(&w, "Moonwater");
+                dbus_o_string(&w, "1");
+                dbus_o_string(&w, "1.2");
+                dbus_reply_end(&w, from, m, body);
+                return;
+        }
+        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", dbus.service.unique);
+}
+
+// The portal's org.freedesktop.portal.Notification: AddNotification(s id, a{sv} notification) and RemoveNotification(s id); 1 when the call was one.
+static int dbus_portal_notification(struct dbus_client *from, const struct dbus_message *m)
+{
+        char key[64];
+
+        if (!dbus_equal(m->interface, "org.freedesktop.portal.Notification"))
+                return 0;
+        if ((dbus_equal(m->member, "AddNotification") && dbus_equal(m->signature, "sa{sv}")) ||
+            (dbus_equal(m->member, "RemoveNotification") && dbus_equal(m->signature, "s")))
+        {
+                if (dbus_arg_string(m, 0, key, sizeof key) < 0)
+                {
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "A notification's id is at most 63 bytes", dbus.service.unique);
+                        return 1;
+                }
+                if (m->member[0] == 'R')
+                {
+                        dbus_reply_empty(from, m, dbus.service.unique);
+                        for (long k = 0; k < DBUS_NOTICES; k++)
+                                if (dbus.notice[k].id && dbus.notice[k].portal && dbus.notice[k].owner == from->id && dbus_equal(dbus.notice[k].key, key))
+                                {
+                                        dbus_notice_end(&dbus.notice[k], 3);
+                                        dbus_notices_told();
+                                }
+                        return 1;
+                }
+                {
+                        long title_at = dbus_option_at(m, 1, "title", 's'), body_at = dbus_option_at(m, 1, "body", 's');
+                        long priority_at = dbus_option_at(m, 1, "priority", 's');
+                        const unsigned char *b = m->bytes + m->body_at;
+                        long title_n = title_at < 0 ? 0 : (long)dbus_get32(b + title_at), body_n = body_at < 0 ? 0 : (long)dbus_get32(b + body_at);
+                        const char *priority = priority_at < 0 ? "normal" : (const char *)b + priority_at + 4;
+                        unsigned urgency = dbus_equal(priority, "low") ? 0 : dbus_equal(priority, "urgent") || dbus_equal(priority, "high") ? 2 : 1;
+
+                        if (!dbus_notice_post(from, 0, key, (const unsigned char *)"", 0, title_at < 0 ? b : b + title_at + 4, title_n,
+                                              body_at < 0 ? b : b + body_at + 4, body_n, urgency, -1))
+                                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "Too many notifications at once", dbus.service.unique);
+                        else
+                                dbus_reply_empty(from, m, dbus.service.unique);
+                }
+                return 1;
+        }
+        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", dbus.service.unique);
+        return 1;
+}
+
 // A call to the portal (the service's own).
 static void dbus_service_call(struct dbus_client *from, const struct dbus_message *m)
 {
@@ -2289,6 +2678,11 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
         struct dbus_out w;
         long body;
 
+        if (dbus_equal(m->path, DBUS_PATH_NOTIFY))
+        {
+                dbus_notify_call(from, m);
+                return;
+        }
         if (dbus_common(from, m, dbus.service.unique, dbus_introspect_portal))
                 return;
         if (!dbus_equal(m->path, DBUS_PATH_PORTAL))
@@ -2406,6 +2800,8 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 dbus_portal_request(from, m, m->signature[1] == 'a' ? 1 : 2, 2);
                 return;
         }
+        if (dbus_portal_notification(from, m))
+                return;
         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", dbus.service.unique);
 }
 
@@ -2784,7 +3180,8 @@ DBUS_API int dbus_start(const struct dbus_host *host)
         dbus.service.id = 1;
         dbus_text(dbus.service.unique, sizeof dbus.service.unique, ":1.1");
         dbus_name_add(DBUS_NAME_PORTAL, DBUS_SERVICE, 0);
-        dbus.service.names = 1;
+        dbus_name_add(DBUS_NAME_NOTIFY, DBUS_SERVICE, 0);
+        dbus.service.names = 2;
         return 0;
 }
 
@@ -3213,6 +3610,7 @@ DBUS_API void dbus_tick(void)
         if (!dbus.due || now < dbus.due)
                 return;
         dbus.due = 0;
+        dbus_notices_due(now);
         for (long at = 0; at < DBUS_CLIENTS; at++)
         {
                 struct dbus_client *c = dbus.client[at];

@@ -41,6 +41,63 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-198: any program may post to the desktop's notices, so every part of a notification is capped
+
+| | |
+|---|---|
+| Status | Contained by design from the first commit that serves it, 2026-11-15, the commit that adds this entry (`git log -S 'MW-2026-198' -- incident_response.md`) |
+| Class | A shared sink any client writes to: flooding the desktop's board, spoofing through the text's bytes, and reading or ending another program's notifications |
+| Attacker | Any program that can connect to `/run/moonwater/bus`, in any bowl, as many connections as its uid has (96) |
+| Reachable | src/dbus/dbus.c `dbus_notify_call`, `dbus_portal_notification`, `dbus_notice_post`, `dbus_foreign`; src/dbus/service.c `sessionbus_notices` (root, writing the compositor's table) |
+
+**What it is.** The session bus serves org.freedesktop.Notifications and the
+portal's org.freedesktop.portal.Notification, and the sessionbus, which runs as
+root, puts what they are told on the desktop's board, the compositor's table
+that the notices popup, the tray's dot and Settings read. Nothing about a
+poster is trusted: it is any program of any bowl.
+
+**The caps, each held by a row of CHECK_dbus `db_test_notifications` and
+killed by a mutant in test/dbus_mutations.py.** The bus keeps `DBUS_NOTICES`
+(4) notifications, every program's together, and the oldest gives way to a new
+one (told NotificationClosed reason 1), so the board's 32 slots, which the
+GPU's, the sound card's and the kernel's notices share, lose 4 at most however
+much is posted. A program's name is cut to 23 bytes and its summary and body
+together to 191, each at a character's end (a character cut by the cap is not
+half put down), and the walk stops where the room ends, so a body of 256 KiB
+costs what one of 191 bytes does. A client posts `DBUS_NOTICE_BURST` (8) and the
+bus `DBUS_NOTICE_ALL` (32) in each 10 s, and one past either is LimitsExceeded:
+the board's lock and the readers' copy are not driven by a loop. A notification
+lives what it names, from 1 s to 30 min (none named is 30 min), and 0 is until
+it is closed or gives way. Its text is put down as the kit draws a stranger's
+words (`ui_label_foreign`): a control byte is its picture (an escape U+241B, a
+newline U+240A, delete U+2421), and a C1 control, the embeddings, overrides and
+isolates (U+202A to U+202E, U+2066 to U+2069), U+200E, U+200F, U+061C, the line
+and paragraph separators, the zero width space, the word joiner and the byte
+order mark are U+FFFD, so nothing in a notification moves the text around it or
+reads as something else. Only its poster replaces it (replaces_id, or the
+portal's id) or closes it, and CloseNotification is answered alike whether the
+id is the caller's or not; NotificationClosed is sent to the poster alone, so no
+client learns another's ids or when its notifications end.
+
+Who may write the board: the table is root's (the compositor's memfd, opened
+through its `/proc` by root or handed to the desktop's own programs by
+`/dev/spark`), and the sessionbus is root; a program of a bowl reaches the board
+only through Notify and these caps. What it can make the board's readers do: the
+tray's dot counts any issue, so a program can light it, and keep it lit by
+posting again, within the caps; only amber, since every notification is filed a
+warning (a critical one too), and the red stays what the system says of itself.
+That is accepted: lighting the dot is what a notification is for.
+
+**Still open.** A notification's words are the poster's: a program may post one
+in another's name ("Chromium"), as on any desktop. The board files it under the
+program's name, so a program named as a Settings option's row (`canvas gpu`)
+would be listed under that option until Settings leaves notifications out of
+its rows (the change was sent to the architect for the UI agent, with the board
+code `WINDOWS_ISSUE_NOTIFICATION` window.c does not have yet: until it lands the
+board refuses the code and nothing is shown, which is NOT a test of the board's
+side). Actions, icons and markup are not offered (GetCapabilities is `body`
+alone), so a click does nothing.
+
 ### MW-2026-197: any program could own the session bus's accessibility, secrets and notifications names and be sent every bowl's keys, passwords and notices
 
 | | |
@@ -67,10 +124,11 @@ attack was run against a real browser here.
 **The fix.** The three names are the bus's to keep (`dbus_kept`,
 `dbus_name_kept`): RequestName of one is
 `org.freedesktop.DBus.Error.AccessDenied`, with or without the flags that ask to
-replace an owner, so nobody owns them and a call to one is ServiceUnknown in the
-call (a median of 15 us over the socket), which is what a program is told on a
-desktop with no such service, and what GTK 4's synchronous ask for the
-accessibility bus needs to start at once. A name that only begins like one kept
+replace an owner, so nobody owns the first two and a call to one is
+ServiceUnknown in the call (a median of 15 us over the socket), which is what a
+program is told on a desktop with no such service, and what GTK 4's synchronous
+ask for the accessibility bus needs to start at once. The third is the bus's own
+service's since MW-2026-198, which serves it. A name that only begins like one kept
 (`org.a11y.Bus2`) is a client's as any other.
 
 **Tests that fail without the fix.** CHECK_dbus `db_test_kept` (lane `dbus`):

@@ -18,6 +18,9 @@
                                       cursor-size (canvas cursor size: 24 pixels times the percent over 100, 12 at least)
         and a change of any is told to the programs that listen (SettingChanged) within the time the loop takes to wake: at
         once for a file written, within 20 s for the clock turning auto from dark to light.
+
+        The notifications programs post (org.freedesktop.Notifications, the portal's Notification) go on the desktop's
+        board, where the notices popup and the tray's dot read them (sessionbus_notices).
 */
 #ifndef SESSIONBUS_INCLUDED
 #define SESSIONBUS_INCLUDED
@@ -129,7 +132,104 @@ static void sessionbus_trace(void *context, const char *line)
         log_flush();
 }
 
-static struct dbus_host sessionbus_host = {0, sessionbus_alloc, sessionbus_release, sessionbus_now, sessionbus_random, 0};
+/*
+        The desktop's notifications (dbus.c's org.freedesktop.Notifications and the portal's) on the board, the compositor's table
+        that the notices popup and the tray's dot read (window.c's windows_issue_set): one issue for each program's name, filed under
+        that name, with the newest of its notifications as the detail, and cleared when the program has none left. Each is a
+        warning, a critical one too: the tray's dot is lit by a notification as by any issue, and only its amber, so the red stays
+        what the system says of itself (a program cannot make the desktop say it has an error).
+        The table is root's (a memfd of the compositor's reached through its /proc, or /dev/spark's ioctl for a program of the
+        desktop), and this process is root: a program of a bowl reaches the board only through the bus, and the bus's caps. The bus keeps DBUS_NOTICES, so the notifications take that many of the board's
+        WINDOWS_ISSUES at most, whatever is posted. The table is made anew by a compositor that starts again, so it is mapped again
+        when the file at its path is not the one mapped (by its inode), and nothing is written while there is none.
+
+        The code is window.c's WINDOWS_ISSUE_NOTIFICATION, a program's notification, whose message is its detail as it is; until
+        window.c names it, this is the number it takes after WINDOWS_ISSUE_RADIO, which the board refuses as past its codes.
+*/
+#define SESSIONBUS_NOTICE_CODE ((unsigned int)WINDOWS_ISSUE_RADIO + 1)
+
+static struct
+{
+        struct windows *table;
+        long size;
+        unsigned long inode;
+        char key[DBUS_NOTICES][WINDOWS_ISSUE_KEY]; // the programs' names on the board now
+} sessionbus_board;
+
+// The board, mapped (again when the compositor's table there is another file than the one mapped), or null when there is none.
+static struct windows *sessionbus_board_take(void)
+{
+        p8 record[256];
+        unsigned long inode = 0, size = 0;
+        long file = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 2 | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0), mapped;
+
+        memory_zero(record, sizeof record);
+        // statx of what was opened: its inode at 32 and its size at 40 of the kernel's fixed record
+        if (file >= 0 && system_stat_at(file, (string_address) "", AT_EMPTY_PATH, 0x300, record) >= 0)
+        {
+                memory_copy(&inode, record + 32, sizeof inode);
+                memory_copy(&size, record + 40, sizeof size);
+        }
+        if (sessionbus_board.table && (file < 0 || inode != sessionbus_board.inode))
+        {
+                sessionbus_call(syscall(munmap), (positive)sessionbus_board.table, (positive)sessionbus_board.size, 0, 0, 0, 0);
+                sessionbus_board.table = null;
+                memory_zero(sessionbus_board.key, sizeof sessionbus_board.key);
+        }
+        if (file >= 0 && !sessionbus_board.table && size >= sizeof(struct windows))
+        {
+                mapped = sessionbus_call(syscall(mmap), 0, (positive)size, 3, 1, (positive)file, 0); // PROT_READ | PROT_WRITE, MAP_SHARED
+                if (mapped >= 0 || mapped <= -4096)
+                        sessionbus_board.table = (struct windows *)mapped, sessionbus_board.size = (long)size, sessionbus_board.inode = inode;
+        }
+        if (file >= 0)
+                system_close((int)file);
+        return sessionbus_board.table;
+}
+
+static void sessionbus_notices(void *context, const struct dbus_notice *notice, long count)
+{
+        struct windows *table = sessionbus_board_take();
+        char shown[DBUS_NOTICES][WINDOWS_ISSUE_KEY];
+
+        (void)context;
+        memory_zero(shown, sizeof shown);
+        if (!table)
+                return;
+        for (long k = 0; k < count && k < DBUS_NOTICES; k++)
+        {
+                const struct dbus_notice *newest = &notice[k];
+                unsigned int of = 0;
+                int first = 1;
+
+                if (!notice[k].id)
+                        continue;
+                for (long j = 0; j < count; j++)
+                        if (notice[j].id && string_equals((string_address)notice[j].app, (string_address)notice[k].app))
+                        {
+                                of++;
+                                first &= j >= k;
+                                newest = notice[j].order > newest->order ? &notice[j] : newest;
+                        }
+                if (!first)
+                        continue;
+                string_copy_bounded((p8 *)shown[k], (string_address)notice[k].app, WINDOWS_ISSUE_KEY);
+                windows_issue_set(table, shown[k], WINDOWS_ISSUE_WARNING, SESSIONBUS_NOTICE_CODE, (unsigned int)newest->id, of, newest->text);
+        }
+        // a program that had notifications on the board and has none now
+        for (long k = 0; k < DBUS_NOTICES; k++)
+        {
+                int still = 0;
+
+                for (long j = 0; j < DBUS_NOTICES && sessionbus_board.key[k][0]; j++)
+                        still |= string_equals((string_address)shown[j], (string_address)sessionbus_board.key[k]);
+                if (sessionbus_board.key[k][0] && !still)
+                        windows_issue_clear(table, sessionbus_board.key[k], SESSIONBUS_NOTICE_CODE);
+        }
+        memory_copy(sessionbus_board.key, shown, sizeof shown);
+}
+
+static struct dbus_host sessionbus_host = {0, sessionbus_alloc, sessionbus_release, sessionbus_now, sessionbus_random, 0, sessionbus_notices};
 
 /* ---- the settings ---- */
 

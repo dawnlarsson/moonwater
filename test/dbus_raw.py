@@ -228,5 +228,44 @@ for interface in ("GlobalShortcuts", "ScreenCast", "Screenshot", "RemoteDesktop"
     median = statistics.median(times)
     row(errors == {"org.freedesktop.DBus.Error.UnknownProperty"} and median < 1000,
         "the portal's %s is not claimed: its version is UnknownProperty in a median of %d us of 50" % (interface, median), repr(errors))
+
+# The desktop's notifications (MW-2026-198): Notify answers an id, and closing it tells the poster alone.
+def notify_body(app, summary, body, expire=-1):
+    b = text(app)
+    b = pad(b, 4) + struct.pack("<I", 0)
+    b = pad(b, 4) + text("")
+    b = pad(b, 4) + text(summary)
+    b = pad(b, 4) + text(body)
+    b = pad(b, 4) + struct.pack("<I", 0)  # actions: none
+    b = pad(b, 4) + struct.pack("<I", 0)  # hints: none
+    b = pad(b, 8)
+    return pad(b, 4) + struct.pack("<i", expire)
+
+
+NOTIFY = ("org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications")
+listener = Client()
+listener.add_match("type='signal'")
+began = time.perf_counter()
+serial = a.call(*NOTIFY, "Notify", "susssasa{sv}i", notify_body("Raw", "Hello", "from the wire"))
+m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+took = (time.perf_counter() - began) * 1e6
+nid = struct.unpack_from("<I", m["body"])[0] if m and m["type"] == 2 else 0
+row(nid > 0, "Notify is answered an id in %d us" % took, repr(m and m["fields"]))
+serial = a.call(*NOTIFY, "CloseNotification", "u", struct.pack("<I", nid))
+closed = a.wait(lambda m: m["type"] == 4 and m["fields"].get(3) == "NotificationClosed")
+row(closed is not None and struct.unpack_from("<II", closed["body"]) == (nid, 3) and closed["fields"].get(6) == a.unique,
+    "and CloseNotification of it is NotificationClosed(id, 3) to the poster", repr(closed))
+heard = listener.wait(lambda m: m["type"] == 4 and m["fields"].get(3) == "NotificationClosed", 0.3)
+row(heard is None, "and a client listening for every signal does not hear it", repr(heard))
+serial = a.call(*NOTIFY, "GetCapabilities")
+m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+row(m is not None and m["type"] == 2 and m["body"] == struct.pack("<II", 9, 4) + b"body\0", "GetCapabilities is body alone", repr(m and m["body"]))
+burst = 0
+for k in range(10):
+    serial = a.call(*NOTIFY, "Notify", "susssasa{sv}i", notify_body("Raw", "Burst %d" % k, ""))
+    m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+    burst += m is not None and m["type"] == 3 and m["fields"].get(4) == "org.freedesktop.DBus.Error.LimitsExceeded"
+row(burst >= 2, "a client that posts ten at once is refused past its eight: LimitsExceeded (%d)" % burst)
+listener.s.close()
 a.s.close()
 sys.exit(failures)

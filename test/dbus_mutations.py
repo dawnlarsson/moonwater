@@ -4,7 +4,7 @@
 Each mutation is one edit to a copy of dbus.c (a check taken out, a bound moved, a count changed), built into CHECK_dbus with
 gcc and run; the check must turn red.  A mutation that survives is a hole in the check.
 
-    python3 test/dbus_mutations.py [NAME...]          from the tree's root; 8 builds at a time
+    python3 test/dbus_mutations.py [NAME...]          from the tree's root; 8 builds at a time (DBUS_MUTATION_JOBS=N for N)
 
 Last run: see the commit that changed this line.
 """
@@ -90,6 +90,25 @@ M = [
     ("a kept name owned by whoever asks first", "if (dbus_name_kept(text))", "if (0)"),
     ("the accessibility bus a client's", '{"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications", 0}',
      '{"org.freedesktop.secrets", "org.freedesktop.Notifications", 0}'),
+    # ---- the desktop's notifications (MW-2026-198) ----
+    ("a notification's control bytes kept", "                if (code < 0x20)\n                        code += 0x2400;", "                if (0)\n                        code += 0x2400;"),
+    ("a notification's override kept", "(code >= 0x202a && code <= 0x202e) || ", ""),
+    ("a notification's isolates kept", "(code >= 0x2066 && code <= 0x2069) || ", ""),
+    ("no rate for a client", "if (c->notice_count >= DBUS_NOTICE_BURST || dbus.notice_count >= DBUS_NOTICE_ALL)",
+     "if (dbus.notice_count >= DBUS_NOTICE_ALL)"),
+    ("no rate for the bus", "if (c->notice_count >= DBUS_NOTICE_BURST || dbus.notice_count >= DBUS_NOTICE_ALL)",
+     "if (c->notice_count >= DBUS_NOTICE_BURST)"),
+    ("a client's rate never starts again", "if (!c->notice_count || now - c->notice_span >= DBUS_NOTICE_SPAN_MS)", "if (!c->notice_count)"),
+    ("another's notification replaced", "if (e->id && e->owner == c->id && ((key", "if (e->id && ((key"),
+    ("another's notification closed", "if (id && dbus.notice[k].id == id && dbus.notice[k].owner == from->id && !dbus.notice[k].portal)",
+     "if (id && dbus.notice[k].id == id && !dbus.notice[k].portal)"),
+    ("NotificationClosed to every client", '"NotificationClosed", "", dbus.client[slot]->unique, dbus.service.unique, "uu"',
+     '"NotificationClosed", "", "", dbus.service.unique, "uu"'),
+    ("a notification never expires", "                if (now >= n->due)\n                        dbus_notice_end(n, 1), ended = 1;",
+     "                if (0)\n                        dbus_notice_end(n, 1), ended = 1;"),
+    ("a notification's time not held to the longest", "expire > DBUS_NOTICE_MS ? DBUS_NOTICE_MS : ", ""),
+    ("the oldest never gives way", "        if (!n)\n        {\n                n = oldest;\n                dbus_notice_end(n, 1);\n        }",
+     "        if (!n)\n                return 0;"),
 ]
 
 source = open(engine).read()
@@ -123,7 +142,7 @@ def run(index):
     return (name, "RED", (last[0] if last else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("DBUS_MUTATION_JOBS", "8"))) as pool:
     results = [r for r in pool.map(run, range(len(M))) if r]
 survived = 0
 for name, status, detail in results:
