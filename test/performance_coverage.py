@@ -458,6 +458,10 @@ cover('correctness_only', 'src/canvas/window.c', 'memory_copy_rect_reverse_u32',
       'bit-exact against windows_rotate_u32 180-degree loop and paired-timed on arm64 NEON (6.15x on 224x48)')
 cover('correctness_only', 'src/canvas/compositor.c', 'memory_mix_const_u32_rect',
       'bit-exact against compositor_chip_draw loop and paired-timed on arm64 NEON (3.16x alpha=180, 3.23x alpha=255 on 96x48)')
+cover('unmeasured', None, 'memory_or_u32 memory_swizzle_rb_u32 string_first_of_either_or_end',
+      'no row of their own yet, in correctness or in timing: the Wayland host makes a client\'s XRGB8888 opaque and '
+      'swaps ABGR8888\'s red and blue with the first two, the lexer finds a quote, a backslash or the end with the '
+      'third, and the CHECK_verify rows that hold them to the C they replaced are being written')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

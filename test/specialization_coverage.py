@@ -498,6 +498,15 @@ cover('folds_already', 'width', 'memory_copy_rect_reverse_u32',
       'windows_rotate_u32 hands it the clipped damage width and height at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_mix_const_u32_rect',
       'compositor_chip_draw hands it the clipped chip box width, height, and alpha at run time; no reachable call site passes a literal')
+cover('folds_already', 'mask', 'memory_or_u32',
+      'every call site hands it 0xff000000 as a literal, and a known mask removes nothing: the or is one '
+      'instruction a vector whatever the mask is; the count is a row of a client\'s damage, set at run time')
+cover('folds_already', 'or_mask', 'memory_swizzle_rb_u32',
+      'the Wayland host hands it 0 or 0xff000000 as a literal (ABGR8888 or XBGR8888), and a known mask removes at '
+      'most one or a vector; the count is a row of a client\'s damage, set at run time')
+cover('folds_already', 'second', 'string_first_of_either_or_end',
+      'the lexer hands it the backslash as a literal and the quote at run time; a known byte is one broadcast a '
+      'call, and the string is foldable only as a literal, which no caller scans')
 cover('folds_already', 'count', 'memory_tint_u32',
       'the compositor tints the same spans, and whole blocks when the side turns; the length is run time, and the '
       'side the glass takes is the window\'s, so toward, cap and floor are run time too')
