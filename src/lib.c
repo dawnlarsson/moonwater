@@ -14517,8 +14517,8 @@ __asm__(
     "40: movd (%rdx), %xmm0\n   movdqu (%rdi), %xmm1\n"
     "punpcklbw %xmm7, %xmm0\n   movdqa %xmm0, %xmm2\n   psrlw $7, %xmm2\n   paddw %xmm0, %xmm2\n"
     "punpcklwd %xmm2, %xmm2\n   movdqa %xmm2, %xmm3\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
-    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   psrlw $8, %xmm4\n"
-    "movdqa %xmm8, %xmm10\n   pmullw %xmm3, %xmm10\n   psrlw $8, %xmm10\n"
+    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   paddw %xmm5, %xmm4\n   psrlw $8, %xmm4\n"
+    "movdqa %xmm8, %xmm10\n   pmullw %xmm3, %xmm10\n   paddw %xmm5, %xmm10\n   psrlw $8, %xmm10\n"
     "packuswb %xmm10, %xmm4\n"
     "punpcklwd %xmm0, %xmm0\n   movdqa %xmm0, %xmm2\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm0, %xmm0\n"
     "packuswb %xmm0, %xmm2\n   movdqa %xmm2, %xmm3\n   pand %xmm9, %xmm3\n   por %xmm3, %xmm4\n"
@@ -14532,7 +14532,7 @@ __asm__(
     "80: test %rax, %rax\n   jz 89f\n   push %rbx\n"
     "81: movzbl (%rdx), %ebx\n   test %ebx, %ebx\n   jz 84f\n"
     "movd %ebx, %xmm0\n   pshuflw $0, %xmm0, %xmm0\n   movdqa %xmm0, %xmm2\n   psrlw $7, %xmm2\n   paddw %xmm0, %xmm2\n"
-    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   psrlw $8, %xmm4\n   packuswb %xmm7, %xmm4\n"
+    "movdqa %xmm8, %xmm4\n   pmullw %xmm2, %xmm4\n   paddw %xmm5, %xmm4\n   psrlw $8, %xmm4\n   packuswb %xmm7, %xmm4\n"
     "shl $24, %ebx\n   movd %ebx, %xmm3\n   por %xmm3, %xmm4\n"
     "movdqa %xmm6, %xmm10\n   psubw %xmm0, %xmm10\n"
     "movd (%rdi), %xmm1\n   punpcklbw %xmm7, %xmm1\n   pmullw %xmm10, %xmm1\n   paddw %xmm5, %xmm1\n"
@@ -26563,8 +26563,8 @@ __asm__(
     "uxtl v4.8h, v2.8b\n   uxtl2 v5.8h, v2.16b\n"
     "uxtl v6.8h, v3.8b\n   uxtl2 v7.8h, v3.16b\n"
     "add v4.8h, v4.8h, v6.8h\n   add v5.8h, v5.8h, v7.8h\n"
-    "mul v4.8h, v4.8h, v27.8h\n   shrn v4.8b, v4.8h, #8\n"
-    "mul v5.8h, v5.8h, v27.8h\n   shrn2 v4.16b, v5.8h, #8\n"
+    "mul v4.8h, v4.8h, v27.8h\n   rshrn v4.8b, v4.8h, #8\n"
+    "mul v5.8h, v5.8h, v27.8h\n   rshrn2 v4.16b, v5.8h, #8\n"
     "and v6.16b, v2.16b, v30.16b\n   orr v4.16b, v4.16b, v6.16b\n"
     "mvn v2.16b, v2.16b\n"
     "umull v5.8h, v1.8b, v2.8b\n   umull2 v6.8h, v1.16b, v2.16b\n"
@@ -26577,7 +26577,7 @@ __asm__(
     "ldrb w9, [x12], #1\n   cbz w9, 21f\n"
     "fmov s0, w9\n   tbl v2.16b, {v0.16b}, v29.16b\n   ushr v3.16b, v2.16b, #7\n"
     "uxtl v4.8h, v2.8b\n   uxtl v6.8h, v3.8b\n   add v4.8h, v4.8h, v6.8h\n"
-    "mul v4.8h, v4.8h, v27.8h\n   shrn v4.8b, v4.8h, #8\n"
+    "mul v4.8h, v4.8h, v27.8h\n   rshrn v4.8b, v4.8h, #8\n"
     "and v6.16b, v2.16b, v30.16b\n   orr v4.16b, v4.16b, v6.16b\n"
     "ld1 {v1.s}[0], [x11]\n   mvn v2.16b, v2.16b\n"
     "umull v5.8h, v1.8b, v2.8b\n   add v5.8h, v5.8h, v31.8h\n   usra v5.8h, v5.8h, #8\n   shrn v7.8b, v5.8h, #8\n"
@@ -36957,9 +36957,9 @@ __asm__(
     "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
     "1: lbu t3, 0(t1)\n   beqz t3, 5f\n"
     "srli t4, t3, 7\n   add t4, t3, t4\n"
-    "andi t5, a6, 255\n   mul t5, t5, t4\n   srli t5, t5, 8\n"
-    "srli t6, a6, 8\n   andi t6, t6, 255\n   mul t6, t6, t4\n   srli t6, t6, 8\n   slli t6, t6, 8\n   or t5, t5, t6\n"
-    "srli t6, a6, 16\n   andi t6, t6, 255\n   mul t6, t6, t4\n   srli t6, t6, 8\n   slli t6, t6, 16\n   or t5, t5, t6\n"
+    "andi t5, a6, 255\n   mul t5, t5, t4\n   addi t5, t5, 128\n   srli t5, t5, 8\n"
+    "srli t6, a6, 8\n   andi t6, t6, 255\n   mul t6, t6, t4\n   addi t6, t6, 128\n   srli t6, t6, 8\n   slli t6, t6, 8\n   or t5, t5, t6\n"
+    "srli t6, a6, 16\n   andi t6, t6, 255\n   mul t6, t6, t4\n   addi t6, t6, 128\n   srli t6, t6, 8\n   slli t6, t6, 16\n   or t5, t5, t6\n"
     "slli t6, t3, 24\n   or t5, t5, t6\n"
     "lwu t4, 0(t0)\n   sub t3, a7, t3\n"
     "andi t6, t4, 255\n   mul t6, t6, t3\n   addi t6, t6, 127\n   divu t6, t6, a7\n"
@@ -54774,7 +54774,9 @@ fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 add
 fn memory_add_sat_u8_rect(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
                           positive width, positive height);
 // height rows of width 8-bit coverage bytes of cover (cover_stride bytes apart): each pixel of into
-// (into_stride words apart) becomes ui_over(ui_tone(ink, cover), pixel). Zero width or height touches nothing.
+// (into_stride words apart) becomes ui_over(ui_tone(ink, cover), pixel) -- the tone's alpha the cover and each of its
+// colours (ink * (cover + (cover >> 7)) + 128) >> 8, ink's top byte left out -- and a pixel under a cover of zero is left.
+// Zero width or height touches nothing.
 fn memory_over_cover_u32_rect(p32 address_to into, positive into_stride, const p8 address_to cover, positive cover_stride,
                               positive width, positive height, p32 ink);
 // height rows of width 8-bit coverage bytes of cover (cover_stride bytes apart): each pixel of into
