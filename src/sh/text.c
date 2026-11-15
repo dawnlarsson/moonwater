@@ -43671,16 +43671,26 @@ static bool cmp_count_of(string_address value, positive address_to result)
         value += *value == '+';
 
         bipolar radix = cmp_radix_of(value, result);
+        bool counted;
 
         if (radix)
-                return radix > 0;
+                counted = radix > 0;
+        else
+        {
+                string_address suffix = value;
 
-        string_address suffix = value;
+                suffix += string_span(suffix, string_set_digits);
+                counted = *suffix != 'b' && *suffix != 'm' && *suffix != 'R' &&
+                          *suffix != 'Q' && text_count_suffixed(value, result);
+        }
 
-        suffix += string_span(suffix, string_set_digits);
-
-        return *suffix != 'b' && *suffix != 'm' && *suffix != 'R' &&
-               *suffix != 'Q' && text_count_suffixed(value, result);
+        //      diffutils reads both counts with xstrtoimax and refuses one
+        //      past INTMAX_MAX, in any base and with a suffix or without:
+        //      cmp -n 9223372036854775808, -n 8E, -n 0x8000000000000000 and
+        //      -i 9223372036854775808 are invalid values to 3.10, where they
+        //      were read as all of it here, the decimal ones saturated by
+        //      text_count_suffixed.
+        return counted && address_to result <= (positive)bipolar_max;
 }
 
 static fn cmp_octal(positive value)
