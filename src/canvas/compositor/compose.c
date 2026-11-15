@@ -829,8 +829,10 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
         y1 = cy > t->y1 ? cy : t->y1;
         x2 = cx + r < t->x2 ? cx + r : t->x2;
         y2 = cy + r < t->y2 ? cy + r : t->y2;
-        if (x2 > x1 && y2 > y1)
-                compositor_reading(t);
+        // A square the target does not meet has nothing to draw, and its width or height, none or less, is no count for a row.
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        compositor_reading(t);
         // Every row has the same columns, so the inks that are not a picture are made once.
         sx1 = x1 > x ? x1 : x;
         sx2 = x2 < x + w ? x2 : x + w;
