@@ -31891,6 +31891,8 @@ line_add_padded() { line_add "$@"; }
                 (tree / name).parent.mkdir(parents=True, exist_ok=True)
                 (tree / name).write_text(text)
 
+        # Each tree is one row, counted once its asserts have held: what ran is what the tally says.
+        glue = 0
         for stock in (False, True):
             for kind in ("absent", "symlink", "directory", "file"):
                 tree = Path(work) / f"patch-{stock}-{kind}"
@@ -31950,6 +31952,7 @@ line_add_padded() { line_add "$@"; }
                     assert header.read_bytes() == before
                     assert settings_before == {name: (tree / name).read_bytes()
                                                for name in settings_anchors}
+                glue += 1
         # A function kernel/kernel.c replaces, gone from where it was: the
         # build stops and names the file, rather than linking an image in which
         # two definitions of it exist or neither does.
@@ -31961,6 +31964,7 @@ line_add_padded() { line_add "$@"; }
                                 env={**os.environ, "MOONWATER_STOCK": ""},
                                 text=True, capture_output=True)
         assert result.returncode != 0 and "namei.c" in result.stderr, result.stderr
+        glue += 1
         # A makefile that no longer names an object stops the build, and says
         # which: apply had no die of its own, and every edit it could not make
         # used to go by without a word.
@@ -31970,6 +31974,7 @@ line_add_padded() { line_add "$@"; }
                                 env={**os.environ, "MOONWATER_STOCK": ""},
                                 text=True, capture_output=True)
         assert result.returncode != 0 and "memset_64.o" in result.stderr, result.stderr
+        glue += 1
         # A kernel line the settings section is placed by, moved: the build stops
         # and names the file, rather than building an image without the section.
         tree = Path(work) / "patch-moved-settings"
@@ -31980,6 +31985,7 @@ line_add_padded() { line_add "$@"; }
                                 env={**os.environ, "MOONWATER_STOCK": ""},
                                 text=True, capture_output=True)
         assert result.returncode != 0 and "x86-stub.c" in result.stderr, result.stderr
+        glue += 1
         # The same for a scheduler line, and for a tree that already carries
         # another text of an edit -- an older one, say: skipping it because its
         # marker is there would build a kernel with the old edit in it.
@@ -31991,6 +31997,7 @@ line_add_padded() { line_add "$@"; }
                                 env={**os.environ, "MOONWATER_STOCK": ""},
                                 text=True, capture_output=True)
         assert result.returncode != 0 and "fair.c" in result.stderr, result.stderr
+        glue += 1
         tree = Path(work) / "patch-stale-scheduler"
         patch_tree(tree, makefile_lines)
         fair = tree / "linux/kernel/sched/fair.c"
@@ -32002,8 +32009,9 @@ line_add_padded() { line_add "$@"; }
                                 text=True, capture_output=True)
         assert (result.returncode != 0 and "fair.c" in result.stderr and
                 "another text" in result.stderr), result.stderr
-        print("  kernel-glue 12 of 12", flush=True)
-        write_tally("kernel-glue", 12, 12)
+        glue += 1
+        print("  kernel-glue %d of %d" % (glue, glue), flush=True)
+        write_tally("kernel-glue", glue, glue)
         binary, _ = build_c(Path(work) / "core-state.c", source,
                             ("-std=c11", "-O2", "-Wall", "-Wextra"), sanitize=False)
         subprocess.run([str(binary)], check=True)
