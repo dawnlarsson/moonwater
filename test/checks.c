@@ -185181,14 +185181,16 @@ static void check_compositor_display_verb(void) {
     made=windows_displays_set(file,sizeof(file),start,"Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
     co_check(made>0&&made==(int)strlen(file)&&!strcmp(file,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\nVirtual-1 rotation=270 refresh=preferred\n"));
 
-    /* A screen's scale is set the same way: its line keeps its other fields, and 100, the default, is not written back. */
+    /* A screen's scale is set the same way: its line keeps its other fields, and 100, the default, is not written back.
+       Set in a file of its own, from start, so the file the rows below go on from keeps Virtual-1's line. */
+    { char scaled[sizeof(file)];
     memset(&change,0,sizeof(change));
     change.scale=150;
-    made=windows_displays_set(file,sizeof(file),start,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
-    co_check(made>0&&made==(int)strlen(file)&&!strcmp(file,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred scale=150 x=-10 y=20\nbad_name x=1 y=2\n"));
+    made=windows_displays_set(scaled,sizeof(scaled),start,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
+    co_check(made>0&&made==(int)strlen(scaled)&&!strcmp(scaled,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred scale=150 x=-10 y=20\nbad_name x=1 y=2\n"));
     change.scale=100;
-    made=windows_displays_set(next,sizeof(next),file,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
-    co_check(made>0&&made==(int)strlen(next)&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred x=-10 y=20\nbad_name x=1 y=2\n"));
+    made=windows_displays_set(next,sizeof(next),scaled,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
+    co_check(made>0&&made==(int)strlen(next)&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred x=-10 y=20\nbad_name x=1 y=2\n")); }
 
     /* HDMI-A-1 goes to its preferred rate: its rotation stays, and its line stays where it was. */
     memset(&change,0,sizeof(change));
@@ -185328,14 +185330,15 @@ static void check_compositor_outputs(void) {
              compositor_screen_owner(two,2,4600,1300,100,50)==1);
     { int box[4];compositor_screens_box(two,2,box);co_check(co_rect(box,0,0,4480,1200));
       static const int shifted[2][4]={{100,50,10,10},{-20,70,5,100}};compositor_screens_box(shifted,2,box);co_check(co_rect(box,-20,50,130,120)); }
-    /* Kept reachable: on one screen exactly the old rule (all of it when it fits, its top left when not), line inside. */
+    /* Kept reachable: on one screen exactly the old rule (all of it when it fits, its top left when not), line inside,
+       but on an axis where the window is exactly the screen's size: there the line has no room and is not kept (df950770). */
     for(int seed=1;seed<4000;seed++) {
         int w=1+(seed*7919)%3000,h=1+(seed*104729)%1500,line=seed&1,wx=(seed*31337)%6000-3000,wy=(seed*7177)%3000-1500;
         static const int one[1][4]={{0,0,2560,1080}};
-        int kx=wx,ky=wy,old_x=wx,old_y=wy;
+        int kx=wx,ky=wy,old_x=wx,old_y=wy,lx=w==2560?0:line,ly=h==1080?0:line;
         compositor_screen_keep_window(one,1,&kx,&ky,w,h,line,24);
-        old_x=old_x>2560-w-line?2560-w-line:old_x;old_y=old_y>1080-h-line?1080-h-line:old_y;
-        old_x=old_x<line?line:old_x;old_y=old_y<line?line:old_y;
+        old_x=old_x>2560-w-lx?2560-w-lx:old_x;old_y=old_y>1080-h-ly?1080-h-ly:old_y;
+        old_x=old_x<lx?lx:old_x;old_y=old_y<ly?ly:old_y;
         if(kx!=old_x||ky!=old_y){co_check(0);break;}
     }
     x=2450,y=100;compositor_screen_keep_window(two,2,&x,&y,400,300,1,24);co_check(x==2450&&y==100); /* across both: left alone */
