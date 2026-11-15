@@ -94563,10 +94563,15 @@ def harness_kernel_ports(argv):
                 block, limited, allowed = [], False, False
         return found
 
+    # kernel.c is compiled here with these lines and nothing else before it, where the
+    # kernel has its headers: bool and true (linux/types.h and linux/stddef.h, for
+    # x86_64's moonwater_dirhash_simd) and module_param_named, which declares nothing
+    # the asm reads and so is empty here.
     def macros(arch):
         kind = "%function" if arch == "arm64" else "@function"
         config = {"x86_64": "CONFIG_X86_64", "arm64": "CONFIG_ARM64", "riscv64": "CONFIG_RISCV"}[arch]
-        return (("#define MW_GET_CURRENT \"adrp x8, current_task\\n   ldr x8, [x8, :lo12:current_task]\\n\"\n" if arch == "arm64" else "") +
+        return ("#include <stdbool.h>\n" +
+                ("#define MW_GET_CURRENT \"adrp x8, current_task\\n   ldr x8, [x8, :lo12:current_task]\\n\"\n" if arch == "arm64" else "") +
                 ("#define CONFIG_IA32_EMULATION 1\n" if arch == "x86_64" else "") +
                 ("#define MW_GET_CURRENT_RV \"la t5, current_task\\n   ld t5, 0(t5)\\n\"\n" if arch == "riscv64" else "") +
                 "#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
@@ -94609,10 +94614,13 @@ def harness_kernel_ports(argv):
             (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + (stub_actor if port not in ("offset_iterate_dir", "call_filldir") else "") + KERNEL_PORTS_COMMON + test_text)
             objects = [str(work / "oracle.c"), str(work / "port.c")]
             if arch == "x86_64":
+                # the wide hash's constants are local labels in .rodata, spelled as
+                # lib.c spells them for an ELF build, which the kernel's is
                 (work / "wide.c").write_text(
                     '#define KERNEL_MODE 1\n#define X64 1\n#define ASM_SIMD_SECTION ""\n#define ASM_SIMD_SECTION_END ""\n'
                     '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
-                    '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
+                    '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n'
+                    '#define ASM_LABEL(name) ".L" #name\n#define ASM_RODATA_PUSH ".pushsection .rodata"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
             built = build_run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
