@@ -24893,6 +24893,28 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->client_rects_card || table->client_rects_cpu)
                 host_say(log, "  client rects    %p damage rectangles copied by the card, %p by the processor\n",
                          (positive)table->client_rects_card, (positive)table->client_rects_cpu);
+        //      A client's dma-buf refused as a framebuffer to scan out (compositor_lent_fb): how many, and what the last one asked and why.
+        if (table->client_scan_refused)
+        {
+                char fourcc[5] = {(char)(table->client_scan_fourcc & 255u), (char)(table->client_scan_fourcc >> 8 & 255u),
+                                  (char)(table->client_scan_fourcc >> 16 & 255u), (char)(table->client_scan_fourcc >> 24 & 255u), 0};
+
+                for (unsigned int at = 0; at < 4; at++)
+                        fourcc[at] = fourcc[at] >= 32 && fourcc[at] < 127 ? fourcc[at] : '?';
+                host_say(log, "  client scan-out %p refused; the last: %s, modifier %p, pitch %p, offset %p, %p by %p: %s %p\n",
+                         (positive)table->client_scan_refused, (string_address)fourcc, (positive)table->client_scan_modifier,
+                         (positive)table->client_scan_pitch, (positive)table->client_scan_offset, (positive)table->client_scan_width,
+                         (positive)table->client_scan_height,
+                         table->client_scan_errno == -1 ? (string_address) "not asked, the pitch is no whole 256-byte blocks (amdgpu), " :
+                         table->client_scan_errno == -2 ? (string_address) "not asked, the offset is no whole 256-byte blocks (amdgpu), " :
+                         table->client_scan_errno == -3 ? (string_address) "the display's node would not take the buffer (PRIME), " :
+                                                          (string_address) "the kernel's errno",
+                         (positive)(table->client_scan_errno < 0 ? 0 : table->client_scan_errno));
+        }
+        //      A lent dma-buf the processor read in place (its write-combined mapping): the presents it did, and the rows copied once for it.
+        if (table->client_wc_presents || table->client_wc_seeded)
+                host_say(log, "  client wc       %p presents the processor read a client's dma-buf in place, %p rows copied into the table for it\n",
+                         (positive)table->client_wc_presents, (positive)table->client_wc_seeded);
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)
