@@ -264,6 +264,7 @@ static void compositor_damage_space(void);
         when it was not committed.
 */
 static int compositor_fence_prop; // the primary plane's IN_FENCE_FD (0: not looked for yet; -1: none, or refused)
+static int compositor_fence_errno; // the errno the card refused a fenced commit with, which turned the fence off (0: none)
 
 static unsigned int compositor_in_fence(void)
 {
@@ -301,7 +302,7 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
         if ((refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit)) != 0)
         {
                 if (refused != -16) // not a flip still in flight: no fenced commit on this card
-                        compositor_fence_prop = -1;
+                        compositor_fence_prop = -1, compositor_fence_errno = (int)-refused;
                 return 0;
         }
         compositor.flip_serial++;
@@ -413,6 +414,36 @@ static void compositor_card_commit(void)
         compositor_card.fenced = fence >= 0 && compositor_flip_fenced(compositor.fb, fence);
 }
 
+/*
+        How the first present the card draws without a wait reaches the screen, said once in the kernel's log (dmesg | grep compositor), since moonwater
+        debug's flips with jobs in flight count only the flips committed with a job's fence: that one, or the legacy flip at the fence and why (no IN_FENCE_FD
+        on the primary plane, or the errno it was refused with), or no flip at all (composed in place: a window on the overlay, more than one screen, a turned
+        screen, a card that copies its damage).
+*/
+static void compositor_kmsg(string_address text, positive value, string_address tail);
+static void compositor_card_said(void)
+{
+        static int said;
+
+        if (said++)
+                return;
+        if (compositor_card.fenced)
+                compositor_kmsg((string_address) "compositor: present without a wait: its flip is committed with the job's fence (IN_FENCE_FD)", 0, (string_address) "");
+        else if (!compositor_card.flip_own)
+                compositor_kmsg((string_address) "compositor: present without a wait: composed in place, no flip, for ", 0,
+                                (string_address)(compositor.plane_row >= 0 ? "a window on the overlay" : compositor_output_count() > 1 ? "more than one screen" :
+                                                 compositor_card.turning ? "a screen turned" : compositor_copies_damage() ? "a card that copies its damage" :
+                                                 "want of a second plate"));
+        else if (compositor_fence_prop < 0 && compositor_fence_errno)
+                compositor_kmsg((string_address) "compositor: present without a wait: legacy flip at its fence, IN_FENCE_FD refused, error ",
+                                (positive)compositor_fence_errno, (string_address) "");
+        else if (compositor_fence_prop < 0)
+                compositor_kmsg((string_address) "compositor: present without a wait: legacy flip at its fence, no IN_FENCE_FD", 0,
+                                (string_address) " on the primary plane");
+        else
+                compositor_kmsg((string_address) "compositor: present without a wait: legacy flip at its fence (a flip in flight)", 0, (string_address) "");
+}
+
 // A present the card draws, at its end in compositor_present_frames: the rows whose pictures it reads, how it ends kept for when its jobs are done, and
 // its flip committed now where it can be.
 static void compositor_card_after(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off,
@@ -425,6 +456,7 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
         compositor_card.clips = clips, compositor_card.turning = turning, compositor_card.composed = gpu_composed;
         compositor_card.flip_own = flip_own, compositor_card.back = back, compositor_card.plane_off = plane_off;
         compositor_card_commit();
+        compositor_card_said();
 }
 
 /*
