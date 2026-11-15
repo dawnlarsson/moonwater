@@ -134827,7 +134827,11 @@ static void check_compositor_volume(void)
         taskbar_settings_set("bottom", "primary", "battery none\n");
         taskbar_tray_set("{time.24h.hour}:{time.24h.min}");
         view = compositor_taskbar_view();
-        check("volume: a tray of the person's own format has none", !taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch));
+        // A format of the person's keeps the cell (the owner's e8cccd1): at the tray's start, the format's text after it, and no clock cell.
+        check("volume: a tray of the person's own format keeps the cell, at the tray's start with the format's text after it, a point in it the volume",
+              taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch) && taskbar_slot(&view, -2, &x, &y, &w, &h) && taskbar_slot(&view, -9, &bx, &by, &bw, &bh) &&
+                  cx == x && bx == cx + cw && bx + bw == x + w && cw > 0 && bw > 0 && !taskbar_slot(&view, -3, &w, &h, &w, &h) &&
+                  taskbar_hit_reach(&view, cx + cw / 2, cy + ch / 2, 0) == TASKBAR_VOLUME);
         taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
         view = compositor_taskbar_view();
         taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
@@ -135043,7 +135047,11 @@ static void check_compositor_volume(void)
                 taskbar_settings_set("bottom", "primary", "battery none\n");
                 taskbar_tray_set("{time.24h.hour}:{time.24h.min}");
                 view = compositor_taskbar_view();
-                check("mic: a tray of the person's own format has none", !taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh));
+                // A format of the person's keeps the cell (the owner's e8cccd1): at the tray's start, the volume's after it and the format's text after that.
+                check("mic: a tray of the person's own format keeps the cell, at the tray's start, the volume's after it and the format's text after that",
+                      taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh) && taskbar_slot(&view, TASKBAR_VOLUME, &vx, &vy, &vw, &vh) &&
+                          taskbar_slot(&view, -2, &x, &y, &w, &h) && taskbar_slot(&view, -9, &bx, &by, &bw, &bh) && mx == x && vx == mx + mw && bx == vx + vw &&
+                          mw > 0 && taskbar_hit_reach(&view, mx + mw / 2, my + mh / 2, 0) == TASKBAR_MIC);
                 taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
                 check("mic: and when the server goes the cell goes with it", mic_cell(1, 0, AUDIO_STATE_PLAYING) && (volume_put_page(52429, 0, 0), compositor_volume_unmap(), compositor_volume.hold_until = 0,
                                                                                                                         compositor_volume_look(clock_monotonic_nanoseconds()), !taskbar.mic_item));
