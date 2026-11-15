@@ -17167,7 +17167,8 @@ static fn ui_buttons_draw(struct ui address_to ui, struct ui_buttons address_to 
         for (int k = 0; k < b->count; k++)
         {
                 b->button[k].focused = keys && b->keys == k + 1;
-                ui_control_draw(ui, &b->button[k]);
+                if (b->button[k].w > 0) // a button the view veiled while another is armed (ui_view_end) is not drawn
+                        ui_control_draw(ui, &b->button[k]);
         }
 }
 
@@ -18273,7 +18274,37 @@ static int ui_view_end(struct ui_view address_to v)
                 int from = ui_rtl() ? high + gap : start, to = ui_rtl() ? row_end : low - gap;
                 struct ui_control address_to line = &v->group.line;
 
+                int armed = v->group.confirm.armed ? v->group.confirm.what - 1 : -1;
+
                 line->kind = UI_HEADING, line->variant = UI_BODY_MEDIUM, line->role = UI_ON_SURFACE_VARIANT;
+                // A row of several buttons can leave too little room before them for what an armed one will do (the launcher's four power
+                // buttons): then, while one is armed, the line is said in the room of the row's other buttons, on the side of the armed one
+                // where there is more of it, and those buttons are veiled (not drawn, and no press finds them) until it is fired or dropped.
+                if (armed >= 0 && armed < v->group.count && v->group.says[armed] && ui->regular) // no face, no measure: the line is where it was
+                {
+                        char said[UI_CONFIRM_TEXT];
+                        int at = -1;
+
+                        ui_confirm_line(said, sizeof(said), v->group.says[armed]);
+                        for (int k = first; k < v->tree.count && at < 0; k++)
+                                at = v->item[k].kind == UI_ITEM_BUTTON && v->item[k].button == armed ? k : -1;
+                        if (at >= 0 && v->tree.node[at].parent == v->tree.node[first].parent && ui_kit_measure(ui, (string_address)said, UI_BODY_MEDIUM) > to - from)
+                        {
+                                const struct ui_node address_to it = &v->tree.node[at];
+                                int before = it->x - gap - start, beyond = row_end - (it->x + it->w + gap);
+
+                                from = before >= beyond ? start : it->x + it->w + gap, to = before >= beyond ? it->x - gap : row_end;
+                                for (int k = first; k < v->tree.count; k++)
+                                        if (v->item[k].kind == UI_ITEM_BUTTON && v->item[k].button >= 0 && v->item[k].button != armed &&
+                                            v->tree.node[k].parent == it->parent)
+                                        {
+                                                struct ui_control address_to veiled = &v->group.button[v->item[k].button];
+
+                                                // Nothing of it, and nowhere a finger's reach grown round a small box finds it (ui_hit).
+                                                veiled->x = veiled->y = -UI_TREE_MOST, veiled->w = veiled->h = 0;
+                                        }
+                        }
+                }
                 line->x = (int)((b64)from * 100 / scale), line->w = (int)((to > from ? (b64)to - from : 0) * 100 / scale);
                 line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)) / 2) * 100 / scale);
         }

@@ -174624,6 +174624,40 @@ static fn check_field_hands(string_address regular)
                         check("launcher: with no session action offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two && refused);
                         check("launcher: with Sleep and Log out offered the foot has four buttons inside the bar, each said before it is done, Sleep starting moonwater sleep and Log out moonwater desktop stop",
                               four && said);
+                        // Four buttons leave the line that says what an armed one will do no room before them: armed, the line is in the room
+                        // of the others, after the first button or before the last, wide enough for its words, and the others are veiled (not
+                        // drawn, and a press there is no button's) until it is dropped, when all four are back.
+                        {
+                                struct ui_buttons address_to group = &launcher.view.group;
+                                char line_words[UI_CONFIRM_TEXT];
+                                int scale = launcher.ui.scale > 0 ? launcher.ui.scale : 100, need;
+                                b32 first, last, back;
+
+                                launcher.session = LAUNCHER_SLEEP | LAUNCHER_LOG_OUT;
+                                launcher.height = launcher_build(0);
+                                ui_buttons_press(group, 0);
+                                launcher.height = launcher_build(0);
+                                ui_confirm_line(line_words, sizeof(line_words), group->says[0]);
+                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, UI_BODY_MEDIUM);
+                                first = group->confirm.armed && group->button[0].w > 0 && !group->button[1].w && !group->button[2].w && !group->button[3].w &&
+                                        group->line.x >= group->button[0].x + group->button[0].w && group->line.w * scale / 100 + 1 >= need;
+                                for (int k = 0; k < group->count; k++)
+                                        first = first && ui_control_hit(&launcher.ui, &group->button[k], ui_dev(&launcher.ui, group->line.x + group->line.w / 2),
+                                                                        ui_dev(&launcher.ui, group->button[0].y + group->button[0].h / 2)) < 0;
+                                ui_confirm_drop(&group->confirm);
+                                ui_buttons_press(group, 3);
+                                launcher.height = launcher_build(0);
+                                ui_confirm_line(line_words, sizeof(line_words), group->says[3]);
+                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, UI_BODY_MEDIUM);
+                                last = group->confirm.armed && group->button[3].w > 0 && !group->button[0].w && !group->button[1].w && !group->button[2].w &&
+                                       group->line.x + group->line.w <= group->button[3].x && group->line.w * scale / 100 + 1 >= need;
+                                ui_confirm_drop(&group->confirm);
+                                group->keys = 0;
+                                launcher.height = launcher_build(0);
+                                back = group->button[0].w > 0 && group->button[1].w > 0 && group->button[2].w > 0 && group->button[3].w > 0;
+                                check("launcher: with four buttons an armed one's line is in the room of the others, after the first or before the last, wide enough for its words, the others veiled till it is dropped",
+                                      first && last && back);
+                        }
                         launcher.session = was;
                         launcher.height = launcher_build(0);
                 }
