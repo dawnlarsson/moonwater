@@ -180,7 +180,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
 describe()
 {
@@ -267,6 +267,7 @@ describe()
         issues) echo "the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board, and a hostile copy (CHECK_issues)" ;;
         osk) echo "the on-screen keyboard: the headless compositor, a terminal with the keys and the keyboard, typed on by the pointer (a capital, the numbers page, a held Back), the shell's files are the proof (test/osk_e2e.sh)" ;;
         gpumodel) echo "the model of the card, test/gpu_model.c: gpu.c's self-test drawn by it against GPU_TEST_HASH, the decoder against gpuasm, a mutant kernel, records past their buffers, coverage and cost (CHECK_gpu_model), and CHECK_gpu_kit's card rows on it against the processor (CHECK_gpu_model_kit); both gate rows" ;;
+        band) echo "the band's launcher button end to end: the headless compositor says launcher_button down the machine script's FIFO, the answer starts the launcher beside the button, a second press puts it away (test/desktop_e2e.sh)" ;;
         gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
         gpuanim)  echo "the animations sampled as the scan image is written: the headless card's screen in three sessions (lists on, lists off, the processor), each animation step counted for torn, foreign and flipflop frames (test/gpu_anim_flicker.sh)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
@@ -337,7 +338,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk browser" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk band browser" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -6978,6 +6979,28 @@ lane_osk()
         else
                 tally osk 0 1
                 note "osk: $status rows failed (the rows above)"
+        fi
+        return "$status"
+)
+
+#       The band's launcher button, pressed in the headless compositor and answered as the machine script answers it.
+lane_band()
+(
+        work=$(mktemp -d) || exit 1
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
+                note "band: the shell binary did not build"
+                tally band 0 1
+                return 1
+        fi
+        sh test/desktop_e2e.sh "$work/shell" "$work/e2e" > "$work/lane.out" 2>&1
+        status=$?
+        cat "$work/lane.out"
+        if [ "$status" = 0 ]; then
+                tally band 1 1
+        else
+                tally band 0 1
+                note "band: $status rows failed (the rows above)"
         fi
         return "$status"
 )
