@@ -58406,9 +58406,25 @@ static fn lock_process(void)
                 exit(5);
         }
 
+        //      Waited for with the row's own five seconds as the deadline, and
+        //      killed past it: under qemu-aarch64 8.2 this child never ended,
+        //      and an unbounded wait held the lane for as long as nobody came.
         raw = 0;
         if (child > 0)
-                system_wait4_retry(child, address_of raw, 0, null);
+        {
+                bipolar reaped = 0;
+
+                while ((reaped = system_wait4_retry(child, address_of raw, 1, null)) == 0 &&
+                       lock_now() - started < 5000000000ull)
+                        lock_nap(10000000);
+
+                if (reaped == 0)
+                {
+                        system_call_2(syscall(kill), (positive)child, 9);
+                        system_wait4_retry(child, address_of raw, 0, null);
+                        log_direct(str("  the exit child had not ended after five seconds, and was killed\n"));
+                }
+        }
 
         check("exit ends a process whose other thread is still asleep",
               child > 0 && (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 5 &&
@@ -59193,7 +59209,9 @@ static p8 tree_probe_sink(address_any context, address_any node, address_any dat
                 return true;
         }
 
-        if (thread_self()->run && atomic_load(address_of thread_self()->run->stop) != 0)
+        //      The thread's run is an address_any; a tree's is its base, a parallel_run.
+        if (thread_self()->run &&
+            atomic_load(address_of ((parallel_run address_to)thread_self()->run)->stop) != 0)
                 stream->after_stop++;
 
         tree_hash(stream, data, length);
