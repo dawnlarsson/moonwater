@@ -17472,6 +17472,11 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
         sooner, in steps of a twentieth: seven tenths of the quiet ink on the light surface (3.5 to 1), six tenths on the dark
         (3.4 to 1). So a dimmed place is read without effort in both themes and is plainly not the current one, which is in the
         full ink, nor one before it, which is in the quiet ink (7.2 and 7.4 to 1).
+
+        Two more things an app may say. One place is being spelled again (edit_wide is not 0): the app draws its own field where
+        that place's words were, edit_wide device pixels wide, and the trail lays the places round it out, draws no words there
+        and rules a line in the accent under it. And the keys are in the trail (keys): the place they are on (focus) has the
+        kit's ring round it. Which keys move it and what they do are the app's.
 */
 #define UI_TRAIL_MOST 48    // the places of one trail
 #define UI_TRAIL_GAP 6      // logical pixels either side of the separator, and what a place's own press reaches past its words
@@ -17487,6 +17492,9 @@ struct ui_trail
         unsigned char lost[UI_TRAIL_MOST]; // a place after the current one that was looked for and is not there: struck through as well as dimmed
         int x, y, w, h;                    // its box, device pixels
         int hover;                         // the place under the pointer (ui_trail_hit's answer the app last kept), -1 none
+        int edit, edit_wide;               // edit_wide not 0: the place `edit` is the app's field, this wide in device pixels
+        int focus;                         // the place the keys are on,
+        b32 keys;                          // while they are in the trail
         // The kit's (ui_trail_layout).
         int at[UI_TRAIL_MOST], wide[UI_TRAIL_MOST]; // where each place's words are, as laid from the left, and how wide
         int first, last;                   // the places that show: first..last, the current one among them
@@ -17509,7 +17517,7 @@ static fn ui_trail_layout(struct ui address_to ui, struct ui_trail address_to t)
         t->current = t->current < 0 ? 0 : t->current >= t->count ? t->count - 1 : t->current;
         t->mark = mark, t->mark_wide = between;
         for (int k = 0; k < t->count; k++)
-                t->wide[k] = t->label[k] ? ui_kit_measure(ui, (string_address)t->label[k], UI_BODY_MEDIUM) : 0;
+                t->wide[k] = t->edit_wide && k == t->edit ? t->edit_wide : t->label[k] ? ui_kit_measure(ui, (string_address)t->label[k], UI_BODY_MEDIUM) : 0;
         if (!t->count)
         {
                 t->first = 0, t->last = -1;
@@ -17605,9 +17613,26 @@ static fn ui_trail_draw(struct ui address_to ui, struct ui_trail address_to t)
                 unsigned int ink = k == t->hover ? strong : k > t->current ? dim : k == t->current ? strong : quiet;
                 int x = ui_trail_flip(t, t->at[k], t->wide[k]);
 
-                if (t->label[k])
+                if (t->edit_wide && k == t->edit)
+                {
+                        // The app's field is here: a line in the accent under it, and no words of the trail's.
+                        int thick = ui_dev(ui, 2) < 1 ? 1 : ui_dev(ui, 2);
+                        struct ui_box rule = {x * 256, (t->y + t->h - ui_dev(ui, 6) - thick) * 256, (x + t->wide[k]) * 256, (t->y + t->h - ui_dev(ui, 6)) * 256, 0, 0};
+
+                        ui_kit_fill(ui, &rule, ui_role(UI_PRIMARY), null);
+                }
+                else if (t->label[k])
                         ui_kit_text_clip(ui, x, baseline, (string_address)t->label[k], UI_BODY_MEDIUM, ink, 0, right);
-                if (k > t->current && t->lost[k])
+                if (t->keys && k == t->focus && !(t->edit_wide && k == t->edit))
+                {
+                        // The keys are on this place: the kit's ring round its words.
+                        int out = ui_dev(ui, UI_TRAIL_GAP) / 2, tall = ui_dev(ui, 24);
+                        struct ui_box ring = {(x - out) * 256, (t->y + (t->h - tall) / 2) * 256, (x + t->wide[k] + out) * 256, (t->y + (t->h - tall) / 2 + tall) * 256,
+                                              ui_dev(ui, 4) * 256, ui_dev(ui, 4) * 256};
+
+                        ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_ON_SURFACE));
+                }
+                if (k > t->current && t->lost[k] && !(t->edit_wide && k == t->edit))
                 {
                         struct ui_box strike = {x * 256, (t->y + t->h / 2) * 256, (x + t->wide[k]) * 256, (t->y + t->h / 2 + (ui_dev(ui, 1) < 1 ? 1 : ui_dev(ui, 1))) * 256, 0, 0};
 

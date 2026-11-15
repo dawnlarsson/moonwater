@@ -23,8 +23,12 @@
         Backspace and Alt+Up; opening the folder that is the next dimmed one moves along it; and only a folder that is not on it
         (another branch, opened or typed) makes the trail that folder's path. A dimmed folder is looked at again before it is gone
         to, by what it was: one that is gone, or has something else in its place (a link too: it is not followed), says so in the
-        foot and the trail is cut there, the folder shown staying. Back and Forward keep paths, as they did, and the trail is
-        worked out from the path gone to by the one rule (files_trail_note), so the two agree. A trail too long for the band
+        foot and it and the folders after it are struck through where they stand (lost), the folder shown staying: they are put
+        right by spelling them again, below. Back and Forward keep paths, as they did, and the trail is
+        worked out from the path gone to by the one rule (files_trail_note), so the two agree. Moving along the trail reads
+        nothing: the model keeps the listings of the trail's folders that were read (files_model.c says how many), so a folder
+        gone back to is shown at once as it was left, its cursor, what was chosen and where its rows were scrolled to, and is
+        looked at again straight after (files_model_stale): only one that changed is read again, beside what is shown. A trail too long for the band
         shows the folders round the one shown and three dots where others are left out; a press on the dots, or on the band's own
         ground, or Ctrl+L, turns the band into the kit's text field holding the whole path: Enter goes where it says, Escape or a press
         elsewhere puts the crumbs back, and Tab finishes the folder name being typed from the listing shown when the text's
@@ -32,6 +36,23 @@
         the text goes to the model's own open (files_model_try), which follows a link anywhere in what was typed, its last part
         too, because typing a name asks for what it names. A path that is no folder, may not be read or is not there says so in
         the foot, and the folder shown stays as it was.
+
+        One folder of the trail spelled again. A second press on a folder of the trail, in the time a double click has, makes
+        that one folder a small field holding its name, all of it chosen, with the folders round it where they were. Enter
+        replaces that folder in the path and keeps every folder after it: /path/to/something/else with "to" made "foo" is
+        /path/foo/something/else, and the browser goes to the deepest folder of that path that is one; the folders after it
+        that are not there (or are no folder, or may not be read) stay in the trail struck through, the foot saying why the
+        first of them is, so the next can be spelled the same way. A stroke typed makes several folders, no name takes the
+        folder out, Escape or a press elsewhere leaves the trail as it was, and Tab finishes the name from the listing of the
+        folder before it when the model has that in memory (the folder shown, or a kept one: no disk is read). The first press
+        of the two is a press and goes to its folder at once, as any press on the trail does: going along the trail changes
+        nothing of it and reads nothing, so there is nothing to wait for, and the second press takes that move back (the way
+        back's own step, which also reads nothing) before the field opens, so Escape leaves a person where they were.
+
+        The keys in the trail. Tab from the rows puts the keys on the trail (the folder shown first, a ring round it): Left and
+        Right move between its folders, Enter goes to the one they are on, F2 spells it again, Ctrl+C copies the whole trail's
+        path, the dimmed part with it, as text, and Tab, Escape or Down gives the keys back to the rows. Alt+Up and Alt+Down
+        move along the trail wherever the keys are, and Ctrl+L opens the whole path's field with all of it chosen.
 
         Changing what is there. Delete asks first: the foot says how many would go and the first of their names, and only Delete
         again does it (any other key or a press leaves them); the delete then runs between events as the reading does
@@ -60,6 +81,9 @@
 #define FILES_KEY_F2 60
 #define FILES_EDIT_PATH 1            // files.editing: the band's field holds the path,
 #define FILES_EDIT_NAME 2            // or the new name of the entry at files.naming
+#define FILES_EDIT_PART 3            // or, in the trail itself, the name of its folder files.part
+#define FILES_KEY_C 46
+#define FILES_PART_PAD 6             // logical pixels of a spelled folder's field either side of its words
 #define FILES_ASK_NAMES 3            // the names a delete's question says, of however many it would remove
 
 // Everything that is large: one mapping, not the image's bss.
@@ -93,7 +117,13 @@ static struct
         struct files_trail trail; // the model's trail: the deepest path of this branch, and where on it the folder shown is
         struct ui_trail crumbs;   // and the kit's, which draws it and says what a point is on
         int crumb_hover;          // the folder of it under the pointer, -1 none
-        int editing;             // the band is the field: FILES_EDIT_PATH or FILES_EDIT_NAME, 0 the crumbs
+        int editing;             // the band is the field: FILES_EDIT_PATH or FILES_EDIT_NAME; FILES_EDIT_PART one folder of the trail is; 0 the crumbs
+        int part;                // the trail's folder being spelled again
+        b32 crumb_keys;          // the keys are in the trail,
+        int crumb_focus;         // on this folder of it
+        int crumb_clicked, crumb_from; // the folder of the trail a press last went to, and the one that was shown before it:
+        b64 crumb_clicked_at;    // a second press on it in time spells it again
+        b32 reseat;              // the rows are to be put where the folder shown had them, at the next layout
         p32 naming;              // the place of the entry being named
         b32 armed;               // Delete was pressed once: the foot asks, and Delete again does it
         p32 armed_at;            // the model's revision the question was asked at: a listing that changed since is asked again
@@ -230,9 +260,27 @@ static fn files_crumbs_lay(void)
                 ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k]));
                 t->label[k] = files.big->crumb_words[k];
         }
+        for (int k = 0; k < UI_TRAIL_MOST; k++)
+                t->lost[k] = k < trail->count && trail->lost[k];
         t->x = files.crumbs_box.x, t->y = files.crumbs_box.y, t->w = files.crumbs_box.w, t->h = files.crumbs_box.h;
         t->hover = files.crumb_hover;
+        t->keys = files.crumb_keys && files.focused && !files.editing, t->focus = files.crumb_focus;
+        t->edit = files.part, t->edit_wide = 0;
+        if (files.editing == FILES_EDIT_PART)
+        {
+                // The folder being spelled is a field as wide as what is typed in it, and never wider than half the band.
+                static p8 typed[FILES_NAME * 2];
+                static char shown[FILES_NAME * 6 + 4];
+                positive length = ui_text_string(files_field(), typed, sizeof(typed));
+                int wide;
+
+                ui_label_foreign(shown, sizeof(shown), typed, length);
+                wide = ui_kit_measure(&files.ui, (string_address)shown, UI_BODY_LARGE) + ui_dev(&files.ui, 2 * FILES_PART_PAD + 8);
+                wide = wide < ui_dev(&files.ui, 56) ? ui_dev(&files.ui, 56) : wide > t->w / 2 ? t->w / 2 : wide;
+                t->edit_wide = wide, t->current = files.part; // the field is kept in sight
+        }
         ui_trail_layout(&files.ui, t);
+        t->current = trail->current;
 }
 
 // What of the trail a point of the window is on: a folder's number, UI_TRAIL_MARK, or -1 (the band's own ground, or not the band).
@@ -243,8 +291,18 @@ static int files_crumb_at(int x, int y)
 
 static fn files_crumbs_draw(void)
 {
-        files.crumbs.hover = files.crumb_hover;
-        ui_trail_draw(&files.ui, &files.crumbs);
+        struct ui_trail address_to t = &files.crumbs;
+
+        t->hover = files.crumb_hover;
+        ui_trail_draw(&files.ui, t);
+        if (files.editing == FILES_EDIT_PART && t->edit_wide && t->edit >= t->first && t->edit <= t->last)
+        {
+                // The folder being spelled: the kit's field, drawn where its words were.
+                int x = ui_trail_flip(t, t->at[t->edit], t->wide[t->edit]), pad = ui_dev(&files.ui, FILES_PART_PAD);
+
+                ui_text_field_draw(&files.ui, &files.path, x + pad, x + t->wide[t->edit] - pad, t->y, t->y + t->h);
+                files_field()->well_left = x, files_field()->well_right = x + t->wide[t->edit];
+        }
 }
 
 /* ---- the layout ---- */
@@ -280,7 +338,7 @@ static fn files_layout(void)
                 ui_button(WORDS(files_forward), .class = "ghost", .on = files_act, .arg = 1);
                 ui_button(WORDS(files_up), .class = "ghost", .on = files_act, .arg = 2);
                 // The path: the field while it is typed, else the room its crumbs are laid out and drawn in (files_crumbs_lay).
-                if (files.editing)
+                if (files.editing && files.editing != FILES_EDIT_PART)
                         ui_control(&files.path, .grow = 1, .h = UI_ROW);
                 else
                         ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
@@ -299,7 +357,12 @@ static fn files_layout(void)
         l->row_x = 0, l->row_w = files.width;
         l->empty = files_state_text(m);
         ui_list_layout(ui, l);
-        if (!files.editing)
+        // A folder shown as it was left has its rows where they were; any other, from the top. And where they are now is the model's
+        // to keep with the listing when the folder is left.
+        if (files.reseat)
+                ui_scroll_set(&l->scroll, (int)m->seat), files.reseat = false;
+        m->seat = l->scroll.scroll;
+        if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_lay();
 }
 
@@ -316,6 +379,7 @@ static fn files_show_cursor(void)
 /* ---- what a person asks ---- */
 
 static fn files_moved(void);
+static fn files_part_go(void);
 
 // The band becomes the field: holding the whole path (FILES_EDIT_PATH), or the name of the entry the keys are on for a new one
 // (FILES_EDIT_NAME); or the crumbs again (0).
@@ -326,12 +390,20 @@ static fn files_edit(int how)
 
         if (how == FILES_EDIT_NAME && !entry)
                 return;
+        if (how == FILES_EDIT_PART && (files.part <= 0 || files.part >= files.trail.count))
+                how = FILES_EDIT_PATH; // the root is not spelled again: the whole path is
         files.editing = how;
         files_field()->most = how == FILES_EDIT_NAME ? FILES_NAME - 1 : FILES_PATH - 1;
         if (how == FILES_EDIT_PATH)
                 ui_text_set(files_field(), m->path, string_length((string_address)m->path));
         else if (how == FILES_EDIT_NAME)
                 ui_text_set(files_field(), files_model_name(m, entry), entry->length), files.naming = m->cursor;
+        else if (how == FILES_EDIT_PART)
+                ui_text_set(files_field(), files.trail.path + files.trail.from[files.part], (positive)(files.trail.to[files.part] - files.trail.from[files.part]));
+        // The whole path, and a folder's name in the trail, are chosen whole: what is typed takes their place.
+        if (how == FILES_EDIT_PATH || how == FILES_EDIT_PART)
+                doc_select_set(&files_field()->doc, 0, doc_length(&files_field()->doc));
+        files.crumb_keys = false;
         files.crumb_hover = -1, files.said = 0, files.armed = false, files.big->note[0] = 0;
         files.dirty = true;
 }
@@ -444,6 +516,86 @@ static fn files_name_go(void)
         string_copy_bounded(m->came, typed, FILES_NAME);
 }
 
+static unsigned int files_state_said(int state)
+{
+        return state == FILES_GONE ? LANGUAGE_files_gone : state == FILES_UNREADABLE ? LANGUAGE_files_unreadable : state == FILES_NOT_DIRECTORY ? LANGUAGE_files_not_folder
+               : LANGUAGE_files_failed;
+}
+
+// The foot says why a folder of the trail is lost, with its name before the words, since it is not the folder shown: "else: This folder is gone".
+static fn files_lost_say(int which, unsigned int said)
+{
+        const struct files_trail address_to trail = &files.trail;
+        char address_to into = files.big->note;
+        positive used;
+
+        files.said = said, into[0] = 0;
+        if (which <= 0 || which >= trail->count)
+                return;
+        used = ui_label_foreign(into, 96, trail->path + trail->from[which], (positive)(trail->to[which] - trail->from[which]));
+        into[used++] = ':', into[used++] = ' ', into[used] = 0;
+        string_append_bounded((string_address)into, (string_address)language_text(said), sizeof(files.big->note));
+}
+
+// Enter in the field of one folder of the trail: the path with that folder spelled as typed and the folders after it kept, gone to as
+// far as it is folders, the rest of it lost in the trail with the reason in the foot. Text that is no folder's name says so and the field stays.
+static fn files_part_go(void)
+{
+        static p8 typed[FILES_PATH], path[FILES_PATH], before[FILES_PATH];
+        struct files_model address_to m = &files.big->model;
+        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        int why;
+
+        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        string_copy_bounded(before, m->path, FILES_PATH);
+        if (string_length(typed) != length || !files_trail_spell(&files.trail, files.part, typed, path) ||
+            (why = files_trail_resolve(m, &files.trail, path)) == FILES_NONE)
+        {
+                files.said = LANGUAGE_files_name_bad, files.dirty = true;
+                return;
+        }
+        files_edit(0);
+        if (!string_equals((string_address)before, (string_address)m->path))
+                files_moved();
+        else
+                files_keep_trim(m, &files.trail);
+        if (why != FILES_READY)
+                files_lost_say(files.trail.current + 1, files_state_said(why));
+        files.dirty = true;
+}
+
+// Tab in that field: the name being typed finished from the listing of the folder before it in the trail, when the model has it.
+static fn files_part_complete(void)
+{
+        static p8 typed[FILES_PATH], parent[FILES_PATH], name[FILES_NAME];
+        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+
+        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        length = string_length(typed);
+        for (positive at = 0; at < length; at++)
+                if (typed[at] == '/')
+                        return;
+        if (files.part <= 0 || length >= FILES_NAME)
+                return;
+        files_trail_path(&files.trail, files.part - 1, parent);
+        if (!files_model_complete_in(&files.big->model, parent, typed, length, name, sizeof(name)) || string_length(name) == length)
+                return;
+        ui_text_set(files_field(), name, string_length(name));
+        files.dirty = true;
+}
+
+// The whole trail's path, the dimmed part with it, offered to the clipboard as text.
+static fn files_trail_copy(void)
+{
+        positive length = string_length(files.trail.path), room = 0;
+        p8 address_to text = null;
+
+        if (!length || !array_store_reserve(text, room, 0, length + 1, 256))
+                return;
+        memory_copy(text, files.trail.path, length);
+        ui_clip_offer(&files.own, WINDOWS_CLIP_CLIPBOARD, text, room, length);
+}
+
 // To the folder the field's text names, if it is one: the crumbs come back with it. One that is not says why in the foot, and the
 // field stays as it is for the text to be put right.
 static fn files_edit_go(void)
@@ -457,6 +609,11 @@ static fn files_edit_go(void)
                 files_name_go();
                 return;
         }
+        if (files.editing == FILES_EDIT_PART)
+        {
+                files_part_go();
+                return;
+        }
 
         typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
         came = files_model_try(&files.big->model, typed);
@@ -466,8 +623,7 @@ static fn files_edit_go(void)
                 files_moved();
                 return;
         }
-        files.said = came == FILES_GONE ? LANGUAGE_files_gone : came == FILES_UNREADABLE ? LANGUAGE_files_unreadable
-                     : came == FILES_NOT_DIRECTORY ? LANGUAGE_files_not_folder : LANGUAGE_files_failed;
+        files.said = files_state_said(came);
         files.dirty = true;
 }
 
@@ -498,45 +654,123 @@ static fn files_edit_complete(void)
         files.dirty = true;
 }
 
-// To a folder of the trail. One deeper than the folder shown is looked at again first, by what it was: gone, or something else in its
-// place, is said in the foot and the trail is cut there, the folder shown staying. The trail itself does not change by going along it.
+// To a folder of the trail. One deeper than the folder shown is opened as the folder it was (files_trail_open: not followed, and held
+// to its device and inode on the descriptor that was opened, which is then the one shown): gone, or something else in its place, is
+// said in the foot and it and the folders after it are lost in the trail, the folder shown staying. The trail's folders do not change
+// by going along it.
 static fn files_crumb_go(int which)
 {
         static p8 to[FILES_PATH];
         struct files_model address_to m = &files.big->model;
         struct files_trail address_to trail = &files.trail;
-        int seen = FILES_SAME, came;
+        bipolar handle, error;
+        int seen, came;
 
         if (which < 0 || which >= trail->count || which == trail->current)
                 return;
-        if (which > trail->current && (seen = files_trail_check(trail, which)) != FILES_SAME)
-        {
-                files.said = seen == FILES_MISSING ? LANGUAGE_files_gone : LANGUAGE_files_not_folder;
-                files_trail_cut(trail, which);
-                files.dirty = true;
-                return;
-        }
         files_trail_path(trail, which, to);
-        came = files_model_try(m, to);
-        if (came == FILES_READING)
+        if (which > trail->current)
         {
+                if ((seen = files_trail_open(trail, which, &handle, &error)) != FILES_SAME)
+                {
+                        files_lost_say(which, seen == FILES_MISSING ? LANGUAGE_files_gone : seen == FILES_REFUSED ? files_state_said(files_state_of(error)) : LANGUAGE_files_not_folder);
+                        files_trail_lose(trail, which);
+                        files.dirty = true;
+                        return;
+                }
+                files_model_take(m, to, handle);
                 files_moved();
                 return;
         }
-        files.said = came == FILES_GONE ? LANGUAGE_files_gone : came == FILES_UNREADABLE ? LANGUAGE_files_unreadable : LANGUAGE_files_not_folder;
-        files_trail_cut(trail, which);
+        came = files_model_try(m, to);
+        if (came == FILES_READING)
+        {
+                // Up the trail: the keys are on the folder of it come up through, as Up puts them on the folder come out of.
+                static p8 through[FILES_NAME];
+                positive length = (positive)(trail->to[which + 1] - trail->from[which + 1]);
+
+                memory_copy(through, trail->path + trail->from[which + 1], length < FILES_NAME ? length : 0);
+                through[length < FILES_NAME ? length : 0] = end;
+                files_model_came(m, through);
+                files_moved();
+                return;
+        }
+        files.said = files_state_said(came);
         files.dirty = true;
+}
+
+// Along the trail by one folder: up it (-1) or down it (1), as far as it goes.
+static fn files_crumb_step(int by)
+{
+        files_crumb_go(files.trail.current + by);
+}
+
+// One folder of the trail becomes the field. When the press before this one went to that folder, that move is taken back first, so
+// what is shown is what was shown before the two presses.
+static fn files_part_edit(int which, b32 pressed)
+{
+        if (pressed && files.trail.current == which && files.crumb_from != which && files_model_back(&files.big->model, false))
+                files_moved();
+        files.part = which;
+        files_edit(FILES_EDIT_PART);
+}
+
+// The keys while they are in the trail. False for a key that is not the trail's (the rows have it then).
+static b32 files_crumb_key(const struct window_event address_to event)
+{
+        b32 control = (event->flags & WINDOW_KEY_CONTROL) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0;
+        int key = (int)event->a, to;
+
+        if (control && key == FILES_KEY_C)
+        {
+                files_trail_copy();
+                return true;
+        }
+        if (control || alt)
+                return false;
+        switch (key)
+        {
+        case UI_KEY_LEFT:
+        case UI_KEY_RIGHT:
+                to = files.crumb_focus + ui_arrow(key);
+                files.crumb_focus = to < 0 ? 0 : to >= files.trail.count ? files.trail.count - 1 : to;
+                break;
+        case UI_KEY_HOME: files.crumb_focus = 0; break;
+        case UI_KEY_END: files.crumb_focus = files.trail.count - 1; break;
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
+                if (!(event->flags & WINDOW_KEY_REPEAT))
+                        to = files.crumb_focus, files_crumb_go(to), files.crumb_keys = true, files.crumb_focus = to;
+                break;
+        case FILES_KEY_F2:
+                files_part_edit(files.crumb_focus, false);
+                break;
+        case UI_KEY_TAB:
+        case UI_KEY_ESCAPE:
+        case UI_KEY_DOWN:
+                files.crumb_keys = false;
+                break;
+        default: return false;
+        }
+        files.dirty = true;
+        return true;
 }
 
 // Another folder is shown: its rows from the top, nothing said of the folder before.
 static fn files_moved(void)
 {
+        struct files_model address_to m = &files.big->model;
+
         files.editing = 0, files.crumb_hover = -1, files.armed = false, files.big->note[0] = 0;
-        // The trail is told where the person is now: a folder on it moves the place, any other is a new branch (files_trail_note).
-        files_trail_note(&files.trail, files.big->model.path, files.big->model.handle >= 0 ? &files.big->model.folder : null);
+        // The trail is told where the person is now: a folder on it moves the place, any other is a new branch (files_trail_note),
+        // and the listings kept are the trail's: one whose folder has left it is let go.
+        files_trail_note(&files.trail, m->path, m->handle >= 0 ? &m->folder : null);
+        files_keep_trim(m, &files.trail);
+        files.crumb_focus = files.trail.current;
         files.clicked = FILES_NO, files.said = 0;
-        ui_scroll_set(&files.big->list.scroll, 0);
-        files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
+        // The rows: where they were left for a listing shown as it was left, which is then looked at again at once; else from the top.
+        files.reseat = true;
+        files.next_look = (b64)ui_kit.now + (m->restored ? 0 : FILES_LOOK_NS);
         files.dirty = true;
 }
 
@@ -598,6 +832,19 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
+        // Along the trail, wherever the keys are; then the trail's own keys while they are in it.
+        if (alt && (key == UI_KEY_UP || key == UI_KEY_DOWN))
+        {
+                files_crumb_step(key == UI_KEY_UP ? -1 : 1);
+                return true;
+        }
+        if (files.crumb_keys && files_crumb_key(event))
+                return true;
+        if (key == UI_KEY_TAB && !shift && !control && !alt)
+        {
+                files.crumb_keys = !files.crumb_keys, files.crumb_focus = files.trail.current, files.dirty = true;
+                return true;
+        }
         if (key == FILES_KEY_F2)
         {
                 files_edit(FILES_EDIT_NAME);
@@ -610,7 +857,7 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (alt && (key == UI_KEY_LEFT || key == UI_KEY_RIGHT))
                 return files_act(key == UI_KEY_RIGHT);
-        if ((alt && key == UI_KEY_UP) || key == UI_KEY_BACKSPACE)
+        if (key == UI_KEY_BACKSPACE)
                 return files_act(2);
         if (key == FILES_KEY_F5 || (control && key == FILES_KEY_R))
         {
@@ -703,6 +950,8 @@ static b32 files_event(const struct window_event address_to event)
                 {
                         if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) && files.editing == FILES_EDIT_PATH)
                                 files_edit_complete();
+                        else if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) && files.editing == FILES_EDIT_PART)
+                                files_part_complete();
                         return true;
                 }
         }
@@ -745,13 +994,25 @@ static b32 files_event(const struct window_event address_to event)
                 {
                         int crumb = files_crumb_at(ui_kit.pointer_x, ui_kit.pointer_y);
 
-                        // A folder of the trail is gone to; its ground, and the dots that stand for folders left out, open the field.
-                        if (crumb >= 0)
+                        // A folder of the trail is gone to, and a second press on it in time spells it again (the first one's move
+                        // taken back); its ground, and the dots that stand for folders left out, open the field.
+                        files.crumb_keys = false;
+                        if (crumb >= 0 && crumb == files.crumb_clicked && (b64)ui_kit.now - files.crumb_clicked_at <= ui_click_ns)
+                        {
+                                files.crumb_clicked = -1;
+                                files_part_edit(crumb, true);
+                        }
+                        else if (crumb >= 0)
+                        {
+                                files.crumb_from = files.trail.current, files.crumb_clicked = crumb, files.crumb_clicked_at = (b64)ui_kit.now;
                                 files_crumb_go(crumb);
+                        }
                         else
                                 files_edit(FILES_EDIT_PATH);
                         break;
                 }
+                if (down)
+                        files.crumb_keys = false, files.crumb_clicked = -1;
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 // The press itself puts the cursor on its row, as the list lights it.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
@@ -786,13 +1047,13 @@ static fn files_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
         files_layout();
-        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys;
+        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys;
         ui_list_draw(ui, l);
         ui_view_draw(ui, &files.big->view, files.focused);
+        if (!files.editing || files.editing == FILES_EDIT_PART)
+                files_crumbs_draw();
         if (files.editing)
                 ui_text_overlay(ui, files_field()); // a finger's selection in the field: its handles, over the rows
-        else
-                files_crumbs_draw();
         files.seen = files.big->model.revision;
 }
 
@@ -918,7 +1179,7 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-        files.clicked = FILES_NO, files.crumb_hover = -1;
+        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1;
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;

@@ -26,6 +26,15 @@
         folder read again (files_model_reload) is read beside the listing shown and takes its place when it is whole,
         so what is on the screen is never half of one.
 
+        Kept listings. A folder that was read whole and is left is not forgotten at once: its listing is kept (its entries, their
+        order, what was chosen, where the keys were and where a view had its rows), and going to that folder again shows it as it
+        was left with no reading at all; the view then asks files_model_stale, as it does of any folder shown, and only one that
+        changed is read again, beside what is shown. At most FILES_KEPT listings are kept and FILES_KEPT_BYTES bytes of them
+        together; when another would pass either the one left longest ago is let go, a listing larger than the bytes alone is
+        not kept, and files_keep_trim lets go of every one whose folder is not on a trail, so what is kept is the trail's. A kept
+        listing is the folder's only while the path opens to the same device and inode; anything else under its path is read.
+        m->reads counts the readings begun, which is how a check knows that moving along a trail began none.
+
         The walk is the tree's (file_walk_open, file_walk_open_found, file_walk_next, file_walk_close: src/sh/file.c) and
         the look is file_look_code; no call to the kernel is made here that the tree does not already make there.
 */
@@ -39,6 +48,10 @@
 #endif
 #define FILES_NAMES (FILES_MOST * 24u) // and the bytes of their names: a listing whose names fill it is cut there too
 #define FILES_HISTORY 32             // the folders back and the folders forward that are kept, each
+#define FILES_KEPT 8                 // the listings kept of folders left,
+#ifndef FILES_KEPT_BYTES
+#define FILES_KEPT_BYTES (8u << 20)  // and the bytes of all of them together
+#endif
 #define FILES_NO 0xffffffffu         // no entry: no cursor, no place
 
 // What an entry is, as it was looked at without following it.
@@ -117,6 +130,22 @@ struct files_listing
         b32 cut;                 // the folder has more than is held
 };
 
+// The listing of a folder that was left, as it was left: one mapping of its entries, their order, their names and what was chosen.
+struct files_kept
+{
+        p8 path[FILES_PATH];     // "" for a place that keeps nothing
+        address_any mapped;
+        positive bytes;
+        p32 count, names_used;
+        b32 cut;
+        file_facts folder;       // the folder as it was when the reading began: what a look for staleness compares
+        int sort;
+        b32 descending, hidden;
+        p32 cursor, anchor, chosen_count;
+        bipolar seat;
+        p64 left;                // when it was left, by the model's own count: the least is the oldest
+};
+
 struct files_model
 {
         p8 path[FILES_PATH];     // the folder shown: absolute, no slash at its end but the root's
@@ -139,6 +168,11 @@ struct files_model
         p8 address_to back, address_to forward; // FILES_HISTORY paths each, the last the nearest
         p32 back_count, forward_count;
         p32 revision;            // counted up when what a view shows of it changed
+        p32 reads;               // the readings of a folder begun, ever: a kept listing shown begins none
+        bipolar seat;            // where a view has the rows of the folder shown (its scroll): kept with a listing and given back with it
+        b32 restored;            // the folder shown came from a kept listing, as it was left, and was not read
+        struct files_kept kept[FILES_KEPT];
+        p64 kept_clock;
         address_any mapped;
         positive mapped_size;
 };
@@ -178,8 +212,12 @@ static b32 files_model_open(struct files_model address_to m)
         return true;
 }
 
+static fn files_keep_drop(struct files_model address_to m, int which);
+
 static fn files_model_close(struct files_model address_to m)
 {
+        for (int k = 0; k < FILES_KEPT; k++)
+                files_keep_drop(m, k);
         if (m->walking)
                 file_walk_close(&m->reader);
         if (m->handle >= 0)
@@ -515,16 +553,148 @@ static b32 files_model_begin(struct files_model address_to m)
                 memory_fill(&m->folder, 0, sizeof(m->folder));
         if (!file_walk_open(&m->reader, m->handle, (string_address) "."))
                 return false;
-        m->walking = true;
+        m->walking = true, m->reads++;
         return true;
 }
 
-// The folder shown is this one from now on: its descriptor (taken over; -1 with an error for one that did not open) and its reading begun.
+/* ---- kept listings ---- */
+
+static fn files_keep_drop(struct files_model address_to m, int which)
+{
+        struct files_kept address_to k = &m->kept[which];
+
+        if (k->mapped)
+                system_call_2(syscall(munmap), (positive)k->mapped, k->bytes);
+        k->mapped = null, k->bytes = 0, k->path[0] = end, k->count = 0;
+}
+
+// The place that keeps this path's listing, -1 for none.
+static int files_keep_find(const struct files_model address_to m, const p8 address_to path)
+{
+        for (int k = 0; path[0] && k < FILES_KEPT; k++)
+                if (string_equals((string_address)m->kept[k].path, (string_address)path))
+                        return k;
+        return -1;
+}
+
+static inline positive files_keep_bytes(p32 count, p32 names_used)
+{
+        return (positive)count * (sizeof(struct files_entry) + sizeof(p32)) + names_used + (count + 7) / 8;
+}
+
+// A kept listing as a listing: its entries, order and names where they lie in its mapping. Answers where its chosen bits are, after them.
+static p8 address_to files_keep_listing(const struct files_kept address_to k, struct files_listing address_to l)
+{
+        p8 address_to at = (p8 address_to)k->mapped;
+
+        l->entry = (struct files_entry address_to)at, at += (positive)k->count * sizeof(struct files_entry);
+        l->order = (p32 address_to)at, at += (positive)k->count * sizeof(p32);
+        l->names = at, at += k->names_used;
+        l->count = k->count, l->names_used = k->names_used, l->cut = k->cut;
+        return at;
+}
+
+// The kept listing left longest ago, other than `but`: -1 for none.
+static int files_keep_oldest(const struct files_model address_to m, int but)
+{
+        int oldest = -1;
+
+        for (int k = 0; k < FILES_KEPT; k++)
+                if (k != but && m->kept[k].path[0] && (oldest < 0 || m->kept[k].left < m->kept[oldest].left))
+                        oldest = k;
+        return oldest;
+}
+
+// The folder shown is being left: its listing, if it is whole, is kept as it is. One too large to keep, or with no memory for it, is not.
+static fn files_keep_put(struct files_model address_to m)
+{
+        positive bytes = files_keep_bytes(m->shown.count, m->shown.names_used), held = 0;
+        int which = files_keep_find(m, m->path);
+        struct files_kept address_to k;
+        struct files_listing into;
+        bipolar mapped = 0;
+        p8 address_to chosen;
+
+        if (which >= 0)
+                files_keep_drop(m, which);
+        if (m->state != FILES_READY || m->handle < 0 || bytes > FILES_KEPT_BYTES)
+                return;
+        for (int at = 0; which < 0 && at < FILES_KEPT; at++)
+                which = m->kept[at].path[0] ? -1 : at;
+        if (which < 0)
+                files_keep_drop(m, which = files_keep_oldest(m, -1));
+        for (int at = 0; at < FILES_KEPT; at++)
+                held += m->kept[at].bytes;
+        while (held + bytes > FILES_KEPT_BYTES)
+        {
+                int oldest = files_keep_oldest(m, which);
+
+                held -= m->kept[oldest].bytes;
+                files_keep_drop(m, oldest);
+        }
+        if (bytes && (mapped = (bipolar)system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0)) < 0 && mapped > -4096)
+                return;
+        k = &m->kept[which];
+        string_copy_bounded(k->path, m->path, FILES_PATH);
+        k->mapped = (address_any)mapped, k->bytes = bytes;
+        k->count = m->shown.count, k->names_used = m->shown.names_used, k->cut = m->shown.cut;
+        k->folder = m->folder, k->sort = m->sort, k->descending = m->descending, k->hidden = m->hidden;
+        k->cursor = m->cursor, k->anchor = m->anchor, k->chosen_count = m->chosen_count, k->seat = m->seat;
+        k->left = ++m->kept_clock;
+        if (!bytes)
+                return;
+        chosen = files_keep_listing(k, &into);
+        memory_copy(into.entry, m->shown.entry, (positive)k->count * sizeof(struct files_entry));
+        memory_copy(into.order, m->shown.order, (positive)k->count * sizeof(p32));
+        memory_copy(into.names, m->shown.names, k->names_used);
+        memory_copy(chosen, m->chosen, (k->count + 7) / 8);
+}
+
+// A kept listing shown again, as it was left (in the order asked for now), and its place given up: nothing is read.
+static fn files_keep_take(struct files_model address_to m, int which)
+{
+        struct files_kept address_to k = &m->kept[which];
+        struct files_listing from;
+        const p8 address_to chosen;
+        p32 on;
+
+        m->shown.count = k->count, m->shown.names_used = k->names_used, m->shown.cut = k->cut;
+        if (k->bytes)
+        {
+                chosen = files_keep_listing(k, &from);
+                memory_copy(m->shown.entry, from.entry, (positive)k->count * sizeof(struct files_entry));
+                memory_copy(m->shown.order, from.order, (positive)k->count * sizeof(p32));
+                memory_copy(m->shown.names, from.names, k->names_used);
+                memory_copy(m->chosen, chosen, (k->count + 7) / 8);
+        }
+        m->chosen_count = k->chosen_count, m->anchor = k->anchor, m->cursor = k->cursor < k->count ? k->cursor : FILES_NO;
+        m->folder = k->folder, m->seat = k->seat;
+        if (k->sort != m->sort || k->descending != m->descending)
+        {
+                on = m->cursor != FILES_NO ? m->shown.order[m->cursor] : FILES_NO;
+                files_listing_sort(&m->shown, m->sort, m->descending);
+                for (p32 place = 0; place < m->shown.count && on != FILES_NO; place++)
+                        if (m->shown.order[place] == on)
+                        {
+                                m->cursor = place;
+                                break;
+                        }
+        }
+        files_keep_drop(m, which);
+}
+
+// The folder shown is this one from now on: its descriptor (taken over; -1 with an error for one that did not open), and its reading
+// begun, unless its listing was kept and it is still that folder (the same device and inode on the descriptor): then it is shown as
+// it was left and nothing is read (m->restored). The folder left, if its listing was whole, is kept.
 static fn files_model_show(struct files_model address_to m, string_address path, bipolar handle, bipolar error)
 {
+        file_facts now;
+        int kept;
+
         if (m->walking)
                 file_walk_close(&m->reader);
         m->walking = false, m->reloading = false;
+        files_keep_put(m);
         if (m->handle >= 0)
                 system_close(m->handle);
         m->handle = handle;
@@ -532,7 +702,21 @@ static fn files_model_show(struct files_model address_to m, string_address path,
                 string_copy_bounded(m->path, path, FILES_PATH);
         files_listing_empty(&m->shown), files_listing_empty(&m->next);
         files_model_choose_none(m);
-        m->cursor = FILES_NO;
+        m->cursor = FILES_NO, m->seat = 0, m->restored = false;
+        if ((kept = files_keep_find(m, m->path)) >= 0)
+        {
+                const struct files_kept address_to k = &m->kept[kept];
+
+                if (handle >= 0 && k->hidden == m->hidden && file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &now) >= 0 && now.inode == k->folder.inode &&
+                    now.device_major == k->folder.device_major && now.device_minor == k->folder.device_minor)
+                {
+                        files_keep_take(m, kept);
+                        m->state = FILES_READY, m->error = 0, m->restored = true, m->came[0] = end;
+                        m->revision++;
+                        return;
+                }
+                files_keep_drop(m, kept);
+        }
         m->state = FILES_READING, m->error = 0;
         if (handle < 0 || !files_model_begin(m))
         {
@@ -726,7 +910,7 @@ static int files_model_try(struct files_model address_to m, string_address path)
         how many folders start so; into is the bytes given when none goes further. Files are not offered: a path being typed is a
         folder's. The listing is the one in memory, so this reads no disk.
 */
-static p32 files_model_complete(const struct files_model address_to m, const p8 address_to start, positive length, p8 address_to into, positive room)
+static p32 files_listing_complete(const struct files_listing address_to l, const p8 address_to start, positive length, p8 address_to into, positive room)
 {
         p32 found = 0;
         positive shared = 0;
@@ -736,10 +920,10 @@ static p32 files_model_complete(const struct files_model address_to m, const p8 
         length = length < room - 1 ? length : room - 1;
         memory_copy(into, start, length);
         into[length] = end;
-        for (p32 place = 0; m->state == FILES_READY && place < m->shown.count; place++)
+        for (p32 place = 0; l && place < l->count; place++)
         {
-                const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
-                const p8 address_to name = m->shown.names + entry->name;
+                const struct files_entry address_to entry = &l->entry[l->order[place]];
+                const p8 address_to name = l->names + entry->name;
 
                 if (entry->kind != FILES_KIND_DIRECTORY || entry->length < length || entry->length >= room ||
                     (length && memory_compare((address_any)name, (address_any)start, length)))
@@ -759,6 +943,34 @@ static p32 files_model_complete(const struct files_model address_to m, const p8 
                 into[shared] = end;
         }
         return found;
+}
+
+static p32 files_model_complete(const struct files_model address_to m, const p8 address_to start, positive length, p8 address_to into, positive room)
+{
+        return files_listing_complete(m->state == FILES_READY ? &m->shown : null, start, length, into, room);
+}
+
+// The same from the listing of any folder that is in memory, the one shown or one kept: none found for a folder that is neither.
+static p32 files_model_complete_in(const struct files_model address_to m, const p8 address_to folder, const p8 address_to start, positive length, p8 address_to into, positive room)
+{
+        struct files_listing kept;
+        int which = files_keep_find(m, folder);
+
+        if (string_equals((string_address)folder, (string_address)m->path))
+                return files_model_complete(m, start, length, into, room);
+        if (which >= 0 && m->kept[which].bytes)
+                files_keep_listing(&m->kept[which], &kept);
+        return files_listing_complete(which >= 0 && m->kept[which].bytes ? &kept : null, start, length, into, room);
+}
+
+// A folder that is open already, by a descriptor that is taken over, is the folder shown: the one before it goes on the way back.
+static fn files_model_take(struct files_model address_to m, string_address path, bipolar handle)
+{
+        if (m->state != FILES_NONE)
+                files_history_push(m->back, &m->back_count, m->path);
+        m->forward_count = 0;
+        m->came[0] = end;
+        files_model_show(m, path, handle, 0);
 }
 
 // Into the folder at a place of the listing: only one that is, now, the folder that was listed (files_model_check), opened without
@@ -795,6 +1007,18 @@ static int files_model_enter(struct files_model address_to m, p32 place)
         return FILES_SAME;
 }
 
+// The cursor is to be on this name (the folder come up out of): when the listing is whole, or at once in one shown as it was left,
+// where everything else is as it was left.
+static fn files_model_came(struct files_model address_to m, const p8 address_to name)
+{
+        p32 place = m->restored && name[0] ? files_model_find(m, name) : FILES_NO;
+
+        if (!m->restored)
+                string_copy_bounded(m->came, (string_address)name, FILES_NAME);
+        else if (place != FILES_NO && place != m->cursor)
+                m->cursor = place, m->revision++;
+}
+
 // To the folder this one is in, with the cursor on the folder come out of. False at the root.
 static b32 files_model_up(struct files_model address_to m)
 {
@@ -807,7 +1031,7 @@ static b32 files_model_up(struct files_model address_to m)
         m->forward_count = 0;
         file_walk_open(&opened, AT_FDCWD, parent);
         files_model_show(m, parent, opened.handle, opened.error);
-        string_copy_bounded(m->came, name, FILES_NAME);
+        files_model_came(m, name);
         return true;
 }
 
@@ -830,7 +1054,7 @@ static b32 files_model_back(struct files_model address_to m, b32 forward)
                 name[0] = end;
         file_walk_open(&opened, AT_FDCWD, to);
         files_model_show(m, to, opened.handle, opened.error);
-        string_copy_bounded(m->came, name, FILES_NAME);
+        files_model_came(m, name);
         return true;
 }
 
@@ -858,6 +1082,7 @@ struct files_trail
         p64 inode[FILES_TRAIL];                 // what each was when it was shown,
         p32 device_major[FILES_TRAIL], device_minor[FILES_TRAIL];
         p8 known[FILES_TRAIL];                  // for those that were
+        p8 lost[FILES_TRAIL];                   // a folder after the current one that was looked for and is not there, or is not the folder it was
         int count, current;
 };
 
@@ -890,6 +1115,22 @@ static fn files_trail_split(struct files_trail address_to t)
         }
 }
 
+// The trail is this path, whole. What the folders it shares with the old one were is kept with them; no other is known, and none is lost.
+static fn files_trail_become(struct files_trail address_to t, const p8 address_to path)
+{
+        struct files_trail was = *t;
+
+        string_copy_bounded(t->path, (string_address)path, FILES_PATH);
+        files_trail_split(t);
+        for (int k = 0; k < t->count; k++)
+        {
+                b32 same = k < was.count && was.known[k] && was.to[k] == t->to[k] && was.from[k] == t->from[k] && !memory_compare((address_any)was.path, (address_any)t->path, t->to[k]);
+
+                t->known[k] = same, t->lost[k] = 0;
+                t->inode[k] = same ? was.inode[k] : 0, t->device_major[k] = same ? was.device_major[k] : 0, t->device_minor[k] = same ? was.device_minor[k] : 0;
+        }
+}
+
 // The path shown is this one now, and this is the folder it is (null: not known). True when the trail was kept and only the place moved.
 static b32 files_trail_note(struct files_trail address_to t, const p8 address_to shown, const file_facts address_to folder)
 {
@@ -901,21 +1142,13 @@ static b32 files_trail_note(struct files_trail address_to t, const p8 address_to
                         place = k;
         if (place < 0)
         {
-                // Another branch: the trail is this path. What the folders it shares with the old one were is kept with them.
-                struct files_trail was = *t;
-
-                string_copy_bounded(t->path, (string_address)shown, FILES_PATH);
-                files_trail_split(t);
-                for (int k = 0; k < t->count; k++)
-                {
-                        b32 same = k < was.count && was.known[k] && was.to[k] == t->to[k] && !memory_compare((address_any)was.path, (address_any)t->path, t->to[k]);
-
-                        t->known[k] = same;
-                        t->inode[k] = same ? was.inode[k] : 0, t->device_major[k] = same ? was.device_major[k] : 0, t->device_minor[k] = same ? was.device_minor[k] : 0;
-                }
+                // Another branch: the trail is this path.
+                files_trail_become(t, shown);
                 place = t->count - 1;
         }
         t->current = place < 0 ? 0 : place;
+        for (int k = 0; k <= t->current && k < t->count; k++)
+                t->lost[k] = 0; // what was gone to is there
         if (folder && place >= 0 && folder->inode)
                 t->known[place] = 1, t->inode[place] = folder->inode, t->device_major[place] = folder->device_major, t->device_minor[place] = folder->device_minor;
         return t->to[t->count ? t->count - 1 : 0] != length;
@@ -930,24 +1163,54 @@ static fn files_trail_path(const struct files_trail address_to t, int which, p8 
         into[length] = end;
 }
 
-// A folder of the trail looked at again, by its path and without following: is it the folder it was?
-static int files_trail_check(const struct files_trail address_to t, int which)
+/*
+        A folder of the trail opened as the folder it was. The open comes first and does not follow (O_NOFOLLOW: a link under its
+        name is refused by the kernel), and what it was is then compared on the descriptor that was opened, its device and inode,
+        so there is no moment between a look and an open in which the name can be given to something else: whatever the
+        descriptor is, it is what was compared. FILES_SAME with the descriptor in *handle (the caller's from then on);
+        FILES_MISSING for a path that names nothing now; FILES_CHANGED for anything else there (another folder, a file, a link);
+        FILES_REFUSED for no such folder of the trail, or one that may not be opened (*error has the kernel's code).
+*/
+static int files_trail_open(const struct files_trail address_to t, int which, bipolar address_to handle, bipolar address_to error)
 {
         p8 path[FILES_PATH];
         file_facts facts;
-        bipolar looked;
+        bipolar opened;
 
+        *handle = -1, *error = 0;
         if (which < 0 || which >= t->count)
                 return FILES_REFUSED;
         files_trail_path(t, which, path);
-        looked = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, &facts);
-        if (looked < 0)
-                return looked == -ERROR_NO_ENTRY || looked == -ERROR_NOT_DIRECTORY ? FILES_MISSING : FILES_CHANGED;
-        if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+        opened = system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (opened < 0)
+        {
+                // Why not: nothing there, or something that is no folder (a look, for the word alone: nothing is done by it).
+                if (opened == -ERROR_NO_ENTRY)
+                        return FILES_MISSING;
+                if (opened == -ERROR_NOT_DIRECTORY || opened == -40)
+                        return file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, &facts) < 0 ? FILES_MISSING : FILES_CHANGED;
+                *error = opened;
+                return FILES_REFUSED;
+        }
+        if (file_look_code(opened, (string_address) "", AT_EMPTY_PATH, &facts) < 0 ||
+            (t->known[which] && (facts.inode != t->inode[which] || facts.device_major != t->device_major[which] || facts.device_minor != t->device_minor[which])))
+        {
+                system_close(opened);
                 return FILES_CHANGED;
-        if (t->known[which] && (facts.inode != t->inode[which] || facts.device_major != t->device_major[which] || facts.device_minor != t->device_minor[which]))
-                return FILES_CHANGED;
+        }
+        *handle = opened;
         return FILES_SAME;
+}
+
+// Whether a folder of the trail is the folder it was, and nothing more: opened as files_trail_open opens it, and closed.
+static int files_trail_check(const struct files_trail address_to t, int which)
+{
+        bipolar handle, error;
+        int seen = files_trail_open(t, which, &handle, &error);
+
+        if (handle >= 0)
+                system_close(handle);
+        return seen == FILES_REFUSED && error ? FILES_CHANGED : seen;
 }
 
 // The trail ends before its folder number `which`: that one and all after it are dropped. The current one is never dropped.
@@ -957,6 +1220,115 @@ static fn files_trail_cut(struct files_trail address_to t, int which)
                 return;
         t->path[t->to[which - 1]] = end;
         t->count = which;
+}
+
+// From its folder number `which` on, the trail's folders are lost: looked for and not there. They stay, struck through, to be put right.
+static fn files_trail_lose(struct files_trail address_to t, int which)
+{
+        for (int k = which > t->current ? which : t->current + 1; k < t->count; k++)
+                t->lost[k] = 1;
+}
+
+// Every kept listing whose folder is not on the trail is let go: what is kept is the trail's.
+static fn files_keep_trim(struct files_model address_to m, const struct files_trail address_to t)
+{
+        for (int k = 0; k < FILES_KEPT; k++)
+        {
+                positive length = string_length((string_address)m->kept[k].path);
+                b32 on = false;
+
+                for (int at = 0; length && at < t->count && !on; at++)
+                        on = t->to[at] == length && !memory_compare((address_any)t->path, (address_any)m->kept[k].path, length);
+                if (length && !on)
+                        files_keep_drop(m, k);
+        }
+}
+
+/*
+        One folder of the trail spelled again: the path the trail would be with its folder number `which` replaced by the text
+        and every folder after it kept, written to into. /path/to/something/else with "to" spelled "foo" is
+        /path/foo/something/else. A stroke in the text makes several folders of it; no text takes the folder out. The text is a
+        person's and is not trusted: a byte below a blank or the delete byte, and a folder spelled . or .., are refused, and so
+        is a path that would not fit. The root cannot be spelled again. False for what is refused, and into is not to be read.
+*/
+static b32 files_trail_spell(const struct files_trail address_to t, int which, const p8 address_to text, p8 address_to into)
+{
+        positive length = string_length((string_address)text), used = 0, whole = string_length((string_address)t->path);
+        positive parts[3][2];
+        const p8 address_to from[3];
+
+        if (which < 0 || which >= t->count || t->to[which] <= 1 || (which == 0 && t->from[0] == 0))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (text[at] < 0x20 || text[at] == 0x7f)
+                        return false;
+        // What is before it (its stroke with it), the text, what is after it (its stroke with it): strokes run together are one.
+        from[0] = t->path, parts[0][0] = 0, parts[0][1] = t->from[which];
+        from[1] = text, parts[1][0] = 0, parts[1][1] = length;
+        from[2] = t->path, parts[2][0] = t->to[which], parts[2][1] = whole;
+        for (int part = 0; part < 3; part++)
+                for (positive at = parts[part][0]; at < parts[part][1]; at++)
+                {
+                        p8 byte = from[part][at];
+
+                        if (byte == '/' && used && into[used - 1] == '/')
+                                continue;
+                        if (used + 1 >= FILES_PATH)
+                                return false;
+                        into[used++] = byte;
+                }
+        while (used > 1 && into[used - 1] == '/')
+                used--;
+        into[used] = end;
+        for (positive at = 1; at < used;)
+        {
+                positive stop = at;
+
+                while (stop < used && into[stop] != '/')
+                        stop++;
+                if ((stop - at == 1 && into[at] == '.') || (stop - at == 2 && into[at] == '.' && into[at + 1] == '.') || stop - at >= FILES_NAME)
+                        return false;
+                at = stop + 1;
+        }
+        return used && into[0] == '/';
+}
+
+/*
+        The trail made a path a person spelled, and the folder shown its deepest folder that is one. The path's folders are tried
+        from the deepest up, each opened as named (a link is followed, which is what naming a folder means: files_model_go's rule),
+        and the first that opens is shown (not opened again when it is the folder shown already); the whole path is the trail,
+        with that folder the current one and every folder after it lost. Answers FILES_READY when the whole path was a folder,
+        else the state the first folder that was not would have had (FILES_GONE, FILES_NOT_DIRECTORY, FILES_UNREADABLE,
+        FILES_FAILED), for a view to say; FILES_NONE, and nothing changes, when not even its first folder opens.
+*/
+static int files_trail_resolve(struct files_model address_to m, struct files_trail address_to t, const p8 address_to path)
+{
+        static struct files_trail next;
+        p8 part[FILES_PATH];
+        file_walk opened;
+        int why = FILES_READY, deepest;
+
+        memory_fill(&next, 0, sizeof(next));
+        string_copy_bounded(next.path, (string_address)path, FILES_PATH);
+        files_trail_split(&next);
+        opened.handle = -1;
+        for (deepest = next.count - 1; deepest >= 0; deepest--)
+        {
+                files_trail_path(&next, deepest, part);
+                if (file_walk_open(&opened, AT_FDCWD, part))
+                        break;
+                why = files_state_of(opened.error);
+        }
+        if (deepest < 0)
+                return FILES_NONE;
+        if (string_equals((string_address)part, (string_address)m->path) && m->handle >= 0)
+                system_close(opened.handle);
+        else
+                files_model_take(m, part, opened.handle);
+        files_trail_become(t, path);
+        files_trail_note(t, m->path, m->handle >= 0 ? &m->folder : null);
+        files_trail_lose(t, deepest + 1);
+        return why;
 }
 
 /* ---- changing what is in the folder ---- */
