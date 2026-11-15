@@ -41,6 +41,57 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-201: a subsurface's buffer read at every compose, and one released while it was still read
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-15, this commit |
+| Class | Client memory read by the compositor after the commit (a layer read in place); a release sent while another hold remained (the client draws into a buffer still read) |
+| Attacker | 1 or 8: any program that can open `/run/moonwater/wayland-0`, which is mode 0666, a bowl's programs included |
+| Reachable | src/canvas/wayland_host.c `compositor_wl_row_layers`, `compositor_wl_layers_frames`, from `wl_surface.commit` of a subsurface (src/canvas/wayland.c `wayland_layers`); src/canvas/wayland.c `wayland_let_go` |
+
+**What happened.** Until this change a subsurface's picture was copied into
+its window's picture at its commit, and the client's buffer was read only
+then. With a window's subsurfaces as layers of their own (`row_layers`), each
+is read where its client keeps it at every compose that draws it, as a whole
+window's lent picture already was: a client can cut the pool's file, grow
+the pool so its mapping moves, destroy the subsurface, the buffer or the
+pool, or kill itself between the commit and the compose. Separately, and
+before this change, `wayland_let_go` told a client its buffer was released
+at every let go of a hold, not at the last: a buffer held twice (a window's
+picture with subsurfaces that is also its lent picture) was released while
+the compositor still read it, and a client that redraws into a released
+buffer drew into the picture on the screen.
+
+**The fix.** A layer is read only while the shim holds its buffer as a lent
+picture's (`lent`, `lent_gone`); a buffer a layer stops being read from is
+let go of only once a frame has been drawn without it, and one of a
+subsurface that goes (destroyed, taken off its parent, its parent gone) is
+kept in the client's list of them (`gone`, `WAYLAND_GONE`) until then; the
+host is told before any of it (the layers it keeps are replaced, or laid into
+the window's picture when it refuses them). A pool cut under a layer is read
+as the zero pages the SIGBUS handler maps (its first and last pixel are read
+at the commit, as a lent picture's are, and the layer is refused there); a
+pool that moves moves its layers with it (`compositor_wl_remap`). A client's
+row closing or the client going lets go of the layers with the row. A layer
+is bounded: WAYLAND_LAYERS a window, COMPOSITOR_LAYERS in all, the window's
+rectangle, a buffer the processor reads at its own size, no transform. And
+`wayland_let_go` releases a buffer when its last hold goes.
+
+**Tests that fail without the fix.** CHECK_wayland (lane `wayland`),
+`test_layers`: "the buffer it replaced is not released before a frame is
+drawn", "a subsurface given no buffer is handed no more, and its buffer is
+held until a frame is drawn", "a subsurface destroyed while it is a layer is
+handed no more, its buffer held", red with `wayland_let_go` as it was (the
+first two) and with the layers' holds taken out. test/wayland_layers.py,
+"a subsurface's file cut while it is read in place, the compositor goes on
+and the next client is drawn", run by hand against the headless compositor;
+the lane's end-to-end run was NOT RUN here (it needs libwayland's client and
+scanner).
+
+**Still open.** A dma-buf layer is read by the card through its import: no
+card here, NOT RUN.
+
 ### MW-2026-200: a client could be told its buffer was free while a card job still read it, and tear the desktop's frame
 
 | | |

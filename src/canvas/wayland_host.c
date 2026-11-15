@@ -175,6 +175,47 @@ static struct
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
 
 /*
+        A window's subsurfaces as layers of their own (row_layers, wayland.c): each the rectangle of a client's buffer at its place in the
+        window, cut to it, read where the client keeps it as the lent picture is, and shown as a frame of its own over the window's
+        (compositor_wl_layers_frames), so a subsurface's commit is the composing of its damage and nothing copied. A row has layers only while
+        its own picture is lent: they are over that picture, and a row whose picture is the table's has its layers laid into it
+        (compositor_wl_layers_lay), as the shim lays a subsurface it does not hand as a layer. COMPOSITOR_LAYERS in all (the frames a
+        present has room for), WAYLAND_LAYERS a row.
+*/
+struct compositor_wl_layer
+{
+        const unsigned int *pixels;   // the first pixel of the layer's rectangle, in the client's buffer
+        unsigned long pitch;          // in pixels
+        int x, y, width, height;      // the rectangle in the window's pixels
+        int blend;                    // premultiplied, laid over what is under it
+        unsigned int id;              // the surface's (wayland_picture.layer)
+        const unsigned char *map;     // the mapping the buffer is in, and its size, as the lent picture's
+        long fd, size;
+        unsigned long dev, ino, modifier;
+        positive va, import;          // a dma-buf's: the card's address of the first pixel, and the import's
+        unsigned int epoch, fourcc, offset;
+        int synced;
+};
+
+static struct
+{
+        struct compositor_wl_layer layer[WINDOWS][WAYLAND_LAYERS];
+        unsigned char count[WINDOWS];
+        unsigned int total;
+        // The row's own picture was copied when last handed with layers (root 1): it is not asked for again to have them
+        // (WAYLAND_LAYERS_ROOT), and its subsurfaces are laid into it, as before, until its next picture is read in place.
+        unsigned char root_refused[WINDOWS];
+        // What the layers handed with the row's own picture changed of the window (root 1), for the picture's take: rectangles x1, y1, x2,
+        // y2 in the window's pixels, count -1 for more than there is room for (their box is damaged).
+        int pending_row, pending_count, pending_box[4];
+        int pending[WAYLAND_DAMAGE][4];
+} compositor_wl_layers = {.pending_row = -1};
+
+// The layers of all rows together are held to COMPOSITOR_LAYERS (compositor_wl_layers.total), the frames a present has room for beside its
+// windows', and one window's whole set fits in it.
+_Static_assert(COMPOSITOR_LAYERS >= WAYLAND_LAYERS && COMPOSITOR_LAYERS <= WINDOWS * WAYLAND_LAYERS, "the layers' room is COMPOSITOR_LAYERS");
+
+/*
         A card address of a client's dma-buf (its import's), kept with the card's epoch the import was made in: 0 once the card has been let go of since
         (gpu_recover: the import went with the old descriptor, and the address may be another map's by now), so that the picture is imported again.
 */
@@ -515,6 +556,15 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
                                 (const unsigned int *)((const unsigned char *)compositor_wl.lent[row].pixels + (got - (long)at));
                         compositor_wl.lent[row].map = (const unsigned char *)got;
                 }
+        // And the layers read in place from it (compositor_wl_layers).
+        for (int row = 0; row < WINDOWS; row++)
+                for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                        if (compositor_wl_layers.layer[row][k].map == (const unsigned char *)at)
+                        {
+                                compositor_wl_layers.layer[row][k].pixels =
+                                        (const unsigned int *)((const unsigned char *)compositor_wl_layers.layer[row][k].pixels + (got - (long)at));
+                                compositor_wl_layers.layer[row][k].map = (const unsigned char *)got;
+                        }
         return (void *)got;
 }
 
@@ -904,7 +954,9 @@ static unsigned int compositor_lent_fb(int row)
                 unsigned long long modifier[4];
         } fb = {0};
 
-        if (!compositor_lent(row) || compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0)
+        // A picture with layers over it is not the window: its layers are composed over it (compositor_wl_layers_frames).
+        if (!compositor_lent(row) || compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0 ||
+            compositor_wl_layers.count[row])
                 return 0;
         if (compositor_wl.lent[row].scan_fb)
                 return compositor_wl.lent[row].scan_fb;
@@ -959,9 +1011,57 @@ static int compositor_wl_row_async(int row)
         return row >= 0 && wayland_row_hint(row, WAYLAND_HINT_ASYNC) != 0;
 }
 
-// The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's.
+// A row's layers let go of: the imports of their dma-bufs released (as the lent picture's are), and the row has none.
+static void compositor_wl_layers_drop(int row)
+{
+        if (row < 0 || row >= WINDOWS)
+                return;
+        for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
+                if (compositor_wl_live(compositor_wl_layers.layer[row][at].import, compositor_wl_layers.layer[row][at].epoch))
+                        gpu_release_import(compositor_wl_layers.layer[row][at].import);
+        compositor_wl_layers.total -= compositor_wl_layers.count[row];
+        compositor_wl_layers.count[row] = 0;
+        if (compositor_wl_layers.pending_row == row)
+                compositor_wl_layers.pending_row = -1;
+}
+
+// Layers laid into a picture of the table (to, pitch: the window's first pixel), each over what is under it, bottom first.
+static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list, unsigned int count, unsigned int *to, unsigned long pitch)
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const struct compositor_wl_layer *l = &list[at];
+                unsigned int *into = to + (unsigned long)l->y * pitch + (unsigned long)l->x;
+                unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
+
+                if (l->fd >= 0)
+                        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                if (l->blend)
+                        memory_over_u32_rect(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
+                else if (l->fd >= 0)
+                        memory_copy_rect_stream_u32(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
+                else
+                        memory_copy_rect_u32(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
+                if (l->fd >= 0)
+                {
+                        sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+                        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                }
+        }
+}
+
+// A row's layers laid into a picture of the table.
+static void compositor_wl_layers_put(int row, unsigned int *to, unsigned long pitch)
+{
+        compositor_wl_layers_put_list(compositor_wl_layers.layer[row], compositor_wl_layers.count[row], to, pitch);
+}
+
+// The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's;
+// the layers over it go with it (the shim lays what it shows of them again).
 static void compositor_wl_unlend(int row)
 {
+        if (row >= 0 && row < WINDOWS && compositor_wl_layers.count[row])
+                compositor_wl_layers_drop(row);
         if (!compositor_lent(row))
                 return;
         compositor_wl_lent_drop_fb(row);
@@ -970,8 +1070,8 @@ static void compositor_wl_unlend(int row)
         memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
 }
 
-// The lent picture copied into a table buffer, whole, and then let go of: the row's picture is that buffer's from here on. Its size is the
-// picture's, which the table's buffers hold (a lend is only for a picture of the table's size at most).
+// The lent picture copied into a table buffer, whole, with the layers over it laid on, and then let go of: the row's picture is that buffer's
+// from here on. Its size is the picture's, which the table's buffers hold (a lend is only for a picture of the table's size at most).
 static void compositor_wl_seed(int row, unsigned int which)
 {
         unsigned int *to;
@@ -993,19 +1093,59 @@ static void compositor_wl_seed(int row, unsigned int which)
                 sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         }
+        compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
         compositor_wl_unlend(row);
+}
+
+// A row's layers laid into its picture, and the row has none: the lent picture with them into the table (compositor_wl_seed), or a picture
+// that is the table's already with them laid over it, in the buffer it shows. What is shown is what was: nothing to compose again.
+static void compositor_wl_layers_lay(int row)
+{
+        if (row < 0 || row >= WINDOWS || !compositor_wl_layers.count[row])
+                return;
+        if (compositor_lent(row))
+                compositor_wl_seed(row, compositor.front[row]);
+        else
+                compositor_wl_layers_put(row, (unsigned int *)((char *)compositor.table + compositor.pixels +
+                                                               ((unsigned long)row * 2 + (compositor.front[row] & 1u)) * compositor.buffer),
+                                         (unsigned long)compositor_stride());
+        compositor_wl_layers_drop(row);
+}
+
+/*
+        Whether a rectangle of a window (x1, y1 to x2, y2 in its pixels) meets one of the squares its round corners are drawn in: a frame's
+        radius (compositor_radius) and line, at the window's size. A layer there would be drawn square over the round corner.
+*/
+static int compositor_wl_meets_corner(int x1, int y1, int x2, int y2, int width, int height, int radius, int line)
+{
+        int near = radius - line;
+
+        if (radius <= 0)
+                return 0;
+        return (x1 < near || x2 > width - near) && (y1 < near || y2 > height - near);
 }
 
 /*
         The lent picture of a row whose window is not the size of the picture (it grew or shrank since the commit, and the compositor is to
         draw the picture stretched, or a picture of another size is the one shown): the picture is copied into the table, which can be
         stretched there, and the row is the table's. A lent picture that the pool was cut under is drawn from the zero pages the SIGBUS
-        handler maps over it, and its card maps are let go of, so the card maps the zero pages too.
+        handler maps over it, and its card maps are let go of, so the card maps the zero pages too. A row with layers that cannot be drawn as
+        frames of their own over the window (it lands, which scales it, or is glass, which is the window composed over its backdrop, or its
+        picture is the table's) has them laid into its picture first.
 */
 #define COMPOSITOR_WL_WC_PRESENTS 2
 
 static void compositor_wl_settle(int row)
 {
+        if (row >= 0 && row < WINDOWS && compositor_wl_layers.count[row])
+        {
+                for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
+                        if (compositor_wl_cut(compositor_wl_layers.layer[row][at].pixels))
+                                gpu_forget(compositor_wl_layers.layer[row][at].pixels,
+                                           (positive)compositor_wl_layers.layer[row][at].height * compositor_wl_layers.layer[row][at].pitch * 4);
+                if (!compositor_lent(row) || compositor.landing[row] || compositor.glassy[row])
+                        compositor_wl_layers_lay(row);
+        }
         if (!compositor_lent(row))
                 return;
         // A dma-buf the processor read in place COMPOSITOR_WL_WC_PRESENTS presents running: copied once, and the row's copies made from here on.
@@ -1120,6 +1260,28 @@ static void compositor_wl_lent_sync(int start)
                                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC,
                                                 (positive)&end_sync, 0, 0, 0);
                                 compositor_wl.lent[row].synced = 0;
+                        }
+                }
+        // The layers of dma-bufs, each bracketed as the picture under them is, for a present that draws their window.
+        for (int row = 0; row < WINDOWS; row++)
+                for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                {
+                        struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+
+                        if (l->fd < 0)
+                                continue;
+                        if (start && !l->synced && compositor_wl_row_damaged(row))
+                        {
+                                l->synced = compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)l->fd) &&
+                                            compositor_wl_sync_start(wayland_row_owner(row), (int)l->fd);
+                                // The processor reads it in place as it does a lent picture: counted the same (compositor_wl.wc_reads).
+                                if (compositor_wl.wc_reads[row] < 255)
+                                        compositor_wl.wc_reads[row]++;
+                        }
+                        else if (!start && l->synced)
+                        {
+                                compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&end_sync, 0, 0, 0);
+                                l->synced = 0;
                         }
                 }
 }
@@ -1379,6 +1541,357 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
         table->damage_y[row] = (int)y1;
         table->damage_width[row] = (int)(x2 - x1);
         table->damage_height[row] = (int)(y2 - y1);
+}
+
+/*
+        A subsurface's picture as a layer of a row (width by height the window's pixels; radius and line its frame's corners), made into out:
+        1 when it can be one, with a rectangle of no width for one wholly outside the window, and 0 when it cannot, which refuses all of the
+        row's layers (they are laid into its picture). The rules are the lent picture's (compositor_wl_lend): plain ARGB or XRGB of a buffer
+        the processor reads, at its own size, its rectangle's first and last pixel read first (a pool cut under it is refused), mapped for the
+        card when the card is up, and a dma-buf imported to the card, an import a layer of the same buffer in old already has being taken
+        from it. And one whose rectangle meets a round corner of the window is refused: it would be drawn square over it.
+*/
+static int compositor_wl_layer_make(const struct wayland_picture *picture, long width, long height, int radius, int line,
+                                    struct compositor_wl_layer *old, unsigned int olds, struct compositor_wl_layer *out)
+{
+        long x1, y1, x2, y2;
+        unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0, bytes;
+        const unsigned char *at;
+        volatile unsigned int probe;
+
+        memory_zero(out, sizeof *out);
+        out->fd = -1;
+        out->id = (unsigned int)picture->layer;
+        if (picture->layer <= 0 || !picture->pixels || !picture->map || picture->fragile || compositor_wl_needs_xform(picture, picture->width, picture->height))
+                return 0;
+        if (picture->width <= 0 || picture->height <= 0 || picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || (stride & 3) ||
+            stride < (unsigned long)picture->width * 4 || picture->dest_x < -WAYLAND_DIMENSION || picture->dest_x > WAYLAND_DIMENSION ||
+            picture->dest_y < -WAYLAND_DIMENSION || picture->dest_y > WAYLAND_DIMENSION)
+                return 0;
+        x1 = picture->dest_x < 0 ? 0 : picture->dest_x;
+        y1 = picture->dest_y < 0 ? 0 : picture->dest_y;
+        x2 = picture->dest_x + picture->width > width ? width : picture->dest_x + picture->width;
+        y2 = picture->dest_y + picture->height > height ? height : picture->dest_y + picture->height;
+        if (x2 <= x1 || y2 <= y1)
+                return 1;
+        if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line))
+                return 0;
+        at = picture->pixels + (unsigned long)(y1 - picture->dest_y) * stride + (unsigned long)(x1 - picture->dest_x) * 4;
+        bytes = (unsigned long)(y2 - y1 - 1) * stride + (unsigned long)(x2 - x1) * 4;
+        if (at < picture->map || (unsigned long)(at - picture->map) + bytes > (unsigned long)picture->map_bytes)
+                return 0;
+        // A pool cut under the read raises the SIGBUS its handler answers with zeros, here, and the layer is refused as a copy of it is.
+        probe = *(const volatile unsigned int *)at;
+        probe = probe + *(const volatile unsigned int *)(at + bytes - 4);
+        (void)probe;
+        if (compositor_wl_cut(picture->pixels))
+                return 0;
+#ifdef MOONWATER_GPU_C
+        if (picture->sync_fd < 0 && compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !gpu_va_bytes(at, (positive)bytes) &&
+            !gpu_map(at, (positive)bytes))
+                return 0;
+#endif
+        if (picture->pool_id)
+                dev = 0, ino = picture->pool_id;
+        else if (picture->sync_fd >= 0)
+                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        if (picture->sync_fd >= 0)
+        {
+                if (!gpu_ready())
+                        return 0;
+                for (unsigned int k = 0; k < olds && !out->import; k++)
+                        if (old[k].fd == picture->sync_fd && old[k].map == picture->map && old[k].size == picture->map_bytes && old[k].dev == dev &&
+                            old[k].ino == ino && compositor_wl_live(old[k].import, old[k].epoch))
+                        {
+                                out->import = old[k].import;
+                                old[k].import = 0; // the new layer's now
+                        }
+                if (!out->import)
+                        out->import = gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                if (!out->import)
+                        return 0;
+                out->va = out->import + (positive)(at - picture->map);
+        }
+        out->pixels = (const unsigned int *)at;
+        out->pitch = stride / 4;
+        out->x = (int)x1;
+        out->y = (int)y1;
+        out->width = (int)(x2 - x1);
+        out->height = (int)(y2 - y1);
+        out->blend = picture->blend != 0;
+        out->map = picture->map;
+        out->fd = picture->sync_fd;
+        out->size = picture->map_bytes;
+        out->dev = dev;
+        out->ino = ino;
+        out->modifier = picture->modifier;
+        out->epoch = gpu_epoch;
+        out->fourcc = picture->fourcc;
+        out->offset = (unsigned int)(picture->plane_offset[0] + (unsigned long)(at - picture->pixels));
+        return 1;
+}
+
+// A rectangle of what layers changed of a window (x1, y1 to x2, y2), into a list of room (count -1 once it is past it) and their box.
+static void compositor_wl_change(int rects[][4], int *count, int room, int box[4], int x1, int y1, int x2, int y2)
+{
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        if (*count >= 0 && *count < room)
+        {
+                rects[*count][0] = x1, rects[*count][1] = y1, rects[*count][2] = x2, rects[*count][3] = y2;
+                (*count)++;
+        }
+        else
+                *count = -1;
+        if (box[2] <= box[0])
+                box[0] = x1, box[1] = y1, box[2] = x2, box[3] = y2;
+        else
+        {
+                box[0] = x1 < box[0] ? x1 : box[0], box[1] = y1 < box[1] ? y1 : box[1];
+                box[2] = x2 > box[2] ? x2 : box[2], box[3] = y2 > box[3] ? y2 : box[3];
+        }
+}
+
+/*
+        What a row's layers now change of its window against the ones it had: a layer that is new, moved, of another size or blend, or put in
+        another order is its rectangle and the one it had; one that went is the one it had; one whose surface committed (changed) is its
+        damage (the commit's rectangles in its buffer, moved to its place and cut to its rectangle), or all of it; one with another buffer and
+        no commit is all of it; the others are nothing.
+*/
+static void compositor_wl_layers_changes(const struct compositor_wl_layer *old, unsigned int olds, const struct compositor_wl_layer *now,
+                                         const struct wayland_picture *const *from, unsigned int nows, int rects[][4], int *count, int room,
+                                         int box[4])
+{
+        int restacked = 0, last = -1;
+        unsigned char matched[WAYLAND_LAYERS] = {0};
+
+        for (unsigned int at = 0; at < nows; at++)
+                for (unsigned int k = 0; k < olds; k++)
+                        if (old[k].id == now[at].id)
+                        {
+                                restacked |= (int)k < last;
+                                last = (int)k;
+                        }
+        for (unsigned int at = 0; at < nows; at++)
+        {
+                const struct compositor_wl_layer *l = &now[at];
+                const struct wayland_picture *p = from[at];
+                int was = -1;
+
+                for (unsigned int k = 0; k < olds && was < 0; k++)
+                        if (old[k].id == l->id)
+                                was = (int)k;
+                if (was >= 0)
+                        matched[was] = 1;
+                if (was < 0 || restacked || old[was].x != l->x || old[was].y != l->y || old[was].width != l->width || old[was].height != l->height ||
+                    old[was].blend != l->blend)
+                {
+                        compositor_wl_change(rects, count, room, box, l->x, l->y, l->x + l->width, l->y + l->height);
+                        if (was >= 0)
+                                compositor_wl_change(rects, count, room, box, old[was].x, old[was].y, old[was].x + old[was].width,
+                                                     old[was].y + old[was].height);
+                }
+                else if (p->changed && !p->full && p->damages > 0 && p->damages <= WAYLAND_DAMAGE)
+                        for (long k = 0; k < p->damages; k++)
+                        {
+                                long x1 = p->damage[k].x + p->dest_x, y1 = p->damage[k].y + p->dest_y;
+                                long x2 = x1 + p->damage[k].width, y2 = y1 + p->damage[k].height;
+
+                                x1 = x1 < l->x ? l->x : x1, y1 = y1 < l->y ? l->y : y1;
+                                x2 = x2 > l->x + l->width ? l->x + l->width : x2, y2 = y2 > l->y + l->height ? l->y + l->height : y2;
+                                compositor_wl_change(rects, count, room, box, (int)x1, (int)y1, (int)x2, (int)y2);
+                        }
+                else if (p->changed || old[was].pixels != l->pixels)
+                        compositor_wl_change(rects, count, room, box, l->x, l->y, l->x + l->width, l->y + l->height);
+        }
+        for (unsigned int k = 0; k < olds; k++)
+                if (!matched[k])
+                        compositor_wl_change(rects, count, room, box, old[k].x, old[k].y, old[k].x + old[k].width, old[k].y + old[k].height);
+}
+
+/*
+        The shim's row_layers (wayland.c says what it is handed and answers): a row's subsurfaces kept as layers, each read where its client
+        keeps it. With root 0 they are over the picture the row shows, which is to be the root's lent one; the window is drawn again where
+        they changed it, and nothing is copied. With root 1 the root's picture follows (compositor_wl_row_picture), which takes what they
+        changed with its own. Refused (a layer that cannot be one, more than COMPOSITOR_LAYERS in all, another window size), the layers the
+        row had are laid into its picture first, so that the shim may lay these as it did and the window be as it was.
+*/
+static int compositor_wl_row_layers(void *context, int row, const struct wayland_picture *layers, long count, long root)
+{
+        struct windows *table = compositor.table;
+        struct compositor_wl_layer made[WAYLAND_LAYERS], *old;
+        const struct wayland_picture *from[WAYLAND_LAYERS];
+        struct compositor_frame corners;
+        unsigned int kept = 0, olds;
+        long width, height;
+        int ok = 1, changes = 0, box[4] = {0, 0, 0, 0}, rects[WAYLAND_DAMAGE][4];
+
+        (void)context;
+        if (row < 0 || row >= WINDOWS || !table)
+                return 0;
+        // A window landing (drawn scaled) or of glass (composed over its backdrop) is drawn from one picture: its layers would be laid into it
+        // at the next present (compositor_wl_settle), every present it is so, so they are refused here.
+        if (count < 0 || count > WAYLAND_LAYERS || (count && !layers) || compositor.landing[row] || compositor.glassy[row])
+        {
+                compositor_wl_layers_lay(row);
+                return 0;
+        }
+        // Over a picture that is the table's (it has older layers laid in it), the layers are taken only with the root's picture again,
+        // unless that was copied last time: then they are laid as before.
+        if (!root && !compositor_lent(row))
+        {
+                compositor_wl_layers_lay(row);
+                return compositor_wl_layers.root_refused[row] ? 0 : WAYLAND_LAYERS_ROOT;
+        }
+        width = root && count ? layers[0].row_width : (long)table->width[row];
+        height = root && count ? layers[0].row_height : (long)table->height[row];
+        width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
+        height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
+        memory_zero(&corners, sizeof corners);
+        corners.width = (int)width;
+        corners.height = (int)height;
+        corners.radius = compositor_rounded(row) ? UI_RADIUS * compositor_row_scale(row) / 100 : 0;
+        corners.line = compositor_frame_line(row);
+        old = compositor_wl_layers.layer[row];
+        olds = compositor_wl_layers.count[row];
+        for (long at = 0; at < count && ok; at++)
+        {
+                // A dma-buf of a row the processor composes is copied, not read in place (compositor_wl.wc_copy): no layers then.
+                if (layers[at].row_width != (root ? layers[0].row_width : (long)table->width[row]) ||
+                    layers[at].row_height != (root ? layers[0].row_height : (long)table->height[row]) ||
+                    (layers[at].sync_fd >= 0 && compositor_wl.wc_copy[row]) ||
+                    !compositor_wl_layer_make(&layers[at], width, height, compositor_radius(&corners), corners.line, old, olds, &made[kept]))
+                        ok = 0;
+                else if (made[kept].width > 0)
+                        from[kept++] = &layers[at];
+        }
+        if (ok && compositor_wl_layers.total - olds + kept > COMPOSITOR_LAYERS)
+                ok = 0;
+        if (!ok)
+        {
+                for (unsigned int at = 0; at < kept; at++)
+                        if (compositor_wl_live(made[at].import, made[at].epoch))
+                                gpu_release_import(made[at].import);
+                compositor_wl_layers_lay(row);
+                return 0;
+        }
+        compositor_wl_layers_changes(old, olds, made, from, kept, rects, &changes, WAYLAND_DAMAGE, box);
+        for (unsigned int at = 0; at < olds; at++)
+                if (compositor_wl_live(old[at].import, old[at].epoch))
+                        gpu_release_import(old[at].import);
+        memory_copy(old, made, (positive)kept * sizeof made[0]);
+        compositor_wl_layers.total = compositor_wl_layers.total - olds + kept;
+        compositor_wl_layers.count[row] = (unsigned char)kept;
+        // A subsurface's commit kept as a layer is a picture read in place (moonwater debug's count), as a window's lent one is.
+        for (unsigned int at = 0; at < kept; at++)
+                table->client_in_place += from[at]->changed != 0;
+        if (root)
+        {
+                compositor_wl_layers.pending_row = row;
+                compositor_wl_layers.pending_count = changes;
+                memory_copy(compositor_wl_layers.pending_box, box, sizeof box);
+                if (changes > 0)
+                        memory_copy(compositor_wl_layers.pending, rects, (positive)changes * sizeof rects[0]);
+                return WAYLAND_LAYERS_KEPT;
+        }
+        if (box[2] <= box[0])
+                return WAYLAND_LAYERS_KEPT; // nothing of the window changed
+        compositor_wl.parts[row].count = 0;
+        for (int at = 0; at < changes; at++)
+                compositor_wl_part(row, rects[at][0], rects[at][1], rects[at][2], rects[at][3]);
+        if (changes < 0)
+                compositor_wl.parts[row].count = -1;
+        table->damage_x[row] = box[0];
+        table->damage_y[row] = box[1];
+        table->damage_width[row] = box[2] - box[0];
+        table->damage_height[row] = box[3] - box[1];
+        __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
+        compositor_wl_take(row);
+        return WAYLAND_LAYERS_KEPT;
+}
+
+// The layers handed with the row's own picture (root 1): what they changed taken with the picture's damage (a box and its rectangles), or
+// nothing when the picture is all damaged.
+static void compositor_wl_layers_pending(struct windows *table, int row)
+{
+        if (compositor_wl_layers.pending_row != row)
+                return;
+        compositor_wl_layers.pending_row = -1;
+        if (compositor_wl_layers.pending_box[2] <= compositor_wl_layers.pending_box[0] || table->damage_width[row] <= 0)
+                return;
+        {
+                int x1 = table->damage_x[row], y1 = table->damage_y[row];
+                int x2 = x1 + table->damage_width[row], y2 = y1 + table->damage_height[row];
+                const int *b = compositor_wl_layers.pending_box;
+
+                // The picture's own rectangles stand as compositor_wl_lent_damage made them (a single box is one of its own).
+                if (compositor_wl.parts[row].count == 0)
+                        compositor_wl_part(row, x1, y1, x2, y2);
+                if (compositor_wl_layers.pending_count < 0)
+                        compositor_wl_part(row, b[0], b[1], b[2], b[3]);
+                for (int at = 0; at < compositor_wl_layers.pending_count; at++)
+                        compositor_wl_part(row, compositor_wl_layers.pending[at][0], compositor_wl_layers.pending[at][1], compositor_wl_layers.pending[at][2],
+                                           compositor_wl_layers.pending[at][3]);
+                x1 = b[0] < x1 ? b[0] : x1, y1 = b[1] < y1 ? b[1] : y1;
+                x2 = b[2] > x2 ? b[2] : x2, y2 = b[3] > y2 ? b[3] : y2;
+                table->damage_x[row] = x1;
+                table->damage_y[row] = y1;
+                table->damage_width[row] = x2 - x1;
+                table->damage_height[row] = y2 - y1;
+        }
+}
+
+/*
+        A row's layers as frames of their own over its window's (frames[at - 1], made by compositor_frame_of), into frames[at] on with their row
+        in rows: the count. Each is its rectangle at the window's place, no line, no corners, its pixels where its client keeps them (a
+        dma-buf's at its import's address on the card), blended when it is not opaque. A window drawn other than as its picture at its own
+        size (scaled, or composed as glass), or whose corners its layers now meet, has them laid into its picture instead (compositor_wl_layers_lay),
+        and its frame is that picture's.
+*/
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at)
+{
+        struct compositor_frame *window = &frames[at - 1];
+        unsigned int count = row >= 0 && row < WINDOWS ? compositor_wl_layers.count[row] : 0;
+        int fit = count && compositor_lent(row) && !compositor_scaled(window) && window->pixels == compositor_wl.lent[row].pixels &&
+                  window->width == compositor_wl.lent[row].width && window->height == compositor_wl.lent[row].height;
+
+        for (unsigned int k = 0; fit && k < count; k++)
+        {
+                const struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+
+                fit = !compositor_wl_meets_corner(l->x, l->y, l->x + l->width, l->y + l->height, window->width, window->height,
+                                                  compositor_radius(window), window->builtin || window->line < 0 ? 0 : window->line);
+        }
+        if (!fit)
+        {
+                if (count)
+                {
+                        compositor_wl_layers_lay(row);
+                        window->pixels = compositor_pixels(row);
+                        window->pitch = (unsigned long)compositor_stride();
+                        window->gpu_base = 0;
+                }
+                return 0;
+        }
+        for (unsigned int k = 0; k < count; k++)
+        {
+                const struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+                struct compositor_frame *f = &frames[at + k];
+
+                memory_zero(f, sizeof *f);
+                f->x = window->x + l->x;
+                f->y = window->y + l->y;
+                f->width = l->width;
+                f->height = l->height;
+                f->scale = window->scale;
+                f->pixels = l->pixels;
+                f->pitch = l->pitch;
+                f->gpu_base = compositor_wl_live(l->va, l->epoch);
+                f->blend = l->blend;
+                f->layer = 1;
+                rows[at + k] = (unsigned char)row;
+        }
+        return count;
 }
 
 static inline unsigned int compositor_wl_clamp8(long v)
@@ -1742,6 +2255,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
         int was_lent, sync_started = 0;
         int has_content = picture->pixels != 0 || picture->sync_fd >= 0;
+        struct compositor_wl_layer over[WAYLAND_LAYERS];
+        unsigned int aside = 0;
 
         (void)context;
         if (row < 0 || row >= WINDOWS || !table)
@@ -1764,6 +2279,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 }
                 else
                         compositor_wl_lent_damage(table, row, picture, width, height);
+                compositor_wl_layers_pending(table, row);
+                compositor_wl_layers.root_refused[row] = 0;
                 table->width[row] = (unsigned int)width;
                 table->height[row] = (unsigned int)height;
                 table->client_in_place++;
@@ -1771,8 +2288,27 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 compositor_wl_take(row);
                 return WAYLAND_PICTURE_LENT;
         }
+        if (compositor_wl_layers.pending_row == row && !(picture->last && has_content))
+                compositor_wl_layers.pending_row = -1;
         if (picture->sync_fd >= 0 && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+        {
+                compositor_wl_layers.pending_row = -1; // not shown: the next is whole
                 return 1;
+        }
+        // Layers handed with this picture (row_layers with root 1), which it is not read in place under: kept aside while it is laid, and
+        // laid over it then, and the row's subsurfaces are laid into its picture from here on, as before, until one is read in place.
+        if (compositor_wl_layers.pending_row == row)
+        {
+                aside = compositor_wl_layers.count[row];
+                memory_copy(over, compositor_wl_layers.layer[row], (positive)aside * sizeof over[0]);
+                for (unsigned int at = 0; at < aside; at++)
+                        if (compositor_wl_live(over[at].import, over[at].epoch))
+                                gpu_release_import(over[at].import);
+                compositor_wl_layers.total -= aside;
+                compositor_wl_layers.count[row] = 0;
+                compositor_wl_layers.pending_row = -1;
+                compositor_wl_layers.root_refused[row] = 1;
+        }
         if (!compositor_wl.laying[row].open)
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
@@ -1935,6 +2471,12 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 return -1;
                         }
                 }
+        }
+        if (aside)
+        {
+                compositor_wl_layers_put_list(over, aside, to, pitch);
+                compositor_wl.laying[row].full = 1;
+                compositor_wl.laying[row].touched = 1;
         }
         if (!picture->last)
                 return 0;
@@ -3506,6 +4048,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_clip_clear,
     compositor_wl_dmabuf_signaled,
     compositor_wl_random,
+    compositor_wl_row_layers,
 };
 
 /* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */

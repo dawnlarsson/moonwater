@@ -101,6 +101,9 @@ struct compositor_frame
         positive gpu_base;
         // A client's premultiplied ARGB8888 picture that is not opaque: blended over what lies under it (op 11 on the card).
         int blend;
+        // A layer of its row's window (a client's subsurface read where it keeps it, compositor_wl_layers_frames): a frame after the row's own,
+        // with the row in rows[] as the window's own frame has, and nothing of a window but its picture (no line, corners, buttons or runs).
+        int layer;
 };
 
 /*

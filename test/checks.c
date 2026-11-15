@@ -185533,7 +185533,7 @@ static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
-    fake_clip_clear, fake_dmabuf_ready, fake_random};
+    fake_clip_clear, fake_dmabuf_ready, fake_random, 0}; // no row_layers: every subsurface laid into its window (test_layers gives one)
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -190504,6 +190504,222 @@ static void test_cursor_picture(void)
         wayland_stop();
 }
 
+/*
+        A window's subsurfaces handed to the host as layers (row_layers): the fake host says what it keeps, as the compositor would
+        (answer with root 0, answer_root with root 1), and keeps what it was handed last.
+*/
+static struct
+{
+        long answer, answer_root;
+        long calls, roots, drops, count, kept;
+        struct wayland_picture last[WAYLAND_LAYERS], held[WAYLAND_LAYERS];
+} fake_layers;
+
+// What the host does with the layers it kept when it keeps them no more (a refusal, none): lays them into the window's picture, bottom first.
+static void fake_layers_lay(int row)
+{
+        for (long at = 0; at < fake_layers.kept; at++)
+        {
+                struct wayland_picture laid = fake_layers.held[at];
+
+                laid.last = 0;
+                laid.full = 1;
+                laid.damages = 0;
+                fake_row_picture(0, row, &laid);
+        }
+        fake_layers.kept = 0;
+}
+
+static int fake_row_layers(void *context, int row, const struct wayland_picture *layers, long count, long root)
+{
+        long answer;
+
+        (void)context;
+        if (count < 0)
+        {
+                fake_layers.drops++;
+                fake_layers_lay(row);
+                return 0;
+        }
+        fake_layers.calls++;
+        fake_layers.roots += root != 0;
+        fake_layers.count = count;
+        for (long at = 0; at < count && at < WAYLAND_LAYERS; at++)
+                fake_layers.last[at] = layers[at];
+        answer = root ? fake_layers.answer_root : fake_layers.answer;
+        if (answer != WAYLAND_LAYERS_KEPT)
+                fake_layers_lay(row);
+        else
+        {
+                fake_layers.kept = count;
+                for (long at = 0; at < count && at < WAYLAND_LAYERS; at++)
+                        fake_layers.held[at] = layers[at];
+        }
+        return (int)answer;
+}
+
+// A subsurface of t's window at (x, y), size by size of one colour, synchronized or not, its buffer committed.
+static unsigned long layer_child(struct tree *t, long x, long y, long size, unsigned colour, int desync, unsigned long *sub_out, unsigned long *buffer_out)
+{
+        struct wlc *c = t->s.c;
+        unsigned long surface = wlc_id(c, WLI_wl_surface, 6), sub = wlc_id(c, WLI_wl_subsurface, 1), buffer;
+
+        wlc_send(c, t->s.compositor, WLQ_wl_compositor_create_surface, surface);
+        wlc_send(c, t->subcompositor, WLQ_wl_subcompositor_get_subsurface, sub, surface, t->s.surface);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_position, x, y);
+        if (desync)
+                wlc_send(c, sub, WLQ_wl_subsurface_set_desync);
+        buffer = wl_buffer_of(&t->s, size, size, colour, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_damage_buffer, 0L, 0L, size, size);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        if (sub_out)
+                *sub_out = sub;
+        if (buffer_out)
+                *buffer_out = buffer;
+        return surface;
+}
+
+/*
+        A window's subsurfaces as the host's layers (row_layers): handed at a subsurface's commit with its damage and nothing laid into the
+        window's picture; the window's own commit handed with them (root 1) and its picture the last; a buffer a layer was read from held
+        until a frame is drawn after it is replaced, taken off or destroyed; the host that would have them only with the root again
+        (WAYLAND_LAYERS_ROOT) handed the root's picture again; a host that refuses, nine of them, and one under the root that it does not
+        hide, laid into the picture as before; and everything given back when the client goes mid-way.
+*/
+static void test_layers(void)
+{
+        struct wayland_host host = fake_host;
+        struct tree t;
+        struct wlc *c;
+        unsigned long second, third, sub, extra, gone_buffer, gone_sub, below;
+        long calls, pictures, lends, copied;
+
+        host.row_layers = fake_row_layers;
+        wl_reset();
+        memset(&fake_layers, 0, sizeof fake_layers);
+        fake_layers.answer = fake_layers.answer_root = WAYLAND_LAYERS_KEPT;
+        fake.lend = 1;
+        wayland_start(&host);
+        tree_open(&t, 1); // a window of 32 by 24, a subsurface of 8 by 8 at (4, 4), not synchronized (its desync hands the window's none first)
+        c = t.s.c;
+        WLCHECK(c->errors == 0 && fake_layers.calls == 2 && fake_layers.count == 1 && fake_layers.last[0].dest_x == 4 && fake_layers.last[0].dest_y == 4 &&
+                    fake_layers.last[0].layer > 0 && fake_layers.last[0].changed == 1 && fake_layers.last[0].full == 1 && fake_layers.last[0].row_width == 32 &&
+                    fake_layers.last[0].row_height == 24 && fake_layers.last[0].width == 8 && !fake_layers.last[0].blend,
+                "a subsurface's commit is handed as a layer: its place, its picture whole, the window's size (%ld calls, %ld at %ld,%ld, %s)", fake_layers.calls,
+                fake_layers.count, fake_layers.last[0].dest_x, fake_layers.last[0].dest_y, c->error_text);
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff202020u, "and nothing of it is laid into the window's picture (%08x)", fake.row[0].pixels[5 * FAKE_W + 5]);
+        // Its next buffer, a part of it damaged: handed with that damage; the buffer it replaced is held until a frame is drawn.
+        second = wl_buffer_of(&t.s, 8, 8, 0xffff0000, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, second, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 2L, 2L, 3L, 3L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(fake_layers.calls == 3 && fake_layers.last[0].changed == 1 && fake_layers.last[0].full == 0 && fake_layers.last[0].damages == 1 &&
+                    fake_layers.last[0].damage[0].x == 2 && fake_layers.last[0].damage[0].width == 3,
+                "its next commit is handed with the rectangle it damaged (%ld calls, full %ld, %ld rectangles)", fake_layers.calls, fake_layers.last[0].full,
+                fake_layers.last[0].damages);
+        WLCHECK(wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 0, "the buffer it replaced is not released before a frame is drawn");
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1, "and is once one is (%ld)", wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release));
+
+        // The window's own commit: handed with its layers (root 1), its picture the last, read in place.
+        pictures = fake.row[0].pictures;
+        lends = fake.lends;
+        calls = fake_layers.roots;
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake_layers.roots == calls + 1 && fake.row[0].pictures == pictures + 1 && fake.lends == lends + 1 && fake_layers.last[0].changed == 0 &&
+                    fake.row[0].pixels[5 * FAKE_W + 5] == 0xff202020u,
+                "the window's commit is handed with its layers, unchanged, and its picture is its last and read in place (%ld roots, %ld pictures, %ld lends)",
+                fake_layers.roots - calls, fake.row[0].pictures - pictures, fake.lends - lends);
+
+        // A host that would have them only with the root again: the root's picture is handed again, whole, with them.
+        fake_layers.answer = WAYLAND_LAYERS_ROOT;
+        pictures = fake.row[0].pictures;
+        calls = fake_layers.roots;
+        third = wl_buffer_of(&t.s, 8, 8, 0xff0000ff, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, third, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(fake_layers.roots == calls + 1 && fake.row[0].pictures == pictures + 1 && c->errors == 0,
+                "a host that keeps them only with the root's picture is handed that again with them (%ld, %ld)", fake_layers.roots - calls,
+                fake.row[0].pictures - pictures);
+        fake_layers.answer = WAYLAND_LAYERS_KEPT;
+
+        // A second subsurface, and then the first given no buffer: handed without it, and its buffer let go of after a frame.
+        extra = layer_child(&t, 16, 8, 6, 0xff00ffff, 1, &gone_sub, &gone_buffer);
+        WLCHECK(fake_layers.count == 2 && fake_layers.last[1].dest_x == 16 && fake_layers.last[1].changed && !fake_layers.last[0].changed,
+                "a second subsurface is handed over the first, the first unchanged (%ld)", fake_layers.count);
+        wlc_forget(c);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(fake_layers.count == 1 && fake_layers.last[0].dest_x == 16 && releases_of(c, third) == 0,
+                "a subsurface given no buffer is handed no more, and its buffer is held until a frame is drawn (%ld, %ld)", fake_layers.count,
+                releases_of(c, third));
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, third) == 1, "and released once one is");
+        // Destroyed while it is a layer: handed no more, its buffer held until a frame is drawn.
+        wlc_forget(c);
+        wlc_send(c, gone_sub, WLQ_wl_subsurface_destroy);
+        wlc_send(c, extra, WLQ_wl_surface_destroy);
+        wlc_pump(c);
+        WLCHECK(fake_layers.count == 0 && releases_of(c, gone_buffer) == 0, "a subsurface destroyed while it is a layer is handed no more, its buffer held (%ld)",
+                fake_layers.count);
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(releases_of(c, gone_buffer) == 1, "until a frame is drawn without it");
+
+        // Under the root and hidden by it: left out. Past its edge, which the root does not hide: no layers, laid as before.
+        below = layer_child(&t, 10, 10, 4, 0xff112233, 1, &sub, 0);
+        wlc_send(c, sub, WLQ_wl_subsurface_place_below, t.s.surface);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake_layers.count == 0 && fake_layers.drops == 0, "a subsurface under the opaque root, inside it, is left out (%ld, %ld drops)",
+                fake_layers.count, fake_layers.drops);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_position, 30L, 10L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        copied = fake.copied;
+        wlc_send(c, below, WLQ_wl_surface_attach, wl_buffer_of(&t.s, 4, 4, 0xff112233, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(c, below, WLQ_wl_surface_commit);
+        WLCHECK(fake_layers.drops == 1 && fake.copied > copied, "one under it past its edge is no layers: the host is told, and they are laid (%ld drops)",
+                fake_layers.drops);
+        wlc_send(c, sub, WLQ_wl_subsurface_destroy);
+        wlc_send(c, below, WLQ_wl_surface_destroy);
+
+        // Nine: no layers, laid into the picture.
+        calls = fake_layers.calls;
+        for (int k = 0; k < WAYLAND_LAYERS; k++)
+                layer_child(&t, 2 + 3 * k, 2, 2, 0xff445566, 1, 0, 0);
+        // Each made at its place and then not synchronized: its window handed once for the place, and once for its buffer.
+        WLCHECK(fake_layers.calls == calls + 2 * WAYLAND_LAYERS && fake_layers.count == WAYLAND_LAYERS, "eight are handed as layers (%ld, %ld calls)",
+                fake_layers.count, fake_layers.calls - calls);
+        layer_child(&t, 2, 20, 2, 0xff778899, 1, 0, 0);
+        WLCHECK(fake_layers.drops == 2 && fake.row[0].pixels[20 * FAKE_W + 2] == 0xff778899u && fake.row[0].pixels[2 * FAKE_W + 2] == 0xff445566u,
+                "a ninth is no layers: the host is told, and all of them are laid into the picture (%ld drops, %08x)", fake_layers.drops,
+                fake.row[0].pixels[20 * FAKE_W + 2]);
+
+        wlc_end(c);
+        leak_check("layers");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+
+        // A host that refuses: laid as before.
+        wl_reset();
+        memset(&fake_layers, 0, sizeof fake_layers);
+        fake.lend = 1;
+        wayland_start(&host);
+        tree_open(&t, 1);
+        c = t.s.c;
+        WLCHECK(fake_layers.calls == 2 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00u,
+                "a host that refuses the layers has the subsurface laid into the picture as before (%08x)", fake.row[0].pixels[5 * FAKE_W + 5]);
+        wlc_end(c);
+        leak_check("layers refused");
+        wayland_stop();
+}
+
 /* ---- dma-bufs ---- */
 
 #define DRM_ARGB8888 0x34325241L
@@ -192898,6 +193114,7 @@ int main(int argc, char **argv)
         test_geometry();
         test_cursor();
         test_cursor_picture();
+        test_layers();
         test_budget();
         test_stall_state();
         test_dmabuf();

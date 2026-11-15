@@ -274,6 +274,9 @@ struct wayland_picture
         long plane_count;
         long plane_fd[4];
         unsigned long plane_offset[4], plane_stride[4];
+        // A subsurface's picture handed as a layer of its window (row_layers): its surface's index and one, and whether it is new since
+        // the layers were last handed (1: damage and full say where, as above; 0: the picture the layer had, at the place it says now).
+        long layer, changed;
 };
 
 /*
@@ -358,7 +361,20 @@ struct wayland_host
         // Whether a dma-buf has no writer now (its GPU is done), asked and never waited for; a host with none says every buffer is ready.
         int (*dmabuf_ready)(void *context, long fd);
         int (*random)(void *context, unsigned char *into, long bytes); // fills bytes with random bytes: 1 when it did
+        // row_layers: the subsurfaces of a window as layers of their own over its picture, bottom first, count pictures each at its place in
+        // the window (with layer and changed), read where their client keeps them: WAYLAND_LAYERS_KEPT when the host keeps them, and the
+        // shim holds each one's buffer as a lent picture's until layers that leave it out are kept or refused and the frame after is drawn;
+        // 0 when it does not, having laid any it kept into the window's picture (the shim then lays them there as it did); WAYLAND_LAYERS_ROOT
+        // when it keeps them only with the window's own picture again (the picture it has holds older ones laid in it). root 1: the window's
+        // own picture follows at once (row_picture with last), and the layers are over it. A count of -1 is no layers: any kept are laid into
+        // the picture. Optional, and last, so a host's positional initializer without it is one that lays every subsurface in its window.
+        int (*row_layers)(void *context, int row, const struct wayland_picture *layers, long count, long root);
 };
+
+#define WAYLAND_LAYERS 8        // the most subsurfaces a window is handed to the host with as layers (row_layers)
+#define WAYLAND_LAYERS_KEPT 1
+#define WAYLAND_LAYERS_ROOT 2
+#define WAYLAND_GONE 32         // buffers read in place that a client is owed back once a frame is drawn: of subsurfaces that went, and of rows a card job may still read
 
 /*
         Objects. An object is an id the client chose (or the server, from WAYLAND_SERVER_BASE), the interface it
@@ -450,8 +466,11 @@ struct wayland_surface
         unsigned char geometry_set;
         long window_x, window_y, window_w, window_h; // the part of the picture last shown as the window, in pixels
         // The buffers this window's picture is read in place from (WAYLAND_PICTURE_LENT): the one that is the picture, and the one it
-        // replaced, held until the frame that shows the replacement is drawn (buffer index + 1, 0 for none).
+        // replaced, held until the frame that shows the replacement is drawn (buffer index + 1, 0 for none). A subsurface's are the same
+        // for its picture as a layer (row_layers). layered: a root whose subsurfaces the host keeps as layers; laying: a root whose picture
+        // is being laid (a row_picture without last was handed, and the take that ends it is owed).
         unsigned short lent, lent_gone;
+        unsigned char layered, laying;
         // A toplevel.
         char title[WAYLAND_TEXT];
         char app_id[WAYLAND_TEXT];
@@ -674,6 +693,10 @@ struct wayland_client
         unsigned int relative_id[WAYLAND_RELATIVES];
         unsigned char relatives;
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
+        // The buffers subsurfaces that went (destroyed, or taken off their parent) were read in place from as layers, buffer index and one:
+        // the host has been told they went, and a frame drawn since lets them go (wayland_gone_drawn).
+        unsigned short gone[WAYLAND_GONE];
+        unsigned char gones;
         unsigned short index[WAYLAND_IDS];
         unsigned short server_index[WAYLAND_SERVER_IDS];
         struct wayland_object objects[WAYLAND_OBJECTS];
@@ -1698,6 +1721,7 @@ static void wayland_constraints_update(void);
 static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
 
 static void wayland_let_go(struct wayland_client *c, long index);
+static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s);
 
 static void wayland_texts_row_gone(struct wayland_client *c, long row);
 
@@ -1716,12 +1740,26 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         if (wayland.keyboard_row == s->row)
                 wayland.keyboard_row = -1;
         wayland.host->row_close(wayland.host->context, s->row);
-        // The window is gone, so the host has let go of what it read in place: the buffers its picture was are the client's again.
+        // The window is gone, so the host has let go of what it read in place: the buffers its picture was are the client's again, and so
+        // are those of its subsurfaces' layers.
         s->lent = s->lent_gone = 0;
+        s->layered = s->laying = 0;
         if (lent)
                 wayland_let_go(c, lent - 1);
         if (gone)
                 wayland_let_go(c, gone - 1);
+        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        {
+                struct wayland_surface *child = &c->surfaces[wayland_first_bit(mask)];
+                unsigned short held[2] = {child->lent, child->lent_gone};
+
+                if (child == s || wayland_root_of(c, child) != s)
+                        continue;
+                child->lent = child->lent_gone = 0;
+                for (long at = 0; at < 2; at++)
+                        if (held[at])
+                                wayland_let_go(c, held[at] - 1);
+        }
         wayland.rows--;
         s->row = -1;
         // What was said of that window (a close, a popup's done) was said of it alone: the surface's next window is asked to go anew.
@@ -1859,6 +1897,8 @@ static int wayland_sub_synced(struct wayland_client *c, struct wayland_surface *
 }
 
 // A buffer held by a surface let go of (buffer index): its record is freed if its object was destroyed while it was held, else its client is told.
+// once the last hold of it goes. A buffer is held more than once while it is read in place (a window's picture and its lent one, a layer's), and
+// told at the first let go, its client drew into it while the compositor still read it.
 static void wayland_let_go(struct wayland_client *c, long index)
 {
         struct wayland_buffer *b = &c->buffers[index];
@@ -1874,7 +1914,7 @@ static void wayland_let_go(struct wayland_client *c, long index)
                 b->zombie = 0;
                 wayland.buffers--;
         }
-        else if (!b->zombie)
+        else if (!b->zombie && b->held <= 0)
         {
                 long slot = wayland_find(c, b->id, WLI_wl_buffer);
 
@@ -1992,14 +2032,19 @@ static void wayland_window_rect(struct wayland_client *c, const struct wayland_s
         *h = wayland_min(y2 - y1, WAYLAND_DIMENSION);
 }
 
-/* The row's picture taken: after the copies of a commit, the compositor is told the window has a new one. */
+/*
+        The row's picture taken: after the copies of a commit, the compositor is told the window has a new one. A commit that laid nothing
+        (its subsurfaces are the host's layers, row_layers) owes no take: taken with nothing laid, a picture read in place was copied whole
+        into the table to be laid over (compositor_wl_seed), every frame of a video in a subsurface.
+*/
 static void wayland_row_take(struct wayland_client *c, struct wayland_surface *root)
 {
         struct wayland_picture none;
         long wx, wy, ww, wh;
 
-        if (root->row < 0)
+        if (root->row < 0 || !root->laying)
                 return;
+        root->laying = 0;
         wayland_zero(&none, sizeof none);
         wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         none.row_width = ww;
@@ -2211,6 +2256,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
                 picture.damage[0].width = x2 - x1;
                 picture.damage[0].height = y2 - y1;
         }
+        root->laying = 1;
         if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
                 root->need_full = 1;
         root->budget_used += picture.full ? wayland_min(tw, ww) * wayland_min(th, wh) : picture.damage[0].width * picture.damage[0].height;
@@ -2246,10 +2292,315 @@ static void wayland_flatten(struct wayland_client *c, long parent, const struct 
 }
 
 /*
+        ---- a window's subsurfaces as layers (row_layers) ----
+
+        A window's subsurfaces are handed to the host as layers of their own over the root's picture, each read where its client keeps
+        it, rather than laid into one picture (wayland_flatten): what a subsurface's commit costs the compositor is the composing of its
+        damage from its buffer, nothing copied, and the window is drawn again only where that damage is. The list is the subsurfaces that
+        show a buffer, in the order wayland_flatten lays them. One under the root is a layer only where the root, opaque, hides it whole
+        (it is left out); one the root shows through, or more than WAYLAND_LAYERS, and the window is laid as one picture as before, as it
+        is whenever the host refuses (a picture that needs turning or scaling, a corner, no room). A layer's buffer is held as a lent
+        picture's (lent, lent_gone), and so is one of a subsurface that goes (gone), until the host has been told and a frame is drawn.
+*/
+
+// A buffer read in place as a surface's picture (index and one): held once more as the surface's lent buffer, and the one it replaced is the
+// one that goes when the frame that shows the new one is drawn, as a window's lent picture (wayland_show).
+static void wayland_lend_hold(struct wayland_client *c, struct wayland_surface *s, unsigned short now)
+{
+        if (!now || s->lent == now)
+                return;
+        if (s->lent_gone == now)
+                s->lent_gone = 0; // its hold is the picture's again
+        else
+        {
+                c->buffers[now - 1].held++;
+                if (s->lent_gone)
+                        wayland_gone_let(c, s, 0);
+        }
+        if (s->lent)
+                s->lent_gone = s->lent;
+        s->lent = now;
+}
+
+// A surface's picture read in place no more: its lent buffer is the one that goes when the next frame is drawn.
+static void wayland_lend_end(struct wayland_client *c, struct wayland_surface *s)
+{
+        if (!s->lent)
+                return;
+        if (s->lent_gone)
+                wayland_gone_let(c, s, 0);
+        s->lent_gone = s->lent;
+        s->lent = 0;
+}
+
+// The buffers a surface that goes was read in place from (it hangs from no window, or is gone): kept by its client until a frame is drawn
+// without them (wayland_gone_drawn), or let go of at once past WAYLAND_GONE.
+static void wayland_lend_leave(struct wayland_client *c, struct wayland_surface *s)
+{
+        unsigned short kept[2] = {s->lent, s->lent_gone};
+
+        s->lent = s->lent_gone = 0;
+        for (long at = 0; at < 2; at++)
+                if (kept[at] && c->gones < WAYLAND_GONE)
+                        c->gone[c->gones++] = kept[at];
+                else if (kept[at])
+                        wayland_let_go(c, kept[at] - 1);
+}
+
+// A frame drawn without the layers of subsurfaces that went: their buffers are their client's again (a dma-buf's once it is presented, as
+// the card may have shown it until the flip; dmabufs 1).
+static void wayland_gone_drawn(struct wayland_client *c, int dmabufs)
+{
+        long kept = 0;
+
+        for (long at = 0; at < c->gones; at++)
+        {
+                long index = c->gone[at] - 1;
+
+                if (!dmabufs && c->pools[c->buffers[index].pool].dmabuf)
+                        c->gone[kept++] = c->gone[at];
+                else
+                        wayland_let_go(c, index);
+        }
+        c->gones = (unsigned char)kept;
+}
+
+// The subsurfaces that hang from no shown window hold no buffer as a layer: theirs go once a frame is drawn without them. also is a surface
+// just taken out of its tree (wayland_sub_drop), which is in no mask.
+static void wayland_layers_sweep(struct wayland_client *c, struct wayland_surface *also)
+{
+        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        {
+                struct wayland_surface *s = &c->surfaces[wayland_first_bit(mask)];
+
+                // An orphan is its own root, and has no window either.
+                if ((s->lent || s->lent_gone) && wayland_root_of(c, s)->row < 0)
+                        wayland_lend_leave(c, s);
+        }
+        if (also && also->row < 0 && (also->lent || also->lent_gone))
+                wayland_lend_leave(c, also);
+}
+
+// The list being made: the pictures, the window, and the root's picture in the window's pixels and whether it is opaque.
+struct wayland_layering
+{
+        struct wayland_picture *list;
+        long count;
+        int refused;
+        struct wayland_surface *root;
+        struct wayland_rect window, root_box;
+        int root_opaque;
+};
+
+// A subsurface that shows a buffer, as a layer at its place: the whole of its buffer, read where it is.
+static void wayland_layer_add(struct wayland_client *c, struct wayland_surface *s, struct wayland_layering *l, int below)
+{
+        struct wayland_buffer *b = &c->buffers[s->held - 1];
+        struct wayland_picture *p;
+        long ox, oy;
+
+        if (l->count >= WAYLAND_LAYERS)
+        {
+                l->refused = 1;
+                return;
+        }
+        p = &l->list[l->count];
+        wayland_zero(p, sizeof *p);
+        wayland_sub_offset(c, s, &ox, &oy);
+        wayland_fill_picture_meta(p, s, b, &c->pools[b->pool], s->transform, s->width, s->height);
+        p->dest_x = ox - l->window.x;
+        p->dest_y = oy - l->window.y;
+        p->row_width = l->window.width;
+        p->row_height = l->window.height;
+        p->blend = !wayland_surface_is_opaque(s, b);
+        p->transparent = p->blend;
+        p->full = 1;
+        p->layer = wayland_surface_index(c, s) + 1;
+        if (below)
+        {
+                // Under the root: hidden by it whole, or the window is one picture.
+                if (!(l->root_opaque && p->dest_x >= l->root_box.x && p->dest_y >= l->root_box.y &&
+                      p->dest_x + s->width <= l->root_box.x + l->root_box.width && p->dest_y + s->height <= l->root_box.y + l->root_box.height))
+                        l->refused = 1;
+                return;
+        }
+        l->count++;
+}
+
+// The layers of a surface and what hangs from it, in wayland_flatten's order: those under it, it, those over it.
+static void wayland_layers_walk(struct wayland_client *c, long self, struct wayland_layering *l, int below, long depth)
+{
+        struct wayland_surface *s = &c->surfaces[self];
+        int found = 0;
+        long order = 0;
+
+        if (depth > WAYLAND_SURFACES)
+        {
+                l->refused = 1;
+                return;
+        }
+        for (long child = wayland_next_child(c, self, order, &found); child >= 0 && c->surfaces[child].sub_order < 0 && !l->refused;
+             child = wayland_next_child(c, self, order, &found))
+        {
+                order = c->surfaces[child].sub_order;
+                wayland_layers_walk(c, child, l, below || s == l->root, depth + 1);
+        }
+        if (s != l->root && s->held && !l->refused)
+                wayland_layer_add(c, s, l, below);
+        found = 0;
+        order = 0;
+        for (long child = wayland_next_child(c, self, order, &found); child >= 0 && !l->refused; child = wayland_next_child(c, self, order, &found))
+        {
+                order = c->surfaces[child].sub_order;
+                if (order >= 0)
+                        wayland_layers_walk(c, child, l, below, depth + 1);
+        }
+}
+
+/*
+        A window's layers made into list (WAYLAND_LAYERS of room), with changed the subsurface whose commit is being made (its damage, or all of
+        it when full) and the others as they were; window and root_box the window and the root's picture in the window's pixels, and whether
+        the root is opaque. The count, or -1 when the window is not to be layers.
+*/
+static long wayland_layers_make(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *changed, int full,
+                                const struct wayland_rect *window, const struct wayland_rect *root_box, int root_opaque,
+                                struct wayland_picture *list)
+{
+        struct wayland_layering l = {list, 0, 0, root, *window, *root_box, root_opaque};
+
+        wayland_layers_walk(c, wayland_surface_index(c, root), &l, 0, 0);
+        if (l.refused)
+                return -1;
+        for (long at = 0; changed && at < l.count; at++)
+                if (list[at].layer == wayland_surface_index(c, changed) + 1)
+                {
+                        struct wayland_picture *p = &list[at];
+
+                        p->changed = 1;
+                        p->full = 1;
+                        if (!full && changed->damages && !p->transform && !p->src_width && !p->dst_width)
+                        {
+                                unsigned long long kept;
+
+                                for (long k = 0; k < changed->damages; k++)
+                                        p->damage[k] = changed->damage_kind[k] ? changed->damage[k] : wayland_cover(changed->damage[k], changed->scale120);
+                                kept = rects_clip((long long *)p->damage, (unsigned long long)changed->damages, (unsigned long long)p->width,
+                                                  (unsigned long long)p->height);
+                                p->damages = (long)(kept << 1 >> 1);
+                                p->full = (kept >> 63) || !p->damages;
+                        }
+                }
+        return l.count;
+}
+
+// After the layers are handed: the subsurfaces the host keeps (list, count; none when it keeps none) hold their buffers as lent, the others not.
+static void wayland_layers_lent(struct wayland_client *c, struct wayland_surface *root, const struct wayland_picture *list, long count)
+{
+        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        {
+                long at = wayland_first_bit(mask);
+                struct wayland_surface *s = &c->surfaces[at];
+                int kept = 0;
+
+                if (s == root || wayland_root_of(c, s) != root)
+                        continue;
+                for (long k = 0; list && k < count; k++)
+                        kept |= list[k].layer == at + 1;
+                if (kept)
+                        wayland_lend_hold(c, s, s->held);
+                else
+                        wayland_lend_end(c, s);
+        }
+        root->layered = list != 0;
+}
+
+/*
+        The root's picture handed again, whole, from the buffer it shows, with the layers over it (row_layers with root 1): for a host whose
+        picture of the window holds older layers laid in it (WAYLAND_LAYERS_ROOT). WAYLAND_LAYERS_KEPT when they are kept, else 0.
+*/
+static long wayland_root_again(struct wayland_client *c, struct wayland_surface *root, const struct wayland_rect *window,
+                               const struct wayland_picture *list, long count)
+{
+        unsigned short shown = root->held ? root->held : root->lent;
+        struct wayland_picture picture;
+        struct wayland_buffer *b;
+        long status;
+
+        if (!shown || wayland.host->row_layers(wayland.host->context, root->row, list, count, 1) != WAYLAND_LAYERS_KEPT)
+                return 0;
+        b = &c->buffers[shown - 1];
+        wayland_zero(&picture, sizeof picture);
+        wayland_fill_picture_meta(&picture, root, b, &c->pools[b->pool], root->transform, root->width, root->height);
+        picture.dest_x = -window->x;
+        picture.dest_y = -window->y;
+        picture.row_width = window->width;
+        picture.row_height = window->height;
+        picture.transparent = !wayland_surface_is_opaque(root, b);
+        picture.fragile = root->xsurface != 0 && !c->pools[b->pool].dmabuf;
+        picture.full = 1;
+        picture.last = 1;
+        status = wayland.host->row_picture(wayland.host->context, root->row, &picture);
+        if (status == WAYLAND_PICTURE_LENT)
+                wayland_lend_hold(c, root, shown);
+        else if (status == 0 && !root->held && root->lent == shown)
+        {
+                // Copied: the buffer is held as the window's picture instead (a window with subsurfaces keeps its picture to lay them over
+                // again, wayland_relay), the hold its lend had going to that, so a subsurface that goes can be laid out of it.
+                root->held = root->lent;
+                root->lent = 0;
+        }
+        else if (status == 0)
+                wayland_lend_end(c, root);
+        else if (status > 0)
+                root->need_full = 1;
+        return WAYLAND_LAYERS_KEPT;
+}
+
+/*
+        A window's subsurfaces handed as layers (row_layers), changed the one whose commit is being made (and full, whether all of it
+        changed), none for a relay: 1 when the host keeps them, and nothing of them is laid into the window's picture. 0 when it does not,
+        and they are laid as before (the host has laid any it kept into the picture first).
+*/
+static int wayland_layers(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *changed, int full)
+{
+        struct wayland_picture list[WAYLAND_LAYERS];
+        unsigned short shown = root->held ? root->held : root->lent;
+        struct wayland_rect window, box;
+        long count, status = 0;
+
+        if (!wayland.host->row_layers || root->row < 0 || !(root->flags & WAYLAND_SURFACE_MAPPED))
+                return 0;
+        window = wayland_window_of(c, root);
+        box = (struct wayland_rect){-window.x, -window.y, root->width, root->height};
+        count = wayland_layers_make(c, root, changed, full, &window, &box, shown && wayland_surface_is_opaque(root, &c->buffers[shown - 1]), list);
+        // A window that is another rectangle now (a subsurface moved past the root's edge, or back) is the root's picture at another place
+        // in it: the root is handed again with the layers.
+        if (count >= 0 && (window.x != root->window_x || window.y != root->window_y || window.width != root->window_w ||
+                           window.height != root->window_h))
+                status = WAYLAND_LAYERS_ROOT;
+        else if (count >= 0)
+                status = wayland.host->row_layers(wayland.host->context, root->row, list, count, 0);
+        else if (root->layered)
+                wayland.host->row_layers(wayland.host->context, root->row, 0, -1, 0);
+        if (status == WAYLAND_LAYERS_ROOT)
+                status = wayland_root_again(c, root, &window, list, count);
+        wayland_layers_lent(c, root, status == WAYLAND_LAYERS_KEPT ? list : 0, count);
+        if (status == WAYLAND_LAYERS_KEPT)
+        {
+                root->window_x = window.x;
+                root->window_y = window.y;
+                root->window_w = window.width;
+                root->window_h = window.height;
+        }
+        return status == WAYLAND_LAYERS_KEPT;
+}
+
+/*
         The window's picture laid again, whole, where a subsurface that covered some of it went, moved or was put in another
         order: the root's held picture, when it kept one, and the subsurfaces over it. A root that kept none (it had no subsurface
         when it was last drawn) cannot show again what a subsurface that went had covered: only the order is laid again, and the
-        rest waits for the root's next commit, which is drawn whole.
+        rest waits for the root's next commit, which is drawn whole. A window whose subsurfaces are the host's layers is handed them
+        as they are now, and nothing is laid.
 */
 static void wayland_relay(struct wayland_client *c, struct wayland_surface *root)
 {
@@ -2259,13 +2610,16 @@ static void wayland_relay(struct wayland_client *c, struct wayland_surface *root
                 return;
         if (!(root->flags & WAYLAND_SURFACE_MAPPED))
                 return;
-        // What is laid now is the window as it is now: the next picture of the root is drawn whole only if that changes.
+        // What is laid now is the window as it is now: the next picture of the root is drawn whole only if that changes. Layers are handed
+        // against the window the host has (wayland_layers keeps it, or hands the root again where it changed).
+        root->need_full = 0;
+        if (wayland_layers(c, root, 0, 0))
+                return;
         window = wayland_window_of(c, root);
         root->window_x = window.x;
         root->window_y = window.y;
         root->window_w = window.width;
         root->window_h = window.height;
-        root->need_full = 0;
         wayland_flatten(c, ~wayland_surface_index(c, root), 0, &window);
         wayland_row_take(c, root);
 }
@@ -2372,7 +2726,10 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 is_opaque = wayland_surface_is_opaque(s, b);
                 wayland_sub_offset(c, s, &ox, &oy);
                 window = wayland_window_of(c, root);
-                if (root->need_full)
+                // As layers, the host has the window's subsurfaces as they are now, their places and their order too: nothing is laid.
+                if (wayland_layers(c, root, s, full))
+                        root->need_full = 0;
+                else if (root->need_full)
                         wayland_relay(c, root);
                 else if (!is_opaque || s->translucent)
                 {
@@ -2551,6 +2908,9 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
                 root->need_full = 1;
                 wayland_relay(c, root);
         }
+        // The host has been told (the relay's layers leave them out, or the window's row goes with it): what they were read from as layers
+        // goes once a frame is drawn without them.
+        wayland_layers_sweep(c, s);
 }
 
 /* A surface gone, in whatever order: its window, its callbacks, and the objects that named it inert. */
@@ -3320,6 +3680,24 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         // what is remembered as copied (shown_full, shown_rect) is what was: the subsurfaces are laid over all of it again.
         if (!picture.full && !picture.damages)
                 picture.full = 1;
+        // A window with subsurfaces: they are handed as the host's layers over this picture (row_layers with root 1), which is then the
+        // window's last, or it is the first of the pictures laid into the window's (wayland_flatten, after). They are laid at the root's
+        // scale (wayland_sub_offset): a commit that changes it is laid as one picture.
+        if (!picture.last)
+        {
+                struct wayland_picture list[WAYLAND_LAYERS];
+                struct wayland_rect window = {wx, wy, ww, wh}, box = {-wx, -wy, tw, th};
+                long count = -1;
+
+                if (wayland.host->row_layers && scale120 == (s->scale120 > 0 ? s->scale120 : WAYLAND_UNIT))
+                        count = wayland_layers_make(c, s, 0, 0, &window, &box, !picture.transparent, list);
+                if (count >= 0)
+                        picture.last = wayland.host->row_layers(wayland.host->context, s->row, list, count, 1) == WAYLAND_LAYERS_KEPT;
+                else if (s->layered)
+                        wayland.host->row_layers(wayland.host->context, s->row, 0, -1, 0);
+                wayland_layers_lent(c, s, picture.last ? list : 0, count);
+                s->laying = !picture.last;
+        }
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
         // A picture the host reads in place keeps its buffer: it is the surface's lent buffer, and the one it replaced is let go of when
         // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.
@@ -3659,7 +4037,8 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                                 s->held = (unsigned short)(c->objects[buffer].link + 1);
                         }
                         window = wayland_window_of(c, s);
-                        wayland_flatten(c, wayland_surface_index(c, s), s->shown_full ? 0 : &s->shown_rect, &window);
+                        if (!s->layered) // as layers they are the host's, over the picture as it is now (wayland_show)
+                                wayland_flatten(c, wayland_surface_index(c, s), s->shown_full ? 0 : &s->shown_rect, &window);
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
                         wayland_row_take(c, s);
                 }
@@ -8932,8 +9311,31 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
 }
 
 /*
+        The buffers a window's lent pictures replaced, its own and its subsurfaces' as layers, let go of: those in pools, and those of dma-bufs
+        too when dmabufs (one may be the buffer the card shows until the flip lands).
+*/
+static void wayland_window_gone(struct wayland_client *c, struct wayland_surface *root, int dmabufs)
+{
+        struct wayland_surface *s = root;
+        unsigned long long mask = c->sub_mask;
+
+        while (s)
+        {
+                if (s->lent_gone && (dmabufs || !c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf))
+                {
+                        wayland_let_go(c, s->lent_gone - 1);
+                        s->lent_gone = 0;
+                }
+                for (s = 0; mask && !s; mask &= mask - 1)
+                        if (&c->surfaces[wayland_first_bit(mask)] != root && wayland_root_of(c, &c->surfaces[wayland_first_bit(mask)]) == root)
+                                s = &c->surfaces[wayland_first_bit(mask)];
+        }
+}
+
+/*
         The feedbacks of every window shown, answered with the frame at when. A drawn frame (drawn 1) also lets go of the buffer a
-        lent picture was replaced by, since the frame that shows the new picture is the one drawn; an idle frame does not.
+        lent picture was replaced by, since the frame that shows the new picture is the one drawn; an idle frame does not. Either lets go of
+        the buffers of subsurfaces that went (wayland_gone_drawn): the host was told when they went, and a frame has gone by since.
 */
 static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn)
 {
@@ -8951,19 +9353,12 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                         // client's again at the first frame's time after the commit, drawn or not (what read it before the commit is done
                         // by then). Kept for a frame that never comes, a client with two buffers that draws while it is put away had
                         // neither: one is the picture, and the other was never released.
-                        if (s->lent_gone)
-                        {
-                                wayland_let_go(c, s->lent_gone - 1);
-                                s->lent_gone = 0;
-                        }
+                        wayland_window_gone(c, s, 1);
                         continue;
                 }
                 // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
-                if (drawn && s->lent_gone)
-                {
-                        wayland_let_go(c, s->lent_gone - 1);
-                        s->lent_gone = 0;
-                }
+                if (drawn)
+                        wayland_window_gone(c, s, 1);
                 wayland_presentings_done(c, s, when, refresh, seq, flags);
                 if (c->sub_mask)
                 for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
@@ -8973,6 +9368,9 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                                 wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
                 }
         }
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (wayland.client[slot] && wayland.client[slot]->gones)
+                        wayland_gone_drawn(wayland.client[slot], 1);
 }
 
 /*
@@ -8990,16 +9388,16 @@ static void wayland_drawn_rows(int dmabuf_busy_row)
                 struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
                 struct wayland_facts facts;
 
-                if (!s || !s->live || !s->lent_gone)
-                        continue;
-                if (c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf && (dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row))
+                if (!s || !s->live)
                         continue;
                 // A window put away is in no frame: its buffer goes at a frame's time all the same (wayland_presented_rows).
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
-                wayland_let_go(c, s->lent_gone - 1);
-                s->lent_gone = 0;
+                wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
         }
+        for (long slot = 0; wayland.host && slot < WAYLAND_CLIENTS; slot++)
+                if (wayland.client[slot] && wayland.client[slot]->gones)
+                        wayland_gone_drawn(wayland.client[slot], 0);
 }
 
 WAYLAND_API void wayland_drawn(void)
@@ -9074,7 +9472,10 @@ WAYLAND_API long wayland_frame_wanted(void)
                 // A size owed to a window resized by hand is said at the frame's end: a frame is wanted for it.
                 if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].configure_late)
                         return 1;
-                // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows).
+                // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows),
+                // and so is a client that holds those of subsurfaces that went.
+                if (c && c->gones)
+                        return 1;
                 if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].lent_gone &&
                     wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         return 1;

@@ -594,6 +594,7 @@ static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
 static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
 static void compositor_wl_lent_sync(int start);
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at);
 #else
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
 {
@@ -644,6 +645,11 @@ static void compositor_wl_count_card(const unsigned char *rows, unsigned int win
 static void compositor_wl_lent_sync(int start)
 {
         (void)start;
+}
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at)
+{
+        (void)row, (void)frames, (void)rows, (void)at;
+        return 0;
 }
 #endif
 

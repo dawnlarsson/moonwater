@@ -709,6 +709,18 @@ if ! alive || [ "$(echo "$out" | grep -c '^ok')" != 6 ]; then
         row FAIL "the client that draws a part at a time ran its six rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
 fi
 
+# A window with subsurfaces (test/wayland_layers.py): each subsurface is a layer of its own, read where its client keeps it, and the screen shows
+# what one picture with them laid into it showed: opaque, translucent, under the window, moved, put in the other order, taken off, nine of them
+# (laid into one picture, as before), and a pool cut under one; the debug page says none of a subsurface's commits was copied.
+out=$(python3 -I "$(dirname "$0")/wayland_layers.py" "$work/scan.img" "$work/bin/moonwater" 2>&1)
+echo "$out" | while read -r verdict rest; do
+        case $verdict in ok | FAIL | NOT) echo "$verdict $rest" ;; esac
+done
+failures=$((failures + $(echo "$out" | grep -c '^FAIL')))
+if ! alive || [ "$(echo "$out" | grep -c '^ok')" != 12 ]; then
+        row FAIL "the client with subsurfaces ran its twelve rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
+fi
+
 # A pool on a file whose pages the client serves itself and never does (FUSE, test/wayland_held.py): the pool is refused, and the compositor
 # answers the next client. Mapped, its read of the picture waited on the client for as long as the client liked (MW-2026-195).
 out=$(python3 -I "$(dirname "$0")/wayland_held.py" 2>&1)

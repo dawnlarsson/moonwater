@@ -528,7 +528,7 @@ static void compositor_present_frames(void)
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_frame band;
         struct compositor_frame preview;
-        unsigned char rows[WINDOWS];
+        unsigned char rows[WINDOWS + COMPOSITOR_LAYERS];
         unsigned int count = 0, windows;
         int tinted;
 
@@ -550,6 +550,8 @@ static void compositor_present_frames(void)
                 {
                         rows[count] = compositor.stack[at];
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
+                        // Its client's subsurfaces as frames of their own over it, read where they are (wayland_host.c), each with the row.
+                        count += compositor_wl_layers_frames(compositor.stack[at], frames, rows, count);
                 }
         windows = count;
         compositor_record_scene(frames, windows); // the window pictures of this present, for the record's frames
