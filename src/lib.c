@@ -36982,17 +36982,18 @@ __asm__(
 
     ASM_FUNC(memory_mix_const_u32_rect)
     "beqz a4, 9f\n   beqz a5, 9f\n   andi a7, a7, 255\n   beqz a7, 9f\n"
-    "slli a1, a1, 2\n   li t6, 255\n"
+    "addi sp, sp, -32\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   slli a1, a1, 2\n   li t6, 255\n"
     "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
     "1: lbu t3, 0(t1)\n   mul t3, t3, a7\n   addi t3, t3, 1\n   srli t4, t3, 8\n   add t3, t3, t4\n   srli t3, t3, 8\n   beqz t3, 5f\n"
     "lwu t4, 0(t0)\n   sub t5, t6, t3\n"
     "andi s0, t4, 255\n   mul s0, s0, t5\n   andi s1, a6, 255\n   mul s1, s1, t3\n   add s0, s0, s1\n   addi s0, s0, 128\n   srli s1, s0, 8\n   add s0, s0, s1\n   srli s0, s0, 8\n"
-    "srli s1, t4, 8\n   andi s1, s1, 255\n   mul s1, s1, t5\n   srli t4, t4, 16\n   andi s2, a6, 0xff00\n   srli s2, s2, 8\n   mul s2, s2, t3\n   add s1, s1, s2\n   addi s1, s1, 128\n   srli s2, s1, 8\n   add s1, s1, s2\n   srli s1, s1, 8\n   slli s1, s1, 8\n   or s0, s0, s1\n"
+    "srli s1, t4, 8\n   andi s1, s1, 255\n   mul s1, s1, t5\n   srli t4, t4, 16\n   srli s2, a6, 8\n   andi s2, s2, 255\n   mul s2, s2, t3\n   add s1, s1, s2\n   addi s1, s1, 128\n   srli s2, s1, 8\n   add s1, s1, s2\n   srli s1, s1, 8\n   slli s1, s1, 8\n   or s0, s0, s1\n"
     "andi s1, t4, 255\n   mul s1, s1, t5\n   srli s2, a6, 16\n   andi s2, s2, 255\n   mul s2, s2, t3\n   add s1, s1, s2\n   addi s1, s1, 128\n   srli s2, s1, 8\n   add s1, s1, s2\n   srli s1, s1, 8\n   slli s1, s1, 16\n   or s0, s0, s1\n"
     "srli s1, t4, 8\n   mul s1, s1, t5\n   srli s2, a6, 24\n   mul s2, s2, t3\n   add s1, s1, s2\n   addi s1, s1, 128\n   srli s2, s1, 8\n   add s1, s1, s2\n   srli s1, s1, 8\n   slli s1, s1, 24\n   or s0, s0, s1\n"
     "sw s0, 0(t0)\n"
     "5: addi t0, t0, 4\n   addi t1, t1, 1\n   addi t2, t2, -1\n   bnez t2, 1b\n"
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   addi sp, sp, 32\n"
     "9: " ASM_RET
     ASM_END(memory_mix_const_u32_rect)
 #endif
