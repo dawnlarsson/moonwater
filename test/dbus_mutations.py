@@ -86,6 +86,10 @@ M = [
     ("a call waits for ever", "                        if (now < row[k].due)\n", "                        if (1)\n"),
     ("a call answered NoReply keeps its row", "                        row[k].used = 0;\n                        c->pending--;", "                        c->pending--;"),
     ("the bus sleeps past its deadline", "return left < 0 ? 0 : left < most ? left : most;", "return most;"),
+    # ---- the names no client may own (MW-2026-197) ----
+    ("a kept name owned by whoever asks first", "if (dbus_name_kept(text))", "if (0)"),
+    ("the accessibility bus a client's", '{"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications", 0}',
+     '{"org.freedesktop.secrets", "org.freedesktop.Notifications", 0}'),
 ]
 
 source = open(engine).read()

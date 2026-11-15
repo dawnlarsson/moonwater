@@ -207,5 +207,26 @@ for name, (destination, object_path, interface, member, signature, body) in {
     median = statistics.median(times)
     row(errors == {"org.freedesktop.DBus.Error.ServiceUnknown"} and median < 1000,
         "%s is ServiceUnknown in a median of %d us of 50 (the slowest %d), under a millisecond" % (name, median, max(times)), repr(errors))
+
+# The names whose owner every bowl's programs would send keys, passwords and notifications to are no client's (MW-2026-197).
+for name in ("org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications"):
+    serial = a.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", "su", pad(text(name), 4) + struct.pack("<I", 2 | 4))
+    m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+    row(m is not None and m["type"] == 3 and m["fields"].get(4) == "org.freedesktop.DBus.Error.AccessDenied", "a client may not own %s: AccessDenied" % name,
+        repr(m and m["fields"]))
+
+# The portal interfaces Moonwater does not serve are not claimed: their version is UnknownProperty at once, so a browser hides the feature.
+for interface in ("GlobalShortcuts", "ScreenCast", "Screenshot", "RemoteDesktop"):
+    times, errors = [], set()
+    for _ in range(50):
+        began = time.perf_counter()
+        serial = a.call(PORTAL, DESKTOP, "org.freedesktop.DBus.Properties", "Get", "ss",
+                        pad(text("org.freedesktop.portal." + interface), 4) + text("version"))
+        m = a.wait(lambda m: m["type"] in (2, 3) and m["fields"].get(5) == serial)
+        times.append((time.perf_counter() - began) * 1e6)
+        errors.add(m and m["type"] == 3 and m["fields"].get(4))
+    median = statistics.median(times)
+    row(errors == {"org.freedesktop.DBus.Error.UnknownProperty"} and median < 1000,
+        "the portal's %s is not claimed: its version is UnknownProperty in a median of %d us of 50" % (interface, median), repr(errors))
 a.s.close()
 sys.exit(failures)

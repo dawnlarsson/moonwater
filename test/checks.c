@@ -195954,6 +195954,79 @@ static void db_test_deadlines(void)
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
+/*
+        Clean refusals (MW-2026-197): the names whose owner every bowl's programs would send keys, passwords or notifications to
+        are no client's, and a call to them is ServiceUnknown; the portal interfaces that need PipeWire or a person's choice that
+        Moonwater has no way to ask (GlobalShortcuts, ScreenCast, Screenshot, RemoteDesktop) are not claimed: their version is
+        UnknownProperty and their methods UnknownMethod, at once, so a browser hides the feature.
+*/
+static void db_test_kept(void)
+{
+        static const char *const kept[] = {"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications"};
+        static const char *const unclaimed[] = {"org.freedesktop.portal.GlobalShortcuts", "org.freedesktop.portal.ScreenCast",
+                                                "org.freedesktop.portal.Screenshot", "org.freedesktop.portal.RemoteDesktop"};
+        static const char *const methods[] = {"CreateSession", "CreateSession", "Screenshot", "CreateSession"};
+        long a, b;
+        struct db_seen s;
+
+        db_reset();
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+        for (int k = 0; k < 3; k++)
+        {
+                db_request(a, kept[k], 0);
+                db_next(a, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.AccessDenied"), "%s is no client's to own: AccessDenied",
+                        kept[k]);
+                db_request(a, kept[k], 2 | 4);
+                db_next(a, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR, "and asking to replace its owner does not make it so");
+                db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "NameHasOwner", "s", kept[k], 0);
+                db_find(b, &s, DBUS_RETURN, 0);
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_u32_body(&s) == 0, "nobody owns %s", kept[k]);
+                db_call(b, kept[k], "/", "org.example.Any", "Any", "", 0, 0);
+                db_next(b, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown") && s.m.reply == db_last_serial(),
+                        "a call to %s is ServiceUnknown, in the call", kept[k]);
+                db_drain(b);
+        }
+        db_request(a, "org.a11y.Bus2", 0);
+        db_find(a, &s, DBUS_RETURN, 0);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_u32_body(&s) == 1, "a name that only starts like one kept is a client's as any other");
+        db_drain(a);
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListActivatableNames", "", 0, 0);
+        db_find(b, &s, DBUS_RETURN, 0);
+        DBCHECK(s.ok && !db_holds(&s, "org.a11y.Bus\0") && !db_holds(&s, "org.freedesktop.secrets") && !db_holds(&s, "org.freedesktop.Notifications"),
+                "and no name kept is said to be one that can be started");
+        for (int k = 0; k < 4; k++)
+        {
+                db_call(b, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", unclaimed[k], "version");
+                db_next(b, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownProperty"), "%s is not claimed: its version is UnknownProperty",
+                        unclaimed[k]);
+                db_call(b, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "GetAll", "s", unclaimed[k], 0);
+                db_next(b, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_RETURN && !strcmp(s.m.signature, "a{sv}") && dbus_get32(s.bytes + s.m.body_at) == 0, "and GetAll of it is empty");
+                db_call(b, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, unclaimed[k], methods[k], "", 0, 0);
+                db_next(b, &s);
+                DBCHECK(s.ok && s.m.type == DBUS_ERROR && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod") && !db_queued(b),
+                        "and %s.%s is UnknownMethod at once, with no request to wait on", unclaimed[k], methods[k]);
+        }
+        db_call(b, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
+        db_next(b, &s);
+        DBCHECK(s.ok && memmem(s.bytes, (size_t)s.size, "portal.FileChooser", 18) && !memmem(s.bytes, (size_t)s.size, "ScreenCast", 10) &&
+                    !memmem(s.bytes, (size_t)s.size, "GlobalShortcuts", 15) && !memmem(s.bytes, (size_t)s.size, "Screenshot", 10) &&
+                    !memmem(s.bytes, (size_t)s.size, "RemoteDesktop", 13),
+                "and the portal's introspection names none of them");
+        dbus_drop(a);
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
@@ -195962,6 +196035,7 @@ int main(int argc, char **argv)
                 db_seed = strtoul(argv[3], 0, 0) | 1;
         db_test_requests();
         db_test_deadlines();
+        db_test_kept();
         db_test_auth();
         db_test_hello_and_names();
         db_test_routing();

@@ -41,6 +41,62 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-197: any program could own the session bus's accessibility, secrets and notifications names and be sent every bowl's keys, passwords and notices
+
+| | |
+|---|---|
+| Status | Fixed for org.a11y.Bus, org.freedesktop.secrets and org.freedesktop.Notifications, 2026-11-15, the commit that adds this entry (`git log -S 'MW-2026-197' -- incident_response.md`); open for the input-method and wallet names (below) |
+| Class | Impersonation of a well-known service on a shared bus (name squatting); disclosure of keystrokes, screen text, stored passwords and notification text across bowls |
+| Attacker | Any program that can connect to `/run/moonwater/bus`: every program of every bowl is told the address (bowl.c sets `DBUS_SESSION_BUS_ADDRESS`), and all of a bowl's programs are the same mapped uid, so the bus cannot tell one bowl's from another's |
+| Reachable | src/dbus/dbus.c `dbus_bus_call` (RequestName), `dbus_request_name` |
+
+**What happened.** The session bus serves no accessibility bus, no secret
+service and no notification server, and RequestName gave any of those names to
+the first client that asked, with nothing to tell it from a real service. A
+GTK 4 or Qt program asks `org.a11y.Bus` for `GetAddress` at its start and then
+connects to the address it is answered and sends there, over AT-SPI, every
+text it shows and every key it is given; libsecret, and with it Chromium (when
+not told `--password-store=basic`), Electron and VS Code, stores a profile's
+passwords with whoever owns `org.freedesktop.secrets`; and Chromium, GLib's
+GNotification and libnotify send every notification's text, a sign-in code
+among them, to `org.freedesktop.Notifications`. One bus serves every bowl and
+the host, so a program in one bowl that owned one of those names was sent what
+the programs of every other bowl meant for the desktop. Read from the code; no
+attack was run against a real browser here.
+
+**The fix.** The three names are the bus's to keep (`dbus_kept`,
+`dbus_name_kept`): RequestName of one is
+`org.freedesktop.DBus.Error.AccessDenied`, with or without the flags that ask to
+replace an owner, so nobody owns them and a call to one is ServiceUnknown in the
+call (a median of 15 us over the socket), which is what a program is told on a
+desktop with no such service, and what GTK 4's synchronous ask for the
+accessibility bus needs to start at once. A name that only begins like one kept
+(`org.a11y.Bus2`) is a client's as any other.
+
+**Tests that fail without the fix.** CHECK_dbus `db_test_kept` (lane `dbus`):
+each kept name is AccessDenied to RequestName and to a RequestName that asks to
+replace, has no owner, and a call to it is ServiceUnknown; two mutants in
+test/dbus_mutations.py ("a kept name owned by whoever asks first", "the
+accessibility bus a client's") turn it red. test/dbus_raw.py, run by
+test/dbus_e2e.sh against the sessionbus: "a client may not own NAME:
+AccessDenied" for the three.
+
+**Still open.** Names whose owner is sent keystrokes or keys in some
+configurations, and which a person may run a real service under on this bus,
+so refusing them would break that service: `org.fcitx.Fcitx5`,
+`org.fcitx.Fcitx`, `org.freedesktop.portal.Fcitx`, `org.freedesktop.IBus`,
+`org.freedesktop.portal.IBus` (a GTK, Qt or SDL program configured for fcitx
+talks to its input method over this bus and sends it every key), and
+`org.kde.kwalletd5`, `org.kde.kwalletd6` (Chromium on a KDE desktop, or told
+`--password-store=kwallet`, keeps its passwords there). One bowl's program
+owning one of them is sent another bowl's keys or passwords. Whether one bowl's
+program may serve another bowl's clients is the owner's to decide; the broker
+could tell bowls apart (it runs as root and could read the peer's mount
+namespace, `/proc/PID/ns/mnt`, at the accept) and keep a name's calls inside the
+bowl that owns it, which was described to the architect and not built. The
+other names a program owns (a media player's MPRIS name, a tray's) are still
+first come, first served, across bowls.
+
 ### MW-2026-196: clients' descriptors filled the compositor's table and were numbered as the clipboard's
 
 | | |

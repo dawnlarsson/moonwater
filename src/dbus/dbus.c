@@ -44,7 +44,8 @@
            seconds is dropped. No wait is without its end: a call routed to a client that does not answer in
            DBUS_REPLY_MS is answered NoReply and its caller's row let go, and a portal Response the bus holds for its
            caller's rule is sent after DBUS_RESPONSE_MS whatever the caller has.
-        5. A name is a client's only while it is connected; the bus's own names, and the service's, are not for taking.
+        5. A name is a client's only while it is connected; the bus's own names, and the service's, are not for taking, nor
+           are the names whose owner every bowl's programs would send keys, passwords or notifications to (dbus_kept).
 
         It is freestanding C with no allocator, in ring 3, the same way the Wayland shim is, with the host behind a small
         seam (struct dbus_host) so that the checks can put a fake one behind it.
@@ -1521,6 +1522,24 @@ static int dbus_name_ok(const char *name)
         return dbus_valid_name(name, dbus_length(name), 1);
 }
 
+/*
+        The names no client may own (MW-2026-197). The bus is every bowl's and the host's, and whoever owns a name is sent
+        what every program of every bowl sends to it. org.a11y.Bus answers GetAddress, and a GTK 4 or Qt program connects to
+        the address it is given and sends there every text it shows and every key it is given (AT-SPI); org.freedesktop.secrets
+        is where libsecret, and so Chromium, Electron and VS Code, keep a profile's passwords; org.freedesktop.Notifications is
+        sent the text of every notification (a sign-in code among them), and is the bus's own to serve. Nobody serves the first
+        two here, and a program is told so at once (ServiceUnknown): GTK 4 asks for the accessibility bus with a call it waits on.
+*/
+static const char *const dbus_kept[] = {"org.a11y.Bus", "org.freedesktop.secrets", "org.freedesktop.Notifications", 0};
+
+static int dbus_name_kept(const char *name)
+{
+        for (long k = 0; dbus_kept[k]; k++)
+                if (dbus_equal(dbus_kept[k], name))
+                        return 1;
+        return 0;
+}
+
 static void dbus_name_release(long slot, struct dbus_name *n)
 {
         struct dbus_client *c = dbus_client_of(slot);
@@ -1700,6 +1719,12 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 if (text[0] == ':' || !dbus_name_ok(text) || dbus_equal(text, DBUS_NAME_BUS))
                 {
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "That name cannot be owned", DBUS_NAME_BUS);
+                        return;
+                }
+                if (dbus_name_kept(text))
+                {
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.AccessDenied",
+                                         "That name is the bus's to keep: its owner would be sent what every program sends it", DBUS_NAME_BUS);
                         return;
                 }
                 flags = dbus_request_name(from, text, flags);
