@@ -242692,6 +242692,39 @@ static void scanout_refused_rows(void)
         compositor.table = kept_table, compositor.direct_refused = kept_refused, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
 }
 
+/*
+        One way to the screen for each kind of card (compositor_plate_wanted): the second plate where the card shows what its buffer holds (and headless),
+        none where it copies what it is told changed (virtio_gpu, simpledrm: in place, apart, told the rows that changed), none with a screen turned, two
+        screens or a window on a plane.
+*/
+static void plate_wanted_rows(void)
+{
+        char kept_driver[sizeof(compositor.driver)];
+        int kept_card = compositor.card, kept_plane = compositor.plane_row;
+        unsigned int kept_outputs = compositor.outputs;
+
+        memory_copy(kept_driver, compositor.driver, sizeof(kept_driver));
+        compositor.plane_row = -1, compositor.outputs = 1, compositor.card = -1;
+        check("plate: headless, the frame goes into the scan image's other name", compositor_plate_wanted(0));
+        compositor.card = 7;
+        string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        check("plate: a card that shows what its buffer holds composes into the second plate", compositor_plate_wanted(0) && !compositor_copies_damage());
+        string_copy((string_address)compositor.driver, (string_address) "i915");
+        check("plate: and so does one whose buffer is the machine's memory scanned as it is", compositor_plate_wanted(0));
+        string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+        check("plate: a card that copies its damage to its host has none: in place, told what changed", !compositor_plate_wanted(0) && compositor_copies_damage());
+        string_copy((string_address)compositor.driver, (string_address) "simpledrm");
+        check("plate: nor the firmware's", !compositor_plate_wanted(0));
+        string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        check("plate: a screen turned has none", !compositor_plate_wanted(1));
+        compositor.plane_row = 2;
+        check("plate: nor a window on a plane", !compositor_plate_wanted(0));
+        compositor.plane_row = -1, compositor.outputs = 2;
+        check("plate: nor two screens", !compositor_plate_wanted(0));
+        compositor.card = kept_card, compositor.plane_row = kept_plane, compositor.outputs = kept_outputs;
+        memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -243552,6 +243585,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        plate_wanted_rows();
         scanout_refused_rows();
         metric_present_rows();
         dirty_rows();

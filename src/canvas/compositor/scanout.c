@@ -912,11 +912,40 @@ static void compositor_apart_drop(void)
         compositor.changed = 0;
 }
 
+/*
+        One way to the screen for each kind of card. The two ways are not one done twice: what each is for is a kind of card's.
+
+        A card that scans out what its buffer holds (a card with memory of its own, amdgpu, radeon, nouveau, the emulated cards' VRAM, and i915 and xe,
+        whose buffer is the machine's memory scanned as it is) shows a buffer while it is being written: composed in place, a frame tears at the line the
+        write has reached. There the frame goes into the second plate and the screen is flipped to it (compositor_plate_swap, compositor_flip), with one
+        screen and no window on a plane; with two screens, a plane up or a screen turned it is composed in place, apart (compositor_slice_flush, with the
+        mirror) where a store to the card is dear, as it was before the plates.
+
+        A card that copies to its device or its host what it is told changed, from a buffer in the machine's memory (compositor_copies_damage: virtio_gpu
+        and the other guests' cards that keep one, simpledrm, the server boards' ast and mgag200, the USB displays udl and gud) shows nothing of the buffer
+        until it is told: the frame composed in place and told by DIRTYFB is copied whole and only where it changed, so it has no torn frame of its own.
+        A flip there tells the driver no damage, and the driver copies the whole screen for it (drm_atomic_helper_damage_merged's full update): a second
+        plate would cost every frame the whole screen across to the host or the device, 33 MB a frame at 4K, for nothing. So it has none, and is composed
+        apart (the mirror is the scanout itself, read at the machine's speed), told only the rows that changed.
+*/
+static const char *const compositor_damage_copied[] = {"virtio_gpu", "simpledrm", "cirrus-qemu", "hyperv_drm", "ast", "mgag200", "udl", "gud"};
+
+static int compositor_copies_damage(void)
+{
+        return compositor.card >= 0 && compositor_driver_in(compositor_damage_copied, sizeof(compositor_damage_copied) / sizeof(compositor_damage_copied[0]));
+}
+
+// Whether this present composes into the second plate and flips to it: one screen, no window on a plane, no screen turned, and a card that shows
+// what its buffer holds (a headless scan image's names are exchanged the same way); never one that copies its damage.
+static int compositor_plate_wanted(int turning)
+{
+        return !turning && compositor_output_count() < 2 && compositor.plane_row < 0 && !compositor_copies_damage();
+}
+
 static int compositor_changed_ready(void)
 {
         static const char *const apart[] = {"amdgpu", "radeon", "nouveau", "bochs-drm", "qxl", "vmwgfx"};
-        static const char *const shared[] = {"virtio_gpu", "simpledrm", "cirrus-qemu", "hyperv_drm", "ast",
-                                             "mgag200", "udl", "gud"};
+        const char *const *shared = compositor_damage_copied;
         unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
         unsigned long slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
         int own, listed, turned = compositor_turning_software();
@@ -929,7 +958,7 @@ static int compositor_changed_ready(void)
         if (compositor.card < 0)
                 return 0;
         own = compositor_driver_in(apart, sizeof(apart) / sizeof(apart[0]));
-        listed = own || compositor_driver_in(shared, sizeof(shared) / sizeof(shared[0]));
+        listed = own || compositor_driver_in(shared, sizeof(compositor_damage_copied) / sizeof(compositor_damage_copied[0]));
         // A screen Canvas turns reads the scene whole, a frame at a time, and a read of the card's memory is more than a
         // frame can pay (a dumb buffer is mapped write-combined on most cards, and word loads from one came to about ten
         // megabytes a second on a real card): with a screen turned, the scene is kept in the machine's memory whatever the

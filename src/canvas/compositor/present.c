@@ -424,7 +424,7 @@ static void compositor_present_frames(void)
         int scene[COMPOSITOR_DAMAGE][4];
         unsigned int scenes = 0;
 
-        if (!turning && compositor_output_count() < 2 && compositor.plane_row < 0)
+        if (compositor_plate_wanted(turning))
         {
                 if (compositor.card >= 0)
                         compositor_plate_make();
