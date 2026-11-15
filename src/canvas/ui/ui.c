@@ -22934,12 +22934,35 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, struct window_row 
 }
 
 /*
+        A window that opens beside a panel's button (the launcher from the panel with -a, a menu from a cell of the panel): the
+        rectangle the compositor wrote in the window table when the button was pressed, the edge the panel is along and the screen
+        it is on. ui_anchor_take reads it once, when the app was asked to open beside (asked); a table with no press in it, or a
+        screen or an edge that is none, leaves it unanchored, in the middle. ui_anchor_place finds where a width by height window
+        goes beside the button (above a bottom panel, below a top one, beside a left or right one, the other way kept where the
+        button is), kept inside the screen; ui_anchor_set asks the compositor for that place, with the picture it is for.
+*/
+struct ui_anchor
+{
+        b32 anchored;
+        int button[4], screen[4];  // the panel's button (x, y, width, height) and the screen's rectangle
+        unsigned int edge, number; // the edge the panel is along, and the screen's number
+};
+
+/*
         One app's window and loop. The runner claims the standard descriptors,
         takes the window, sets its title, name, glass, scale and ground, and calls
         open. Then it runs the loop: events, closing, focus, ground, the size
         asked for by the hand, a due picture,
         the app's tick and its one descriptor, and the wait. An app keeps its
         state and its pictures; it does not repeat the loop.
+
+        The window's plumbing is the kit's too, for an app that names its size, the buffer it shows and its picture (width,
+        height, shown and draw) and no hook of its own for them: the kit's frame draws the picture whole into the buffer the
+        compositor is not reading at the app's size (ui_app_frame), the kit's size takes the size the hand asks for, cut to the
+        output, with the scratch line fitted to it (ui_app_size), and a language's change puts the whole picture due as a
+        theme's does. ui_app_option reads the options every app takes (-f FONT, -b BOLD, and -a: open beside the band's cell that
+        was pressed), ui_app_place gives the window its first size and place, and ui_app_map the one mapping an app keeps what is
+        large in, saying so in the kernel's log when there is no memory for it. An app that names a hook of its own keeps it.
 */
 struct ui_app
 {
@@ -22984,6 +23007,13 @@ struct ui_app
         b32 had_keys;
         void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_row), the one a tab press would show
         void (*language)(void);         // optional: run when the language changes; the kit listens for it, once, as the app starts
+        // The kit's plumbing (ui_app_frame, ui_app_size, ui_app_place): the app's size and the buffer it shows, which are the app's
+        // own variables, and its picture, drawn whole. With these named the app needs no frame and no size hook of its own.
+        int address_to width, address_to height; // device pixels
+        int address_to shown;                    // the buffer shown, -1 before the first (the kit sets it so as the app starts)
+        void (*draw)(unsigned int address_to pixels);
+        b32 beside;                     // -a: the window opens beside the band's cell that was pressed, where the compositor left one
+        struct ui_anchor anchor;        // that cell, as ui_app_place took it
 };
 
 // The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
@@ -23095,6 +23125,45 @@ static b32 ui_start_apart(string_address address_to words, positive count)
         return true;
 }
 
+// The kit's frame: the app's picture at its size, into the buffer the compositor is not reading (ui_app_present). An app's own frame instead, when it names one.
+static b32 ui_app_frame(struct ui_app address_to app)
+{
+        if (app->frame)
+                return app->frame();
+        return ui_app_present(app->own, app->shown, app->dirty, *app->width, *app->height, app->draw);
+}
+
+// A size for the window: the app's own hook, or the kit's, which is the size, the scratch line the words are drawn through fitted to its
+// width, and the picture due.
+static fn ui_app_size(struct ui_app address_to app, unsigned int width, unsigned int height)
+{
+        if (app->size)
+        {
+                app->size(width, height);
+                return;
+        }
+        *app->width = (int)width, *app->height = (int)height;
+        ui_scratch_fit(app->ui, width);
+        *app->dirty = true;
+}
+
+// The size the hand asked for, or the one a new scale lays out again: cut to the output for an app with no size hook of its own (one with
+// a hook is given it as it came, and cuts it itself).
+static fn ui_app_resize(struct ui_app address_to app, const struct windows address_to table, unsigned int width, unsigned int height)
+{
+        if (!app->size)
+                width = width > table->output_width ? table->output_width : width, height = height > table->output_height ? table->output_height : height;
+        ui_app_size(app, width, height);
+}
+
+// A language's change, for an app with no hook of its own: the whole picture is due, its words asked again as it is drawn.
+static struct ui_app address_to ui_app_running;
+static fn ui_app_language(void)
+{
+        if (ui_app_running)
+                ui_app_changed(ui_app_running);
+}
+
 static int ui_app_run(struct ui_app address_to app)
 {
         struct windows address_to table;
@@ -23146,9 +23215,12 @@ static int ui_app_run(struct ui_app address_to app)
         ui_kit_inks(app->ui);
         *app->focused = false;
         ui_kit_pass();
-        // The app hears of a language's change from the kit, which listens for it once, here (language_listen holds a few).
-        if (app->language)
-                language_listen(app->language);
+        // The app hears of a language's change from the kit, which listens for it once, here (language_listen holds a few); an app with no
+        // hook of its own has its whole picture due.
+        ui_app_running = app;
+        language_listen(app->language ? app->language : ui_app_language);
+        if (app->shown)
+                *app->shown = -1;
         // The row's list, when the table has one: this window's frames may be recorded into it (ui_list_wanted).
         ui_app_list.ready = 0;
         ui_app_ui = app->ui, ui_app_row = row;
@@ -23255,7 +23327,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit_settle();
                         ui_app_changed(app);
                         if (table->width[row] && table->height[row])
-                                app->size(table->width[row], table->height[row]);
+                                ui_app_resize(app, table, table->width[row], table->height[row]);
                 }
                 if (table->want_width[row] && table->want_height[row] &&
                     (table->want_width[row] != app->asked_w || table->want_height[row] != app->asked_h))
@@ -23263,7 +23335,7 @@ static int ui_app_run(struct ui_app address_to app)
                         app->asked_w = table->want_width[row];
                         app->asked_h = table->want_height[row];
                         ui_kit_settle();
-                        app->size(app->asked_w, app->asked_h);
+                        ui_app_resize(app, table, app->asked_w, app->asked_h);
                 }
 
                 if (!running)
@@ -23288,7 +23360,7 @@ static int ui_app_run(struct ui_app address_to app)
                                 ui_kit.busy = 0;
                                 ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                 ui_kit_turn();
-                                if (!app->frame())
+                                if (!ui_app_frame(app))
                                         timeout = 50000000;
                                 else
                                 {
@@ -23384,21 +23456,6 @@ static void ui_centre(struct windows address_to table, unsigned int row, int wid
         table->y[row] = y + (screen_height - height) / 2 - offset;
 }
 
-/*
-        A window that opens beside a panel's button (the launcher from the panel with -a, a menu from a cell of the panel): the
-        rectangle the compositor wrote in the window table when the button was pressed, the edge the panel is along and the screen
-        it is on. ui_anchor_take reads it once, when the app was asked to open beside (asked); a table with no press in it, or a
-        screen or an edge that is none, leaves it unanchored, in the middle. ui_anchor_place finds where a width by height window
-        goes beside the button (above a bottom panel, below a top one, beside a left or right one, the other way kept where the
-        button is), kept inside the screen; ui_anchor_set asks the compositor for that place, with the picture it is for.
-*/
-struct ui_anchor
-{
-        b32 anchored;
-        int button[4], screen[4];  // the panel's button (x, y, width, height) and the screen's rectangle
-        unsigned int edge, number; // the edge the panel is along, and the screen's number
-};
-
 // The side of a panel's button a window goes on: above a bottom panel, below a top one, right of a left one, left of the rest.
 static unsigned int ui_panel_side(unsigned int edge)
 {
@@ -23432,6 +23489,69 @@ static void ui_anchor_set(const struct ui_anchor address_to anchor, struct windo
         place.width = (unsigned int)width, place.height = (unsigned int)height;
         place.screen = anchor->number;
         windows_place_set(table, row, &place);
+}
+
+/*
+        A window's first size and place, the same for every app that opens one: width by height device pixels asked, as wide as the
+        output at most and as tall as the output less UI_WINDOW_ROOM (ui_app_room: what a window leaves above and below it), beside the
+        band's cell that was pressed where the app was asked to open there (-a) and the compositor left one, else in the middle of the
+        primary screen and UI_WINDOW_RAISE above it. The size is the app's (ui_app_size); the place is read with the first picture.
+*/
+#define UI_WINDOW_ROOM (2 * (24 + 24)) // logical pixels of the output's height a window leaves free, above and below it together
+#define UI_WINDOW_RAISE 12             // logical pixels a window in the middle of its screen sits above the middle
+
+static int ui_app_room(const struct ui_app address_to app)
+{
+        int room = (int)app->own->table->output_height - ui_px(app->ui, UI_WINDOW_ROOM);
+
+        return room > 0 ? room : 0;
+}
+
+static fn ui_app_place(struct ui_app address_to app, int width, int height)
+{
+        struct windows address_to table = app->own->table;
+        int room = ui_app_room(app);
+
+        ui_app_size(app, (unsigned int)(width > (int)table->output_width ? (int)table->output_width : width), (unsigned int)(height < room || !room ? height : room));
+        ui_anchor_take(&app->anchor, table, app->beside);
+        if (app->anchor.anchored)
+                ui_anchor_set(&app->anchor, table, app->own->row, *app->width, *app->height);
+        else
+                ui_centre(table, app->own->row, *app->width, *app->height, ui_px(app->ui, UI_WINDOW_RAISE));
+}
+
+/*
+        An option of the command line every app takes, at at: -f FONT (the face it is drawn in), -b BOLD (its bold face) and -a (it
+        opens beside the band's cell that was pressed). Answers how many arguments it took, 0 for one that is not among them.
+*/
+static positive ui_app_option(struct ui_app address_to app, positive at)
+{
+        string_address value;
+
+        if (string_equals(program_argument(at), (string_address) "-a"))
+                return app->beside = true, 1;
+        if ((value = ui_argument(at, (string_address) "-f")))
+                return app->font = value, 2;
+        if ((value = ui_argument(at, (string_address) "-b")))
+                return app->bold = value, 2;
+        return 0;
+}
+
+/*
+        The one mapping an app keeps what is large in (not the image's bss), bytes long and zeroed: null when there is no memory for
+        it, which is said in the kernel's log as "NAME: no memory, pid PID".
+*/
+static address_any ui_app_map(const struct ui_app address_to app, positive bytes)
+{
+        long mapped = ui_map(bytes);
+        char said[48];
+
+        if (mapped >= 0 || mapped <= -4096)
+                return (address_any)mapped;
+        string_copy_bounded((string_address)said, app->name ? app->name : (string_address) "app", sizeof(said) - 24);
+        compositor_kmsg((string_append_bounded((string_address)said, (string_address) ": no memory, pid ", sizeof(said)), (string_address)said),
+                        (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
+        return null;
 }
 
 // Whether a process is the program name: its command name is name and a newline, as /proc/PID/comm has it.
