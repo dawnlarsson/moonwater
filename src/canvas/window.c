@@ -519,7 +519,7 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "cooling down after hangs", "a scanout pitch not 16 bytes", "a job given up on may still run",
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
-    "other frames, or empty damage", "a window with alpha and round corners (the card does not draw it yet)",
+    "other frames, or empty damage", "a window with alpha and round corners (the file gpu-round-off is there)",
     "a client's own pointer picture drawn into the scene"};
 // The GPU's prerequisites, in the order the path needs them (gpu.c's enum gpu_req, the same order): their names, and what to do about each one, in words.
 // moonwater debug shows them, and the issue board's detail for a failed one.
@@ -1187,6 +1187,10 @@ struct windows
         unsigned long long metric_gpu_job_ns_copy;   // and the time waited for them
         unsigned int metric_gpu_jobs_scale;          // its scaling jobs
         unsigned long long metric_gpu_job_ns_scale;  // and the time waited for them
+        // The card's jobs since the start the loop waited for, and those submitted without a wait; and of the waited ones, the time inside
+        // the submit (the driver's walk of the pages named, and its retries) and the time from there to the job's end, in nanoseconds.
+        unsigned int metric_jobs_waited, metric_jobs_unwaited;
+        unsigned long long metric_job_submit_ns, metric_job_wait_ns;
         // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
