@@ -2143,6 +2143,9 @@ typedef struct
         host_settings address_to carry;
         bool carried;    // the slots of what was put in place are carry
         bool had_loader; // a rollback found a loader to keep
+        bool switched;   // the loader is the image put in place: what firmware starts now
+        bool unkept;     // the loader could not be read, so it is not kept as previous.efi
+        bool stranded;   // stopped after the switch: the build the loader was is only in previous.new
         p8 image[HOST_PATH_ROOM];
         p8 next[HOST_PATH_ROOM];
         p8 kept[HOST_PATH_ROOM];
@@ -2281,6 +2284,34 @@ static b32 host_place_check(host_place address_to place)
         return 0;
 }
 
+/*
+        The loader copied to previous.new to be kept, which an update and a
+        rollback do before they replace it. A loader that cannot be read to
+        its end is not kept, and does not stop the write that replaces it: an
+        image that cannot be read is what a write over it is for, and the
+        copy that failed stopped the update or rollback before anything was
+        written, so a loader that had gone bad could not be replaced at all.
+        What was copied of it is removed, previous.efi is left as it is, that
+        is said, and unkept tells the steps after.
+*/
+static b32 host_place_keep_copy(host_place address_to place)
+{
+        p8 sum[32];
+
+        if (!host_copy_file(place->image, place->kept_next))
+                return 0;
+        //      Which side stopped the copy is asked of the loader, read again to
+        //      its end, and only when it did stop: a whole copy reads it once.
+        if (host_image_sum(place->image, false, sum))
+                return 1;
+        place->unkept = true;
+        system_remove_at(AT_FDCWD, place->kept_next, 0);
+        host_say(log_error, host_label "%s cannot be read, so it is not kept to go back to: "
+                                       "%s is left as it was\n",
+                 place->image, place->kept);
+        return 0;
+}
+
 static b32 host_place_step(host_place address_to place, positive step)
 {
         bipolar failed;
@@ -2294,9 +2325,9 @@ static b32 host_place_step(host_place address_to place, positive step)
                 host_image_discard(place->system);
                 return 0;
         case HOST_PLACE_KEEP_COPY:
-                return loader ? host_copy_file(place->image, place->kept_next) : 0;
+                return loader ? host_place_keep_copy(place) : 0;
         case HOST_PLACE_KEEP:
-                if (!loader)
+                if (!loader || place->unkept)
                         return 0;
                 if (!host_files_alike(place->image, place->kept_next, 0, 0))
                         return host_refuse("%s could not be kept whole\n", place->image);
@@ -2311,6 +2342,7 @@ static b32 host_place_step(host_place address_to place, positive step)
         case HOST_PLACE_SWITCH:
                 failed = system_rename_at(AT_FDCWD, place->next, AT_FDCWD, place->image, 0);
                 return_if(failed < 0, host_fail(place->image, failed));
+                place->switched = true;
                 host_place_sync(place->system);
                 return 0;
         }
@@ -2342,15 +2374,24 @@ static b32 host_back_step(host_place address_to place, positive step)
                 place->had_loader = system_access_at(AT_FDCWD, place->image, 0) >= 0;
                 if (!place->had_loader)
                         return 0;
-                if (host_copy_file(place->image, place->kept_next))
+                if (host_place_keep_copy(place))
                         return 1;
+                //      Not kept, so there is nothing for KEEP to rename or for
+                //      the read back to find.
+                if (place->unkept)
+                {
+                        place->had_loader = false;
+                        return 0;
+                }
                 if (!host_files_alike(place->image, place->kept_next, 0, 0) ||
                     !host_image_sum(place->kept_next, false, place->sums[1]))
                         return host_refuse("%s could not be kept whole\n", place->image);
                 return 0;
         case HOST_BACK_SWITCH:
                 failed = system_rename_at(AT_FDCWD, place->next, AT_FDCWD, place->image, 0);
-                return failed < 0 ? host_fail(place->image, failed) : 0;
+                return_if(failed < 0, host_fail(place->image, failed));
+                place->switched = true;
+                return 0;
         case HOST_BACK_KEEP:
                 failed = place->had_loader ? system_rename_at(AT_FDCWD, place->kept_next,
                                                               AT_FDCWD, place->kept, 0)
@@ -2362,9 +2403,31 @@ static b32 host_back_step(host_place address_to place, positive step)
         return 0;
 }
 
+/*
+        What a write that stopped at step leaves: what it was making beside
+        the images is removed, and a refusal of the judge is before anything
+        and leaves the partition as it was.
+
+        Once the loader has been switched nothing beside it is removed: the
+        only step after a switch is a rollback's KEEP, and when its rename
+        fails, previous.efi is the build asked for (the loader now) and the
+        build the loader was is in previous.new and nowhere else, written,
+        synced and read back by KEEP_COPY. It stays, the partition is synced
+        with the loader the switch put there, and the caller says what the
+        machine starts (host_rollback_locked). The cleanup removed it, so the
+        only copy of the build a rollback replaced went with a failed rename.
+*/
+static fn host_place_stopped(host_place address_to place, positive step)
+{
+        place->stranded = place->switched;
+        if (place->switched)
+                host_place_sync(place->system);
+        else if (step != HOST_PLACE_JUDGE)
+                host_image_discard(place->system);
+}
+
 /* Every step of an update, or of a rollback, in order: the first that fails
-   stops it, and what it was making beside the images is removed. A refusal
-   of the judge is before anything, and leaves the partition as it was. */
+   stops it, and host_place_stopped says what is left. */
 static b32 host_place_written(host_place address_to place, bool back)
 {
         positive steps = back ? HOST_BACK_STEPS : HOST_PLACE_STEPS;
@@ -2372,8 +2435,7 @@ static b32 host_place_written(host_place address_to place, bool back)
         for (positive step = 0; step < steps; step++)
                 if (back ? host_back_step(place, step) : host_place_step(place, step))
                 {
-                        if (step != HOST_PLACE_JUDGE)
-                                host_image_discard(place->system);
+                        host_place_stopped(place, step);
                         return 1;
                 }
         return 0;
@@ -2409,17 +2471,21 @@ static bool host_back_landed(string_address system, address_any opaque)
         an install and the whole of an update: source, which is to read back
         as build, with the settings carry stamped into it. The image there
         before is kept as previous.efi, for `setup rollback`, the firmware's
-        shell or a stick to start when a build turns out bad. What it did is
-        read back from the disk itself, the partition unmounted, and the
-        partition is left unmounted.
+        shell or a stick to start when a build turns out bad, unless it
+        cannot be read, which unkept (when it is not null) then says. What
+        it did is read back from the disk itself, the partition unmounted,
+        and the partition is left unmounted.
 */
 static b32 host_place_image(string_address name, string_address system,
                             string_address source, string_address build,
-                            host_settings address_to carry, bool address_to carried)
+                            host_settings address_to carry, bool address_to carried,
+                            bool address_to unkept)
 {
         host_place place;
 
         *carried = false;
+        if (unkept)
+                *unkept = false;
         if (!host_place_open(address_of place, system, source, build, carry))
                 return host_refuse("%s: path too long\n", system);
 
@@ -2427,6 +2493,8 @@ static b32 host_place_image(string_address name, string_address system,
                 return 1;
 
         *carried = place.carried;
+        if (unkept)
+                *unkept = place.unkept;
         if (!host_on_disk(name, system, host_place_landed, address_of place))
                 return host_refuse("%s did not read back from the disk as the image "
                                    "that was written\n", name);
@@ -2793,45 +2861,59 @@ static fn host_medium_fresh(p8 address_to medium, positive size)
         stick is only carrying a build. An image from before there were
         settings has none, which is the defaults. What the loader on the
         system partition mounted at HOST_SYSTEM keeps, as the next generation
-        of it, into disk; 1, said, when the loader is there and cannot be read.
+        of it, into disk.
+
+        A loader that is there and cannot be read says nothing of the
+        settings in it, and the write goes on with the defaults, said before
+        anything is written: it was refused, so a loader gone bad could not
+        be replaced by the update that would mend it. A loader that reads and
+        has no settings is told from one that does not read by reading it to
+        its end, which only those two need. lost is whether the loader's
+        settings were there and could not be read, either way, so that what
+        follows does not say the disk keeps them.
 */
-static b32 host_settings_carried(host_install address_to install, host_settings address_to disk)
+static b32 host_settings_carried(host_install address_to install, host_settings address_to disk,
+                                 bool address_to lost)
 {
         p8 path[HOST_PATH_ROOM];
+        p8 sum[32];
         b32 read = -1;
-        b32 failed = 0;
 
         host_settings_empty(disk);
+        *lost = false;
         if (host_join(path, sizeof(path), HOST_SYSTEM, HOST_IMAGE))
         {
                 bipolar opened = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
 
-                //      An image that is there and cannot be read says nothing of
-                //      the settings in it, and is not replaced on a guess that it
-                //      has none.
                 if (opened >= 0)
                 {
                         system_close(opened);
                         read = host_settings_image(path, disk);
                 }
-                else if (opened != -ERROR_NO_ENTRY)
-                        failed = host_refuse("%s cannot be read, so its settings "
-                                             "cannot be kept\n", install->system);
+                *lost = opened != -ERROR_NO_ENTRY && read < 0 &&
+                        !host_image_sum(path, false, sum);
+                if (*lost)
+                        host_say(log_error, host_label "the image on %s cannot be read, so the "
+                                                       "settings in it cannot be kept: %s starts "
+                                                       "from the defaults\n",
+                                 install->system, install->disk);
         }
 
         if (read == 0)
                 host_say(log, host_label "both settings slots on %s are damaged: "
                                          "it starts from the defaults\n",
                          install->disk);
+        *lost |= read == 0;
 
         disk->generation++;
         host_medium_fresh(disk->medium, sizeof(disk->medium));
-        return failed;
+        return 0;
 }
 
-/* What became of the settings an image was given, said: whose names the image. */
+/* What became of the settings an image was given, said: whose names the image,
+   and lost is host_settings_carried's, whose line then said what the disk has. */
 static fn host_settings_landed(host_install address_to install, host_settings address_to disk,
-                               bool carried, string_address whose)
+                               bool carried, bool lost, string_address whose)
 {
         host_settings session;
 
@@ -2841,6 +2923,8 @@ static fn host_settings_landed(host_install address_to install, host_settings ad
                                          "with the defaults\n", whose, install->disk);
                 return;
         }
+        if (lost)
+                return;
 
         //      A session started from this disk is still its copy.
         if (host_settings_kept(address_of session) &&
@@ -2860,6 +2944,7 @@ static b32 host_update_locked(host_install address_to install)
         host_medium_search search;
         host_settings disk;
         bool carried;
+        bool lost;
         bipolar mounted;
         b32 failed;
 
@@ -2898,14 +2983,15 @@ static b32 host_update_locked(host_install address_to install)
         host_say(log, host_label "writing this build to %s, from %s\n",
                  install->system, search.name);
 
-        failed = host_settings_carried(install, address_of disk);
+        failed = host_settings_carried(install, address_of disk, address_of lost);
         if (!failed && !host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE))
                 failed = host_refuse("%s: path too long\n", HOST_MEDIUM);
         if (!failed)
                 failed = host_place_image(install->system, HOST_SYSTEM, source, running,
-                                          address_of disk, address_of carried);
+                                          address_of disk, address_of carried, null);
         if (!failed)
-                host_settings_landed(install, address_of disk, carried, "this build's image");
+                host_settings_landed(install, address_of disk, carried, lost,
+                                     "this build's image");
 
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
@@ -4092,7 +4178,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         host_splash_install(HOST_MEDIUM, HOST_SYSTEM, name, address_of splash);
         failed = host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE)
                      ? host_place_image(target.system, HOST_SYSTEM, path, running,
-                                        address_of carry, address_of carried)
+                                        address_of carry, address_of carried, null)
                      : host_refuse("%s: path too long\n", HOST_MEDIUM);
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
@@ -27548,6 +27634,8 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
         p8 question[HOST_BUILD_ROOM * 2 + 128];
         p16 machine;
         bool carried;
+        bool lost;
+        bool unkept;
         bool summed = false;
         bipolar mounted;
         b32 fit;
@@ -27609,9 +27697,14 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
                                            : (string_address) "a build",
                          build, summed ? ", and its bytes are the sum beside it" : "");
 
+                //      An image whose build cannot be read may not read at all, and
+                //      one that does not is not kept (host_place_keep_copy).
                 (void)string_join(question, sizeof(question), "Writing it over ", install->disk,
-                                  " keeps the data there, and the build it has as the one to go "
-                                  "back to.");
+                                  install->readable
+                                      ? " keeps the data there, and the build it has as the one "
+                                        "to go back to."
+                                      : " keeps the data there, and the image it has as the one "
+                                        "to go back to if that image can be read.");
                 if (!host_said_yes(false, (string_address)question))
                         return 1;
         }
@@ -27636,19 +27729,25 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
         host_say(log, host_label "writing the build on %s to %s\n", stick->name,
                  install->system);
 
-        failed = host_settings_carried(install, address_of disk);
+        failed = host_settings_carried(install, address_of disk, address_of lost);
         if (!failed)
                 failed = host_place_image(install->system, HOST_SYSTEM, source, build,
-                                          address_of disk, address_of carried);
+                                          address_of disk, address_of carried, address_of unkept);
         if (!failed)
         {
                 p8 whose[HOST_NAME_ROOM + 24];
 
                 (void)string_join(whose, sizeof(whose), "the image on ", stick->name);
-                host_settings_landed(install, address_of disk, carried, (string_address)whose);
-                host_say(log, host_label "%s starts %s from its next start, keeping its data; "
-                                         "moonwater setup rollback starts the build it had "
-                                         "again. reboot starts it now\n",
+                host_settings_landed(install, address_of disk, carried, lost,
+                                     (string_address)whose);
+                host_say(log, unkept ? host_label "%s starts %s from its next start, keeping its "
+                                                  "data; the image it had could not be read and "
+                                                  "is not kept, so moonwater setup rollback "
+                                                  "starts what " HOST_KEPT_IMAGE " already had. "
+                                                  "reboot starts it now\n"
+                                     : host_label "%s starts %s from its next start, keeping its "
+                                                  "data; moonwater setup rollback starts the build "
+                                                  "it had again. reboot starts it now\n",
                          install->disk, build);
         }
 
@@ -27661,23 +27760,22 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
         previous.efi made the image that starts and the one that started
         kept as previous.efi in its place: back is the build previous.efi
         reads as, and carry is stamped into it. The partition is left
-        unmounted.
+        unmounted. What the steps found is left in place for the caller:
+        whether the slots were carried, whether the loader could be kept, and
+        whether it was stranded, which it can be when this fails, since the
+        last rename of a rollback is after its switch.
 */
 static b32 host_back_image(string_address name, string_address system, string_address back,
-                           host_settings address_to carry, bool address_to carried)
+                           host_settings address_to carry, host_place address_to place)
 {
-        host_place place;
-
-        *carried = false;
-        if (!host_place_open(address_of place, system, null, back, carry))
+        if (!host_place_open(place, system, null, back, carry))
                 return host_refuse("%s: path too long\n", system);
-        place.source = place.kept;
+        place->source = place->kept;
 
-        if (host_place_written(address_of place, true))
+        if (host_place_written(place, true))
                 return 1;
 
-        *carried = place.carried;
-        if (!host_on_disk(name, system, host_back_landed, address_of place))
+        if (!host_on_disk(name, system, host_back_landed, place))
                 return host_refuse("%s did not read back from the disk as the images that "
                                    "were written\n", name);
 
@@ -27700,11 +27798,13 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
         p8 back[HOST_BUILD_ROOM];
         p8 asked[HOST_BUILD_ROOM];
         p16 machine;
-        bool carried;
+        host_place place;
+        bool lost;
         bipolar mounted;
         b32 fit;
         b32 failed;
 
+        memory_zero(address_of place, sizeof(place));
         if (!host_install_refresh(install))
                 return host_refuse("%s is no longer here\n", install->disk);
         host_install_read(install);
@@ -27745,8 +27845,13 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                 {
                         string_copy(asked, back);
                         host_unmount(HOST_SYSTEM);
-                        if (!host_said_yes(false, "Starting that one again keeps the data, and "
-                                                  "the build it has now as the one to go back to."))
+                        if (!host_said_yes(false, install->readable
+                                                      ? "Starting that one again keeps the data, "
+                                                        "and the build it has now as the one to "
+                                                        "go back to."
+                                                      : "Starting that one again keeps the data, "
+                                                        "and the image it has now as the one to go "
+                                                        "back to if that image can be read."))
                                 return 1;
                         if (!host_install_refresh(install))
                                 return host_refuse("%s is no longer here\n", install->disk);
@@ -27762,16 +27867,38 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
         }
 
         if (!failed)
-                failed = host_settings_carried(install, address_of disk);
+                failed = host_settings_carried(install, address_of disk, address_of lost);
         if (!failed)
                 failed = host_back_image(install->system, HOST_SYSTEM, back, address_of disk,
-                                         address_of carried);
+                                         address_of place);
         if (!failed)
         {
-                host_settings_landed(install, address_of disk, carried, "the build from before");
-                host_say(log, host_label "%s starts %s from its next start, keeping its data; "
-                                         "moonwater setup rollback starts the other again. "
-                                         "reboot starts it now\n", install->disk, back);
+                host_settings_landed(install, address_of disk, place.carried, lost,
+                                     "the build from before");
+                host_say(log, place.unkept
+                                  ? host_label "%s starts %s from its next start, keeping its "
+                                               "data, and keeps it as previous.efi too: the image "
+                                               "it had could not be read and is not kept. reboot "
+                                               "starts it now\n"
+                                  : host_label "%s starts %s from its next start, keeping its "
+                                               "data; moonwater setup rollback starts the other "
+                                               "again. reboot starts it now\n",
+                         install->disk, back);
+        }
+        /*      The loader was switched and the build it was could not be made
+                previous.efi: what starts is the build asked for, and the other
+                is only in the copy beside it, which the next write removes. */
+        else if (place.stranded)
+        {
+                host_settings_landed(install, address_of disk, place.carried, lost,
+                                     "the build from before");
+                host_say(log_error, host_label "%s starts %s from its next start, keeping its "
+                                               "data, and keeps it as previous.efi too: the "
+                                               "build it started until now could not be kept "
+                                               "there, and is only in " HOST_KEPT_IMAGE_NEXT
+                                               " on %s, which a firmware's shell can start and "
+                                               "the next update or rollback removes\n",
+                         install->disk, back, install->system);
         }
 
         host_unmount(HOST_SYSTEM);

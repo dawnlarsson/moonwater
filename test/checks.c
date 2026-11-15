@@ -114752,6 +114752,105 @@ static fn update_cuts(void)
         update_clear();
 }
 
+/*
+        An update and a rollback over a loader that cannot be read: a link to
+        a directory stands for one here, a name that opens and does not read
+        and that a rename replaces. Each writes its image all the same and
+        keeps nothing of the loader, so previous.efi is the build it kept
+        before, whole, and nothing is left beside them; where the copy of the
+        loader that previous.new is made from stopped both before anything
+        was written, and a loader gone bad could not be replaced at all.
+*/
+static b32 update_unread_loader(void)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 aside[HOST_PATH_ROOM];
+
+        update_at(path, sizeof(path), "/esp" HOST_IMAGE);
+        update_at(aside, sizeof(aside), "/esp/EFI/unread");
+        system_make_directory_at(AT_FDCWD, (string_address)aside, 0755);
+        return system_remove_at(AT_FDCWD, (string_address)path, 0) >= 0 &&
+               system_symbolic_link_at((string_address)aside, AT_FDCWD, (string_address)path) >= 0;
+}
+
+static fn update_unreadable(void)
+{
+        host_place place;
+        p8 path[HOST_PATH_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+        bool ready = update_ready() &&
+                     update_open(address_of place, false, (string_address)update_new) &&
+                     update_unread_loader();
+
+        check("an update over a loader that cannot be read writes its image all the same",
+              ready && !host_place_written(address_of place, false) && update_boots() == 1);
+        check("and keeps nothing of it: previous.efi is the build kept before, whole, and "
+              "nothing is left beside them",
+              ready && update_sum_is("/esp" HOST_KEPT_IMAGE, false, update_sum_kept) &&
+                  update_unstaged());
+
+        ready = ready && update_open(address_of place, true, (string_address)update_older) &&
+                update_unread_loader();
+        check("a rollback over a loader that cannot be read starts the build asked for all the same",
+              ready && !host_place_written(address_of place, true) &&
+                  !host_image_fit(update_at(path, sizeof(path), "/esp" HOST_IMAGE), build,
+                                  sizeof(build), null) &&
+                  string_equals(build, update_older));
+        check("and leaves previous.efi as it was, whole, and nothing beside them",
+              ready && update_sum_is("/esp" HOST_KEPT_IMAGE, false, update_sum_kept) &&
+                  update_unstaged());
+
+        system_remove_at(AT_FDCWD, update_at(path, sizeof(path), "/esp/EFI/unread"), AT_REMOVEDIR);
+        update_clear();
+}
+
+/*
+        A rollback whose last rename fails, after its switch: previous.efi is
+        made a directory with a file in it between the switch and the rename,
+        which a rename of a file cannot replace. The loader is the build asked
+        for and previous.efi still is too, so the build the loader was is in
+        previous.new and nowhere else: what is left of the stopped write keeps
+        it, whole, and says the switch was made, where it was removed with the
+        copies a stopped write leaves and the rollback said only that it failed.
+*/
+static fn update_back_stopped(void)
+{
+        host_place place;
+        p8 path[HOST_PATH_ROOM];
+        p8 inside[HOST_PATH_ROOM];
+        p8 loader[32];
+        bool ready = update_ready() &&
+                     update_open(address_of place, false, (string_address)update_new) &&
+                     !host_place_written(address_of place, false) &&
+                     update_sum("/esp" HOST_IMAGE, false, loader) &&
+                     update_open(address_of place, true, (string_address)update_old);
+        bool stepped = ready;
+        bool stopped;
+
+        for (positive step = 0; stepped && step <= HOST_BACK_SWITCH; step++)
+                stepped = !host_back_step(address_of place, step);
+
+        update_at(path, sizeof(path), "/esp" HOST_KEPT_IMAGE);
+        update_at(inside, sizeof(inside), "/esp" HOST_KEPT_IMAGE "/held");
+        stepped = stepped && system_remove_at(AT_FDCWD, path, 0) >= 0 &&
+                  system_make_directory_at(AT_FDCWD, path, 0755) >= 0 &&
+                  update_write((string_address)inside, 16);
+        stopped = stepped && host_back_step(address_of place, HOST_BACK_KEEP);
+        if (stopped)
+                host_place_stopped(address_of place, HOST_BACK_KEEP);
+
+        check("a rollback whose last rename fails after its switch is stopped there",
+              stopped && place.switched && place.stranded);
+        check("and the loader is the build asked for", stopped && update_boots() == 0);
+        check("and the build the loader was is still beside it in previous.new, whole",
+              stopped && update_sum_is("/esp" HOST_KEPT_IMAGE_NEXT, false, loader) &&
+                  update_gone("/esp" HOST_IMAGE_NEXT));
+
+        system_remove_at(AT_FDCWD, (string_address)inside, 0);
+        system_remove_at(AT_FDCWD, path, AT_REMOVEDIR);
+        update_clear();
+}
+
 
 /*
         The boot splash (src/moonwater/splash.c, and its half of src/sh/host.c): what a file of a picture
@@ -115205,6 +115304,8 @@ static fn update_scenes(void)
         update_digests();
         update_places();
         update_cuts();
+        update_unreadable();
+        update_back_stopped();
         splash_scenes();
 
         update_clear();
