@@ -16501,6 +16501,168 @@ static fn pixel_either(void)
 }
 
 /*
+        The registers a caller keeps across a call (rbx, rbp and r12 to r15
+        on x86-64; x19 to x29 and d8 to d15 on arm64; s0 to s11 and fs0 to
+        fs11 on riscv64), each loaded with a value of its own before a call
+        of one of the eleven and read back after it: pixel_saved_call answers
+        nonzero when one came back changed. A body that spends one and gives
+        it back wrong corrupts whoever called it -- the riscv64 chip mix
+        spent s0 to s2 unsaved until 59ebded -- and a check whose own loops
+        happen not to keep anything there would never notice.
+*/
+extern positive pixel_saved_call(address_any routine, const positive address_to arguments) __asm__("pixel_saved_call")
+        __attribute__((visibility("hidden")));
+
+#if X64
+__asm__(".pushsection .text\n   .balign 16\n   .local pixel_saved_call\n   .type pixel_saved_call, @function\n"
+        "pixel_saved_call:\n"
+        "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+        "mov %rdi, %rax\n   mov %rsi, %r11\n   sub $8, %rsp\n   pushq 56(%r11)\n   pushq 48(%r11)\n"
+        "mov (%r11), %rdi\n   mov 8(%r11), %rsi\n   mov 16(%r11), %rdx\n   mov 24(%r11), %rcx\n   mov 32(%r11), %r8\n   mov 40(%r11), %r9\n"
+        "movabs $0x5b1f3c9d2e4a6b71, %rbx\n   lea 1(%rbx), %rbp\n   lea 2(%rbx), %r12\n   lea 3(%rbx), %r13\n   lea 4(%rbx), %r14\n   lea 5(%rbx), %r15\n"
+        "call *%rax\n   add $24, %rsp\n"
+        "movabs $0x5b1f3c9d2e4a6b71, %rcx\n   mov %rbx, %rax\n   xor %rcx, %rax\n"
+        "inc %rcx\n   mov %rbp, %rdx\n   xor %rcx, %rdx\n   or %rdx, %rax\n"
+        "inc %rcx\n   mov %r12, %rdx\n   xor %rcx, %rdx\n   or %rdx, %rax\n"
+        "inc %rcx\n   mov %r13, %rdx\n   xor %rcx, %rdx\n   or %rdx, %rax\n"
+        "inc %rcx\n   mov %r14, %rdx\n   xor %rcx, %rdx\n   or %rdx, %rax\n"
+        "inc %rcx\n   mov %r15, %rdx\n   xor %rcx, %rdx\n   or %rdx, %rax\n"
+        "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n   ret\n"
+        ".size pixel_saved_call, .-pixel_saved_call\n   .popsection\n");
+#elif ARM64
+__asm__(".pushsection .text\n   .balign 16\n   .local pixel_saved_call\n   .type pixel_saved_call, %function\n"
+        "pixel_saved_call:\n"
+        "stp x29, x30, [sp, #-160]!\n   mov x29, sp\n"
+        "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
+        "stp d8, d9, [sp, #96]\n   stp d10, d11, [sp, #112]\n   stp d12, d13, [sp, #128]\n   stp d14, d15, [sp, #144]\n"
+        "mov x16, x0\n   mov x17, x1\n"
+        "ldp x0, x1, [x17]\n   ldp x2, x3, [x17, #16]\n   ldp x4, x5, [x17, #32]\n   ldp x6, x7, [x17, #48]\n"
+        "mov x19, #0x6b71\n   movk x19, #0x2e4a, lsl #16\n   movk x19, #0x3c9d, lsl #32\n   movk x19, #0x5b1f, lsl #48\n"
+        "add x20, x19, #1\n   add x21, x19, #2\n   add x22, x19, #3\n   add x23, x19, #4\n   add x24, x19, #5\n"
+        "add x25, x19, #6\n   add x26, x19, #7\n   add x27, x19, #8\n   add x28, x19, #9\n"
+        "add x9, x19, #10\n   fmov d8, x9\n   add x9, x19, #11\n   fmov d9, x9\n   add x9, x19, #12\n   fmov d10, x9\n"
+        "add x9, x19, #13\n   fmov d11, x9\n   add x9, x19, #14\n   fmov d12, x9\n   add x9, x19, #15\n   fmov d13, x9\n"
+        "add x9, x19, #16\n   fmov d14, x9\n   add x9, x19, #17\n   fmov d15, x9\n"
+        "blr x16\n"
+        "mov x9, #0x6b71\n   movk x9, #0x2e4a, lsl #16\n   movk x9, #0x3c9d, lsl #32\n   movk x9, #0x5b1f, lsl #48\n"
+        "eor x0, x19, x9\n"
+        "add x10, x9, #1\n   eor x11, x20, x10\n   orr x0, x0, x11\n   add x10, x9, #2\n   eor x11, x21, x10\n   orr x0, x0, x11\n"
+        "add x10, x9, #3\n   eor x11, x22, x10\n   orr x0, x0, x11\n   add x10, x9, #4\n   eor x11, x23, x10\n   orr x0, x0, x11\n"
+        "add x10, x9, #5\n   eor x11, x24, x10\n   orr x0, x0, x11\n   add x10, x9, #6\n   eor x11, x25, x10\n   orr x0, x0, x11\n"
+        "add x10, x9, #7\n   eor x11, x26, x10\n   orr x0, x0, x11\n   add x10, x9, #8\n   eor x11, x27, x10\n   orr x0, x0, x11\n"
+        "add x10, x9, #9\n   eor x11, x28, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d8\n   add x10, x9, #10\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d9\n   add x10, x9, #11\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d10\n   add x10, x9, #12\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d11\n   add x10, x9, #13\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d12\n   add x10, x9, #14\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d13\n   add x10, x9, #15\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d14\n   add x10, x9, #16\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "fmov x11, d15\n   add x10, x9, #17\n   eor x11, x11, x10\n   orr x0, x0, x11\n"
+        "mov x11, sp\n   eor x11, x11, x29\n   orr x0, x0, x11\n"
+        "ldp d14, d15, [sp, #144]\n   ldp d12, d13, [sp, #128]\n   ldp d10, d11, [sp, #112]\n   ldp d8, d9, [sp, #96]\n"
+        "ldp x27, x28, [sp, #80]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n"
+        "ldp x29, x30, [sp], #160\n   ret\n"
+        ".size pixel_saved_call, .-pixel_saved_call\n   .popsection\n");
+#elif RISCV64
+#define PIXEL_SAVED_RV(n) "addi t3, t2, " #n "\n   xor t4, s" #n ", t3\n   or a0, a0, t4\n"
+#define PIXEL_SAVED_RV_F(n) "fmv.x.d t4, fs" #n "\n   addi t3, t2, 12 + " #n "\n   xor t4, t4, t3\n   or a0, a0, t4\n"
+__asm__(".pushsection .text\n   .balign 16\n   .local pixel_saved_call\n   .type pixel_saved_call, @function\n"
+        "pixel_saved_call:\n"
+        "addi sp, sp, -208\n   sd ra, 0(sp)\n"
+        "sd s0, 8(sp)\n   sd s1, 16(sp)\n   sd s2, 24(sp)\n   sd s3, 32(sp)\n   sd s4, 40(sp)\n   sd s5, 48(sp)\n"
+        "sd s6, 56(sp)\n   sd s7, 64(sp)\n   sd s8, 72(sp)\n   sd s9, 80(sp)\n   sd s10, 88(sp)\n   sd s11, 96(sp)\n"
+        "fsd fs0, 104(sp)\n   fsd fs1, 112(sp)\n   fsd fs2, 120(sp)\n   fsd fs3, 128(sp)\n   fsd fs4, 136(sp)\n   fsd fs5, 144(sp)\n"
+        "fsd fs6, 152(sp)\n   fsd fs7, 160(sp)\n   fsd fs8, 168(sp)\n   fsd fs9, 176(sp)\n   fsd fs10, 184(sp)\n   fsd fs11, 192(sp)\n"
+        "mv t0, a0\n   mv t1, a1\n"
+        "ld a0, 0(t1)\n   ld a1, 8(t1)\n   ld a2, 16(t1)\n   ld a3, 24(t1)\n   ld a4, 32(t1)\n   ld a5, 40(t1)\n   ld a6, 48(t1)\n   ld a7, 56(t1)\n"
+        "li s0, 0x5b1f3c9d2e4a6b71\n   addi s1, s0, 1\n   addi s2, s0, 2\n   addi s3, s0, 3\n   addi s4, s0, 4\n   addi s5, s0, 5\n"
+        "addi s6, s0, 6\n   addi s7, s0, 7\n   addi s8, s0, 8\n   addi s9, s0, 9\n   addi s10, s0, 10\n   addi s11, s0, 11\n"
+        "addi t2, s0, 12\n   fmv.d.x fs0, t2\n   addi t2, s0, 13\n   fmv.d.x fs1, t2\n   addi t2, s0, 14\n   fmv.d.x fs2, t2\n"
+        "addi t2, s0, 15\n   fmv.d.x fs3, t2\n   addi t2, s0, 16\n   fmv.d.x fs4, t2\n   addi t2, s0, 17\n   fmv.d.x fs5, t2\n"
+        "addi t2, s0, 18\n   fmv.d.x fs6, t2\n   addi t2, s0, 19\n   fmv.d.x fs7, t2\n   addi t2, s0, 20\n   fmv.d.x fs8, t2\n"
+        "addi t2, s0, 21\n   fmv.d.x fs9, t2\n   addi t2, s0, 22\n   fmv.d.x fs10, t2\n   addi t2, s0, 23\n   fmv.d.x fs11, t2\n"
+        "jalr t0\n"
+        "li t2, 0x5b1f3c9d2e4a6b71\n   xor a0, s0, t2\n"
+        PIXEL_SAVED_RV(1) PIXEL_SAVED_RV(2) PIXEL_SAVED_RV(3) PIXEL_SAVED_RV(4) PIXEL_SAVED_RV(5) PIXEL_SAVED_RV(6)
+        PIXEL_SAVED_RV(7) PIXEL_SAVED_RV(8) PIXEL_SAVED_RV(9) PIXEL_SAVED_RV(10) PIXEL_SAVED_RV(11)
+        PIXEL_SAVED_RV_F(0) PIXEL_SAVED_RV_F(1) PIXEL_SAVED_RV_F(2) PIXEL_SAVED_RV_F(3) PIXEL_SAVED_RV_F(4) PIXEL_SAVED_RV_F(5)
+        PIXEL_SAVED_RV_F(6) PIXEL_SAVED_RV_F(7) PIXEL_SAVED_RV_F(8) PIXEL_SAVED_RV_F(9) PIXEL_SAVED_RV_F(10) PIXEL_SAVED_RV_F(11)
+        "ld ra, 0(sp)\n"
+        "ld s0, 8(sp)\n   ld s1, 16(sp)\n   ld s2, 24(sp)\n   ld s3, 32(sp)\n   ld s4, 40(sp)\n   ld s5, 48(sp)\n"
+        "ld s6, 56(sp)\n   ld s7, 64(sp)\n   ld s8, 72(sp)\n   ld s9, 80(sp)\n   ld s10, 88(sp)\n   ld s11, 96(sp)\n"
+        "fld fs0, 104(sp)\n   fld fs1, 112(sp)\n   fld fs2, 120(sp)\n   fld fs3, 128(sp)\n   fld fs4, 136(sp)\n   fld fs5, 144(sp)\n"
+        "fld fs6, 152(sp)\n   fld fs7, 160(sp)\n   fld fs8, 168(sp)\n   fld fs9, 176(sp)\n   fld fs10, 184(sp)\n   fld fs11, 192(sp)\n"
+        "addi sp, sp, 208\n   ret\n"
+        ".size pixel_saved_call, .-pixel_saved_call\n   .popsection\n");
+#undef PIXEL_SAVED_RV
+#undef PIXEL_SAVED_RV_F
+#endif
+
+//      Each of the eleven called on shapes that reach its wide turns, its tails and more than one row, through
+//      pixel_saved_call: one row a routine, a tier at a time.
+static fn pixel_saved(void)
+{
+        static const positive widths[] = {1, 3, 4, 5, 8, 9, 17, 37, 64, 300};
+        static const string_address names[] = {
+            "memory_add_sat_u8_rect", "memory_copy_rect_reverse_u32", "memory_lerp_u32_row", "memory_mix_const_u32_rect",
+            "memory_or_u32", "memory_over_cover_u32_rect", "memory_over_u32_rect", "memory_scale_u8",
+            "memory_swizzle_rb_u32", "memory_transpose_u8", "string_first_of_either_or_end"};
+        address_any const routines[] = {
+            (address_any)memory_add_sat_u8_rect, (address_any)memory_copy_rect_reverse_u32, (address_any)memory_lerp_u32_row,
+            (address_any)memory_mix_const_u32_rect, (address_any)memory_or_u32, (address_any)memory_over_cover_u32_rect,
+            (address_any)memory_over_u32_rect, (address_any)memory_scale_u8, (address_any)memory_swizzle_rb_u32,
+            (address_any)memory_transpose_u8, (address_any)string_first_of_either_or_end};
+        positive changed[array_count(names)] = {0}, calls[array_count(names)] = {0};
+        positive a = (positive)pixel_rooms[0].low, b = (positive)pixel_rooms[1].low, c = (positive)pixel_rooms[2].low;
+        p8 address_to text = pixel_rooms[3].low;
+
+        pixel_fill(pixel_rooms[0].low, 65536, PIXEL_WORDS);
+        pixel_fill(pixel_rooms[1].low, 65536, PIXEL_WORDS);
+        pixel_fill(pixel_rooms[2].low, 65536, PIXEL_COVERS);
+        for (positive i = 0; i < 1000; i++)
+                text[i] = (p8)('a' + i % 26);
+        text[1000] = 0;
+        for (positive w = 0; w < array_count(widths); w++)
+                for (positive turn = 0; turn < 2; turn++)
+                {
+                        positive n = widths[w], rows = n > 64 ? 1 : 3, s = n + 3, ends = turn ? 0x7f : 0xff;
+                        const positive arguments[array_count(names)][8] = {
+                            {a, s, b, s, n, rows},
+                            {a, s, b, s, n, rows},
+                            {a, b, c, n * rows, 100 + turn},
+                            {a, s, c, s, n, rows, 0x00123456u, 200 + turn * 55},
+                            {a, b, n * rows, ends << 24},
+                            {a, s, c, s, n, rows, 0xff336699u},
+                            {a, s, b, s, n, rows},
+                            {a, b, n * rows, 180 - turn},
+                            {a, b, n * rows, ends << 24},
+                            {a, n, b, rows + 3, turn ? (positive)-1 : 1, rows, n},
+                            {(positive)text + n, turn ? '"' : '\\', '\''},
+                        };
+
+                        for (positive r = 0; r < array_count(names); r++)
+                        {
+                                positive given[8];
+
+                                for (positive k = 0; k < 8; k++)
+                                        given[k] = arguments[r][k];
+                                //  The transpose's from_row of -1 starts its rows at the last.
+                                if (r == 9 && turn)
+                                        given[2] += rows - 1;
+                                PIXEL_CALL();
+                                changed[r] += pixel_saved_call(routines[r], given) != 0;
+                                calls[r]++;
+                        }
+                }
+        for (positive r = 0; r < array_count(names); r++)
+        {
+                same(names[r], "the registers a caller keeps, kept across the call", changed[r], 0);
+                same(names[r], "called through the register check", calls[r], 2 * array_count(widths));
+        }
+}
+
+/*
         The rows, on every body this machine has. A tier the machine does not
         have is said, so a pass on it is not read as one.
 */
@@ -16566,7 +16728,10 @@ fn check_pixel_rows(void)
                 pixel_each_tier(each);                                                                                  \
                 if (failures != was)                                                                                    \
                         string_format(log, "  %s: %p of %p cases disagreed\n", #each, failures - was, checks - asked); \
+                log_flush();                                                                                            \
         } while (0)
+        //  The registers first: a body that gives a caller's back wrong can leave the loops after it unable to end.
+        PIXEL_ROUTINE(pixel_saved);
         PIXEL_ROUTINE(pixel_add_sat);
         PIXEL_ROUTINE(pixel_reverse);
         PIXEL_ROUTINE(pixel_lerp);
@@ -18911,7 +19076,7 @@ static p8 dirty_one[DIRTY_ROOM] __attribute__((aligned(64)));
 static p8 dirty_two[DIRTY_ROOM] __attribute__((aligned(64)));
 static p32 dirty_at_one[4200], dirty_at_two[4200];
 
-static const p8 dirty_values[] = {0x00, 0x01, '\n', ' ', '"', '0', 'A', 'a',
+static const p8 dirty_values[] = {0x00, 0x01, 0x02, '\n', ' ', '"', '0', 'A', 'a',
                                   'z', 0x7f, 0x80, 0xa0, 0xe9, 0xff};
 static const positive dirty_long_sizes[] = {79, 80, 95, 96, 97, 127, 128,
                                             129, 191, 192, 255, 256, 257, 300,
@@ -19540,7 +19705,7 @@ static fn dirty_prepare(void)
         The string hunts and the two that write, over a terminated string
         of bytes that are neither the value nor nought, the value at a
         random place and at a stride after it, and bytes past the terminator
-        that may hold it. The value is nought on one turn in fourteen, which
+        that may hold it. The value is nought on one turn in fifteen, which
         is the terminator's own question.
 */
 static fn dirty_strings_one(positive size, positive residue, positive turn)
