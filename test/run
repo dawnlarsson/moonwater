@@ -4234,6 +4234,14 @@ lane_cli()
         2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
         *) cli_outcome=1 ;;
         esac
+        #       The lock files against what can stand at their names: a FIFO, a
+        #       directory and a file, each question given three seconds.
+        python3 test/differential.py --harness moonwater_lock_files
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
         return "$cli_outcome"
 }
 

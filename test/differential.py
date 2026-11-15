@@ -54733,6 +54733,210 @@ int main(void)
     return 1 if failed else 0
 
 
+def harness_moonwater_lock_files(argv):
+    """The lock files of the moonwater command (/run/moonwater/lock, link.lock,
+    usb.watcher and the rest), lifted out of src/sh/host.c with the kernel's
+    own open, fstat and fcntl under them, against what can stand at a lock's
+    name: a FIFO, a directory, a file. host_lock_owner opened the name to read
+    and a FIFO there held it for ever, waiting for a writer, so `moonwater
+    link`, `link off`, `device lock` and `device unlock` never answered where
+    one had been planted (the cli fuzz's and the state fuzz's hangs past the
+    deadline). Each question here runs in a child with three seconds to
+    answer. A tree without host_lock_handle (the parent) builds as well, so
+    it can be run there and shown to hang.
+    """
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_lock_files")
+    parser.add_argument("--root", default=str(HARNESS_ROOT),
+                        help="the tree whose src/sh/host.c is lifted (a parent's, to see it lose)")
+    args = parser.parse_args(argv)
+    host = (Path(args.root) / "src/sh/host.c").read_text()
+
+    def section(first, following):
+        return src_slice(host, first, following, "moonwater_lock_files")
+
+    def optional(first, following):
+        try:
+            return section(first, following)
+        except ValueError:
+            return ""
+
+    lifted = (optional("static bipolar host_lock_handle(bipolar handle)", "/* A lock file, made if it is not there.") +
+              section("static bipolar host_lock_open(string_address path)", "\n/*\n        A lock file held, waited for") +
+              section("typedef struct\n{\n        b16 type;", "\n// A signal for whoever holds the lock"))
+    source = r"""
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+typedef unsigned long positive;
+typedef long bipolar;
+typedef int b32;
+typedef short b16;
+typedef unsigned char p8;
+typedef p8 *string_address;
+#define address_of &
+#define address_to *
+#define fn void
+#define AT_FDCWD (-100)
+#define FILE_READ_WRITE O_RDWR
+#define FILE_CREATE O_CREAT
+#define HOST_FILE_GETLK F_GETLK
+#define HOST_FILE_SETLK F_SETLK
+#define HOST_FILE_SETLKW F_SETLKW
+#define HOST_FILE_WRLCK F_WRLCK
+#define HOST_FILE_UNLCK F_UNLCK
+#define SYSTEM_PATH_AT_EMPTY_PATH 0
+#define SYSTEM_PATH_STATX_TYPE 0
+#define syscall(name) 0
+typedef struct
+{
+        unsigned mode;
+} system_path_identity;
+static fn host_state_ready(void) {}
+static bipolar result(long got) { return got < 0 ? -(bipolar)errno : (bipolar)got; }
+static bipolar system_open_at(int at, string_address path, int flags)
+{
+        return result(openat(at, (const char *)path, flags));
+}
+static bipolar system_open_at_mode(int at, string_address path, int flags, int mode)
+{
+        return result(openat(at, (const char *)path, flags, mode));
+}
+static fn system_close(bipolar handle) { close((int)handle); }
+static bipolar system_path_identity_at(bipolar handle, string_address path, int flags, int mask,
+                                       system_path_identity *facts)
+{
+        struct stat seen;
+
+        (void)path; (void)flags; (void)mask;
+        if (fstat((int)handle, &seen) < 0)
+                return -(bipolar)errno;
+        facts->mode = seen.st_mode;
+        return 0;
+}
+//      fcntl is the only three-word call the lifted lines make.
+#define system_call_3(number, handle, command, record) \
+        result(fcntl((int)(handle), (int)(command), (struct flock *)(record)))
+""" + lifted + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name)
+{
+        total++;
+        if (!ok)
+        {
+                bad++;
+                printf("  FAIL %s\n", name);
+        }
+}
+/* A question in a child with three seconds to answer: its answer, or -1000 for a hang. */
+static long asked(int what, const char *path)
+{
+        int ends[2];
+        long answer = -1000;
+        pid_t child;
+        int status;
+
+        if (pipe(ends) < 0)
+                return -1001;
+        child = fork();
+        if (!child)
+        {
+                long got;
+
+                alarm(3);
+                if (what == 0)
+                        got = host_lock_owner((string_address)path);
+                else
+                {
+                        bipolar handle = host_lock_file((string_address)path, HOST_FILE_SETLK, 0);
+
+                        got = handle >= 0 ? 1 : handle;
+                }
+                (void)!write(ends[1], &got, sizeof(got));
+                _exit(0);
+        }
+        close(ends[1]);
+        if (read(ends[0], &answer, sizeof(answer)) != sizeof(answer))
+                answer = -1000;
+        close(ends[0]);
+        waitpid(child, &status, 0);
+        return answer;
+}
+int main(int count, char **words)
+{
+        char fifo[512], directory[512], file[512];
+        int held[2];
+        pid_t holder;
+        long owner;
+
+        (void)count;
+        snprintf(fifo, sizeof(fifo), "%s/link.lock", words[1]);
+        snprintf(directory, sizeof(directory), "%s/usb.watcher", words[1]);
+        snprintf(file, sizeof(file), "%s/lock", words[1]);
+        mkfifo(fifo, 0600);
+        mkdir(directory, 0700);
+
+        check(asked(0, fifo) == 0, "asking whose lock a FIFO at its name is answers at once: nobody's");
+        check(asked(1, fifo) < 0 && asked(1, fifo) != -1000,
+              "and taking it is refused at once, a FIFO being no lock file");
+        check(asked(0, directory) == 0 && asked(1, directory) < 0 && asked(1, directory) != -1000,
+              "a directory at a lock's name is nobody's lock and is not taken");
+
+        //      A lock file that is a file: taken by a holder, whose pid the question names.
+        if (pipe(held) < 0)
+                return 1;
+        holder = fork();
+        if (!holder)
+        {
+                char byte;
+
+                close(held[1]);
+                if (host_lock_file((string_address)file, HOST_FILE_SETLK, 0) < 0)
+                        _exit(3);
+                (void)!read(held[0], &byte, 1);
+                _exit(0);
+        }
+        close(held[0]);
+        usleep(200000);
+        owner = asked(0, file);
+        check(owner == holder, "a lock file that is a file is taken, and its holder named");
+        close(held[1]);
+        waitpid(holder, 0, 0);
+        check(asked(0, file) == 0 && asked(1, file) == 1, "and once let go it is nobody's, and taken again");
+        printf("moonwater lock files %u/%u\n", total - bad, total);
+        return bad != 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="moonwater-lock-files-") as temporary:
+        work = Path(temporary)
+        (work / "state").mkdir()
+        (work / "lock.c").write_text(source)
+        cc = os.environ.get("CC", "cc")
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+                           str(work / "lock"), str(work / "lock.c")], capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            write_tally("moonwater-lock-files", 0, 5)
+            return 1
+        ran = subprocess.run([str(work / "lock"), str(work / "state")], capture_output=True, text=True,
+                             timeout=120)
+        print(ran.stdout, end="")
+        found = re.search(r"moonwater lock files (\d+)/(\d+)", ran.stdout)
+        if not found:
+            print(ran.stderr[-3000:])
+        write_tally("moonwater-lock-files", int(found.group(1)) if found else 0,
+                    int(found.group(2)) if found else 5)
+        return 0 if ran.returncode == 0 and found else 1
+
+
 def harness_machine_reap(argv):
     """The machine loop reaps the radio's join and nothing else of its own.
 
@@ -100862,6 +101066,7 @@ HARNESS_CHECKS = {
     "moonwater_races": harness_moonwater_races,
     "moonwater_script": harness_moonwater_script,
     "moonwater_setup": harness_moonwater_setup,
+    "moonwater_lock_files": harness_moonwater_lock_files,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
     "nts": harness_nts,

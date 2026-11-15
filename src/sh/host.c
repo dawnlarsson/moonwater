@@ -733,15 +733,39 @@ static bool host_data_disk(p8 address_to into, positive room)
 #define RADIO_LOCK_NB 4
 #define RADIO_LOCK_UN 8
 
+/*
+        A lock file opened as one: nonblocking, and a regular file or nothing.
+        A FIFO at a lock's name held the open of whoever asked whose lock it
+        was (host_lock_owner opens it to read, which waits for a writer that
+        never comes), so `moonwater link`, `link off`, `device lock` and
+        `device unlock` sat for ever where one was planted (the cli and state
+        fuzzes' hangs past the deadline); a device or a directory is no lock
+        file either. The handle, or the error; -EINVAL for what is no file.
+*/
+static bipolar host_lock_handle(bipolar handle)
+{
+        system_path_identity facts;
+        bipolar looked;
+
+        if (handle < 0)
+                return handle;
+        looked = system_path_identity_at(handle, (string_address) "", SYSTEM_PATH_AT_EMPTY_PATH,
+                                         SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (looked >= 0 && (facts.mode & 0170000) == 0100000)
+                return handle;
+        system_close(handle);
+        return looked < 0 ? looked : -22;
+}
+
 /* A lock file, made if it is not there. Not through a link: the lock is made
    where it is named. */
 static bipolar host_lock_open(string_address path)
 {
         host_state_ready();
-        return system_open_at_mode(AT_FDCWD, path,
-                                   FILE_READ_WRITE | FILE_CREATE |
-                                       O_NOFOLLOW | O_CLOEXEC,
-                                   0600);
+        return host_lock_handle(system_open_at_mode(AT_FDCWD, path,
+                                                    FILE_READ_WRITE | FILE_CREATE | O_NONBLOCK |
+                                                        O_NOFOLLOW | O_CLOEXEC,
+                                                    0600));
 }
 
 /*
@@ -894,7 +918,9 @@ static bipolar host_lock_file(string_address path, positive command,
         //      Asking whose lock it is makes none: a lock file never made is
         //      nobody's, so a status or a query never creates one.
         bipolar handle = command == HOST_FILE_GETLK
-                             ? system_open_at(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                             ? host_lock_handle(system_open_at(AT_FDCWD, path,
+                                                               O_RDONLY | O_NONBLOCK | O_CLOEXEC |
+                                                                   O_NOFOLLOW))
                              : host_lock_open(path);
         bipolar asked;
 
