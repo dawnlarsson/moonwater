@@ -299,7 +299,7 @@ describe()
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
-        ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say" ;;
+        ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say; then the same image booted with /dev/spark's registration failed, init running without it (NOT RUN on an image without fault injection)" ;;
         sound)    echo "the sound server heard: the image booted with an Intel HDA card whose output is a wav file, a second of 440 Hz played through moonwater audio test, and the tone measured in the file (a codec starts muted; a server that leaves it so plays into silence) (NOT RUN without qemu-system-x86_64, python3, a wav audio backend or an image)" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for, /dev/uinput's mode and vm.max_map_count (MOONWATER_TIER names the tier)" ;;
         input)    echo "the desktop image's game controllers, booted: a virtual pad made through /dev/uinput, its /dev/input/js node found and a press read back from it, a DRM sync object on the render node, and the node modes and vm.max_map_count (NOT RUN without qemu-system-x86_64, cc, an image or a box whose drm headers are installed)" ;;
@@ -16162,6 +16162,11 @@ counted
 #       munmap is refused, and is not held to ending clean; the machine is.
 #       MOONWATER_GUEST_SEED and MOONWATER_RING0_TRANSCRIPT are as for wifi.
 #
+#       Then a second, short boot of the same image with /dev/spark's
+#       registration made to fail (fail_spark_device=, which either profile
+#       builds), which has to come up with init running and the shell
+#       answering; NOT RUN on an image without fault injection.
+#
 lane_ring0()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -16292,6 +16297,42 @@ if grep -a -E 'BUG: KCSAN: .*(canvas_|pane_|spark_|moonwater_|floodlight_|compos
         lost 'no data race in the module' "$(head -3 "$work/races" | tr '\n' ' ')"
 else
         won
+fi
+
+#       The machine with no /dev/spark. The device's registration is made to
+#       fail at boot (fail_spark_device=, src/moonwater/core.c, a fault
+#       injection knob built only with CONFIG_FAULT_INJECTION, which both
+#       sanitizer profiles have), and the machine has to boot anyway: init is a
+#       Spark binary and the format that runs it does not need the device, and
+#       the shell forks what it would have spawned. A start() that gave the
+#       format up with the device left the kernel nothing to run /init with,
+#       and this boot ended in "No working init found". The answers are
+#       reversed, as everywhere a console echoes the question; an image built
+#       without fault injection never fails the registration and says no
+#       FAULT_INJECTION line, and the row is not run there.
+{
+        echo "the console eats the front of the first line"
+        echo 'echo nospark-$((7 * 191)) | rev'
+        echo '[ -e /dev/spark ] && echo present | rev || echo absent | rev'
+        echo 'poweroff'
+} > "$work/nospark_commands"
+timeout 900 qemu-system-x86_64 -m 3G -smp 4 "$@" -kernel "$image" \
+        -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none mac80211_hwsim.radios=0 panic=-1 fail_spark_device=1,100,0,1" \
+        < "$work/nospark_commands" > "$work/nospark" 2>&1 || true
+tr -d '\r' < "$work/nospark" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
+mv "$work/said" "$work/nospark"
+[ -n "${MOONWATER_RING0_TRANSCRIPT:-}" ] && cp "$work/nospark" "$MOONWATER_RING0_TRANSCRIPT.nospark"
+if grep -a -q -F 'FAULT_INJECTION: forcing a failure' "$work/nospark"; then
+        group nospark
+        says nospark 'the registration was made to fail' 'could not register /dev/spark'
+        says nospark 'init ran and the shell answered' '7331-krapson'
+        says nospark 'and there is no /dev/spark' 'tnesba'
+        never nospark 'a working init was found' 'No working init'
+        never nospark 'no kernel panic' 'Kernel panic'
+        group ring0
+else
+        echo "  ring0      nospark        NOT RUN -- no FAULT_INJECTION line: the image was built without CONFIG_FAULT_INJECTION (sec_sanitize or sec_kcsan has it)"
 fi
 
 counted

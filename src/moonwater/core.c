@@ -28,6 +28,9 @@
 #include <linux/mount.h>
 #include <uapi/linux/mount.h>
 #include <linux/miscdevice.h>
+#ifdef CONFIG_FAULT_INJECTION
+#include <linux/fault-inject.h>
+#endif
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/sched/task.h>
@@ -348,6 +351,30 @@ static struct miscdevice device = {
     .mode = 0666,
 };
 
+// Whether start() got /dev/spark registered, so that the exit undoes only
+// what was done: misc_deregister of a device that never registered destroys
+// whatever device holds the minor and frees a minor it does not own.
+static bool device_registered;
+
+#ifdef CONFIG_FAULT_INJECTION
+/*
+        fail_spark_device=<interval>,<probability>,<space>,<times> on the
+        kernel command line, read as failslab= reads its four, makes the
+        registration of /dev/spark fail at boot -- the one way to reach
+        start()'s failure path in a booted machine (test/run ring0 does, on a
+        sanitizer image). It exists only where CONFIG_FAULT_INJECTION does,
+        which is the debug profiles (kernel/profile/sec_sanitize, sec_kcsan);
+        no profile a machine ships with builds it.
+*/
+static DECLARE_FAULT_ATTR(fail_spark_device);
+
+static int __init fail_spark_device_setup(char *text)
+{
+        return setup_fault_attr(&fail_spark_device, text);
+}
+__setup("fail_spark_device=", fail_spark_device_setup);
+#endif
+
 // static, because the kernel has its own init_mount in fs/init.c and the
 // module's symbols share one namespace with it. Nothing outside this file
 // calls it, so internal linkage is the answer rather than a prefix.
@@ -431,14 +458,42 @@ static b32 __init start()
 
         register_binfmt(&format);
 
-        ret = misc_register(&device);
+        /*
+                /dev/spark is the fast way to start a program, not the way the
+                machine runs. /init is a Spark binary, and the format just
+                registered is the only thing that can execute it; the device is
+                how the shell spawns without a fork, and how the moonwater
+                command and the desktop talk to the module. So a device that
+                cannot be registered -- its fixed minor already some other
+                driver's (-EBUSY), or no memory for its struct device -- is
+                said, and the boot goes on without it: the format, the
+                settings, the bindings and Canvas all stay. devtmpfs then has
+                no /dev/spark (it is on /dev by now, over the node the
+                initramfs carries), the shell's open of it fails, and the shell
+                forks each program as it does on any kernel without the device
+                (shell_spawn_device_open in src/sh/shell.c); what asks the
+                device for more than a spawn says the device is missing.
+
+                It used to give up instead: unregister the format, free the
+                settings and return the error. With the format gone the kernel
+                had nothing to run /init with, tried the fallback inits, which
+                are the same Spark binaries, and panicked with "No working init
+                found" -- a machine that could have run, stopped for want of an
+                optimisation. A retry would not help: -EBUSY does not clear,
+                and memory short at device_initcall is short for everything
+                after it.
+        */
+#ifdef CONFIG_FAULT_INJECTION
+        if (should_fail(&fail_spark_device, 1))
+                ret = -ENOMEM;
+        else
+#endif
+                ret = misc_register(&device);
+
         if (ret)
-        {
-                pr_alert("[moonwater] " "could not register /dev/spark: %d\n", ret);
-                unregister_binfmt(&format);
-                kfree(xchg(&settings_current, NULL));
-                return ret;
-        }
+                pr_alert("[moonwater] " "could not register /dev/spark: %d; going on without it, and the shell will fork\n", ret);
+        else
+                device_registered = true;
 
         // Before the compositor: bindings have to work with no screen.
         bind_start();
@@ -456,7 +511,9 @@ static void __exit exit_module(void)
 
         bind_stop();
 
-        misc_deregister(&device);
+        if (device_registered)
+                misc_deregister(&device);
+        device_registered = false;
         kvfree(snapshot);
         kfree(settings_current);
         unregister_binfmt(&format);
