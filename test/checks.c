@@ -130252,11 +130252,14 @@ static void check_compositor_preview_held(void)
             plain[1].preview[2] = 0;
 
             // The reference: the scene with no tint, the whole target tinted per pixel, then the window and the one over it drawn over it.
+            // The tint's pixel rule is memory_mix_u32_row's, which the card's mix records follow too: a cover of none leaves the pixel
+            // as it is, its top byte with it (compositor_mix's own answer there is the pixel with its top byte cleared).
             memory_copy(want, wall, sizeof(wall));
             compositor_scene(&reference, plain, 3);
             for (int py = 0; py < 32; py++)
                 for (int px = 0; px < 48; px++)
-                    want[py * HELD_W + px] = compositor_mix(want[py * HELD_W + px], ink & 0xffffffu, ink >> 24);
+                    if (ink >> 24)
+                        want[py * HELD_W + px] = compositor_mix(want[py * HELD_W + px], ink & 0xffffffu, ink >> 24);
             {
                 struct compositor_target cell = compositor_clipped(&reference, 0, 0, 48, 32);
 

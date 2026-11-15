@@ -1693,8 +1693,8 @@ unsigned long compositor_tint_pixels;
 
 /*
         A run of a row mixed with one ink: memory_mix_u32_row over it with the colour and cover runs made once for the tint
-        (compositor_tint), which is the same pixels as compositor_mix per pixel. A cover of 0 or 255 is the pixel rule
-        itself (compositor_mix's clear and its whole ink), which the row routine does not take, so those are per pixel.
+        (compositor_tint), the rule the card's mix records follow too. Its ends are its own: an ink of alpha 255 is its colour
+        filled (the top byte none), and one of alpha 0 leaves every pixel as it is, its top byte with it, so neither is mixed.
 */
 static void compositor_mix_run(unsigned int *pixels, long count, unsigned int ink, const unsigned int *colour,
                                const unsigned char *cover)
