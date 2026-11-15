@@ -49252,8 +49252,13 @@ while True:
                 else:
                     check(False, f"an unexpected name answer after {current}", line)
             elif line.startswith("@@node "):
-                saved = [l for l in lines if l.startswith("@@saved ")][0].split()[1]
-                check(line.split()[1] == saved, "the first roll is the name the kernel is told", line)
+                #       A first roll that saved nothing is this row failing, not
+                #       the harness: an empty "@@saved " line ended the whole
+                #       cli harness with an IndexError and no row after it ran.
+                first = [l.split() for l in lines if l.startswith("@@saved ")][:1]
+                saved = first[0][1] if first and len(first[0]) > 1 else None
+                check(saved is not None and line.split()[1:2] == [saved],
+                      "the first roll is the name the kernel is told", line)
             elif line.startswith("@@status ") and current and current.startswith("bad "):
                 parts = line.split()
                 check(parts[1] != "0" and parts[2:] == ["space-wizard"],
