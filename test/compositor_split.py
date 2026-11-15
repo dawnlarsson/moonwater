@@ -90,17 +90,37 @@ UNINCLUDE = re.compile(r'^(\s*#\s*include\s+")\.\./', re.M)
 PART_LINE = re.compile(r'^#include "compositor/([\w.]+)".*\n', re.M)
 
 # The preprocessor's view the split is held to: the types row's (test/run gate_types), the build without the shim and the
-# card, the build tool, and test/checks.c the way freestanding_check builds every section that includes the compositor.
+# card, the build tool, and test/checks.c the way freestanding_check builds every section that includes the compositor
+# (check_sections: the CHECK_ names of the conditional each #include of compositor.c in test/checks.c sits in).
 FREESTANDING = ['-O2', '-march=x86-64', '-fno-builtin', '-fno-stack-protector']
 VIEWS = [
     ('programs/shell.c', ['-O2', '-DCONFIG_MOONWATER_WAYLAND']),
     ('programs/shell.c', ['-O2', '-DSHELL_NO_WAYLAND', '-DSHELL_NO_GPU']),
     ('src/build/build.c', ['-O2', '-DCONFIG_MOONWATER_WAYLAND']),
-    ('test/checks.c', FREESTANDING + ['-DCHECK_terminal']),
-    ('test/checks.c', FREESTANDING + ['-DCHECK_gpu_kit']),
-    ('test/checks.c', FREESTANDING + ['-DCHECK_kit_frames']),
-    ('test/checks.c', FREESTANDING + ['-DCHECK_draw_list']),
 ]
+
+
+def check_sections(text):
+    """The sections of test/checks.c that include the compositor: for each #include of it, the CHECK_ names of the innermost
+       conditional around it that names any."""
+    open_at, names = [], []
+    for line in text.split('\n'):
+        word = re.match(r'\s*#\s*(\w+)', line)
+        word = word.group(1) if word else ''
+        if word in ('if', 'ifdef', 'ifndef'):
+            open_at.append(line)
+        elif word in ('elif', 'else') and open_at:
+            open_at[-1] = line
+        elif word == 'endif' and open_at:
+            open_at.pop()
+        elif word == 'include' and re.search(r'"[^"]*src/canvas/compositor\.c"', line):
+            found = next((re.findall(r'\bCHECK_\w+', at) for at in reversed(open_at) if re.search(r'\bCHECK_\w+', at)), [])
+            if not found:
+                raise Refused('test/checks.c includes the compositor in no CHECK_ section: %s' % line.strip())
+            names += [name for name in found if name not in names]
+    if not names:
+        raise Refused('test/checks.c includes the compositor nowhere: the sections to hold the split to are not known')
+    return names
 
 # The tools that name compositor.c by path, and what the split does to each.
 DIFFERENTIAL = 'test/differential.py'
@@ -476,7 +496,8 @@ def check(tree):
         write(tree, name, text)
     say('the parts put back are compositor.c byte for byte')
 
-    for source, flags in VIEWS:
+    sections = check_sections((ROOT / 'test/checks.c').read_text())
+    for source, flags in VIEWS + [('test/checks.c', FREESTANDING + ['-D' + name]) for name in sections]:
         before, after = preprocessed(ROOT, source, flags), preprocessed(tree, source, flags)
         label = 'gcc -E -P %s %s' % (' '.join(flags), source)
         if before == after:
@@ -578,6 +599,9 @@ def main():
             audit_count(ROOT, True)
             print('written: %s, and test/function_audit.seal' % ', '.join(sorted(written)))
             print('next: build and run CHECK_terminal (and the gate), then commit these files as one commit')
+            print('to do, by hand, which the split does not rewrite:')
+            for path, why in REPORTED[:2]:
+                print('  %s: %s' % (path, why))
         return 0
     except Refused as refusal:
         print('compositor_split: %s' % refusal, file=sys.stderr)
