@@ -1174,8 +1174,18 @@ struct windows
         unsigned int metric_present_most;   // the longest the loop spent inside one present, microseconds
         unsigned int metric_flip_jobs;      // the flips committed while a job of the card's was still running
         unsigned int metric_flip_jobs_most; // the most jobs in flight at one such flip (0 to 2)
+        // The microseconds in the last second the loop spent inside the card's waits (every job it waited for: a list's render, a client's
+        // copy, a wake).
+        unsigned int metric_waited;
         // The maps of the compositor's own memory that fell back to userptr, and the errno of the last fallback.
         unsigned int metric_maps_own_user, metric_maps_own_errno;
+        // The card's jobs since the start, by kind, each with the time the loop waited for the ones it waited for, in nanoseconds:
+        unsigned int metric_gpu_jobs_scene;          // the card's scene jobs, presents and list renders
+        unsigned long long metric_gpu_job_ns_scene;  // the time the loop waited for the waited ones
+        unsigned int metric_gpu_jobs_copy;           // the card's copies of a client's damage
+        unsigned long long metric_gpu_job_ns_copy;   // and the time waited for them
+        unsigned int metric_gpu_jobs_scale;          // its scaling jobs
+        unsigned long long metric_gpu_job_ns_scale;  // and the time waited for them
         // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
