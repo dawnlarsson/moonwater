@@ -5246,7 +5246,7 @@ freestanding_checks_one()
         fi
 
         if [ "$suite" = verify ]; then
-                sed -n '/FAIL/p;/ABSENT/p;/under neither name here/p' \
+                sed -n '/FAIL/p;/ABSENT/p;/under neither name here/p;/NOT RUN/p' \
                         "$work/$suite.$name.out"
         else
                 sed -n '/FAIL/p;/NOT RUN/p' "$work/$suite.$name.out"

@@ -22860,24 +22860,11 @@ fn check_lazy_file_and_library()
 /*
         Whether the mapping holding an address has asked for huge pages: "hg"
         in the VmFlags line smaps gives it. 0 for no, 1 for yes, 2 where the
-        file is not there to read or the kernel (an emulator's host, a
-        machine that is not Linux) does not take the advice at all, which a
-        page of its own says.
+        file is not there to read or the address is in no mapping it lists.
 */
-static positive memory_asked_huge(positive address)
+static positive memory_smaps_huge(positive address)
 {
         static char text[1 << 18];
-        positive probe = (positive)memory(4096);
-
-        if (!probe || system_failed(probe))
-                return 2;
-
-        bipolar taken = (bipolar)system_call_3(syscall(madvise), probe, 4096, MEMORY_ADVISE_HUGE_PAGE);
-
-        memory_free((address_any)probe, 4096);
-        if (taken < 0)
-                return 2;
-
         bipolar handle = system_open_at(AT_FDCWD, "/proc/self/smaps", FILE_READ);
         positive used = 0;
 
@@ -22930,6 +22917,28 @@ static positive memory_asked_huge(positive address)
 }
 
 /*
+        memory_smaps_huge of an address, where smaps can say: 2 when it
+        cannot, which a page of the check's own says. The page is asked for
+        huge pages by the syscall itself and read back while it is mapped; a
+        kernel that does not take the advice (an error) or a smaps that does
+        not show it (qemu-user writes its own, whose VmFlags never carry hg)
+        cannot tell memory() asking from memory() not asking.
+*/
+static positive memory_asked_huge(positive address)
+{
+        positive probe = (positive)memory(4096);
+
+        if (!probe || system_failed(probe))
+                return 2;
+
+        bipolar taken = (bipolar)system_call_3(syscall(madvise), probe, 4096, MEMORY_ADVISE_HUGE_PAGE);
+        positive shown = taken < 0 ? 2 : memory_smaps_huge(probe);
+
+        memory_free((address_any)probe, 4096);
+        return shown == 1 ? memory_smaps_huge(address) : 2;
+}
+
+/*
         A mapping of eight megabytes or more is an arena a tool fills, and
         memory() asks for huge pages for it where the kernel is built to give
         them to whoever asks; a smaller one does not, and a store that
@@ -22948,7 +22957,9 @@ fn check_memory_huge()
                 memory_free((address_any)small, MEMORY_HUGE_MIN - 4096);
                 memory_free((address_any)large, MEMORY_HUGE_MIN);
                 memory_free((address_any)big, 3 * MEMORY_HUGE_MIN + 4096);
-                string_format(log, "  NOTE memory: the kernel here does not take huge page advice, so none was checked\n");
+                string_format(log, "  NOT RUN memory: huge page advice cannot be seen here (a page madvised for huge "
+                                   "pages shows no hg in smaps: qemu-user's own smaps, or a kernel without the advice), "
+                                   "so the eight megabyte rows of memory and memory_reserve are not run\n");
                 return;
         }
 
@@ -33260,6 +33271,9 @@ b32 main()
         // making a formatter change wait on unrelated platform tests when a
         // target is available only through a minimal linker and qemu-user.
         check_formatters();
+#elif defined(VERIFY_HUGE_ONLY)
+        // The huge page rows alone (check_memory_huge): whether memory() and memory_reserve ask, where smaps can say.
+        check_memory_huge();
 #elif defined(VERIFY_PIXELS_ONLY)
         // The rows of the compositor's, the kit's, the font engine's and the lexer's eleven routines alone (check_pixel_rows):
         // a change to one of them, and the breaks that show the rows fail, without the whole lane.
