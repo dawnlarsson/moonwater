@@ -1002,6 +1002,32 @@ def shell_words(text, at):
     return words, i
 
 
+def substitution(text, start, end):
+    """The span of the $( ... ) that holds text[start:end], without its $( and ), or None."""
+    line_start = text.rfind('\n', 0, start) + 1
+    while line_start > 1 and text[line_start - 2] == '\\':
+        line_start = text.rfind('\n', 0, line_start - 2) + 1
+    opened = text.rfind('$(', line_start, start)
+    if opened < 0:
+        return None
+    depth, i, quote = 1, opened + 2, None
+    while i < len(text) and depth:
+        c = text[i]
+        if quote:
+            if c == quote:
+                quote = None
+            elif c == '\\' and quote == '"':
+                i += 1
+        elif c in '\'"':
+            quote = c
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        i += 1
+    return (opened + 2, i - 1) if not depth and i - 1 >= end else None
+
+
 def rewrite_run(text, source, ctx):
     """test/run names source: a seam's case that names it names its parts too, each grep, awk or sed of it reads it and its
        parts through cat, and every other line that names it (a compile, an #include, a comment, a message) stays."""
@@ -1030,14 +1056,24 @@ def rewrite_run(text, source, ctx):
             cut = cut[:-1].rstrip()
         new = 'cat %s %s/*.c | %s%s' % (source, folder, cut, text[finish:end])
         edits.append((match.start(), end, new))
-        pairs.append(('reader', text[match.start():end], new))
+        # What is held is the whole command substitution the reader is in (its sort, its count), which cat's order of
+        # the parts must not change.
+        outer = substitution(text, match.start(), end)
+        old_pipe = text[outer[0]:outer[1]] if outer else text[match.start():end]
+        new_pipe = (text[outer[0]:match.start()] + new + text[end:outer[1]]) if outer else new
+        pairs.append(('reader', old_pipe, new_pipe))
         said.append('test/run: line %d: its %s of %s reads it and its parts' % (number, match.group(1), source))
-    # The seams: a pattern of a case that names the file names its parts after it.
-    depth = 0
+    # The seams: a pattern of seam_of_path's case that names the file names its parts after it. A case elsewhere that
+    # names it (gpu_kernels_wanted's, on the file a build is given) is on the file as the program it is, and stays.
+    depth, seam, cases = 0, False, []
     for number, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith('#'):
             continue
+        if re.match(r'seam_of_path\(\)$', stripped):
+            seam = True
+        elif seam and line.startswith('}'):
+            seam = False
         if re.match(r'case\b.*\bin$', stripped):
             depth += 1
         elif re.match(r'esac\b', stripped):
@@ -1049,7 +1085,9 @@ def rewrite_run(text, source, ctx):
         if any(begin <= at <= end for begin, end, _ in edits):
             continue
         after = re.match(r'\s*([|)])', line[found.end():])
-        if after:
+        if after and not seam:
+            cases.append(number)
+        elif after:
             edits.append((at, at, ' | %s/*' % folder))
             said.append("test/run: line %d (a seam's case) gives %s/* what it gives %s" % (number, folder, source))
             pairs.append(('seam', number))
@@ -1069,7 +1107,7 @@ def rewrite_run(text, source, ctx):
         while back >= 1 and lines[back - 1].endswith('\\'):
             logical = lines[back - 1] + ' ' + logical
             back -= 1
-        if re.search(r'#include\s+"%s"' % re.escape(source), line):
+        if re.search(r'#include\s+"%s"' % re.escape(source), line) or number in cases:
             continue
         if re.search(r'(?:^|\s)(?:-D|-o\b|-c\b|-I|-f|-W|-static|-O\d|-l)|\bc?cc\b|\$\{?CC|freestanding|\$\w*cc\b|"\$\w*cc"', logical):
             continue
@@ -1423,7 +1461,7 @@ def hold_run(before_tree, after_tree, source, written, pairs):
         b = run(['sh', '-c', new.replace('\\\n', ' ')], after_tree)
         if a.stdout != b.stdout or a.returncode != b.returncode:
             raise Refused('test/run: %r gives %r before and %r after' % (new, a.stdout[:200], b.stdout[:200]))
-        say('test/run: %s gives what %s gave (%d bytes)' % (new.split('|', 1)[1].strip()[:60], old.split()[0], len(a.stdout)))
+        say('test/run: %s gives what it gave (%d bytes)' % (' '.join(new.split())[:90], len(a.stdout)))
 
 
 def hold_layout(tree, source):
