@@ -16320,7 +16320,6 @@ static void compositor_close(int row)
 */
 #define COMPOSITOR_CLIP_GESTURE_NS 1500000000ull
 #define COMPOSITOR_CLIP_HISTORY 32
-#define COMPOSITOR_F_GET_SEALS 1034
 #define COMPOSITOR_F_DUPFD_CLOEXEC 1030
 #define COMPOSITOR_CLIP_SEALS 14 // SHRINK, GROW and WRITE: the bytes and the size are what they were when it was taken
 
@@ -16512,7 +16511,7 @@ static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_t
         system_close((bipolar)held);
         if (opened < 0)
                 return -1;
-        seals = compositor_call(syscall(fcntl), (positive)opened, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);
+        seals = compositor_call(syscall(fcntl), (positive)opened, WINDOWS_F_GET_SEALS, 0, 0, 0, 0);
         size = compositor_call(syscall(lseek), (positive)opened, 0, 2, 0, 0, 0);
         if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0 ||
             (unsigned long)size > compositor.table->clip_limit)
@@ -20859,7 +20858,7 @@ static void compositor_input_read(unsigned int at)
 static long compositor_table_memfd(unsigned long bytes)
 {
         p8 path[48] = "/proc/";
-        long handle = compositor_call(syscall(memfd_create), (positive) "moonwater-windows", 1 | 2, 0, 0, 0, 0);
+        long handle = compositor_call(syscall(memfd_create), (positive) "moonwater-windows", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
         positive at = 6;
 
         if (handle < 0)
@@ -20872,9 +20871,9 @@ static long compositor_table_memfd(unsigned long bytes)
         memory_copy(path + at, "/fd/", 4);
         at += 4;
         path[at + positive_into_string(path + at, (positive)handle)] = 0;
-        // MFD_CLOEXEC | MFD_ALLOW_SEALING above; F_ADD_SEALS of F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW.
+        // The seals: F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW.
         compositor.memfd_failed = compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0 ? 8
-                                  : compositor_call(syscall(fcntl), (positive)handle, 1033, 1 | 2 | 4, 0, 0, 0) < 0 ? 9
+                                  : compositor_call(syscall(fcntl), (positive)handle, WINDOWS_F_ADD_SEALS, 1 | 2 | 4, 0, 0, 0) < 0 ? 9
                                   : compositor_call(syscall(fchmod), (positive)handle, WINDOWS_MODE, 0, 0, 0, 0) < 0 ? 10
                                   : compositor_call(syscall(symlinkat), (positive)path, (positive)AT_FDCWD,
                                                     (positive)WINDOWS_TABLE, 0, 0, 0) < 0
@@ -21719,7 +21718,7 @@ static void compositor_descriptors_room(void)
         }
         for (long last = compositor_descriptors_most - 1; last >= 127; last = (last - 1) / 2)
         {
-                long made = compositor_call(syscall(fcntl), 0, 1030, (positive)last, 0, 0, 0); // F_DUPFD_CLOEXEC
+                long made = compositor_call(syscall(fcntl), 0, COMPOSITOR_F_DUPFD_CLOEXEC, (positive)last, 0, 0, 0);
 
                 if (made >= 0)
                 {
