@@ -27171,6 +27171,9 @@ static const host_row host_rows[] = {
     {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]", 'f'},
     {null, "link modem key", "the key of the audio modem, in hex, made on first use: the receiver needs the same", 'f'},
     {null, "link modem send FILE", "FILE over the sound card to the receiver on the Mac (tools/modem_rx.c); nothing is acknowledged", 'f'},
+    {null, "@ssh", null, 'r'},
+    {null, "ssh key remove LABEL", "take a key back by its label; every session ends", 'b'},
+    {null, "ssh log [N]", "the last changes, starts, refusals and logins, the newest last [20]", 'b'},
 };
 
 /* The column the words of a row start in. A command that would not leave two
@@ -28396,6 +28399,7 @@ static b32 host_answer(bool update, string_address disk)
 }
 
 #include "../waterlink/command.c"
+#include "ssh.c" // moonwater ssh: OpenSSH's server from bowl profile ssh, run from its settings and nothing else
 #include "languages.c"
 
 /*
@@ -28457,6 +28461,8 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(LINK_TRANSPORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    //  The ssh server's settings, its keys and its host key, kept as the link's are; a timed on still ends at the next boot.
+    HOST_WIPE_KEEP(SSH_STATE),
     //  Where the windows were last put, which the compositor writes and no plain row names.
     HOST_WIPE_KEEP(SETTING_WINDOWS_PLACES_PATH),
     //  The text size every terminal follows, which is the module's own
@@ -29382,6 +29388,7 @@ static b32 host_main()
             {"dns", host_dns, false, true},
             {"security", host_security, false, true},
             {"link", link_main, false},
+            {"ssh", ssh_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
             {"boot", host_boot_verb, false},

@@ -8441,6 +8441,10 @@ struct bowl_profile
         // preload shim kept in /usr/local/lib routes pwrite* back to
         // __NR_pwrite64 (and __NR_writev for offset -1) with sandboxes intact.
         bool pwrite_shim;
+        // The ssh server's (src/sh/ssh.c): install records the files sshd runs
+        // from by their digests and leaves the server off; remove stops it, and
+        // every session with it, and drops the record. Neither starts it.
+        bool ssh;
 };
 
 /*
@@ -9690,6 +9694,34 @@ static string_address bowl_steam_session[] = {
     "x86-64 only, and Arch's arm64 and RISC-V ports have no [multilib])\n"
 #endif
 
+/*
+        OpenSSH's server, for a person to reach this machine by a key of a list
+        Moonwater keeps, and nothing else of the bowl's: Moonwater writes its
+        configuration from its own settings and starts it itself, from copies of
+        the files this install recorded (src/sh/ssh.c, `moonwater ssh`), never
+        from the bowl's /etc/ssh or its init scripts. Alpine's, since its
+        openssh-server is built against musl and OpenSSL's libcrypto with no PAM
+        at all (openssh-server-pam is another package), so what sshd maps is the
+        loader and the libraries its ELF files name, which the record lists, and
+        no PAM module a package could add, where Debian's, Arch's and Fedora's
+        are built with PAM. ssh-keygen
+        makes the host key at the first on, and is the one program the profile
+        makes reachable by name (to read a key's fingerprint): sshd is not, since
+        a server started by hand would be one the settings never chose. Install
+        does not start it; remove stops it first.
+*/
+static string_address bowl_ssh_alpine[] = {"openssh-server", "openssh-keygen", null};
+
+static string_address bowl_ssh_expose[] = {"ssh-keygen", null};
+
+static const struct bowl_component bowl_ssh_components[] = {
+    {"alpine", bowl_ssh_alpine, 0, bowl_ssh_expose},
+    {null, null, 0, null},
+};
+
+static b32 ssh_profile_record(string_address root);
+static fn ssh_profile_forget(void);
+
 static const struct bowl_profile bowl_profiles[] = {
     {"desktop", "KDE Plasma", "start it with: desktop", bowl_desktop_components,
      bowl_desktop_session, false},
@@ -9702,9 +9734,12 @@ static const struct bowl_profile bowl_profiles[] = {
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
      false, null, BOWL_STEAM_UNAVAILABLE, true, true, true},
+    {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
+     "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
+     bowl_ssh_components, null, false, null, null, false, false, false, false, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam\n"
+#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam, ssh\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -10443,6 +10478,8 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                                      : bowl_profile_expose(distro->root,
                                                            profile->name,
                                                            part->expose);
+                if (!failed && profile->ssh)
+                        failed = ssh_profile_record(distro->root);
                 if (failed)
                         return failed;
         }
@@ -10643,6 +10680,9 @@ static fn bowl_profile_script_drop(const struct bowl_profile address_to profile,
 
 static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
 {
+        //      The server before its files: stopped, and its sessions with it.
+        if (profile->ssh)
+                ssh_profile_forget();
         for (const struct bowl_component address_to part =
                  profile->components;
              part->distro; part++)

@@ -2786,6 +2786,7 @@ static b32 host_machine_run(void)
                 usb_recover();
                 locale_recover();
                 link_keep_machine();
+                ssh_keep_machine();
                 failed = host_machine_wait(device, address_of control);
                 if (failed == -EINTR || failed == -ETIMEDOUT)
                         continue;

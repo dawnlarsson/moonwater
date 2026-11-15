@@ -103147,8 +103147,487 @@ static fn bowl_hardened_and_limits_rows(void)
 #endif
 }
 
+/*
+        The ssh server's (src/sh/ssh.c): the file written from every setting
+        that changes it is the text this row spells out line by line, and no
+        other; what sshd -T says is held to the settings value by value, so a
+        changed or a missing value refuses; the settings, the key list and an
+        address read back only as written; a public key is the shape OpenSSH
+        makes and its fingerprint the one ssh-keygen -l says; the apk database
+        gives a file's checksum by its folder and name; and a timed on ends at
+        its second and in any other boot. With MOONWATER_SSHD (an sshd) and
+        MOONWATER_SSH_STATE (a directory holding a host_ed25519_key and an
+        authorized_keys), every file is also given to that sshd's -T and held
+        to what it says; without them those rows say NOT RUN.
+*/
+static positive ssh_expected(p8 address_to into, positive room, string_address state, bool root, string_address port,
+                             string_address address)
+{
+        static const char address_to fixed =
+            "AddressFamily any\n"
+            "HostKeyAlgorithms ssh-ed25519\n"
+            "KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org\n"
+            "Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com\n"
+            "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com\n"
+            "PubkeyAcceptedAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com\n"
+            "AllowUsers root\n"
+            "AuthenticationMethods publickey\n"
+            "PubkeyAuthentication yes\n"
+            "PasswordAuthentication no\n"
+            "KbdInteractiveAuthentication no\n"
+            "PermitEmptyPasswords no\n"
+            "HostbasedAuthentication no\n"
+            "IgnoreRhosts yes\n"
+            "AuthorizedKeysCommand none\n"
+            "AuthorizedPrincipalsFile none\n"
+            "AuthorizedPrincipalsCommand none\n"
+            "TrustedUserCAKeys none\n"
+            "StrictModes yes\n"
+            "MaxAuthTries 3\n"
+            "MaxSessions 4\n"
+            "MaxStartups 3:50:10\n"
+            "PerSourceMaxStartups 2\n"
+            "LoginGraceTime 20\n"
+            "ClientAliveInterval 30\n"
+            "ClientAliveCountMax 3\n"
+            "TCPKeepAlive no\n"
+            "DisableForwarding yes\n"
+            "AllowTcpForwarding no\n"
+            "AllowStreamLocalForwarding no\n"
+            "AllowAgentForwarding no\n"
+            "X11Forwarding no\n"
+            "PermitTunnel no\n"
+            "GatewayPorts no\n"
+            "PermitListen none\n"
+            "PermitOpen none\n"
+            "PermitUserEnvironment no\n"
+            "PermitUserRC no\n"
+            "PermitTTY yes\n"
+            "PrintMotd no\n"
+            "UseDNS no\n"
+            "Compression no\n"
+            "LogLevel VERBOSE\n"
+            "PidFile none\n";
+
+        into[0] = 0;
+        string_append_bounded(into, (string_address) "# Written by moonwater ssh from its settings at every start, and overwritten:\n"
+                                                     "# the server is changed with moonwater ssh, never here.\nPort ", room);
+        string_append_bounded(into, port, room);
+        string_append_bounded(into, (string_address) "\n", room);
+        if (address[0])
+        {
+                string_append_bounded(into, (string_address) "ListenAddress ", room);
+                string_append_bounded(into, address, room);
+                string_append_bounded(into, (string_address) "\n", room);
+        }
+        string_append_bounded(into, (string_address) "HostKey ", room);
+        string_append_bounded(into, state, room);
+        string_append_bounded(into, (string_address) "/host_ed25519_key\nAuthorizedKeysFile ", room);
+        string_append_bounded(into, state, room);
+        string_append_bounded(into, (string_address) "/authorized_keys\nPermitRootLogin ", room);
+        string_append_bounded(into, (string_address)(root ? "prohibit-password\n" : "no\n"), room);
+        string_append_bounded(into, (string_address)fixed, room);
+        return string_length(into);
+}
+
+// What sshd -T says of a file: each line of it in lower case, the addresses as sshd spells them, and lines it adds of its own.
+static positive ssh_told_of(string_address text, p8 address_to into, positive room, string_address port, string_address address,
+                            bool spelled_old)
+{
+        positive used = 0;
+
+        into[0] = 0;
+        string_append_bounded(into, (string_address) "x11displayoffset 10\nmodulifile /etc/ssh/moduli\n", room);
+        for (string_address line = text; *line;)
+        {
+                string_address stop = string_first_of(line, '\n');
+                positive length = stop ? (positive)(stop - line) : string_length(line);
+
+                if (line[0] != '#' && !host_starts(line, (string_address) "ListenAddress "))
+                {
+                        bool keyword = true;
+
+                        used = string_length(into);
+                        for (positive at = 0; at < length && used + 2 < room; at++)
+                        {
+                                p8 byte = line[at];
+
+                                keyword &= byte != ' ';
+                                if (keyword && byte >= 'A' && byte <= 'Z')
+                                        byte += 'a' - 'A';
+                                into[used++] = byte;
+                        }
+                        into[used++] = '\n';
+                        into[used] = 0;
+                }
+                line += length + (stop != null);
+        }
+        //      OpenSSH 9 says prohibit-password by its first name.
+        if (spelled_old && string_find(into, (string_address) "permitrootlogin prohibit-password"))
+        {
+                string_address at = string_find(into, (string_address) "prohibit-password");
+                positive rest = string_length(at + 17) + 1;
+
+                memory_copy(at, "without-password", 16);
+                for (positive byte = 0; byte < rest; byte++)
+                        at[16 + byte] = at[17 + byte];
+        }
+        if (address[0])
+        {
+                bool six = string_first_of(address, ':') != null;
+
+                string_append_bounded(into, (string_address) "listenaddress ", room);
+                string_append_bounded(into, (string_address)(six ? "[" : ""), room);
+                string_append_bounded(into, address, room);
+                string_append_bounded(into, (string_address)(six ? "]:" : ":"), room);
+                string_append_bounded(into, port, room);
+                string_append_bounded(into, (string_address) "\n", room);
+        }
+        else
+        {
+                string_append_bounded(into, (string_address) "listenaddress [::]:", room);
+                string_append_bounded(into, port, room);
+                string_append_bounded(into, (string_address) "\nlistenaddress 0.0.0.0:", room);
+                string_append_bounded(into, port, room);
+                string_append_bounded(into, (string_address) "\n", room);
+        }
+        return string_length(into);
+}
+
+static fn ssh_rows(void)
+{
+        static p8 text[SSH_CONFIG_ROOM], want[SSH_CONFIG_ROOM], told[SSH_CONFIG_ROOM * 2], copy[SSH_CONFIG_ROOM * 2];
+        static const struct
+        {
+                p16 port;
+                string_address port_text;
+                string_address address;
+        } places[] = {{22, "22", ""}, {2222, "2222", "192.0.2.7"}, {65535, "65535", "2001:db8::7"}, {1, "1", "::1"}};
+        bool exact = true, same = true, verified = true, refused = true, old_name = true, missing = true;
+        positive mutants = 0, held = 0;
+        string_address sshd = string_get_environment(file_environment_all(), (string_address) "MOONWATER_SSHD");
+        string_address scratch = string_get_environment(file_environment_all(), (string_address) "MOONWATER_SSH_STATE");
+        positive real = 0, real_held = 0;
+
+        for (positive root = 0; root < 2; root++)
+                for (positive at = 0; at < array_count(places); at++)
+                {
+                        ssh_settings settings;
+                        p8 wrong[64];
+                        positive length, told_length;
+
+                        ssh_settings_standard(&settings);
+                        settings.root = (p8)root;
+                        settings.port = places[at].port;
+                        string_copy_bounded(settings.address, places[at].address, sizeof(settings.address));
+                        length = ssh_config_text(&settings, (string_address) "/root/ssh", text, sizeof(text));
+                        exact &= length && length == ssh_expected(want, sizeof(want), (string_address) "/root/ssh", root,
+                                                                   places[at].port_text, places[at].address) &&
+                                 string_equals(text, want);
+                        //      On or off, a limit or none, a timed on or not: the same file.
+                        settings.on = true;
+                        settings.limit = 5;
+                        settings.until = 99;
+                        string_copy_bounded(settings.boot, (string_address) "00000000-0000-0000-0000-000000000000", sizeof(settings.boot));
+                        same &= ssh_config_text(&settings, (string_address) "/root/ssh", copy, sizeof(copy)) == length &&
+                                string_equals(copy, text);
+
+                        //      What sshd -T says of it is held to it, and a value changed in any line it decides refuses.
+                        told_length = ssh_told_of(text, told, sizeof(told), places[at].port_text, places[at].address, false);
+                        verified &= ssh_config_verify(&settings, (string_address) "/root/ssh", told, told_length, wrong, sizeof(wrong));
+                        if (root)
+                        {
+                                told_length = ssh_told_of(text, copy, sizeof(copy), places[at].port_text, places[at].address, true);
+                                old_name &= ssh_config_verify(&settings, (string_address) "/root/ssh", copy, told_length, wrong,
+                                                              sizeof(wrong));
+                        }
+                        else
+                        {
+                                //      root off is no, and the old name of on is not it.
+                                told_length = ssh_told_of(text, copy, sizeof(copy), places[at].port_text, places[at].address, false);
+                                string_address no = string_find(copy, (string_address) "permitrootlogin no\n");
+
+                                if (no)
+                                {
+                                        p8 changed[SSH_CONFIG_ROOM * 2];
+                                        positive before = (positive)(no - copy);
+
+                                        memory_copy(changed, copy, before);
+                                        changed[before] = 0;
+                                        string_append_bounded(changed, (string_address) "permitrootlogin without-password\n", sizeof(changed));
+                                        string_append_bounded(changed, no + 19, sizeof(changed));
+                                        refused &= !ssh_config_verify(&settings, (string_address) "/root/ssh", changed,
+                                                                      string_length(changed), wrong, sizeof(wrong));
+                                }
+                                else
+                                        refused = false;
+                        }
+                        told_length = ssh_told_of(text, told, sizeof(told), places[at].port_text, places[at].address, false);
+                        for (string_address line = told; *line;)
+                        {
+                                string_address stop = string_first_of(line, '\n');
+                                positive length_line = (positive)(stop - line);
+                                positive before = (positive)(line - told);
+                                p8 changed[SSH_CONFIG_ROOM * 2];
+                                bool decided = !host_starts(line, (string_address) "x11displayoffset") &&
+                                               !host_starts(line, (string_address) "modulifile");
+
+                                //      The line with its value changed, and the line gone.
+                                memory_copy(changed, told, before + length_line);
+                                changed[before + length_line] = 0;
+                                string_append_bounded(changed, (string_address) "x", sizeof(changed));
+                                string_append_bounded(changed, stop, sizeof(changed));
+                                if (decided)
+                                {
+                                        mutants++;
+                                        held += !ssh_config_verify(&settings, (string_address) "/root/ssh", changed,
+                                                                   string_length(changed), wrong, sizeof(wrong));
+                                }
+                                memory_copy(changed, told, before);
+                                changed[before] = 0;
+                                string_append_bounded(changed, stop + 1, sizeof(changed));
+                                if (decided)
+                                        missing &= !ssh_config_verify(&settings, (string_address) "/root/ssh", changed,
+                                                                      string_length(changed), wrong, sizeof(wrong));
+                                line = stop + 1;
+                        }
+
+                        //      And the sshd named, when one is: the file written into the scratch state, and what its -T says.
+                        if (sshd && scratch)
+                        {
+                                p8 path[256];
+                                b32 ends[2];
+                                bipolar child, handle;
+                                positive status = 0, got = 0;
+                                bipolar read;
+                                string_address words[] = {sshd, (string_address) "-T", (string_address) "-f", path, null};
+
+                                length = ssh_config_text(&settings, scratch, text, sizeof(text));
+                                (void)string_join(path, sizeof(path), scratch, (string_address) "/sshd_config");
+                                handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0600);
+                                if (handle >= 0)
+                                {
+                                        (void)system_write_all((positive)handle, text, length);
+                                        system_close(handle);
+                                }
+                                if (handle < 0 || system_pipe(ends, O_CLOEXEC) < 0 || (child = system_fork()) < 0)
+                                        continue;
+                                if (!child)
+                                {
+                                        system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
+                                        system_execute(sshd, words, file_environment_all());
+                                        system_call_1(syscall(exit_group), 127);
+                                }
+                                system_close(ends[1]);
+                                while (got + 1 < sizeof(told) &&
+                                       (read = system_read_retry((positive)ends[0], told + got, sizeof(told) - 1 - got)) > 0)
+                                        got += (positive)read;
+                                system_close(ends[0]);
+                                system_wait4_retry(child, &status, 0, null);
+                                told[got] = 0;
+                                real++;
+                                real_held += wait_status_code(status) == 0 &&
+                                             ssh_config_verify(&settings, scratch, told, got, wrong, sizeof(wrong));
+                                if (wait_status_code(status) || !ssh_config_verify(&settings, scratch, told, got, wrong, sizeof(wrong)))
+                                        string_format(log, "  ssh: %s -T on root %p port %p address %s: status %p, first wrong: %s\n",
+                                                      sshd, root, (positive)places[at].port, places[at].address,
+                                                      wait_status_code(status), (string_address)wrong);
+                        }
+                }
+        check("ssh: the file written from each setting of root, port and address is exactly the lines spelled here", exact);
+        check("ssh: whether it is on, its limit and a timed on change nothing in the file", same);
+        check("ssh: what sshd -T says of the file is taken as the settings, with the addresses sshd spells", verified);
+        check("ssh: root on is taken from sshd -T in either name it has (OpenSSH 9 without-password, 10 prohibit-password)", old_name);
+        check("ssh: root off is refused when sshd -T says root may log in by key", refused);
+        string_format(log, "  ssh: %p values sshd -T says changed one at a time, %p refused\n", mutants, held);
+        check("ssh: every value sshd -T says that the settings decide, changed, refuses the start", mutants > 200 && held == mutants);
+        check("ssh: every value sshd -T says that the settings decide, missing, refuses the start", missing);
+        if (sshd && scratch)
+        {
+                string_format(log, "  ssh: %s -T held to %p of %p files\n", sshd, real_held, real);
+                check("ssh: the sshd named takes every file written, and says of each what the settings decide", real == 8 && real_held == real);
+        }
+        else
+                log_direct(str("ssh: the files given to a real sshd -T NOT RUN -- MOONWATER_SSHD and MOONWATER_SSH_STATE unset\n"));
+
+        //      The settings, the list and the addresses read back only as they are written.
+        {
+                ssh_settings settings, back;
+                p8 kept[512];
+                positive length;
+                static const char address_to bad[] = {
+                    "on\nwhat 1\n", "port 0\n", "port 65536\n", "port 022\n", "limit 0\n", "limit 1441\n", "root yes\n",
+                    "address 2001:DB8::7\n", "address 1.2.3.4.5\n", "until 1234 5\n", "until 00000000-0000-0000-0000-00000000000g 5\n",
+                    "on \n", "address [::1]\n"};
+                bool refuses = true, round = true;
+
+                ssh_settings_standard(&settings);
+                check("ssh: the standard is off, root off, port 22, every address, 60 minutes",
+                      !settings.on && !settings.root && settings.port == 22 && !settings.address[0] && settings.limit == 60);
+                settings.on = settings.root = true;
+                settings.port = 2200;
+                settings.limit = 0;
+                string_copy_bounded(settings.address, (string_address) "2001:db8::7", sizeof(settings.address));
+                string_copy_bounded(settings.boot, (string_address) "0123abcd-0000-1111-2222-333344445555", sizeof(settings.boot));
+                settings.until = 123456;
+                length = ssh_settings_text(&settings, kept, sizeof(kept));
+                round &= length && ssh_settings_parse(kept, length, &back) && back.on && back.root && back.port == 2200 &&
+                         !back.limit && string_equals(back.address, (string_address) "2001:db8::7") && back.until == 123456 &&
+                         string_equals(back.boot, settings.boot);
+                for (positive at = 0; at < sizeof(bad) / sizeof(bad[0]); at++)
+                        refuses &= !ssh_settings_parse((string_address)bad[at], string_length((string_address)bad[at]), &back);
+                check("ssh: the settings read back as they were written", round);
+                check("ssh: a settings line that is not one of the file's is no settings at all", refuses);
+
+                //      A timed on ends at its second, and in any boot but its own.
+                check("ssh: a timed on is not over before its second, in its boot",
+                      !ssh_expired_at(&settings, (string_address) "0123abcd-0000-1111-2222-333344445555", 123455));
+                check("ssh: a timed on is over at its second, and in another boot whatever is left",
+                      ssh_expired_at(&settings, (string_address) "0123abcd-0000-1111-2222-333344445555", 123456) &&
+                          ssh_expired_at(&settings, (string_address) "ffffffff-0000-1111-2222-333344445555", 1));
+                settings.until = 0;
+                check("ssh: an on with no limit is never over", !ssh_expired_at(&settings, (string_address) "x", (p64)1 << 40));
+        }
+        {
+                static const struct
+                {
+                        string_address typed;
+                        string_address normal;
+                } addresses[] = {{"192.0.2.7", "192.0.2.7"},   {"::1", "::1"},
+                                 {"2001:DB8:0:0:0:0:0:7", "2001:db8::7"}, {"1:0:0:2:0:0:0:3", "1:0:0:2::3"},
+                                 {"1:0:0:0:2:0:0:3", "1::2:0:0:3"},      {"0:0:0:0:0:0:0:0", "::"},
+                                 {"1:2:3:4:5:6:7:0", "1:2:3:4:5:6:7:0"}, {"fe80::1%eth0", null},
+                                 {"::ffff:192.0.2.7", null},             {"256.1.1.1", null},
+                                 {"[::1]", null},                        {"host.example", null},
+                                 {"", null}};
+                bool all = true;
+
+                for (positive at = 0; at < sizeof(addresses) / sizeof(addresses[0]); at++)
+                {
+                        p8 normal[48];
+                        bool took = ssh_address_normal(addresses[at].typed, normal, sizeof(normal));
+
+                        all &= addresses[at].normal ? took && string_equals(normal, addresses[at].normal) : !took;
+                }
+                check("ssh: an address is kept as sshd -T says it back (RFC 5952), and a zone, a bracket or a name is none", all);
+        }
+        {
+                //      Two keys of no private half: 32 bytes counted up, as an Ed25519 and as a security key's; ssh-keygen -l said these.
+                static p8 list[4096];
+                static ssh_keys keys;
+                ssh_key one;
+                p8 print[64];
+                static const char address_to ed =
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+                static const char address_to sk =
+                    "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AAAAABHNzaDo=";
+                static const char address_to bad[] = {
+                    "restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a b\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8h a\n",
+                    "restrict,pty ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHwECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gAA== a\n",
+                    "restrict,pty sk-ssh-ed25519@openssh.com AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g -a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n"
+                    "restrict,pty sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AAAAABHNzaDo= a\n"};
+                bool refuses = true;
+                positive length;
+
+                memory_zero(&one, sizeof(one));
+                string_copy_bounded(one.type, (string_address) "ssh-ed25519", sizeof(one.type));
+                string_copy_bounded(one.blob, (string_address)ed, sizeof(one.blob));
+                check("ssh: an Ed25519 key's fingerprint is the one ssh-keygen -l says",
+                      ssh_key_fingerprint(&one, print) && string_equals(print, (string_address) "SHA256:mKqU+0K8OhKmA8bBQi9Rz0Q5l7/g160hIP+rJYSTNj4"));
+                string_copy_bounded(one.type, (string_address) "sk-ssh-ed25519@openssh.com", sizeof(one.type));
+                string_copy_bounded(one.blob, (string_address)sk, sizeof(one.blob));
+                check("ssh: a security key's fingerprint is the one ssh-keygen -l says",
+                      ssh_key_fingerprint(&one, print) && string_equals(print, (string_address) "SHA256:c/3vAQK71VH3tiPw+eWPowglqzC45ljISgdYDmpjCGE"));
+                (void)string_join(list, sizeof(list), (string_address) "restrict,pty ssh-ed25519 ", (string_address)ed,
+                                  (string_address) " laptop\nrestrict,pty sk-ssh-ed25519@openssh.com ", (string_address)sk,
+                                  (string_address) " yubikey.2\n");
+                length = string_length(list);
+                check("ssh: the list as moonwater ssh writes it is read back, key by key, label by label",
+                      ssh_keys_parse(list, length, &keys) && keys.count == 2 &&
+                          string_equals(keys.keys[0].label, (string_address) "laptop") &&
+                          string_equals(keys.keys[1].label, (string_address) "yubikey.2") &&
+                          ssh_keys_text(&keys, copy, sizeof(copy)) == length && string_equals(copy, list));
+                for (positive at = 0; at < sizeof(bad) / sizeof(bad[0]); at++)
+                        refuses &= !ssh_keys_parse((string_address)bad[at], string_length((string_address)bad[at]), &keys);
+                check("ssh: a list line with other options, no label or two, a key that is not well made or not its type, or a label twice, is not the list",
+                      refuses);
+        }
+        {
+                //      The apk database, as Alpine 3.24 writes it: each R: under the F: before it, and Z: its checksum.
+                static const char address_to database =
+                    "C:Q1aaa\nP:openssh-keygen\nV:10.3_p1-r2\nF:usr\nF:usr/bin\nR:ssh-keygen\nZ:Q1GnzRSE5p51SMLcbJfJrcfwP/1Xw=\n\n"
+                    "C:Q1bbb\nP:openssh-server\nV:10.3_p1-r2\nF:usr\nF:usr/lib\nF:usr/lib/ssh\nR:sshd-auth\nZ:Q1xWQNzLq8rui0LuT7kqZAqCHqKcA=\n"
+                    "R:sshd-session\nZ:Q14kXrTPQDRhyA/177gNP2SMV6dlQ=\nF:usr/sbin\nR:sshd\na:0:0:755\nZ:Q1oUoNK0kI5i7J9YNlnrkr2kAg7Mc=\n\n"
+                    "P:other\nR:sshd\nZ:Q1notthis\n";
+                p8 root[96], path[160], sum[48];
+                static p8 files[16][128];
+                bipolar handle;
+                positive count;
+
+                (void)string_join(root, sizeof(root), (string_address)BOWL_ROOT_PREFIX, (string_address) "sshdb");
+                (void)string_join(path, sizeof(path), root, (string_address) "/lib/apk/db");
+                (void)bowl_mkdir_parents(path);
+                (void)string_join(path, sizeof(path), root, (string_address) "/lib/apk/db/installed");
+                handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0644);
+                if (handle >= 0)
+                {
+                        (void)system_write_all((positive)handle, (string_address)database, string_length((string_address)database));
+                        system_close(handle);
+                }
+                check("ssh: the database gives a file its own checksum, by its folder and its name",
+                      ssh_apk_checksum(root, (string_address) "usr/sbin/sshd", sum, sizeof(sum)) &&
+                          string_equals(sum, (string_address) "Q1oUoNK0kI5i7J9YNlnrkr2kAg7Mc=") &&
+                          ssh_apk_checksum(root, (string_address) "usr/lib/ssh/sshd-session", sum, sizeof(sum)) &&
+                          string_equals(sum, (string_address) "Q14kXrTPQDRhyA/177gNP2SMV6dlQ=") &&
+                          !ssh_apk_checksum(root, (string_address) "usr/bin/sshd", sum, sizeof(sum)));
+                count = ssh_apk_package(root, (string_address) "openssh-server", files, 16);
+                check("ssh: the files of a package are the R: lines of that package, each with its folder",
+                      count == 3 && string_equals(files[0], (string_address) "/usr/lib/ssh/sshd-auth") &&
+                          string_equals(files[1], (string_address) "/usr/lib/ssh/sshd-session") &&
+                          string_equals(files[2], (string_address) "/usr/sbin/sshd"));
+        }
+        {
+                //      An ELF file names its loader and libraries, and a file that is none is not taken for one.
+                ssh_needed needed;
+                bool elf = false;
+                bipolar handle = system_open_at(AT_FDCWD, (string_address) "/proc/self/exe", FILE_READ | O_CLOEXEC);
+                bool read = handle >= 0 && ssh_elf_needed(handle, &needed, &elf);
+
+                if (handle >= 0)
+                        system_close(handle);
+                check("ssh: this static check is an ELF file that names no loader and no library", read && elf && !needed.loader[0] && !needed.count);
+                handle = system_open_at(AT_FDCWD, (string_address) "/proc/self/cmdline", FILE_READ | O_CLOEXEC);
+                read = handle >= 0 && ssh_elf_needed(handle, &needed, &elf);
+                if (handle >= 0)
+                        system_close(handle);
+                check("ssh: a file that is no ELF is not taken for one", read && !elf);
+                handle = system_open_at(AT_FDCWD, (string_address) "/usr/bin/env", FILE_READ | O_CLOEXEC);
+                read = handle >= 0 && ssh_elf_needed(handle, &needed, &elf);
+                if (handle >= 0)
+                        system_close(handle);
+                if (read && elf && needed.loader[0])
+                {
+                        bool libc = false;
+
+                        for (positive at = 0; at < needed.count; at++)
+                                libc |= host_starts(needed.names[at], (string_address) "libc.");
+                        check("ssh: a program of the host names its loader and its libc", host_starts(needed.loader, (string_address) "/lib") && libc);
+                }
+                else
+                        log_direct(str("ssh: a dynamic program's loader and libraries NOT RUN -- /usr/bin/env here is not one\n"));
+        }
+}
+
 b32 main(void)
 {
+        ssh_rows();
         names();
         launchers();
         isolation();

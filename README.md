@@ -163,6 +163,11 @@ moonwater link remove NAME             stop knowing it
 moonwater link transport [network|modem]  how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]
 
 
+# SSH (bowl profile ssh)
+moonwater ssh key remove LABEL         take a key back by its label; every session ends
+moonwater ssh log [N]                  the last changes, starts, refusals and logins, the newest last [20]
+
+
 # Wi-Fi
 moonwater wifi [on|off]                the radio, saved networks and those in range [off]
 moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network, joined once wifi is on; asks for the password, - reads it from stdin; wpa2 lets a tight tier join it without WPA3

@@ -916,6 +916,139 @@ that the clipboard changed, never what it holds.
   escape sequence); that would let anything printed to the terminal write the
   clipboard.
 
+## The ssh server (bowl profile ssh)
+
+A deliberate exposure, not an incident: `bowl profile ssh install` puts
+OpenSSH's server (Alpine's `openssh-server` and `openssh-keygen`, 10.3p1 on
+Alpine 3.24) in the Alpine bowl so that a person can reach the machine by a key,
+and `moonwater ssh` (`src/sh/ssh.c`) runs it. It is **off** after install and
+after every boot that followed a timed on; it listens only while the switch
+says on. The Settings window's SSH group is the same rows (`src/sh/registry.c`).
+
+### What it holds and where
+
+- `/root/ssh` (0700, root's; kept by `wipe`): `settings` (the switch, root, the
+  port, the address, the time limit and a timed on's end), `authorized_keys`
+  (the one list, written only by `ssh key add` and `ssh key remove`, each line
+  `restrict,pty TYPE KEY LABEL`), `host_ed25519_key` (made by the copied
+  ssh-keygen at the first on, on the machine, never in the tree), `sshd_config`
+  (written from the settings at every start and given with `-f`; no
+  `Include`), `digests` (the SHA-256 of each file sshd runs from, recorded at
+  install) and `log` (every change with the pid and program that asked, every
+  start, stop and refusal, and sshd's own lines at `LogLevel VERBOSE`; root's,
+  cut to its newer half past 64 KiB; logins, starts, stops and refusals go to
+  the kernel's log as well). Every file is read through no link and refused
+  when it is not a regular file of root's with no group or other bits.
+- The configuration: keys only (`AuthenticationMethods publickey`, no password,
+  keyboard-interactive, empty password or host-based login), `AllowUsers root`
+  and `PermitRootLogin prohibit-password` only while `ssh root on` (else
+  `no`), `AuthorizedKeysFile` the list above and no `AuthorizedKeysCommand`,
+  principals or CA; every forwarding off (`DisableForwarding`, TCP, stream
+  local, agent, X11, tunnel, gateway ports, `PermitListen`/`PermitOpen none`),
+  `PermitUserEnvironment no`, `PermitUserRC no`; `MaxAuthTries 3`,
+  `LoginGraceTime 20`, `MaxStartups 3:50:10`, `PerSourceMaxStartups 2`,
+  `ClientAliveInterval 30` with a count of 3, `StrictModes yes`; host key
+  ed25519 only; keys `ssh-ed25519` and `sk-ssh-ed25519@openssh.com` only;
+  key exchange `sntrup761x25519-sha512@openssh.com` then X25519; ciphers
+  AES-GCM alone, which Terrapin's prefix truncation (CVE-2023-48795) does not
+  reach with any client, strict key exchange or not (it reaches
+  ChaCha20-Poly1305 and the encrypt-then-MAC modes). No `UsePAM` line: Alpine's sshd has
+  no PAM, and a build that has it is off by default and is held to that.
+- Only root can log in. The machine's other account (`user`, 1000) is the id
+  every program of a bowl runs as at the hardened tier, so a login as it would
+  be every bowl's programs and files and nothing of the machine's (no
+  `moonwater` change, no `/root`, no debugger on the compositor): it is not
+  offered. With root off the server answers and lets nobody in.
+
+### How it starts, and what is enforced
+
+- `ssh_view_enter`, in a child of the supervisor (`moonwater ssh serve`, which
+  holds `/run/moonwater/ssh.lock` for the server's life): it enters PID 1's
+  mount namespace (whatever namespace the command was typed in), makes one of
+  its own as a slave of it, and mounts a tmpfs there that nothing else sees.
+  Each recorded file is copied from the bowl into it and hashed as it is copied;
+  one whose SHA-256 is not the record's refuses the start whole, by name, so
+  what was checked is what runs and the bowl's files are never executed. The
+  copies are laid over `/lib` and `/usr/lib` (an overlay: the loader, the
+  libraries and `sshd-session`/`sshd-auth` at the paths sshd was built with),
+  Moonwater's own `passwd` and `group` (root, and the privilege-separation
+  account 65520) over the machine's, an empty directory over `/etc/ssh` and
+  `/var/empty`, and the tmpfs is made read-only.
+- `sshd -T -f` on the file, and every value the settings decide compared with
+  what it says it will use (each once; the addresses exactly the ones named; a
+  `usepam` line, where the build has one, `no`): any difference refuses the
+  start and names the keyword.
+- sshd is executed by its absolute path in the tmpfs with an **empty
+  environment** (no `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, nothing
+  inherited), `-D -e -f /root/ssh/sshd_config`.
+- The machine process, every five seconds (`ssh_keep_machine`): a timed on that
+  ran out, or one from another boot, is turned off; off is no server (its
+  supervisor is told to end it, and it ends every session first); on is the
+  server started from the settings as they are now (one started from other
+  settings is stopped and started again); every `sshd`, `sshd-session` or
+  `sshd-auth` that does not descend from the supervisor, and every process
+  holding a socket that listens on the port and is not the listener, is ended
+  with SIGKILL and said in the log.
+- There is no firewall in the tree (the kernel profiles have no netfilter):
+  the port is reachable exactly while something listens on it, which is the
+  server alone. Off, a connection to it is refused, and at the tight net tier
+  dropped without an answer (FW-D1).
+
+### What an attacker on the network reaches while it is on
+
+The TCP port (22 unless set) on every address, or on the one address set: the
+SSH transport of OpenSSH 10.3p1 before authentication (the version exchange,
+the key exchange with the algorithms above, and public-key authentication for
+`root` against the list), in sshd-session and the unprivileged sshd-auth
+(chrooted into the empty `/var/empty` as 65520), at most 3 unauthenticated
+connections before random early drops and 10 in all, 2 from one source, 20
+seconds each, 3 tries each, and OpenSSH's own per-source penalties. What stops
+them: there is no password of any kind to guess and no account but root; a key
+not in the list is refused; nothing is forwarded for anyone, a key in the list
+included. What remains: a fault in OpenSSH's pre-authentication code (the class
+of regreSSHion, CVE-2024-6387, fixed in 9.8) is reachable by anyone who can
+reach the port; updating the bowl's package (`apk upgrade`) changes the files,
+which the server then refuses until `bowl profile ssh install` records them
+again; the limit (60 minutes by default) bounds how long a forgotten on stays
+reachable.
+
+### Who may change the settings
+
+| Who | Can |
+|---|---|
+| Root of the machine's user namespace, at a terminal (`moonwater ssh ...`) | everything |
+| The Settings window (a root program) | everything, through the same verbs |
+| A process that is root only in a namespace of its own | nothing: the verbs ask PID 1's user namespace (`ssh_machine_root`) |
+| A program of a bowl at the hardened tier (a real uid 1000) | nothing: `/root` is not in its view, the state is root's 0600, the lock and the record are root's, and it cannot signal or trace the server |
+| A program of a bowl at the **default** tier | **everything a file can do**: it is root to the machine's files (BOWL-D1), so it can read the host key and rewrite the settings and the list, as it can rewrite the machine script; these settings hold only against the rest |
+| An unprivileged program of the machine, a Wayland or X client, a D-Bus call or portal | nothing of the settings; the session bus has no method that runs `moonwater`, and no client can write the window table. A uid 1000 program can bind the port while the server is off (above 1024, when the port is set there), and is ended at the next look |
+| A program with `/dev/uinput` (root, or a bowl with the input grant, which `bowl profile steam` gives) | **can type into any window**, the Settings window and a root terminal included: the compositor does not tell a virtual device from a real one |
+
+### What is not done
+
+- The Settings window does not tell a virtual input device from a real one: the
+  rows that are a deliberate act (Server, Root login, Add a key) carry
+  `deliberate` in the registry and nothing reads it yet. It needs the
+  compositor to mark each evdev device whose sysfs path is under
+  `/sys/devices/virtual/` (uinput, and uhid, so a Bluetooth keyboard through
+  uhid would count as virtual) and the window to refuse a deliberate row for a
+  virtual press. Until then the deliberate path is `moonwater ssh on`, `ssh root
+  on` and `ssh key add` typed in a root terminal at the machine, and a uinput
+  keyboard can type those as well as it can type anything else. Kernels of the
+  hardened and locked profiles have no uinput.
+- At the default bowl tier nothing here holds against a program of a bowl
+  (BOWL-D1): the status line and the Settings row say which tier the machine
+  is, and `sec_bowl_hardened` is the tier at which they hold.
+- No sftp subsystem: files are moved with the shell. A session's mount
+  namespace is the server's, a slave of the machine's: a mount made inside a
+  session is not seen outside it.
+- Ending a session (`ssh end`, `ssh off`, `ssh key remove`) ends each
+  connection's privileged process, so its terminal hangs up and what it ran is
+  told so as after any disconnection; a program that detached from its terminal
+  goes on.
+- `/proc` is shared: any process of the machine can see that sshd runs and the
+  title of each session's process (who is logged in).
+
 ## Security tiers
 
 Five profiles in `kernel/profile/` choose how the build leans where safety and
