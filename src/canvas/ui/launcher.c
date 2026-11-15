@@ -1031,13 +1031,6 @@ static fn launcher_paint(unsigned int address_to pixels)
         }
 }
 
-// One picture, into the buffer the compositor is not reading; false when there is none yet (the kit's frame; the bar's moved place is
-// asked with the picture, before the buffer is shown).
-static b32 launcher_frame(void)
-{
-        return ui_app_present(&launcher.own, &launcher.buffers.shown, &launcher.dirty, launcher.width, launcher.height, launcher_paint);
-}
-
 /* ---- the program ---- */
 
 // The names of PATH, their directories, the hash table and the scan's buffer: one mapping, not in the image's bss.
@@ -1045,24 +1038,14 @@ static b32 launcher_memory(void)
 {
         positive names = (positive)LAUNCHER_NAMES * LAUNCHER_NAME, from = LAUNCHER_NAMES,
                  hashed = (positive)LAUNCHER_HASH * sizeof(unsigned short);
-        long mapped = ui_map(names + from + hashed + LAUNCHER_DIRENTS);
+        char address_to mapped = ui_app_map(&launcher_app, names + from + hashed + LAUNCHER_DIRENTS);
 
-        if (mapped < 0 && mapped > -4096)
+        if (!mapped)
                 return false;
-        launcher.names = (char address_to)mapped;
+        launcher.names = mapped;
         launcher.from = (unsigned char address_to)(mapped + names);
         launcher.hashed = (unsigned short address_to)(mapped + names + from);
         return true;
-}
-
-static fn launcher_size(unsigned int width, unsigned int height)
-{
-        struct windows address_to table = launcher.own.table;
-
-        launcher.width = (int)(width > table->output_width ? table->output_width : width);
-        launcher.height = (int)(height > table->output_height ? table->output_height : height);
-        ui_scratch_fit(&launcher.ui, width);
-        launcher.dirty = true;
 }
 
 // The launcher's start, once its window is taken: the lift, the fonts and the first picture. -1 runs the loop.
@@ -1083,13 +1066,9 @@ static int launcher_open(void)
                 return 0;
 
         if (!launcher_memory())
-        {
-                compositor_kmsg((string_address) "launcher: no memory, pid ",
-                                (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
-        }
 
-        launcher_size((unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
+        ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         launcher_changed();
         if (launcher.anchor.anchored)
@@ -1106,7 +1085,7 @@ static int launcher_open(void)
                         table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
                 }
         }
-        launcher_frame();
+        ui_app_frame(&launcher_app);
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
         // change with the scan and needs no second frame; a key read after this sees every name.
@@ -1142,14 +1121,16 @@ static struct ui_app launcher_app = {
         .focused = &launcher.focused,
         .ground = &launcher.ground,
         .open = launcher_open,
-        .frame = launcher_frame,
         .language = launcher_language,
         .event = launcher_event,
         .dismiss = true,        // a temporary overlay: the keys went elsewhere after it had them, so it is put away (ui_app_keys)
-        .size = launcher_size,
         .tick = launcher_tick,
         .popup = &launcher.menu,
         .chose = launcher_chose,
+        .width = &launcher.width,
+        .height = &launcher.height,
+        .shown = &launcher.buffers.shown,
+        .draw = launcher_paint,
 };
 
 static b32 launcher_main()
