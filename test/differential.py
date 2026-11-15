@@ -93747,8 +93747,47 @@ static struct {
         int fpu_ok, haskey;
 } G;
 
+/* ---- the frame record a port leaves for an unwinder ----
+   A stack trace taken in something a port calls (lockdep, KASAN, a WARN) walks
+   the frame pointers up through the port's frame, as the kernel's unwinder
+   reads them: on x86_64 the saved rbp at rbp, on arm64 the record at x29, and on
+   riscv64 the record at s0-16 (the next s0) and s0-8 (ra), which is where
+   arch/riscv/kernel/stacktrace.c looks. mw_frame_from is the frame of the test's
+   call into a port, set only while the port runs (MW_PORT); a stub the port
+   reaches walks that many frames up from its own -- 2 when the port called it, 3
+   when one more function is between -- and has to arrive there, each step
+   going up the stack and none past it. Everything here is built with frame
+   pointers, so the C frames in the walk are right by construction and a wrong
+   answer is the port's. __builtin_frame_address(n) cannot do the walk: on
+   riscv64 GCC 13 follows the word at s0 itself, not the one at s0-16. */
+static void *mw_frame_from;
+static long mw_frame_walks, mw_frame_bad;
+static __attribute__((noinline)) void mw_frame_walk(void *fp, int levels)
+{
+        if (!mw_frame_from)
+                return;
+        mw_frame_walks++;
+        for (int l = 0; l < levels; l++) {
+                void *up;
+                if (((unsigned long)fp & 7) || (char *)fp >= (char *)mw_frame_from) { mw_frame_bad++; return; }
+#if defined(__riscv)
+                up = ((void **)fp)[-2];
+#else
+                up = ((void **)fp)[0];
+#endif
+                if ((char *)up <= (char *)fp) { mw_frame_bad++; return; }
+                fp = up;
+        }
+        if (fp != mw_frame_from)
+                mw_frame_bad++;
+}
+#define MW_FRAME_AT(levels) mw_frame_walk(__builtin_frame_address(0), (levels))
+#define MW_PORT(statement) do { mw_frame_from = __builtin_frame_address(0); statement; mw_frame_from = NULL; } while (0)
+#define MW_FRAMES_SAY() printf("frames %ld bad %ld\n", mw_frame_walks, mw_frame_bad)
+
 void mw_error(const char *function, const char *format, ...)
 {
+        MW_FRAME_AT(3);         /* the port, __ext4_check_dir_entry, then this */
         if (R.nerrors < 40) {
                 size_t fl = strlen(function);   /* the oracle is compiled under another name: report it as the kernel's */
                 int n = snprintf(R.errors[R.nerrors], 200, "%.*s: ", (int)(fl > 2 && !strcmp(function + fl - 2, "_c") ? fl - 2 : fl), function);
@@ -93761,6 +93800,7 @@ void mw_error(const char *function, const char *format, ...)
 
 struct buffer_head *__ext4_read_dirblock(struct inode *inode, ext4_lblk_t block, dirblock_type_t type, const char *func, unsigned int line)
 {
+        MW_FRAME_AT(2);
         R.reads++;
         (void)inode; (void)block; (void)func; (void)line;
         if (type != DIRENT_HTREE) R.reads += 1000;
@@ -93805,10 +93845,19 @@ int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor, co
 /* the dcache calls of the libfs port: present in every build of kernel.c, used by the libfs test */
 static struct { long bad, locks, dputs; } LF;
 static struct dentry *(*lf_lookup)(struct dentry *, loff_t);
-void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++; }
+void _raw_spin_lock(void *l) { MW_FRAME_AT(2); int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++; }
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
-void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
-struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
+void dput(struct dentry *d) { MW_FRAME_AT(2); LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
+struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset)
+{
+        void *from = mw_frame_from;     /* the lookup's own locks are not the port's calls */
+        struct dentry *found;
+        MW_FRAME_AT(2);
+        mw_frame_from = NULL;
+        found = lf_lookup ? lf_lookup(parent, offset) : NULL;
+        mw_frame_from = from;
+        return found;
+}
 static struct { long live, allocs, frees, fail_at; } MA;
 /* With the partitioned caches slab.h puts a token between the size and the flags
    (DECL_TOKEN_PARAMS); the typed partition indexes the copies by it. */
@@ -93818,6 +93867,7 @@ void *__kmalloc_noprof(size_t size, unsigned long token, unsigned gfp)
 void *__kmalloc_noprof(size_t size, unsigned gfp)
 #endif
 {
+        MW_FRAME_AT(2);
         MA.allocs++;
         if (MA.fail_at && MA.allocs == MA.fail_at) return NULL;
         if (gfp != (GFP_KERNEL | __GFP_ZERO)) abort();   /* kzalloc(GFP_KERNEL), as the C asks: the arena wants zeroed pages */
@@ -93827,13 +93877,14 @@ void *__kmalloc_noprof(size_t size, unsigned gfp)
         MA.live++;
         return calloc(1, size);
 }
-void kfree(const void *p) { if (p) { MA.frees++; MA.live--; free((void *)p); } }
-void rb_insert_color(struct rb_node *node, struct rb_root *root) { (void)node; (void)root; }
+void kfree(const void *p) { MW_FRAME_AT(2); if (p) { MA.frees++; MA.live--; free((void *)p); } }
+void rb_insert_color(struct rb_node *node, struct rb_root *root) { MW_FRAME_AT(2); (void)node; (void)root; }
 static long mw_msgs;
-void __ext4_msg(struct super_block *sb, const char *level, const char *fmt, ...) { (void)sb; (void)level; (void)fmt; mw_msgs++; }
+void __ext4_msg(struct super_block *sb, const char *level, const char *fmt, ...) { MW_FRAME_AT(2); (void)sb; (void)level; (void)fmt; mw_msgs++; }
 struct rb_node *rb_next(const struct rb_node *node)
 {
         struct rb_node *parent;
+        MW_FRAME_AT(2);
         if (node->rb_right) { node = node->rb_right; while (node->rb_left) node = node->rb_left; return (struct rb_node *)node; }
         while ((parent = (struct rb_node *)(node->__rb_parent_color & ~3UL)) && node == parent->rb_right) node = parent;
         return parent;
@@ -93853,9 +93904,11 @@ unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
 }
 int copy_to_user_nofault(void *to, const void *from, unsigned long n) { return _copy_to_user(to, from, n) ? -EFAULT : 0; }
 
-bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
-int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
+/* called by ext4_match, which the port calls: one frame more */
+__attribute__((noinline)) bool fscrypt_has_encryption_key(const struct inode *inode) { MW_FRAME_AT(3); (void)inode; return G.haskey; }
+__attribute__((noinline)) int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
 {
+        MW_FRAME_AT(3);
         (void)parent; (void)folded_name;
         if (de_name_len != name->len) return 0;
         for (u32 i = 0; i < de_name_len; i++)
@@ -94063,7 +94116,7 @@ KERNEL_PORTS_HTREE_TEST = r"""int main(int argc, char **argv)
                 ra = R;
                 memset(&R, 0, sizeof R);
                 G.usr_calls = 0;
-                R.count = htree_dirblock_to_tree(&file, &dir, 3, &hb, sh, sm);
+                MW_PORT(R.count = htree_dirblock_to_tree(&file, &dir, 3, &hb, sh, sm));
                 rb = R;
                 entries += ra.stores;
                 char why[1000];
@@ -94073,6 +94126,7 @@ KERNEL_PORTS_HTREE_TEST = r"""int main(int argc, char **argv)
                 }
                 (void)wide_used;
         }
+        MW_FRAMES_SAY();
         printf("cases %ld differ %ld stores %ld\n", iters, bad, entries);
         return bad != 0;
 }
@@ -94145,7 +94199,7 @@ int main(int argc, char **argv)
                 R.count = ext4_find_dest_de_c(&dir, &G.bh, blk, buf_size, &fname, &da);
                 ra = R;
                 memset(&R, 0, sizeof R);
-                R.count = ext4_find_dest_de(&dir, &G.bh, blk, buf_size, &fname, &db);
+                MW_PORT(R.count = ext4_find_dest_de(&dir, &G.bh, blk, buf_size, &fname, &db));
                 rb = R;
                 if (ra.count == 0 || ra.count == -17) found++;
                 char why[1000];
@@ -94154,6 +94208,7 @@ int main(int argc, char **argv)
                 if (!ok && bad++ < 5)
                         printf("case %ld differs: %s (size %d buf_size %d csum %d flags %x name_len %d)\n", it, why, size, buf_size, csum, dir.i_flags, nl);
         }
+        MW_FRAMES_SAY();
         printf("cases %ld differ %ld stores %ld\n", iters, bad, found);
         return bad != 0;
 }
@@ -94179,6 +94234,7 @@ static int lf_nkids;
 
 static bool lf_actor(struct dir_context *ctx, const char *name, int namelen, loff_t offset, u64 ino, unsigned type)
 {
+        MW_FRAME_AT(3);         /* moonwater_emit_batch, then offset_iterate_dir */
         if (EM.n < 400) {
                 memcpy(EM.e[EM.n].name, name, namelen);
                 EM.e[EM.n].len = namelen; EM.e[EM.n].off = offset; EM.e[EM.n].ino = ino; EM.e[EM.n].type = type; EM.e[EM.n].pos = ctx->pos;
@@ -94257,7 +94313,7 @@ int main(int argc, char **argv)
                         dir.d_lockref.count = dir_count;
                         memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
                         mw_user_lo = (char *)ub; mw_user_hi = (char *)ub + window;
-                        offset_iterate_dir(&file, &gb.ctx);
+                        MW_PORT(offset_iterate_dir(&file, &gb.ctx));
                         char why[200] = "";
                         struct dir_context ca = ga.ctx, cb = gb.ctx;
                         if (real) {
@@ -94312,6 +94368,7 @@ int main(int argc, char **argv)
                 free(kids); free(inodes); free(offs);
         }
         printf("locks taken: C %ld, port %ld; dput calls: C %ld, port %ld; over %ld entries\n", locks_c, locks_p, puts_c, puts_p, emitted);
+        MW_FRAMES_SAY();
         printf("cases %ld differ %ld stores %ld\n", iters, bad, emitted);
         return bad != 0;
 }
@@ -94325,6 +94382,7 @@ int call_filldir(struct file *file, struct dir_context *ctx, struct fname *fname
 static struct { int n; struct { char name[256]; int len; long off; u64 ino; unsigned type; long pos; } e[600]; int limit; } XM;
 static bool xd_actor(struct dir_context *ctx, const char *name, int namelen, loff_t offset, u64 ino, unsigned type)
 {
+        MW_FRAME_AT(3);         /* moonwater_emit_batch, then call_filldir */
         if (XM.n < 600) {
                 memcpy(XM.e[XM.n].name, name, namelen);
                 XM.e[XM.n].len = namelen; XM.e[XM.n].off = offset; XM.e[XM.n].ino = ino; XM.e[XM.n].type = type; XM.e[XM.n].pos = ctx->pos;
@@ -94333,13 +94391,22 @@ static bool xd_actor(struct dir_context *ctx, const char *name, int namelen, lof
         return !(XM.limit && XM.n >= XM.limit);
 }
 
+/* the call into whichever call_filldir it is, its own frame, so that the port's caller is this */
+static __attribute__((noinline)) int xd_call(int (*call)(struct file *, struct dir_context *, struct fname *), struct file *file, struct dir_context *ctx, struct fname *f)
+{
+        int r;
+        if (call != call_filldir) return call(file, ctx, f);
+        MW_PORT(r = call(file, ctx, f));
+        return r;
+}
+
 /* ext4_dx_readdir's walk over the nodes, as the source has it, around whichever call_filldir it is given */
 static int xd_drive(int (*call)(struct file *, struct dir_context *, struct fname *), struct file *file, struct dir_context *ctx, struct fname *start, int extra)
 {
         struct dir_private_info *info = file->private_data;
         struct fname *fname;
         if (extra) {
-                if (call(file, ctx, info->extra_fname)) return 1;
+                if (xd_call(call, file, ctx, info->extra_fname)) return 1;
                 info->extra_fname = NULL;
                 goto next_node;
         }
@@ -94347,7 +94414,7 @@ static int xd_drive(int (*call)(struct file *, struct dir_context *, struct fnam
                 fname = rb_entry(info->curr_node, struct fname, rb_hash);
                 info->curr_hash = fname->hash;
                 info->curr_minor_hash = fname->minor_hash;
-                if (call(file, ctx, fname)) return 1;
+                if (xd_call(call, file, ctx, fname)) return 1;
         next_node:
                 info->curr_node = rb_next(info->curr_node);
                 if (!info->curr_node) return 0;
@@ -94485,6 +94552,7 @@ int main(int argc, char **argv)
                 }
                 munmap(region, (2 * (n * 2) + 2) * 4096);
         }
+        MW_FRAMES_SAY();
         printf("cases %ld differ %ld stores %ld\n", iters, bad, emitted);
         return bad != 0;
 }
@@ -94546,12 +94614,14 @@ int main(int argc, char **argv)
                 char why[200] = "";
                 for (int round = 0; round < 2 && !*why; round++) {
                         if (round == 0) {
-                                if (ext4_dir_open(&inode, &fa) || !fa.private_data) { sprintf(why, "open failed"); break; }
+                                int opened;
+                                MW_PORT(opened = ext4_dir_open(&inode, &fa));
+                                if (opened || !fa.private_data) { sprintf(why, "open failed"); break; }
                         }
                         struct dir_private_info *ia = fa.private_data;
                         MA.fail_at = rnd() % 4 == 0 ? MA.allocs + 1 + rnd() % 4 : 0;
                         int done = 0, r = 0;
-                        for (int i = 0; i < m; i++) { r = ext4_htree_store_dirent(&fa, hash[i], minor[i], &de[i], &nm[i]); if (r) break; done++; }
+                        for (int i = 0; i < m; i++) { MW_PORT(r = ext4_htree_store_dirent(&fa, hash[i], minor[i], &de[i], &nm[i])); if (r) break; done++; }
                         MA.fail_at = 0;
                         if (r && r != -ENOMEM) { sprintf(why, "returned %d", r); break; }
                         if (r && MA.fail_at == 0 && done == m) { sprintf(why, "failed with nothing to fail"); break; }
@@ -94560,7 +94630,7 @@ int main(int argc, char **argv)
                         if (!*why && !same_trees(ic, ia, why)) break;
                         stored += done;
                         /* the tree is thrown away and the file goes on: what it had is freed, what it makes next is whole */
-                        free_rb_tree_fname(&ia->root);
+                        MW_PORT(free_rb_tree_fname(&ia->root));
                         if (ia->root.rb_node) { sprintf(why, "the tree was not emptied"); break; }
                         if (MA.live != 1) { sprintf(why, "%ld allocations live after the tree was freed (want the info alone)", MA.live); break; }
                 }
@@ -94569,6 +94639,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < m; i++) free(nm[i].name);
                 free(de); free(nm);
         }
+        MW_FRAMES_SAY();
         printf("cases %ld differ %ld stores %ld\n", iters, bad, stored);
         return bad != 0;
 }
@@ -94799,7 +94870,8 @@ def harness_kernel_ports(argv):
                     '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n'
                     '#define ASM_LABEL(name) ".L" #name\n#define ASM_RODATA_PUSH ".pushsection .rodata"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
-            built = build_run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
+            # frame pointers everywhere: the stubs walk them back through the port (MW_FRAME_AT)
+            built = build_run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-fno-omit-frame-pointer", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))
@@ -94812,7 +94884,8 @@ def harness_kernel_ports(argv):
             for line in ran.stdout.splitlines():
                 if line.startswith(("case ", "locks taken")) and not sabotage:
                     print("    " + line)
-            return tuple(int(x) for x in found.groups())
+            frames = re.search(r"frames (\d+) bad (\d+)", ran.stdout)
+            return tuple(int(x) for x in found.groups()) + ((int(frames.group(1)), int(frames.group(2))) if frames else (None, None))
 
     machine = platform.machine().lower()
     targets = []
@@ -94849,8 +94922,12 @@ def harness_kernel_ports(argv):
                     checks(split is not None and split[1] == 0,
                            "%s %s: with the caches partitioned (%s) the allocator is given a token and then kzalloc's flags" % (arch, port, partition.lower()))
             if plain:
-                cases, bad, stores = plain
+                cases, bad, stores, walks, astray = plain
                 checks(bad == 0 and stores > 500, "%s %s: %d cases, %d entries, %d differ from the kernel's C" % (arch, port, cases, stores, bad))
+                # an unwinder in a callee walks the frame pointers back through the port to its caller
+                if walks is not None:
+                    checks(walks > 0 and astray == 0,
+                           "%s %s: the frame record leads an unwinder from a callee back to the caller, %d walks, %d astray" % (arch, port, walks, astray))
                 broken = run(arch, compiler, runner, cflags, min(count, 600), True, port)
                 checks(broken is not None and broken[1] > 0, "%s %s: an oracle with one line changed is caught" % (arch, port))
     return checks.verdict("kernel ports: checks passed", "kernel-ports")

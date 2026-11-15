@@ -248,16 +248,19 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //       (no profile here) the fscrypt branches are not built, which is
 //       unreachable for an encrypted directory too, since ext4_readdir has
 //       returned the stub's -EOPNOTSUPP before any of this. No divergence in
-//       what the function does. One defect beside it, found and not fixed:
-//       the riscv64 body sets s0 to the frame's top as GCC does but keeps ra
-//       and the old s0 at L_RA and L_S0, 96 and 88 bytes under it, where
-//       arch/riscv/kernel/stacktrace.c reads the frame record at s0-8 and
-//       s0-16; a stack trace taken in a callee (lockdep, KASAN, a WARN) on a
-//       frame-pointer riscv64 kernel reads the caller's saved s9 and s10 as
-//       the next frame and return address and stops or misreports there. The
-//       same holds for ext4_find_dest_de, offset_iterate_dir,
-//       moonwater_emit_batch and call_filldir; the three dir.c routines below
-//       have the record where it belongs.
+//       what the function does. One defect beside it, found and fixed: the
+//       riscv64 body set s0 to the frame's top as GCC does but kept ra and
+//       the old s0 96 and 88 bytes under it, where arch/riscv/kernel/
+//       stacktrace.c reads the frame record at s0-8 and s0-16, so a stack
+//       trace taken in a callee (lockdep, KASAN, a WARN) on a frame-pointer
+//       riscv64 kernel read the caller's saved s9 and s10 as the next frame
+//       and return address and stopped or misreported there. The same was
+//       true of ext4_find_dest_de, offset_iterate_dir, moonwater_emit_batch
+//       and call_filldir (the three dir.c routines below had it right); all
+//       five keep ra at s0-8 and the old s0 at s0-16 now, and test/
+//       differential.py --harness kernel_ports walks the frame pointers from
+//       a callee back to the caller through every port on all three
+//       architectures, the walk of the kernel's own unwinder.
 //
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
@@ -760,8 +763,8 @@ __asm__(
     ".set L_SMINOR, 56\n"
     ".set L_COUNT, 60\n"
     ".set L_SAVELEN, 64\n"
-    ".set L_RA, 80\n"
-    ".set L_S0, 88\n"
+    ".set L_RA, 168\n"
+    ".set L_S0, 160\n"
     ".set L_S1, 96\n"
     ".set L_S2, 104\n"
     ".set L_S3, 112\n"
@@ -770,8 +773,8 @@ __asm__(
     ".set L_S6, 136\n"
     ".set L_S7, 144\n"
     ".set L_S8, 152\n"
-    ".set L_S9, 160\n"
-    ".set L_S10, 168\n"
+    ".set L_S9, 80\n"
+    ".set L_S10, 88\n"
     ".set L_FRAME, 176\n"
 );
 
@@ -1252,8 +1255,8 @@ __asm__(
     ".set F_DEST, 16\n"
     ".set F_BUFSZ, 24\n"
     ".set F_OFF, 28\n"
-    ".set F_RA, 40\n"
-    ".set F_S0, 48\n"
+    ".set F_RA, 136\n"
+    ".set F_S0, 128\n"
     ".set F_S1, 56\n"
     ".set F_S2, 64\n"
     ".set F_S3, 72\n"
@@ -1263,7 +1266,7 @@ __asm__(
     ".set F_S7, 104\n"
     ".set F_S8, 112\n"
     ".set F_S9, 120\n"
-    ".set F_S10, 128\n"
+    ".set F_S10, 40\n"
     ".set F_FRAME, 144\n"
 );
 
@@ -2043,8 +2046,8 @@ __asm__(
     ".set I_EOD, 4\n"
     ".set I_N, 8\n"
     ".set I_LAST, 16\n"
-    ".set I_RA, 32\n"
-    ".set I_S0, 40\n"
+    ".set I_RA, 1912\n"
+    ".set I_S0, 1904\n"
     ".set I_S1, 48\n"
     ".set I_S2, 56\n"
     ".set I_S3, 64\n"
@@ -2057,13 +2060,13 @@ __asm__(
     ".set I_BUFSZ, 1792\n"
     ".set I_BATCH, 16\n"
     ".set I_NAMEMAX, 1024\n"
-    ".set I_FRAME, 1904\n"
-    ".set E_RA, 0\n"
-    ".set E_S0, 8\n"
+    ".set I_FRAME, 1920\n"
+    ".set E_RA, 40\n"
+    ".set E_S0, 32\n"
     ".set E_S1, 16\n"
     ".set E_S2, 24\n"
-    ".set E_S3, 32\n"
-    ".set E_S4, 40\n"
+    ".set E_S3, 8\n"
+    ".set E_S4, 0\n"
     ".set E_FRAME, 48\n"
 );
 
@@ -2534,8 +2537,6 @@ __asm__(
     MWSET(MW_FMODE_32BIT)
     MWSET(MW_FMODE_64BIT)
     MWSET(MW_TIF_32)
-    ".set C_RA, 0\n"
-    ".set C_S0, 8\n"
     ".set C_S1, 16\n"
     ".set C_S2, 24\n"
     ".set C_S3, 32\n"
@@ -2551,12 +2552,12 @@ __asm__(
     ".set C_BUF, 336\n"
     ".set C_BUFSZ, 2048\n"
     ".set C_BATCH, 16\n"
-    ".set C_FRAME, 2384\n"
+    ".set C_FRAME, 2400\n"
 );
 
 __asm__(
     ASM_FUNC(call_filldir)
-    "        li      t0, C_FRAME\n   sub     sp, sp, t0\n   sd      ra, C_RA(sp)\n   sd      s0, C_S0(sp)\n   add     s0, sp, t0\n"
+    "        li      t0, C_FRAME\n   sub     sp, sp, t0\n   add     t1, sp, t0\n   sd      ra, -8(t1)\n   sd      s0, -16(t1)\n   mv      s0, t1\n"
     "        sd      s1, C_S1(sp)\n   sd      s2, C_S2(sp)\n   sd      s3, C_S3(sp)\n   sd      s4, C_S4(sp)\n   sd      s5, C_S5(sp)\n"
     "        mv      s1, a0\n   mv      s2, a1\n   mv      s4, a2\n   ld      s3, MW_FILE_PRIV(s1)\n   ld      t1, MW_FILE_INODE(s1)\n"
     "        beqz    s4, .Lcf_null\n"
@@ -2611,8 +2612,8 @@ __asm__(
     "        ld      a0, MW_INODE_SB(t1)\n   ld      a5, MW_I_INO(t1)\n   lla     a1, .Lcf_lvl\n   lla     a2, .Lcf_fmt\n   lla     a3, .Lcf_fn\n"
     "        li      a4, 554\n   " MW_GET_CURRENT_RV "   li      t6, MW_TASK_COMM\n   add     a6, t5, t6\n   call    __ext4_msg\n   li      a0, 0\n"
     ".Lcf_out:\n"
-    "        ld      ra, C_RA(sp)\n   ld      s0, C_S0(sp)\n   ld      s1, C_S1(sp)\n   ld      s2, C_S2(sp)\n   ld      s3, C_S3(sp)\n"
-    "        ld      s4, C_S4(sp)\n   ld      s5, C_S5(sp)\n   li      t0, C_FRAME\n   add     sp, sp, t0\n"
+    "        ld      ra, -8(s0)\n   ld      s1, C_S1(sp)\n   ld      s2, C_S2(sp)\n   ld      s3, C_S3(sp)\n"
+    "        ld      s4, C_S4(sp)\n   ld      s5, C_S5(sp)\n   li      t0, C_FRAME\n   add     sp, sp, t0\n   ld      s0, -16(sp)\n"
     "        " ASM_RET
     "        .pushsection .rodata.str1.1, \"aMS\", @progbits, 1\n"
     ".Lcf_lvl:      .asciz \"\\0013\"\n"
