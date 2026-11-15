@@ -243788,6 +243788,14 @@ static void iss_rows_basic(void)
                   windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_NONE, 0, 0, null) == 0 &&
                   windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_COUNT, 0, 0, null) == 0 && iss_table.issue_count == 1);
         {
+                static struct windows notified;
+
+                check("issues: a program's notification is a code the board takes, no kernel notice's, with a name for moonwater debug",
+                      windows_issue_set(&notified, "files", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_NOTIFICATION, 7, 1, "copied") == 1 &&
+                          notified.issue_count == 1 && notified.issues[0].code == WINDOWS_ISSUE_NOTIFICATION && notified.issues[0].a == 7 &&
+                          !windows_issue_kernel(WINDOWS_ISSUE_NOTIFICATION) && windows_issue_names[WINDOWS_ISSUE_NOTIFICATION] != null);
+        }
+        {
                 char wide[WINDOWS_ISSUE_DETAIL * 2];
 
                 memory_fill(wide, 'w', sizeof(wide) - 1);

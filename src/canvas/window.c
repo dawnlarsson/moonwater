@@ -587,6 +587,7 @@ enum windows_issue_code
         WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_CODE)
 #undef WINDOWS_KERNEL_CODE
         WINDOWS_ISSUE_RADIO,            // a radio is blocked by rfkill (under wifi or bluetooth): the detail says which switch
+        WINDOWS_ISSUE_NOTIFICATION,     // a program's notification (the session bus, src/dbus): key the program's name, a its id, b how many it has; the detail is its words
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
@@ -603,7 +604,7 @@ static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
 #define WINDOWS_KERNEL_NAME(name, key, text) [WINDOWS_ISSUE_KERNEL_##name] = text,
         WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_NAME)
 #undef WINDOWS_KERNEL_NAME
-        [WINDOWS_ISSUE_RADIO] = "a radio is blocked (rfkill)"};
+        [WINDOWS_ISSUE_RADIO] = "a radio is blocked (rfkill)", [WINDOWS_ISSUE_NOTIFICATION] = "a program's notification"};
 
 struct windows_issue
 {
