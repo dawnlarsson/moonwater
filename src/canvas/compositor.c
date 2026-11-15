@@ -200,6 +200,7 @@ struct compositor_target
         int x1, y1, x2, y2;  // the damage: nothing outside it is written
         int ox, oy;          // the point pixels[0] is, on the output (a corner's scratch); 0 for the output
         unsigned int *scratch; // where the scene draws a round corner's square; none is the one of its own
+        int out;             // only written: a scanout, which nothing here reads back, so its copies stream past the cache
 };
 
 // A scale in percent as the whole device pixels of one logical pixel, never less than one.
@@ -362,9 +363,9 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
 
         if (x2 <= x1 || y2 <= y1)
                 return;
-        memory_copy_rect_u32(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
-                             source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
-                             (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
+        (t->out ? memory_copy_rect_out_u32 : memory_copy_rect_u32)(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
+                                                                   t->pitch, source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
+                                                                   (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
 }
 
 // Premultiplied ARGB8888 source-over (matching the GPU kernel's op 11: src + dst * (255 - src_a) / 255, saturating each channel at 255).
@@ -433,8 +434,10 @@ static int compositor_runs_same(const struct compositor_run_row *one, const stru
         fill each run of it and one to copy each gap, for as many rows as the block has.
 */
 static void compositor_runs_copy(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
-                                 unsigned long width, unsigned long height, const struct compositor_run_row *rows, unsigned long skip)
+                                 unsigned long width, unsigned long height, const struct compositor_run_row *rows, unsigned long skip, int out)
 {
+        fn (*copy)(p32 address_to, positive, const p32 address_to, positive, positive, positive) = out ? memory_copy_rect_out_u32 : memory_copy_rect_u32;
+
         while (height)
         {
                 unsigned long block = 1, at = 0, count = rows->count < COMPOSITOR_RUN_ROW ? rows->count : COMPOSITOR_RUN_ROW;
@@ -450,12 +453,12 @@ static void compositor_runs_copy(unsigned int *into, unsigned long into_pitch, c
                         if (b - a < COMPOSITOR_RUNS_FILL)
                                 continue;
                         if ((unsigned long)a > at)
-                                memory_copy_rect_u32(into + at, into_pitch, from + at, from_pitch, (unsigned long)a - at, block);
+                                copy(into + at, into_pitch, from + at, from_pitch, (unsigned long)a - at, block);
                         memory_fill_u32_rect(into + a, into_pitch, (unsigned long)(b - a), block, rows->run[k].colour);
                         at = (unsigned long)b;
                 }
                 if (at < width)
-                        memory_copy_rect_u32(into + at, into_pitch, from + at, from_pitch, width - at, block);
+                        copy(into + at, into_pitch, from + at, from_pitch, width - at, block);
                 into += block * into_pitch;
                 from += block * from_pitch;
                 rows += block;
@@ -482,7 +485,7 @@ static void compositor_blit_runs(const struct compositor_target *t, int x, int y
         }
         compositor_runs_copy(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
                              source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
-                             (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), rows + (y1 - y), (unsigned long)(x1 - x));
+                             (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), rows + (y1 - y), (unsigned long)(x1 - x), t->out);
 }
 
 /*
@@ -2370,8 +2373,11 @@ static void compositor_scene_band(address_any context, positive index)
         banding->first[index] = banding->last[index] = -1;
         if (band.y2 <= band.y1)
                 return;
+        // Not composed apart, the band is written straight into the caller's target, which is a scanout (the screen's, a strip of
+        // it the card left, an overlay plane's): only written, so its copies stream.
         if (!banding->apart)
         {
+                band.out = 1;
                 compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan);
                 return;
         }

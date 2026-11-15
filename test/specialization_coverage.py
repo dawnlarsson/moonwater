@@ -456,6 +456,12 @@ cover('folds_already', 'width', 'memory_copy_rect_u32',
 cover('folds_already', 'width', 'memory_copy_rect_stream_u32',
       'the Wayland host hands it the damaged width of a client window'"'"'s picture, which the client sets at run time; no '
       'reachable call site passes a literal, and the height is the same kind of value')
+cover('folds_already', 'width', 'memory_copy_rect_out_u32',
+      'compositor_blit and compositor_runs_copy hand it the visible width of a span of a scanout, which the damage sets at '
+      'run time; no reachable call site passes a literal, and the height is the same kind of value')
+cover('nothing_to_fold', None, 'memory_copy_rect_nt_row_ymm',
+      'the row memory_copy_rect_out_u32 hands to it in bytes, after a head it computes from the destination at run time; '
+      'no call site names it')
 cover('folds_already', 'width', 'memory_runs_u32',
       'compositor_runs_learn hands it the width of a window'"'"'s picture, which the program sets at run time; no reachable '
       'call site passes a literal, and the height is the same kind of value')

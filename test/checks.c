@@ -33113,6 +33113,131 @@ fn check_formatters()
         check_wait_status_code_base();
 }
 
+/*
+        memory_copy_rect_out_u32: the rectangle memory_copy_rect_u32 makes, for every width under 250 words (the narrow
+        rows, which are that copy) at zero to three rows and every width from 250 to 600 (the streamed rows begin at 256
+        words: every head the destination's 64-byte line leaves at its sixteen word offsets, and every tail of the 128 and
+        256-byte turns) at none, one and three, the source at several word offsets, strides of the width plus a few words. Each buffer has a page
+        that faults on both sides of it, and each case is laid twice: ending a few words short of the page after it, every
+        word between held to a canary, and starting a few words past the page before it, so a word read or written past
+        either end faults or shows; the source is held to what it was. Then rectangles that overlap, in place and across
+        rows, which are memory_copy's rows in row order. On x86_64 at each tier (AVX-512, AVX2 alone, neither), on riscv64
+        with V as each call's first ask finds it and then without.
+*/
+static p8 copy_out_one(p32 address_to twin, positive twin_words, p32 address_to fwin, positive fwin_words, positive da, positive sa,
+                       positive ds, positive ss, positive w, positive height, p8 first)
+{
+        p32 address_to frect = fwin + sa;
+        p32 address_to trect = twin + da;
+        positive span_d = height ? (height - 1) * ds + w : 0;
+        p8 fine = true;
+
+        for (positive i = 0; i < fwin_words; i++)
+                fwin[i] = 0x5a000000u + (p32)i;
+        for (positive i = 0; i < twin_words; i++)
+                twin[i] = 0xdeadbeef;
+        VECTOR_FIRST_CALL(first);
+        memory_copy_rect_out_u32(trect, ds, frect, ss, w, height);
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < w; c++)
+                        fine = fine && trect[r * ds + c] == frect[r * ss + c];
+        for (positive i = 0; i < twin_words; i++)
+        {
+                b64 j = (b64)i - (b64)da;
+                p8 inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
+
+                fine = fine && (inside || twin[i] == 0xdeadbeef);
+        }
+        for (positive i = 0; i < fwin_words; i++)
+                fine = fine && fwin[i] == 0x5a000000u + (p32)i;
+        return fine;
+}
+
+static fn check_copy_rect_out()
+{
+        static const positive gaps[3][2] = {{0, 0}, {1, 37}, {37, 1}};
+        p8 address_to from_pages = memory(5 * 4096);
+        p8 address_to to_pages = memory(5 * 4096);
+        p8 guarded = from_pages && to_pages && system_call_3(syscall(mprotect), (positive)from_pages, 4096, 0) == 0 &&
+                     system_call_3(syscall(mprotect), (positive)(from_pages + 4 * 4096), 4096, 0) == 0 &&
+                     system_call_3(syscall(mprotect), (positive)to_pages, 4096, 0) == 0 &&
+                     system_call_3(syscall(mprotect), (positive)(to_pages + 4 * 4096), 4096, 0) == 0;
+
+        same("memory_copy_rect_out_u32", "a page that faults on both sides of each buffer", guarded, 1);
+        if (!guarded)
+                return;
+        p32 address_to from_pool = (p32 address_to)(from_pages + 4096), address_to to_pool = (p32 address_to)(to_pages + 4096);
+        p32 address_to from_end = from_pool + 3 * 4096 / 4, address_to to_end = to_pool + 3 * 4096 / 4;
+#if X64
+        p8 avx2_on = cpu_has_avx2, avx512_on = cpu_has_avx512;
+        positive tiers = 3;
+#elif RISCV64
+        p8 vector_was = cpu_has_vector;
+        positive tiers = 2;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx512 = tier == 0 ? avx512_on : 0;
+                cpu_has_avx2 = tier < 2 ? avx2_on : 0;
+#elif RISCV64
+                // Tier 0: every call the first, which asks for V; tier 1: none.
+                cpu_has_vector = tier ? 1 : 0;
+#endif
+                p8 first = tier == 0, fine = true;
+
+                for (positive w = 0; w <= 600; w++)
+                        for (positive height = 0; height <= 3; height += w < 250 || height != 1 ? 1 : 2)
+                                for (positive g = 0; g < 3; g += w < 250 ? 1 : 2)
+                                        for (positive sa = 0; sa < 16; sa += w < 250 ? 5 : 9)
+                                                for (positive da = 0; da < 16; da += w < 250 ? 3 : 1)
+                                                {
+                                                        positive ds = w + gaps[g][0], ss = w + gaps[g][1];
+                                                        positive span_d = height ? (height - 1) * ds + w : 0;
+                                                        positive span_s = height ? (height - 1) * ss + w : 0;
+
+                                                        // Ending a few words short of the page after it, and starting a few words past the page before it.
+                                                        fine = fine && copy_out_one(to_end - (16 + da + span_d), 16 + da + span_d, from_end - (16 + sa + span_s),
+                                                                                    16 + sa + span_s, da, sa, ds, ss, w, height, first);
+                                                        fine = fine && copy_out_one(to_pool, da + span_d + 16, from_pool, sa + span_s + 16, da, sa, ds, ss, w,
+                                                                                    height, first);
+                                                }
+                same("memory_copy_rect_out_u32", "every word of the rectangle, nothing else, the source unchanged", fine, 1);
+
+                fine = true;
+                for (positive w = 1; w <= 600; w += w < 250 ? 13 : 1)
+                        for (positive height = 1; height <= 3; height++)
+                                for (b64 shift = -20; shift <= 20; shift += 5)
+                                {
+                                        positive ds = w + 3, ss = w + 1;
+                                        p32 address_to base = from_pool + 64;
+                                        p32 address_to ref = to_pool + 64;
+                                        p32 address_to dst = base + 40;
+                                        p32 address_to src = (p32 address_to)((b64)dst + 4 * shift);
+
+                                        for (positive i = 0; i < 2900; i++)
+                                                base[i] = ref[i] = 0x3c000000u + (p32)i * 2654435761u;
+                                        VECTOR_FIRST_CALL(first);
+                                        memory_copy_rect_out_u32(dst, ds, src, ss, w, height);
+                                        for (positive r = 0; r < height; r++)
+                                                memory_copy(ref + 40 + r * ds, (p32 address_to)((b64)ref + 4 * (40 + shift + (b64)(r * ss))), w * 4);
+                                        for (positive i = 0; i < 2900; i++)
+                                                fine = fine && base[i] == ref[i];
+                                }
+                same("memory_copy_rect_out_u32", "overlapping rows answer as memory_copy one row at a time", fine, 1);
+        }
+#if X64
+        cpu_has_avx2 = avx2_on;
+        cpu_has_avx512 = avx512_on;
+#elif RISCV64
+        cpu_has_vector = vector_was;
+#endif
+        memory_free(from_pages, 5 * 4096);
+        memory_free(to_pages, 5 * 4096);
+}
+
 b32 main()
 {
 #if defined(VERIFY_REPORTS_ONLY)
@@ -33139,6 +33264,9 @@ b32 main()
         // The rows of the compositor's, the kit's, the font engine's and the lexer's eleven routines alone (check_pixel_rows):
         // a change to one of them, and the breaks that show the rows fail, without the whole lane.
         check_pixel_rows();
+#elif defined(VERIFY_COPY_OUT_ONLY)
+        // memory_copy_rect_out_u32's rows alone, for a change to it and the breaks that show them fail.
+        check_copy_rect_out();
 #elif defined(VERIFY_BINS_ONLY)
         // The bins' and the word hash's rows alone: a few seconds on each machine, for a change to those routines
         // and for showing the rows fail when one of them is broken.
@@ -33199,6 +33327,7 @@ b32 main()
         check_automaton();
         check_bins();
         check_pixel_rows();
+        check_copy_rect_out();
         check_wire();
         check_hand();
         check_wire_arguments();

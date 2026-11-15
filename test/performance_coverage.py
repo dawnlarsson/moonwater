@@ -416,6 +416,11 @@ cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_str
       'paired timing against memory_copy_rect_u32 over the same windows of ordinary memory, a control that the streaming '
       'loads lose nothing where they have nothing to win (they are for a GPU buffer mapped write-combined, 9x faster to '
       'read there, measured by hand on the box); AVX2 on x86_64, the same copy elsewhere')
+cover('correctness_only', 'test/checks.c#CHECK_verify', 'memory_copy_rect_out_u32 memory_copy_rect_nt_row_ymm',
+      'held to memory_copy_rect_u32\'s rectangle over pages that fault on both sides at every tier (AVX-512, AVX2, neither; '
+      'V and none); its timing is the headless compositor\'s 3840x2160 present A/B on the box recorded with the change, CPU '
+      'time a frame, and not a BENCH row: the destination it is for is a scanout nothing reads back, which a paired loop '
+      'over cached memory is not', {'memory_copy_rect_nt_row_ymm': 'memory_copy_rect_out_u32'})
 cover('direct_benchmark', 'test/checks.c#BENCH_runs', 'memory_runs_u32',
       'paired timing against the C loop of the same chunk walk, over 64 rows 1160 words wide with rows 2560 apart: '
       'a blank window, lines of text and noise, with AVX-512 and without, NEON, and riscv64')

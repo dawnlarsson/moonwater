@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        506 routines (480 public, 26 local), 495 of them on all three and 11 local to one.
+        508 routines (481 public, 27 local), 496 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -255,6 +255,8 @@
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
           memory_copy_rect_nt_row        local   yes     --      --
+          memory_copy_rect_nt_row_ymm    local   yes     --      --
+          memory_copy_rect_out_u32       public  yes     yes     yes
           memory_copy_rect_reverse_u32   public  yes     yes     yes
           memory_copy_rect_stream_u32    public  yes     yes     yes
           memory_copy_rect_u32           public  yes     yes     yes
@@ -580,6 +582,7 @@
           cpu_vector_detect -- local to riscv64
           deflate_tokens_encode_bmi2 -- local to x86_64
           memory_copy_rect_nt_row -- local to x86_64
+          memory_copy_rect_nt_row_ymm -- local to x86_64
           memory_offsets_fields_arm64 -- local to arm64
           memory_offsets_fields_rv -- local to riscv64
           memory_offsets_fields_x64 -- local to x86_64
@@ -16829,6 +16832,69 @@ __asm__(
     ASM_END(memory_copy_rect_stream_u32)
 
     //
+    //       memory_copy_rect_out_u32 -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words, r8 width in
+    //       words, r9 height. memory_copy_rect_u32 for a destination the processor writes and does not read back: a scanout,
+    //       which the screen reads and nothing here does. A plain store fetches the line it writes into the cache first, so a
+    //       row a plain copy writes is read once more from memory, and the frame then sits in the cache in the place of what
+    //       is read. A non-temporal store writes the line whole and fetches nothing: a row of 1 KiB or more goes through
+    //       memory_copy_rect_nt_row on AVX-512 (zmm, four 64-byte lines a turn) and memory_copy_rect_nt_row_ymm on AVX2, the
+    //       destination's head up to its first line and its tail plain copies, and the rectangle ends with sfence. Over
+    //       write-combined memory, which is what a card's scanout is mapped as, a store is combined whatever its kind, and
+    //       the non-temporal body's whole, aligned lines are what that memory takes fastest. A narrower row (a round corner's
+    //       square, a caret), rectangles whose extents meet (copied in row order, as memory_copy_rect_u32 copies them), a
+    //       machine with no AVX2 and a kernel build are memory_copy_rect_u32. Measured on a 4-core Xeon with AVX-512 and a
+    //       260 MiB L3 under a load of 12 to 13 (2026-11-15: a headless compositor's 3840 by 2160 present of one window at
+    //       60 Hz into a scan image in tmpfs, CPU time a frame, three runs each, every row of the present streamed by this
+    //       body as the scene's bands do it): 6.17 to 6.20 ms with the plain copy, 4.77 to 4.97 ms streamed. A card's
+    //       write-combined scanout was not measured: there is none on that machine.
+    //
+    ASM_FUNC(memory_copy_rect_out_u32)
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "9f")
+    "cmp $256, %r8\n   jb 9f\n   test %r9, %r9\n   jz 8f\n"
+    "lea -1(%r9), %rax\n   mov %rsi, %r10\n   shl $2, %r10\n   imul %rax, %r10\n   add %rdi, %r10\n   lea (%r10,%r8,4), %r10\n"
+    "mov %rcx, %r11\n   shl $2, %r11\n   imul %rax, %r11\n   add %rdx, %r11\n   lea (%r11,%r8,4), %r11\n"
+    "cmp %rdx, %r10\n   jbe 1f\n   cmp %rdi, %r11\n   ja 9f\n"
+    "1:  push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   push %rbp\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n   shl $2, %r8\n"
+    "mov %rdi, %r12\n   mov %rdx, %r13\n   mov %r9, %rbx\n   mov %rsi, %r14\n   mov %rcx, %r15\n   mov %r8, %rbp\n"
+    ASM_NARROW("cpu_has_avx512", "3f")
+    "2:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_rect_nt_row\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 2b\n   jmp 7f\n"
+    "3:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_rect_nt_row_ymm\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 3b\n"
+    "7:  sfence\n   pop %rbp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "8:  " ASM_RET
+    "9:\n"
+    )
+    "jmp memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_out_u32)
+
+    //
+    //       memory_copy_rect_nt_row_ymm -- rdi into, rsi from, rdx bytes, at least 1024 of them, a multiple of 4: the row of
+    //       memory_copy_rect_out_u32 on a machine with AVX2 and not AVX-512, memory_copy_rect_nt_row's walk with 32-byte
+    //       registers: the head up to the destination's first 64-byte line as memory_copy_apart, then 128 bytes a turn, four
+    //       loads before four vmovntdq stores, so each line is two stores in a row and is written whole; then the tail, under
+    //       128 bytes, as memory_copy_apart. The caller ends the rectangle with sfence. Preserves rbx and r12-r15.
+    //
+    ASM_USERSPACE_WIDE(
+    ASM_LOCAL_FUNC(memory_copy_rect_nt_row_ymm)
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %rdi, %rbx\n   mov %rsi, %r12\n   mov %rdx, %r13\n"
+    "mov %rbx, %r14\n   neg %r14\n   and $63, %r14\n"
+    "mov %r14, %rdx\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   call memory_copy_apart\n"
+    "add %r14, %rbx\n   add %r14, %r12\n   sub %r14, %r13\n"
+    "mov %r13, %r15\n   and $-128, %r15\n   xor %ecx, %ecx\n"
+    ".balign 16\n"
+    "1:  vmovdqu (%r12,%rcx), %ymm0\n   vmovdqu 32(%r12,%rcx), %ymm1\n   vmovdqu 64(%r12,%rcx), %ymm2\n   vmovdqu 96(%r12,%rcx), %ymm3\n"
+    "vmovntdq %ymm0, (%rbx,%rcx)\n   vmovntdq %ymm1, 32(%rbx,%rcx)\n   vmovntdq %ymm2, 64(%rbx,%rcx)\n   vmovntdq %ymm3, 96(%rbx,%rcx)\n"
+    "add $128, %rcx\n   cmp %r15, %rcx\n   jb 1b\n"
+    "lea (%rbx,%r15), %rdi\n   lea (%r12,%r15), %rsi\n   mov %r13, %rdx\n   sub %r15, %rdx\n   jz 2f\n   call memory_copy_apart\n"
+    "2:  vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_LOCAL_END(memory_copy_rect_nt_row_ymm)
+    )
+
+    //
     //       memory_runs_u32 -- rdi rows, rsi from, rdx from_stride in words, rcx width in words, r8 height. Reads a
     //       picture for the stretches of one colour a compose can fill, where it would copy, and writes them as one
     //       row of 128 bytes a picture row: a count and a spare word (written as 0), then up to 15 runs of x0 and x1
@@ -27785,6 +27851,17 @@ __asm__(
     ASM_END(memory_copy_rect_stream_u32)
 
     //
+    //       memory_copy_rect_out_u32 -- x0 into, x1 into_stride in words, x2 from, x3 from_stride in words, x4 width in
+    //       words, x5 height. The x86_64 block carries the contract: memory_copy_rect_u32 for a destination the processor
+    //       does not read back. Here it is that copy: the cores this floor runs on find a run of whole-line stores themselves
+    //       and stop allocating them (the write streaming of Cortex-A and Neoverse), so a plain copy of a scanout's rows
+    //       already streams, and stnp, a hint those cores may take or not, was not measured here.
+    //
+    ASM_FUNC(memory_copy_rect_out_u32)
+    "b memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_out_u32)
+
+    //
     //       memory_runs_u32 -- x0 rows, x1 from, x2 from_stride in words, x3 width in words, x4 height. The x86_64
     //       block carries the contract. A chunk of 16 words is four q registers compared with its first word
     //       (ld1r), the four results anded and reduced to a byte by uminv: 255 is flat; a kernel build has no vector
@@ -38444,6 +38521,16 @@ __asm__(
     ASM_FUNC(memory_copy_rect_stream_u32)
     "j memory_copy_rect_u32\n"
     ASM_END(memory_copy_rect_stream_u32)
+
+    //
+    //       memory_copy_rect_out_u32 -- a0 into, a1 into_stride in words, a2 from, a3 from_stride in words, a4 width in
+    //       words, a5 height. The x86_64 block carries the contract: memory_copy_rect_u32 for a destination the processor
+    //       does not read back, which here is that copy: the floor has no non-temporal store (Zihintntl's hints are not in
+    //       it).
+    //
+    ASM_FUNC(memory_copy_rect_out_u32)
+    "j memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_out_u32)
 
     //
     //       memory_runs_u32 -- a0 rows, a1 from, a2 from_stride in words, a3 width in words, a4 height. The x86_64
@@ -54811,6 +54898,12 @@ fn memory_copy_rect_reverse_u32(p32 address_to into, long into_pitch, const p32 
 // Each byte of from scaled by (scale & 255) / 255 into into, for count bytes: from[i] * (scale & 255) / 255 rounded down,
 // into and from apart. A zero count touches nothing.
 fn memory_scale_u8(p8 address_to into, const p8 address_to from, positive count, unsigned int scale);
+// memory_copy_rect_u32 for a destination the processor writes and does not read back (a scanout): the same words, rows and
+// row order, rectangles that overlap included. On x86_64 with AVX2 a row of 1 KiB or more of rectangles apart is written with
+// non-temporal stores, which do not read the line they write and leave the cache to what is read; elsewhere, and for a
+// narrower row, it is memory_copy_rect_u32. Zero width or height touches nothing.
+fn memory_copy_rect_out_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                            positive width, positive height);
 // memory_copy_rect_u32 for a source the processor does not cache (a GPU's buffer mapped write-combined) and for rectangles
 // that do not overlap: on x86_64 with AVX2 a row is read with 32-byte streaming loads, which read such memory nine times as
 // fast as plain loads; elsewhere, and for a row under 128 bytes, it is memory_copy_rect_u32. Overlapping rectangles are
