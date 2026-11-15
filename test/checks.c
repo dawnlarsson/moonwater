@@ -140915,6 +140915,26 @@ static void caret_field_check(struct ui address_to wui)
     }
     check("caret field: a field without the keys draws no caret: its picture is a focused field's with the caret gone", differ_off == 0);
     check("caret field: a focused field draws its caret solid, in pixels the unfocused field does not have", differ_on > 0);
+    // A line longer than the window is wide, the caret at its end: its last words are drawn at the field's right, not cut where the
+    // kit's scratch (as wide as the window) ends.
+    {
+        static p8 path[512];
+        int inked = 0;
+
+        for (i = 0; i < 400; i++)
+            path[i] = i % 10 == 9 ? '/' : (p8)('a' + i % 7);
+        path[400] = 0;
+        ui_text_set(&t, path, 400);
+        t.focused = false, t.caret_fade = 0;
+        ui_begin(wui, plain, 400, 400, 60);
+        ui_text_draw(wui, &t, 10, 10, 380, 40, 0);
+        ui_text_set(&t, path, 0);
+        ui_begin(wui, drawn, 400, 400, 60);
+        ui_text_draw(wui, &t, 10, 10, 380, 40, 0);
+        for (i = 0; i < 400 * 60; i++)
+            inked += i % 400 >= 300 && i % 400 < 388 && plain[i] != drawn[i];
+        check("field: a line longer than the window is wide is drawn where it is scrolled to: with the caret at its end its last words are at the field's right", inked > 60);
+    }
 
     ui_text_close(&t);
     ui_kit.caret_speed = saved;
@@ -156785,6 +156805,34 @@ static fn check_kit_trail(void)
                  ui_trail_hit(&ui, &trail, 390 - (trail.at[1] - 10) - 2, 40) == 1 && ui_trail_hit(&ui, &trail, 388, 40) == 0;
         ui_kit.rtl = 0;
         check("trail: in a window read from the right the trail is mirrored in its box, the first place at the right, and a point is on the place drawn there", turned);
+        // The dimmed ink in both themes: far enough from its ground to be read (the ink itself UI_TRAIL_DIM and more, its drawn words
+        // three to one and more), and well short of the current place's ink and of the quiet ink of a place before it.
+        {
+                b32 read = true;
+
+                for (int theme = 0; theme < 2; theme++)
+                {
+                        unsigned int current, dimmed, quiet, surface, ink;
+
+                        ui_kit_theme(theme ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+                        surface = ui_role(UI_SURFACE) & 0xffffffu;
+                        trail.count = 4, trail.current = 2, trail.w = 380;
+                        ui_trail_layout(&ui, &trail);
+                        for (int at = 0; at < 400 * 200; at++)
+                                pixels[at] = 0xff000000u | surface;
+                        ui_trail_draw(&ui, &trail);
+                        quiet = trail_darkest(pixels, trail.at[1], trail.at[1] + trail.wide[1], 20, 60, surface);
+                        current = trail_darkest(pixels, trail.at[2], trail.at[2] + trail.wide[2], 20, 60, surface);
+                        dimmed = trail_darkest(pixels, trail.at[3], trail.at[3] + trail.wide[3], 20, 60, surface);
+                        ink = ui_contrast(ui_trail_dim(&ui) & 0xffffffu, surface);
+                        read = read && ink >= UI_TRAIL_DIM && dimmed >= 300 && dimmed * 10 < current * 6 && dimmed * 10 < quiet * 8;
+                        if (!(ink >= UI_TRAIL_DIM && dimmed >= 300 && dimmed * 10 < current * 6 && dimmed * 10 < quiet * 8))
+                                string_format(log, "    theme %d: dimmed ink %d drawn %d, quiet %d, current %d\n", (b64)theme, (b64)ink, (b64)dimmed, (b64)quiet, (b64)current);
+                }
+                check("trail: a dimmed place is read in the light theme and in the dark one, three to one and more from its ground, and is under six tenths of the current place's ink and eight tenths of a quiet one's",
+                      read);
+                ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+        }
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
 }
 

@@ -17466,10 +17466,17 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
         places are taken outward from it, one before and one after by turns, while there is room, and what is left out at either end is
         a mark of three dots there (UI_TRAIL_MARK under a point), so the middle of a long trail is what shows and its ends are what is
         cut. In a window read from the right the trail is mirrored in its box: its first place is at the right.
+
+        The dimmed ink is the quiet ink taken toward the ground it is on, half way at most and never nearer it than UI_TRAIL_DIM
+        (3.2 to 1). Half way is nearer than that on both surfaces (2.3 to 1 on the light one, 2.7 on the dark), so the ink stops
+        sooner, in steps of a twentieth: seven tenths of the quiet ink on the light surface (3.5 to 1), six tenths on the dark
+        (3.4 to 1). So a dimmed place is read without effort in both themes and is plainly not the current one, which is in the
+        full ink, nor one before it, which is in the quiet ink (7.2 and 7.4 to 1).
 */
 #define UI_TRAIL_MOST 48    // the places of one trail
 #define UI_TRAIL_GAP 6      // logical pixels either side of the separator, and what a place's own press reaches past its words
 #define UI_TRAIL_MARK (-2)  // what a point is on: the mark for the places left out
+#define UI_TRAIL_DIM 320    // a dimmed place's ink is at least this far from its ground, as ui_contrast counts (3.2 to 1)
 struct ui_trail
 {
         // The app's.
@@ -17566,12 +17573,21 @@ static int ui_trail_hit(const struct ui address_to ui, const struct ui_trail add
         return -1;
 }
 
-// The dimmed ink of the places after the current one: the quiet ink half way to the ground it is on.
+// The dimmed ink of the places after the current one: the quiet ink toward the ground it is on, half way at most, and no nearer
+// the ground than UI_TRAIL_DIM (a quiet ink that is itself nearer than that is left as it is).
 static unsigned int ui_trail_dim(const struct ui address_to ui)
 {
-        unsigned int quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), ground = ui->glass ? ui->ground : ui_role(UI_SURFACE);
+        unsigned int quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT) | 0xff000000u, ground = (ui->glass ? ui->ground : ui_role(UI_SURFACE)) | 0xff000000u;
+        unsigned int ink = quiet;
 
-        return 0xff000000u | (ui_mix(quiet | 0xff000000u, 50, ground | 0xff000000u) & 0xffffffu);
+        for (unsigned int share = 50; share < 100; share += 5)
+        {
+                ink = ui_mix(quiet, share, ground);
+                if (ui_contrast(ink & 0xffffffu, ground & 0xffffffu) >= UI_TRAIL_DIM)
+                        break;
+                ink = quiet;
+        }
+        return 0xff000000u | (ink & 0xffffffu);
 }
 
 // The trail drawn: the places to the current one in the ink (the current one, and the one under the pointer, at full strength; the ones
@@ -26273,8 +26289,17 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                              ui_tone(selection & 0xffffffu, selection >> 24));
 
         if (t->mode != UI_TEXT_CODE || l->bidi)
-                ui_run_flagged(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin, baseline, (string_address)l->shown,
-                               t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0, ui_text_flags(t));
+        {
+                // A run is drawn through the kit's scratch, which is as wide as the window: a line longer than that (a path in a field)
+                // drawn from its start is cut there, however far it is scrolled. So a line that reads one way is drawn from the
+                // cluster before the first one in sight, and what is left of the box is never laid into the scratch at all.
+                p32 first = 0;
+
+                while (!l->bidi && first + 2 < l->count && origin + l->x[first + 2] <= t->left)
+                        first++;
+                ui_run_flagged(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin + (l->bidi ? 0 : l->x[first]), baseline,
+                               (string_address)(l->shown + l->shown_at[first]), t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0, ui_text_flags(t));
+        }
         else
         {
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
