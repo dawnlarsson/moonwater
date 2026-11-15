@@ -640,8 +640,33 @@ static void compositor_record_report(void)
 }
 
 /*
+        Whether the directory's files are to be read at this look: its mtime (nanoseconds of the real clock) is not the one the last read was made
+        at (seen; 0 for none), or the last read was so soon after that mtime (read_at, within COMPOSITOR_RECORD_SETTLE_NS) that a file made after
+        the read in the same tick of the filesystem's clock left the mtime as it was. moonwater canvas record makes its start and report files there
+        and the look takes each one away, so every request moves the mtime. A directory that is not there (mtime 0) is read for, after it is made.
+*/
+#define COMPOSITOR_RECORD_SETTLE_NS 50000000ll
+static long long compositor_record_seen, compositor_record_read_at;
+
+static int compositor_record_look_wanted(long long mtime, long long seen, long long read_at)
+{
+        return !mtime || mtime != seen || read_at - mtime < COMPOSITOR_RECORD_SETTLE_NS;
+}
+
+// The directory's mtime in nanoseconds of the real clock, 0 when it is not there: one statx (STATX_MTIME), at the 112th byte of the answer.
+static long long compositor_record_mtime(void)
+{
+        unsigned char answer[256];
+
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR, 0, 0x40, (positive)answer, 0) < 0)
+                return 0;
+        return *(long long *)(answer + 112) * 1000000000ll + *(unsigned int *)(answer + 120);
+}
+
+/*
         A look at the files of moonwater canvas record. Every COMPOSITOR_RECORD_POLL presents: the start file (a recording, its seconds taken from
-        the file; the file goes), the report request (the report is written; the request goes).
+        the file; the file goes), the report request (the report is written; the request goes). A look is one statx of the directory, and the
+        files are opened only when the directory changed since they were (compositor_record_look_wanted); it was a mkdirat and two openats.
 */
 static void compositor_record_look(unsigned long long now)
 {
@@ -649,8 +674,15 @@ static void compositor_record_look(unsigned long long now)
         long handle;
         long got;
         unsigned long long secs = 0;
+        long long mtime = compositor_record_mtime();
+        timespec real = {0, 0};
 
-        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR, 0755, 0, 0, 0);
+        if (!compositor_record_look_wanted(mtime, compositor_record_seen, compositor_record_read_at))
+                return;
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        compositor_record_seen = mtime, compositor_record_read_at = (long long)real.tv_sec * 1000000000ll + real.tv_nsec;
+        if (!mtime)
+                compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR, 0755, 0, 0, 0);
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/start", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {

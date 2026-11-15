@@ -140219,6 +140219,25 @@ static int space_session(volatile unsigned int address_to step, const char addre
     return 0;
 }
 
+/*
+        moonwater canvas record's files are looked for with one statx of their directory, and opened only when it changed since they were read
+        (compositor_record_look_wanted): where every look was a mkdirat and two openats, every COMPOSITOR_RECORD_POLL presents. The directory
+        moves its mtime with every file made or taken away, and one made in the same tick of the filesystem's clock as the last read leaves it
+        where it was, so a read that soon after the mtime is made again.
+*/
+static void check_compositor_record_look(void)
+{
+    long long at = 1800000000ll * 1000000000ll, tick = 4000000ll;
+
+    check("record look: a directory not there is made and read", compositor_record_look_wanted(0, 0, 0) && compositor_record_look_wanted(0, at, at));
+    check("record look: a directory never read is read", compositor_record_look_wanted(at, 0, 0));
+    check("record look: a directory whose mtime moved since the last read is read", compositor_record_look_wanted(at + tick, at, at + 3 * COMPOSITOR_RECORD_SETTLE_NS));
+    check("record look: one that did not move, read well after its mtime, is not opened again",
+          !compositor_record_look_wanted(at, at, at + COMPOSITOR_RECORD_SETTLE_NS) && !compositor_record_look_wanted(at, at, at + 60 * 1000000000ll));
+    check("record look: one read in the tick of its mtime is read again, a file made after that read leaving the mtime as it was",
+          compositor_record_look_wanted(at, at, at + tick / 2) && compositor_record_look_wanted(at, at, at + COMPOSITOR_RECORD_SETTLE_NS - 1));
+}
+
 static void check_compositor_space_sizes(void)
 {
     static const char path[] = "compositor-space-sizes.tmp";
@@ -179032,6 +179051,7 @@ b32 main()
         check_compositor_card_lists();
         check_compositor_card_turn();
         check_compositor_space_sizes();
+        check_compositor_record_look();
         check_compositor_card_edid();
         check_compositor_card_walk();
         check_compositor_screen_wait();
