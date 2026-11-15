@@ -132362,6 +132362,87 @@ static void check_compositor_preview_held(void)
 }
 
 /*
+        A scene that reads what it is composed into, composed into a target only written (a scanout): the rows it reads are
+        composed aside, a slice at a time, and copied out (compositor_scene_band), so the picture is bit for bit the one the
+        scene composed in place makes, and nothing reads the target. Over a blended window (its premultiplied picture over a
+        round window with a line and the wallpaper), a snap preview's tint over a round window with the window drawn again
+        over it, a shared edge's mark, the two together, and neither; over the whole target, which is bands on threads, and a
+        damage inside it, which is one band at an offset. A read is counted where a path that reads its target meets one
+        only written (compositor_reading); the scene composed in place into such a target is the count's control.
+*/
+#define ASIDE_W 640
+#define ASIDE_H 160
+static void check_compositor_aside(void)
+{
+    static unsigned int got[ASIDE_W * ASIDE_H], want[ASIDE_W * ASIDE_H], wall[ASIDE_W * ASIDE_H];
+    static unsigned int window[200 * 90], glassy[120 * 70];
+    struct compositor_frame frames[4];
+    unsigned long wrong = 0, read = 0, control = 0;
+    static const int damage[2][4] = {{0, 0, ASIDE_W, ASIDE_H}, {37, 21, 411, 117}};
+    static const int preview_rect[4] = {40, 20, 320, 110}, mark_rect[4] = {290, 100, 200, 40};
+
+    for (unsigned int at = 0; at < ASIDE_W * ASIDE_H; at++)
+        wall[at] = (at * 2654435761u) >> 8;
+    for (unsigned int at = 0; at < 200 * 90; at++)
+        window[at] = 0xc06020u + at * 77u;
+    // Premultiplied: each colour at most its alpha, the alpha every value.
+    for (unsigned int at = 0; at < 120 * 70; at++)
+    {
+        unsigned int a = at * 37u & 255u, c = (at * 91u) % (a + 1);
+
+        glassy[at] = a << 24 | c << 16 | (c / 2) << 8 | (a - c);
+    }
+    for (int kind = 0; kind < 5; kind++)
+        for (int d = 0; d < 2; d++)
+        {
+            struct compositor_target t = {got, ASIDE_W, ASIDE_W, ASIDE_H, damage[d][0], damage[d][1], damage[d][2], damage[d][3], 0, 0, 0};
+            struct compositor_target r = t;
+            int rows[2];
+
+            frames[0] = (struct compositor_frame){.x = 0, .y = 0, .width = ASIDE_W, .height = ASIDE_H, .scale = 100, .pixels = wall, .pitch = ASIDE_W};
+            frames[1] = (struct compositor_frame){.x = 60, .y = 30, .width = 200, .height = 90, .scale = 100, .pixels = window, .pitch = 200,
+                                                  .radius = 12, .line = 2, .edge = 0x335577u};
+            frames[2] = (struct compositor_frame){.x = 300, .y = 50, .width = 120, .height = 70, .scale = 100, .pixels = glassy, .pitch = 120,
+                                                  .radius = 9, .line = 1, .edge = 0x112233u, .blend = kind == 0 || kind == 3};
+            frames[3] = (struct compositor_frame){.x = 500, .y = 10, .width = 100, .height = 60, .scale = 100, .pixels = window, .pitch = 200,
+                                                  .radius = 6, .line = 1, .edge = 0x445566u};
+            if (kind == 1 || kind == 3)
+            {
+                memory_copy(frames[1].preview, preview_rect, sizeof(preview_rect));
+                frames[1].preview_ink = 0x9f0a0b0cu, frames[1].preview_radius = 10, frames[1].preview_line = 3, frames[1].preview_edge = 0xc0405060u;
+            }
+            if (kind == 2 || kind == 3)
+            {
+                memory_copy(frames[2].mark, mark_rect, sizeof(mark_rect));
+                frames[2].mark_ink = 0x80ffffffu;
+            }
+            r.pixels = want;
+            memory_copy(want, wall, sizeof(wall));
+            memory_copy(got, wall, sizeof(wall));
+            compositor_scene(&r, frames, 4);
+            compositor_out_reads = 0;
+            compositor_scene_banded(&t, frames, 4, 0, rows);
+            read += compositor_out_reads;
+            wrong += memory_compare(got, want, sizeof(got)) != 0;
+            // The control: the same scene composed in place into a target only written reads it, wherever it reads.
+            if (kind < 4)
+            {
+                struct compositor_target in_place = t;
+
+                in_place.out = 1;
+                compositor_out_reads = 0;
+                compositor_scene(&in_place, frames, 4);
+                control += compositor_out_reads != 0;
+            }
+        }
+    check("aside: a scene composed into a target only written is the picture composed in place, bit for bit, over a blended "
+          "window, a tint and its redraw, a mark, both, and neither, over the whole target and a damage inside it",
+          wrong == 0);
+    check("aside: and nothing reads the target it is composed into", read == 0);
+    check("aside: where the same scene composed in place into it reads it in every case that reads", control == 8);
+}
+
+/*
         A shared edge: two windows that meet edge to edge with the same extent take a press anywhere along their edge, from
         one end to the other, as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint
         across the whole of that edge and nowhere else. An edge that does not meet exactly, and a corner, are the window's
@@ -177244,6 +177325,7 @@ b32 main()
         check_compositor_preview();
         check_compositor_snap_tint();
         check_compositor_preview_held();
+        check_compositor_aside();
         check_compositor_shared();
         check_compositor_cycle();
         check_compositor_hover();

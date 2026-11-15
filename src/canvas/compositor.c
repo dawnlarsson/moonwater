@@ -203,6 +203,16 @@ struct compositor_target
         int out;             // only written: a scanout, which nothing here reads back, so its copies stream past the cache
 };
 
+// The reads of a target only written, counted: none is the rule (compositor_scene_reads), and a count is a path that reads one.
+unsigned long compositor_out_reads;
+
+// What reads the target it draws on says so here: a target only written counts it.
+static inline void compositor_reading(const struct compositor_target *t)
+{
+        if (t->out)
+                __atomic_fetch_add(&compositor_out_reads, 1, __ATOMIC_RELAXED);
+}
+
 // A scale in percent as the whole device pixels of one logical pixel, never less than one.
 static int compositor_px1(int percent)
 {
@@ -414,6 +424,7 @@ static void compositor_blit_blend(const struct compositor_target *t, int x, int 
 
         if (x2 <= x1 || y2 <= y1)
                 return;
+        compositor_reading(t);
         memory_over_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
                              source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
                              (positive)(x2 - x1), (positive)(y2 - y1));
@@ -841,6 +852,7 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
 
         if (w <= 0 || y2 <= y1 || width <= 0 || height <= 0)
                 return;
+        compositor_reading(t);
         if (w <= 4096)
         {
                 unsigned int scratch[4096];
@@ -963,6 +975,7 @@ static void compositor_lit_corner(const struct compositor_target *t, const struc
         y2 = cy + r < t->y2 ? cy + r : t->y2;
         if (x2 <= x1 || y2 <= y1)
                 return;
+        compositor_reading(t);
         memory_fill_u32(ink_row, (positive)(x2 - x1), ink & 0xffffffu);
         for (int py = y1; py < y2; py++)
         {
@@ -1031,6 +1044,8 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
         y1 = cy > t->y1 ? cy : t->y1;
         x2 = cx + r < t->x2 ? cx + r : t->x2;
         y2 = cy + r < t->y2 ? cy + r : t->y2;
+        if (x2 > x1 && y2 > y1)
+                compositor_reading(t);
         // Every row has the same columns, so the inks that are not a picture are made once.
         sx1 = x1 > x ? x1 : x;
         sx2 = x2 < x + w ? x2 : x + w;
@@ -1164,6 +1179,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                         compositor_corner_rows(t, frame, corner, r, b, edge, tab);
                         continue;
                 }
+                compositor_reading(t);
 
                 for (int py = y1; py < y2; py++)
                         for (int px = x1; px < x2; px++)
@@ -1843,6 +1859,7 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
         cell = compositor_clipped(t, rect[0], rect[1], rect[2], rect[3]);
         if (cell.x2 <= cell.x1 || cell.y2 <= cell.y1)
                 return;
+        compositor_reading(t);
         memory_fill_u32(colour, COMPOSITOR_TINT_RUN, ink & 0xffffffu);
         memory_fill(cover, (int)(ink >> 24), COMPOSITOR_TINT_RUN);
         // A shape: its radius kept to its half sides and the masks' largest, and its line inside the radius.
@@ -2357,7 +2374,46 @@ struct compositor_banding
         const int *radii;
         const struct compositor_plan *plan;
         int first[COMPOSITOR_BANDS], last[COMPOSITOR_BANDS];
+        int read_top, read_bottom; // the rows of a target only written that the scene reads (compositor_scene_reads): composed aside
 };
+
+/*
+        What of a scene reads the target it is composed into, which a scanout cannot pay for: it is write-combined memory on
+        most cards, where a word loaded is a trip across the bus (about ten megabytes a second, compositor_changed_ready).
+        A frame blended over what is under it (frame->blend) has every frame of the damage drawn over the last in the target,
+        so the whole damage reads it; a tint (a snap preview, a shared edge's mark) mixes over the target and has the frames
+        over it drawn again over its rectangle, so its rows do. Answers whether any row reads, and the rows from *top to
+        *bottom, inside the target's.
+*/
+static int compositor_scene_reads(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
+                                  int *top, int *bottom)
+{
+        *top = t->y2, *bottom = t->y1;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                if (frames[at].blend)
+                {
+                        *top = t->y1, *bottom = t->y2;
+                        break;
+                }
+                for (int k = 0; k < 2; k++)
+                {
+                        const int *r = k ? frames[at].mark : frames[at].preview;
+
+                        if (r[2] <= 0 || r[3] <= 0)
+                                continue;
+                        *top = r[1] < *top ? r[1] : *top;
+                        *bottom = r[1] + r[3] > *bottom ? r[1] + r[3] : *bottom;
+                }
+        }
+        *top = *top < t->y1 ? t->y1 : *top;
+        *bottom = *bottom > t->y2 ? t->y2 : *bottom;
+        return *bottom > *top;
+}
+
+// The slices of the rows a scene reads, COMPOSITOR_SLICE rows of the damage's width for each band, mapped when a scene first reads.
+static unsigned int *compositor_aside;
+static unsigned long compositor_aside_bytes;
 
 static void compositor_scene_band(address_any context, positive index)
 {
@@ -2374,11 +2430,39 @@ static void compositor_scene_band(address_any context, positive index)
         if (band.y2 <= band.y1)
                 return;
         // Not composed apart, the band is written straight into the caller's target, which is a scanout (the screen's, a strip of
-        // it the card left, an overlay plane's): only written, so its copies stream.
+        // it the card left, an overlay plane's): only written, so its copies stream. The rows of it the scene reads are composed
+        // aside, a slice at a time into memory of the band's own, and each slice copied out, so nothing reads the target.
         if (!banding->apart)
         {
+                int a = banding->read_top > band.y1 ? banding->read_top : band.y1;
+                int b = banding->read_bottom < band.y2 ? banding->read_bottom : band.y2;
+                struct compositor_target part = band;
+
                 band.out = 1;
-                compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan);
+                if (b <= a || !compositor_aside)
+                {
+                        compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan);
+                        return;
+                }
+                part.out = 1, part.y2 = a;
+                if (part.y2 > part.y1)
+                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan);
+                for (int top = a; top < b; top += COMPOSITOR_SLICE)
+                {
+                        struct compositor_target slice = band;
+                        unsigned long pitch = (unsigned long)(band.x2 - band.x1);
+
+                        slice.y1 = top;
+                        slice.y2 = top + COMPOSITOR_SLICE < b ? top + COMPOSITOR_SLICE : b;
+                        slice.pixels = compositor_aside + index * COMPOSITOR_SLICE * pitch;
+                        slice.pitch = pitch;
+                        slice.ox = band.x1, slice.oy = top, slice.out = 0;
+                        compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan);
+                        compositor_blit(&band, band.x1, top, band.x2 - band.x1, slice.y2 - top, slice.pixels, pitch);
+                }
+                part.y1 = b, part.y2 = band.y2;
+                if (part.y2 > part.y1)
+                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan);
                 return;
         }
         for (int top = band.y1; top < band.y2; top += COMPOSITOR_SLICE)
@@ -2413,10 +2497,23 @@ static void compositor_scene_banded(const struct compositor_target *t, const str
 
         compositor_radii(frames, count, radii);
         compositor_plan_make(&plan, t, frames, count, radii);
-        struct compositor_banding banding = {t, frames, count, 1, apart, radii, &plan, {0}, {0}};
+        struct compositor_banding banding = {t, frames, count, 1, apart, radii, &plan, {0}, {0}, 0, 0};
 
         bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
         bands = bands < (positive)(t->y2 - t->y1) / 16 ? bands : (positive)(t->y2 - t->y1) / 16;
+        // A target only written that the scene reads: room for each band's slice, as wide as the damage, made here before the bands.
+        if (!apart && compositor_scene_reads(t, frames, count, &banding.read_top, &banding.read_bottom))
+        {
+                unsigned long need = (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_SLICE * (unsigned long)(t->x2 - t->x1) * 4;
+
+                if (need > compositor_aside_bytes)
+                {
+                        if (compositor_aside)
+                                system_call_2(syscall(munmap), (positive)compositor_aside, compositor_aside_bytes);
+                        compositor_aside = (unsigned int *)compositor_map_zeroed(need);
+                        compositor_aside_bytes = compositor_aside ? need : 0;
+                }
+        }
         if (bytes >= PARALLEL_MINIMUM_BYTES && bands >= 2 && !compositor_band_scratch)
                 compositor_band_scratch = (unsigned int *)compositor_map_zeroed(
                     (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST * sizeof(unsigned int));
@@ -2483,6 +2580,7 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 
         if (!alpha || inner < 1 || x2 <= x1 || y2 <= y1)
                 return;
+        compositor_reading(t);
         outer_mask = compositor_corner_mask(radius);
         inner_mask = compositor_corner_mask(inner);
         for (int py = y1; py < y2; py++)
@@ -20175,6 +20273,7 @@ static void compositor_chip_draw(const struct compositor_target *t)
 
         if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha)
                 return;
+        compositor_reading(t);
         compositor_chip_place(box);
         for (int layer = 0; layer < layers; layer++)
         {
