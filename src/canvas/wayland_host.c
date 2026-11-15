@@ -3376,7 +3376,19 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
         if (got < 0 && got > -4096)
         {
-                if (gpu_ready() || compositor.card >= 0 || compositor_wl.render != 0)
+                // A buffer the processor cannot map is shown by the card, through its import: one the card cannot import either can be shown
+                // by nothing, and is refused here, at its making (the params' failed, create_immed's invalid_wl_buffer), not taken and then
+                // shown as nothing at every commit.
+                if (gpu_ready())
+                {
+                        positive import = gpu_import_fd((int)fd, (positive)size);
+
+                        if (!import)
+                                return 0;
+                        gpu_release_import(import);
+                        return WAYLAND_DMABUF_UNMAPPED;
+                }
+                if (compositor.card >= 0 || compositor_wl.render != 0)
                         return WAYLAND_DMABUF_UNMAPPED;
                 return 0;
         }
