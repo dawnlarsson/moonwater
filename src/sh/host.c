@@ -24658,8 +24658,9 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 }
                 host_debug_body(table, row);
         }
-        host_say(log, "  pointer         %s\n", table->pointer_plane ? (string_address) "on a plane of its own"
-                                                                    : (string_address) "drawn in software");
+        host_say(log, "  pointer         %s\n", table->pointer_plane == 1   ? (string_address) "on a plane of its own"
+                                               : table->pointer_plane == 2 ? (string_address) "drawn in software: the plane's probe saw no vblank with it"
+                                                                           : (string_address) "drawn in software");
         host_say(log, "  overlay         %s\n", table->overlay > 0    ? (string_address) "found"
                                                : table->overlay < 0 ? (string_address) "none, or refused"
                                                                     : (string_address) "not asked yet");

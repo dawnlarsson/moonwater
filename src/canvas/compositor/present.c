@@ -587,7 +587,7 @@ static void compositor_present_frames(void)
         if (compositor.table)
         {
                 memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
-                compositor.table->pointer_plane = !compositor.cursor.soft;
+                compositor.table->pointer_plane = compositor_pointer_plane_word();
                 compositor.table->overlay = compositor.overlay_state;
         }
 
@@ -884,9 +884,7 @@ static void compositor_present_frames(void)
                                 compositor_scene_banded(&strip, frames, count, 0, rows);
                                 if (compositor_spots_any(0))
                                         compositor_spots_compose(&strip, frames, count);
-                                if (compositor.cursor.drawn)
-                                        compositor_cursor_draw(&strip, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as,
-                                                               compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+                                compositor_cursor_compose(&strip, frames, count);
                         }
                 }
                 else
@@ -897,9 +895,8 @@ static void compositor_present_frames(void)
                 // Composed apart, each slice had the fingers' marks; on a scanout only written, they are composed aside.
                 if (!apart && compositor_spots_any(0))
                         compositor_spots_compose(&target, frames, count);
-                if (!apart && compositor.cursor.drawn)
-                        compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as,
-                                               compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+                if (!apart)
+                        compositor_cursor_compose(&target, frames, count);
                 }
 
                 compositor.painted += (unsigned long)compositor_area(rectangle);

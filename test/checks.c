@@ -137846,6 +137846,57 @@ static void check_compositor_picture(void)
 }
 
 /*
+        The software pointer over a scanout only written is composed aside (compositor_cursor_compose): its square's scene drawn into
+        memory of its own, the pointer over it there, and the square copied out, where the pointer was mixed into the scanout in place
+        and every pixel it wrote was a read of the scanout's write-combined memory. Bit for bit the frame the mix in place made: each
+        frame here is presented with the pointer, then again without it and the pointer mixed in place over that, and the two are
+        compared whole, at a window's middle, across a window's edge, cut by the screen's corner, and for a client's own picture.
+*/
+static unsigned int aside_shot[GLASS_SIDE * GLASS_SIDE];
+
+static b32 pointer_aside_same(int x, int y)
+{
+    struct compositor_target t = {compositor.scanout, GLASS_SIDE, GLASS_SIDE, GLASS_SIDE, 0, 0, GLASS_SIDE, GLASS_SIDE};
+    b32 drew;
+
+    compositor.pointer_x = x, compositor.pointer_y = y;
+    compositor_cursor_move();
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    memory_copy(aside_shot, compositor.scanout, sizeof(aside_shot));
+    compositor.cursor.drawn = 0;
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    drew = memory_compare(aside_shot, compositor.scanout, sizeof(aside_shot)) != 0;
+    compositor.cursor.drawn = 1;
+    compositor_cursor_draw(&t, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
+                           compositor_cursor_ink(1, 0));
+    return drew && !memory_compare(aside_shot, compositor.scanout, sizeof(aside_shot));
+}
+
+static void check_compositor_pointer_aside(void)
+{
+    static unsigned int picture[8][8];
+    struct windows address_to table = predict_setup();
+
+    if (!table)
+    {
+        check("pointer aside: the table is mapped", false);
+        return;
+    }
+    check("pointer aside: over a window's middle, the frame is the one the pointer mixed in place made, bit for bit", pointer_aside_same(110, 70));
+    check("pointer aside: across a window's edge and its frame", pointer_aside_same(48, 28));
+    check("pointer aside: cut by the screen's corner", pointer_aside_same(GLASS_SIDE - 3, GLASS_SIDE - 2));
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++)
+            picture[y][x] = (x + y) & 1 ? 0xff20c040u : 0x80402010u;
+    compositor_picture.worn = compositor_picture_take((const unsigned char address_to)&picture[0][0], 32, 8, 8, 0, 3, 3, 1, 100);
+    check("pointer aside: and a client's own picture", compositor_picture.worn && pointer_aside_same(100, 60));
+    compositor_picture.worn = 0;
+    compositor.cursor.soft = 0;
+}
+
+/*
         The wheel through the compositor's reader, from a pipe that stands for a device in slot 0: what a notch
         becomes in the ring of the window under the pointer, what moonwater debug is told of it, and a swipe at a
         window that is not reading while it comes, which its ring of WINDOWS_EVENTS events used to cut off.
@@ -139696,6 +139747,93 @@ static void check_compositor_table_taken(void)
           child > 0 && waited == child && (status & 0xffff) == 0);
     if (child > 0 && waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) != 0)
         string_format(log, "  table taken: the program's step %p failed\n", (positive)((status >> 8) & 0xff));
+}
+
+/*
+        The cursor plane's probe (compositor_cursor_probe, compositor/kms.c), with the card's answer given by hand, as no card is here:
+        without the file i915 and xe are refused the plane by name as before; asked, they are not; a vblank that came keeps the plane,
+        none takes it off and says so in moonwater debug's word, and a card that cannot be asked tells nothing, so the names' refusal
+        stands for theirs and no other. The file is looked for at its path, in a child with a /run of its own.
+*/
+static void check_compositor_cursor_probe(void)
+{
+    char was[sizeof(compositor.driver)];
+    int card = compositor.card, soft = compositor.cursor.soft;
+    unsigned int uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
+    unsigned int gid = (unsigned int)compositor_call(syscall(getgid), 0, 0, 0, 0, 0, 0);
+    bipolar child, waited = -1;
+    positive status = 0;
+    b32 named, asked;
+
+    memory_copy(was, compositor.driver, sizeof(was));
+    memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
+    string_copy((string_address)compositor.driver, (string_address) "i915");
+    named = !compositor_cursor_plane_wanted();
+    string_copy((string_address)compositor.driver, (string_address) "xe");
+    named = named && !compositor_cursor_plane_wanted();
+    string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+    check("cursor probe: not asked, i915 and xe are refused the plane by name, and another driver is not", named && compositor_cursor_plane_wanted());
+    compositor_cursor_probe.asked = 1;
+    string_copy((string_address)compositor.driver, (string_address) "i915");
+    check("cursor probe: asked for, i915 is given the plane to try", compositor_cursor_plane_wanted());
+    compositor.card = -1;
+    check("cursor probe: a card that cannot be asked for a vblank answers that it cannot", compositor_cursor_vblank(0) == -1);
+    check("cursor probe: a vblank that came keeps the plane, and the probe is made once",
+          compositor_cursor_probed(1) == 0 && compositor_cursor_probe.done && !compositor_cursor_probe.stopped);
+    memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
+    compositor_cursor_probe.asked = 1;
+    compositor.cursor.soft = 1;
+    check("cursor probe: none takes the plane off, and moonwater debug's pointer word says the probe drew it",
+          compositor_cursor_probed(0) == -1 && compositor_cursor_probe.stopped && compositor_pointer_plane_word() == 2);
+    memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
+    check("cursor probe: a card that cannot be asked keeps the names' refusal for i915", compositor_cursor_probed(-1) == -1);
+    memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
+    string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+    check("cursor probe: and for no other driver", compositor_cursor_probed(-1) == 0 && !compositor_cursor_probe.stopped);
+    compositor.cursor.soft = 0;
+    check("cursor probe: the pointer word is 1 on the plane and 0 drawn for no probe", compositor_pointer_plane_word() == 1 &&
+                                                                                          (compositor.cursor.soft = 1, compositor_pointer_plane_word() == 0));
+    memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
+    memory_copy(compositor.driver, was, sizeof(was));
+    compositor.card = card, compositor.cursor.soft = soft;
+
+    child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+    if (child == 0)
+    {
+        char map[40] = "0 ";
+        positive at = 2;
+
+        if (compositor_call(syscall(unshare), 0x10000000 | 0x00020000, 0, 0, 0, 0, 0) != 0)
+            system_call_1(syscall(exit_group), 77);
+        table_sealed_write("/proc/self/setgroups", "deny");
+        at += positive_into_string((p8 address_to)map + at, uid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/uid_map", map);
+        at = 2;
+        at += positive_into_string((p8 address_to)map + at, gid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/gid_map", map);
+        if (compositor_call(syscall(mount), (positive) "none", (positive) "/run", (positive) "tmpfs", 0, 0, 0) != 0)
+            system_call_1(syscall(exit_group), 77);
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run/moonwater", 0755, 0, 0, 0);
+        asked = compositor_cursor_probe_asked();
+        {
+            bipolar made = system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_CURSOR_PROBE_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+
+            if (made >= 0)
+                system_close(made);
+        }
+        system_call_1(syscall(exit_group), !asked && compositor_cursor_probe_asked() ? 0 : 1);
+    }
+    if (child > 0)
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    if (waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 77)
+    {
+        string_format(log, "  cursor probe: the file's rows NOT RUN, no user namespace with a /run of its own here\n");
+        return;
+    }
+    check("cursor probe: asked for by " COMPOSITOR_CURSOR_PROBE_FILE " alone: none there is not asked, one there is",
+          child > 0 && waited == child && (status & 0xffff) == 0);
 }
 
 static void check_compositor_table_sealed(void)
@@ -178776,6 +178914,7 @@ b32 main()
         check_compositor_predict_model();
         check_compositor_predict_table();
         check_compositor_picture();
+        check_compositor_pointer_aside();
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
@@ -178793,6 +178932,7 @@ b32 main()
         check_compositor_signal_again();
         check_compositor_table_sealed();
         check_compositor_table_taken();
+        check_compositor_cursor_probe();
         check_compositor_doors_held();
         check_compositor_asked();
         check_compositor_tiling();

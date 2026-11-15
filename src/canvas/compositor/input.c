@@ -3048,6 +3048,51 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
         compositor_chip_compose(t, frames, count);
 }
 
+/*
+        The software pointer over a target only written (a scanout, a strip of one the card left): its square composed aside, the
+        scene, the fingers' marks and the chip as they are drawn under it, the pointer drawn over that, and the square copied out,
+        so nothing reads the scanout, whose memory is write-combined on most cards (the pointer was mixed into it in place, and a
+        mix reads every pixel it writes). The pixels are the ones the pointer mixed in place made, bit for bit: the square's scene
+        is the scene's (compositor_scene of a part is the part of the scene, as the marks' squares are). With no memory for the
+        square the pointer is mixed in place as it was.
+*/
+static void compositor_cursor_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
+{
+        static unsigned int *square_pixels;
+        int hot_x, hot_y, span = compositor_pointer_span(&compositor.cursor.drawn_as, &hot_x, &hot_y);
+        int box[4] = {compositor.cursor.x - hot_x, compositor.cursor.y - hot_y, compositor.cursor.x - hot_x + span, compositor.cursor.y - hot_y + span};
+        int clip[4] = {t->x1, t->y1, t->x2, t->y2};
+
+        if (!compositor.cursor.drawn)
+                return;
+        compositor_meet(box, clip);
+        if (box[2] <= box[0] || box[3] <= box[1])
+                return;
+        if (!square_pixels)
+                square_pixels = (unsigned int *)compositor_map_zeroed((unsigned long)4 * CP_SPAN_MOST * CP_SPAN_MOST);
+        if (!square_pixels)
+        {
+                compositor_cursor_draw(t, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
+                                       compositor_cursor_ink(1, 0));
+                return;
+        }
+        {
+                struct compositor_target square = {square_pixels, (unsigned long)(box[2] - box[0]), t->width, t->height, box[0], box[1], box[2], box[3],
+                                                   box[0], box[1], 0, 0};
+
+                compositor_scene(&square, frames, count);
+                if (compositor_spots_any(0))
+                {
+                        compositor_spots_marks(&square);
+                        if (compositor.chip.kind != COMPOSITOR_CHIP_NONE && compositor.chip.alpha && compositor.chip.scratch)
+                                compositor_chip_draw(&square);
+                }
+                compositor_cursor_draw(&square, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
+                                       compositor_cursor_ink(1, 0));
+                compositor_blit(t, box[0], box[1], box[2] - box[0], box[3] - box[1], square_pixels, (unsigned long)(box[2] - box[0]));
+        }
+}
+
 // `moonwater canvas touch`, read with the other settings the compositor takes at once: on (the row's standard, nothing
 // kept or a file that says default) or off, which takes every mark away.
 // What a side edge's setting runs (COMPOSITOR_SIDE_*): the choice's index, off for a file that names none.

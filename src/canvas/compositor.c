@@ -1153,6 +1153,10 @@ static void compositor_spots_draw(const struct compositor_target *t);
 static void compositor_spots_marks(const struct compositor_target *t);
 static void compositor_spots_compose(const struct compositor_target *t, const struct compositor_frame *frames,
                                      unsigned int count);
+// The software pointer over a target only written, composed aside (the touch section's neighbour, compositor/input.c).
+static void compositor_cursor_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count);
+// What moonwater debug says of the pointer: on the plane, drawn, or drawn for the plane's probe (compositor/kms.c).
+static unsigned int compositor_pointer_plane_word(void);
 static void compositor_spots_ready(void);
 
 // A colour of the pointer: its fill is white and its outline black, or the other way for the dark one.

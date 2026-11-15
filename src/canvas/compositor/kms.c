@@ -1492,15 +1492,129 @@ static void compositor_cursor_damage(void)
         compositor.damage_by = 0;
 }
 
-// Whether this card's cursor plane is worth using: the driver's name and the setting Canvas was started with.
-static int compositor_cursor_plane_wanted(void)
+/*
+        The cursor plane's probe, made where the machine's owner asks for it (COMPOSITOR_CURSOR_PROBE_FILE there at the pointer's start).
+        i915 and xe are refused the plane by their names, for the reason 23811f25 gives in four words ("stop their pipe on one", a
+        dumb buffer on the plane), with no machine or log behind it, and there is none here to try it on. Asked, the names are not
+        refused: the plane is given its first picture and its crtc asked for one vblank event, waited for COMPOSITOR_CURSOR_PROBE_NS.
+        One that comes is a pipe that runs on with the plane, which is kept; none is the pipe the note means, and the plane is taken
+        off and the pointer drawn, which the log and `moonwater debug`'s pointer line say. A card that cannot be asked for a vblank
+        tells nothing, and the names' refusal stands for it. Without the file all is as it was; the names go only once the probe
+        has been run on such a machine and shown to be enough alone.
+*/
+#define COMPOSITOR_CURSOR_PROBE_FILE "/run/moonwater/cursor-plane-probe"
+#define COMPOSITOR_CURSOR_PROBE_NS 100000000ull
+#define COMPOSITOR_WAIT_VBLANK COMPOSITOR_DRM(0x3au, 24u)
+#define COMPOSITOR_EVENT_VBLANK 1u
+#define COMPOSITOR_CURSOR_PROBE_TAG 0x65626f7270ull // the probe's vblank, by its user data
+
+static struct
+{
+        int asked;   // the file was there at the pointer's start
+        int done;    // the probe has been made
+        int stopped; // and the plane was taken off for it
+} compositor_cursor_probe;
+
+// Whether the owner asks for the probe: the file is there.
+static int compositor_cursor_probe_asked(void)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_CURSOR_PROBE_FILE, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return 0;
+        system_close(handle);
+        return 1;
+}
+
+// Whether the card's driver is one refused the plane by name.
+static int compositor_cursor_named(void)
 {
         const char *name = compositor.driver;
+
+        return (name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) || (name[0] == 'x' && name[1] == 'e' && !name[2]);
+}
+
+/*
+        One vblank event of the crtc at crtc_index asked for (DRM_IOCTL_WAIT_VBLANK, relative, an event) and waited for, at most
+        COMPOSITOR_CURSOR_PROBE_NS: 1 when it came, 0 when none did, -1 when the card would not be asked. An event of another kind read
+        meanwhile (a flip's) is handled as the loop handles it.
+*/
+static int compositor_cursor_vblank(unsigned int crtc_index)
+{
+        struct
+        {
+                unsigned int type, sequence;
+                unsigned long signal, pad;
+        } ask = {0x1u | 0x4000000u | (crtc_index << 1 & 0x3eu), 1, COMPOSITOR_CURSOR_PROBE_TAG, 0}; // _DRM_VBLANK_RELATIVE | _EVENT, the high crtc
+        positive until;
+
+        if (compositor.card < 0 || system_control(compositor.card, COMPOSITOR_WAIT_VBLANK, address_of ask) != 0)
+                return -1;
+        until = clock_monotonic_nanoseconds() + COMPOSITOR_CURSOR_PROBE_NS;
+        for (;;)
+        {
+                positive now = clock_monotonic_nanoseconds();
+                struct compositor_poll wanted = {compositor.card, COMPOSITOR_POLLIN, 0};
+                long wait[2];
+                p8 events[512];
+                long got;
+
+                if (now >= until)
+                        return 0;
+                wait[0] = (long)((until - now) / 1000000000ull);
+                wait[1] = (long)((until - now) % 1000000000ull);
+                if (compositor_call(syscall(ppoll), (positive)&wanted, 1, (positive)wait, 0, 0, 0) <= 0)
+                        continue;
+                got = compositor_call(syscall(read), (positive)compositor.card, (positive)events, sizeof(events), 0, 0, 0);
+                if (got <= 0)
+                        continue;
+                compositor_card_events(events, got);
+                for (long at = 0; at + 16 <= got;)
+                {
+                        unsigned int type, length;
+                        unsigned long data;
+
+                        memory_copy(address_of type, events + at, 4);
+                        memory_copy(address_of length, events + at + 4, 4);
+                        if (length < 8 || at + (long)length > got)
+                                break;
+                        memory_copy(address_of data, events + at + 8, 8);
+                        if (type == COMPOSITOR_EVENT_VBLANK && data == COMPOSITOR_CURSOR_PROBE_TAG)
+                                return 1;
+                        at += length;
+                }
+        }
+}
+
+// What the probe found (compositor_cursor_vblank's answer): 0 when the plane is kept, -1 when it is to be taken off, each said.
+static int compositor_cursor_probed(int answer)
+{
+        compositor_cursor_probe.done = 1;
+        if (answer > 0 || (answer < 0 && !compositor_cursor_named()))
+        {
+                log_direct(answer > 0 ? str("compositor: the cursor plane's probe: the screen's vblank came with the plane showing; the plane is kept\n")
+                                      : str("compositor: the cursor plane's probe: the card gives no vblank to ask for; the plane is kept\n"));
+                return 0;
+        }
+        compositor_cursor_probe.stopped = 1;
+        log_direct(answer == 0 ? str("compositor: the cursor plane's probe: no vblank within 100 ms of the plane's first picture; the plane is taken off and the pointer drawn\n")
+                               : str("compositor: the cursor plane's probe: the card gives no vblank to ask for, and its driver is refused the plane by name; the pointer is drawn\n"));
+        return -1;
+}
+
+// What `moonwater debug` says of the pointer (struct windows pointer_plane): 1 on the plane, 0 drawn, 2 drawn because the probe took the plane off.
+static unsigned int compositor_pointer_plane_word(void)
+{
+        return !compositor.cursor.soft ? 1u : compositor_cursor_probe.stopped ? 2u : 0u;
+}
+
+// Whether this card's cursor plane is worth using: the driver's name (unless the probe is asked for) and the setting Canvas was started with.
+static int compositor_cursor_plane_wanted(void)
+{
         p8 setting[4] = {0};
         bipolar handle;
 
-        if ((name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) ||
-            (name[0] == 'x' && name[1] == 'e' && !name[2]))
+        if (!compositor_cursor_probe.asked && compositor_cursor_named())
                 return 0;
 
         handle = system_open_at(AT_FDCWD, (string_address) "/sys/module/moonwater/parameters/cursor_plane",
@@ -1581,6 +1695,10 @@ static int compositor_cursor_planes(int left, int top)
                                 if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of give) != 0)
                                         return -1;
                                 output->shows = (unsigned int)compositor.cursor.paints;
+                                // The probe, asked for, after the plane's first picture: a pipe with no vblank has the plane refused.
+                                if (compositor_cursor_probe.asked && !compositor_cursor_probe.done &&
+                                    compositor_cursor_probed(compositor_cursor_vblank(compositor.outputs ? output->crtc_index : compositor.crtc_index)) < 0)
+                                        return -1;
                         }
                         else
                         {
@@ -1622,6 +1740,8 @@ static void compositor_cursor_start(void)
         struct compositor_dumb dumb[2] = {{CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}, {CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}};
 
         compositor.cursor.plane_on = 0;
+        compositor_cursor_probe.asked = compositor_cursor_probe_asked();
+        compositor_cursor_probe.done = compositor_cursor_probe.stopped = 0;
         if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
             system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0)
         {

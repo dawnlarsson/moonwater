@@ -857,8 +857,9 @@ struct windows
         // finger's mark is drawn over it (`moonwater canvas touch on`); 15 a screen is turned (its displays line), so no window is shown straight; 16 the windows'
         // lists are drawn (list_mode): the card writes the pictures in place, so they are composed and none is shown straight.
         unsigned int unscanned;
-        // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
-        // and the overlay: 1 found, -1 none or refused, 0 not yet asked.
+        // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own (1), drawn (0)
+        // or drawn because the plane's probe saw no vblank with it (2, compositor_cursor_probe), and the overlay: 1 found, -1 none or
+        // refused, 0 not yet asked.
         char driver[16];
         unsigned int pointer_plane;
         int overlay;
