@@ -7613,6 +7613,9 @@ static COLD fn wifi_caps_merge(wifi_rsn_caps address_to into, const wifi_rsn_cap
 //      here, so nothing was joined; or the station ended without a status.
 #define WIFI_REFUSE_CONFINE (-70101)
 #define WIFI_REFUSE_APART (-70102)
+//      And the broker could not start: the keeper's lock, its channel or the
+//      station's fork failed, so nothing was asked of the air (radio_broker).
+#define WIFI_REFUSE_UNSTARTED (-70103)
 
 /* What a join asks of an access point: the key management suite (2, 6 or
    8), the protection it asks for, and the PSK suite it may try when WPA3
@@ -12716,6 +12719,24 @@ static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer addres
 }
 
 /*
+        A broker that could not start says so to whoever asked for the join,
+        and ends: nothing was asked of the air, so the join is no network's
+        failure and is not kept as one (radio_last_set). It ended without a
+        word, which the joiner took for a station that ended without one
+        (WIFI_REFUSE_APART), and the network was written down as last failed
+        for it: a cut at the keeper's lock left wifi.last as neither the state
+        it was in nor the one the join makes.
+*/
+static DEAD_END COLD fn radio_broker_unstarted(b32 told)
+{
+        b64 status = WIFI_REFUSE_UNSTARTED;
+
+        (void)system_write_all((positive)told, address_of status, sizeof(status));
+        system_call_1(syscall(exit_group), 1);
+        unreachable_here();
+}
+
+/*
         The broker: root, detached, holding the keeper's lock. It forks the
         station, forgets every password it carries, then answers questions
         until the station ends; the join's status goes to whoever asked for
@@ -12734,10 +12755,10 @@ static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid
         if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0 ||
             system_call_4(syscall(socketpair), AF_UNIX,
                           RADIO_SOCK_SEQPACKET | SOCK_CLOEXEC, 0, (positive)ends) < 0)
-                system_call_1(syscall(exit_group), 1);
+                radio_broker_unstarted(told);
         station = system_fork();
         if (station < 0)
-                system_call_1(syscall(exit_group), 1);
+                radio_broker_unstarted(told);
         if (!station)
                 radio_station_run(ends[1], broker, ssid, ssid_length, pass, pass_length, force);
         system_close(ends[1]);
@@ -12991,6 +13012,9 @@ static string_address radio_join_words(bipolar failed)
                : failed == WIFI_REFUSE_APART
                    ? (string_address) "was not joined: the confined Wi-Fi station ended "
                                       "without a word"
+               : failed == WIFI_REFUSE_UNSTARTED
+                   ? (string_address) "was not joined: the join could not be started on this "
+                                      "machine"
                    : (string_address) "could not be joined";
 }
 
@@ -13073,6 +13097,9 @@ static fn radio_last_set(string_address ssid, bipolar failed)
                 system_remove_at(AT_FDCWD, RADIO_LAST_PATH, 0);
                 return;
         }
+        //      No join was made, so there is nothing to say of the network.
+        if (failed == WIFI_REFUSE_UNSTARTED)
+                return;
         //      Another time for the same name and reason, or the first.
         //      A pass that asked nothing of the air, and was told by the scan of
         //      a moment ago, has not found the network no further away.
@@ -13327,7 +13354,9 @@ static b32 radio_wifi_bring(bool say)
                         }
                         break;
                 }
-                if (failed == -19)
+                //      No interface, or no join that can start: the next
+                //      network would fail the same way.
+                if (failed == -19 || failed == WIFI_REFUSE_UNSTARTED)
                         break;
         }
         //      One pass is one failure, whichever of the networks it was the
