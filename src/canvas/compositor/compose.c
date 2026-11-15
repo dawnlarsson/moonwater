@@ -1083,7 +1083,7 @@ enum compositor_gpu_why
         COMPOSITOR_GPU_WHY_HANG,      // the scene did not finish
         COMPOSITOR_GPU_WHY_TURN,      // a turned screen's rotation did not finish on the card (the processor turned it)
         COMPOSITOR_GPU_WHY_OTHER,     // a frame of another kind, or the damage is empty
-        COMPOSITOR_GPU_WHY_ROUND = COMPOSITOR_GPU_WHY_OTHER + 1, // a window with alpha whose picture reaches into a round corner (the card does not draw that yet): no map in it
+        COMPOSITOR_GPU_WHY_ROUND = COMPOSITOR_GPU_WHY_OTHER + 1, // a window with alpha whose picture reaches into a round corner, while gpu-round-off is there (else 12 lays it over)
         // the pointer drawn into the scene wears a window's client's own picture (compositor_picture); slot 17, after OTHER, is the
         // round corners' that window.c names already
         COMPOSITOR_GPU_WHY_POINTER = COMPOSITOR_GPU_WHY_OTHER + 2,
@@ -1187,7 +1187,8 @@ static unsigned int compositor_gpu_close_table(int side, int half)
 }
 
 // One record: the rectangle cut to the picture, none when nothing is left. A fill writes the colour; a copy takes the picture's pixels from the frame, at the
-// rectangle's own corner; a mix is memory_mix_u32_row by the cover table at cover (pitch r), the ink the colour or, with a frame, the picture.
+// rectangle's own corner; a mix (5) is memory_mix_u32_row by the cover table at cover (pitch r), the ink the colour or, with a frame, the picture; 12 is the
+// same words with the premultiplied picture laid over by the cover (compositor_over_weighted), a blended picture's round corner.
 static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y1, unsigned int colour, const struct compositor_frame *frame, unsigned int cover, int r)
 {
         struct compositor_gscene *g = &compositor_gscene;
@@ -1207,7 +1208,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 else
                         op[0] |= (unsigned int)frame->pitch << 16, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32);
         }
-        if (kind == 5)
+        if (kind == 5 || kind == 12)
                 op[0] |= (unsigned int)r << 8, op[5] = cover + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), op[6] = frame ? op[6] : colour;
         g->count++;
 }
@@ -1328,7 +1329,8 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
-        if (f->blend && ri > 0 && (f->square & 15) != 15)
+        // The owner's way back (/run/moonwater/gpu-round-off, gpu.c's gpu_round_off): a blended window's round corners on the processor, as before 12.
+        if (gpu_round_off && f->blend && ri > 0 && (f->square & 15) != 15)
                 return g->why = COMPOSITOR_GPU_WHY_ROUND, false;
         if (b)
         {
@@ -1378,8 +1380,9 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                         return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                 if (b)
                         compositor_gpu_rect(5, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
+                // A blended picture is laid over by the inner corner's cover (12), as compositor_draw_with lays it (compositor_over_weighted); an opaque one mixed (5).
                 if (picture && ri && sx2 > sx1 && sy2 > sy1)
-                        compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
+                        compositor_gpu_rect(f->blend ? 12 : 5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
         if (b && f->lit && f->lit_w > b && !compositor_gpu_lit_over(f, ox, oy, ow, oh, r))
                 return false;

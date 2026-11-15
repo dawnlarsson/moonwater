@@ -442,6 +442,8 @@ scene:
 	s_cbranch_scc1	.scene_image
 	s_cmp_eq_u32	s47, 5
 	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 12
+	s_cbranch_scc1	.scene_mix
 	s_cmp_eq_u32	s47, 6
 	s_cbranch_scc1	.scene_close
 	s_cmp_eq_u32	s47, 7
@@ -530,6 +532,34 @@ scene:
 	v_cmp_ne_u32_e64 s[96:97], 0, \cv
 	v_cndmask_b32_e64 v42, \o, v42, s[96:97]
 	v_cndmask_b32_e64 \o, \o, v42, \mk
+.endm
+
+; \o = compositor_over_weighted(\o, \ink, \cv) where \mk has it: the premultiplied ink's four channels each times the cover, (c * cv + 127 + 1 + that >> 8) >> 8,
+; the ink as it is for a cover of 255 or more, then laid over \o as overv lays it; \o as it was for a cover of 0 or an ink of alpha 0
+.macro wover o, cv, ink, mk
+	v_and_b32	v44, s75, \ink
+	v_mad_u32_u24	v44, v44, \cv, 0x007f007f
+	v_lshrrev_b32	v46, 8, v44
+	v_and_b32	v46, s75, v46
+	v_add3_u32	v44, v44, 0x00010001, v46
+	v_lshrrev_b32	v44, 8, v44
+	v_and_b32	v44, s75, v44
+	v_lshrrev_b32	v45, 8, \ink
+	v_and_b32	v45, s75, v45
+	v_mad_u32_u24	v45, v45, \cv, 0x007f007f
+	v_lshrrev_b32	v46, 8, v45
+	v_and_b32	v46, s75, v46
+	v_add3_u32	v45, v45, 0x00010001, v46
+	v_and_b32	v45, 0xff00ff00, v45
+	v_lshl_or_b32	v44, v45, 0, v44
+	v_cmp_lt_u32_e64 s[96:97], 254, \cv
+	v_cndmask_b32_e64 v44, v44, \ink, s[96:97]
+	overv		v42, \o, v44
+	v_cmp_ne_u32_e64 s[96:97], 0, \cv
+	v_cmp_lt_u32_e64 s[98:99], 0x00ffffff, \ink
+	s_and_b64	s[96:97], s[96:97], s[98:99]
+	s_and_b64	s[96:97], s[96:97], \mk
+	v_cndmask_b32_e64 \o, \o, v42, s[96:97]
 .endm
 
 ; one load of a turned picture: the pixel \k places along the row from the lane's first (its index in v30 and the step in s80), into \out
@@ -684,7 +714,8 @@ scene:
 	s_branch	.scene_loop
 
 ; a mix (5 | the cover's pitch << 8 | the ink's pitch << 16, x0, y0, x1, y1 in pixels, the place of the cover byte at x0, y0 from the buffer's start, the ink's address in
-; two words, or the ink's colour in the first when the ink's pitch is 0): memory_mix_u32_row over the rectangle, the covers a table of bytes in the buffer
+; two words, or the ink's colour in the first when the ink's pitch is 0): memory_mix_u32_row over the rectangle, the covers a table of bytes in the buffer;
+; 12 with the same words is the ink laid over by its cover instead (compositor_over_weighted: a premultiplied picture in a round corner)
 .scene_mix:
 	s_cmp_le_i32	s59, s28
 	s_cbranch_scc1	.scene_loop
@@ -749,10 +780,18 @@ scene:
 	v_bfe_u32	v61, v34, 8, 8
 	v_bfe_u32	v62, v34, 16, 8
 	v_bfe_u32	v63, v34, 24, 8
+	s_cmp_eq_u32	s47, 12
+	s_cbranch_scc1	.mix_over
 	mixpixel	v5, v60, v64, s[82:83]
 	mixpixel	v6, v61, v65, s[84:85]
 	mixpixel	v7, v62, v66, s[86:87]
 	mixpixel	v8, v63, v67, s[88:89]
+	s_branch	.scene_loop
+.mix_over:
+	wover		v5, v60, v64, s[82:83]
+	wover		v6, v61, v65, s[84:85]
+	wover		v7, v62, v66, s[86:87]
+	wover		v8, v63, v67, s[88:89]
 	s_branch	.scene_loop
 
 ; an image (4 copied, 11 premultiplied alpha-over blended, x0, y0, x1, y1 in pixels, the address of the picture's pixel at x0, y0 in two words, its pitch in pixels):

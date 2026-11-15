@@ -244139,6 +244139,40 @@ static void gpu_own_rows(void)
 }
 
 /*
+        A blended window's round corners (compose.c's compositor_gpu_frame): its picture laid over by each inner corner's cover (12) by default, and refused for the
+        processor (COMPOSITOR_GPU_WHY_ROUND) while the owner's file gpu-round-off is there (gpu.c's gpu_round_off), as before 12. The picture is a client's dma-buf
+        already on the card (gpu_base): no map is asked.
+*/
+static void gpu_round_rows(void)
+{
+        unsigned char kept_gpu[sizeof(gpu)], kept_gscene[sizeof(compositor_gscene)];
+        struct compositor_frame f;
+        unsigned int twelves = 0, fives = 0;
+        b32 built;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene));
+        gpu.at = (unsigned int address_to)gpu_late_buffer, gpu.size = sizeof(gpu_late_buffer);
+        compositor_gpu_layout();
+        compositor_gscene.width = 256, compositor_gscene.height = 160;
+        memory_zero(&f, sizeof(f));
+        f.x = 20, f.y = 20, f.width = 120, f.height = 80, f.scale = 100, f.pixels = (const unsigned int *)gpu_late_screen, f.pitch = 120, f.gpu_base = GPU_VA_MAPS;
+        f.blend = 1, f.radius = 12, f.line = 1, f.edge = 0xff404040u, f.slot = -1, f.square = 2; // one corner square, three round
+        gpu_round_off = 0;
+        built = compositor_gpu_frames(&f, 1, 0xff102030u);
+        for (unsigned int k = 0; k < compositor_gscene.count; k++)
+                twelves += (compositor_gscene.ops[8 * k] & 255) == 12, fives += (compositor_gscene.ops[8 * k] & 255) == 5;
+        check("gpu round: a blended window's three round corners are laid over by their covers (12), each corner's line mixed (5)", built && twelves == 3 && fives == 3);
+        gpu_round_off = 1;
+        built = compositor_gpu_frames(&f, 1, 0xff102030u);
+        check("gpu round: with gpu-round-off the same window is refused for the processor, as a window with alpha and round corners",
+              !built && compositor_gscene.why == COMPOSITOR_GPU_WHY_ROUND && compositor_gscene.count == 0);
+        f.square = 15;
+        check("gpu round: and a blended window whose corners are all square is the card's with the file there too", compositor_gpu_frames(&f, 1, 0xff102030u));
+        gpu_round_off = 0;
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&compositor_gscene, kept_gscene, sizeof(compositor_gscene));
+}
+
+/*
         The jobs without a wait (gpu.c's gpu_submit, gpu_scene_submit, gpu_scene_more_submit, gpu_done, gpu_fence_fd), on the fake card (no descriptor, a submit the
         fake takes and numbers, a fence it answers for every job alike): a scene is submitted and not waited for; the next is built in the other slot and the other
         side of the bins while it runs; a third waits for the first, and nothing of the first's is written; a job is asked after without a wait; its sync_file is
@@ -244253,6 +244287,20 @@ static void gpu_async_rows(void)
               gpu.ctx != was_ctx && !gpu_lost && !gpu_bins.job[0] && !gpu_bins.job[1]);
         gpu_fake_errno = 0;
         check("gpu async: and its end is said once, as a failed wait", gpu_late_end() == GPU_END_WAIT && gpu_late_end() == GPU_END_NONE);
+
+        // 10. The jobs counted apart: waited (gpu_run) and not (gpu_go), each kind (a scene, a copy), and a waited job's time split into its submit and the rest.
+        {
+                unsigned int waited = gpu_jobs_waited, unwaited = gpu_jobs_unwaited, scenes = gpu_jobs_kind[0], copies = gpu_jobs_kind[1];
+                unsigned long long whole = gpu_job_ns, parts = gpu_job_submit_ns + gpu_job_wait_ns;
+                b32 ran;
+
+                gpu_fake_busy = 0, gpu_fake_idle = 1, gpu.pending = 0, gpu_before.sequence = 0;
+                ran = gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_blit(GPU_VA + d_at, 64, GPU_VA + d_at + 4096, 64, 0, 0, 64, 4);
+                ran = ran && gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) != 0;
+                check("gpu async: jobs are counted waited and not, by kind, and a waited job's time is its submit's and its wait's",
+                      ran && gpu_jobs_waited == waited + 2 && gpu_jobs_unwaited == unwaited + 1 && gpu_jobs_kind[0] == scenes + 2 && gpu_jobs_kind[1] == copies + 1 &&
+                          gpu_job_submit_ns + gpu_job_wait_ns - parts == gpu_job_ns - whole && gpu_job_ns > whole);
+        }
 
         gpu_fake_card = 0, gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_fake_errno = 0, gpu_lost = 0, gpu_handed_clear();
         gpu_before.sequence = 0, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
@@ -245480,6 +245528,7 @@ b32 main(void)
         gpu_async_rows();
         gpu_card_rows();
         gpu_own_rows();
+        gpu_round_rows();
         gpu_bench_rows();
         flip_wait_rows();
         descriptor_rows();
@@ -250639,6 +250688,84 @@ b32 main()
         }
 
         check("gpu model kit: the text runs (ui_run_in), as a scene and as a program's list drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+
+        // A blended window (a client's premultiplied picture with alpha, frame->blend) with round corners, as the compositor's records draw it on the card
+        // (compositor_gpu_frames: the line, kind 11 over the middle, each round corner's line by its cover (5) and the picture laid over by the inner cover (12)),
+        // against compositor_draw on the processor over the same ground: every corner state (f->square's 16 values), radii from 1 to 48, lines of 0 to 4, windows
+        // partly off every edge, and a damage rectangle of the picture's, the pixels inside it compared whole (all four bytes). The pictures have every alpha,
+        // fully opaque and fully clear pixels, and clear ones with colour left in them (a premultiplied picture a client got wrong).
+        {
+                enum { BW = 256, BH = 160, BROUNDS = 96, BPIC = 200 * 160 };
+                static unsigned int picture[BPIC], want_b[BW * BH];
+                positive d_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), blend_bad = 0, compared = 0;
+                unsigned int address_to got_b = (unsigned int address_to)((p8 address_to)gpu.at + d_at), corners_12 = 0;
+                int kept_width = compositor.width, kept_height = compositor.height;
+
+                compositor_gpu_layout();
+                for (int round = 0; round < BROUNDS; round++)
+                {
+                        struct compositor_frame f;
+                        struct compositor_target t;
+                        unsigned int ground = gpu_random() | 0xff000000u;
+                        int pw = 24 + (int)(gpu_random() % 170), ph = 24 + (int)(gpu_random() % 130);
+                        int dx0 = (int)(gpu_random() % BW), dy0 = (int)(gpu_random() % BH), dx1, dy1;
+
+                        for (int i = 0; i < pw * ph; i++)
+                        {
+                                unsigned int a = gpu_random() % 4 == 0 ? 255 : gpu_random() % 4 == 0 ? 0 : gpu_random() & 255, s = gpu_random();
+
+                                picture[i] = a << 24 | (((s & 255) * a / 255) | ((s >> 8 & 255) * a / 255) << 8 | ((s >> 16 & 255) * a / 255) << 16);
+                                if (!a && gpu_random() % 5 == 0)
+                                        picture[i] = s & 0x00ffffffu; // clear, with colour left in it
+                        }
+                        memory_zero(&f, sizeof(f));
+                        f.x = (int)(gpu_random() % (BW + 60)) - 60, f.y = (int)(gpu_random() % (BH + 60)) - 60, f.width = pw, f.height = ph, f.scale = 100;
+                        f.pixels = picture, f.pitch = (unsigned long)pw, f.blend = 1, f.square = round % 16;
+                        f.line = (int)(gpu_random() % 5), f.radius = 1 + (int)(gpu_random() % 48), f.edge = gpu_random() | 0xff000000u, f.slot = -1;
+                        dx1 = dx0 + 1 + (int)(gpu_random() % (unsigned int)(BW - dx0)), dy1 = dy0 + 1 + (int)(gpu_random() % (unsigned int)(BH - dy0));
+                        if (round % 3 == 0)
+                                dx0 = dy0 = 0, dx1 = BW, dy1 = BH;
+                        compositor.width = BW, compositor.height = BH;
+                        compositor_gscene.width = BW, compositor_gscene.height = BH;
+                        if (!gpu_va_bytes(picture, sizeof(picture)) && !gpu_map(picture, sizeof(picture)))
+                        {
+                                check("gpu model kit: the blended window's picture is mapped for the model card", false);
+                                break;
+                        }
+                        if (!compositor_gpu_frames(&f, 1, ground))
+                        {
+                                if (++blend_bad < 6)
+                                        string_format(log, "  FAIL gpu blend round %p: the records were refused (why %p)\n", (positive)round, (positive)compositor_gscene.why);
+                                model_wrong++;
+                                continue;
+                        }
+                        for (unsigned int k = 0; k < compositor_gscene.count; k++)
+                                corners_12 += (compositor_gscene.ops[8 * k] & 255) == 12;
+                        for (int i = 0; i < BW * BH; i++)
+                                got_b[i] = want_b[i] = ground;
+                        memory_zero(&t, sizeof(t));
+                        t.pixels = want_b, t.pitch = BW, t.width = BW, t.height = BH, t.x1 = 0, t.y1 = 0, t.x2 = BW, t.y2 = BH;
+                        compositor_draw(&t, &f);
+                        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, compositor_gscene.count, COMPOSITOR_GPU_BINS_AT, d_at, BW, BW, BH, (unsigned int)dx0, (unsigned int)dy0,
+                                       (unsigned int)dx1, (unsigned int)dy1))
+                        {
+                                check("gpu model kit: the blended window's scene finishes", false);
+                                break;
+                        }
+                        for (int y = dy0; y < dy1; y++)
+                                for (int x = dx0; x < dx1; x++, compared++)
+                                        if (got_b[y * BW + x] != want_b[y * BW + x] && (++model_wrong, ++blend_bad) < 6)
+                                                string_format(log, "  FAIL gpu blend round %p (square %p, radius %p, line %p, at %p,%p): pixel %p,%p is %p, wanted %p\n", (positive)round,
+                                                              (positive)f.square, (positive)f.radius, (positive)f.line, (positive)(f.x + 1000), (positive)(f.y + 1000), (positive)x, (positive)y,
+                                                              (positive)got_b[y * BW + x], (positive)want_b[y * BW + x]);
+                }
+                compositor.width = kept_width, compositor.height = kept_height;
+                check("gpu model kit: a blended window with round corners (kind 12 in its corners) drawn by the model card is compositor_draw's, pixel for pixel, over every "
+                      "corner state, radius, line, place and damage",
+                      blend_bad == 0 && corners_12 > 0 && !gpu_model.fault.code);
+                string_format(log, "gpu model kit: %p blended windows, %p corner records of kind 12, %p pixels compared, %p differ\n", (positive)BROUNDS, (positive)corners_12, compared,
+                              blend_bad);
+        }
 
         // The coverage of CHECK_gpu_kit's scenes: the scene kernel's instructions they ran, and the bytes in its code where each run of the ones they did not begins.
         {

@@ -68,6 +68,9 @@ static unsigned int gpu_maps_own_user, gpu_maps_own_errno;
 // The start's probe took an anonymous page by userptr: a userptr refused after with EINVAL, EFAULT or EPERM is the address's (a dma-buf's mmap, a page gone), not
 // the kernel's, and does not make userptr gone for the session (gpu_map_as).
 static b32 gpu_userptr_ok;
+// /run/moonwater/gpu-round-off, looked for at each start as gpu-nouserptr is: a blended window whose picture reaches into a round corner is the processor's (the
+// compositor refuses it, COMPOSITOR_GPU_WHY_ROUND), as before the scene kernel laid such a corner over by its cover (12): the owner's way back if a card draws it wrong.
+static b32 gpu_round_off;
 static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
 static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
 static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
@@ -640,6 +643,10 @@ static b32 gpu_start(positive bytes)
                 gpu_own_userptr = off >= 0;
                 if (off >= 0)
                         system_close((int)off);
+                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-round-off", FILE_READ | O_CLOEXEC);
+                gpu_round_off = off >= 0;
+                if (off >= 0)
+                        system_close((int)off);
                 off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
                 GPU_WIDE_FAKE(off);
                 gpu_wide = off >= 0;
@@ -862,6 +869,12 @@ static unsigned int gpu_text_num(char *to, unsigned int at, unsigned int room, p
 // jobs with their total wait (gpu_run).
 static unsigned int gpu_map_hits, gpu_map_misses, gpu_wakes, gpu_jobs;
 static unsigned long long gpu_job_ns;
+// The jobs apart (moonwater debug): the ones a call waited for (gpu_run) and the ones it did not (gpu_go); of the waited ones, the time in the submit (the kernel's
+// look at every userptr page the bo list names, and EAGAIN's asks again) and the time after it until the fence or the cap; and the jobs of each kind of program, 0
+// a scene (ops 4, 5 and 6: a present, a program's list, a turned screen), 1 a copy (op 0), 2 a picture scaled (op 7), with their time (the waited ones' whole time).
+static unsigned int gpu_jobs_waited, gpu_jobs_unwaited, gpu_jobs_kind[3];
+static unsigned long long gpu_job_submit_ns, gpu_job_wait_ns, gpu_job_ns_kind[3], gpu_submit_took; // (the last submit's own time, gpu_submit)
+#define GPU_JOB_KIND(op) ((op) == 0 ? 1u : (op) == 7 ? 2u : 0u)
 #ifndef GPU_MAP_FAKE
 #define GPU_MAP_FAKE(taken)
 #endif
@@ -1907,7 +1920,7 @@ static positive gpu_submit(void)
                 if (gpu_last_error == 125 || gpu_last_error == 19 || gpu_last_error == 22)
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_lost = 1, gpu_job_began = kept;
+                        gpu_lost = 1, gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
                         return 0;
                 }
                 // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
@@ -1922,13 +1935,14 @@ static positive gpu_submit(void)
                 if (++tries == 3 || gpu_drop_unmapped())
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_job_began = kept;
+                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
                         return 0;
                 }
         }
         if (gpu.pending)
                 gpu_before.sequence = gpu.pending, gpu_before.began = kept;
         gpu.pending = sequence, gpu_pending_slot = gpu_slot, gpu_end_said = 0, gpu_fault_poll = began + GPU_LATE_NS + GPU_FAULT_FIRST;
+        gpu_submit_took = clock_monotonic_nanoseconds() - began;
         return sequence;
 }
 
@@ -1943,10 +1957,15 @@ static b32 gpu_run_job(void)
 // A job run and waited for (gpu_run_job), timed: the count and the total wait the metrics publish.
 static b32 gpu_run(void)
 {
-        b64 began = clock_monotonic_nanoseconds();
-        b32 done = gpu_run_job();
+        const unsigned int kind = GPU_JOB_KIND(GPU_ARGS->op);
+        b64 began = clock_monotonic_nanoseconds(), took;
+        b32 done;
 
-        gpu_jobs++, gpu_job_ns += clock_monotonic_nanoseconds() - began;
+        gpu_submit_took = 0;
+        done = gpu_run_job();
+        took = clock_monotonic_nanoseconds() - began;
+        gpu_jobs++, gpu_job_ns += took, gpu_jobs_waited++, gpu_jobs_kind[kind]++, gpu_job_ns_kind[kind] += took;
+        gpu_job_submit_ns += gpu_submit_took, gpu_job_wait_ns += took > gpu_submit_took ? took - gpu_submit_took : 0;
         if (!gpu.pending) // a job given up on may still read the maps: their addresses stay handed out until it is done (gpu_idle)
                 gpu_handed_clear();
         return done;
@@ -1956,9 +1975,10 @@ static b32 gpu_run(void)
 // (the job's bo list names them, and no map is dropped while a job may run: gpu_idle).
 static positive gpu_go(void)
 {
+        const unsigned int kind = GPU_JOB_KIND(GPU_ARGS->op);
         positive sequence = gpu_submit();
 
-        gpu_jobs++;
+        gpu_jobs++, gpu_jobs_unwaited++, gpu_jobs_kind[kind]++;
         if (sequence)
                 gpu_handed_clear();
         return sequence;
