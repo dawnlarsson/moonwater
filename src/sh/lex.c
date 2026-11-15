@@ -1081,7 +1081,13 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                           !lex_parameter_pattern(at + 1);
         lex_cases cases;
 
+        //      Every count starts at nothing: an overflow left as whatever
+        //      the stack held read the first case as the seventeenth, so no
+        //      case was followed and $(case a in a) echo;; esac) ended at a).
         cases.count = 0;
+        cases.overflow = 0;
+        cases.pattern_parens = 0;
+        cases.pattern_started = false;
         cases.command = true;
 
         if (nesting >= EXPAND_DEPTH ||
