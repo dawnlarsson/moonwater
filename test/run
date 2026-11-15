@@ -1225,6 +1225,11 @@ gpu_kernels_wanted()
                 [ -n "${gpu_includers+x}" ] ||
                         gpu_includers=$(grep -rlE '#include +"([^"]*/)?gpu\.c"' src programs 2> /dev/null | grep -v '^src/canvas/gpu\.c$')
                 [ -n "$gpu_includers" ] ;;
+                #       A section that reaches gpu.c through the shell's sources
+                #       (CHECK_audit_builtin_regressions does) finds the include a
+                #       build left; a tree that has never built one, a clean export,
+                #       has none, and the section did not compile there at all.
+        test/checks.c) [ ! -e artifacts/gpu_kernels.inc ] ;;
         *) return 1 ;;
         esac
 }
