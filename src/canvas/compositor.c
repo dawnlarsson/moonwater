@@ -7221,6 +7221,18 @@ static int compositor_shows_row(int row)
                 (compositor.plane_fb == compositor.scan_fb[row][0] || compositor.plane_fb == compositor.scan_fb[row][1]));
 }
 
+/*
+        Whether a job of the card that reads a row's picture where it is (a window's table buffer, a client's lent buffer) may still run: while it does,
+        nothing that program is told may let it draw into what the job reads (the door's "taken", the shim's release of a buffer a commit replaced), and
+        both wait for it to be over: its fence signalled, or the hang path's end of it. Every present's jobs are waited for in place for now, so no job
+        reads a picture once its present is over: none.
+*/
+__attribute__((unused)) static int compositor_card_reads(int row)
+{
+        (void)row;
+        return 0;
+}
+
 // A flip to fb, done at the next vertical blank, with its event; false when the card refuses it.
 /*
         The second scanout (compositor_plate_make, compositor_plate_swap): the buffer the screen is not showing is the one composed into,
