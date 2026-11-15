@@ -174638,7 +174638,7 @@ static fn check_field_hands(string_address regular)
                                 ui_buttons_press(group, 0);
                                 launcher.height = launcher_build(0);
                                 ui_confirm_line(line_words, sizeof(line_words), group->says[0]);
-                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, UI_BODY_MEDIUM);
+                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, group->line.variant);
                                 first = group->confirm.armed && group->button[0].w > 0 && !group->button[1].w && !group->button[2].w && !group->button[3].w &&
                                         group->line.x >= group->button[0].x + group->button[0].w && group->line.w * scale / 100 + 1 >= need;
                                 for (int k = 0; k < group->count; k++)
@@ -174648,7 +174648,7 @@ static fn check_field_hands(string_address regular)
                                 ui_buttons_press(group, 3);
                                 launcher.height = launcher_build(0);
                                 ui_confirm_line(line_words, sizeof(line_words), group->says[3]);
-                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, UI_BODY_MEDIUM);
+                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, group->line.variant);
                                 last = group->confirm.armed && group->button[3].w > 0 && !group->button[0].w && !group->button[1].w && !group->button[2].w &&
                                        group->line.x + group->line.w <= group->button[3].x && group->line.w * scale / 100 + 1 >= need;
                                 ui_confirm_drop(&group->confirm);

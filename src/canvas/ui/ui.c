@@ -18308,6 +18308,9 @@ static int ui_view_end(struct ui_view address_to v)
                                 int before = it->x - gap - start, beyond = row_end - (it->x + it->w + gap);
 
                                 from = before >= beyond ? start : it->x + it->w + gap, to = before >= beyond ? it->x - gap : row_end;
+                                // Still too little room for the line in its type: it is said in the smaller type of a status line.
+                                if (ui_kit_measure(ui, (string_address)said, UI_BODY_MEDIUM) > to - from)
+                                        line->variant = UI_LABEL_MEDIUM;
                                 for (int k = first; k < v->tree.count; k++)
                                         if (v->item[k].kind == UI_ITEM_BUTTON && v->item[k].button >= 0 && v->item[k].button != armed &&
                                             v->tree.node[k].parent == it->parent)
@@ -18320,7 +18323,7 @@ static int ui_view_end(struct ui_view address_to v)
                         }
                 }
                 line->x = (int)((b64)from * 100 / scale), line->w = (int)((to > from ? (b64)to - from : 0) * 100 / scale);
-                line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)) / 2) * 100 / scale);
+                line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[line->variant].line)) / 2) * 100 / scale);
         }
         v->group.keys = v->group.keys > v->group.count ? 0 : v->group.keys;
         return v->tree.node[0].h;
