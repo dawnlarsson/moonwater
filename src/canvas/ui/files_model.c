@@ -1386,8 +1386,6 @@ struct files_job
         int depth;
 };
 
-static bipolar files_did_error; // the kernel's code of the last FILES_DID_FAILED
-
 // Whether bytes are a name a folder can hold: not empty, not . or .., no stroke, and short enough.
 static b32 files_name_good(const p8 address_to name)
 {
@@ -1411,7 +1409,6 @@ static int files_model_make_folder(struct files_model address_to m, const p8 add
         made = (bipolar)system_call_3(syscall(mkdirat), (positive)m->handle, (positive)name, 0755);
         if (made >= 0)
                 return FILES_DID;
-        files_did_error = made;
         return made == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
 }
 
@@ -1427,7 +1424,6 @@ static int files_model_rename(struct files_model address_to m, p32 place, const 
                                        FILE_RENAME_NOREPLACE);
         if (moved >= 0)
                 return FILES_DID;
-        files_did_error = moved;
         return moved == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
 }
 

@@ -4777,6 +4777,76 @@ static fn settings_status_check(void)
 
 #if MOONWATER_UI_SETTINGS
 /*
+        The metric line changes inside the window after a page was made, and then the card goes quiet: the page is made again once the window
+        has passed (a change is not lost to the window, and nothing else needs to move for it).
+*/
+static fn settings_metric_check(void)
+{
+        static struct windows table;
+        b64 t0 = 100000000000ll;
+
+        settings.ui.scale = 100;
+        settings_size(700, 520);
+        settings_group_choose(0);
+        memory_zero(&table, sizeof(table));
+        table.gpu_on = 1, table.gpu_able = 1, table.gpu_state = WINDOWS_GPU_UP;
+        settings.own.table = &table;
+        settings_board_due = 0, settings_metric_at = 0;
+        ui_kit.now = ui_kit.test_clock = t0;
+        settings_board_tick();
+        check("settings metric: the first board read makes the page at its time", settings_metric_at == (positive)t0);
+        table.metric_card_mean = 7;
+        ui_kit.now = ui_kit.test_clock = t0 + 1000000000ll;
+        settings_board_tick();
+        check("settings metric: a change inside the window does not make the page again yet", settings_metric_at == (positive)t0);
+        ui_kit.now = ui_kit.test_clock = t0 + 11000000000ll;
+        settings_board_tick();
+        check("settings metric: once the window has passed on a quiet card the page is made again with the changed line",
+              settings_metric_at == (positive)(t0 + 11000000000ll));
+}
+#endif
+
+#if MOONWATER_UI_MIXER
+/*
+        A page that is read and has not moved stays mapped: the mixer looks for its server again only when the page has truly stopped, so a quiet
+        page is not unmapped and mapped again every two seconds. The page is a mapping of its own (the unmap is the kernel's, of its own pages).
+*/
+static fn mixer_quiet_check(void)
+{
+        const b64 t0 = 100000000000ll, ms = 1000000ll;
+        long page_map = ui_map(sizeof(struct audio_state)), big_map = ui_map(sizeof(struct mixer_big));
+        b64 at;
+        b32 kept = true;
+
+        if ((page_map < 0 && page_map > -4096) || (big_map < 0 && big_map > -4096))
+        {
+                check("mixer quiet: the page and the state map", false);
+                return;
+        }
+        mixer_fixture_streams();
+        *(struct audio_state address_to)page_map = mixer_fixture_page;
+        memory_zero(&mixer, sizeof(mixer));
+        mixer.big = (struct mixer_big address_to)big_map;
+        mixer.page = (const volatile struct audio_state address_to)page_map;
+        mixer.page_path = "/nonexistent/audio_state";
+        mixer.socket_path = "/nonexistent/native";
+        mixer.have = audio_state_read(mixer.page, &mixer.big->copy);
+        mixer.listed = true;
+        mixer.seen_at = t0;
+        for (at = t0; at <= t0 + 5000 * ms; at += 100 * ms)
+        {
+                ui_kit.now = ui_kit.test_clock = at;
+                mixer_poll((b64)at);
+                if (!mixer.page || !mixer.have)
+                        kept = false;
+        }
+        check("mixer quiet: a page that has not moved is kept mapped for 5 s, and not mapped again every 2 s",
+              kept && mixer.page == (const volatile struct audio_state address_to)page_map);
+}
+#endif
+
+#if MOONWATER_UI_SETTINGS
+/*
         The GPU's status line in Settings says counts of presents, and every present moves them: the board is made again when the status or the
         card's share of the presents moves, not when a count alone does (a page made again presents, and that moves the counts again).
 */
@@ -4917,6 +4987,11 @@ static fn language_check(void)
                         }
                 check("languages: the Noto Sans Arabic and Hebrew faces, regular and bold, load", loaded);
         }
+#if MOONWATER_UI_SETTINGS && MOONWATER_UI_MIXER
+        // Before the failures' return: the rows of the settings metric and the mixer's page run whatever failed before them.
+        settings_metric_check();
+        mixer_quiet_check();
+#endif
         if (failures)
                 return;
         language_files_check(&regular, &bold);

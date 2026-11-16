@@ -886,6 +886,7 @@ static struct ui_spring settings_fold_spring[SETTINGS_ALL];
 static unsigned char settings_fold_live[SETTINGS_ALL];
 static positive settings_board_due;
 static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SUB_TEXT];
+static char settings_metric_shown[SETTINGS_SUB_TEXT]; // the metric line the page was last made with (settings_rebuild copies it)
 static char settings_notices_text[SETTINGS_SUB_TEXT];
 static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
 static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
@@ -1209,7 +1210,6 @@ static long settings_board_tick(void)
         positive now = (positive)ui_kit.now;
         struct windows_issues copy;
         unsigned int was = settings_gpu_key;
-        char before_metric[SETTINGS_SUB_TEXT];
 
         if (!settings.own.table)
                 return -1;
@@ -1218,12 +1218,12 @@ static long settings_board_tick(void)
         settings_board_due = now + (positive)SETTINGS_BOARD_NS;
         if (!windows_issues_read(settings.own.table, &copy))
                 return (long)SETTINGS_BOARD_NS;
-        string_copy_bounded((string_address)before_metric, (string_address)settings_metric_line, sizeof(before_metric));
         settings_gpu_sample();
         // The status line is made again when its key moves (settings_gpu_sample). The metric line is rates of presents, and a page made again presents,
-        // so its own change makes the page again no more often than SETTINGS_METRIC_NS (the line is as of the last time the page was made).
+        // so its own change makes the page again no more often than SETTINGS_METRIC_NS, measured from the last time the page was made: the line
+        // is compared with the one the page shows (settings_metric_shown), so a change inside that window is made once the window has passed.
         if (memory_compare(&copy, &settings_board, sizeof(copy)) || settings_gpu_key != was ||
-            (!string_equals((string_address)before_metric, (string_address)settings_metric_line) && now - settings_metric_at >= (positive)SETTINGS_METRIC_NS))
+            (!string_equals((string_address)settings_metric_shown, (string_address)settings_metric_line) && now - settings_metric_at >= (positive)SETTINGS_METRIC_NS))
         {
                 settings_board = copy;
                 settings_metric_at = now;
@@ -2326,6 +2326,7 @@ static fn settings_rebuild(void)
 {
         int count = 0;
 
+        string_copy_bounded((string_address)settings_metric_shown, (string_address)settings_metric_line, sizeof(settings_metric_shown));
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         // Every id written is a place of the kit's list (UI_LIST_MOST): the lines under the rows take what the rows leave, and a row past
         // that is not listed.

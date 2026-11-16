@@ -261,7 +261,8 @@ static b32 mixer_poll(b64 now)
         else
                 mixer.have = audio_state_read(mixer.page, &mixer.big->copy);
         changed = !mixer.listed || mixer.have != had || (mixer.have && mixer.big->copy.seq != before);
-        if (changed || !mixer.have)
+        // A page that was read is seen at its time, changed or not: it is remapped only once it has truly stopped (not read for MIXER_REMAP_NS).
+        if (changed || mixer.have)
                 mixer.seen_at = now;
         // A server that was started again has a page of its own: the old one is let go when it has not moved for a while.
         if (mixer.page && now - mixer.seen_at > MIXER_REMAP_NS)
