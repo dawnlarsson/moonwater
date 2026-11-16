@@ -2052,8 +2052,19 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 }
                 switch (which)
                 {
-                case TASKBAR_LAUNCHER: // the moon, the clock on it
+                case TASKBAR_LAUNCHER: // the moon, the clock on it; ringed over it while the band is arranged
                         taskbar_moon(view, t, n, time_ok ? broken.tm_hour : -1, time_ok ? broken.tm_min : -1, view->launcher_lit);
+                        if (taskbar.editing)
+                        {
+                                struct ui grip;
+                                struct ui_box ring = taskbar_face(t, n, 0, 0);
+                                b32 in = (b32)(s / 100 > 1 ? s / 100 : 1) * 256 * 2;
+
+                                taskbar_glass_ui(&grip, view, t, ground);
+                                ring.x0 += in, ring.y0 += in, ring.x1 -= in, ring.y1 -= in;
+                                ring.rx = ring.ry = ((ring.x1 - ring.x0 < ring.y1 - ring.y0 ? ring.x1 - ring.x0 : ring.y1 - ring.y0) / 2);
+                                ui_kit_ring(&grip, &ring, (b32)(s * 256 / 100 > 256 ? s * 256 / 100 : 256), (window_contrast(ground) & 0xffffffu) | 0x99000000u);
+                        }
                         break;
                 case TASKBAR_TRAY:
                 case TASKBAR_TRAY_BEFORE:
@@ -2316,6 +2327,254 @@ static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsi
         taskbar.clock_bulge = bulge >= 0 && bulge <= 100 ? bulge : 60;
         taskbar.clock_12h = twelve != 0;
         taskbar.stale = 1;
+}
+
+/*
+        The moon's menu: a right press on the moon (a finger's long press is one) opens the kit's menu (ui_popmenu) beside the moon, on the
+        screen's side of the band. Under its header (AM or PM, while the clock is read in twelve hours, which the moon's digits do not
+        say) are Edit taskbar, which puts the band into its arrangement (taskbar.editing), Settings, and the other clock format (24-hour
+        clock while it is 12, 12-hour clock while it is 24), kept through `time format` as the verb keeps it. The compositor draws it as
+        a frame of its own over everything and gives it the pointer while it is up; a press anywhere but on it, a wheel's turn or Escape
+        puts it away (taskbar_menu_hand).
+*/
+static struct
+{
+        struct ui ui;
+        struct ui_popmenu menu;
+        int open, x, y, width, height; // where it is in the space, and its size, device pixels
+        b32 dirty;                     // drawn again at the next present
+} taskbar_menu;
+
+// The kit's ui the menu is drawn with: the band's faces and engine, the band's scale, the theme's surface for its ground.
+static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_to pixels)
+{
+        struct ui address_to ui = &taskbar_menu.ui;
+
+        memory_zero(ui, sizeof(*ui));
+        ui->engine = view->engine, ui->regular = view->face, ui->bold = view->bold ? view->bold : view->face;
+        ui->scale = taskbar_scaled(view->scale), ui->opaque = 1;
+        ui->pixels = pixels, ui->pitch = (unsigned long)taskbar_menu.width, ui->width = taskbar_menu.width, ui->height = taskbar_menu.height;
+        ui->top = 0, ui->bottom = taskbar_menu.height;
+        ui_inks(ui, compositor_tab_target(0) & 0xffffffu);
+}
+
+// The menu made and placed beside the moon of the band being drawn: false with no moon or no face to write it with.
+static int taskbar_menu_open(const struct taskbar_view *view)
+{
+        int x, y, w, h, gap;
+
+        if (!view->engine || !view->face || !taskbar_anchor(view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
+                return 0;
+        memory_zero(&taskbar_menu.menu, sizeof(taskbar_menu.menu));
+        taskbar_menu.menu.hot = -1;
+        if (taskbar.clock_12h)
+        {
+                timespec now = {0, 0};
+                time_t seconds;
+                tm broken;
+
+                clock_gettime(CLOCK_REALTIME, address_of now);
+                seconds = taskbar.moon_at ? taskbar.moon_at : now.tv_sec;
+                if (localtime_r(&seconds, &broken))
+                        ui_popmenu_add(&taskbar_menu.menu, broken.tm_hour < 12 ? WORDS(tray_am) : WORDS(tray_pm), null, UI_MENU_HEADER, 0);
+        }
+        ui_popmenu_add(&taskbar_menu.menu, WORDS(tray_edit), null, 0, TASKBAR_MENU_EDIT);
+        ui_popmenu_add(&taskbar_menu.menu, WORDS(tray_settings), null, 0, TASKBAR_MENU_SETTINGS);
+        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(&taskbar_menu.menu, taskbar.clock_12h ? WORDS(tray_clock_24h) : WORDS(tray_clock_12h), null, 0, TASKBAR_MENU_CLOCK);
+        taskbar_menu.width = taskbar_menu.height = 1;
+        taskbar_menu_ui(view, null);
+        ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
+        taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
+        if (taskbar_menu.width <= 0 || taskbar_menu.height <= 0)
+                return 0;
+        // Beside the moon on the screen's side of the band, its middle on the moon's, held inside the screen.
+        gap = taskbar_scaled(view->scale) * 6 / 100;
+        taskbar_menu.x = x + w / 2 - taskbar_menu.width / 2, taskbar_menu.y = y + h / 2 - taskbar_menu.height / 2;
+        if (view->position == TASKBAR_BOTTOM)
+                taskbar_menu.y = y - gap - taskbar_menu.height;
+        else if (view->position == TASKBAR_TOP)
+                taskbar_menu.y = y + h + gap;
+        else if (view->position == TASKBAR_LEFT)
+                taskbar_menu.x = x + w + gap;
+        else
+                taskbar_menu.x = x - gap - taskbar_menu.width;
+        taskbar_menu.x = taskbar_menu.x + taskbar_menu.width > view->x + view->width ? view->x + view->width - taskbar_menu.width : taskbar_menu.x;
+        taskbar_menu.y = taskbar_menu.y + taskbar_menu.height > view->y + view->height ? view->y + view->height - taskbar_menu.height : taskbar_menu.y;
+        taskbar_menu.x = taskbar_menu.x < view->x ? view->x : taskbar_menu.x, taskbar_menu.y = taskbar_menu.y < view->y ? view->y : taskbar_menu.y;
+        taskbar_menu.open = 1, taskbar_menu.dirty = 1;
+        return 1;
+}
+
+// The menu drawn into pixels (its width a row), with the faces of view.
+static fn taskbar_menu_draw(const struct taskbar_view *view, unsigned int address_to pixels)
+{
+        taskbar_menu_ui(view, pixels);
+        ui_clear(&taskbar_menu.ui);
+        ui_kit.now = (b64)ui_kit_clock();
+        ui_popmenu_draw(&taskbar_menu.ui, &taskbar_menu.menu);
+        taskbar_menu.dirty = taskbar_menu.menu.moving;
+}
+
+// An event of the hand for the menu, at x, y in the space: the id of an item chosen, 0 for nothing, -1 for the menu to go.
+static int taskbar_menu_hand(unsigned int type, unsigned int flags, int a, int b, int x, int y)
+{
+        struct window_event event = {type, flags, a, b, 0};
+        int answer;
+
+        if (!taskbar_menu.open)
+                return -1;
+        ui_kit.now = (b64)ui_kit_clock();
+        answer = ui_popmenu_event(&taskbar_menu.ui, &taskbar_menu.menu, &event, x - taskbar_menu.x, y - taskbar_menu.y);
+        taskbar_menu.dirty = 1;
+        return answer == UI_MENU_GONE ? -1 : answer > 0 ? answer : 0;
+}
+
+// Whether the menu is up, and where (left, top, width, height in the space).
+static int taskbar_menu_rect(int rect[4])
+{
+        rect[0] = taskbar_menu.x, rect[1] = taskbar_menu.y, rect[2] = taskbar_menu.width, rect[3] = taskbar_menu.height;
+        return taskbar_menu.open && taskbar_menu.width > 0 && taskbar_menu.height > 0;
+}
+
+// Whether the menu's picture is to be drawn again.
+static int taskbar_menu_redraw(void)
+{
+        return taskbar_menu.dirty;
+}
+
+static void taskbar_menu_shut(void)
+{
+        taskbar_menu.open = 0;
+}
+
+// The clock format the menu's clock item turns to (`time format`'s word), and the band's clock turned to it.
+static const char *taskbar_clock_other(void)
+{
+        return taskbar.clock_12h ? "24h" : "12h";
+}
+
+static void taskbar_clock_turn(void)
+{
+        taskbar.clock_12h = !taskbar.clock_12h, taskbar.stale = 1;
+}
+
+static int taskbar_editing(void)
+{
+        return taskbar.editing;
+}
+
+/*
+        The band's arrangement (taskbar.editing): each item that can be moved is ringed (the moon, every task and each tray item), the
+        three places along the band are slots a drop is aimed at, and the Done button is at the end. An item pressed and let go elsewhere
+        on the band is moved there (taskbar_edit_drop), at once, by a press of a device plugged into the machine alone (the compositor
+        refuses one with WINDOW_EVENT_VIRTUAL, as Settings refuses a deliberate row for one); Done keeps the arrangement through the
+        `taskbar` rows' own files and words (taskbar_edit_words), as the verbs and Settings keep them, and the band leaves its arrangement.
+*/
+static void taskbar_edit_set(int on)
+{
+        taskbar.editing = on != 0;
+        taskbar.stale = 1;
+}
+
+// The item of the arrangement at a point of the band: the moon, a task, a tray item or the Done button; TASKBAR_HIT_NONE for none.
+static int taskbar_edit_item(const struct taskbar_view *view, int px, int py)
+{
+        const struct ui_tree address_to t = taskbar_tree(view);
+        int at, which;
+
+        if (!taskbar.editing)
+                return TASKBAR_HIT_NONE;
+        at = ui_tree_hit(t, px, py, (int[2]){0, 0});
+        if (at < 0)
+                return TASKBAR_HIT_NONE;
+        which = t->node[at].id - 1;
+        return which >= 0 || which == TASKBAR_LAUNCHER || which == TASKBAR_DONE || taskbar_item_of(which) >= 0 ? which : TASKBAR_HIT_NONE;
+}
+
+// The middle of a slot along the band, or -1 with no such slot.
+static int taskbar_edit_along(const struct taskbar_view *view, int which)
+{
+        const struct ui_node address_to n = taskbar_node(view, which), address_to band = &taskbar_tree(view)->node[1];
+
+        return n ? (band->dir ? n->y + n->h / 2 : n->x + n->w / 2) : -1;
+}
+
+/*
+        An item let go at px, py: the moon to the place it is let go in (the tasks no longer split round it unless it is in the middle);
+        a task to the place, or onto the moon to split the tasks round it; a tray item before the tasks or after them, by the side of the
+        tasks' middle it is let go on. Answers whether the arrangement changed.
+*/
+static int taskbar_edit_drop(const struct taskbar_view *view, int which, int px, int py)
+{
+        const struct ui_node address_to band = &taskbar_tree(view)->node[1];
+        int along = band->dir ? py : px, zone = TASKBAR_ZONE_CENTRE, best = -1, moon = taskbar_edit_along(view, TASKBAR_LAUNCHER);
+        int moon_zone = taskbar.moon_zone, tasks_zone = taskbar.tasks_zone;
+        unsigned int before = taskbar.tray_before;
+
+        if (!taskbar.editing)
+                return 0;
+        for (int each = TASKBAR_ZONE_START; each <= TASKBAR_ZONE_END; each++)
+        {
+                const struct ui_node address_to n = taskbar_node(view, TASKBAR_ZONE - each);
+                int from, to, apart;
+
+                if (!n)
+                        continue;
+                from = band->dir ? n->y : n->x, to = from + (band->dir ? n->h : n->w);
+                apart = along < from ? from - along : along >= to ? along - to + 1 : 0;
+                if (best < 0 || apart < best)
+                        best = apart, zone = each;
+        }
+        if (which == TASKBAR_LAUNCHER)
+        {
+                moon_zone = zone;
+                if (tasks_zone == TASKBAR_ZONE_SPLIT && zone != TASKBAR_ZONE_CENTRE)
+                        tasks_zone = TASKBAR_ZONE_CENTRE;
+        }
+        else if (which >= 0)
+        {
+                const struct ui_node address_to n = taskbar_node(view, TASKBAR_LAUNCHER);
+                int on_moon = n && px >= n->x && px < n->x + n->w && py >= n->y && py < n->y + n->h;
+
+                tasks_zone = on_moon ? TASKBAR_ZONE_SPLIT : zone;
+                if (on_moon)
+                        moon_zone = TASKBAR_ZONE_CENTRE;
+        }
+        else if (taskbar_item_of(which) >= 0)
+        {
+                int tasks = taskbar.tasks_zone == TASKBAR_ZONE_SPLIT ? moon : taskbar_edit_along(view, TASKBAR_TABS);
+
+                tasks = tasks < 0 ? moon : tasks;
+                if (tasks < 0)
+                        return 0;
+                before = along < tasks ? before | 1u << taskbar_item_of(which) : before & ~(1u << taskbar_item_of(which));
+        }
+        else
+                return 0;
+        if (moon_zone == taskbar.moon_zone && tasks_zone == taskbar.tasks_zone && before == taskbar.tray_before)
+                return 0;
+        taskbar.moon_zone = moon_zone, taskbar.tasks_zone = tasks_zone, taskbar.tray_before = before, taskbar.stale = 1;
+        return 1;
+}
+
+/*
+        The arrangement as the `taskbar` rows keep it: for each row its file and its word, the moon's place, the tasks' and each tray item's
+        side (the rows' choices, as `taskbar moon`, `taskbar tasks` and `taskbar item ITEM` take them). Answers how many.
+*/
+static int taskbar_edit_words(const char *paths[TASKBAR_EDIT_ROWS], const char *words[TASKBAR_EDIT_ROWS])
+{
+        static const char address_to const places[3] = {"start", "center", "end"};
+        static const char address_to const items[6] = {SETTING_TASKBAR_ITEM_NOTICES_PATH, SETTING_TASKBAR_ITEM_MIC_PATH, SETTING_TASKBAR_ITEM_SOUND_PATH,
+                                                         SETTING_TASKBAR_ITEM_BATTERY_PATH, SETTING_TASKBAR_ITEM_TEXT_PATH, SETTING_TASKBAR_ITEM_CLOCK_PATH};
+        int count = 0;
+
+        paths[count] = SETTING_TASKBAR_MOON_PATH, words[count++] = places[taskbar.moon_zone >= 0 && taskbar.moon_zone < 3 ? taskbar.moon_zone : 1];
+        paths[count] = SETTING_TASKBAR_TASKS_PATH;
+        words[count++] = taskbar.tasks_zone == TASKBAR_ZONE_SPLIT ? "split" : places[taskbar.tasks_zone >= 0 && taskbar.tasks_zone < 3 ? taskbar.tasks_zone : 1];
+        for (int at = 0; at < 6; at++)
+                paths[count] = items[at], words[count++] = taskbar.tray_before >> at & 1 ? "before" : "after";
+        return count;
 }
 
 // `taskbar fullscreen`: on, the band slides off its edge while a window is fullscreen (taskbar_slide_now).

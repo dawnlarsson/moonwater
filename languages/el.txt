@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάστα
 terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
 tray_am	0d13	πμ
 tray_charging	60c2	φορτίζει
+tray_clock_12h	8ab5	12ωρο ρολόι
+tray_clock_24h	78ae	24ωρο ρολόι
 tray_day_fri	fbe8	Παρ
 tray_day_mon	82e1	Δευ
 tray_day_sat	2a77	Σάβ
@@ -254,6 +256,7 @@ tray_day_tue	f425	Τρί
 tray_day_wed	5757	Τετ
 tray_discharging	41a0	αποφορτίζεται
 tray_done	1791	Τέλος
+tray_edit	b953	Επεξεργασία γραμμής
 tray_month_apr	1df2	Απρ
 tray_month_aug	8fd4	Αυγ
 tray_month_dec	7a73	Δεκ
@@ -267,6 +270,7 @@ tray_month_nov	c404	Νοε
 tray_month_oct	f3e9	Οκτ
 tray_month_sep	a4ef	Σεπ
 tray_pm	f466	μμ
+tray_settings	8728	Ρυθμίσεις
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο

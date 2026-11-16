@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	завершено со статусом %d,
 terminal_press_to_close	080d	нажмите любую клавишу, чтобы закрыть
 tray_am	0d13	ДП
 tray_charging	60c2	заряжается
+tray_clock_12h	8ab5	12-часовой формат
+tray_clock_24h	78ae	24-часовой формат
 tray_day_fri	fbe8	пт
 tray_day_mon	82e1	пн
 tray_day_sat	2a77	сб
@@ -254,6 +256,7 @@ tray_day_tue	f425	вт
 tray_day_wed	5757	ср
 tray_discharging	41a0	разряжается
 tray_done	1791	Готово
+tray_edit	b953	Изменить панель задач
 tray_month_apr	1df2	апр
 tray_month_aug	8fd4	авг
 tray_month_dec	7a73	дек
@@ -267,6 +270,7 @@ tray_month_nov	c404	ноя
 tray_month_oct	f3e9	окт
 tray_month_sep	a4ef	сен
 tray_pm	f466	ПП
+tray_settings	8728	Настройки
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается

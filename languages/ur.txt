@@ -246,6 +246,8 @@ terminal_exited_press_to_close	a8cf	ایگزٹ کوڈ %d کے ساتھ ختم ہ
 terminal_press_to_close	080d	بند کرنے کے لیے کوئی کلید دبائیں
 tray_am	0d13	ص
 tray_charging	60c2	چارج ہو رہی ہے
+tray_clock_12h	8ab5	12 گھنٹے کی گھڑی
+tray_clock_24h	78ae	24 گھنٹے کی گھڑی
 tray_day_fri	fbe8	جمعہ
 tray_day_mon	82e1	پیر
 tray_day_sat	2a77	ہفتہ
@@ -255,6 +257,7 @@ tray_day_tue	f425	منگل
 tray_day_wed	5757	بدھ
 tray_discharging	41a0	ڈسچارج ہو رہی ہے
 tray_done	1791	ہو گیا
+tray_edit	b953	ٹاسک بار میں ترمیم
 tray_month_apr	1df2	اپریل
 tray_month_aug	8fd4	اگست
 tray_month_dec	7a73	دسمبر
@@ -268,6 +271,7 @@ tray_month_nov	c404	نومبر
 tray_month_oct	f3e9	اکتوبر
 tray_month_sep	a4ef	ستمبر
 tray_pm	f466	ش
+tray_settings	8728	ترتیبات
 ui_confirm_again	b3ff	دوبارہ دبائیں: 
 ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
 ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا

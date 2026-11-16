@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	beendet mit Status %d, zum Schließen eine T
 terminal_press_to_close	080d	zum Schließen eine Taste drücken
 tray_am	0d13	AM
 tray_charging	60c2	lädt
+tray_clock_12h	8ab5	12-Stunden-Uhr
+tray_clock_24h	78ae	24-Stunden-Uhr
 tray_day_fri	fbe8	Fr
 tray_day_mon	82e1	Mo
 tray_day_sat	2a77	Sa
@@ -254,6 +256,7 @@ tray_day_tue	f425	Di
 tray_day_wed	5757	Mi
 tray_discharging	41a0	entlädt
 tray_done	1791	Fertig
+tray_edit	b953	Taskleiste bearbeiten
 tray_month_apr	1df2	Apr
 tray_month_aug	8fd4	Aug
 tray_month_dec	7a73	Dez
@@ -267,6 +270,7 @@ tray_month_nov	c404	Nov
 tray_month_oct	f3e9	Okt
 tray_month_sep	a4ef	Sep
 tray_pm	f466	PM
+tray_settings	8728	Einstellungen
 ui_confirm_again	b3ff	zur Bestätigung erneut drücken: 
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
 ui_field_full	fe02	mehr passt nicht hinein

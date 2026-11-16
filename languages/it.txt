@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	terminato con stato %d, premere un tasto per
 terminal_press_to_close	080d	premere un tasto per chiudere
 tray_am	0d13	AM
 tray_charging	60c2	in carica
+tray_clock_12h	8ab5	Orologio a 12 ore
+tray_clock_24h	78ae	Orologio a 24 ore
 tray_day_fri	fbe8	ven
 tray_day_mon	82e1	lun
 tray_day_sat	2a77	sab
@@ -254,6 +256,7 @@ tray_day_tue	f425	mar
 tray_day_wed	5757	mer
 tray_discharging	41a0	in scarica
 tray_done	1791	Fatto
+tray_edit	b953	Modifica la barra
 tray_month_apr	1df2	apr
 tray_month_aug	8fd4	ago
 tray_month_dec	7a73	dic
@@ -267,6 +270,7 @@ tray_month_nov	c404	nov
 tray_month_oct	f3e9	ott
 tray_month_sep	a4ef	set
 tray_pm	f466	PM
+tray_settings	8728	Impostazioni
 ui_confirm_again	b3ff	premi di nuovo per confermare: 
 ui_field_digits	f52b	un numero è fatto di cifre
 ui_field_full	fe02	non ce ne sta di più

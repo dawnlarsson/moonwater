@@ -1170,6 +1170,204 @@ static int compositor_moon_band(int x, int y)
         return found;
 }
 
+/*
+        The moon's menu and the band's arrangement in the compositor's hand. A settings row the arrangement keeps is written as the
+        `taskbar` verbs write it (the row's own file, its word parsed by the row as the verb parses it, and a line), under
+        compositor_settings_root, which is the machine's root and a check's own directory in a check. The compositor reads it back as it
+        reads every row (it watches /root), so the verbs, Settings and the band agree.
+*/
+static const char *compositor_settings_root = "";
+static int compositor_edit_refused; // the arrangement's presses refused for a device that is not the machine's own (WINDOW_EVENT_VIRTUAL)
+
+static int compositor_row_write(const char *path, const char *word)
+{
+        const struct settings_row *row = setting_by_path((string_address)path);
+        p8 kept[32];
+        long value;
+        char where[160], line[40];
+        bipolar handle;
+        positive length;
+
+        if (!row || !setting_parse(row, (string_address)word, kept, sizeof(kept) - 1, &value))
+                return 0;
+        string_copy_bounded((p8 *)where, (string_address)compositor_settings_root, sizeof(where));
+        string_append_bounded((p8 *)where, (string_address)path, sizeof(where));
+        string_copy_bounded((p8 *)line, kept, sizeof(line) - 1);
+        length = string_length((string_address)line);
+        line[length++] = '\n';
+        handle = system_open_at_mode(AT_FDCWD, (string_address)where, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return 0;
+        system_write_all((b32)handle, line, length);
+        system_close(handle);
+        return 1;
+}
+
+// Done: the arrangement kept through its rows, and the band out of it.
+static int compositor_edit_done(void)
+{
+        const char *paths[TASKBAR_EDIT_ROWS], *words[TASKBAR_EDIT_ROWS];
+        int count = taskbar_edit_words(paths, words), kept = 0;
+
+        for (int at = 0; at < count; at++)
+                kept += compositor_row_write(paths[at], words[at]);
+        taskbar_edit_set(0);
+        compositor_tabs_changed();
+        return kept == count;
+}
+
+// The menu put away: its square damaged.
+static void compositor_menu_close(void)
+{
+        int rect[4];
+
+        if (!taskbar_menu_rect(rect))
+                return;
+        taskbar_menu_shut();
+        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+}
+
+// The moon's menu opened beside the moon of the band at x, y.
+static void compositor_menu_open(int x, int y)
+{
+        int band = compositor_moon_band(x, y);
+        struct taskbar_view view;
+
+        compositor_menu_close();
+        if (band < 0)
+                return;
+        compositor.band_at = band;
+        view = compositor_band_view();
+        compositor_menu.band = band, compositor_menu.drawn = 0;
+        if (taskbar_menu_open(&view))
+        {
+                int rect[4];
+
+                taskbar_menu_rect(rect);
+                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        }
+        compositor.band_at = 0;
+}
+
+// What a chosen item of the menu does.
+static void compositor_menu_chose(int id)
+{
+        compositor_menu_close();
+        if (id == TASKBAR_MENU_EDIT)
+        {
+                taskbar_edit_set(1);
+                compositor_tabs_changed();
+        }
+        else if (id == TASKBAR_MENU_SETTINGS)
+                compositor_settings_open();
+        else if (id == TASKBAR_MENU_CLOCK && compositor_row_write(SETTING_CLOCK_FORMAT_PATH, taskbar_clock_other()))
+        {
+                taskbar_clock_turn();
+                compositor_tabs_changed();
+        }
+}
+
+/*
+        A button of the hand while the menu is up or the band is arranged: answers whether it was theirs. The menu takes what is on it and
+        is put away by a press anywhere else (which is then nothing more); the arrangement takes the band's presses: Done, and an item
+        pressed and let go elsewhere on the band, from a device plugged into the machine alone.
+*/
+static struct
+{
+        int which, band, held;
+} compositor_edit_drag;
+
+/*
+        A press of the arrangement on the band of view (its number band) at x, y, from a device that is the machine's own or not (physical):
+        0 when it is on nothing of the arrangement's, else 1, taken (refused for a device not the machine's: counted, nothing done).
+*/
+static int compositor_edit_press(const struct taskbar_view *view, int band, int x, int y, int physical)
+{
+        int which = taskbar_edit_item(view, x, y);
+
+        if (which == TASKBAR_HIT_NONE)
+                return 0;
+        // The arrangement is the settings': a device that is not the machine's own moves nothing and keeps nothing.
+        if (!physical)
+        {
+                compositor_edit_refused++;
+                return 1;
+        }
+        if (which == TASKBAR_DONE)
+                compositor_edit_done();
+        else
+                compositor_edit_drag.which = which, compositor_edit_drag.band = band, compositor_edit_drag.held = 1;
+        return 1;
+}
+
+// The press let go at x, y: the item held moved there, from the machine's own device alone. 1 when there was one held.
+static int compositor_edit_release(const struct taskbar_view *view, int x, int y, int physical)
+{
+        if (!compositor_edit_drag.held)
+                return 0;
+        compositor_edit_drag.held = 0;
+        if (!physical)
+                compositor_edit_refused++;
+        else if (taskbar_edit_drop(view, compositor_edit_drag.which, x, y))
+                compositor_tabs_changed();
+        return 1;
+}
+
+static int compositor_band_hand(unsigned int code, int down)
+{
+        int x = compositor.pointer_x, y = compositor.pointer_y, rect[4];
+
+        if (taskbar_menu_rect(rect))
+        {
+                if (x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3])
+                {
+                        int answer = taskbar_menu_hand(WINDOW_EVENT_BUTTON, down ? WINDOW_KEY_DOWN : 0, (int)code, 0, x, y);
+
+                        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+                        if (answer < 0)
+                                compositor_menu_close();
+                        else if (answer > 0)
+                                compositor_menu_chose(answer);
+                        return 1;
+                }
+                if (down)
+                {
+                        compositor_menu_close();
+                        return 1;
+                }
+        }
+        if (!taskbar_editing() || code != COMPOSITOR_BTN_LEFT)
+                return 0;
+        if (!down)
+        {
+                int taken;
+
+                if (!compositor_edit_drag.held)
+                        return 0;
+                compositor.band_at = compositor_edit_drag.band;
+                {
+                        struct taskbar_view view = compositor_band_view();
+
+                        taken = compositor_edit_release(&view, x, y, compositor_post_physical);
+                }
+                compositor.band_at = 0;
+                return taken;
+        }
+        for (int band = 0; band < compositor_bands(); band++)
+        {
+                struct taskbar_view view;
+                int taken;
+
+                compositor.band_at = band;
+                view = compositor_band_view();
+                taken = compositor_edit_press(&view, band, x, y, compositor_post_physical);
+                compositor.band_at = 0;
+                if (taken)
+                        return 1;
+        }
+        return 0;
+}
+
 static void compositor_motion(void)
 {
         int under, tab;
@@ -1179,6 +1377,16 @@ static void compositor_motion(void)
         // The moon turns while a hand is about, and grows while the pointer is over it.
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
+        // The menu's hover: the item under the hand lit.
+        {
+                int rect[4];
+
+                if (taskbar_menu_rect(rect))
+                {
+                        taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y);
+                        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+                }
+        }
 
         // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
         // the shape its client asked for with wp_cursor_shape, or the program's controls publish (the arrow when it has none).
@@ -1661,6 +1869,9 @@ static void compositor_button(unsigned int code, int down)
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
+        // The moon's menu and the band's arrangement first: what is theirs goes no further.
+        if (compositor_band_hand(code, down))
+                return;
         if (!down)
         {
                 compositor_release(code, 1);
@@ -1710,6 +1921,12 @@ static void compositor_button(unsigned int code, int down)
         // The panel's cells (the launcher's button, the microphone, the volume and the tray) take a press by the taskbar's rule
         // (taskbar_cell_press): what it does is the rule's action, and the compositor carries the action out. Each takes its
         // press alone: none of them passes it on to a window.
+        // The moon's right press: its menu beside it.
+        if (tab == TASKBAR_LAUNCHER && code == COMPOSITOR_BTN_RIGHT)
+        {
+                compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
         if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == COMPOSITOR_TRAY)
         {
                 switch (taskbar_cell_press(&compositor.cells, tab, code - COMPOSITOR_BTN_LEFT, clock_monotonic_nanoseconds(),

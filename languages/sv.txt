@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tange
 terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm
 tray_charging	60c2	laddar
+tray_clock_12h	8ab5	12-timmarsklocka
+tray_clock_24h	78ae	24-timmarsklocka
 tray_day_fri	fbe8	fre
 tray_day_mon	82e1	mån
 tray_day_sat	2a77	lör
@@ -254,6 +256,7 @@ tray_day_tue	f425	tis
 tray_day_wed	5757	ons
 tray_discharging	41a0	laddar ur
 tray_done	1791	Klar
+tray_edit	b953	Redigera aktivitetsfältet
 tray_month_apr	1df2	apr
 tray_month_aug	8fd4	aug
 tray_month_dec	7a73	dec
@@ -267,6 +270,7 @@ tray_month_nov	c404	nov
 tray_month_oct	f3e9	okt
 tray_month_sep	a4ef	sep
 tray_pm	f466	em
+tray_settings	8728	Inställningar
 ui_confirm_again	b3ff	tryck igen för att bekräfta: 
 ui_field_digits	f52b	ett tal består av siffror
 ui_field_full	fe02	mer ryms inte

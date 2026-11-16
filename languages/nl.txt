@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets 
 terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.
 tray_charging	60c2	laadt op
+tray_clock_12h	8ab5	12-uursklok
+tray_clock_24h	78ae	24-uursklok
 tray_day_fri	fbe8	vr
 tray_day_mon	82e1	ma
 tray_day_sat	2a77	za
@@ -254,6 +256,7 @@ tray_day_tue	f425	di
 tray_day_wed	5757	wo
 tray_discharging	41a0	ontlaadt
 tray_done	1791	Klaar
+tray_edit	b953	Taakbalk bewerken
 tray_month_apr	1df2	apr
 tray_month_aug	8fd4	aug
 tray_month_dec	7a73	dec
@@ -267,6 +270,7 @@ tray_month_nov	c404	nov
 tray_month_oct	f3e9	okt
 tray_month_sep	a4ef	sep
 tray_pm	f466	p.m.
+tray_settings	8728	Instellingen
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in

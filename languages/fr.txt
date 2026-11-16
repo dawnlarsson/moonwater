@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une to
 terminal_press_to_close	080d	appuyez sur une touche pour fermer
 tray_am	0d13	AM
 tray_charging	60c2	en charge
+tray_clock_12h	8ab5	Horloge 12 h
+tray_clock_24h	78ae	Horloge 24 h
 tray_day_fri	fbe8	ven
 tray_day_mon	82e1	lun
 tray_day_sat	2a77	sam
@@ -254,6 +256,7 @@ tray_day_tue	f425	mar
 tray_day_wed	5757	mer
 tray_discharging	41a0	en décharge
 tray_done	1791	Terminé
+tray_edit	b953	Modifier la barre
 tray_month_apr	1df2	avr.
 tray_month_aug	8fd4	août
 tray_month_dec	7a73	déc.
@@ -267,6 +270,7 @@ tray_month_nov	c404	nov.
 tray_month_oct	f3e9	oct.
 tray_month_sep	a4ef	sept.
 tray_pm	f466	PM
+tray_settings	8728	Réglages
 ui_confirm_again	b3ff	appuyez de nouveau pour confirmer : 
 ui_field_digits	f52b	un nombre s'écrit en chiffres
 ui_field_full	fe02	c'est tout ce que ce champ peut contenir

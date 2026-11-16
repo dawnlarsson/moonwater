@@ -3189,6 +3189,101 @@ static void check_moon_motion(void)
 }
 
 /*
+        The band's arrangement, opened from the moon's menu: the moon ringed with the rest; an item pressed and let go elsewhere moves
+        there from the machine's own device and not from a virtual one (WINDOW_EVENT_VIRTUAL: uinput, uhid, the on-screen keyboard, the
+        headless pipe), which is counted and moves nothing; and Done keeps the arrangement through the `taskbar` rows' files and words (in
+        a directory of the check's own), which the rows read back as the arrangement it was, and the band leaves its arrangement.
+*/
+static void check_taskbar_edit(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    static char root[64], path[160], word[32];
+    struct taskbar_view view;
+    int sx, sy, sw, sh, zx, zy, zw, zh, refused_before;
+    b32 menu = 1, virtual_refused, moved, kept, read_back, left;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    memory_zero(&view, sizeof(view));
+    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_standard();
+    // The menu's words: the clock's other format, as `time format` takes it.
+    menu &= string_equals((string_address)taskbar_clock_other(), (string_address)(taskbar.clock_12h ? "24h" : "12h"));
+    taskbar_edit_set(1);
+    taskbar_slot(&view, TASKBAR_LAUNCHER, &sx, &sy, &sw, &sh);
+    {
+        const struct ui_node address_to start = taskbar_node(&view, TASKBAR_ZONE - TASKBAR_ZONE_START);
+
+        zx = start ? start->x : 0, zy = start ? start->y : 0, zw = start ? start->w : 0, zh = start ? start->h : 0;
+    }
+    menu &= taskbar_edit_item(&view, sx + sw / 2, sy + sh / 2) == TASKBAR_LAUNCHER && zw > 0;
+    // A virtual device: the press and its release are refused and counted, and the moon stays in the middle.
+    refused_before = compositor_edit_refused;
+    compositor_edit_press(&view, 0, sx + sw / 2, sy + sh / 2, 0);
+    compositor_edit_release(&view, zx + 2, zy + zh / 2, 0);
+    virtual_refused = compositor_edit_refused == refused_before + 1 && taskbar.moon_zone == TASKBAR_ZONE_CENTRE && !compositor_edit_drag.held;
+    // The machine's own: the moon pressed and let go at the band's start is there, the tasks no longer split round it.
+    compositor_edit_press(&view, 0, sx + sw / 2, sy + sh / 2, 1);
+    compositor_edit_release(&view, zx + 2, zy + zh / 2, 1);
+    moved = taskbar.moon_zone == TASKBAR_ZONE_START && taskbar.tasks_zone != TASKBAR_ZONE_SPLIT;
+    // Done, into the check's own directory of rows: each row's file holds its word, and the row reads it as the place it is.
+    string_copy((string_address)root, (string_address) "/tmp/moonwater-check-edit-");
+    positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
+    system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)root, 0700);
+    string_copy((string_address)path, (string_address)root), string_copy((string_address)path + string_length((string_address)path), (string_address) "/root");
+    system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700);
+    compositor_settings_root = root;
+    kept = compositor_edit_done();
+    left = !taskbar.editing;
+    read_back = 1;
+    {
+        static const char *const paths[2] = {SETTING_TASKBAR_MOON_PATH, SETTING_TASKBAR_TASKS_PATH};
+        static const char *const want[2] = {"start", "center"};
+
+        for (int at = 0; at < 2; at++)
+        {
+            bipolar got;
+            long value = -1;
+
+            string_copy((string_address)path, (string_address)root), string_copy((string_address)path + string_length((string_address)path), (string_address)paths[at]);
+            got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)word, sizeof(word) - 1, 0);
+            word[got > 0 ? got : 0] = 0;
+            if (got > 0 && word[got - 1] == '\n')
+                word[got - 1] = 0;
+            read_back &= got > 0 && string_equals((string_address)word, (string_address)want[at]) && compositor_setting_kept(paths[at], word, &value);
+            if (at == 0)
+                read_back &= value == TASKBAR_ZONE_START;
+            system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        }
+        // The tray items' rows too, each its side.
+        for (int at = 0; at < 6; at++)
+        {
+            static const char *const items[6] = {SETTING_TASKBAR_ITEM_NOTICES_PATH, SETTING_TASKBAR_ITEM_MIC_PATH, SETTING_TASKBAR_ITEM_SOUND_PATH,
+                                                 SETTING_TASKBAR_ITEM_BATTERY_PATH, SETTING_TASKBAR_ITEM_TEXT_PATH, SETTING_TASKBAR_ITEM_CLOCK_PATH};
+            bipolar got;
+
+            string_copy((string_address)path, (string_address)root), string_copy((string_address)path + string_length((string_address)path), (string_address)items[at]);
+            got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)word, sizeof(word) - 1, 0);
+            read_back &= got > 0;
+            system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        }
+    }
+    string_copy((string_address)path, (string_address)root), string_copy((string_address)path + string_length((string_address)path), (string_address) "/root");
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0x200); // AT_REMOVEDIR
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)root, 0x200);
+    compositor_settings_root = "";
+    taskbar_standard();
+    taskbar_edit_set(0);
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    check("taskbar edit: the moon is an item of the arrangement, and the menu's clock item is the other format", menu);
+    check("taskbar edit: a press of a virtual device (WINDOW_EVENT_VIRTUAL) is refused and moves nothing", virtual_refused);
+    check("taskbar edit: the moon pressed and let go at the band's start by the machine's own device is there", moved);
+    check("taskbar edit: Done keeps every row of the arrangement and the band leaves it", kept && left);
+    check("taskbar edit: the rows read back what Done kept (the moon start, the tasks center, each tray item's side)", read_back);
+}
+
+/*
         Where the clock is (`taskbar clock`), in twelve hours as in twenty-four (`time format`): in the moon, with no cell of its own in the
         tray and the tray the standard one (no format of its own, which a twelve-hour clock used to make, and drew the clock as a cell of
         text beside the moon); none, the moon alone; a cell of the tray, inside its pill after the tasks, as long as its text in the hours

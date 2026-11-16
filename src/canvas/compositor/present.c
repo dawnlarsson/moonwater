@@ -960,6 +960,7 @@ static void compositor_present_frames(void)
         }
         if (tinted)
                 frames[count++] = preview;
+        count += compositor_moon_menu_frame(&frames[count]); // the moon's menu, over the band and the windows
 
         // The snap assist and the grid, over the windows (the one held too), the tabs and the snap preview: a thumbnail's picture is drawn again each present. They
         // fade in when they come up and out when they go (compositor_overlay_fade), a thumbnail with them.

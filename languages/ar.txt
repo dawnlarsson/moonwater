@@ -246,6 +246,8 @@ terminal_exited_press_to_close	a8cf	انتهى برمز الخروج %d، اضغ
 terminal_press_to_close	080d	اضغط أي مفتاح للإغلاق
 tray_am	0d13	ص
 tray_charging	60c2	قيد الشحن
+tray_clock_12h	8ab5	ساعة 12 ساعة
+tray_clock_24h	78ae	ساعة 24 ساعة
 tray_day_fri	fbe8	الجمعة
 tray_day_mon	82e1	الاثنين
 tray_day_sat	2a77	السبت
@@ -255,6 +257,7 @@ tray_day_tue	f425	الثلاثاء
 tray_day_wed	5757	الأربعاء
 tray_discharging	41a0	قيد التفريغ
 tray_done	1791	تم
+tray_edit	b953	تعديل شريط المهام
 tray_month_apr	1df2	أبريل
 tray_month_aug	8fd4	أغسطس
 tray_month_dec	7a73	ديسمبر
@@ -268,6 +271,7 @@ tray_month_nov	c404	نوفمبر
 tray_month_oct	f3e9	أكتوبر
 tray_month_sep	a4ef	سبتمبر
 tray_pm	f466	م
+tray_settings	8728	الإعدادات
 ui_confirm_again	b3ff	اضغط مرة أخرى للتأكيد: 
 ui_field_digits	f52b	العدد يتكون من أرقام
 ui_field_full	fe02	هذا أقصى ما يتسع له

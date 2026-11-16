@@ -1374,6 +1374,23 @@ static b64 taskbar_moon_share(void);
 static int taskbar_moon_glow_square(const struct taskbar_view *view, int square[4]);
 static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixels, const int square[4]);
 static int taskbar_moon_glow_was(int band, int shown);
+static int taskbar_menu_open(const struct taskbar_view *view);
+static void taskbar_menu_draw(const struct taskbar_view *view, unsigned int *pixels);
+static int taskbar_menu_hand(unsigned int type, unsigned int flags, int a, int b, int x, int y);
+static void taskbar_edit_set(int on);
+static int taskbar_edit_item(const struct taskbar_view *view, int px, int py);
+static int taskbar_edit_drop(const struct taskbar_view *view, int which, int px, int py);
+#define TASKBAR_MENU_EDIT 1     // the moon's menu: Edit taskbar
+#define TASKBAR_MENU_SETTINGS 2 // Settings
+#define TASKBAR_MENU_CLOCK 3    // the other clock format
+#define TASKBAR_EDIT_ROWS 8     // the rows the arrangement keeps
+static int taskbar_menu_rect(int rect[4]);
+static int taskbar_menu_redraw(void);
+static void taskbar_menu_shut(void);
+static int taskbar_edit_words(const char *paths[TASKBAR_EDIT_ROWS], const char *words[TASKBAR_EDIT_ROWS]);
+static const char *taskbar_clock_other(void);
+static void taskbar_clock_turn(void);
+static int taskbar_editing(void);
 static void taskbar_spin_set(int seconds);
 static void taskbar_bar_set(int separate, int edge);
 #define TASKBAR_EDGE_LEAST -16 // `taskbar edge`: logical pixels out past the screen's edge at the most (held further by TASKBAR_EDGE_KEEP)
@@ -7907,6 +7924,8 @@ LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key 
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
 LANGUAGE_ID(tray_am, "AM") \
 LANGUAGE_ID(tray_charging, "charging") \
+LANGUAGE_ID(tray_clock_12h, "12-hour clock") \
+LANGUAGE_ID(tray_clock_24h, "24-hour clock") \
 LANGUAGE_ID(tray_day_fri, "Fri") \
 LANGUAGE_ID(tray_day_mon, "Mon") \
 LANGUAGE_ID(tray_day_sat, "Sat") \
@@ -7916,6 +7935,7 @@ LANGUAGE_ID(tray_day_tue, "Tue") \
 LANGUAGE_ID(tray_day_wed, "Wed") \
 LANGUAGE_ID(tray_discharging, "discharging") \
 LANGUAGE_ID(tray_done, "Done") \
+LANGUAGE_ID(tray_edit, "Edit taskbar") \
 LANGUAGE_ID(tray_month_apr, "Apr") \
 LANGUAGE_ID(tray_month_aug, "Aug") \
 LANGUAGE_ID(tray_month_dec, "Dec") \
@@ -7929,6 +7949,7 @@ LANGUAGE_ID(tray_month_nov, "Nov") \
 LANGUAGE_ID(tray_month_oct, "Oct") \
 LANGUAGE_ID(tray_month_sep, "Sep") \
 LANGUAGE_ID(tray_pm, "PM") \
+LANGUAGE_ID(tray_settings, "Settings") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
 LANGUAGE_ID(ui_field_full, "that is as much as it holds")

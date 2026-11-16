@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
 terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM
 tray_charging	60c2	charging
+tray_clock_12h	8ab5	12-hour clock
+tray_clock_24h	78ae	24-hour clock
 tray_day_fri	fbe8	Fri
 tray_day_mon	82e1	Mon
 tray_day_sat	2a77	Sat
@@ -254,6 +256,7 @@ tray_day_tue	f425	Tue
 tray_day_wed	5757	Wed
 tray_discharging	41a0	discharging
 tray_done	1791	Done
+tray_edit	b953	Edit taskbar
 tray_month_apr	1df2	Apr
 tray_month_aug	8fd4	Aug
 tray_month_dec	7a73	Dec
@@ -267,6 +270,7 @@ tray_month_nov	c404	Nov
 tray_month_oct	f3e9	Oct
 tray_month_sep	a4ef	Sep
 tray_pm	f466	PM
+tray_settings	8728	Settings
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds

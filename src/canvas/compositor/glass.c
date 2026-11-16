@@ -465,6 +465,55 @@ static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
         return 1;
 }
 
+/*
+        The moon's menu (taskbar_menu) as a frame of its own over everything, while it is up: its picture drawn again only when the menu
+        says it changed (a hover, a press's ripple), into a buffer made as large as it when it is first wanted larger. Answers how many.
+*/
+static struct
+{
+        unsigned int *pixels;
+        positive bytes;
+        int band;  // the band whose moon it is from
+        int drawn; // the buffer holds the menu's picture
+} compositor_menu;
+
+static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
+{
+        struct taskbar_view view;
+        int rect[4], was = compositor.band_at;
+        positive bytes;
+
+        if (!taskbar_menu_rect(rect))
+                return 0;
+        bytes = (positive)rect[2] * (positive)rect[3] * 4;
+        if (compositor_menu.bytes < bytes)
+        {
+                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return 0;
+                if (compositor_menu.pixels)
+                        gpu_forget(compositor_menu.pixels, compositor_menu.bytes),
+                            compositor_call(syscall(munmap), (positive)compositor_menu.pixels, compositor_menu.bytes, 0, 0, 0, 0);
+                compositor_menu.pixels = (unsigned int *)got, compositor_menu.bytes = bytes, compositor_menu.drawn = 0;
+        }
+        if (taskbar_menu_redraw() || !compositor_menu.drawn)
+        {
+                compositor.band_at = compositor_menu.band;
+                view = compositor_band_view();
+                taskbar_menu_draw(&view, compositor_menu.pixels);
+                compositor.band_at = was, compositor_menu.drawn = 1;
+                if (taskbar_menu_redraw()) // a ripple still going: the next frame draws it on
+                        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        }
+        memory_zero(frame, sizeof(*frame));
+        frame->x = rect[0], frame->y = rect[1], frame->width = rect[2], frame->height = rect[3];
+        frame->scale = compositor.scale, frame->pixels = compositor_menu.pixels, frame->pitch = (unsigned long)rect[2];
+        frame->radius = 8 * compositor.scale / 100, frame->line = compositor.scale / 100 > 0 ? compositor.scale / 100 : 1;
+        frame->edge = window_mix(compositor_tab_target(0) & 0xffffffu, window_contrast(compositor_tab_target(0)) & 0xffffffu, 48), frame->slot = -5;
+        return 1;
+}
+
 // After a present: a slide still going, or the highlight of the tab with the keys still moving from one tab to the next, is damaged
 // again, so the next frame draws the band where it has got to.
 static void compositor_taskbar_keep(positive now)

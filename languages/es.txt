@@ -245,6 +245,8 @@ terminal_exited_press_to_close	a8cf	terminó con estado %d, pulse una tecla para
 terminal_press_to_close	080d	pulse una tecla para cerrar
 tray_am	0d13	a. m.
 tray_charging	60c2	cargando
+tray_clock_12h	8ab5	Reloj de 12 horas
+tray_clock_24h	78ae	Reloj de 24 horas
 tray_day_fri	fbe8	vie
 tray_day_mon	82e1	lun
 tray_day_sat	2a77	sáb
@@ -254,6 +256,7 @@ tray_day_tue	f425	mar
 tray_day_wed	5757	mié
 tray_discharging	41a0	descargando
 tray_done	1791	Listo
+tray_edit	b953	Editar la barra
 tray_month_apr	1df2	abr
 tray_month_aug	8fd4	ago
 tray_month_dec	7a73	dic
@@ -267,6 +270,7 @@ tray_month_nov	c404	nov
 tray_month_oct	f3e9	oct
 tray_month_sep	a4ef	sep
 tray_pm	f466	p. m.
+tray_settings	8728	Ajustes
 ui_confirm_again	b3ff	pulse de nuevo para confirmar: 
 ui_field_digits	f52b	un número son dígitos
 ui_field_full	fe02	no cabe más
