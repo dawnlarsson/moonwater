@@ -4387,6 +4387,30 @@ static void check_moon_bench(void)
         ui_moon_night(&ui, 0, 0, 0x5b7fa6u, 1, 0);
         at[2] = clock_monotonic_nanoseconds();
         string_format(log, "  wallpaper bench: 1920 by 1080 dark and dimmed in %p ms, light in %p ms, cold\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 1000000);
+        // Its stages, dark and dimmed: the sky (the ground, the stars and their streaks, the glow) and the moon.
+        {
+            int width = 1920, height = 1080, size = width * 95 / 100, left = (width - size) / 2, top = height * 38 / 100;
+            unsigned int options = UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM;
+
+            at[0] = clock_monotonic_nanoseconds();
+            ui_moon_paper_ground(&ui, options, 0x5b7fa6u, 1, 0, left + size / 2.0, top + size / 2.0, size / 2.0);
+            at[1] = clock_monotonic_nanoseconds();
+            ui_moon_paper(&ui, left, top, size, 0, options, 0x5b7fa6u);
+            at[2] = clock_monotonic_nanoseconds();
+            string_format(log, "  wallpaper bench: the sky in %p ms, the moon in %p ms\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 1000000);
+        }
+        // And at 4K, cold, whole.
+        {
+            static unsigned int wall4k[3840 * 2160];
+            struct ui big;
+
+            memory_zero(&big, sizeof(big));
+            big.pixels = wall4k, big.pitch = 3840, big.width = 3840, big.height = 2160, big.bottom = 2160, big.scale = 100;
+            at[0] = clock_monotonic_nanoseconds();
+            ui_moon_night(&big, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
+            at[1] = clock_monotonic_nanoseconds();
+            string_format(log, "  wallpaper bench: 3840 by 2160 dark and dimmed in %p ms, cold\n", (at[1] - at[0]) / 1000000);
+        }
     }
 }
 

@@ -16290,17 +16290,34 @@ static inline void ui_moon_vector(decimal longitude, decimal latitude, decimal o
 }
 
 // How much of the maria a point of the sphere is in, 0 to 1: the caps, their shores moved by noise.
+// Each mare's middle as a vector and the cosine of its farthest shore, made once (the same numbers each time, so two threads that make
+// them at once make the same): asked of every point of a surface, they were four sines and cosines a mare a point.
+static struct
+{
+        decimal c[3], shore;
+} ui_moon_maria_at[sizeof(ui_moon_maria) / sizeof(ui_moon_maria[0])];
+static int ui_moon_maria_made;
+
 static decimal ui_moon_mare(const decimal p[3])
 {
         decimal rest = 1, shore = 1.5 * ui_moon_fbm(p[0], p[1], p[2], 3.0, 6, 77u) + 0.6 * ui_moon_fbm(p[0], p[1], p[2], 11.0, 4, 79u);
 
+        if (!__atomic_load_n(&ui_moon_maria_made, __ATOMIC_ACQUIRE))
+        {
+                for (unsigned int at = 0; at < sizeof(ui_moon_maria) / sizeof(ui_moon_maria[0]); at++)
+                {
+                        ui_moon_vector(ui_moon_maria[at].longitude * UI_MOON_DEGREE, ui_moon_maria[at].latitude * UI_MOON_DEGREE, ui_moon_maria_at[at].c);
+                        ui_moon_maria_at[at].shore = cosine(1.7 * ui_moon_maria[at].radius * UI_MOON_DEGREE);
+                }
+                __atomic_store_n(&ui_moon_maria_made, 1, __ATOMIC_RELEASE);
+        }
         for (unsigned int at = 0; at < sizeof(ui_moon_maria) / sizeof(ui_moon_maria[0]); at++)
         {
-                decimal c[3], radius = ui_moon_maria[at].radius * UI_MOON_DEGREE, near, far, share;
+                const decimal address_to c = ui_moon_maria_at[at].c;
+                decimal radius = ui_moon_maria[at].radius * UI_MOON_DEGREE, near, far, share;
 
-                ui_moon_vector(ui_moon_maria[at].longitude * UI_MOON_DEGREE, ui_moon_maria[at].latitude * UI_MOON_DEGREE, c);
                 near = p[0] * c[0] + p[1] * c[1] + p[2] * c[2];
-                if (near < cosine(1.7 * radius))
+                if (near < ui_moon_maria_at[at].shore)
                         continue; // past any shore of it
                 far = arc_cosine(near > 1 ? 1 : near < -1 ? -1 : near) / radius + shore;
                 share = far >= 1.25 ? 0 : far <= 0.55 ? 1 : (1.25 - far) / 0.7;
@@ -17119,88 +17136,27 @@ static unsigned int ui_moon_fresnel(unsigned int tone, int x, int y, decimal cx,
 }
 
 /*
-        The disc in ink, its outline over it. A small one (under 96 pixels: the taskbar's) is the same moon held to what a pixel can say:
-        its maria the masses alone, read at sixteen samples a pixel with the shore's broad noise and none of the brush's, no craters or
-        pits, and an outline of a twentieth of the disc, between a pixel and a half and two and a half. With UI_MOON_PAPER_DIM in dark the
-        moon keeps its real arrangement, dimmed: a mid grey disc with near black maria, the outline the soft light ink.
+        The wallpaper moon's disc a band of rows at a time (from, to), for ui_moon_paper: the rows are shared out among threads, each its own,
+        none writing a pixel another writes, and every field read from the grid the threads read alike.
 */
-static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b64 turn, unsigned int options, unsigned int accent)
+struct ui_moon_disc
 {
-        int width = ui->width, height = ui->bottom - ui->top, small = size < 96, step = small ? 1 : 2;
-        decimal r = size / 2.0, cx = left + r, cy = top + r, scale = small ? 1 : height / 1080.0;
-        decimal t = (decimal)(turn & (UI_ONE - 1)) / (decimal)UI_ONE * 2 * UI_MOON_PI, ct = cosine(t), st = sine(t);
-        decimal outline = small ? (size * 0.05 < 1.5 ? 1.5 : size * 0.05 > 2.5 ? 2.5 : size * 0.05) : r * 0.022 + 2 * scale;
-        int x0 = left < 0 ? 0 : left, x1 = left + size > width ? width : left + size;
-        int y0 = top < ui->top ? ui->top : top, y1 = top + size > ui->bottom ? ui->bottom : top + size;
-        int gw = (x1 - x0) / step + 2, gh = (y1 - y0) / step + 2;
-        unsigned int paper, ink, bright, deep;
-        decimal sun[3];
-        long got;
-        float address_to grid = null;
+        struct ui address_to ui;
+        const float address_to grid;
+        int gw, gh, step, small, x0, x1, y0, from, to;
+        decimal cx, cy, r, ct, st, scale;
+        unsigned int options, bright, deep, accent;
+};
 
-        ui_moon_paper_tones(options, &paper, &ink);
-        // The moon's two tones: the ground (its highlands) and the ink (its maria); dimmed, a mid grey and a near black.
-        bright = paper, deep = ink;
-        if (options & UI_MOON_PAPER_DIM)
-                bright = 0x8e8d89u, deep = window_mix(0x000000u, bright, (unsigned int)(ui_moon_dim_seas * 256));
-        // The sun the craters' sides are read by: from the upper left and in front, in the eye's frame, then the body's.
-        {
-                decimal vx = -0.55, vy = 0.45, vz = 0.70;
+static fn ui_moon_disc_rows(const struct ui_moon_disc address_to disc)
+{
+        struct ui address_to ui = disc->ui;
+        const float address_to grid = disc->grid;
+        int gw = disc->gw, gh = disc->gh, step = disc->step, small = disc->small, x0 = disc->x0, x1 = disc->x1, y0 = disc->y0;
+        decimal cx = disc->cx, cy = disc->cy, r = disc->r, ct = disc->ct, st = disc->st, scale = disc->scale;
+        unsigned int options = disc->options, bright = disc->bright, deep = disc->deep, accent = disc->accent;
 
-                sun[0] = vx * ct + vz * st, sun[1] = vy, sun[2] = -vx * st + vz * ct;
-        }
-        if (size <= 0 || x1 <= x0 || y1 <= y0)
-                return;
-        // The surface's fields on a grid of two pixels (one for a small moon): the maria's cover, the shore's and the brush's noise, the rays.
-        got = ui_map((positive)gw * (positive)gh * 4 * sizeof(float));
-        if (got < 0 && got > -4096)
-                return;
-        grid = (float address_to)got;
-        for (int j = 0; j < gh; j++)
-                for (int i = 0; i < gw; i++)
-                {
-                        decimal p[3], rays = 0;
-                        long at = ((long)j * gw + i) * 4;
-
-                        if (!ui_moon_under(x0 + step * i, y0 + step * j, cx, cy, r, ct, st, p))
-                        {
-                                grid[at] = grid[at + 1] = grid[at + 2] = grid[at + 3] = 0;
-                                continue;
-                        }
-                        grid[at] = (float)ui_moon_mare(p);
-                        grid[at + 1] = (float)ui_moon_fbm(p[0], p[1], p[2], 16.0, 3, 91u);
-                        grid[at + 2] = (float)ui_moon_fbm(p[0], p[1], p[2], 70.0, 2, 93u);
-                        // The rays: from each young crater, thirty narrow streaks along great circles out of it, by the bearing round it on the
-                        // sphere and the way out, so they are foreshortened as the sphere is.
-                        for (unsigned int k = 0; !small && k < sizeof(ui_moon_rays) / sizeof(ui_moon_rays[0]); k++)
-                        {
-                                decimal c[3], east[3], north[3], reach = ui_moon_rays[k].reach * UI_MOON_DEGREE, near, far, b, best = 0;
-                                decimal longitude = ui_moon_rays[k].longitude * UI_MOON_DEGREE, latitude = ui_moon_rays[k].latitude * UI_MOON_DEGREE;
-
-                                ui_moon_vector(longitude, latitude, c);
-                                near = p[0] * c[0] + p[1] * c[1] + p[2] * c[2];
-                                if (near < cosine(reach))
-                                        continue;
-                                far = arc_cosine(near > 1 ? 1 : near);
-                                east[0] = cosine(longitude), east[1] = 0, east[2] = -sine(longitude);
-                                north[0] = -sine(latitude) * sine(longitude), north[1] = cosine(latitude), north[2] = -sine(latitude) * cosine(longitude);
-                                b = arc_tangent_two(p[0] * east[0] + p[1] * east[1] + p[2] * east[2], p[0] * north[0] + p[1] * north[1] + p[2] * north[2]);
-                                for (int ray = 0; ray < 30; ray++)
-                                {
-                                        decimal bearing = ui_moon_unit(k * 977u + (unsigned int)ray * 31u) * 2 * UI_MOON_PI - UI_MOON_PI;
-                                        decimal out = reach * (0.35 + 0.65 * ui_moon_unit(k * 313u + (unsigned int)ray * 17u)), off = b - bearing, x, lobe;
-
-                                        off = off > UI_MOON_PI ? off - 2 * UI_MOON_PI : off < -UI_MOON_PI ? off + 2 * UI_MOON_PI : off;
-                                        x = off * far / (0.006 + 0.012 * ui_moon_unit(k * 131u + (unsigned int)ray * 7u));
-                                        lobe = far < out ? (1 - far / out) / (1 + x * x) : 0;
-                                        best = lobe > best ? lobe : best;
-                                }
-                                rays = best > rays ? best : rays;
-                        }
-                        grid[at + 3] = (float)rays;
-                }
-        // The disc: per pixel, the maria's mass and its broken shore, the rays through it.
-        for (int y = y0; y < y1; y++)
+        for (int y = disc->from; y < disc->to; y++)
                 for (int x = x0; x < x1; x++)
                 {
                         decimal dx = x + 0.5 - cx, dy = y + 0.5 - cy, d = square_root(dx * dx + dy * dy), gx = (x + 0.5 - x0) / step, gy = (y + 0.5 - y0) / step;
@@ -17295,6 +17251,132 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
                         at = ui->pixels + (long)y * (long)ui->pitch + x;
                         *at = (*at & 0xff000000u) | window_mix(*at, tone, (unsigned int)(cover > 1 ? 256 : cover * 256));
                 }
+}
+
+static fn ui_moon_disc_run(address_any context)
+{
+        ui_moon_disc_rows((const struct ui_moon_disc address_to)context);
+}
+
+#define UI_MOON_DISC_THREADS 4 // the threads a large moon's disc is shared among, this one with them
+
+/*
+        The disc in ink, its outline over it. A small one (under 96 pixels: the taskbar's) is the same moon held to what a pixel can say:
+        its maria the masses alone, read at sixteen samples a pixel with the shore's broad noise and none of the brush's, no craters or
+        pits, and an outline of a twentieth of the disc, between a pixel and a half and two and a half. With UI_MOON_PAPER_DIM in dark the
+        moon keeps its real arrangement, dimmed: a mid grey disc with near black maria, the outline the soft light ink.
+*/
+static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b64 turn, unsigned int options, unsigned int accent)
+{
+        int width = ui->width, height = ui->bottom - ui->top, small = size < 96, step = small ? 1 : (int)(2.0 * height / 1080.0 + 0.5) < 2 ? 2 : (int)(2.0 * height / 1080.0 + 0.5);
+        decimal r = size / 2.0, cx = left + r, cy = top + r, scale = small ? 1 : height / 1080.0;
+        // The craters with rays, each once: where it is, its east and north, how far it reaches; each of its thirty rays' bearing, length
+        // and width. Asked of every point of the grid, they were made again at each.
+        enum { UI_MOON_RAYS = sizeof(ui_moon_rays) / sizeof(ui_moon_rays[0]) };
+        decimal ray_c[UI_MOON_RAYS][3], ray_east[UI_MOON_RAYS][3], ray_north[UI_MOON_RAYS][3], ray_near[UI_MOON_RAYS], ray_reach[UI_MOON_RAYS];
+        decimal ray_bearing[UI_MOON_RAYS][30], ray_out[UI_MOON_RAYS][30], ray_wide[UI_MOON_RAYS][30];
+        decimal t = (decimal)(turn & (UI_ONE - 1)) / (decimal)UI_ONE * 2 * UI_MOON_PI, ct = cosine(t), st = sine(t);
+        decimal outline = small ? (size * 0.05 < 1.5 ? 1.5 : size * 0.05 > 2.5 ? 2.5 : size * 0.05) : r * 0.022 + 2 * scale;
+        int x0 = left < 0 ? 0 : left, x1 = left + size > width ? width : left + size;
+        int y0 = top < ui->top ? ui->top : top, y1 = top + size > ui->bottom ? ui->bottom : top + size;
+        int gw = (x1 - x0) / step + 2, gh = (y1 - y0) / step + 2;
+        unsigned int paper, ink, bright, deep;
+        decimal sun[3];
+        long got;
+        float address_to grid = null;
+
+        ui_moon_paper_tones(options, &paper, &ink);
+        // The moon's two tones: the ground (its highlands) and the ink (its maria); dimmed, a mid grey and a near black.
+        bright = paper, deep = ink;
+        if (options & UI_MOON_PAPER_DIM)
+                bright = 0x8e8d89u, deep = window_mix(0x000000u, bright, (unsigned int)(ui_moon_dim_seas * 256));
+        // The sun the craters' sides are read by: from the upper left and in front, in the eye's frame, then the body's.
+        {
+                decimal vx = -0.55, vy = 0.45, vz = 0.70;
+
+                sun[0] = vx * ct + vz * st, sun[1] = vy, sun[2] = -vx * st + vz * ct;
+        }
+        if (size <= 0 || x1 <= x0 || y1 <= y0)
+                return;
+        for (unsigned int k = 0; k < UI_MOON_RAYS; k++)
+        {
+                decimal longitude = ui_moon_rays[k].longitude * UI_MOON_DEGREE, latitude = ui_moon_rays[k].latitude * UI_MOON_DEGREE;
+
+                ray_reach[k] = ui_moon_rays[k].reach * UI_MOON_DEGREE, ray_near[k] = cosine(ray_reach[k]);
+                ui_moon_vector(longitude, latitude, ray_c[k]);
+                ray_east[k][0] = cosine(longitude), ray_east[k][1] = 0, ray_east[k][2] = -sine(longitude);
+                ray_north[k][0] = -sine(latitude) * sine(longitude), ray_north[k][1] = cosine(latitude), ray_north[k][2] = -sine(latitude) * cosine(longitude);
+                for (int ray = 0; ray < 30; ray++)
+                {
+                        ray_bearing[k][ray] = ui_moon_unit(k * 977u + (unsigned int)ray * 31u) * 2 * UI_MOON_PI - UI_MOON_PI;
+                        ray_out[k][ray] = ray_reach[k] * (0.35 + 0.65 * ui_moon_unit(k * 313u + (unsigned int)ray * 17u));
+                        ray_wide[k][ray] = 0.006 + 0.012 * ui_moon_unit(k * 131u + (unsigned int)ray * 7u);
+                }
+        }
+        // The surface's fields on a grid of two pixels (one for a small moon): the maria's cover, the shore's and the brush's noise, the rays.
+        got = ui_map((positive)gw * (positive)gh * 4 * sizeof(float));
+        if (got < 0 && got > -4096)
+                return;
+        grid = (float address_to)got;
+        for (int j = 0; j < gh; j++)
+                for (int i = 0; i < gw; i++)
+                {
+                        decimal p[3], rays = 0;
+                        long at = ((long)j * gw + i) * 4;
+
+                        if (!ui_moon_under(x0 + step * i, y0 + step * j, cx, cy, r, ct, st, p))
+                        {
+                                grid[at] = grid[at + 1] = grid[at + 2] = grid[at + 3] = 0;
+                                continue;
+                        }
+                        grid[at] = (float)ui_moon_mare(p);
+                        grid[at + 1] = (float)ui_moon_fbm(p[0], p[1], p[2], 16.0, 3, 91u);
+                        grid[at + 2] = (float)ui_moon_fbm(p[0], p[1], p[2], 70.0, 2, 93u);
+                        // The rays: from each young crater, thirty narrow streaks along great circles out of it, by the bearing round it on the
+                        // sphere and the way out, so they are foreshortened as the sphere is.
+                        for (unsigned int k = 0; !small && k < UI_MOON_RAYS; k++)
+                        {
+                                const decimal address_to c = ray_c[k], address_to east = ray_east[k], address_to north = ray_north[k];
+                                decimal near, far, b, best = 0;
+
+                                near = p[0] * c[0] + p[1] * c[1] + p[2] * c[2];
+                                if (near < ray_near[k])
+                                        continue;
+                                far = arc_cosine(near > 1 ? 1 : near);
+                                b = arc_tangent_two(p[0] * east[0] + p[1] * east[1] + p[2] * east[2], p[0] * north[0] + p[1] * north[1] + p[2] * north[2]);
+                                for (int ray = 0; ray < 30; ray++)
+                                {
+                                        decimal out = ray_out[k][ray], off = b - ray_bearing[k][ray], x, lobe;
+
+                                        off = off > UI_MOON_PI ? off - 2 * UI_MOON_PI : off < -UI_MOON_PI ? off + 2 * UI_MOON_PI : off;
+                                        x = off * far / ray_wide[k][ray];
+                                        lobe = far < out ? (1 - far / out) / (1 + x * x) : 0;
+                                        best = lobe > best ? lobe : best;
+                                }
+                                rays = best > rays ? best : rays;
+                        }
+                        grid[at + 3] = (float)rays;
+                }
+        // The disc: per pixel, the maria's mass and its broken shore, the rays through it; a large one's rows shared among threads.
+        {
+                struct ui_moon_disc part[UI_MOON_DISC_THREADS];
+                thread address_to worker[UI_MOON_DISC_THREADS] = {null};
+                int parts = small ? 1 : UI_MOON_DISC_THREADS;
+
+                for (int at = 0; at < parts; at++)
+                {
+                        part[at] = (struct ui_moon_disc){ui, grid, gw, gh, step, small, x0, x1, y0, y0 + (y1 - y0) * at / parts, y0 + (y1 - y0) * (at + 1) / parts,
+                                                         cx, cy, r, ct, st, scale, options, bright, deep, accent};
+                        if (at + 1 < parts)
+                                worker[at] = thread_start(ui_moon_disc_run, (address_any)&part[at]);
+                        if (at + 1 < parts && !worker[at])
+                                ui_moon_disc_rows(&part[at]); // no thread: this one
+                }
+                ui_moon_disc_rows(&part[parts - 1]);
+                for (int at = 0; at + 1 < parts; at++)
+                        if (worker[at])
+                                thread_join(worker[at]);
+        }
         compositor_call(syscall(munmap), (positive)got, (positive)gw * (positive)gh * 4 * sizeof(float), 0, 0, 0, 0);
         if (!small)
         {
