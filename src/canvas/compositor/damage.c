@@ -1074,12 +1074,12 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.face = &compositor.face;
         view.bold = compositor.bold_ok ? &compositor.bold : null;
         view.engine = compositor.engine;
-        view.count = compositor.listing;
+        view.count = compositor.listing < TASKBAR_TAB_ROOM ? compositor.listing : TASKBAR_TAB_ROOM;
         view.launcher_lit = compositor_launcher_row() >= 0;
         view.marks = compositor.marks;
         view.lengths = compositor.lengths;
         view.rows = compositor.listed;
-        for (unsigned int at = 0; at < compositor.listing; at++)
+        for (unsigned int at = 0; at < view.count; at++)
         {
                 int row = compositor.listed[at];
 

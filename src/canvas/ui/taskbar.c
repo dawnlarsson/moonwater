@@ -495,10 +495,10 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         int pad = taskbar.padding * scale / 100; // the kit's padding in a glass button (UI_GLASS_PAD, `taskbar padding`), either side of what it shows
         int inset = taskbar_inset(scale), high = thick - 2 * inset, count = (int)view->count, moon, icons = 0, done = 0, split = taskbar.tasks_zone == TASKBAR_ZONE_SPLIT;
         int square, cell, clocked, tab, text_w = 0, glyph, longest, side, trays[2], most, inner = length - 2 * gap, icon_gap = TASKBAR_ICON_GAP * scale / 100;
-        int widths[WINDOWS], titled[WINDOWS], zones[3], list[2][WINDOWS], listed[2] = {0, 0}, tabs[2] = {0, 0}, moon_zone = split ? TASKBAR_ZONE_CENTRE : taskbar.moon_zone;
+        int widths[TASKBAR_TAB_ROOM], titled[TASKBAR_TAB_ROOM], zones[3], list[2][TASKBAR_TAB_ROOM], listed[2] = {0, 0}, tabs[2] = {0, 0}, moon_zone = split ? TASKBAR_ZONE_CENTRE : taskbar.moon_zone;
         struct ui_node address_to n;
 
-        high = high < 1 ? 1 : high, count = count < WINDOWS ? count : WINDOWS, side = taskbar_icon_side(high, scale);
+        high = high < 1 ? 1 : high, count = count < TASKBAR_TAB_ROOM ? count : TASKBAR_TAB_ROOM, side = taskbar_icon_side(high, scale);
         // The numbers: the moon, bare on the band and as thick as it; the tray's items, each its padding either side of its mark or its text,
         // held to half the band; the mark of the speaker and the microphone; and each tab, no longer than its icon and eight thicknesses.
         moon = thick <= length - 2 * gap ? thick : 0; // and none on a band too short for it
@@ -740,10 +740,10 @@ struct taskbar_key
         int own, padding, launcher;     // the taskbar's settings: its scale, the room round a tab's text, the launcher's button
         int tray, cells, rtl;           // a format of the person's (its characters; -1: the standard cells), the cells there now (a bit each), reading from the right
         int arrange, editing;           // where the pills are (the zones, the side of the newest task, the items before the tasks, the order) and whether it is arranged
-        unsigned char lengths[WINDOWS]; // each tab's title in characters
+        unsigned char lengths[TASKBAR_TAB_ROOM]; // each tab's title in characters
 };
 
-_Static_assert(sizeof(struct taskbar_key) == 8 + 16 * 4 + WINDOWS, "a key is compared as bytes, so it has no padding");
+_Static_assert(sizeof(struct taskbar_key) == 8 + 16 * 4 + TASKBAR_TAB_ROOM, "a key is compared as bytes, so it has no padding");
 
 /*
         The highlight of the tab whose window has the keys: the kit's lit face (ui_glass_button) over that tab, which moves from one tab
@@ -788,7 +788,7 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
         if (view->lengths)
-                memory_copy(key.lengths, view->lengths, view->count < WINDOWS ? view->count : WINDOWS);
+                memory_copy(key.lengths, view->lengths, view->count < TASKBAR_TAB_ROOM ? view->count : TASKBAR_TAB_ROOM);
         if (!band->tree.count || memory_compare(&band->key, &key, sizeof(key)))
         {
                 band->key = key;
@@ -905,8 +905,9 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
 // A slot's redo bit: a tab's, the tray's on its own bit past the tabs, and the launcher button's on the one after.
 static unsigned long taskbar_bit(int which)
 {
-        return which == TASKBAR_LAUNCHER ? 1ul << (WINDOWS + 1) : which < 0 ? 1ul << WINDOWS : 1ul << which;
+        return which == TASKBAR_LAUNCHER ? 1ul << (TASKBAR_TAB_ROOM + 1) : which < 0 ? 1ul << TASKBAR_TAB_ROOM : 1ul << which;
 }
+_Static_assert(TASKBAR_TAB_ROOM + 2 <= 64, "a redo bit a tab, the tray's and the launcher's, in a word");
 
 /*
         The slots the damage meets, with the blur's reach round each: a change
@@ -1864,7 +1865,7 @@ static struct taskbar_picture
         unsigned int seq;         // and that picture's sequence
         int side;                 // how large it was made
         unsigned int pixels[UI_ICON_MOST * UI_ICON_MOST];
-} taskbar_pictures[WINDOWS];
+} taskbar_pictures[TASKBAR_TAB_ROOM]; // by the window's row, past the room by its row's place among them (a picture made again only when it differs)
 
 static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int which, unsigned int ink)
 {
@@ -1880,7 +1881,7 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
         ui.scale = taskbar_scaled(view->scale), ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
         if (view->icons[which] && view->icon_seqs[which] && side <= UI_ICON_MOST)
         {
-                struct taskbar_picture address_to kept = &taskbar_pictures[view->rows && view->rows[which] < WINDOWS ? view->rows[which] : which];
+                struct taskbar_picture address_to kept = &taskbar_pictures[(view->rows ? view->rows[which] : (unsigned int)which) % TASKBAR_TAB_ROOM];
 
                 if (kept->from != view->icons[which] || kept->seq != view->icon_seqs[which] || kept->side != side)
                 {

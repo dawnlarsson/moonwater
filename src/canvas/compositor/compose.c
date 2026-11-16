@@ -1615,7 +1615,11 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_OVERLAYS 40 // the snap assist's thumbnails and veils, and the grid's tiles, borders and regions (compositor_overlays)
 // A client's surfaces shown as layers of its window, each a frame with no chrome after its window's (wayland_host.c appends them): room for this many in all.
 #define COMPOSITOR_LAYERS 64
-#define COMPOSITOR_FRAMES (2 * WINDOWS + 3 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS) // the snap preview and the moon's menu have a frame each, the moon's glow one a band
+// The frames a present of `rows` rows may have: two a window (its picture and its line or shadow), the snap preview and the moon's menu a frame
+// each, the moon's glow one a band, the overlays and the layers. The arrays sized by it are the rows' (compositor_rows_make), as many as the rows in use.
+#define COMPOSITOR_FRAMES_FOR(rows) (2 * (unsigned long)(rows) + 3 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
+#define COMPOSITOR_FRAMES COMPOSITOR_FRAMES_FOR(WINDOWS)
+#define COMPOSITOR_PIECES_FOR(rows) (3 * COMPOSITOR_FRAMES_FOR(rows))
 
 /*
         The scene: inside the target's damage, each window where nothing
@@ -1636,7 +1640,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
         bottom to top, into a scratch of its own, and then copied out. The
         target is written and never read.
 */
-#define COMPOSITOR_PIECES (3 * COMPOSITOR_FRAMES)
+#define COMPOSITOR_PIECES COMPOSITOR_PIECES_FOR(WINDOWS)
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
@@ -2115,19 +2119,34 @@ static void compositor_radii(const struct compositor_frame *frames, unsigned int
 */
 struct compositor_plan
 {
-        int box[COMPOSITOR_PIECES][4];
-        unsigned int owner[COMPOSITOR_PIECES];
+        int (*box)[4];      // COMPOSITOR_PIECES_FOR the rows in use of each, the rows' (compositor_plan_box and the rest)
+        unsigned int *owner;
         unsigned int pieces;
-        int edge[2 * COMPOSITOR_PIECES + 2]; // the damage's top and bottom, and every piece's top or bottom inside them, sorted
+        int *edge;          // the damage's top and bottom, and every piece's top or bottom inside them, sorted
         unsigned int edges;
 };
+
+/*
+        The one plan's memory (a plan is made on the loop's thread, one damage at a time), and each band's edges and spans (the band
+        threads' COMPOSITOR_BANDS, and the loop's own scene after them): arrays of the rows' reservation (compositor_rows_make), each with
+        room for the pieces of every row, where they were arrays on the stack of the pieces of WINDOWS rows.
+*/
+static int (*compositor_plan_box)[4];
+static unsigned int *compositor_plan_owner;
+static int *compositor_plan_edge;
+static int *compositor_lane_edge[9];
+static int (*compositor_lane_span[9])[2];
+static int *compositor_scene_radii;
 
 static void compositor_plan_make(struct compositor_plan *plan, const struct compositor_target *t,
                                  const struct compositor_frame *frames, unsigned int count, const int *radii)
 {
-        int (*box)[4] = plan->box, *edge = plan->edge;
-        unsigned int *owner = plan->owner;
+        int (*box)[4], *edge;
+        unsigned int *owner;
         unsigned int edges = 2, pieces = 0;
+
+        plan->box = compositor_plan_box, plan->owner = compositor_plan_owner, plan->edge = compositor_plan_edge;
+        box = plan->box, edge = plan->edge, owner = plan->owner;
 
         edge[0] = t->y1;
         edge[1] = t->y2;
@@ -2174,10 +2193,10 @@ static void compositor_plan_make(struct compositor_plan *plan, const struct comp
 // The scene of a band (or slice) of a damage, from its plan: the band's edges are its top and bottom and the plan's
 // that lie strictly inside them, which are the ones the band would have cut at on its own.
 static void compositor_scene_plan(const struct compositor_target *t, const struct compositor_frame *frames,
-                                  unsigned int count, const int *radii, const struct compositor_plan *plan)
+                                  unsigned int count, const int *radii, const struct compositor_plan *plan, unsigned int lane)
 {
         unsigned int *scratch = t->scratch ? t->scratch : compositor_corner_scratch;
-        int edge[2 * COMPOSITOR_PIECES + 2];
+        int *edge = compositor_lane_edge[lane];
         const int (*box)[4] = plan->box;
         const unsigned int *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
@@ -2203,7 +2222,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         for (unsigned int band = 0; band + 1 < edges; band++)
         {
                 int top = edge[band], bottom = edge[band + 1];
-                int span[COMPOSITOR_PIECES + 1][2];
+                int (*span)[2] = compositor_lane_span[lane];
                 unsigned int spans = 1;
 
                 if (bottom <= top)
@@ -2307,12 +2326,12 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
 // The scene of a damage with its frames' radii made here, for the callers that have no damage of their own.
 static void compositor_scene(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
 {
-        int radii[COMPOSITOR_FRAMES];
+        int *radii = compositor_scene_radii;
         struct compositor_plan plan;
 
         compositor_radii(frames, count, radii);
         compositor_plan_make(&plan, t, frames, count, radii);
-        compositor_scene_plan(t, frames, count, radii, &plan);
+        compositor_scene_plan(t, frames, count, radii, &plan, 8); // the loop's lane, after the bands' (COMPOSITOR_BANDS)
 }
 
 /*
@@ -2324,6 +2343,7 @@ static void compositor_scene(const struct compositor_target *t, const struct com
         Small damage, under the pool's floor, is drawn here in one band.
 */
 #define COMPOSITOR_BANDS 8
+_Static_assert(sizeof(compositor_lane_edge) / sizeof(compositor_lane_edge[0]) == COMPOSITOR_BANDS + 1, "a lane a band and the loop's");
 
 // Mapped when the first banded scene is drawn, not kept in the image: 128 KiB of the image's address space is
 // what a shell under a 12 MiB cap cannot spare, in every program that links this.
@@ -2420,12 +2440,12 @@ static void compositor_scene_band(address_any context, positive index)
                 band.out = 1;
                 if (b <= a || !compositor_aside)
                 {
-                        compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan);
+                        compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan, (unsigned int)index);
                         return;
                 }
                 part.out = 1, part.y2 = a;
                 if (part.y2 > part.y1)
-                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan);
+                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan, (unsigned int)index);
                 for (int top = a; top < b; top += COMPOSITOR_SLICE)
                 {
                         struct compositor_target slice = band;
@@ -2436,12 +2456,12 @@ static void compositor_scene_band(address_any context, positive index)
                         slice.pixels = compositor_aside + index * COMPOSITOR_SLICE * pitch;
                         slice.pitch = pitch;
                         slice.ox = band.x1, slice.oy = top, slice.out = 0;
-                        compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan);
+                        compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan, (unsigned int)index);
                         compositor_blit(&band, band.x1, top, band.x2 - band.x1, slice.y2 - top, slice.pixels, pitch);
                 }
                 part.y1 = b, part.y2 = band.y2;
                 if (part.y2 > part.y1)
-                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan);
+                        compositor_scene_plan(&part, banding->frames, banding->count, banding->radii, banding->plan, (unsigned int)index);
                 return;
         }
         for (int top = band.y1; top < band.y2; top += COMPOSITOR_SLICE)
@@ -2455,7 +2475,7 @@ static void compositor_scene_band(address_any context, positive index)
                 slice.pitch = banding->apart->pitch;
                 slice.ox = 0;
                 slice.oy = top;
-                compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan);
+                compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan, (unsigned int)index);
                 banding->apart->flush(&slice, &first, &last);
                 if (first < 0)
                         continue;
@@ -2471,7 +2491,7 @@ static void compositor_scene_banded(const struct compositor_target *t, const str
 {
         positive bytes = (positive)(t->x2 - t->x1) * (positive)(t->y2 - t->y1) * 4;
         positive bands = parallel_width();
-        int radii[COMPOSITOR_FRAMES];
+        int *radii = compositor_scene_radii;
         struct compositor_plan plan;
 
         compositor_radii(frames, count, radii);

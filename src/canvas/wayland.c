@@ -81,7 +81,6 @@
 #define WAYLAND_POOL_BYTES (1L << 30)
 #define WAYLAND_POOL_TOTAL (1L << 31) // what one client may have mapped
 #define WAYLAND_DIMENSION 16384
-#define WAYLAND_ROWS 32         // the compositor's table
 #define WAYLAND_SERVER_IDS 0x01000000UL // the server's own ids, from 0xff000000 (the protocol's range): its index grows with what it makes
 #define WAYLAND_ID_GAP 4096     // how far past the next id a client's new one may be (libwayland's servers allow none; a gap costs index, not more)
 #define WAYLAND_SERVER_BASE 0xff000000UL
@@ -144,7 +143,7 @@
         WAYLAND_BUDGET_SCREENS of the largest screen copied in WAYLAND_BUDGET_MS, which a window that draws every frame of a screen at
         twice 60 Hz keeps within; the commit past it waits, with the rest of what its client sent, until the window's next window of
         time. A window whose budget is untouched always has its commit made, so one picture larger than the budget is never refused.
-        The budget is the window's (its root surface's), not the client's: the compositor has WAYLAND_ROWS windows whoever's they
+        The budget is the window's (its root surface's), not the client's: the compositor's rows are its windows whoever's they
         are, so what all of them may cost it is the same, and a client's one busy window does not use up what its others may draw
         (a browser is one client and many windows). Its commit that waits still holds the client's stream behind it: the requests
         of one connection are made in the order they came.
@@ -783,8 +782,12 @@ static struct
 {
         const struct wayland_host *host;
         struct wayland_client *client[WAYLAND_CLIENTS];
-        long row_client[WAYLAND_ROWS], row_surface[WAYLAND_ROWS];
-        long row_percent[WAYLAND_ROWS];  // the percent the window of the row was last told its scale for (0 before the first)
+        // Each row of the compositor's table the shim has been given (row_made of them, grown as a row past them is opened, never
+        // moving): the client and the surface whose window it is (-1 for none), and the percent the window was last told its scale
+        // for (0 before the first). Tables (struct wayland_table) as a client's are, so the rows are as many as the compositor makes.
+        long *row_client, *row_surface, *row_percent;
+        struct wayland_table row_client_table, row_surface_table, row_percent_table;
+        long row_made;
         struct wayland_screen screen[WAYLAND_SCREENS];
         long screens;
         long output_age[WAYLAND_SCREENS]; // how many times the screen of the number has been removed: its global's name is not used twice
@@ -947,6 +950,29 @@ static void wayland_table_drop(struct wayland_table *t)
         }
         t->at = 0;
         t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
+}
+
+/*
+        The rows below `row` + 1 made the shim's (their client and surface none, their percent none), the three tables grown as one:
+        1 when they are, 0 when the memory is not there (the window is not shown, as when the compositor has no row for it).
+*/
+static int wayland_rows_reach(long row)
+{
+        long was = wayland.row_made;
+
+        if (row < was)
+                return 1;
+        wayland.row_client_table.unit = wayland.row_surface_table.unit = wayland.row_percent_table.unit = sizeof(long);
+        if (!wayland_table_reach(&wayland.row_client_table, row + 1) || !wayland_table_reach(&wayland.row_surface_table, row + 1) ||
+            !wayland_table_reach(&wayland.row_percent_table, row + 1))
+                return 0;
+        wayland.row_client = (long *)wayland.row_client_table.at;
+        wayland.row_surface = (long *)wayland.row_surface_table.at;
+        wayland.row_percent = (long *)wayland.row_percent_table.at;
+        for (long at = was; at <= row; at++)
+                wayland.row_client[at] = wayland.row_surface[at] = -1, wayland.row_percent[at] = 0;
+        wayland.row_made = row + 1;
+        return 1;
 }
 
 // A client's tables made ready (their units) and their arrays pointed at, once a table has its reservation.
@@ -2037,6 +2063,15 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         wayland.rows--;
         wayland_presentings_discard(c, s);
         s->row = -1;
+        // With no window left the shim's rows are given back: the next window's open makes them again.
+        if (!wayland.rows)
+        {
+                wayland_table_drop(&wayland.row_client_table);
+                wayland_table_drop(&wayland.row_surface_table);
+                wayland_table_drop(&wayland.row_percent_table);
+                wayland.row_client = wayland.row_surface = wayland.row_percent = 0;
+                wayland.row_made = 0;
+        }
         // What was said of that window (a close, a popup's done) was said of it alone: the surface's next window is asked to go anew.
         s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
         s->closes = 0;
@@ -3952,6 +3987,11 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 // No row of the table is free: the window is not shown yet, and each commit asks again, so it is shown when one is let go
                 // of. Its client goes on, as a popup with nothing to hang from does: ending it ended Xwayland, every X program with it,
                 // at the desktop's 33rd window.
+                if (s->row >= 0 && !wayland_rows_reach(s->row))
+                {
+                        wayland.host->row_close(wayland.host->context, s->row);
+                        s->row = -1;
+                }
                 if (s->row < 0)
                 {
                         s->row = -1;
@@ -5436,7 +5476,7 @@ static struct wayland_surface *wayland_row_surface(long row, struct wayland_clie
 {
         struct wayland_client *c;
 
-        if (row < 0 || row >= WAYLAND_ROWS || wayland.row_client[row] < 0)
+        if (row < 0 || row >= wayland.row_made || wayland.row_client[row] < 0)
                 return 0;
         c = wayland.client[wayland.row_client[row]];
         if (!c || !c->surfaces[wayland.row_surface[row]].live)
@@ -5803,7 +5843,7 @@ WAYLAND_API long wayland_row_takes_touch(long row)
         struct wayland_client *c = 0;
         long slots[WAYLAND_SEATS];
 
-        if (row < 0 || row >= WAYLAND_ROWS || !wayland_row_surface(row, &c))
+        if (row < 0 || row >= wayland.row_made || !wayland_row_surface(row, &c))
                 return 0;
         return wayland_seats(c, WLI_wl_touch, slots) > 0;
 }
@@ -8964,10 +9004,15 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
             !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
             !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold || !host->random)
                 return -1;
+        // The rows of a shim started before are let go of by the host they were made by.
+        if (wayland.host)
+        {
+                wayland_table_drop(&wayland.row_client_table);
+                wayland_table_drop(&wayland.row_surface_table);
+                wayland_table_drop(&wayland.row_percent_table);
+        }
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
-        for (long row = 0; row < WAYLAND_ROWS; row++)
-                wayland.row_client[row] = wayland.row_surface[row] = -1;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
         wayland.cursor_client = wayland.cursor_surface = -1;
         wayland.xwayland_uid = -1;
@@ -9496,7 +9541,7 @@ WAYLAND_API void wayland_scales_sweep(void)
 {
         if (!wayland.host)
                 return;
-        for (long row = 0; row < WAYLAND_ROWS; row++)
+        for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_surface *root = c ? &c->surfaces[wayland.row_surface[row]] : 0;
@@ -9540,7 +9585,7 @@ WAYLAND_API void wayland_row_wake(long row)
         struct wayland_facts facts;
         long slot;
 
-        if (!wayland.host || row < 0 || row >= WAYLAND_ROWS || wayland.row_client[row] < 0)
+        if (!wayland.host || row < 0 || row >= wayland.row_made || wayland.row_client[row] < 0)
                 return;
         c = wayland.client[wayland.row_client[row]];
         s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
@@ -9595,7 +9640,7 @@ WAYLAND_API void wayland_frame(void)
                 return;
         wayland.frames++;
         now = wayland.host->now(wayland.host->context);
-        for (long row = 0; row < WAYLAND_ROWS; row++)
+        for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row_surface[row]] : 0;
@@ -9691,7 +9736,7 @@ static void wayland_window_gone(struct wayland_client *c, struct wayland_surface
 */
 static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn)
 {
-        for (long row = 0; row < WAYLAND_ROWS; row++)
+        for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
@@ -9734,7 +9779,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
 */
 static void wayland_drawn_rows(int dmabuf_busy_row)
 {
-        for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
+        for (long row = 0; wayland.host && row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
@@ -9815,7 +9860,7 @@ WAYLAND_API long wayland_frame_wanted(void)
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->stalled && wayland.client[slot]->hold && !wayland.client[slot]->hold_at)
                         return 1;
-        for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
+        for (long row = 0; wayland.host && row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
                 struct wayland_facts facts;
@@ -9880,7 +9925,7 @@ enum wayland_row_hint
 WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
 
         switch (hint)
         {
@@ -9902,7 +9947,7 @@ static int wayland_gestures_request(struct wayland_client *c, struct wayland_obj
         if (self->iface == WLI_zwp_pointer_gestures_v1 && op == WLQ_zwp_pointer_gestures_v1_get_pinch_gesture)
         {
                 c->pinches++;
-                for (long at = 0; at < WAYLAND_ROWS; at++)
+                for (long at = 0; at < wayland.row_made; at++)
                         if (wayland.row_client[at] == c->slot)
                                 wayland.host->row_do(wayland.host->context, (int)at, WAYLAND_DO_PINCH_WANT, 1, 0);
         }
@@ -9992,7 +10037,7 @@ WAYLAND_API long wayland_serial_row(unsigned long long serial)
                         struct wayland_surface *s = &c->surfaces[slot];
 
                         if (s->live && s->xserial_set && s->xserial == serial)
-                                return s->row >= 0 && s->row < WAYLAND_ROWS ? s->row : -1;
+                                return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
                 }
         }
         return -2;
@@ -10094,7 +10139,7 @@ WAYLAND_API void wayland_xwindow_gone(unsigned long long serial)
 WAYLAND_API long wayland_row_shortcuts(long row)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
 
         return s && (s->shortcuts || s->xgrab) ? s->shortcut_active : 0;
 }
@@ -10136,7 +10181,7 @@ static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surf
 WAYLAND_API long wayland_shortcuts_key(long row, long code, long value, int super)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
         long now;
 
         if (!s || !(s->shortcuts || s->xgrab) || !s->shortcut_active)
@@ -10287,7 +10332,7 @@ WAYLAND_API void wayland_hint_counts(long *bells, long *icons)
 WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *modal, long *shortcuts)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
 
         *content = s ? (long)s->content : WLN_wp_content_type_v1_type_none;
         *icon = s ? s->icon : 0;
@@ -10298,7 +10343,7 @@ WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *mo
 /* The client a row belongs to, or -1: the compositor asks before it treats a row as a program's. */
 WAYLAND_API long wayland_row_owner(long row)
 {
-        return row >= 0 && row < WAYLAND_ROWS ? wayland.row_client[row] : -1;
+        return row >= 0 && row < wayland.row_made ? wayland.row_client[row] : -1;
 }
 
 /*
@@ -10333,7 +10378,7 @@ WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
         out->stride = out->width = out->height = out->format = out->hot_x = out->hot_y = 0;
         out->scale = 1;
         out->serial = wayland.cursor_serial;
-        if (!s || !s->live || s->gen != wayland.cursor_gen || s->role != WAYLAND_ROLE_CURSOR || !s->held || row < 0 || row >= WAYLAND_ROWS ||
+        if (!s || !s->live || s->gen != wayland.cursor_gen || s->role != WAYLAND_ROLE_CURSOR || !s->held || row < 0 || row >= wayland.row_made ||
             row != wayland.pointer_row || wayland.row_client[row] != wayland.cursor_client)
                 return 0;
         b = &c->buffers[s->held - 1];

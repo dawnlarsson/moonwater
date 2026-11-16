@@ -618,7 +618,8 @@ static unsigned int compositor_rows_made; // the rows whose memory is committed 
 /*
         A set of rows, a bit each, with one past them (the doors' slot that is no row, COMPOSITOR_DOOR_MISC): what the masks of a
         bit for each row were, 32 bits that could not name a row past 31. The words walked are those of the rows in use and the
-        last; none is ever set past them.
+        last (rows_walk); none is ever set past them, so a set copied, emptied or joined to another costs the rows in use and not
+        WINDOWS of them (rows_copy for a copy: an assignment of the struct is every word).
 */
 #define COMPOSITOR_ROW_WORDS ((WINDOWS + 1 + 63) / 64)
 struct compositor_rows
@@ -650,11 +651,30 @@ static inline void rows_del(struct compositor_rows *s, long at)
                 s->word[at / 64] &= ~(1ULL << (at % 64));
 }
 
+// The words of the rows in use, then the last (the misc slot's) when it is not among them: the k-th word walked.
+static inline unsigned int rows_walked(void)
+{
+        unsigned int used = compositor_rows_words();
+
+        return used < COMPOSITOR_ROW_WORDS ? used + 1 : used;
+}
+
+static inline unsigned int rows_walk(unsigned int k)
+{
+        return k < compositor_rows_words() ? k : COMPOSITOR_ROW_WORDS - 1;
+}
+
 // Taken from another thread's set and emptied there, word by word (each word's exchange is the thread's or-fetch's partner).
 static inline void rows_take(struct compositor_rows *into, struct compositor_rows *from)
 {
-        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
-                into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
+        for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
+                w = rows_walk(k), into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
+}
+
+static inline void rows_copy(struct compositor_rows *into, const struct compositor_rows *from)
+{
+        for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
+                w = rows_walk(k), into->word[w] = from->word[w];
 }
 
 static inline void rows_add_atomic(struct compositor_rows *s, long at)
@@ -680,8 +700,8 @@ static inline void rows_none(struct compositor_rows *s)
 
 static inline void rows_or(struct compositor_rows *into, const struct compositor_rows *with)
 {
-        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
-                into->word[w] |= with->word[w];
+        for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
+                w = rows_walk(k), into->word[w] |= with->word[w];
 }
 
 // The first 64 rows as a word, and a set of them from one: what the checks compare and set (their tables have a few rows).
@@ -700,8 +720,8 @@ static inline struct compositor_rows rows_from(unsigned long long low)
 
 static inline void rows_and_not(struct compositor_rows *into, const struct compositor_rows *without)
 {
-        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
-                into->word[w] &= ~without->word[w];
+        for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
+                w = rows_walk(k), into->word[w] &= ~without->word[w];
 }
 
 struct compositor_poll
@@ -2292,6 +2312,28 @@ static int compositor_picture_poll(int row)
 #endif
 
 /*
+        The loop's poll list, sized by what can be in it: the loop's own (COMPOSITOR_POLLS_OWN: the signals, the watch of the input
+        directory, the doors' threads' knock, the card while a flip is in flight, the sync_file of a job of the card's the loop waits
+        on, the uevents and the clipboard's door), every
+        input device, every window's door, and what the Wayland shim adds (COMPOSITOR_WL_POLLS, wayland_host.c, which counts the X
+        window manager's with its own). The size was a sum of numbers written beside the loop, which the X window manager's two
+        were left out of when they came: with every input, every client stalled and a flip in flight the list was written two
+        entries past its end. Whoever adds an entry adds it to the constant its part is counted in.
+*/
+#ifndef COMPOSITOR_WL_POLLS
+#define COMPOSITOR_WL_POLLS 0
+#endif
+#define COMPOSITOR_POLLS_OWN 7
+// The list's room for `rows` rows in use: the list is the rows' (compositor_polls, compositor_rows_make), grown with them.
+#define COMPOSITOR_POLLS_FOR(rows) (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + (unsigned long)(rows) + COMPOSITOR_WL_POLLS)
+#define COMPOSITOR_POLLS COMPOSITOR_POLLS_FOR(WINDOWS)
+static struct compositor_poll *compositor_polls;
+// The compositor's own descriptors fit the share kept for them: the poll list's (but the clients'), a wake for every door, the table,
+// the card, the render node and the buffers given to it, the sound server's socket, the selections and their history, and each transfer's pipe.
+_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_OWN,
+               "the compositor's own descriptors fit the numbers kept for them");
+
+/*
         The compositor's memory of each row: what was 81 arrays of WINDOWS in its structs and beside them, each a pointer into one
         reservation of address space (PROT_NONE and MAP_NORESERVE, of no memory until it is committed), its arrays one after another
         at page boundaries, every one with room for WINDOWS (WINDOWS + 1 for the doors' threads, whose last is the misc door's; the
@@ -2305,6 +2347,12 @@ static int compositor_picture_poll(int row)
 #define COMPOSITOR_ROWS_ROW(rows) (rows)
 #define COMPOSITOR_ROWS_ROW1(rows) ((rows) + 1)
 #define COMPOSITOR_ROWS_SCREENS(rows) WINDOWS_OUTPUTS
+#define COMPOSITOR_ROWS_FRAMES(rows) COMPOSITOR_FRAMES_FOR(rows)
+#define COMPOSITOR_ROWS_PIECES(rows) COMPOSITOR_PIECES_FOR(rows)
+#define COMPOSITOR_ROWS_EDGES(rows) (2 * COMPOSITOR_PIECES_FOR(rows) + 2)
+#define COMPOSITOR_ROWS_SPANS(rows) (COMPOSITOR_PIECES_FOR(rows) + 1)
+#define COMPOSITOR_ROWS_LAYERED(rows) ((unsigned long)(rows) + COMPOSITOR_LAYERS)
+#define COMPOSITOR_ROWS_POLLS(rows) COMPOSITOR_POLLS_FOR(rows)
 
 #define COMPOSITOR_ROWS_OWN(X) \
         X(compositor.scan_fb, COMPOSITOR_ROWS_ROW) \
@@ -2421,7 +2469,33 @@ static int compositor_picture_poll(int row)
         X(compositor_record_shots[0].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[2].rects, COMPOSITOR_ROWS_ROW) \
-        X(compositor_record_pending, COMPOSITOR_ROWS_ROW)
+        X(compositor_record_pending, COMPOSITOR_ROWS_ROW) \
+        X(compositor_polls, COMPOSITOR_ROWS_POLLS) \
+        X(compositor_present_frame_room, COMPOSITOR_ROWS_FRAMES) \
+        X(compositor_present_row_room, COMPOSITOR_ROWS_LAYERED) \
+        X(compositor_gpu_scaled_copy, COMPOSITOR_ROWS_FRAMES) \
+        X(compositor_scene_radii, COMPOSITOR_ROWS_FRAMES) \
+        X(compositor_plan_box, COMPOSITOR_ROWS_PIECES) \
+        X(compositor_plan_owner, COMPOSITOR_ROWS_PIECES) \
+        X(compositor_plan_edge, COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_edge[0], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[0], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[1], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[1], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[2], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[2], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[3], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[3], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[4], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[4], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[5], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[5], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[6], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[6], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[7], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[7], COMPOSITOR_ROWS_SPANS) \
+        X(compositor_lane_edge[8], COMPOSITOR_ROWS_EDGES) \
+        X(compositor_lane_span[8], COMPOSITOR_ROWS_SPANS)
 
 #define COMPOSITOR_ROWS_ALL(X) COMPOSITOR_ROWS_OWN(X) COMPOSITOR_ROWS_WL(X) COMPOSITOR_ROWS_CARD(X) COMPOSITOR_ROWS_KEPT(X)
 
@@ -2513,25 +2587,6 @@ static void compositor_card_zero(void)
 }
 
 /*
-        The loop's poll list, sized by what can be in it: the loop's own (COMPOSITOR_POLLS_OWN: the signals, the watch of the input
-        directory, the doors' threads' knock, the card while a flip is in flight, the sync_file of a job of the card's the loop waits
-        on, the uevents and the clipboard's door), every
-        input device, every window's door, and what the Wayland shim adds (COMPOSITOR_WL_POLLS, wayland_host.c, which counts the X
-        window manager's with its own). The size was a sum of numbers written beside the loop, which the X window manager's two
-        were left out of when they came: with every input, every client stalled and a flip in flight the list was written two
-        entries past its end. Whoever adds an entry adds it to the constant its part is counted in.
-*/
-#ifndef COMPOSITOR_WL_POLLS
-#define COMPOSITOR_WL_POLLS 0
-#endif
-#define COMPOSITOR_POLLS_OWN 7
-#define COMPOSITOR_POLLS (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + WINDOWS + COMPOSITOR_WL_POLLS)
-// The compositor's own descriptors fit the share kept for them: the poll list's (but the clients'), a wake for every door, the table,
-// the card, the render node and the buffers given to it, the sound server's socket, the selections and their history, and each transfer's pipe.
-_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_OWN,
-               "the compositor's own descriptors fit the numbers kept for them");
-
-/*
         What the devices said this turn is on its way to the programs it is for, now: each row of the kit that was given an event is
         knocked on (its wake's byte, by its thread), before the turn reads a settings file, takes a door's picture or a client's
         commit, or composes a frame, where the one knock of a turn was made after the frame had been composed and presented and an
@@ -2540,26 +2595,24 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
 */
 static void compositor_forward(void)
 {
-        struct compositor_rows rows = compositor.woken, kept = {{0}};
         char byte = 0;
 
-        if (!rows_any(&rows))
+        if (!rows_any(&compositor.woken))
                 return;
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-        {
-                if (!rows_has(&rows, row))
-                        continue;
-#ifdef CONFIG_MOONWATER_WAYLAND
-                if (compositor_wl.started && wayland_row_owner(row) >= 0)
+        // A word of no row to knock is passed over whole; a client's row keeps its bit (its socket is written by compositor_wl_wake).
+        for (unsigned int w = 0; w < compositor_rows_words(); w++)
+                for (int row = (int)w * 64; compositor.woken.word[w] && row < (int)(w + 1) * 64 && row < (int)compositor_rows_in_use; row++)
                 {
-                        rows_add(&kept, row);
-                        continue;
-                }
+                        if (!rows_has(&compositor.woken, row))
+                                continue;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (compositor_wl.started && wayland_row_owner(row) >= 0)
+                                continue;
 #endif
-                if (!compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
-                        system_write_once(compositor.wake[row], &byte, 1);
-        }
-        compositor.woken = kept;
+                        rows_del(&compositor.woken, row);
+                        if (!compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
+                                system_write_once(compositor.wake[row], &byte, 1);
+                }
 }
 
 // A turn's devices: each one the poll said has something is read, and what they said is forwarded at once (compositor_forward).
@@ -2877,7 +2930,7 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[COMPOSITOR_POLLS]; // every part of it is counted where it is added (COMPOSITOR_POLLS)
+                struct compositor_poll *wanted = compositor_polls; // every part of it is counted where it is added (COMPOSITOR_POLLS_FOR the rows in use)
                 struct compositor_slots slots;
                 static unsigned int turns;
                 unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, done_at;
@@ -2899,7 +2952,7 @@ static b32 compositor_main()
                 count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at, fence_at = slots.fence_at;
                 uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
                 // A part that adds an entry and not its count (COMPOSITOR_POLLS) has written past the list: said and ended at once, not polled.
-                if (count > COMPOSITOR_POLLS)
+                if (count > COMPOSITOR_POLLS_FOR(compositor_rows_in_use))
                 {
                         compositor_say("the poll list ran past its count, entries", (bipolar)count);
                         break;

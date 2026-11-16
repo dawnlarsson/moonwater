@@ -53,6 +53,7 @@ static unsigned wl_checks, wl_failures;
 
 /* ---- the fake compositor ---- */
 
+#define FAKE_ROWS 32 // the fake host's table: a host has as many rows as it makes, and this one makes 32
 #define FAKE_W 64
 #define FAKE_H 48
 
@@ -70,7 +71,7 @@ struct fake_row
 
 static struct fake_host_state
 {
-        struct fake_row row[WAYLAND_ROWS];
+        struct fake_row row[FAKE_ROWS];
         long fds_open, fds_closed, maps, unmaps, allocs, releases;
         long refuse_open;
         long copied; // pixels of pictures the shim handed the host, counted per pixel read (test_holds)
@@ -197,7 +198,7 @@ static int fake_row_open(void *context, long client, long kind, int parent, long
         (void)client;
         if (fake.refuse_open)
                 return -1;
-        for (int row = 0; row < WAYLAND_ROWS; row++)
+        for (int row = 0; row < FAKE_ROWS; row++)
                 if (!fake.row[row].used)
                 {
                         memset(&fake.row[row], 0, sizeof fake.row[row]);
@@ -302,7 +303,7 @@ static void fake_row_title(void *context, int row, const char *text, long length
         snprintf(fake.row[row].title, sizeof fake.row[row].title, "%s", text);
 }
 
-static long fake_cursor[WAYLAND_ROWS]; // the cursor code the last WAYLAND_DO_CURSOR gave each row (-1 none)
+static long fake_cursor[FAKE_ROWS]; // the cursor code the last WAYLAND_DO_CURSOR gave each row (-1 none)
 
 static void fake_row_do(void *context, int row, long what, long a, long b)
 {
@@ -1020,7 +1021,7 @@ static void leak_check(const char *what)
         WLCHECK(fake.maps == fake.unmaps, "%s: every mapping is unmapped (%ld %ld)", what, fake.maps, fake.unmaps);
         WLCHECK(fake.allocs == fake.releases, "%s: every client record is released (%ld %ld)", what, fake.allocs, fake.releases);
         WLCHECK(fake.reserves == fake.unreserves, "%s: every table's reservation is given back (%ld %ld)", what, fake.reserves, fake.unreserves);
-        for (int row = 0; row < WAYLAND_ROWS; row++)
+        for (int row = 0; row < FAKE_ROWS; row++)
                 if (fake.row[row].used)
                 {
                         WLCHECK(0, "%s: row %d is still open", what, row);
@@ -3655,7 +3656,7 @@ static void test_fuzz(long rounds)
                 if (round % 64 == 0 && c && !wayland_dead(c->slot))
                 {
                         /* the compositor's side too: wakes and frames, with the window in whatever state it is in */
-                        for (int row = 0; row < WAYLAND_ROWS; row++)
+                        for (int row = 0; row < FAKE_ROWS; row++)
                                 if (fake.row[row].used)
                                 {
                                         fake.row[row].states = (long)(wl_random() & 0x1f);
@@ -4684,7 +4685,7 @@ static void test_tree_fuzz(long rounds)
                                 wayland_pointer_motion(0, (long)(wl_random() % 44) - 6, (long)(wl_random() % 36) - 6);
                         break;
                 default:
-                        for (int row = 0; row < WAYLAND_ROWS; row++)
+                        for (int row = 0; row < FAKE_ROWS; row++)
                                 if (fake.row[row].used)
                                 {
                                         fake.row[row].states = (long)(wl_random() & 0x1f);
@@ -4728,7 +4729,7 @@ static void clip_open(struct clipc *k)
         c = k->s.c;
         session_window(&k->s, 0xff404040);
         k->row = -1;
-        for (long row = 0; row < WAYLAND_ROWS; row++)
+        for (long row = 0; row < FAKE_ROWS; row++)
                 if (fake.row[row].used && wayland_row_owner(row) == c->slot)
                         k->row = row;
         k->keyboard = wlc_id(c, WLI_wl_keyboard, 9);

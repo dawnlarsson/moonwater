@@ -44,7 +44,6 @@
 #define COMPOSITOR_WL_FOURCC_ARGB8888 0x34325241u
 #define COMPOSITOR_WL_FOURCC_XRGB8888 0x34325258u
 
-_Static_assert(WAYLAND_ROWS == WINDOWS, "the shim's rows are the compositor's table");
 
 static struct
 {

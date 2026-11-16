@@ -941,13 +941,17 @@ static void compositor_wall_finish(void)
         compositor_wall_take();
 }
 
+// The frames of a present and the row of each: the rows' (compositor_rows_make), as many as the rows in use have.
+static struct compositor_frame *compositor_present_frame_room;
+static unsigned int *compositor_present_row_room;
+
 static void compositor_present_frames(void)
 {
-        struct compositor_frame frames[COMPOSITOR_FRAMES];
+        struct compositor_frame *frames = compositor_present_frame_room; // the rows' (compositor_rows_make), COMPOSITOR_FRAMES_FOR the rows in use
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_frame band;
         struct compositor_frame preview;
-        unsigned int rows[WINDOWS + COMPOSITOR_LAYERS];
+        unsigned int *rows = compositor_present_row_room; // and the row of each frame, the rows in use and the layers
         unsigned int count = 0, windows;
         int tinted;
 

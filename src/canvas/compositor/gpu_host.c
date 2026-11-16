@@ -446,7 +446,7 @@ static b32 compositor_gpu_spots(void)
 */
 #define COMPOSITOR_GPU_SCALED 8
 #define COMPOSITOR_GPU_SCALED_MOST (128ul << 20)
-static struct compositor_frame compositor_gpu_scaled_copy[COMPOSITOR_FRAMES];
+static struct compositor_frame *compositor_gpu_scaled_copy; // the rows' (compositor_rows_make), COMPOSITOR_FRAMES_FOR the rows in use
 static struct
 {
         unsigned int *memory;
@@ -465,7 +465,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
         const struct compositor_frame *frames = *io;
         unsigned int used = 0;
 
-        if (count > COMPOSITOR_FRAMES)
+        if (count > COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
                 return COMPOSITOR_GPU_WHY_OTHER;
         for (unsigned int k = 0; k < count; k++)
         {

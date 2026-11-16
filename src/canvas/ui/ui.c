@@ -1298,6 +1298,13 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
 #define COMPOSITOR_GLASS_ACROSS 8
 #define COMPOSITOR_GLASS_DOWN 4
 
+/*
+        The tabs a band lays, the first of the windows with one in the order they showed: what the band's tree has room for beside
+        its pills (UI_TREE_NODES), where it was the window table's WINDOWS. The windows past them have no tab on the band and are the
+        windows still: Alt-Tab, the launcher and every other way to a window reach them.
+*/
+#define TASKBAR_TAB_ROOM 32
+
 // What the compositor shows the taskbar: the output, the windows that have a tab and the buffers the band is
 // drawn into (none when there is no font, and the tabs are shapes the compositor draws).
 struct taskbar_view
@@ -1317,15 +1324,15 @@ struct taskbar_view
         unsigned int launcher_lit;       // the launcher is up: its button, when the band has one, is drawn as a tab with the keys is
         const unsigned char *marks;      // each tab's mark: lit, put away
         const unsigned char *lengths;    // each tab's title, in characters
-        const char *titles[WINDOWS];     // each tab's title
+        const char *titles[TASKBAR_TAB_ROOM]; // each tab's title
         // Who each tab's window is (the window table's identity, the compositor's own copy of it): the row of the table it is, its
         // app_id ("" or none for a window that has said none), and its icon, WINDOWS_ICON each way and premultiplied, with the
         // sequence that picture is (none and 0 for a window with no icon: its tab draws the kit's symbol for a kit program, the
         // lettered tile for any other program that says an app_id, and the window symbol for one that says nothing).
         const unsigned int *rows;
-        const char *apps[WINDOWS];
-        const unsigned int *icons[WINDOWS];
-        unsigned int icon_seqs[WINDOWS];
+        const char *apps[TASKBAR_TAB_ROOM];
+        const unsigned int *icons[TASKBAR_TAB_ROOM];
+        unsigned int icon_seqs[TASKBAR_TAB_ROOM];
 };
 
 // The glass the band's tabs are made of over a rectangle of the output: the compositor blurs it into

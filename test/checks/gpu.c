@@ -2703,7 +2703,7 @@ static void gpu_card_rows(void)
         const int one[1][4] = {{0, 0, 64, 64}}, three[3][4] = {{0, 0, 64, 64}, {1024, 0, 1088, 64}, {1984, 0, 2048, 64}};
         const unsigned int rows[1] = {3};
         const unsigned short clip[1][4] = {{0, 0, 64, 64}};
-        struct compositor_poll wanted[COMPOSITOR_POLLS];
+        struct compositor_poll *wanted = compositor_polls;
         struct compositor_slots held, open;
         positive now, drew;
 
@@ -2904,7 +2904,7 @@ static void gpu_lists_nowait_rows(void)
         unsigned int address_to present_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_OPS_AT);
         unsigned int address_to list_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_LIST_OPS_AT);
         int kept_gpu_on = compositor_gpu, damage[4] = {-1, -1, -1, -1}, drawn;
-        struct compositor_poll wanted[COMPOSITOR_POLLS];
+        struct compositor_poll *wanted = compositor_polls;
         struct compositor_slots slots;
         positive now, sequence;
         b32 published;

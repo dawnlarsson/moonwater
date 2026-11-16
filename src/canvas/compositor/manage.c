@@ -2231,7 +2231,7 @@ static void compositor_take(int row)
                 return;
 
         unsigned int seen = compositor.seen[row];
-        struct compositor_rows reclaim = compositor.reclaim;
+        b32 reclaimed = rows_has(&compositor.reclaim, row);
         rows_del(&compositor.reclaim, row);
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
@@ -2242,7 +2242,9 @@ static void compositor_take(int row)
         // A publish was writing the list: the frame is not taken now (the window shows what it showed), and the next take takes it.
         if (listed < 0)
         {
-                compositor.seen[row] = seen, compositor.reclaim = reclaim;
+                compositor.seen[row] = seen;
+                if (reclaimed)
+                        rows_add(&compositor.reclaim, row);
                 return;
         }
         b32 list_refused = !listed && __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE) != refused_before;
