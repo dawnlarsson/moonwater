@@ -448,7 +448,10 @@ static fn profile_say_thread(positive index, positive seconds, p64 address_to co
                         if (thread->call_seen[at])
                         {
                                 if (!any)
-                                        host_say(log, "    in the kernel, in system calls:"), any = true;
+                                {
+                                        host_say(log, "    in the kernel, in system calls:");
+                                        any = true;
+                                }
                                 host_say(log, " %p (%p times)", (positive)thread->calls[at], (positive)thread->call_seen[at]);
                         }
                 if (any)
