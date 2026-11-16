@@ -148911,8 +148911,8 @@ static fn check_settings(string_address regular, string_address bold)
         */
         {
                 int server = settings_row_named("SSH server"), add = settings_row_named("Add a key (label, then the public key)");
-                struct window_event virtual_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_EVENT_VIRTUAL, 0, UI_KEY_ENTER};
-                struct window_event plugged_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, UI_KEY_ENTER};
+                struct window_event virtual_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_EVENT_VIRTUAL, UI_KEY_ENTER, 0};
+                struct window_event plugged_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_ENTER, 0};
                 string_address refusal = (string_address)WORDS(settings_virtual_refused);
                 b32 refused, taken, off, typed, typed_root, typed_port, added, added_plugged, other;
 
