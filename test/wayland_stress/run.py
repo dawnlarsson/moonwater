@@ -167,7 +167,8 @@ class Compositor:
         return pids + (children_named(self.pid, "Xwayland") if self.pid else [])
 
     def screenshot(self):
-        return None  # (width, height, bytes RGBX) or None
+        # (width, height, bytes of 4 a pixel, the order of R, G and B in them) or None. On a card, the card's own scanout.
+        return drm_screen() if self.args.real and not os.path.exists(Moonwater.SOCK) else None
 
     def stop(self):
         for p in ([self.xproc] if self.xproc else []) + ([self.proc] if self.proc else []) + self.extra:
@@ -257,7 +258,7 @@ class Moonwater(Compositor):
 
     def screenshot(self):
         if self.args.real:
-            return None
+            return drm_screen()
         try:
             raw = open(self.scan, "rb").read()
         except OSError:
@@ -390,6 +391,65 @@ class Mutter(Compositor):
             if f.startswith(".mutter-Xwaylandauth"):
                 self.env["XAUTHORITY"] = os.path.join(rt, f)
         return bool(self.display)
+
+
+def drm_screen():
+    """The screen as the card scans it out, on the owner's machine: the first lit crtc's framebuffer, mapped as a dumb buffer
+    (GETRESOURCES, GETCRTC, GETFB, MAP_DUMB; root, or the card's master). None where the card will not hand it over (a
+    framebuffer that is a client's buffer shown straight is no dumb buffer)."""
+    import fcntl
+    import mmap
+
+    def iowr(nr, size):
+        return (3 << 30) | (size << 16) | (ord("d") << 8) | nr
+
+    for card in sorted(f for f in os.listdir("/dev/dri") if f.startswith("card")) if os.path.isdir("/dev/dri") else []:
+        try:
+            fd = os.open("/dev/dri/" + card, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            res = bytearray(64)
+            fcntl.ioctl(fd, iowr(0xA0, 64), res)
+            crtcs = struct.unpack_from("I", res, 36)[0]
+            ids = bytearray(4 * max(crtcs, 1))
+            buf = (ctypes_addr(ids))
+            res2 = bytearray(64)
+            struct.pack_into("QQQQIIII", res2, 0, 0, buf, 0, 0, 0, crtcs, 0, 0)
+            fcntl.ioctl(fd, iowr(0xA0, 64), res2)
+            for k in range(crtcs):
+                crtc = bytearray(104)
+                struct.pack_into("QII", crtc, 0, 0, 0, struct.unpack_from("I", ids, 4 * k)[0])
+                fcntl.ioctl(fd, iowr(0xA1, 104), crtc)
+                fb_id = struct.unpack_from("I", crtc, 16)[0]
+                if not fb_id:
+                    continue
+                fb = bytearray(28)
+                struct.pack_into("I", fb, 0, fb_id)
+                fcntl.ioctl(fd, iowr(0xAD, 28), fb)
+                _, w, h, pitch, bpp, depth, handle = struct.unpack("7I", fb)
+                if not handle or bpp != 32:
+                    continue
+                md = bytearray(16)
+                struct.pack_into("I", md, 0, handle)
+                fcntl.ioctl(fd, iowr(0xB3, 16), md)
+                offset = struct.unpack_from("Q", md, 8)[0]
+                m = mmap.mmap(fd, pitch * h, mmap.MAP_SHARED, mmap.PROT_READ, offset=offset)
+                raw = bytearray(w * h * 4)
+                for y in range(h):
+                    raw[y * w * 4:(y + 1) * w * 4] = m[y * pitch:y * pitch + w * 4]
+                m.close()
+                return w, h, bytes(raw), (2, 1, 0)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return None
+
+
+def ctypes_addr(buffer):
+    import ctypes
+    return ctypes.addressof((ctypes.c_char * len(buffer)).from_buffer(buffer))
 
 
 def png_rgbx(path):
