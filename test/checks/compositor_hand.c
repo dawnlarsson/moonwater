@@ -1903,6 +1903,29 @@ static void check_compositor_hover(void)
         table->event_tail[1] = table->event_head[1];
         check("input: a button's release that a full ring dropped is posted once the program has caught up, and once", dropped && landed && once);
     }
+
+    /* A key's release that a full ring dropped is owed the same way, and goes before the next event of the row: the key was left down
+       (repeating, or a modifier held on every key after it) for good. */
+    {
+        unsigned int at;
+        int dropped, landed, after;
+
+        table->event_tail[1] = table->event_head[1];
+        while (table->event_head[1] - table->event_tail[1] < WINDOWS_EVENTS)
+            compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a');
+        dropped = !compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_SHIFT, 42, 0);
+        table->event_tail[1] = table->event_head[1];
+        compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a');
+        at = table->event_tail[1] % WINDOWS_EVENTS;
+        landed = table->event_head[1] - table->event_tail[1] == 2 && table->event_type[1][at] == WINDOW_EVENT_KEY &&
+                 (table->event_flags[1][at] & (WINDOW_KEY_SHIFT | WINDOW_KEY_DOWN)) == WINDOW_KEY_SHIFT && table->event_a[1][at] == 42;
+        at = (table->event_tail[1] + 1) % WINDOWS_EVENTS;
+        after = table->event_a[1][at] == 30 && (table->event_flags[1][at] & WINDOW_KEY_DOWN);
+        table->event_tail[1] = table->event_head[1];
+        compositor_owed_pass();
+        check("input: a key's release that a full ring dropped is posted before the row's next event, with its flags, and once",
+              dropped && landed && after && table->event_head[1] == table->event_tail[1]);
+    }
 }
 
 /*

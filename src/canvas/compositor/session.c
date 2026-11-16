@@ -1243,16 +1243,22 @@ static unsigned char compositor_osk_held[WINDOWS];
 static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b);
 
 /*
-        A button let go that a full ring dropped is owed to its window: the window would hold the press for good (a thumb held, a pull
-        never let go, a drag of its own) with no release to come. It is posted again before the next thing the row is sent and at each
-        pass of the loop (compositor_owed_pass), in the order it was owed.
+        A button or a key let go that a full ring dropped is owed to its window: the window would hold the press for good (a thumb held, a
+        pull never let go, a drag of its own, a key repeating or a modifier held on every key after it) with no release to come. It is posted
+        again before the next thing the row is sent and at each pass of the loop (compositor_owed_pass), the buttons first and then the keys,
+        with the flags it was dropped with (a key's character none, as compositor_keys_release posts it).
 */
 static unsigned char compositor_owed[WINDOWS];                 // the buttons (bit of code - COMPOSITOR_BTN_LEFT) whose release the row is owed
 static unsigned int compositor_owed_flags[WINDOWS][8];
+static unsigned char compositor_owed_keys[WINDOWS][32];        // the keys (bit of code, codes under 256) whose release the row is owed
+static unsigned int compositor_owed_key_flags[WINDOWS][256];
+static unsigned char compositor_owed_any[WINDOWS];             // whether any key of the row is owed
 
 static void compositor_owed_flush(int row)
 {
-        for (unsigned int index = 0; row >= 0 && row < WINDOWS && index < 8 && compositor_owed[row]; index++)
+        if (row < 0 || row >= WINDOWS)
+                return;
+        for (unsigned int index = 0; index < 8 && compositor_owed[row]; index++)
         {
                 if (!(compositor_owed[row] >> index & 1))
                         continue;
@@ -1260,6 +1266,15 @@ static void compositor_owed_flush(int row)
                         return;
                 compositor_owed[row] &= (unsigned char)~(1u << index);
         }
+        for (unsigned int code = 0; code < 256 && compositor_owed_any[row]; code++)
+        {
+                if (!(compositor_owed_keys[row][code >> 3] >> (code & 7) & 1))
+                        continue;
+                if (!compositor_post_now(row, WINDOW_EVENT_KEY, compositor_owed_key_flags[row][code], (int)code, 0))
+                        return;
+                compositor_owed_keys[row][code >> 3] &= (unsigned char)~(1u << (code & 7));
+        }
+        compositor_owed_any[row] = 0;
 }
 
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
@@ -1275,6 +1290,12 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                 compositor_owed[row] |= (unsigned char)(1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT));
                 compositor_owed_flags[row][(unsigned int)a - COMPOSITOR_BTN_LEFT] = flags;
         }
+        if (!posted && type == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a < 256 && row < WINDOWS)
+        {
+                compositor_owed_keys[row][(unsigned int)a >> 3] |= (unsigned char)(1u << ((unsigned int)a & 7));
+                compositor_owed_key_flags[row][(unsigned int)a] = flags;
+                compositor_owed_any[row] = 1;
+        }
         return posted;
 }
 
@@ -1282,13 +1303,15 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
 static void compositor_owed_drop(int row)
 {
         compositor_owed[row] = 0;
+        compositor_owed_any[row] = 0;
+        memory_zero(compositor_owed_keys[row], sizeof compositor_owed_keys[row]);
 }
 
 // What every row is owed, tried again: a program that has caught up takes the release that did not fit.
 static void compositor_owed_pass(void)
 {
         for (int row = 0; row < WINDOWS; row++)
-                if (compositor_owed[row])
+                if (compositor_owed[row] || compositor_owed_any[row])
                         compositor_owed_flush(row);
 }
 
