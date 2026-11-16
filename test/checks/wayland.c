@@ -3965,12 +3965,12 @@ static void test_seat(void)
         }
         wlc_end(c);
 
-        /* a client holds at most WAYLAND_SEATS pointers */
+        /* a client holds as many pointers as it makes, and each is sent the pointer's events */
         session_open(&t.s);
         c = t.s.c;
-        for (int at = 0; at < WAYLAND_SEATS + 1 && !c->errors; at++)
+        for (int at = 0; at < 40 && !c->errors; at++)
                 wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 9));
-        WLCHECK(refused_with(c, WLN_wl_display_error_no_memory), "more pointers than the room is refused");
+        WLCHECK(c->errors == 0, "forty pointers a client is given (%s)", c->errors ? c->error_text : "none refused");
         wlc_end(c);
         /* touch, which the seat does not have */
         session_open(&t.s);
@@ -6741,9 +6741,9 @@ static void test_games(void)
         wlc_end(cd);
         game_open(&d);
         cd = d.k.s.c;
-        for (int at = 0; at < WAYLAND_RELATIVES + 1 && !cd->errors; at++)
+        for (int at = 0; at < 40 && !cd->errors; at++)
                 wlc_send(cd, d.k.s.relative, WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer, wlc_id(cd, WLI_zwp_relative_pointer_v1, 1), d.pointer);
-        WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_NO_MEMORY, "and at most eight relative pointers");
+        WLCHECK(cd->errors == 0, "and as many relative pointers: forty (%s)", cd->errors ? cd->error_text : "none refused");
         wlc_end(cd);
 
         /* what a game asks that the desktop does not do: taken, and nothing happens */

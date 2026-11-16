@@ -85,20 +85,17 @@
 #define WAYLAND_SERVER_BASE 0xff000000UL
 #define WAYLAND_SCREENS 8
 #define WAYLAND_GLOBALS_MAX 40
-#define WAYLAND_SEATS 8         // pointers, keyboards and touches, one client holds
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
 #define WAYLAND_TOKENS 16       // xdg-activation tokens pending or given out, over every client
 #define WAYLAND_TOKENS_PER_CLIENT 4 // of those, the most one client may hold: a client that never commits its tokens cannot take them all
 #define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
-#define WAYLAND_DEVICES 8       // data devices, of each kind, one client holds
 #define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
 #define WAYLAND_CLIP_CLIPBOARD 0
 #define WAYLAND_CLIP_PRIMARY 1
 #define WAYLAND_PICTURE_LENT 2                 // row_picture's answer: the host reads the buffer in place and keeps it (see struct wayland_host)
 #define WAYLAND_DMABUF_ENTRIES 64    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
-#define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_REGION_RECTS 8       // exact disjoint rectangles tracked per region before bounding fallback
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
@@ -413,6 +410,19 @@ struct wayland_table
         long committed, stack_committed, stack;
 };
 
+/*
+        A client's objects of one kind it is sent events through (its pointers, keyboards and touches, its data devices of each kind,
+        its relative pointers): their ids in the order made, a table that grows (as many as it makes), and the slots of those still
+        there as a question of them answers (wayland_seats, wayland_devices), a table of their own.
+*/
+struct wayland_ids
+{
+        unsigned int *id;
+        long count;
+        long *slots;
+        struct wayland_table table, slot_table;
+};
+
 #define WAYLAND_ROLE_NONE 0
 #define WAYLAND_ROLE_TOPLEVEL 1
 #define WAYLAND_ROLE_POPUP 2
@@ -693,13 +703,11 @@ struct wayland_client
         long in_fds[WAYLAND_FDS], in_fd_count;
         unsigned long serial;
         long pool_bytes;
-        unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS], touch_id[WAYLAND_SEATS];
-        unsigned char pointers, keyboards, touches;
+        struct wayland_ids seat_ids[3]; // its pointers, keyboards and touches (wayland_seat_ids)
         unsigned char finger_scroll; // a precise (finger) scroll was sent to this client and no axis_stop since
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
         unsigned int pointer_enter; // the serial of the last wl_pointer.enter this client was sent, which its cursor requests name (0 before the first)
-        unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
-        unsigned char devices[2];
+        struct wayland_ids device_ids[2]; // data devices (0) and primary selection devices (1)
         unsigned int input_serial[WAYLAND_INPUT_SERIALS]; // the serials of the last input this client was sent
         unsigned char input_next;
         long server_hint, server_live; // where the next of the server's own ids is looked for, and how many are in use
@@ -721,8 +729,7 @@ struct wayland_client
         // A commit held for a fifo barrier (hold_at 0: woken by the frames) or for its time (hold_at, the host's ms), and the surface it is for.
         unsigned char hold;
         long hold_surface, hold_at;
-        unsigned int relative_id[WAYLAND_RELATIVES];
-        unsigned char relatives;
+        struct wayland_ids relative_ids; // its relative pointers
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         // The buffers subsurfaces that went (destroyed, or taken off their parent) were read in place from as layers, buffer index and one:
         // the host has been told they went, and a frame drawn since lets them go (wayland_gone_drawn).
@@ -1015,6 +1022,35 @@ static void wayland_client_slots_drop(void)
         wayland.client = 0, wayland.out_dirty = 0, wayland.client_slots = 0;
 }
 
+// An id added to a list (its table grown when it is full): 1, or 0 when the memory is not there.
+static int wayland_ids_add(struct wayland_ids *ids, unsigned int id)
+{
+        ids->table.unit = sizeof(unsigned int);
+        if (!wayland_table_reach(&ids->table, ids->count + 1))
+                return 0;
+        ids->id = (unsigned int *)ids->table.at;
+        ids->id[ids->count++] = id;
+        return 1;
+}
+
+// An id taken out of a list, the last put in its place.
+static void wayland_ids_remove(struct wayland_ids *ids, unsigned int id)
+{
+        for (long at = 0; at < ids->count; at++)
+                if (ids->id[at] == id)
+                {
+                        ids->id[at] = ids->id[--ids->count];
+                        return;
+                }
+}
+
+static void wayland_ids_drop(struct wayland_ids *ids)
+{
+        wayland_table_drop(&ids->table);
+        wayland_table_drop(&ids->slot_table);
+        ids->id = 0, ids->slots = 0, ids->count = 0;
+}
+
 // A client's tables made ready (their units) and their arrays pointed at, once a table has its reservation.
 static void wayland_tables_point(struct wayland_client *c)
 {
@@ -1069,6 +1105,9 @@ static void wayland_tables_drop(struct wayland_client *c)
         wayland_table_drop(&c->feedback_table);
         wayland_table_drop(&c->sub_bits);
         wayland_table_drop(&c->server_table);
+        for (long k = 0; k < 3; k++)
+                wayland_ids_drop(&c->seat_ids[k]);
+        wayland_ids_drop(&c->device_ids[0]), wayland_ids_drop(&c->device_ids[1]), wayland_ids_drop(&c->relative_ids);
         wayland_table_drop(&c->source_table);
         wayland_table_drop(&c->offer_table);
         wayland_table_drop(&c->params_table);
@@ -5555,63 +5594,49 @@ WAYLAND_API long wayland_row_grabs(long row)
         return s && s->grab;
 }
 
-/* A client's id list and count for one kind of seat object: pointer, keyboard or touch. */
-static unsigned int *wayland_seat_ids(struct wayland_client *c, long iface, unsigned char **count)
+/* A client's id list for one kind of seat object: pointer, keyboard or touch. */
+static struct wayland_ids *wayland_seat_ids(struct wayland_client *c, long iface)
 {
-        if (iface == WLI_wl_pointer)
-        {
-                *count = &c->pointers;
-                return c->pointer_id;
-        }
-        if (iface == WLI_wl_touch)
-        {
-                *count = &c->touches;
-                return c->touch_id;
-        }
-        *count = &c->keyboards;
-        return c->keyboard_id;
+        return &c->seat_ids[iface == WLI_wl_pointer ? 0 : iface == WLI_wl_touch ? 2 : 1];
 }
 
-/* The slots of a client's objects of a seat kind that are still there. */
-static long wayland_seats(struct wayland_client *c, long iface, long *slots)
+/* The slots of the objects of a list that are still there and of iface, in the list's own slots (answered in *slots): their count,
+   0 when the memory for them is not there (they are not sent this event). */
+static long wayland_ids_slots(struct wayland_client *c, struct wayland_ids *ids, long iface, long **slots)
 {
-        unsigned char *count;
-        const unsigned int *ids = wayland_seat_ids(c, iface, &count);
         long found = 0;
 
-        for (long at = 0; at < *count; at++)
+        ids->slot_table.unit = sizeof(long);
+        *slots = 0;
+        if (!ids->count || !wayland_table_reach(&ids->slot_table, ids->count))
+                return 0;
+        ids->slots = (long *)ids->slot_table.at;
+        for (long at = 0; at < ids->count; at++)
         {
-                long slot = wayland_slot_of(c, ids[at]);
+                long slot = wayland_slot_of(c, ids->id[at]);
 
                 if (slot >= 0 && c->objects[slot].iface == iface)
-                        slots[found++] = slot;
+                        ids->slots[found++] = slot;
         }
+        *slots = ids->slots;
         return found;
 }
 
-/* A seat object made: its id is kept, up to the room; false for no room. */
+/* The slots of a client's objects of a seat kind that are still there. */
+static long wayland_seats(struct wayland_client *c, long iface, long **slots)
+{
+        return wayland_ids_slots(c, wayland_seat_ids(c, iface), iface, slots);
+}
+
+/* A seat object made: its id is kept; false when the memory for it is not there. */
 static int wayland_seat_add(struct wayland_client *c, long iface, unsigned int id)
 {
-        unsigned char *count;
-        unsigned int *ids = wayland_seat_ids(c, iface, &count);
-
-        if (*count >= WAYLAND_SEATS)
-                return 0;
-        ids[(*count)++] = id;
-        return 1;
+        return wayland_ids_add(wayland_seat_ids(c, iface), id);
 }
 
 static void wayland_seat_remove(struct wayland_client *c, long iface, unsigned int id)
 {
-        unsigned char *count;
-        unsigned int *ids = wayland_seat_ids(c, iface, &count);
-
-        for (long at = 0; at < *count; at++)
-                if (ids[at] == id)
-                {
-                        ids[at] = ids[--(*count)];
-                        return;
-                }
+        wayland_ids_remove(wayland_seat_ids(c, iface), id);
 }
 
 static void wayland_pointer_frame(struct wayland_client *c, long slot)
@@ -5753,7 +5778,7 @@ static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struc
 static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_surface *s)
 {
         unsigned long serial = wayland_serial(c);
-        long slots[WAYLAND_SEATS], count = wayland_seats(c, WLI_wl_pointer, slots);
+        long *slots, count = wayland_seats(c, WLI_wl_pointer, &slots);
 
         for (long at = 0; at < count; at++)
         {
@@ -5814,7 +5839,7 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
-                long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_pointer, slots);
+                long *slots, count = wayland_seats(now, WLI_wl_pointer, &slots);
 
                 now->pointer_enter = (unsigned int)serial;
                 for (long at = 0; at < count; at++)
@@ -5831,7 +5856,7 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
 {
         struct wayland_client *c;
         struct wayland_surface *root, *s = 0;
-        long time, slots[WAYLAND_SEATS], count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
+        long time, *slots, count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
 
         if (!wayland.host || row != wayland.pointer_row || (wayland.hold_mode == 1 && row == wayland.hold_row) ||
             !(root = wayland_row_surface(row, &c)))
@@ -5841,7 +5866,7 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
         if (wayland.pointer_row != row || wayland.pointer_surface < 0 || !s)
                 return;
         time = wayland.host->now(wayland.host->context);
-        count = wayland_seats(c, WLI_wl_pointer, slots);
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
         {
                 struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_motion);
@@ -5879,7 +5904,7 @@ static int wayland_touch_find(long id)
 */
 static void wayland_touch_send(struct wayland_client *c, long event, const unsigned long *words, long count)
 {
-        long slots[WAYLAND_SEATS], seats = wayland_seats(c, WLI_wl_touch, slots);
+        long *slots, seats = wayland_seats(c, WLI_wl_touch, &slots);
 
         for (long at = 0; at < seats; at++)
         {
@@ -5902,11 +5927,11 @@ static void wayland_touch_send(struct wayland_client *c, long event, const unsig
 WAYLAND_API long wayland_row_takes_touch(long row)
 {
         struct wayland_client *c = 0;
-        long slots[WAYLAND_SEATS];
+        long *slots;
 
         if (row < 0 || row >= wayland.row_made || !wayland_row_surface(row, &c))
                 return 0;
-        return wayland_seats(c, WLI_wl_touch, slots) > 0;
+        return wayland_seats(c, WLI_wl_touch, &slots) > 0;
 }
 
 /* A finger went down on row at (x, y) of its picture; id is its tracking id, unique while it is down. */
@@ -5914,7 +5939,7 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *root, *s;
-        long sx = 0, sy = 0, time, slots[WAYLAND_SEATS], point = -1;
+        long sx = 0, sy = 0, time, *slots, point = -1;
         unsigned long serial, words[6];
 
         if (!wayland.host || id < 0 || wayland_touch_find(id) >= 0 || !(root = wayland_row_surface(row, &c)))
@@ -5922,7 +5947,7 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
         for (int at = 0; at < WAYLAND_TOUCHES && point < 0; at++)
                 if (!wayland.touch[at].live)
                         point = at;
-        if (point < 0 || wayland_seats(c, WLI_wl_touch, slots) == 0 || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
+        if (point < 0 || wayland_seats(c, WLI_wl_touch, &slots) == 0 || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
@@ -6028,7 +6053,7 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         struct wayland_client *c;
         struct wayland_surface *s;
         unsigned long serial;
-        long time, slots[WAYLAND_SEATS], count;
+        long time, *slots, count;
 
         if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || code < 0 || code > 0x2ff)
                 return;
@@ -6036,7 +6061,7 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         serial = wayland_input_serial(c);
         if (pressed)
                 c->press_serial = (unsigned int)serial;
-        count = wayland_seats(c, WLI_wl_pointer, slots);
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
         {
                 struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_button);
@@ -6061,7 +6086,7 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
 WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long notch_px)
 {
         struct wayland_client *c;
-        long time, slots[WAYLAND_SEATS], count, axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
+        long time, *slots, count, axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
         int precise = notch_px > 0;
 
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !v120)
@@ -6069,7 +6094,7 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
         if (precise)
                 c->finger_scroll = 1;
         time = wayland.host->now(wayland.host->context);
-        count = wayland_seats(c, WLI_wl_pointer, slots);
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
         {
                 struct wayland_object *o = &c->objects[slots[at]];
@@ -6128,13 +6153,13 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
 WAYLAND_API void wayland_pointer_axis_stop(long row)
 {
         struct wayland_client *c;
-        long time, slots[WAYLAND_SEATS], count;
+        long time, *slots, count;
 
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !c->finger_scroll)
                 return;
         c->finger_scroll = 0;
         time = wayland.host->now(wayland.host->context);
-        count = wayland_seats(c, WLI_wl_pointer, slots);
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
                 for (long axis = 0; axis < 2 && c->objects[slots[at]].version >= 5; axis++)
                 {
@@ -6411,7 +6436,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
         if (was)
         {
                 unsigned long serial = wayland_serial(old);
-                long slots[WAYLAND_SEATS], count = wayland_seats(old, WLI_wl_keyboard, slots);
+                long *slots, count = wayland_seats(old, WLI_wl_keyboard, &slots);
 
                 for (long at = 0; at < count; at++)
                 {
@@ -6433,7 +6458,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
-                long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_keyboard, slots);
+                long *slots, count = wayland_seats(now, WLI_wl_keyboard, &slots);
 
                 // A window is entered with no key held and the locks the compositor says: whatever was held went with the window
                 // that had the keys, whose release the compositor sent there.
@@ -6457,7 +6482,7 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
         struct wayland_client *c;
         struct wayland_surface *s;
         unsigned long serial;
-        long time, slots[WAYLAND_SEATS], count;
+        long time, *slots, count;
 
         if (!wayland.host || code < 1 || code > 0x2ff)
                 return;
@@ -6472,7 +6497,7 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
-        count = wayland_seats(c, WLI_wl_keyboard, slots);
+        count = wayland_seats(c, WLI_wl_keyboard, &slots);
         for (long at = 0; at < count; at++)
         {
                 struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_keyboard_key);
@@ -6531,7 +6556,7 @@ WAYLAND_API void wayland_repeat_changed(void)
         for (long client = 0; client < wayland.client_slots; client++)
         {
                 struct wayland_client *c = wayland.client[client];
-                long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
+                long *slots, count = c ? wayland_seats(c, WLI_wl_keyboard, &slots) : 0;
 
                 for (long at = 0; at < count; at++)
                         wayland_keyboard_repeat(c, slots[at]);
@@ -6546,7 +6571,7 @@ WAYLAND_API void wayland_keymap_changed(void)
         for (long client = 0; client < wayland.client_slots; client++)
         {
                 struct wayland_client *c = wayland.client[client];
-                long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
+                long *slots, count = c ? wayland_seats(c, WLI_wl_keyboard, &slots) : 0;
 
                 for (long at = 0; at < count; at++)
                 {
@@ -6705,28 +6730,14 @@ static const char *wayland_mime_choice(unsigned int mimes)
 }
 
 /* The slots of a client's devices for a selection that are still there. */
-static long wayland_devices(struct wayland_client *c, long which, long *slots)
+static long wayland_devices(struct wayland_client *c, long which, long **slots)
 {
-        long found = 0, iface = which ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device;
-
-        for (long at = 0; at < c->devices[which]; at++)
-        {
-                long slot = wayland_slot_of(c, c->device_id[which][at]);
-
-                if (slot >= 0 && c->objects[slot].iface == iface)
-                        slots[found++] = slot;
-        }
-        return found;
+        return wayland_ids_slots(c, &c->device_ids[which], which ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device, slots);
 }
 
 static void wayland_device_remove(struct wayland_client *c, long which, unsigned int id)
 {
-        for (long at = 0; at < c->devices[which]; at++)
-                if (c->device_id[which][at] == id)
-                {
-                        c->device_id[which][at] = c->device_id[which][--c->devices[which]];
-                        return;
-                }
+        wayland_ids_remove(&c->device_ids[which], id);
 }
 
 // An id of the server's own that no object of the client has now, taken in turn so a number just let go is not the next.
@@ -6808,7 +6819,7 @@ static void wayland_selections_to(struct wayland_client *c)
 {
         for (long which = 0; which < 2; which++)
         {
-                long slots[WAYLAND_DEVICES], count = wayland_devices(c, which, slots);
+                long *slots, count = wayland_devices(c, which, &slots);
 
                 for (long at = 0; at < count; at++)
                         wayland_selection_to(c, slots[at], which);
@@ -6851,7 +6862,7 @@ static void wayland_source_drop(struct wayland_client *c, long index)
 WAYLAND_API void wayland_selection_changed(long which)
 {
         struct wayland_client *c;
-        long slots[WAYLAND_DEVICES], count;
+        long *slots, count;
 
         if (!wayland.host || which < 0 || which > 1)
                 return;
@@ -6863,7 +6874,7 @@ WAYLAND_API void wayland_selection_changed(long which)
         if (wayland.keyboard_row < 0 || wayland.row_client[wayland.keyboard_row] < 0)
                 return;
         c = wayland.client[wayland.row_client[wayland.keyboard_row]];
-        count = c ? wayland_devices(c, which, slots) : 0;
+        count = c ? wayland_devices(c, which, &slots) : 0;
         for (long at = 0; at < count; at++)
                 wayland_selection_to(c, slots[at], which);
 }
@@ -6915,9 +6926,8 @@ static int wayland_source_new(struct wayland_client *c, struct wayland_object *s
 // A device made: kept in the client's list, and shown the selection at once when the client has the keys already.
 static int wayland_device_new(struct wayland_client *c, struct wayland_object *self, long which, long slot)
 {
-        if (c->devices[which] >= WAYLAND_DEVICES)
-                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many data devices");
-        c->device_id[which][c->devices[which]++] = c->objects[slot].id;
+        if (!wayland_ids_add(&c->device_ids[which], c->objects[slot].id))
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data device");
         if (wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == c->slot)
                 wayland_selection_to(c, slot, which);
         return WAYLAND_OK;
@@ -7948,14 +7958,14 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
 // Relative motion to the relative pointers of a client, in the surface's units: the places of the hand, accelerated or not.
 static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
-        for (long at = 0; at < c->relatives; at++)
+        for (long at = 0; at < c->relative_ids.count; at++)
         {
-                long slot = wayland_slot_of(c, c->relative_id[at]);
+                long slot = wayland_slot_of(c, c->relative_ids.id[at]);
                 struct wayland_event e;
 
                 if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
                         continue;
-                e = wayland_begin(c, c->relative_id[at], WLE_zwp_relative_pointer_v1_relative_motion);
+                e = wayland_begin(c, c->relative_ids.id[at], WLE_zwp_relative_pointer_v1_relative_motion);
                 wayland_word(&e, (unsigned long)micro >> 32);
                 wayland_word(&e, (unsigned long)micro & 0xffffffffUL);
                 wayland_word(&e, wayland_fixed(dx, scale120));
@@ -7971,12 +7981,12 @@ WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long micro
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
-        long slots[WAYLAND_SEATS], count;
+        long *slots, count;
 
         if (!wayland.host || !s || row != wayland.hold_row || (wayland.hold_mode != 1 && wayland.hold_mode != 2))
                 return;
         wayland_relative_send(c, s->scale120, dx, dy, dx, dy, micro);
-        count = wayland_seats(c, WLI_wl_pointer, slots);
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
                 wayland_pointer_frame(c, slots[at]);
 }
@@ -8482,16 +8492,15 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
         case WLI_zwp_relative_pointer_manager_v1:
                 if (op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer)
                 {
-                        if (c->relatives >= WAYLAND_RELATIVES)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many relative pointers");
-                        c->relative_id[c->relatives++] = c->objects[a[0].slot].id;
+                        if (!wayland_ids_add(&c->relative_ids, c->objects[a[0].slot].id))
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a relative pointer");
                 }
                 return WAYLAND_OK;
         case WLI_zwp_relative_pointer_v1:
-                for (long at = 0; at < c->relatives; at++)
-                        if (c->relative_id[at] == self->id)
+                for (long at = 0; at < c->relative_ids.count; at++)
+                        if (c->relative_ids.id[at] == self->id)
                         {
-                                c->relative_id[at] = c->relative_id[--c->relatives];
+                                c->relative_ids.id[at] = c->relative_ids.id[--c->relative_ids.count];
                                 break;
                         }
                 return WAYLAND_OK;
