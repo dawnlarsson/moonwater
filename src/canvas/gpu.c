@@ -71,6 +71,10 @@ static b32 gpu_userptr_ok;
 // /run/moonwater/gpu-round-off, looked for at each start as gpu-nouserptr is: a blended window whose picture reaches into a round corner is the processor's (the
 // compositor refuses it, COMPOSITOR_GPU_WHY_ROUND), as before the scene kernel laid such a corner over by its cover (12): the owner's way back if a card draws it wrong.
 static b32 gpu_round_off;
+// /run/moonwater/gpu-cut-off, looked for at each start as gpu-nouserptr is: the bins made without the cut (gpu_record_holds), every record a cell touches in its
+// list as before 321d8bc6, the owner's way back if a window or a part of one is ever missing from the card's frame; and a check's switch, for the differential that
+// holds the cut to the picture the kernel draws without it.
+static b32 gpu_cut_off;
 static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
 static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
 static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
@@ -645,6 +649,10 @@ static b32 gpu_start(positive bytes)
                         system_close((int)off);
                 off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-round-off", FILE_READ | O_CLOEXEC);
                 gpu_round_off = off >= 0;
+                if (off >= 0)
+                        system_close((int)off);
+                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-cut-off", FILE_READ | O_CLOEXEC);
+                gpu_cut_off = off >= 0;
                 if (off >= 0)
                         system_close((int)off);
                 off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
@@ -2010,9 +2018,6 @@ static void gpu_radii(unsigned int address_to r)
         if (i + (unsigned int)m >= n) return -1; \
         x0 = x0 < (int)dx0 ? (int)dx0 : x0, y0 = y0 < (int)dy0 ? (int)dy0 : y0, x1 = x1 > (int)dx1 ? (int)dx1 : x1, y1 = y1 > (int)dy1 ? (int)dy1 : y1; \
         if (x0 < x1 && y0 < y1) { unsigned int tx0 = (unsigned int)x0 >> 6, ty0 = (unsigned int)y0 >> 6, tx1 = (unsigned int)(x1 - 1) >> 6, ty1 = (unsigned int)(y1 - 1) >> 6; body } i += m; }
-// A check's switch: the bins made without the cut (gpu_record_holds), for the differential that holds the cut to the picture the kernel draws without it.
-static b32 gpu_cut_off;
-
 /*
         The cells of the bins a record covers whole as the scene kernel draws it, by the kernel's own rule for a first record that holds its patch (gpu.asm's
         .scene_first_rect and .scene_first_box): a fill (word 0 is 0: its colour is written over the pixel, whatever its alpha), a picture copied (4), or a box (word 0
