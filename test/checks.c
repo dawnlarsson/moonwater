@@ -16291,12 +16291,16 @@ static fn pixel_over(void)
 }
 
 /*
-        memory_over_u32_rect's opaque path: a source of alpha 255 is stored as it is, four pixels a turn where all four
-        are and one at a time in the rest of a row. Over every shape and place the other rows walk, the source made all
-        opaque; opaque and not by turns of four; opaque but one pixel, at each place of a turn of sixteen in turn; an opaque
-        run from every start to every tail inside a row of noise; and runs of three, with every pixel between them alpha 0
-        and colour (premultiplied it cannot be, and it must answer as the reference does). That the target is not read on
-        the opaque path is argued from the bodies (no page can be made writable and not readable on x86_64), not held here.
+        memory_over_u32_rect's opaque path: a source of alpha 255 is stored as it is, a turn at a time where the whole
+        turn is (four pixels on SSE2 and NEON, eight with AVX2 and then four, sixteen with AVX-512 and its masked tail,
+        a strip of V) and one at a time in the rest of a row. Over every shape and place the other rows walk, the source
+        made all opaque; opaque and not by turns of four; opaque but one pixel, at each place of a turn of sixteen in
+        turn; an opaque run from every start to every tail inside a row of noise; runs of three, with every pixel between
+        them alpha 0 and colour (premultiplied it cannot be, and it must answer as the reference does); and, for the
+        wider turns, opaque and not by turns of eight and of sixteen, and opaque but one pixel at each place of a turn of
+        sixty four, a pixel not opaque in these three made so for certain (its alpha's low bit cleared). That the target
+        is not read on the opaque path is argued from the bodies (no page can be made writable and not readable on
+        x86_64), not held here.
 */
 static fn pixel_over_opaque(void)
 {
@@ -16310,14 +16314,14 @@ static fn pixel_over_opaque(void)
                 positive into_span = height ? 4 * ((height - 1) * is + width) : 0, from_span = height ? 4 * ((height - 1) * fs + width) : 0;
 
                 PIXEL_EACH(k, width)
-                        for (positive kind = 0; kind < 5; kind++)
+                        for (positive kind = 0; kind < 8; kind++)
                         {
                                 struct pixel_window out, in[1];
                                 p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape + kind, k, 4));
                                 p8 address_to from = pixel_place(&pixel_rooms[1], from_span, 0, k < 8, pixel_residue(shape * 3 + kind, k, 4));
                                 p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
                                 p32 address_to over = (p32 address_to)from;
-                                positive lone = (shape + k) % 16, start = shape % 7, tail = k % 5;
+                                positive lone = (shape + k) % 16, start = shape % 7, tail = k % 5, lone64 = (shape * 5 + k) % 64;
 
                                 pixel_in(&in[0], 0, 1, from, from_span, 0, PIXEL_WORDS);
                                 for (positive r = 0; r < height; r++)
@@ -16329,12 +16333,17 @@ static fn pixel_over_opaque(void)
                                                             : kind == 1 ? i / 4 % 2 == 0
                                                             : kind == 2 ? i % 16 != lone
                                                             : kind == 3 ? c >= start && c + tail < width
-                                                                        : i / 3 % 2 == 0;
+                                                            : kind == 4 ? i / 3 % 2 == 0
+                                                            : kind == 5 ? i / 8 % 2 == 0
+                                                            : kind == 6 ? i / 16 % 2 == 0
+                                                                        : i % 64 != lone64;
 
                                                 if (opaque)
                                                         *at |= 0xff000000u;
                                                 else if (kind == 4)
                                                         *at = (*at & 0x00ffffffu) | 1u;
+                                                else if (kind >= 5)
+                                                        *at &= 0xfeffffffu;
                                         }
                                 memory_copy(pixel_kept[0], in[0].from, in[0].size);
                                 reference_memory_over_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs, width, height);

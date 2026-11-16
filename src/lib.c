@@ -14438,8 +14438,32 @@ __asm__(
     //       that is ARGB and opaque (Steam's, under XWayland) is a copy. Any other is the blend, alpha 0 too (its
     //       colours are added to the target's and its alpha made 255, so it is not the target left as it was).
     //
+    //       With AVX2, eight pixels a turn in ymm, then one turn of four in xmm and one pixel at a time; with AVX-512,
+    //       sixteen a turn in zmm and the rest of a row as one turn under a mask (bzhi of the width's last four bits,
+    //       made once a call), whose lanes past the row are neither read nor written. The opaque test is of the whole
+    //       turn as on the SSE2 body: vptest of the alpha mask against the sources (CF: no alpha bit clear) with AVX2,
+    //       a single pixel by its word against 0xff000000, and with AVX-512 vpcmpud of each word below 0xff000000 into
+    //       a mask that kortestw finds empty, the tail's under the tail's mask. The blend is the SSE2 body's on eight
+    //       or sixteen pixels: 255 - alpha is the source's complement, set in the four words of its pixel by vpshufb
+    //       (pick_lo the two pixels of each 128-bit lane the low unpack takes, pick_hi the two of the high, 128 the
+    //       high byte none), the products of the target's bytes plus 128 divided by vpmulhuw of 257, which is
+    //       (t + (t >> 8)) >> 8 for every such t (the SSE2 body's two steps, memory_glass_over_u32's argument), and
+    //       the pack, the saturating add and the alpha made 255. The unpacks and the pack act within each lane, which
+    //       holds four whole pixels, so nothing crosses one.
+    //
+#define OVER_BLEND_WIDE(r, d)                                                                                    \
+    "vpxor" d " %" r "mm10, %" r "mm0, %" r "mm2\n   vpshufb %" r "mm13, %" r "mm2, %" r "mm3\n"                 \
+    "vpshufb %" r "mm12, %" r "mm2, %" r "mm2\n"                                                               \
+    "vpunpcklbw %" r "mm7, %" r "mm1, %" r "mm4\n   vpunpckhbw %" r "mm7, %" r "mm1, %" r "mm1\n"                 \
+    "vpmullw %" r "mm2, %" r "mm4, %" r "mm4\n   vpmullw %" r "mm3, %" r "mm1, %" r "mm1\n"                       \
+    "vpaddw %" r "mm5, %" r "mm4, %" r "mm4\n   vpaddw %" r "mm5, %" r "mm1, %" r "mm1\n"                         \
+    "vpmulhuw %" r "mm6, %" r "mm4, %" r "mm4\n   vpmulhuw %" r "mm6, %" r "mm1, %" r "mm1\n"                     \
+    "vpackuswb %" r "mm1, %" r "mm4, %" r "mm4\n   vpaddusb %" r "mm4, %" r "mm0, %" r "mm0\n"                    \
+    "vpor" d " %" r "mm8, %" r "mm0, %" r "mm0\n"
     ASM_FUNC(memory_over_u32_rect)
     "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    ASM_WIDER("cpu_has_avx512", "60f")
+    ASM_WIDER("cpu_has_avx2", "50f")
     "push %rbx\n"
     "shl $2, %rsi\n   shl $2, %rcx\n"
     "pxor %xmm7, %xmm7\n   pcmpeqd %xmm10, %xmm10\n"
@@ -14447,7 +14471,9 @@ __asm__(
     "" ASM_LABEL(over_words255) ": .long 0x00ff00ff, 0x00ff00ff, 0x00ff00ff, 0x00ff00ff\n"
     "" ASM_LABEL(over_words128) ": .long 0x00800080, 0x00800080, 0x00800080, 0x00800080\n"
     "" ASM_LABEL(over_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n"
-    "" ASM_LABEL(over_colours) ": .long 0x00ffffff, 0x00ffffff, 0x00ffffff, 0x00ffffff\n.popsection\n"
+    "" ASM_LABEL(over_colours) ": .long 0x00ffffff, 0x00ffffff, 0x00ffffff, 0x00ffffff\n"
+    "" ASM_LABEL(over_pick_lo) ": .byte 3,128,3,128,3,128,3,128,7,128,7,128,7,128,7,128\n"
+    "" ASM_LABEL(over_pick_hi) ": .byte 11,128,11,128,11,128,11,128,15,128,15,128,15,128,15,128\n.popsection\n"
     "movdqa " ASM_LABEL(over_words255) "(%rip), %xmm6\n   movdqa " ASM_LABEL(over_words128) "(%rip), %xmm5\n   movdqa " ASM_LABEL(over_alpha) "(%rip), %xmm8\n"
     "movdqa " ASM_LABEL(over_colours) "(%rip), %xmm11\n"
     "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
@@ -14475,7 +14501,54 @@ __asm__(
     "89: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 10b\n"
     "pop %rbx\n"
     "90: " ASM_RET
+    //  AVX2: ymm7 none, ymm10 all ones, ymm5 the words 128, ymm6 the words 257, ymm8 the alpha, ymm12 and ymm13 the picks.
+    "50: vpxor %xmm7, %xmm7, %xmm7\n   vpcmpeqd %ymm10, %ymm10, %ymm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %ymm5\n   mov $0x01010101, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastd %xmm6, %ymm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %ymm8\n"
+    "vbroadcasti128 " ASM_LABEL(over_pick_lo) "(%rip), %ymm12\n   vbroadcasti128 " ASM_LABEL(over_pick_hi) "(%rip), %ymm13\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n"
+    "51: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "cmp $8, %rax\n   jb 54f\n"
+    "52: vmovdqu (%rdx), %ymm0\n   vptest %ymm8, %ymm0\n   jc 53f\n"
+    "vmovdqu (%rdi), %ymm1\n"
+    OVER_BLEND_WIDE("y", "")
+    "53: vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rdx\n   sub $8, %rax\n   cmp $8, %rax\n   jae 52b\n"
+    "54: cmp $4, %rax\n   jb 56f\n"
+    "vmovdqu (%rdx), %xmm0\n   vptest %xmm8, %xmm0\n   jc 55f\n"
+    "vmovdqu (%rdi), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "55: vmovdqu %xmm0, (%rdi)\n   add $16, %rdi\n   add $16, %rdx\n   sub $4, %rax\n"
+    "56: test %rax, %rax\n   jz 59f\n"
+    "57: vmovd (%rdx), %xmm0\n   cmpl $0xff000000, (%rdx)\n   jae 58f\n"
+    "vmovd (%rdi), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "58: vmovd %xmm0, (%rdi)\n   add $4, %rdi\n   add $4, %rdx\n   dec %rax\n   jnz 57b\n"
+    "59: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 51b\n"
+    "vzeroupper\n" ASM_RET
+    //  AVX-512: the same registers in zmm, and k2 the lanes of a row's last turn, width mod sixteen of them.
+    "60: vpxor %xmm7, %xmm7, %xmm7\n   vpternlogd $0xff, %zmm10, %zmm10, %zmm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %zmm5\n   mov $0x01010101, %eax\n   vpbroadcastd %eax, %zmm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %zmm8\n"
+    "vbroadcasti32x4 " ASM_LABEL(over_pick_lo) "(%rip), %zmm12\n   vbroadcasti32x4 " ASM_LABEL(over_pick_hi) "(%rip), %zmm13\n"
+    "mov %r8d, %eax\n   and $15, %eax\n   mov $-1, %r10d\n   bzhi %eax, %r10d, %r10d\n   kmovw %r10d, %k2\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n"
+    "61: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "cmp $16, %rax\n   jb 64f\n"
+    "62: vmovdqu32 (%rdx), %zmm0\n   vpcmpud $1, %zmm8, %zmm0, %k1\n   kortestw %k1, %k1\n   jz 63f\n"
+    "vmovdqu32 (%rdi), %zmm1\n"
+    OVER_BLEND_WIDE("z", "d")
+    "63: vmovdqu32 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rdx\n   sub $16, %rax\n   cmp $16, %rax\n   jae 62b\n"
+    "64: test %rax, %rax\n   jz 69f\n"
+    "vmovdqu32 (%rdx), %zmm0{%k2}{z}\n   vpcmpud $1, %zmm8, %zmm0, %k1{%k2}\n   kortestw %k1, %k1\n   jz 65f\n"
+    "vmovdqu32 (%rdi), %zmm1{%k2}{z}\n"
+    OVER_BLEND_WIDE("z", "d")
+    "65: vmovdqu32 %zmm0, (%rdi){%k2}\n"
+    "69: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 61b\n"
+    "vzeroupper\n" ASM_RET
     ASM_END(memory_over_u32_rect)
+#undef OVER_BLEND_WIDE
 
     ASM_FUNC(memory_add_sat_u8_rect)
     "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
@@ -37006,9 +37079,22 @@ __asm__(
     "9: " ASM_RET
     ASM_END(memory_lerp_u32_row)
 
+    //       memory_over_u32_rect: with V, a strip of as many pixels as two registers hold at e32 (vl of what is left of
+    //       the row, so there is no tail), its sources compared below 0xff000000 (vmsltu) and the strip stored as it is
+    //       when vfirst finds none, with no load of the target; else 255 - alpha by vnot and vsrl, set in each byte of
+    //       its pixel by vmul of 0x01010101, and at e8 the target's bytes times it by vwmulu into sixteen-bit lanes,
+    //       + 128, then s + (s >> 8) and the narrowing vnsrl by 8, which is the x86_64 block's division, vsaddu of the
+    //       source and the alpha made 255 by vor, as memory_glass_over_u32's V body does it. Without V, a pixel at a
+    //       time, the division a divu. The x86_64 block carries the contract.
+    ".option push\n   .option arch, +v\n"
     ASM_FUNC(memory_over_u32_rect)
     "beqz a4, 9f\n   beqz a5, 9f\n"
-    "slli a1, a1, 2\n   slli a3, a3, 2\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 70f\n   bnez t3, 10f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n"
+    "j memory_over_u32_rect\n"
+#endif
+    "10: slli a1, a1, 2\n   slli a3, a3, 2\n"
     "li a6, 255\n"
     "0: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
     //       The x86_64 block says why: a source of alpha 255 is the answer, stored with no load of the target.
@@ -37028,7 +37114,21 @@ __asm__(
     "6: addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, -1\n   bnez t2, 1b\n"
     "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 0b\n"
     "9: " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "70: slli a1, a1, 2\n   slli a3, a3, 2\n   li a6, 0xff000000\n   li a7, 0x01010101\n   li t6, 128\n"
+    "71: mv t0, a0\n   mv t1, a2\n   mv t2, a4\n"
+    "72: vsetvli t3, t2, e32, m2, ta, ma\n   vle32.v v8, (t1)\n   vmsltu.vx v0, v8, a6\n   vfirst.m t4, v0\n   bltz t4, 73f\n"
+    "vle32.v v10, (t0)\n   vnot.v v12, v8\n   vsrl.vi v12, v12, 24\n   vmul.vx v12, v12, a7\n   slli t4, t3, 2\n"
+    "vsetvli zero, t4, e8, m2, ta, ma\n   vwmulu.vv v16, v10, v12\n"
+    "vsetvli zero, t4, e16, m4, ta, ma\n   vadd.vx v16, v16, t6\n   vsrl.vi v20, v16, 8\n   vadd.vv v16, v16, v20\n"
+    "vsetvli zero, t4, e8, m2, ta, ma\n   vnsrl.wi v24, v16, 8\n   vsaddu.vv v8, v8, v24\n"
+    "vsetvli zero, t3, e32, m2, ta, ma\n   vor.vx v8, v8, a6\n"
+    "73: vse32.v v8, (t0)\n"
+    "slli t4, t3, 2\n   add t0, t0, t4\n   add t1, t1, t4\n   sub t2, t2, t3\n   bnez t2, 72b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 71b\n" ASM_RET
+#endif
     ASM_END(memory_over_u32_rect)
+    ".option pop\n"
 
     ASM_FUNC(memory_add_sat_u8_rect)
     "beqz a4, 9f\n   beqz a5, 9f\n   li a6, 255\n"
