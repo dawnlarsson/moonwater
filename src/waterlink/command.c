@@ -7,7 +7,7 @@
                 link pair [NAME]        a code, and wait for a machine to use it
                 link cancel             end every wait for a code
                 link NAME CODE          link to the machine called NAME
-                link transport [network|modem]   how machines reach each other
+                link transport [network|tcp|auto|modem]   how machines reach each other
                 link modem key          the modem's key, made on first use, in hex
                 link modem send FILE    FILE over the sound card, to the receiver
                 link NAME [COMMAND...]  a terminal on NAME, or one command
@@ -1969,6 +1969,63 @@ static b32 link_doctor_port_free(void)
         return true;
 }
 
+/*      Which carriers there are here, and which one each peer the listener
+        has open is on: said, not counted among the checks. */
+static fn link_doctor_carriers(bipolar owner, positive port)
+{
+        link_state state;
+        positive state_length = 0;
+        positive shown = 0;
+        p8 carrier = link_carrier(0);
+        p8 proxy[96];
+        discovery_settings settings;
+
+        discovery_settings_read(address_of settings);
+        string_format(log, "  carriers (moonwater link transport %s):\n",
+                      link_carrier_names[carrier]);
+        string_format(log, "        udp %p: %s\n", port,
+                      carrier == LINK_CARRIER_TCP ? (string_address) "the listener's; a client run dials tcp"
+                                                  : (string_address) "yes");
+        if (carrier == LINK_CARRIER_NETWORK)
+                string_format(log, "        tcp: no; moonwater link transport tcp or auto "
+                                   "listens on tcp %p and dials over it\n",
+                              port);
+        else
+                string_format(log, "        tcp %p: %s, and %s\n", port,
+                              owner > 0 ? (string_address) "the listener takes connections"
+                                        : (string_address) "the listener takes connections once it is on",
+                              carrier == LINK_CARRIER_TCP
+                                      ? (string_address) "a client dials over tcp"
+                                      : (string_address) "a client dials over tcp when udp is not answered in a second");
+        if (discovery_proxy(address_of settings, proxy, sizeof proxy))
+                string_format(log, "        proxy %s: a tcp dial goes through its CONNECT "
+                                   "(moonwater network proxy off, or NO_PROXY=*, goes around it)\n",
+                              (string_address)proxy);
+        else
+                string_format(log, "        proxy: none, a tcp dial goes straight there\n");
+
+        if (owner <= 0 ||
+            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
+                                      sizeof state, sizeof state,
+                                      address_of state_length) < 0 ||
+            state_length != sizeof state)
+                return;
+        for (positive at = 0; at < state.open_count && at < LINK_SESSIONS; at++)
+        {
+                link_open_entry address_to open = state.open + at;
+
+                open->name[WATERLINK_NAME_MAX - 1] = 0;
+                open->carrier[sizeof open->carrier - 1] = 0;
+                if (!link_name_good((string_address)open->name))
+                        continue;
+                if (!shown++)
+                        string_format(log, "        peers the listener has open:\n");
+                string_format(log, "          %s over %s\n", (string_address)open->name,
+                              open->carrier[0] ? (string_address)open->carrier
+                                               : (string_address) "udp");
+        }
+}
+
 /*      The checks print the words the status line prints, for the same state
         of the same thing, so a check and the status cannot disagree. */
 static b32 link_doctor(void)
@@ -2046,6 +2103,8 @@ static b32 link_doctor(void)
                                    "discovery\n");
         }
 
+        link_doctor_carriers(owner, port);
+
         {
                 discovery_settings settings;
                 discovery_found found;
@@ -2111,8 +2170,12 @@ static b32 link_port_verb(string_address word)
 }
 
 /*
-        moonwater link transport [network|modem]: how linked machines reach
-        each other, kept in /root/link.transport, network when nothing is kept.
+        moonwater link transport [network|tcp|auto|modem]: how linked machines
+        reach each other, kept in /root/link.transport, network when nothing is
+        kept. network is UDP; tcp is the link's datagrams on a TCP connection,
+        to the peer's port and through HTTPS_PROXY's CONNECT when one is named,
+        and a listener on TCP beside UDP; auto is UDP first and TCP when a
+        second has gone unanswered, with the same listener (stream.c).
         The audio modem is one of the transports: the sound card carries the
         link when it is ready, and a word that asks for it is refused while it
         is not, with the reason. The state is the one place that says so, so a
@@ -2211,7 +2274,7 @@ static b32 link_transport_verb(string_address word)
                 //      What is said is what is used: a file written by hand as
                 //      modem, when the modem is not there, is network.
                 host_say(log, host_label "transport %s\n",
-                         link_modem_in_use() ? "modem" : "network");
+                         link_modem_in_use() ? (string_address) "modem" : link_carrier_names[link_carrier(0)]);
                 if (why)
                         host_say(log, host_label "audio modem not ready: %s\n", why);
                 else
@@ -2230,8 +2293,9 @@ static b32 link_transport_verb(string_address word)
                         return host_refuse("the audio modem is not ready: %s, so "
                                            "the transport stays network\n", why);
         }
-        if (!string_equals(word, "network") && !string_equals(word, "modem"))
-                return host_refuse("transport is network or modem, not %s\n", word);
+        if (!string_equals(word, "network") && !string_equals(word, "modem") &&
+            !string_equals(word, "tcp") && !string_equals(word, "auto"))
+                return host_refuse("transport is network, tcp, auto or modem, not %s\n", word);
         failed = radio_write_word(LINK_TRANSPORT_PATH, word);
         return_if(failed < 0, host_fail("link transport", failed));
         host_say(log, host_label "transport %s\n", word);

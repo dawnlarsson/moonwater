@@ -515,6 +515,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =settings preferences options	8c78	ayarlar tercihler seçenekler
 =slate	deee	arduvaz
 =slow	42b8	yavaş
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal konsol kabuk
 =thick	964e	kalın
 =thin	b172	ince

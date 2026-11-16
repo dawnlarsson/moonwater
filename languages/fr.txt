@@ -515,6 +515,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =settings preferences options	8c78	paramètres réglages préférences options
 =slate	deee	ardoise
 =slow	42b8	lent
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal console shell
 =thick	964e	épais
 =thin	b172	fin

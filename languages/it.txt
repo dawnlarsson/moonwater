@@ -515,6 +515,7 @@ ui_field_full	fe02	non ce ne sta di più
 =settings preferences options	8c78	impostazioni preferenze opzioni
 =slate	deee	ardesia
 =slow	42b8	lento
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminale console shell
 =thick	964e	spesso
 =thin	b172	sottile

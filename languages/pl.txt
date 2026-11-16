@@ -515,6 +515,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =settings preferences options	8c78	ustawienia preferencje opcje
 =slate	deee	łupkowy
 =slow	42b8	wolno
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal konsola powłoka
 =thick	964e	gruby
 =thin	b172	cienki

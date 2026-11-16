@@ -515,6 +515,7 @@ ui_field_full	fe02	that is as much as it holds
 =settings preferences options	8c78	settings preferences options
 =slate	deee	slate
 =slow	42b8	slow
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal shell console
 =thick	964e	thick
 =thin	b172	thin

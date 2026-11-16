@@ -515,6 +515,7 @@ ui_field_full	fe02	больше не помещается
 =settings preferences options	8c78	настройки параметры опции
 =slate	deee	сланцевый
 =slow	42b8	медленно
+=tcp	ba90	tcp
 =terminal shell console	eaba	терминал консоль оболочка
 =thick	964e	толстый
 =thin	b172	тонкий

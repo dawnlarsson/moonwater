@@ -515,6 +515,7 @@ ui_field_full	fe02	mer ryms inte
 =settings preferences options	8c78	inställningar preferenser alternativ
 =slate	deee	skiffer
 =slow	42b8	långsam
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal konsol skal
 =thick	964e	tjock
 =thin	b172	tunn

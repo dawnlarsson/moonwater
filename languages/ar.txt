@@ -516,6 +516,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =settings preferences options	8c78	إعدادات تفضيلات خيارات
 =slate	deee	أردوازي
 =slow	42b8	بطيء
+=tcp	ba90	tcp
 =terminal shell console	eaba	الطرفية الصدفة وحدة التحكم
 =thick	964e	ضخيم
 =thin	b172	رفيع

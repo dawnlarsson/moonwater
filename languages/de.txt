@@ -515,6 +515,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =settings preferences options	8c78	einstellungen optionen präferenzen
 =slate	deee	Schiefer
 =slow	42b8	Langsam
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal konsole shell
 =thick	964e	Dick
 =thin	b172	Dünn

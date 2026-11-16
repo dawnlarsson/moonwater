@@ -6007,6 +6007,53 @@ static b32 mdns_modes(string_address mode)
         }
 }
 
+/*
+        Over a stream (TCP, stream.c) the link resends nothing: a frame sent
+        after the stream was opened is the stream's to deliver. The same
+        frame, the same silence, over UDP is sent again; and one sent before
+        the stream was opened, on the path before it, still is.
+*/
+static fn stream_carrier(void)
+{
+        static struct waterlink_link link;
+        p8 body[WATERLINK_PAYLOAD];
+        p8 alone;
+        p8 payload[4] = {1, 2, 3, 4};
+
+        for (positive carrier = 0; carrier < 3; carrier++)
+        {
+                p64 now = 1000000;
+                positive filled = 0;
+
+                waterlink_link_reset(address_of link);
+                if (carrier == 2)
+                        waterlink_transport(address_of link, 0, WATERLINK_WINDOW_MOST, ~0ull);
+                (void)waterlink_post(address_of link, 3, WATERLINK_FRAME_DURABLE, payload, 4, now);
+                if (carrier == 2)
+                        filled += waterlink_fill(address_of link, body, now, address_of alone) != 0;
+                for (positive turn = 0; turn < 40; turn++, now += 250000)
+                {
+                        if (carrier == 1)
+                                waterlink_transport_stream(address_of link, 1000000);
+                        else if (carrier == 2)
+                                waterlink_transport_stream(address_of link, 1000000 + 1);
+                        else
+                                waterlink_transport(address_of link, 0, WATERLINK_WINDOW_MOST, ~0ull);
+                        filled += waterlink_fill(address_of link, body, now, address_of alone) != 0;
+                }
+                if (carrier == 0)
+                        check("stream: over UDP a frame nobody acknowledges is sent again",
+                              link.retransmitted > 0 && filled > 1);
+                else if (carrier == 1)
+                        check("stream: over a stream it is sent once, and never again",
+                              link.retransmitted == 0 && link.timeouts == 0 && filled == 1 &&
+                                      link.window == WATERLINK_WINDOW_MOST);
+                else
+                        check("stream: a frame sent before the stream opened is still resent",
+                              link.retransmitted > 0);
+        }
+}
+
 b32 main(void)
 {
         if (program_argument_count() > 1)
@@ -6049,6 +6096,7 @@ b32 main(void)
         held_after_losses();
         register_behind_its_newest();
         invalid_application_keys();
+        stream_carrier();
         network_generated();
         clock_ordering();
         handshake();
@@ -13542,6 +13590,796 @@ static fn mdns_apart(void)
         }
 }
 
+/*
+        The TCP carrier (src/waterlink/stream.c): its framing as a transform,
+        its proxy's words, and connections over socketpairs and loopback
+        IPv4, which this runs before anything that needs loopback IPv6.
+*/
+static p8 wls_tcp_got[64 * 1210];
+static positive wls_tcp_got_used;
+static positive wls_tcp_got_frames;
+static p8 wls_tcp_order_good;
+
+static fn wls_tcp_sink(address_any context, p8 address_to datagram,
+                       positive length)
+{
+        (void)context;
+        if (wls_tcp_got_used + length + 2 > sizeof wls_tcp_got)
+        {
+                wls_tcp_order_good = false;
+                return;
+        }
+        wls_tcp_got[wls_tcp_got_used++] = (p8)(length >> 8);
+        wls_tcp_got[wls_tcp_got_used++] = (p8)length;
+        memory_copy(wls_tcp_got + wls_tcp_got_used, datagram, length);
+        wls_tcp_got_used += length;
+        wls_tcp_got_frames++;
+}
+
+static p64 wls_tcp_seed;
+
+static positive wls_tcp_random(positive below)
+{
+        wls_tcp_seed = wls_tcp_seed * 6364136223846793005ull + 1442695040888963407ull;
+        return (positive)((wls_tcp_seed >> 33) % below);
+}
+
+static fn tcp_framing(void)
+{
+        static p8 wire[64 * 1210];
+        static p8 one[WATERLINK_DATAGRAM];
+        p8 hold[2 + LINK_TCP_FRAME_MOST];
+        positive held;
+        positive used = 0;
+        positive frames = 0;
+        positive split_bad = 0;
+        positive byte_bad = 0;
+        bipolar taken;
+
+        wls_tcp_seed = 7;
+        //      Frames of random sizes, the two edges among them, one after another on the wire.
+        while (frames < 24)
+        {
+                positive length = frames == 0   ? 1
+                                  : frames == 1 ? WATERLINK_DATAGRAM
+                                                : 1 + wls_tcp_random(WATERLINK_DATAGRAM);
+
+                for (positive at = 0; at < length; at++)
+                        one[at] = (p8)wls_tcp_random(256);
+                used += link_tcp_frame(wire + used, one, length);
+                frames++;
+        }
+        check("tcp: a frame is its length in two bytes, big-endian, and the datagram",
+              wire[0] == 0 && wire[1] == 1 && wire[3] == WATERLINK_DATAGRAM >> 8 &&
+                      wire[4] == (WATERLINK_DATAGRAM & 255));
+        check("tcp: no frame of nothing or of more than a datagram is made",
+              !link_tcp_frame(one, one, 0) &&
+                      !link_tcp_frame(wire + used, one, WATERLINK_DATAGRAM + 1));
+
+        //      Every frame in one read: coalesced, each handed on whole and in order.
+        held = 0;
+        wls_tcp_got_used = wls_tcp_got_frames = 0;
+        wls_tcp_order_good = true;
+        taken = link_tcp_take(hold, address_of held, wire, used, wls_tcp_sink, null);
+        check("tcp: frames coalesced into one read are each handed on, in order",
+              taken == (bipolar)frames && wls_tcp_got_frames == frames && held == 0 &&
+                      wls_tcp_got_used == used && !memory_compare(wls_tcp_got, wire, used));
+
+        //      The wire cut in two at every byte.
+        for (positive cut = 0; cut <= used; cut++)
+        {
+                bipolar first, second;
+
+                held = 0;
+                wls_tcp_got_used = wls_tcp_got_frames = 0;
+                first = link_tcp_take(hold, address_of held, wire, cut, wls_tcp_sink, null);
+                second = link_tcp_take(hold, address_of held, wire + cut, used - cut,
+                                       wls_tcp_sink, null);
+                if (first < 0 || second < 0 || (positive)(first + second) != frames ||
+                    held || wls_tcp_got_used != used ||
+                    memory_compare(wls_tcp_got, wire, used))
+                        split_bad++;
+        }
+        check("tcp: the frames come through whole with the read cut at every byte",
+              split_bad == 0);
+
+        //      A byte a read.
+        held = 0;
+        wls_tcp_got_used = wls_tcp_got_frames = 0;
+        for (positive at = 0; at < used; at++)
+                if (link_tcp_take(hold, address_of held, wire + at, 1, wls_tcp_sink, null) < 0)
+                        byte_bad++;
+        check("tcp: and a byte at a time",
+              !byte_bad && held == 0 && wls_tcp_got_frames == frames &&
+                      wls_tcp_got_used == used && !memory_compare(wls_tcp_got, wire, used));
+
+        //      Random cuts, many at once.
+        split_bad = 0;
+        for (positive round = 0; round < 200; round++)
+        {
+                positive at = 0;
+
+                held = 0;
+                wls_tcp_got_used = wls_tcp_got_frames = 0;
+                while (at < used)
+                {
+                        positive piece = 1 + wls_tcp_random(3000);
+
+                        if (piece > used - at)
+                                piece = used - at;
+                        if (link_tcp_take(hold, address_of held, wire + at, piece,
+                                          wls_tcp_sink, null) < 0)
+                                split_bad++;
+                        at += piece;
+                }
+                if (held || wls_tcp_got_used != used ||
+                    memory_compare(wls_tcp_got, wire, used))
+                        split_bad++;
+        }
+        check("tcp: and cut at 200 sets of random places", split_bad == 0);
+
+        //      The lengths that are not the link's.
+        {
+                p8 zero[4] = {0, 0, 9, 9};
+                p8 over[3] = {(WATERLINK_DATAGRAM + 1) >> 8, (WATERLINK_DATAGRAM + 1) & 255, 1};
+                p8 most[2] = {0xff, 0xff};
+
+                held = 0;
+                wls_tcp_got_frames = wls_tcp_got_used = 0;
+                check("tcp: a length of zero is refused",
+                      link_tcp_take(hold, address_of held, zero, 4, wls_tcp_sink, null) < 0 &&
+                              !wls_tcp_got_frames);
+                held = 0;
+                check("tcp: a length over a datagram is refused",
+                      link_tcp_take(hold, address_of held, over, 3, wls_tcp_sink, null) < 0 &&
+                              !wls_tcp_got_frames);
+                held = 0;
+                check("tcp: and 65535, cut after its first byte",
+                      link_tcp_take(hold, address_of held, most, 1, wls_tcp_sink, null) == 0 &&
+                              link_tcp_take(hold, address_of held, most + 1, 1, wls_tcp_sink,
+                                            null) < 0 &&
+                              !wls_tcp_got_frames);
+                held = 0;
+                check("tcp: a frame cut short is held and never handed on",
+                      link_tcp_take(hold, address_of held, wire, 300, wls_tcp_sink, null) == 1 &&
+                              wls_tcp_got_frames == 1 && held == 300 - 3);
+        }
+}
+
+static fn tcp_proxy_words(void)
+{
+        p8 address[16];
+        p8 request[160];
+        positive length;
+        static const char want[] = "CONNECT 192.0.2.7:22348 HTTP/1.1\r\nHost: 192.0.2.7:22348\r\n\r\n";
+        static const char want6[] = "CONNECT [2001:db8:0:0:0:0:0:5]:443 HTTP/1.1\r\n"
+                                    "Host: [2001:db8:0:0:0:0:0:5]:443\r\n\r\n";
+        p8 v6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5};
+
+        link_address_v4(address, 0xc0000207u);
+        length = link_proxy_request(request, sizeof request, address, 22348);
+        check("tcp: CONNECT's request is the place, HTTP/1.1, and its Host",
+              length == sizeof want - 1 && !memory_compare(request, want, length));
+        length = link_proxy_request(request, sizeof request, v6, 443);
+        check("tcp: and an IPv6 place in brackets",
+              length == sizeof want6 - 1 && !memory_compare(request, want6, length));
+        check("tcp: and none with no room for it",
+              !link_proxy_request(request, 40, address, 22348));
+
+        {
+                static const struct
+                {
+                        string_address reply;
+                        bipolar answer;
+                } replies[] = {
+                    {"HTTP/1.1 200 Connection established\r\n\r\n", 39},
+                    {"HTTP/1.0 200 OK\r\nProxy-Agent: x\r\n\r\nSTREAM", 35},
+                    {"HTTP/1.1 200\r\n\r\n", 16},
+                    {"HTTP/1.1 200 OK\r\n", 0},
+                    {"HTTP/1.1 2", 0},
+                    {"HTT", 0},
+                    {"", 0},
+                    {"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n", -1},
+                    {"HTTP/1.1 403 Forbidden\r\n\r\n", -1},
+                    {"HTTP/1.1 502 Bad Gateway\r\n", -1},
+                    {"HTTP/1.1 2000 OK\r\n\r\n", -1},
+                    {"HTTP/2.0 200 OK\r\n\r\n", -1},
+                    {"HTTP/1.x 200 OK\r\n\r\n", -1},
+                    {"SSH-2.0-OpenSSH\r\n", -1},
+                    {"http/1.1 200 OK\r\n\r\n", -1},
+                    {"\r\nHTTP/1.1 200 OK\r\n\r\n", -1},
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(replies); at++)
+                        wrong += link_proxy_reply((p8 address_to)replies[at].reply,
+                                                  string_length(replies[at].reply)) !=
+                                 replies[at].answer;
+                check("tcp: the proxy's 200 is taken, its head's end found, "
+                      "and a part of one waited for",
+                      wrong == 0);
+        }
+        {
+                static p8 endless[LINK_PROXY_HEAD_MOST];
+
+                memory_copy(endless, "HTTP/1.1 200 OK\r\n", 17);
+                memory_fill(endless + 17, 'x', sizeof endless - 17);
+                check("tcp: a head that never ends is refused at its bound",
+                      link_proxy_reply(endless, sizeof endless) < 0 &&
+                              link_proxy_reply(endless, sizeof endless - 1) == 0);
+        }
+}
+
+static p8 wls_tcp_place_a[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1};
+static p8 wls_tcp_place_b[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 2};
+
+static p8 wls_pair(bipolar address_to ends)
+{
+        b32 pair[2];
+
+        if (system_call_4(syscall(socketpair), AF_UNIX,
+                          SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+                          (positive)pair) < 0)
+                return false;
+        ends[0] = pair[0];
+        ends[1] = pair[1];
+        return true;
+}
+
+static fn wls_tcp_reset(void)
+{
+        link_tcp_close_all();
+        memory_zero(address_of link_tcp_self, sizeof link_tcp_self);
+}
+
+//      Every connection serviced at once, at now, as the loop does after its wait.
+static fn wls_tcp_service(p64 now)
+{
+        for (positive at = 0; at < LINK_TCP_MOST; at++)
+                link_tcp_self.conn[at].quiet = false;
+        link_tcp_self.listener_quiet = false;
+        link_self.now = now;
+        link_tcp_turn(now);
+}
+
+static fn tcp_connections(void)
+{
+        bipolar ends[2];
+        bipolar spare[LINK_TCP_MOST + 1][2];
+        struct link_tcp address_to c;
+        p64 now = 1000000000ull;
+        positive adopted = 0;
+
+        wls_tcp_reset();
+
+        //      A zero length, an oversized one, and a frame cut by the end: each
+        //      closes the connection.
+        {
+                static const p8 bad[3][4] = {{0, 0, 1, 2}, {0xff, 0xff, 1, 2}, {0, 200, 1, 2}};
+                positive closed = 0;
+
+                for (positive kind = 0; kind < 3; kind++)
+                {
+                        if (!wls_pair(ends))
+                                break;
+                        c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
+                        (void)system_write_all((positive)ends[1], bad[kind], 4);
+                        if (kind == 2)
+                                (void)socket_shutdown((b32)ends[1], 1);
+                        wls_tcp_service(now);
+                        closed += c && c->state == LINK_TCP_FREE && !link_tcp_for(wls_tcp_place_a, 1);
+                        socket_close((b32)ends[1]);
+                }
+                check("tcp: a zero, oversized or truncated length closes the connection",
+                      closed == 3);
+        }
+
+        //      The bound on connections.
+        for (positive at = 0; at <= LINK_TCP_MOST; at++)
+                spare[at][0] = spare[at][1] = -1;
+        for (positive at = 0; at <= LINK_TCP_MOST; at++)
+        {
+                p8 place[16];
+
+                memory_copy(place, wls_tcp_place_a, 16);
+                place[15] = (p8)(at + 10);
+                if (!wls_pair(spare[at]))
+                        break;
+                if (link_tcp_adopt(spare[at][0], place, 7, false, now))
+                        adopted++;
+                else
+                {
+                        socket_close((b32)spare[at][0]);
+                        spare[at][0] = -1;
+                }
+        }
+        check("tcp: no more than LINK_TCP_MOST connections are held", adopted == LINK_TCP_MOST);
+        {
+                p8 room = true;
+
+                for (positive at = 0; at < LINK_TCP_MOST; at++)
+                        room &= link_tcp_self.conn[at].state == LINK_TCP_OPEN;
+                check("tcp: and the ones held are open", room);
+        }
+        wls_tcp_reset();
+        for (positive at = 0; at <= LINK_TCP_MOST; at++)
+                if (spare[at][1] >= 0)
+                        socket_close((b32)spare[at][1]);
+
+        //      The idle timeouts: a connection that carried nothing by
+        //      LINK_TCP_FIRST, and one that heard nothing for LINK_TCP_IDLE.
+        if (wls_pair(ends))
+        {
+                c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
+                wls_tcp_service(now + LINK_TCP_FIRST);
+                check("tcp: a connection that has carried nothing stays to LINK_TCP_FIRST",
+                      c->state == LINK_TCP_OPEN);
+                wls_tcp_service(now + LINK_TCP_FIRST + 1);
+                check("tcp: and is closed after it", c->state == LINK_TCP_FREE);
+                socket_close((b32)ends[1]);
+        }
+        if (wls_pair(ends))
+        {
+                p8 frame[20] = {0, 18};
+
+                c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
+                (void)system_write_all((positive)ends[1], frame, sizeof frame);
+                wls_tcp_service(now + 1000);
+                check("tcp: a frame read is a frame carried", c->frames == 1 && !c->held);
+                wls_tcp_service(now + 1000 + LINK_TCP_IDLE);
+                check("tcp: a connection that carried one stays to LINK_TCP_IDLE of silence",
+                      c->state == LINK_TCP_OPEN);
+                wls_tcp_service(now + 1000 + LINK_TCP_IDLE + 1);
+                check("tcp: and is closed after it", c->state == LINK_TCP_FREE &&
+                                                         link_tcp_self.closed_idle == 2);
+                socket_close((b32)ends[1]);
+        }
+
+        //      A connection whose far end takes nothing: what it holds is
+        //      bounded, the room says so, and nothing waits.
+        if (wls_pair(ends))
+        {
+                static p8 datagram[WATERLINK_DATAGRAM];
+                positive sent = 0;
+                p64 before = link_now();
+
+                c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
+                for (positive at = 0; at < 100000; at++)
+                {
+                        if (!link_tcp_send(c, datagram, WATERLINK_DATAGRAM, now))
+                                break;
+                        sent++;
+                }
+                check("tcp: a peer that reads nothing fills its connection's bound and no more",
+                      c->out_used <= LINK_TCP_OUT && sent < 100000 &&
+                              link_tcp_room(wls_tcp_place_a, 1) == 0 &&
+                              link_tcp_room(wls_tcp_place_b, 1) == ~(positive)0);
+                check("tcp: and no send waited on it", link_age(link_now(), before) < 2000000);
+                wls_tcp_service(now + LINK_TCP_IDLE + 1);
+                check("tcp: bytes that go nowhere for LINK_TCP_IDLE close it",
+                      c->state == LINK_TCP_FREE);
+                socket_close((b32)ends[1]);
+        }
+
+        //      The proxy: its CONNECT, once the connect is done, and its answers.
+        if (wls_pair(ends))
+        {
+                p8 heard[256];
+                bipolar got;
+                static const char want[] = "CONNECT 10.0.0.1:1 HTTP/1.1\r\nHost: 10.0.0.1:1\r\n\r\n";
+                static const char answer[] = "HTTP/1.1 200 Connection established\r\n\r\n";
+                p8 after[22] = {0, 20};
+
+                c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, true, now);
+                c->state = LINK_TCP_CONNECTING;
+                c->proxied = true;
+                wls_tcp_service(now);
+                got = socket_receive((b32)ends[1], heard, sizeof heard, MSG_DONTWAIT, null, null);
+                check("tcp: a proxied connection asks CONNECT host:port once it is connected",
+                      c->state == LINK_TCP_PROXY && got == (bipolar)sizeof want - 1 &&
+                              !memory_compare(heard, want, sizeof want - 1));
+                (void)link_tcp_send(c, after, 18, now);
+                got = socket_receive((b32)ends[1], heard, sizeof heard, MSG_DONTWAIT, null, null);
+                check("tcp: and sends nothing of its own before the proxy says 200",
+                      got == -EAGAIN && c->out_used == 20);
+                (void)system_write_all((positive)ends[1], answer, sizeof answer - 1);
+                (void)system_write_all((positive)ends[1], after, sizeof after);
+                wls_tcp_service(now + 10);
+                got = socket_receive((b32)ends[1], heard, sizeof heard, MSG_DONTWAIT, null, null);
+                check("tcp: after the 200 the stream is the link's, both ways",
+                      c->state == LINK_TCP_OPEN && c->frames == 1 && got == 20);
+                link_tcp_close(c);
+                socket_close((b32)ends[1]);
+        }
+        {
+                static const string_address refusals[] = {
+                    "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+                    "HTTP/1.1 200 OK\nX: y\n\n" /* only CRLF ends a head */ "xxxxxxxx",
+                    "garbage that is no HTTP at all\r\n\r\n",
+                };
+                positive closed = 0;
+
+                for (positive at = 0; at < array_count(refusals); at++)
+                {
+                        if (!wls_pair(ends))
+                                break;
+                        c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, true, now);
+                        c->state = LINK_TCP_PROXY;
+                        c->proxied = true;
+                        (void)system_write_all((positive)ends[1], refusals[at],
+                                               string_length(refusals[at]));
+                        if (at == 1)
+                                (void)socket_shutdown((b32)ends[1], 1);
+                        wls_tcp_service(now);
+                        closed += c->state == LINK_TCP_FREE;
+                        socket_close((b32)ends[1]);
+                }
+                check("tcp: a proxy's non-200, a head cut short and a reply that is not HTTP "
+                      "each close the connection",
+                      closed == 3);
+        }
+        wls_tcp_reset();
+}
+
+/*
+        A whole session over a socketpair standing in for TCP: the client's
+        end is the place it dialled, the machine's end a place it was
+        connected from. One process is both, with the identity swapped as
+        each end reads, as initiator_answer does. The clock jumps a quarter
+        second a turn, past every retransmission timer, so a link that would
+        resend over UDP would here.
+*/
+static fn wls_tcp_two_peers(void)
+{
+        struct waterlink_peer two[2];
+
+        memory_zero(two, sizeof two);
+        memory_copy(two[0].key, wls_client.public, 32);
+        string_copy(two[0].name, "client");
+        two[0].may = WATERLINK_MAY_DEFAULT;
+        memory_copy(two[1].key, wls_server.public, 32);
+        string_copy(two[1].name, "server");
+        two[1].may = WATERLINK_MAY_DEFAULT;
+        (void)wls_write(LINK_PEERS_PATH, two, sizeof two, 0600);
+}
+
+static fn wls_tcp_pump(struct link_tcp address_to client_end,
+                       struct link_tcp address_to server_end, p64 now)
+{
+        link_self.now = now;
+        link_self.me = wls_server;
+        server_end->quiet = false;
+        if (server_end->state != LINK_TCP_FREE)
+                (void)link_tcp_read(server_end, now);
+        link_self.me = wls_client;
+        client_end->quiet = false;
+        if (client_end->state != LINK_TCP_FREE)
+                (void)link_tcp_read(client_end, now);
+        (void)link_sessions_turn(now);
+}
+
+static positive wls_tcp_drain(bipolar handle, p8 address_to into, positive room,
+                              positive address_to used)
+{
+        for (;;)
+        {
+                bipolar got = system_read_once(handle, into + address_to used,
+                                               room - address_to used);
+
+                if (got <= 0)
+                        return address_to used;
+                address_to used += (positive)got;
+        }
+}
+
+static fn tcp_session(void)
+{
+        bipolar ends[2];
+        b32 to_client[2], to_server[2];
+        struct link_session address_to client = link_self.session;
+        struct link_session address_to server;
+        struct link_tcp address_to client_end;
+        struct link_tcp address_to server_end;
+        static p8 sent_up[256 * 1024], sent_down[256 * 1024];
+        static p8 got_up[256 * 1024], got_down[256 * 1024];
+        positive up = 0, down = 0, got_u = 0, got_d = 0;
+        p64 now = link_now();
+        p32 first_keys;
+        p8 linked = false;
+        p8 rekeyed = false;
+
+        wls_tcp_reset();
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        memory_zero(address_of link_client, sizeof link_client);
+        wls_tcp_two_peers();
+        if (!wls_pair(ends) ||
+            system_call_2(syscall(pipe2), (positive)to_client, O_NONBLOCK | O_CLOEXEC) < 0 ||
+            system_call_2(syscall(pipe2), (positive)to_server, O_NONBLOCK | O_CLOEXEC) < 0)
+        {
+                check("tcp: a socketpair and two pipes for the session", false);
+                return;
+        }
+        link_self.server = true;
+        client_end = link_tcp_adopt(ends[0], wls_tcp_place_a, 22348, true, now);
+        server_end = link_tcp_adopt(ends[1], wls_tcp_place_b, 40000, false, now);
+
+        link_self.me = wls_client;
+        if (!link_session_open(client))
+        {
+                check("tcp: a client session opens", false);
+                return;
+        }
+        memory_copy(client->peer, wls_server.public, 32);
+        string_copy((string_address)client->name, "server");
+        memory_copy(client->address, wls_tcp_place_a, 16);
+        client->port = 22348;
+        client->conversation = 0x1122334455667788ull;
+        link_stream_set(client->writes, to_client[1], LINK_KEY_OUTPUT, 0);
+        check("tcp: the client's initiation goes on the connection",
+              link_client_initiate(client, now) && client_end->out_used == 0 &&
+                      link_client.sent == 1);
+
+        for (positive turn = 0; turn < 8 && !linked; turn++)
+        {
+                now += 250000;
+                wls_tcp_pump(client_end, server_end, now);
+                linked = client->now.live;
+        }
+        server = null;
+        for (positive at = 1; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used &&
+                    crypto_same(link_self.session[at].peer, wls_client.public, 32))
+                        server = link_self.session + at;
+        check("tcp: the handshake is made over the stream, both ends keyed",
+              linked && server && server->now.live && server->port == 40000 &&
+                      !memory_compare(server->address, wls_tcp_place_b, 16));
+        if (!linked || !server)
+                goto done;
+        link_stream_set(server->writes, to_server[1], LINK_KEY_INPUT, 0);
+        first_keys = client->now.theirs;
+
+        //      Data both ways, a rekey in the middle, and data both ways after it.
+        wls_tcp_seed = 99;
+        for (positive at = 0; at < sizeof sent_up; at++)
+        {
+                sent_up[at] = (p8)wls_tcp_random(256);
+                sent_down[at] = (p8)wls_tcp_random(256);
+        }
+        for (positive turn = 0; turn < 160 && (got_u < sizeof sent_up || got_d < sizeof sent_down);
+             turn++)
+        {
+                now += 250000;
+                while (up < sizeof sent_up && waterlink_room(client->link) > 8)
+                {
+                        positive piece = sizeof sent_up - up < 1000 ? sizeof sent_up - up : 1000;
+
+                        if (!link_post(client, LINK_KEY_INPUT, WATERLINK_FRAME_DURABLE,
+                                       LINK_DATA, sent_up + up, piece))
+                                break;
+                        up += piece;
+                }
+                while (down < sizeof sent_down && waterlink_room(server->link) > 8)
+                {
+                        positive piece = sizeof sent_down - down < 1000 ? sizeof sent_down - down : 1000;
+
+                        if (!link_post(server, LINK_KEY_OUTPUT, WATERLINK_FRAME_DURABLE,
+                                       LINK_DATA, sent_down + down, piece))
+                                break;
+                        down += piece;
+                }
+                //      The rekey, with half of it across.
+                if (!rekeyed && got_u >= sizeof sent_up / 2)
+                {
+                        link_self.me = wls_client;
+                        rekeyed = link_client_initiate(client, now);
+                }
+                wls_tcp_pump(client_end, server_end, now);
+                (void)wls_tcp_drain(to_server[0], got_up, sizeof got_up, address_of got_u);
+                (void)wls_tcp_drain(to_client[0], got_down, sizeof got_down, address_of got_d);
+        }
+        check("tcp: data both ways arrives whole and in order over the stream",
+              got_u == sizeof sent_up && got_d == sizeof sent_down &&
+                      !memory_compare(got_up, sent_up, sizeof sent_up) &&
+                      !memory_compare(got_down, sent_down, sizeof sent_down));
+        check("tcp: the rekey is made on the stream, and both ends took the new keys",
+              client->now.theirs != first_keys && server->now.ours == client->now.theirs &&
+                      !link_client.ours);
+        check("tcp: with a stream carrier, no retransmission is sent either way",
+              client->link->sent > 0 && server->link->sent > 0 &&
+                      client->link->retransmitted == 0 && server->link->retransmitted == 0 &&
+                      client->link->timeouts == 0 && server->link->timeouts == 0);
+        check("tcp: and its window is the most there is",
+              client->link->window == WATERLINK_WINDOW_MOST);
+        check("tcp: the state says the session is on tcp",
+              string_equals(link_tcp_carrier_word(server->address, server->port), "tcp") &&
+                      string_equals(link_tcp_carrier_word(wls_tcp_place_b, 1), "udp"));
+done:
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        memory_zero(address_of link_client, sizeof link_client);
+        system_close(to_client[0]);
+        system_close(to_server[0]);
+        link_self.server = false;
+        wls_tcp_reset();
+}
+
+/*      auto: the first initiation on UDP, and after a second of silence the
+        place dialled over TCP, which a loopback listener here takes. tcp:
+        the first goes there. */
+static fn tcp_auto(void)
+{
+        struct link_session address_to s = link_self.session;
+        socket_address_internet self;
+        b32 size = sizeof self;
+        bipolar listener = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        bipolar udp = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        bipolar before = link_self.socket;
+        p8 was_v4 = link_self.v4;
+        p8 place[16];
+        p16 port;
+        p64 now = link_now();
+
+        memory_zero(address_of self, sizeof self);
+        self.family = AF_INET;
+        self.host = network_order_32(0x7f000001u);
+        if (listener < 0 || udp < 0 ||
+            socket_bind((b32)listener, address_of self, sizeof self) < 0 ||
+            socket_listen((b32)listener, 4) < 0 ||
+            system_call_3(syscall(getsockname), (positive)listener,
+                          (positive)address_of self, (positive)address_of size) < 0)
+        {
+                string_format(log, "waterlink service: tcp auto NOT RUN -- no loopback IPv4 here\n");
+                log_flush();
+                if (listener >= 0)
+                        socket_close((b32)listener);
+                if (udp >= 0)
+                        socket_close((b32)udp);
+                return;
+        }
+        port = network_order_16(self.port);
+        link_address_v4(place, 0x7f000001u);
+        link_self.socket = udp;
+        link_self.v4 = true;
+        wls_tcp_reset();
+        memory_zero(address_of link_client, sizeof link_client);
+        link_self.me = wls_client;
+
+        (void)wls_text(LINK_TRANSPORT_PATH, "auto\n");
+        if (!link_session_open(s))
+                goto done;
+        memory_copy(s->peer, wls_server.public, 32);
+        memory_copy(s->address, place, 16);
+        s->port = port;
+        s->conversation = 5;
+        check("tcp: auto's first initiation is UDP's, and no connection is made",
+              link_client_initiate(s, now) && !link_tcp_for(place, port) &&
+                      link_carrier(now) == LINK_CARRIER_AUTO);
+        check("tcp: nor is one a moment later",
+              link_client_initiate(s, now + 500000) && !link_tcp_for(place, port));
+        check("tcp: when UDP has been silent a second, the place is dialled over TCP",
+              link_client_initiate(s, now + LINK_TCP_AUTO) && link_tcp_for(place, port) &&
+                      link_tcp_for(place, port)->outgoing && link_tcp_self.fell_back);
+        {
+                struct link_tcp address_to c = link_tcp_for(place, port);
+                bipolar taken = -1;
+                p8 heard[2 + WATERLINK_DATAGRAM];
+                positive used = 0;
+                struct waterlink_datagram head;
+
+                for (positive tries = 0; tries < 200 && taken < 0; tries++)
+                {
+                        timespec pause = {0, 5000000};
+
+                        taken = socket_accept((b32)listener, null, null, SOCK_CLOEXEC);
+                        if (taken < 0)
+                                (void)system_call_2(syscall(nanosleep),
+                                                    (positive)address_of pause, 0);
+                }
+                for (positive tries = 0; tries < 200 && c->state != LINK_TCP_OPEN; tries++)
+                {
+                        timespec pause = {0, 5000000};
+
+                        wls_tcp_service(now + LINK_TCP_AUTO + 1000);
+                        (void)system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                }
+                for (positive tries = 0; taken >= 0 && tries < 200 && used < sizeof heard; tries++)
+                {
+                        bipolar got = socket_receive((b32)taken, heard + used,
+                                                     sizeof heard - used, MSG_DONTWAIT, null, null);
+                        timespec pause = {0, 5000000};
+
+                        if (got > 0)
+                                used += (positive)got;
+                        else
+                                (void)system_call_2(syscall(nanosleep),
+                                                    (positive)address_of pause, 0);
+                }
+                memory_copy(address_of head, heard + 2, 16);
+                check("tcp: and the initiation arrives there, framed",
+                      used == sizeof heard && heard[0] == WATERLINK_DATAGRAM >> 8 &&
+                              heard[1] == (WATERLINK_DATAGRAM & 255) &&
+                              head.kind == WATERLINK_KIND_INITIATE);
+                if (taken >= 0)
+                        socket_close((b32)taken);
+        }
+        wls_tcp_reset();
+        memory_zero(address_of link_client, sizeof link_client);
+
+        (void)wls_text(LINK_TRANSPORT_PATH, "tcp\n");
+        check("tcp: under tcp the first initiation dials",
+              link_client_initiate(s, now + 5000000) && link_tcp_for(place, port) &&
+                      link_carrier(now + 5000000) == LINK_CARRIER_TCP);
+        wls_tcp_reset();
+        (void)wls_text(LINK_TRANSPORT_PATH, "network\n");
+        memory_zero(address_of link_client, sizeof link_client);
+        check("tcp: under network no initiation dials, however long UDP is silent",
+              link_client_initiate(s, now + 10000000) &&
+                      link_client_initiate(s, now + 20000000) && !link_tcp_for(place, port));
+
+        //      The listener: taken under auto beside UDP, refused past the bound.
+        wls_tcp_reset();
+        (void)wls_text(LINK_TRANSPORT_PATH, "auto\n");
+        link_tcp_listen(0, now + 30000000);
+        check("tcp: under auto the listener takes TCP", link_tcp_self.listener > 0);
+        {
+                socket_address_internet bound;
+                b32 bound_size = sizeof bound;
+                bipolar ends[LINK_TCP_MOST][2];
+                bipolar extra = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                positive adopted = 0;
+                p8 room[16];
+
+                (void)socket_name((b32)(link_tcp_self.listener - 1), address_of bound,
+                                  address_of bound_size);
+                for (positive at = 0; at < LINK_TCP_MOST; at++)
+                {
+                        memory_copy(room, place, 16);
+                        room[15] = (p8)(100 + at);
+                        ends[at][0] = ends[at][1] = -1;
+                        if (wls_pair(ends[at]) &&
+                            link_tcp_adopt(ends[at][0], room, 1, false, now))
+                                adopted++;
+                }
+                bound.host = network_order_32(0x7f000001u);
+                if (extra >= 0)
+                        (void)socket_connect((b32)extra, address_of bound, sizeof bound);
+                {
+                        timespec pause = {0, 20000000};
+
+                        (void)system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                }
+                wls_tcp_service(now + 30000000);
+                check("tcp: with every place held, a connection the listener takes is closed",
+                      adopted == LINK_TCP_MOST && link_tcp_self.taken == 1 &&
+                              link_tcp_self.refused == 1);
+                wls_tcp_reset();
+                for (positive at = 0; at < LINK_TCP_MOST; at++)
+                        if (ends[at][1] >= 0)
+                                socket_close((b32)ends[at][1]);
+                if (extra >= 0)
+                        socket_close((b32)extra);
+        }
+        (void)wls_text(LINK_TRANSPORT_PATH, "network\n");
+        link_tcp_self.carrier_read = 0;
+        link_tcp_listen(0, now + 40000000);
+        check("tcp: under network there is no TCP listener", link_tcp_self.listener == 0);
+
+done:
+        if (s->used)
+                link_session_close(s);
+        wls_tcp_reset();
+        memory_zero(address_of link_client, sizeof link_client);
+        (void)system_remove_at(AT_FDCWD, LINK_TRANSPORT_PATH, 0);
+        socket_close((b32)listener);
+        socket_close((b32)udp);
+        link_self.socket = before;
+        link_self.v4 = was_v4;
+}
+
+
 b32 main(void)
 {
         bipolar listener;
@@ -13558,15 +14396,23 @@ b32 main(void)
         wls_identity(address_of wls_client, 82);
         wls_identity(address_of wls_b, 83);
 
+        //      The TCP carrier first: socketpairs and loopback IPv4 are enough.
+        tcp_framing();
+        tcp_proxy_words();
+        tcp_connections();
+        tcp_session();
+        tcp_auto();
+
         listener = wls_listener(address_of port);
         link_self.socket = socket_new(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC |
                                                     SOCK_NONBLOCK, 0);
         if (listener < 0 || link_self.socket < 0)
         {
-                string_format(log, "waterlink service: NOT RUN -- no loopback "
-                                   "IPv6 socket here\n");
+                //      What ran is counted, and the rest said not to have.
+                string_format(log, "waterlink service: the rows after the TCP "
+                                   "carrier's NOT RUN -- no loopback IPv6 socket here\n");
                 log_flush();
-                return 2;
+                return test_report(null);
         }
 
         authorization_files();

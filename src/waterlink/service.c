@@ -993,6 +993,7 @@ typedef struct
         p16 port;
         p64 seconds; // open for
         p64 rtt;     // microseconds, smoothed
+        p8 carrier[24]; // udp, tcp, tcp through the proxy, or modem (link_tcp_carrier_word)
 } link_open_entry;
 
 typedef struct
@@ -1472,30 +1473,46 @@ static bipolar link_udp_send_to(p8 address_to bytes, positive length,
         return sent;
 }
 
+#include "stream.c"
+
 /*
         A datagram of the link's, to one place: onto the socket, or, while the transport is the modem, into the modem's queue
-        (modem.c), which plays it at the modem's rate. The place means nothing over the modem. Answers the length sent, or a
-        negative error; a full queue loses the datagram, as a full socket does, and the link sends it again.
+        (modem.c), which plays it at the modem's rate. The place means nothing over the modem. A place with a TCP connection
+        open to it is that connection (stream.c), and a client run whose carrier is TCP dials a place it has none to. Answers the
+        length sent, or a negative error; a full queue loses the datagram, as a full socket does, and the link sends it again.
 */
 static bipolar link_send_to(p8 address_to bytes, positive length,
                             p8 address_to address, p16 port)
 {
+        struct link_tcp address_to stream;
+
         if (link_modem_carrying())
                 return link_modem_put(bytes, length, link_self.put_at)
                                ? (bipolar)length
                                : -EAGAIN;
+        stream = link_tcp_for(address, port);
+        if (!stream && link_tcp_self.client && link_tcp_wanted(0, link_self.now))
+                stream = link_tcp_dial(address, port, link_self.now);
+        if (stream)
+                return link_tcp_send(stream, bytes, length, link_self.now) ? (bipolar)length
+                                                                          : -EAGAIN;
         return link_udp_send_to(bytes, length, address, port);
 }
 
 /*
         The link's view of the transport, told before it fills anything: over the modem its timer is floored at the queue's
         worth of air, its window is no bigger than the queue, and it knows when the oldest datagram the modem holds was sent.
-        Over the network the link keeps what it always had.
+        Over a TCP connection nothing sent on it is lost or sent again, and the window is the most (stream.c). Over UDP the
+        link keeps what it always had.
 */
 static fn link_transport_tell(struct link_session address_to s)
 {
+        struct link_tcp address_to stream;
+
         if (link_modem_carrying())
                 waterlink_transport(s->link, link_modem_floor(), link_modem_ceiling(), link_modem_queued_from());
+        else if ((stream = link_tcp_for(s->address, s->port)))
+                waterlink_transport_stream(s->link, stream->opened);
         else
                 waterlink_transport(s->link, 0, WATERLINK_WINDOW_MOST, ~0ull);
 }
@@ -1513,7 +1530,8 @@ static fn link_batch_flush(void)
         if (!count)
                 return;
 
-        if (count > 1 && link_self.gso && !link_modem_carrying())
+        if (count > 1 && link_self.gso && !link_modem_carrying() &&
+            !link_tcp_for(link_self.batch_address, link_self.batch_port))
         {
                 socket_address_internet6 to;
                 socket_iovec part = {link_self.batch, count * WATERLINK_DATAGRAM};
@@ -1590,6 +1608,10 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
                 //      allows is not a count of datagrams, and a frame sent
                 //      into a full queue would be lost there. The rest waits.
                 if (link_modem_carrying() && link_modem_free() <= link_self.batched)
+                        break;
+                //      Over TCP, the same of the connection's room: a datagram
+                //      filled is one it takes whole, so none is lost there.
+                if (link_tcp_room(s->address, s->port) <= link_self.batched)
                         break;
 
                 datagram = link_self.batch + link_self.batched *
@@ -3480,6 +3502,9 @@ static fn link_state_write(p64 now)
                 open->port = s->port;
                 open->seconds = link_age(now, s->opened) / 1000000;
                 open->rtt = s->link->smoothed;
+                string_copy_bounded((string_address)open->carrier,
+                                    link_tcp_carrier_word(s->address, s->port),
+                                    sizeof open->carrier);
                 state->open_count++;
         }
         (void)link_file_replace(LINK_STATE_PATH, state, sizeof(address_to state),
@@ -3879,7 +3904,8 @@ static p64 link_sessions_turn(p64 now)
                 due = waterlink_wake(s->link, now);
                 //      With the modem's queue full, nothing this session sends
                 //      can go until the queue plays: wait for it, do not spin.
-                if (link_modem_carrying() && !link_modem_free() &&
+                if (((link_modem_carrying() && !link_modem_free()) ||
+                     !link_tcp_room(s->address, s->port)) &&
                     due < now + LINK_MODEM_WAIT)
                         due = now + LINK_MODEM_WAIT;
                 if (link_self.server && s->exited && !s->exit_sent &&
@@ -3904,6 +3930,7 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
                    signalled);
         link_watch(watch, quiet, address_of count, link_nearby.lan.socket,
                    SYSTEM_POLL_READ, null);
+        link_tcp_watch(watch, quiet, address_of count);
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_watch(link_self.session + at, watch, quiet,
@@ -3931,6 +3958,7 @@ typedef struct
         bipolar send_error; // the last send's error, or 0
         p8 unverified;      // an answer to our initiation that did not verify
         struct link_session address_to session; // the session its keys are for
+        p64 unanswered_since; // the first initiation since the last answer, 0 for none
 } link_client_state;
 
 static link_client_state link_client;
@@ -4022,8 +4050,8 @@ static p64 link_keep_turn(p64 now);
 
 static b32 link_serve(string_address ready_text)
 {
-        system_poll_descriptor watch[3 + LINK_SESSIONS * 5];
-        p8 address_to quiet[3 + LINK_SESSIONS * 5];
+        system_poll_descriptor watch[3 + LINK_SESSIONS * 5 + 1 + LINK_TCP_MOST];
+        p8 address_to quiet[3 + LINK_SESSIONS * 5 + 1 + LINK_TCP_MOST];
         p8 signals_quiet = false;
         bipolar lock;
         bipolar signals;
@@ -4085,6 +4113,7 @@ static b32 link_serve(string_address ready_text)
                 if (stop)
                         break;
 
+                link_tcp_listen(port, now);
                 wake = link_sessions_turn(now);
                 {
                         p64 keep = link_keep_turn(now);
@@ -4102,6 +4131,7 @@ static b32 link_serve(string_address ready_text)
                           link_sessions_watch(watch, quiet, signals,
                                               address_of signals_quiet),
                           due < wake ? due : wake, now);
+                link_tcp_turn(link_self.now = link_now());
                 if (link_self.socket_quiet && link_nearby.lan.socket < 0)
                         continue;
                 now = link_self.now = link_now();
@@ -4119,6 +4149,7 @@ static b32 link_serve(string_address ready_text)
                         link_session_end(link_self.session + at, true);
                         link_session_close(link_self.session + at);
                 }
+        link_tcp_close_all();
         system_remove_at(AT_FDCWD, LINK_STATE_PATH, 0);
         system_close(lock);
         return 0;
@@ -4221,6 +4252,12 @@ static p8 link_client_initiate(struct link_session address_to s, p64 now)
         memory_copy(target, s->address, 16);
         if (link_client.tries++ & 1)
                 (void)link_client_other(s, target, address_of port);
+        //      UDP first under auto: once it has gone a second unanswered, the
+        //      place is dialled over TCP, and this initiation goes there.
+        if (!link_client.unanswered_since)
+                link_client.unanswered_since = now ? now : 1;
+        if (link_tcp_wanted(link_age(now, link_client.unanswered_since), now))
+                (void)link_tcp_dial(target, port, now);
 
         /* A failed index or entropy draw leaves no initiation.  Do not retain
            an earlier MAC, and do not read the still-uninitialized datagram in
@@ -4325,7 +4362,10 @@ static fn link_client_answered(p8 address_to datagram, positive length)
         if (link_client.ours && link_client.session->used &&
             link_client_answer(link_client.session, address_of link_client.noise,
                                link_client.ours, datagram, length))
+        {
                 link_client.ours = 0;
+                link_client.unanswered_since = 0;
+        }
 }
 
 /*      A cookie reply to the initiation out: kept, and asked again under it
@@ -4620,8 +4660,8 @@ static p64 link_keep_turn(p64 now)
 static b32 link_client_run(string_address name, p8 kind,
                            string_address address_to words, positive count)
 {
-        system_poll_descriptor watch[3 + 5];
-        p8 address_to quiet[3 + 5];
+        system_poll_descriptor watch[3 + 5 + 1 + LINK_TCP_MOST];
+        p8 address_to quiet[3 + 5 + 1 + LINK_TCP_MOST];
         p8 signals_quiet = false;
         link_peers peers;
         struct waterlink_peer address_to peer;
@@ -4754,6 +4794,7 @@ static b32 link_client_run(string_address name, p8 kind,
         link_self.socket = link_socket_open(0, false);
         return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
         link_self.gso = LINK_GSO;
+        link_tcp_self.client = true;
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
@@ -5010,10 +5051,15 @@ static b32 link_client_run(string_address name, p8 kind,
                           link_sessions_watch(watch, quiet, signals,
                                               address_of signals_quiet),
                           wake, now);
+                link_tcp_turn(link_self.now = link_now());
                 if (!link_self.socket_quiet)
                         link_receive_all(link_self.now = link_now());
         }
 
+        //      The goodbye said, on whichever carrier it went.
+        for (positive at = 0; at < LINK_TCP_MOST; at++)
+                link_tcp_write(link_tcp_self.conn + at, link_now());
+        link_tcp_close_all();
         edit_terminal_restore();
         crypto_forget(address_of link_client.noise, sizeof link_client.noise);
 

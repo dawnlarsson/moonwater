@@ -516,6 +516,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =settings preferences options	8c78	הגדרות העדפות אפשרויות
 =slate	deee	צפחה
 =slow	42b8	איטי
+=tcp	ba90	tcp
 =terminal shell console	eaba	מסוף מעטפת קונסולה
 =thick	964e	עבה
 =thin	b172	דק

@@ -516,6 +516,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =settings preferences options	8c78	تنظیمات ترجیحات گزینه‌ها
 =slate	deee	سربی
 =slow	42b8	کند
+=tcp	ba90	tcp
 =terminal shell console	eaba	پایانه پوسته کنسول
 =thick	964e	ضخیم
 =thin	b172	نازک

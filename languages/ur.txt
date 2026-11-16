@@ -516,6 +516,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =settings preferences options	8c78	ترتیبات ترجیحات اختیارات
 =slate	deee	سلیٹی
 =slow	42b8	آہستہ
+=tcp	ba90	tcp
 =terminal shell console	eaba	ٹرمینل شیل کنسول
 =thick	964e	موٹا
 =thin	b172	پتلا

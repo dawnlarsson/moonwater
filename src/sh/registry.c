@@ -56,7 +56,7 @@
 #define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
 #define SETTINGS_LANGUAGE 32u  // a choice of the languages: the verb says the code and the menu shows the language's own name (ui/ui.c)
 #define SETTINGS_WAITS 64u     // a verb that waits for another machine (a pairing, up to five minutes): its first line is shown while it waits, its last when it ends
-#define SETTINGS_TRANSPORT 128u // a choice of how linked machines reach each other: network always, modem only while the audio modem is ready (its row says so)
+#define SETTINGS_TRANSPORT 128u // a choice of how linked machines reach each other: network always, modem only while the audio modem is ready (settings.c knows those two words alone, so Connect over, which offers tcp and auto as well, does not set it)
 
 // The Display rows of a screen (settings.c draws the map above them): the screen chosen, its rotation and refresh (the
 // window table says what each is, and the verb sets it), and a note of who turns it.
@@ -779,8 +779,8 @@ static const struct settings_row settings_rows[] = {
     {null, "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
      {"link"}, null, 0,
      .help = "the other machine's name and the code it shows, which pair the two of them"},
-    {null, "Connect over", SETTINGS_CHOICE, 0, SETTINGS_TRANSPORT, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network modem", 0,
-     .help = "network: over the network, as linked machines always have [network]; modem: the audio modem, through the sound card"},
+    {null, "Connect over", SETTINGS_CHOICE, 0, 0, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network tcp auto modem", 0,
+     .help = "network: over the network by udp, as linked machines always have [network]; tcp: over tcp, through HTTPS_PROXY when one is named; auto: udp, then tcp when udp is not answered in a second; modem: the audio modem, through the sound card, refused while it is not ready"},
     {null, "Audio modem", SETTINGS_INFO, 0, SETTINGS_LINE, {"link", "transport"}, "audio modem ", null, {null}, null, 0,
      .help = "the sound card as a link to another machine: it needs a sound card open on the sound server, and says why when it has none"},
     {null, "Paths", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"link", "paths"}, "paths ", null, {null}, null, 0,

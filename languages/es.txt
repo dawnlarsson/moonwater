@@ -515,6 +515,7 @@ ui_field_full	fe02	no cabe más
 =settings preferences options	8c78	ajustes configuración preferencias opciones
 =slate	deee	pizarra
 =slow	42b8	lento
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal consola intérprete
 =thick	964e	grueso
 =thin	b172	fino

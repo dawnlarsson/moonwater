@@ -630,6 +630,20 @@ fn waterlink_transport(struct waterlink_link address_to link, p64 rto_floor,
 }
 
 /*
+        Over a stream (TCP), which delivers what it took in order or breaks:
+        a frame sent at or after `from`, when the stream was opened, is in
+        its queue until it arrives, so none is lost or sent again (the
+        caller's queued_from), and the window is the most there is, since the
+        stream's own congestion control is the one that paces it. A frame
+        sent before, on another path, is still the link's to resend.
+*/
+fn waterlink_transport_stream(struct waterlink_link address_to link, p64 from)
+{
+        waterlink_transport(link, 0, WATERLINK_WINDOW_MOST, from);
+        link->window = WATERLINK_WINDOW_MOST;
+}
+
+/*
         The probe timer, from the estimate: before any sample, the first
         guess; after, the smoothed round trip, four deviations (a millisecond
         at least) and the longest the far side may hold an acknowledgement,

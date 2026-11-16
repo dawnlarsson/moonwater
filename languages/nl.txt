@@ -515,6 +515,7 @@ ui_field_full	fe02	meer past er niet in
 =settings preferences options	8c78	instellingen voorkeuren opties
 =slate	deee	leisteen
 =slow	42b8	langzaam
+=tcp	ba90	tcp
 =terminal shell console	eaba	terminal console shell
 =thick	964e	dik
 =thin	b172	dun

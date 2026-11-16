@@ -509,7 +509,7 @@ static const string_address host_link_rows[] = {
     "  moonwater link group ...       machines on one network that link themselves",
     "  moonwater link on | off        the listener",
     "  moonwater link doctor          the listener, port, addresses, route, discovery",
-    "  moonwater link transport [network|modem]   how machines reach each other",
+    "  moonwater link transport [network|tcp|auto|modem]   how machines reach each other",
     "  moonwater link modem key       the modem's key, made on first use",
     "  moonwater link modem send FILE       FILE over the sound card, to the receiver",
 };
