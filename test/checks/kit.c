@@ -8956,17 +8956,18 @@ static fn check_kit_layout(void)
                       column->extent == 70 && column->offset == 20 && text->y == -20 && text->h == 30 && after->y == 10);
         }
 
-        // The limits: elements past the tree's room and a second root are refused and counted, and nothing is written outside the arrays.
+        // No count of elements is a limit: ten thousand children past the tree's own room are laid out, grown into its reservation, and
+        // a second root is refused and counted, nothing written outside the arrays.
         root = layout_root(0);
-        for (int k = 0; k < UI_TREE_NODES + 4; k++)
+        for (int k = 0; k < 10000; k++)
                 layout_child(1, 1);
         ui_tree_close(&layout_tree);
         a = ui_tree_open(&layout_tree);
         ui_tree_close(&layout_tree);
         ui_tree_run(&layout_tree, 400, 10);
-        check("kit layout: the elements past the room and a second root are refused and counted, and the others are laid out",
-              layout_tree.count == UI_TREE_NODES && layout_tree.dropped == 6 && a == &layout_tree.discard && layout_tree.depth == 0 &&
-                  layout_tree.node[UI_TREE_NODES - 1].x == UI_TREE_NODES - 2);
+        check("kit layout: elements past the tree's own room grow it, every one laid out, and a second root is refused and counted",
+              layout_tree.count == 10001 && layout_tree.dropped == 1 && a == &layout_tree.discard && layout_tree.depth == 0 &&
+                  layout_tree.node == (struct ui_node address_to)layout_tree.grown.at && layout_tree.node[10000].x == 9999);
 }
 
 /*

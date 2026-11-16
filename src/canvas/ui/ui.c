@@ -1648,9 +1648,12 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
         [0, UI_TREE_WEIGHT], a direction other than 1 is 0, a kind outside 0 to 3 is UI_FIT, a justify or an align the table does
         not have is the first; a position is kept to +-2^30. So every product stays in 64 bits.
 
-        Limits, and what happens at them: UI_TREE_NODES elements, UI_TREE_DEPTH open at once. An open that would pass either, or is
-        a second root, or sits inside a refused open, is refused: it adds no element, is counted in dropped, and what is written
-        to the node it answers goes to a node nothing reads. Its close is paired as usual. Nothing is written outside the arrays.
+        Limits, and what happens at them: UI_TREE_DEPTH open at once. The elements are as many as are opened: UI_TREE_NODES in the
+        tree itself, and past them the tree grows (ui_tree_room) into a reservation of address space of its own, committed a doubling
+        at a time, the elements copied there once and never moved after (a pointer to one taken from t->node is good until the tree
+        grows past it). An open that would pass the depth, or is a second root, or sits inside a refused open, or whose element the
+        kernel has no memory for, is refused: it adds no element, is counted in dropped, and what is written to the node it answers
+        goes to a node nothing reads. Its close is paired as usual. Nothing is written outside the arrays.
 
         This is the reference. The routine the kit runs is this C; there is no assembly under it yet, and the one thing that
         would be is ui_tree_run's pass 2, the only part with work per child. The struct is laid out for it (the asserts below pin
@@ -1658,7 +1661,8 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
         x86-64 and was checked against this same arithmetic rectangle by rectangle. Nothing is measured here to say it wins.
 */
 
-#define UI_TREE_NODES 128
+#define UI_TREE_NODES 128          // the elements a tree holds in itself; past them it grows (ui_tree_room)
+#define UI_TREE_GROWN (1L << 24)   // the elements a grown tree's reservation has room for: address space only, 3 GiB of it
 #define UI_TREE_DEPTH 16
 #define UI_TREE_MOST (1 << 22)   // the largest size, gap, pad or margin; a larger value reads as this
 #define UI_TREE_WEIGHT 1024      // the largest weight
@@ -1703,14 +1707,28 @@ struct ui_node
         short wrap, spare;                 // a leaf whose height is the tree's measure of it at its width; and a spare the layout never reads
 };
 
+/*
+        Memory that grows and never moves (a tree's elements past its own, a view's items past its own): a reservation of address
+        space (PROT_NONE, MAP_NORESERVE) of `most` elements, made at the first growth, committed by mprotect a doubling at a time.
+*/
+struct ui_grown
+{
+        unsigned char *at;                 // the reservation, 0 before the first growth
+        long room;                         // elements committed
+};
+
 struct ui_tree
 {
-        struct ui_node node[UI_TREE_NODES];
+        struct ui_node address_to node;    // the elements: first while they fit, then the grown ones (ui_tree_room)
+        int room;                          // the elements node has room for
+        struct ui_node first[UI_TREE_NODES];
         struct ui_node discard;            // what a refused open answers, to be written and not read
         int count, depth, over, dropped;
         int open[UI_TREE_DEPTH];           // the open stack: each open's element, or -1 for a refused one
         int (*measure)(address_any by, int node, int width); // a leaf that wraps: its height at a width (null: none; ui_tree_begin clears it)
         address_any by;                    // what the measure is given
+        int first_scratch[UI_TREE_NODES];  // an int an element for the passes that keep one (ui_tree_scratch)
+        struct ui_grown grown, grown_scratch;
 };
 
 _Static_assert(sizeof(struct ui_size) == 20, "ui_size: five ints");
@@ -1755,11 +1773,77 @@ static inline b64 ui_tree_gaps(const struct ui_node address_to n)
         return n->children > 1 ? (b64)(n->children - 1) * n->gap : 0;
 }
 
+/*
+        Room for `want` elements of `unit` bytes in g, of `most` at the most: 1 when they are committed, 0 when the address space or
+        the memory is not there (what wanted it is refused, nothing else).
+*/
+static int ui_grown_room(struct ui_grown address_to g, long unit, long most, long want)
+{
+        long room;
+
+        if (want <= g->room)
+                return 1;
+        if (want > most)
+                return 0;
+        if (!g->at)
+        {
+                long got = compositor_call(syscall(mmap), 0, (positive)(unit * most), 0, 0x4022, (positive)-1, 0); // PROT_NONE, private, anonymous, no reserve
+
+                if (got < 0 && got > -4096)
+                        return 0;
+                g->at = (unsigned char address_to)got;
+        }
+        room = g->room ? g->room * 2 : 256;
+        room = room < want ? want : room > most ? most : room;
+        if (compositor_call(syscall(mprotect), (positive)g->at, (positive)((unit * room + 4095) & ~4095L), 3, 0, 0, 0) != 0)
+                return 0;
+        g->room = room;
+        return 1;
+}
+
+// The tree's elements pointed at where they are: its own, or the grown ones once it has grown.
+static inline fn ui_tree_point(struct ui_tree address_to t)
+{
+        t->node = t->grown.at ? (struct ui_node address_to)t->grown.at : t->first;
+        t->room = t->grown.at ? (int)t->grown.room : UI_TREE_NODES;
+}
+
+// A tree that was never begun (zero, as a container is made) pointed at its own elements, so a read of it before its first layout reads
+// zeros, as it did when the elements were the tree's alone.
+static inline fn ui_tree_ready(const struct ui_tree address_to t)
+{
+        if (!t->node)
+                ui_tree_point((struct ui_tree address_to)t);
+}
+
+// Room for one more element: the tree grown past its own (its elements copied to the reservation once), 0 when it cannot be.
+static int ui_tree_room(struct ui_tree address_to t)
+{
+        b32 first = !t->grown.at;
+
+        if (t->count < t->room)
+                return 1;
+        if (!ui_grown_room(&t->grown, sizeof(struct ui_node), UI_TREE_GROWN, (long)t->count + 1) ||
+            !ui_grown_room(&t->grown_scratch, sizeof(int), UI_TREE_GROWN, (long)t->count + 1))
+                return 0;
+        if (first)
+                memory_copy(t->grown.at, t->first, (positive)t->count * sizeof(struct ui_node));
+        ui_tree_point(t);
+        return 1;
+}
+
+// An int an element, for a pass that keeps one (the offsets a run asked, a hit's depths).
+static inline int address_to ui_tree_scratch(const struct ui_tree address_to t)
+{
+        return t->grown_scratch.at ? (int address_to)t->grown_scratch.at : (int address_to)t->first_scratch;
+}
+
 // An empty tree with no measure; the array is left as it is.
 static fn ui_tree_begin(struct ui_tree address_to t)
 {
         t->count = t->depth = t->over = t->dropped = 0;
         t->measure = null, t->by = null;
+        ui_tree_point(t);
 }
 
 // An element opened as the last child of the innermost open one (or as the root), zeroed but for the limits: fit sizes, no max.
@@ -1777,7 +1861,9 @@ static struct ui_node address_to ui_tree_open(struct ui_tree address_to t)
         }
         if (t->depth)
                 parent = t->open[t->depth - 1];
-        refused = (t->depth ? parent < 0 : t->count != 0) || t->count >= UI_TREE_NODES;
+        if (!t->node)
+                ui_tree_point(t);
+        refused = (t->depth ? parent < 0 : t->count != 0) || !ui_tree_room(t);
         if (refused)
         {
                 t->dropped++;
@@ -2067,7 +2153,7 @@ static fn ui_tree_lay(struct ui_tree address_to t, int width, int height)
 */
 static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
 {
-        int asked[UI_TREE_NODES];
+        int address_to asked = ui_tree_scratch(t);
         b32 again = false;
 
         for (int at = 0; t->measure && at < t->count; at++)
@@ -2094,6 +2180,7 @@ static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
 // The first element named id, or null: 0 names none.
 static struct ui_node address_to ui_tree_find(struct ui_tree address_to t, int id)
 {
+        ui_tree_ready(t);
         for (int i = 0; id && i < t->count; i++)
                 if (t->node[i].id == id)
                         return &t->node[i];
@@ -2109,7 +2196,8 @@ static struct ui_node address_to ui_tree_find(struct ui_tree address_to t, int i
 */
 static int ui_tree_hit(const struct ui_tree address_to t, int x, int y, const int address_to reach)
 {
-        int depth[UI_TREE_NODES], best = -1;
+        ui_tree_ready(t);
+        int address_to depth = ui_tree_scratch(t), best = -1;
 
         for (int i = 0; i < t->count; i++)
         {
@@ -2126,6 +2214,7 @@ static int ui_tree_hit(const struct ui_tree address_to t, int x, int y, const in
 // The whole tree turned over the root's width: every element as far from the root's right edge as it was from its left.
 static fn ui_tree_mirror(struct ui_tree address_to t)
 {
+        ui_tree_ready(t);
         for (int i = 1; i < t->count; i++)
                 t->node[i].x = 2 * t->node[0].x + t->node[0].w - t->node[i].x - t->node[i].w;
 }
@@ -2139,6 +2228,7 @@ static inline b32 ui_tree_in(const struct ui_node address_to n, int x, int y)
 // The child of element at that a point is in, where the element holds the point too, or -1: what a pointer is over, one level down.
 static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y)
 {
+        ui_tree_ready(t);
         for (int ch = at < t->count && ui_tree_in(&t->node[at], x, y) ? t->node[at].first : -1; ch >= 0; ch = t->node[ch].next)
                 if (ui_tree_in(&t->node[ch], x, y))
                         return ch;
@@ -18576,6 +18666,7 @@ static b32 ui_popmenu_choosable(const struct ui_popmenu address_to m, int at)
 // margin with it. 0 for an item the menu has not laid out.
 static int ui_popmenu_start(const struct ui_popmenu address_to m, int at)
 {
+        ui_tree_ready(&m->tree);
         const struct ui_node address_to first = &m->tree.node[1], address_to n = &m->tree.node[at >= 0 && at < m->count ? m->items[at].node : 0];
 
         return n > first ? n->y - n->margin[2] - first->y + first->margin[2] : 0;
@@ -18584,6 +18675,7 @@ static int ui_popmenu_start(const struct ui_popmenu address_to m, int at)
 // The item at the menu's top, read from the tree: the last that starts at or before the root's offset. A menu rests on an item's top.
 static int ui_popmenu_top(const struct ui_popmenu address_to m)
 {
+        ui_tree_ready(&m->tree);
         int at = 0;
 
         while (at + 1 < m->count && ui_popmenu_start(m, at + 1) <= m->tree.node[0].offset)
@@ -18595,6 +18687,7 @@ static int ui_popmenu_top(const struct ui_popmenu address_to m)
 // it inside its ends (the last page's top), and the kit's region rests where the tree put it, its bar drawn there.
 static fn ui_popmenu_to(struct ui_popmenu address_to m, int at)
 {
+        ui_tree_ready(&m->tree);
         m->tree.node[0].offset = ui_popmenu_start(m, at < m->count ? at : m->count - 1);
         ui_tree_run(&m->tree, 0, 0);
         ui_scroll_set(&m->scroll, m->tree.node[0].offset);
@@ -18633,10 +18726,11 @@ static positive ui_popmenu_shown(const char address_to label, p8 address_to into
 */
 static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to m, int limit)
 {
+        ui_tree_ready(&m->tree);
         struct ui_tree address_to t = &m->tree;
         struct ui_node address_to root, address_to n;
         int pad = ui_dev(ui, UI_MENU_PAD), inset = pad + ui_dev(ui, UI_MENU_INSET), far = ui_dev(ui, UI_MENU_PAD + 14), rule = ui_px(ui, 1);
-        int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), cap = ui_capital(ui, 14), bar = ui_dev(ui, UI_SCROLL_WIDTH), place = t->node[0].offset;
+        int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), cap = ui_capital(ui, 14), bar = ui_dev(ui, UI_SCROLL_WIDTH), place = t->node && t->count ? t->node[0].offset : 0;
 
         ui_tree_begin(t);
         root = ui_tree_open(t);
@@ -18682,6 +18776,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
 // item, and neither is what is scrolled out of the menu: the tree places it past the menu's edge, where nothing is drawn.
 static int ui_popmenu_at(const struct ui_popmenu address_to m, int x, int y)
 {
+        ui_tree_ready(&m->tree);
         for (int at = 0; at < m->count && ui_tree_in(&m->tree.node[0], x, y); at++)
                 if (!(m->items[at].flags & UI_MENU_SEPARATOR) && ui_tree_in(&m->tree.node[m->items[at].node], x, y))
                         return at;
@@ -18753,6 +18848,7 @@ static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b3
 // The menu drawn: every item that shows, in its element as the tree placed it, and a row's marks (a check, a dot, a submenu's) in its pads.
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
 {
+        ui_tree_ready(&m->tree);
         UI_CALL();
         const struct ui_node address_to root = &m->tree.node[0];
 
@@ -18874,6 +18970,7 @@ static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 */
 static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu address_to m, int type, int x, int y, b32 down)
 {
+        ui_tree_ready(&m->tree);
         int scroll = m->scroll.content > m->scroll.view || m->scroll.held ? ui_scroll_pointer(ui, &m->scroll, type, x, y, down) : -1;
 
         if (scroll < 0)
@@ -18893,6 +18990,7 @@ static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu addre
 
 static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_to m, const struct window_event address_to event, int x, int y)
 {
+        ui_tree_ready(&m->tree);
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
         {
                 p32 c = (p32)event->b;
@@ -19170,6 +19268,7 @@ static int ui_popmenu_scroll(struct ui_popup address_to p, const struct window_e
 // The popup's events: the id chosen (the popup closed), UI_MENU_GONE when it went, UI_MENU_NOTHING otherwise.
 static int ui_popmenu_pump(struct ui_popup address_to p)
 {
+        ui_tree_ready(&p->menu.tree);
         struct window_event event;
         int answer = UI_MENU_NOTHING;
 
@@ -20167,7 +20266,9 @@ struct ui_view
 {
         struct ui address_to ui;
         struct ui_tree tree;
-        struct ui_item item[UI_TREE_NODES], discard;
+        struct ui_item address_to item;   // an element's: first while the tree fits in its own, then the grown ones (ui_view_items)
+        struct ui_item first[UI_TREE_NODES], discard;
+        struct ui_grown grown;
         struct ui_buttons group;          // the buttons of the build, in order: hover, press, keys, confirm
         int width, limit;                 // the viewport: its width, and the most height (device pixels; 0 for none)
         int unknown, dropped;             // class names the table lacks, and elements refused (what a check reads)
@@ -20179,6 +20280,15 @@ struct ui_view
         int scrolls;
         struct ui_press finger;           // a finger's press in a scroll container: the drag that moves it, and the lift that throws it
 };
+
+// A view never begun pointed at its own tree's elements and items, so a read before its first build reads zeros.
+static inline fn ui_view_ready(const struct ui_view address_to v)
+{
+        ui_tree_ready(&v->tree);
+        if (!v->item)
+                ((struct ui_view address_to)v)->item = ((struct ui_view address_to)v)->first;
+}
+
 
 static struct ui_view address_to ui_view_now; // the view being declared: the last ui_view_begin's
 
@@ -20266,6 +20376,7 @@ static fn ui_view_due(struct ui_view address_to v, int top, int bottom)
 // True when any such reader is on screen. A variable that no build of the view read last shows nowhere, and moves nothing.
 static b32 ui_view_poll(struct ui_view address_to v)
 {
+        ui_view_ready(v);
         b32 any = false;
 
         if (!v)
@@ -20336,6 +20447,23 @@ static int ui_view_px(const struct ui_view address_to v, int size)
 }
 
 // An element opened inside the one open: its node written from its classes and the props over them, in device pixels.
+// Room for a view's items, one an element of its tree: its own, and past them the grown ones (the first copied there once).
+static int ui_view_items(struct ui_view address_to v, long want)
+{
+        b32 first = !v->grown.at;
+
+        if (!v->item)
+                v->item = v->first;
+        if (want <= (v->grown.at ? v->grown.room : UI_TREE_NODES))
+                return 1;
+        if (!ui_grown_room(&v->grown, sizeof(struct ui_item), UI_TREE_GROWN, want))
+                return 0;
+        if (first)
+                memory_copy(v->grown.at, v->first, sizeof(v->first));
+        v->item = (struct ui_item address_to)v->grown.at;
+        return 1;
+}
+
 static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui_props address_to p)
 {
         struct ui_view address_to v = ui_view_now;
@@ -20343,7 +20471,8 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         int parent = v->tree.depth ? v->tree.open[v->tree.depth - 1] : -1;
         int along = parent >= 0 ? v->tree.node[parent].dir : 0;
         struct ui_node address_to n = ui_tree_open(&v->tree);
-        struct ui_item address_to item = n == &v->tree.discard ? &v->discard : &v->item[n - v->tree.node];
+        struct ui_item address_to item = n == &v->tree.discard || !ui_view_items(v, (long)(n - v->tree.node) + 1) ? &v->discard
+                                                                                                                 : &v->item[n - v->tree.node];
         struct ui_class look;
         int fixed[2], low[2], high[2], grow, type;
 
@@ -20494,6 +20623,7 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
         root->size[1].max = limit > 0 ? limit : UI_TREE_MOST;
         if (limit < 0)
                 root->size[1].kind = UI_FIXED, root->size[1].value = -limit;
+        ui_view_items(v, 1);
         memory_zero(&v->item[0], sizeof(v->item[0]));
         v->item[0].button = v->item[0].scroll = -1;
 }
@@ -20522,6 +20652,7 @@ static fn ui_view_box(const struct ui address_to ui, const struct ui_node addres
 // at the other edge.
 static int ui_view_end(struct ui_view address_to v)
 {
+        ui_view_ready(v);
         struct ui address_to ui = v->ui;
         int scale = ui->scale > 0 ? ui->scale : 100, first = -1, low = 0, high = 0;
 
@@ -20616,6 +20747,7 @@ static int ui_view_end(struct ui_view address_to v)
 // nowhere else. With no scroll container there the rows are every row.
 static fn ui_view_rows(const struct ui_view address_to v, int at, int address_to top, int address_to bottom)
 {
+        ui_view_ready(v);
         *top = -UI_TREE_FAR, *bottom = UI_TREE_FAR;
         for (; at >= 0; at = v->tree.node[at].parent)
                 if (v->item[at].scroll >= 0)
@@ -20631,6 +20763,7 @@ static fn ui_view_rows(const struct ui_view address_to v, int at, int address_to
 // element it is inside that has one, or the end of the tree.
 static int ui_view_after(const struct ui_view address_to v, int at)
 {
+        ui_view_ready(v);
         while (at >= 0 && v->tree.node[at].next < 0)
                 at = v->tree.node[at].parent;
         return at < 0 ? v->tree.count : v->tree.node[at].next;
@@ -20639,6 +20772,7 @@ static int ui_view_after(const struct ui_view address_to v, int at)
 // The scroller of the scroll container a point is in where it shows, the deepest of them (one inside another is declared after it), or none.
 static struct ui_scroll address_to ui_view_scroll_at(struct ui_view address_to v, int x, int y)
 {
+        ui_view_ready(v);
         struct ui_scroll address_to found = null;
 
         for (int at = 0; at < v->tree.count; at++)
@@ -20660,6 +20794,7 @@ static fn ui_view_words(struct ui address_to ui, const struct ui_node address_to
 // container, its pull past an end and its bar; then the buttons over them (keys: the window has the keys).
 static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32 keys)
 {
+        ui_view_ready(v);
         UI_CALL();
         int open[UI_VIEW_SCROLLS], after[UI_VIEW_SCROLLS], depth = 0, top, bottom;
 
@@ -20740,6 +20875,7 @@ static p32 ui_view_act(const struct ui_item address_to item)
 // past an end, the outermost first (ui_scroll_unpull).
 static int ui_view_unpull(const struct ui address_to ui, const struct ui_view address_to v, int at, int y)
 {
+        ui_view_ready(v);
         if (at < 0)
                 return y;
         y = ui_view_unpull(ui, v, v->tree.node[at].parent, y);
@@ -20755,6 +20891,7 @@ static int ui_view_unpull(const struct ui address_to ui, const struct ui_view ad
 
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
+        ui_view_ready(v);
         b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT;
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, lone;
         int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y, own = -1, top, bottom;
@@ -21946,6 +22083,7 @@ static struct ui_node address_to ui_strip_open(struct ui_tree address_to t, int 
 */
 static int ui_strips_tree(const struct ui address_to ui, struct ui_strips address_to s, int count, int offset)
 {
+        ui_tree_ready(&s->tree);
         struct ui_tree address_to t = &s->tree;
         struct ui_node address_to n;
         int gap = ui_px(ui, UI_GAP1), box = ui_px(ui, UI_STRIP_SLIDER_W);
@@ -21983,6 +22121,7 @@ static int ui_strips_tree(const struct ui address_to ui, struct ui_strips addres
 // An element of strip k (UI_STRIP_NODE_) where it is in the window: the last strip's, moved to strip k's column.
 static struct ui_node ui_strip_part(const struct ui_strips address_to s, int k, int part)
 {
+        ui_tree_ready(&s->tree);
         const struct ui_node address_to last = &s->tree.node[s->tree.count - UI_STRIP_NODES];
         struct ui_node n = last[part];
 
@@ -22024,6 +22163,7 @@ static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s
 // column's, turned back when the window reads from the right, and the scroll.
 static fn ui_strips_reveal(struct ui_strips address_to s, int k)
 {
+        ui_tree_ready(&s->tree);
         const struct ui_node address_to row = &s->tree.node[0];
         struct ui_node column = ui_strip_part(s, k, UI_STRIP_NODE_COLUMN);
 
@@ -22086,6 +22226,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
 // A line of words in the middle of the room the first strip and its gap leave of the row, or of all of it: what there is to say instead of strips.
 static fn ui_strips_message(struct ui address_to ui, struct ui_strips address_to s, const char address_to text, b32 beside)
 {
+        ui_tree_ready(&s->tree);
         UI_CALL();
         const struct ui_node address_to first = &s->tree.node[1];
         int gap = ui_px(ui, UI_STRIP_GAP), left = s->x, right = s->x + s->w, measured = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
@@ -22735,6 +22876,7 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
 // ui_view_end turns a screen), then moved so that the root's corner is at x, y.
 static fn ui_tree_origin(struct ui_tree address_to t, int x, int y)
 {
+        ui_tree_ready(t);
         if (ui_rtl())
                 ui_tree_mirror(t);
         for (int at = 0; at < t->count; at++)
@@ -23047,6 +23189,7 @@ static int ui_row_about_lines(struct ui_row_parts address_to p, int width, posit
 */
 static int ui_row_measure(address_any by, int node, int width)
 {
+        ui_tree_ready(&ui_row_parts.tree);
         struct ui_row_parts address_to p = by;
         const struct ui_node address_to n = &p->tree.node[node];
         int type = n == p->note ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, lines = ui_row_break(p, n, width, null, null);
@@ -23313,6 +23456,7 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
 // How tall a row is in a list whose words wrap (device pixels): its tree as tall as its lines, a row high at the least.
 static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row)
 {
+        ui_tree_ready(&ui_row_parts.tree);
         ui_row_tree_at(ui, l, id, row, l->w, 0, true);
         return ui_row_parts.tree.node[0].h;
 }
@@ -23331,11 +23475,13 @@ static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, in
 
 static int ui_row_least(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row)
 {
+        ui_tree_ready(&ui_row_parts.tree);
         const struct ui_row_parts address_to p = &ui_row_parts;
-        const struct ui_node address_to root = &p->tree.node[0];
+        const struct ui_node address_to root;
         int inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, UI_ROW_GAP), least = ui_row_label_least(ui), pads, rest, label, third, k, need;
 
         ui_row_tree_at(ui, l, id, row, UI_ROW_ROOM, ui_dev(ui, UI_ROW), true);
+        root = &p->tree.node[0]; // where the tree just laid out keeps its elements
         pads = root->pad[0] + root->pad[1];
         if (!p->label)
                 return pads;

@@ -487,6 +487,7 @@ static int taskbar_tasks_fit(const struct taskbar_view *view, const int *list, i
 
 static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *view)
 {
+        ui_tree_ready(t);
         // The axis the band runs along (0 across its output, 1 down it) and the one across it, and whether the band is at the end of that one.
         int m = taskbar_vertical(view->position), c = !m, far = view->position == TASKBAR_BOTTOM || view->position == TASKBAR_RIGHT;
         int scale = taskbar_scaled(view->scale), length = m ? view->height : view->width, thick = taskbar_thick(view->scale);
@@ -994,6 +995,7 @@ static unsigned int taskbar_turn(unsigned int position)
 static void taskbar_say(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, const char *text,
                         unsigned int ink, unsigned int ground)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
 
         if (band->dir)
@@ -1007,6 +1009,7 @@ static void taskbar_say(const struct taskbar_view *view, const struct ui_tree ad
 static const struct ui_node address_to taskbar_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t,
                                                   const struct ui_node address_to n, int *x, int *y)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1], address_to mark = &t->node[n->first];
 
         memory_zero(ui, sizeof(*ui));
@@ -1052,6 +1055,7 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
 // The kit's drawing state over the band's pixels as a glass whose ground is what a plate came to (ui_inks), for its buttons.
 static fn taskbar_glass_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t, unsigned int ground)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
 
         memory_zero(ui, sizeof(*ui));
@@ -1063,6 +1067,7 @@ static fn taskbar_glass_ui(struct ui *ui, const struct taskbar_view *view, const
 // A slot's button face: its rectangle in the band's pixels (device 256ths), a pill, along from at for length when those are given (Q30 device pixels from the band's start).
 static struct ui_box taskbar_face(const struct ui_tree address_to t, const struct ui_node address_to n, b64 at, b64 length)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
         int m = band->dir, x = n->x - band->x, y = n->y - band->y;
         struct ui_box face = {x * 256, y * 256, (x + n->w) * 256, (y + n->h) * 256, 0, 0};
@@ -1087,6 +1092,7 @@ static struct ui_box taskbar_face(const struct ui_tree address_to t, const struc
 */
 static fn taskbar_lit_to(struct taskbar_lit address_to lit, const struct ui_tree address_to t, const struct taskbar_view *view)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1], address_to tab = null;
         b32 motion = ui_kit.motion, live = 0;
         int chosen = -1, m = band->dir;
@@ -1869,6 +1875,7 @@ static struct taskbar_picture
 
 static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int which, unsigned int ink)
 {
+        ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
         const char *app = view->apps[which];
         int x = n->x - band->x, y = n->y - band->y, side = n->w < n->h ? n->w : n->h, symbol;
