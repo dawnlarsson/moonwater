@@ -287,6 +287,7 @@ moonwater security trust               every anchor, built in and added, by the 
 moonwater security trust add FILE      trust a CA certificate, PEM or DER, as the built-in anchors are
 moonwater security trust remove SHA256  stop trusting an anchor that was added
 moonwater sensors                      the processor use, clocks, GPU load, heat, fans and power of this machine, read now
+moonwater profile NAME|PID [SECONDS]   where a program's processor time goes, for 1 to 60 seconds [5]: each thread's share of a core, the part in the kernel, and its hottest functions (/shell, by name) or files (other programs)
 moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, every control of the UI kit
 moonwater setup                        where this session runs, and the installs found
 moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it removable takes a disk that says it is; yes is for a script, which cannot be asked

@@ -91,6 +91,7 @@ static const host_row host_rows[] = {
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel", 'b'},
     {null, "notices [clear]", "the errors and warnings of the kernel the desktop has (root): clear dismisses them", 'b'},
     {null, "sensors", "the processor use, clocks, GPU load, heat, fans and power of this machine, read now", 'b'},
+    {null, "profile NAME|PID [SECONDS]", "where a program's processor time goes: each thread's share, its kernel part, and its functions", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},

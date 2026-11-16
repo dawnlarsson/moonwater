@@ -3031,6 +3031,55 @@ static positive build_page_up(positive value)
         return ((value + SPARK_PAGE - 1) / SPARK_PAGE) * SPARK_PAGE;
 }
 
+/*
+        The program's symbol map, OUTPUT.symbols beside it: a line for each
+        function of its .text, the address in sixteen hex digits, a space and
+        the name, in address order (the digits are all there, so the text's
+        order is the address's). moonwater profile names /shell's samples by
+        it (src/sh/host/profile.c). A spark program is linked at the
+        addresses it runs at, so the linked ELF's are the program's.
+*/
+static b32 build_spark_symbols(string_address objdump, string_address elf,
+                               string_address output)
+{
+        string_address words[4] = {objdump, "-t", elf, null};
+        string_address found[BUILD_ARGUMENT_ROOM];
+        string_address path = build_join(output, ".symbols", null);
+        string_address unsorted = build_join(output, ".symbols.unsorted", null);
+        positive parts, used = 0;
+        build_lines walk;
+
+        if (build_capture_words(words, build_file_two, BUILD_FILE_ROOM) < 0)
+                return string_report(log_error, 1, "spark: objdump -t %s failed\n", elf);
+        build_lines_open(address_of walk, (string_address)build_file_two);
+        while (build_lines_words(address_of walk, (string_address address_to)found, address_of parts))
+        {
+                bool text = false;
+                positive name_length, at;
+
+                //      address flags... section size name
+                if (parts < 4 || string_length(found[0]) != 16)
+                        continue;
+                for (at = 1; at + 2 < parts; at++)
+                        text |= string_equals(found[at], ".text") || !memory_compare(found[at], ".text.", 6);
+                if (!text || found[parts - 1][0] == '.')
+                        continue;
+                name_length = string_length(found[parts - 1]);
+                if (used + 18 + name_length >= BUILD_FILE_ROOM)
+                        return string_report(log_error, 1, "spark: the symbol map does not fit\n");
+                memory_copy(build_file_one + used, found[0], 16);
+                build_file_one[used + 16] = ' ';
+                memory_copy(build_file_one + used + 17, found[parts - 1], name_length);
+                build_file_one[used + 17 + name_length] = '\n';
+                used += 18 + name_length;
+        }
+        if (!build_write_file(unsorted, (string_address)build_file_one, used))
+                return string_report(log_error, 1, "spark: cannot write %s\n", unsorted);
+        if (build_tool("sort", "-o", path, unsorted, null))
+                return string_report(log_error, 1, "spark: cannot sort %s\n", unsorted);
+        return build_tool("rm", "-f", unsorted, null);
+}
+
 static b32 build_spark(string_address source, string_address output,
                        string_address mode)
 {
@@ -3131,7 +3180,12 @@ static b32 build_spark(string_address source, string_address output,
                 positive found = build_split(build_key("program_flags"),
                                              (string_address address_to)pieces,
                                              BUILD_ARGUMENT_ROOM);
-                bool keep_lines = mode && word_is(mode, "coverage");
+                //      The ELF is the build's own: the image is its .text
+                //      and .data, copied out below, so its symbols are kept
+                //      for every build (the image's symbol map is read from
+                //      them, build_spark_symbols) and a strip here would
+                //      change no byte of the program.
+                bool keep_lines = true;
 
                 //      Sixteen slots stay free: the hook and debug words that
                 //      follow, the configuration's, and the link's own tail
@@ -3246,6 +3300,9 @@ static b32 build_spark(string_address source, string_address output,
                                                 address_of entry);
                 }
         }
+
+        if (build_spark_symbols(objdump, elf, output))
+                return 1;
 
         //      The image is mapped from SPARK_HEADER_SIZE bytes before .text:
         //      that is where the header sits, and the linker script reserves
