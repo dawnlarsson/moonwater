@@ -122,6 +122,16 @@ attacker gets its invariants here once there is a lane that proves them.
   mandatory and every public server has it). NTS-D2: plain NTP stays the
   default fallback at the default tier, 1:1 with a machine without NTS; a
   network that blocks TCP 4460 costs one try and two minutes without another.
+- **Cloudflare first by default (DNS-D2, the owner's order of 2026-11-16).**
+  With no `moonwater dns` list, resolv.conf names 1.1.1.1 and 1.0.0.1 and then
+  the lease's server, so Cloudflare is told every name the machine looks up
+  where before the network's resolver was; `moonwater dns auto` puts the
+  network's first again, and a list of one's own replaces both. A name of the
+  network's own (one label, `.local`, `.lan`, `.internal`, `.home.arpa`,
+  `dns_name_internal`) is asked of a server that is not a public one first, in
+  the clear even with `dns tls on` (`only` still refuses it), so Cloudflare is
+  not told those and its "no such name" does not end the walk. A lease's search
+  domain is not routed so yet: the DHCP client does not read option 15.
 - **DNS over TLS is off by default (DOT-D1).** `moonwater dns tls on` asks the
   resolvers known to offer it (1.1.1.1, 1.0.0.1, 9.9.9.9, 149.112.112.112: the
   ones resolv.conf names, or else all four) over TLS on 853 first and falls

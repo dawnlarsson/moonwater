@@ -3198,14 +3198,38 @@ static fn storage_test_net_files(void)
                         check("/root/dns is up to three usable addresses, and a file with anything else is none", held);
 
                         file_publish_bytes(target, "9.9.9.9\n", 8, 0644, false);
-                        held = net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
+                        held = net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
                         file_publish_bytes(target, "nope\n", 5, 0644, false);
-                        held &= net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
-                        held &= net_resolver_choose_at(target, 0, chosen) == 1 && chosen[0] == DNS_FALLBACK;
+                        held &= net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, true, 0, chosen) == 1 && chosen[0] == DNS_FALLBACK;
                         system_remove_at(AT_FDCWD, target, 0);
                         held &= net_dns_kept_at(target, chosen) == 0;
-                        held &= net_resolver_choose_at(target, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
-                        check("kept servers win over a lease's, a lease's over the public one, and a file that does not read is not a choice", held);
+                        held &= net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        check("dns auto: kept servers win over a lease's, a lease's over the public one, and a file that does not read is not a choice", held);
+
+                        //      Moonwater's default: 1.1.1.1 and 1.0.0.1, then the lease's server; a kept list still wins.
+                        file_publish_bytes(target, "9.9.9.9\n", 8, 0644, false);
+                        held = net_resolver_choose_at(target, false, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
+                        file_publish_bytes(target, "nope\n", 5, 0644, false);
+                        held &= net_resolver_choose_at(target, false, 0x0a000001, chosen) == 3 && chosen[0] == 0x01010101 &&
+                                chosen[1] == 0x01000001 && chosen[2] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, false, 0, chosen) == 2 && chosen[0] == 0x01010101 &&
+                                chosen[1] == 0x01000001;
+                        held &= net_resolver_choose_at(target, false, 0x01000001, chosen) == 2 && chosen[1] == 0x01000001;
+                        system_remove_at(AT_FDCWD, target, 0);
+                        held &= net_resolver_choose_at(target, false, 0x0a000001, chosen) == 3 && chosen[2] == 0x0a000001;
+                        check("the default: kept servers win, else 1.1.1.1 and 1.0.0.1 with the lease's behind them, named once", held);
+
+                        //      A name of the network's own goes to the network's server first.
+                        held = dns_name_internal("printer") && dns_name_internal("nas.") &&
+                               dns_name_internal("nas.local") && dns_name_internal("NAS.LAN") &&
+                               dns_name_internal("a.home.arpa") && dns_name_internal("db.internal") &&
+                               dns_name_internal("box.localdomain") && !dns_name_internal("example.com") &&
+                               dns_name_internal("local") && !dns_name_internal("thelan.com") &&
+                               !dns_name_internal("lan.example") && !dns_name_internal("") &&
+                               !dns_name_internal(".") && dns_server_public(0x01010101) &&
+                               !dns_server_public(0x0a000001);
+                        check("a one-label name and one under .local, .lan, .internal or .home.arpa is the network's, and no other", held);
                 }
                 //      The count is kept only while a failure is planned;
                 //      one that is never reached counts.

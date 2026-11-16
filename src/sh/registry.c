@@ -668,7 +668,12 @@ static const struct settings_row settings_rows[] = {
     {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0,
      .usage = "dns tls [on|off|only]", .help = "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]"},
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(',
-     .usage = "dns [ADDRESS...|auto]", .help = "up to three servers names are asked of, or the network gives them [auto]"},
+     .usage = "dns [ADDRESS...|default|auto]",
+     .help = "up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the network's; auto is the network's first [default]"},
+    {null, "Servers in order", SETTINGS_INFO, 0, SETTINGS_LINE, {"dns"}, "dns order ", null, {null}, null, 0,
+     .help = "each server in the order it is asked, and where it came from: the person's list, Moonwater's default or the network's lease"},
+    {null, "Names of the network", SETTINGS_INFO, 0, SETTINGS_LINE, {"dns"}, "dns internal ", null, {null}, null, 0,
+     .help = "a one-label name, or one under .local, .lan, .internal or .home.arpa, is asked of the network's server first, which knows it"},
     //  Discovery (src/waterlink/connective.c, docs/connective.md): every lookup that sends a packet off the machine to learn how
     //  it is reached has its switch, and Discovery is all of them at once; the rows under them are what `link discovery` kept
     //  and when, read from its page and never asked of the network by reading.

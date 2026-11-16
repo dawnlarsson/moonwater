@@ -20,6 +20,7 @@
 #define NET_INTERNET_ROOT "/root/internet"
 #define NET_WIFI_LIST "/root/wifi"
 #define NET_DNS_PATH "/root/dns"
+#define NET_DNS_ORDER_PATH "/root/dns.order"
 #define NET_DNS_LEASE NET_STATE_DIR "/dns.lease"
 #define NET_WIFI_POWER "/root/wifi.power"
 #define NET_WIRED_POWER "/root/wired.power"
@@ -1151,13 +1152,15 @@ static bipolar host_word_end(p8 address_to into, bipolar got);
 /*
         /etc/resolv.conf: what the network handed out, or what was kept.
 
-        The file names the resolver the DHCP server gave and nothing behind
-        it, as dhclient writes it, unless `moonwater dns ADDRESS...` kept
+        Since the owner's order of 2026-11-16 the file names Cloudflare's
+        1.1.1.1 and 1.0.0.1 and then the resolver the DHCP server gave, the
+        fallback (net_resolver_choose_at); `moonwater dns ADDRESS...` keeps
         servers in /root/dns, which are written instead, in the order they
-        were given, whatever a lease says. A network that handed out no
-        resolver has Cloudflare's alone: that is the one case the public
-        address goes into the file, and the only other place it is used is
-        dns_resolve_any, for a machine whose file names no server at all.
+        were given, whatever a lease says; and `moonwater dns auto` asks for
+        the order below, the network's resolver and nothing behind it. A
+        name of the network's own goes to the network's resolver first in
+        every order (dns_name_internal in net.c). What follows is why auto
+        is network first, and it holds for anyone who chooses it:
 
         This replaces two orders. Public resolver first cost every machine on
         every network one name in the clear per lookup, to a third party,
@@ -1258,22 +1261,56 @@ static COLD positive net_dns_kept_at(string_address path, p32 address_to into)
         return count;
 }
 
-//      The servers a lease is written as: the kept ones, else its own, else
-//      the public one.
-static COLD positive net_resolver_choose_at(string_address path, p32 nameserver,
-                                            p32 address_to into)
+/*
+        The servers a lease is written as. The person's own list, kept, wins.
+        Without one, Moonwater's default: Cloudflare's 1.1.1.1 and 1.0.0.1,
+        and the lease's own server behind them, the fallback when both give
+        no answer. `moonwater dns auto` (network_first, /root/dns.order
+        holding network) is the order before it: the lease's server, else
+        the public one, alone.
+
+        A public resolver first is told every name, and says "no such name"
+        of one only the network knows, which the walk believes; so a name of
+        the network's own (dns_name_internal in net.c: one label, .local,
+        .lan, .internal, .home.arpa) is asked of the lease's server first,
+        whatever this order is.
+*/
+#define NET_DNS_DEFAULT_FIRST 0x01010101u
+#define NET_DNS_DEFAULT_SECOND 0x01000001u
+
+static COLD positive net_resolver_choose_at(string_address path, bool network_first,
+                                            p32 nameserver, p32 address_to into)
 {
         positive count = net_dns_kept_at(path, into);
 
-        if (!count)
+        if (count)
+                return count;
+        if (network_first)
+        {
                 into[count++] = nameserver ? nameserver : DNS_FALLBACK;
+                return count;
+        }
+        into[count++] = NET_DNS_DEFAULT_FIRST;
+        into[count++] = NET_DNS_DEFAULT_SECOND;
+        if (nameserver && nameserver != NET_DNS_DEFAULT_FIRST &&
+            nameserver != NET_DNS_DEFAULT_SECOND)
+                into[count++] = nameserver;
         return count;
 }
 
+//      Whether `moonwater dns auto` asked for the network's server first.
+static COLD bool net_dns_network_first(void)
+{
+        p8 word[16];
+
+        return host_read_word(NET_DNS_ORDER_PATH, word, sizeof(word)) > 0 &&
+               string_equals((string_address)word, "network");
+}
 
 static COLD positive net_resolver_choose(p32 nameserver, p32 address_to into)
 {
-        return net_resolver_choose_at(NET_DNS_PATH, nameserver, into);
+        return net_resolver_choose_at(NET_DNS_PATH, net_dns_network_first(),
+                                      nameserver, into);
 }
 
 static COLD bipolar net_write_resolv(p32 nameserver)

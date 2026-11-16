@@ -136,7 +136,7 @@ moonwater timezone auto                from the network, one Cloudflare request 
 
 # Network
 moonwater airplane [on|off]            every radio at once
-moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
+moonwater dns [ADDRESS...|default|auto]  up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the network's; auto is the network's first [default]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 moonwater wired [on|off]               the wired links; off keeps them down

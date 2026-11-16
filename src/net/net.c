@@ -2378,10 +2378,12 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         would otherwise hold a lookup for its timeout once per line.
 
         That is the rule with the order the file is written in (see
-        net_write_resolv_servers: the network's own resolver, or the ones
-        moonwater dns kept, and nothing behind them). A name the network says
-        does not exist is not sent anywhere else, and neither is one it gave
-        no answer to, which a public resolver behind it would have been told.
+        net_resolver_choose_at: 1.1.1.1 and 1.0.0.1 and the lease's server
+        behind them by default, the network's alone under dns auto, or the
+        ones moonwater dns kept). A first answer of "no such name" is final,
+        so a name of the network's own is asked of the servers that are not
+        public ones first (dns_name_internal below), where the public one
+        would have said it does not exist.
 
         With no resolv.conf at all, or one that names no server, there is
         still somewhere to ask: DNS_FALLBACK, and only then. A machine that
@@ -2421,19 +2423,87 @@ static CONST COLD bool dns_answer_is_final(bipolar status)
                status == DNS_NO_ADDRESS;
 }
 
+/*
+        A name of the network's own: one label (a printer, a NAS), or under a
+        name the public tree does not delegate -- .local (RFC 6762), .home.arpa
+        (RFC 8375), .internal (ICANN's, 2024) -- or one routers hand out by
+        habit (.lan, .localdomain, .home). A public resolver says "no such
+        name" of these, and that answer is final, so they are asked of the
+        servers that are not the public ones first (dns_resolve_any). A
+        lease's search domain is not one of these yet: the DHCP client does
+        not read option 15.
+*/
+static const p32 dns_public_resolvers[] = {
+    0x01010101u, 0x01000001u, 0x09090909u, 0x95707070u, 0x08080808u,
+    0x08080404u};
+
+static COLD bool dns_name_internal(string_address name)
+{
+        static const string_address suffixes[] = {
+            ".local", ".home.arpa", ".internal", ".lan", ".localdomain", ".home"};
+        positive length = string_length(name);
+        bool dotted = false;
+
+        if (length && name[length - 1] == '.')
+                length--;
+        if (!length)
+                return false;
+        for (positive at = 0; at < length; at++)
+                dotted |= name[at] == '.';
+        if (!dotted)
+                return true;
+        for (positive which = 0; which < array_count(suffixes); which++)
+        {
+                positive size = string_length(suffixes[which]);
+                bool same = length > size;
+
+                for (positive at = 0; same && at < size; at++)
+                {
+                        p8 c = (p8)name[length - size + at];
+
+                        same = (c >= 'A' && c <= 'Z' ? (p8)(c + 32) : c) ==
+                               (p8)suffixes[which][at];
+                }
+                if (same)
+                        return true;
+        }
+        return false;
+}
+
+static COLD bool dns_server_public(p32 server)
+{
+        for (positive at = 0; at < array_count(dns_public_resolvers); at++)
+                if (dns_public_resolvers[at] == server)
+                        return true;
+        return false;
+}
+
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
         bipolar status = DNS_NO_SERVER;
         p32 read[DNS_SERVERS_MAX];
+        p32 order[DNS_SERVERS_MAX];
         p32 address_to servers = dns_held.held ? dns_held.servers : read;
         positive count = dns_held.held
                              ? dns_held.count
                              : dns_servers(path, read, array_count(read));
+        bool internal = dns_name_internal(name);
+        positive placed = 0;
 
-        for (positive index = 0; index < count; index++)
+        //      The file's order, but a name of the network's own goes to the
+        //      network's servers before the public ones.
+        if (count > DNS_SERVERS_MAX)
+                count = DNS_SERVERS_MAX;
+        for (positive pass = 0; pass < 2; pass++)
+                for (positive index = 0; index < count; index++)
+                        if (internal ? (pass == 0) != dns_server_public(servers[index])
+                                     : pass == 0)
+                                order[placed++] = servers[index];
+
+        for (positive index = 0; index < placed; index++)
         {
-                status = dns_resolve_at(servers[index], DNS_PORT, name, found,
+                status = dns_resolve_at(order[index], DNS_PORT, name, found,
                                         seconds);
 
                 if (dns_answer_is_final(status))
@@ -15690,7 +15760,10 @@ static COLD bipolar dns_resolve_wanted(string_address path, string_address name,
         network_deadline deadline;
         bipolar status = DNS_NO_REPLY;
 
-        if (mode == DNS_TLS_OFF)
+        //      A name of the network's own is the network's to answer, in
+        //      the clear as it always was; only refuses even that.
+        if (mode == DNS_TLS_OFF ||
+            (mode != DNS_TLS_ONLY && dns_name_internal(name)))
                 return dns_resolve_any(path, name, found, seconds);
         if (dns_held.held)
         {
