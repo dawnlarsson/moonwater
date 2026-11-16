@@ -21,7 +21,11 @@
                 link group ...          machines on one network that link
                                         themselves
                 link doctor             the listener, port, addresses, route and
-                                        discovery: each pass or fail, and the fix
+                                        discovery: each pass or fail, and the fix;
+                                        then how this machine is reached
+                link discovery [on|off|refresh]   what connective.c learned,
+                                        and every lookup's switch at once
+                link discovery stun|https on|off  one lookup's switch
 
         `key` and `serve` are not in the page: the key is in the status, and
         `serve` is how the listener starts itself.
@@ -52,6 +56,7 @@
 #define WATERLINK_COMMAND_INCLUDED
 
 #include "service.c"
+#include "connective.c"
 
 static fn link_grants_text(p32 may, p8 address_to text, positive room)
 {
@@ -1913,10 +1918,342 @@ static p8 link_known(string_address name)
         return link_peer_named(address_of peers, name) != null;
 }
 
+/*
+        moonwater link discovery: what connective.c learned of how this
+        machine is reached, and the switches of each lookup that sends a
+        packet off it. Each switch is a word in /root, on when there is none;
+        discovery off is every lookup off, whatever its own word says, and
+        off sends nothing. A bare discovery reads what was kept and the
+        interfaces, and sends nothing either: refresh, and the doctor, look
+        again. Settings reads this page, a row a line.
+*/
+#define LINK_DISCOVERY_PATH "/root/link.discovery"
+#define LINK_DISCOVERY_STUN_PATH "/root/link.discovery.stun"
+#define LINK_DISCOVERY_HTTPS_PATH "/root/link.discovery.https"
+
+static const struct
+{
+        string_address word;
+        string_address path;
+        positive ask;
+        string_address says;
+} link_discoveries[] = {
+    {"discovery", LINK_DISCOVERY_PATH, 0, "every lookup below"},
+    {"stun", LINK_DISCOVERY_STUN_PATH, CONNECTIVE_ASK_STUN,
+     "Public address discovery (STUN): a binding to stun.cloudflare.com and "
+     "stun.l.google.com"},
+    {"https", LINK_DISCOVERY_HTTPS_PATH, CONNECTIVE_ASK_HTTPS,
+     "Public address discovery (HTTPS): cloudflare.com's trace, where UDP "
+     "does not get out"},
+};
+
+static p8 link_discovery_switch(positive at)
+{
+        p8 word[8];
+
+        if (host_read_word(link_discoveries[at].path, word, sizeof word) < 0)
+                return true;
+        return !string_equals((string_address)word, "off");
+}
+
+//      The lookups the switches allow: none while discovery is off.
+static positive link_discovery_asks(void)
+{
+        positive ask = 0;
+
+        if (!link_discovery_switch(0))
+                return 0;
+        for (positive at = 1; at < array_count(link_discoveries); at++)
+                if (link_discovery_switch(at))
+                        ask |= link_discoveries[at].ask;
+        return ask;
+}
+
+static fn link_discovery_when(p64 when, p8 address_to text)
+{
+        if (!when)
+                string_copy((string_address)text, "never");
+        else
+                link_ago(when, text);
+}
+
+//      Where each machine linked was last heard: its record's place, then
+//      the others the listener kept for it, each with its age.
+static fn link_discovery_places(string_address prefix)
+{
+        link_peers peers;
+        link_places places;
+        positive shown = 0;
+
+        link_peers_load(address_of peers);
+        link_places_load(address_of places);
+        string_format(log, "%splaces", prefix);
+        for (positive at = 0; at < peers.count; at++)
+        {
+                struct waterlink_peer address_to peer = peers.peer + at;
+                p8 place[64];
+                p8 ago[32];
+
+                if (!link_address_unicast(peer->address))
+                        continue;
+                link_place_text(peer->address, peer->port, place);
+                string_format(log, "%s %s %s", shown++ ? ";" : "",
+                              (string_address)peer->name, (string_address)place);
+                for (positive seen = 0; seen < places.count; seen++)
+                {
+                        if (!crypto_same(places.place[seen].key, peer->key, 32) ||
+                            (places.place[seen].port == peer->port &&
+                             !memory_compare(places.place[seen].address,
+                                             peer->address, 16)))
+                                continue;
+                        link_place_text(places.place[seen].address,
+                                        places.place[seen].port, place);
+                        link_ago(places.place[seen].seen, ago);
+                        string_format(log, ", %s %s", (string_address)place,
+                                      (string_address)ago);
+                }
+        }
+        string_format(log, "%s\n", shown ? "" : " none: no machine linked has "
+                                                "been heard yet");
+}
+
+//      Why the trace was not had, in words.
+static string_address link_discovery_https_reason(b32 status)
+{
+#if !defined(MACOS)
+        switch (status)
+        {
+        case HTTP_NO_HOST:
+                return (string_address) "cloudflare.com did not resolve";
+        case HTTP_NO_ROUTE:
+                return (string_address) "no route to it";
+        case HTTP_UNTRUSTED:
+                return (string_address) "its certificate is not one Moonwater trusts: "
+                                        "something on the way answers TLS for it";
+        case HTTP_TLS:
+        case HTTP_EXPIRED:
+        case HTTP_NOT_YET:
+        case HTTP_MISMATCH:
+        case HTTP_UNCHECKED:
+        case HTTP_CLOCK:
+                return (string_address) "TLS failed -- is the clock right?";
+        case HTTP_STATUS:
+                return (string_address) "it answered with an error";
+        case HTTP_MALFORMED:
+                return (string_address) "the answer named no address";
+        }
+#else
+        (void)status;
+#endif
+        return (string_address) "no answer";
+}
+
+/*      The page, each line a key and its value, prefix before each line
+        (the doctor's indent, or nothing). Every value is digits, the
+        tables' words or an interface's name the kernel holds. */
+static fn link_discovery_report(connective_found address_to found,
+                                connective_here address_to here,
+                                string_address prefix)
+{
+        p8 text[48];
+        p8 ago[32];
+        p8 when[32];
+        p8 proxy[64];
+        const p8 address_to v6 = null;
+        connective_interface address_to v6_where = null;
+        p8 master = link_discovery_switch(0);
+        positive first = found->answered & 1 ? 0 : 1;
+        positive shown = 0;
+
+        for (positive at = 0; at < array_count(link_discoveries); at++)
+                string_format(log, "%s%s %s\n", prefix,
+                              (string_address)link_discoveries[at].word,
+                              link_discovery_switch(at) ? "on" : "off");
+
+        if (found->answered)
+        {
+                connective_address_text(found->mapped[first], text);
+                link_discovery_when(found->stun_when, when);
+                string_format(log, "%spublic ipv4 %s:%p by STUN, %s\n", prefix,
+                              (string_address)text, (positive)found->mapped_port[first],
+                              (string_address)when);
+        }
+        else if (found->https_when && connective_mapped(found->trace))
+        {
+                connective_address_text(found->trace, text);
+                link_discovery_when(found->https_when, when);
+                string_format(log, "%spublic ipv4 %s by HTTPS, %s\n", prefix,
+                              (string_address)text, (string_address)when);
+        }
+        else
+                string_format(log, "%spublic ipv4 not known\n", prefix);
+
+        if (found->https_when && !connective_mapped(found->trace))
+                v6 = found->trace;
+        for (positive at = 0; !v6 && at < here->owns; at++)
+                if (!connective_mapped(here->own[at].address) &&
+                    here->own[at].scope == CONNECTIVE_SCOPE_GLOBAL)
+                {
+                        v6 = here->own[at].address;
+                        v6_where = connective_interface_of(here, here->own[at].index);
+                }
+        if (v6 && v6 != found->trace)
+        {
+                connective_address_text(v6, text);
+                string_format(log, "%spublic ipv6 %s, %s's own global address, now\n",
+                              prefix, (string_address)text,
+                              v6_where ? (string_address)v6_where->name : (string_address)"an interface");
+        }
+        else if (v6)
+        {
+                connective_address_text(v6, text);
+                link_discovery_when(found->https_when, when);
+                string_format(log, "%spublic ipv6 %s by HTTPS, %s\n", prefix,
+                              (string_address)text, (string_address)when);
+        }
+        else
+                string_format(log, "%spublic ipv6 none: no interface has a global "
+                                   "IPv6 address\n", prefix);
+
+        link_discovery_when(found->asked, ago);
+        if (!found->asked)
+                string_format(log, "%sudp out not known: nothing looked yet "
+                                   "(moonwater link discovery refresh)\n", prefix);
+        else if (found->udp == CONNECTIVE_UDP_OUT)
+                string_format(log, "%sudp out yes, %s\n", prefix, (string_address)ago);
+        else if (found->udp == CONNECTIVE_UDP_BLOCKED)
+                string_format(log, "%sudp out blocked: no STUN server answered in "
+                                   "a second, %s\n", prefix, (string_address)ago);
+        else if (found->udp == CONNECTIVE_UDP_NO_NAME)
+                string_format(log, "%sudp out not known: the STUN servers' names "
+                                   "were not found, %s\n", prefix, (string_address)ago);
+        else
+                string_format(log, "%sudp out not asked: %s, %s\n", prefix,
+                              master ? "Public address discovery (STUN) is off"
+                                     : "discovery is off",
+                              (string_address)ago);
+
+        if (found->udp == CONNECTIVE_UDP_NOT_ASKED && !found->answered)
+                string_format(log, "%snat not known: STUN was not asked\n", prefix);
+        else
+                string_format(log, "%snat %s\n", prefix,
+                              (string_address)connective_nat_names[found->nat]);
+
+        if (found->https == CONNECTIVE_HTTPS_ANSWERED)
+                string_format(log, "%shttps answered, %s\n", prefix, (string_address)ago);
+        else if (found->https == CONNECTIVE_HTTPS_FAILED)
+                string_format(log, "%shttps failed: %s (status %b), %s\n", prefix,
+                              link_discovery_https_reason(found->https_status),
+                              (bipolar)found->https_status, (string_address)ago);
+        else if (found->udp == CONNECTIVE_UDP_OUT)
+                string_format(log, "%shttps not asked: UDP gets out\n", prefix);
+        else
+                string_format(log, "%shttps not asked\n", prefix);
+
+        if (connective_proxy(proxy, sizeof proxy))
+                string_format(log, "%sproxy %s, named by the environment; "
+                                   "nothing goes through it yet\n",
+                              prefix, (string_address)proxy);
+        else
+                string_format(log, "%sproxy none\n", prefix);
+
+        string_format(log, "%saddresses", prefix);
+        for (positive at = 0; at < here->owns; at++)
+        {
+                connective_local address_to mine = here->own + at;
+                connective_interface address_to where =
+                    connective_interface_of(here, mine->index);
+
+                if (mine->scope == CONNECTIVE_SCOPE_LOOPBACK)
+                        continue;
+                connective_address_text(mine->address, text);
+                string_format(log, "%s %s %s %s/%p %s", shown++ ? ";" : "",
+                              where ? (string_address)where->name : (string_address)"?",
+                              (string_address)connective_kind_names[where ? where->kind : 0],
+                              (string_address)text, (positive)mine->prefix,
+                              (string_address)connective_scope_names[mine->scope]);
+        }
+        string_format(log, "%s, now\n", shown ? "" : " none but loopback");
+
+        string_format(log, "%slearned %s\n", prefix, (string_address)ago);
+
+        //      The Waterlink group's two: the ways in this machine has, and
+        //      where each machine linked was last heard.
+        string_format(log, "%spaths udp %p on %p local address%s; multicast "
+                           "discovery on the network",
+                      prefix, (positive)link_port(), shown, shown == 1 ? "" : "es");
+        if (found->answered)
+        {
+                connective_address_text(found->mapped[first], text);
+                string_format(log, "; public %s:%p, %s", (string_address)text,
+                              (positive)found->mapped_port[first],
+                              found->nat == CONNECTIVE_NAT_INDEPENDENT ||
+                                      found->nat == CONNECTIVE_NAT_NONE
+                                  ? "a hole can be punched"
+                                  : "no hole can be punched yet");
+        }
+        string_format(log, "\n");
+        link_discovery_places(prefix);
+}
+
+//      Look again now, as far as the switches allow, and keep it.
+static fn link_discovery_refresh(connective_found address_to found,
+                                 connective_here address_to here)
+{
+        connective_here_read(here);
+        connective_gather(link_discovery_asks(), found, here);
+}
+
+static b32 link_discovery_verb(string_address address_to arguments, positive count)
+{
+        connective_found found;
+        connective_here here;
+        positive which = 0;
+        string_address word = null;
+        bipolar failed;
+
+        if (count == 4 && string_equals(arguments[3], "refresh"))
+        {
+                link_discovery_refresh(address_of found, address_of here);
+                link_discovery_report(address_of found, address_of here, "");
+                return 0;
+        }
+        if (count == 4)
+                word = arguments[3];
+        else if (count == 5)
+        {
+                for (which = 1; which < array_count(link_discoveries); which++)
+                        if (string_equals(arguments[3], link_discoveries[which].word))
+                                break;
+                if (which == array_count(link_discoveries))
+                        return host_usage();
+                word = arguments[4];
+        }
+        if (word)
+        {
+                if (!string_equals(word, "on") && !string_equals(word, "off"))
+                        return host_usage();
+                failed = radio_write_word(link_discoveries[which].path, word);
+                return_if(failed < 0, host_fail("link discovery", failed));
+                string_format(log, host_label "%s %s: %s%s\n",
+                              (string_address)link_discoveries[which].word, word,
+                              (string_address)link_discoveries[which].says,
+                              string_equals(word, "off") ? ", and no packet leaves for it"
+                                                         : "");
+                return 0;
+        }
+        connective_found_read(address_of found);
+        connective_here_read(address_of here);
+        link_discovery_report(address_of found, address_of here, "");
+        return 0;
+}
+
 /*      link doctor's checks: read only. The listener's state and the port
         are read; the addresses come from the same walk the network setup
         uses; the route is a connect that sends nothing; discovery is one
-        multicast join on a socket closed again. No pairing request is sent. */
+        multicast join on a socket closed again. No pairing request is sent.
+        After the checks it looks again at how the machine is reached, as
+        far as the discovery switches allow (link discovery refresh). */
 static p8 link_doctor_list[96];
 static positive link_doctor_used;
 
@@ -2018,6 +2355,16 @@ static b32 link_doctor(void)
                                    "        fix: moonwater link add NAME KEY HOST[:PORT], "
                                    "with the other machine's address; that needs no "
                                    "discovery\n");
+        }
+
+        {
+                connective_found found;
+                connective_here here;
+
+                string_format(log, "  how this machine is reached "
+                                   "(moonwater link discovery):\n");
+                link_discovery_refresh(address_of found, address_of here);
+                link_discovery_report(address_of found, address_of here, "        ");
         }
 
         if (failed)
@@ -2216,7 +2563,7 @@ static const struct
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
     {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
-    {"cancel", 3, 3}, {"doctor", 3, 3},
+    {"cancel", 3, 3}, {"doctor", 3, 3}, {"discovery", 3, 5},
 };
 
 //      The code as it is printed, abc-def: a word of six letters is as likely
@@ -2297,6 +2644,8 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 return link_cancel();
         if (string_equals(verb, "doctor"))
                 return link_doctor();
+        if (string_equals(verb, "discovery"))
+                return link_discovery_verb(arguments, count);
 
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.
@@ -2400,7 +2749,7 @@ static b32 link_main(string_address address_to arguments, positive count)
 {
         static const string_address changes[] = {"on",  "off",    "port", "pair", "add",
                                                  "remove", "allow", "deny", "group",
-                                                 "cancel"};
+                                                 "cancel", "discovery"};
         string_address verb = count > 2 ? arguments[2] : null;
         positive previous[4];
         p8 ignored = false;

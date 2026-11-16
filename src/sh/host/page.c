@@ -166,6 +166,8 @@ static const host_row host_rows[] = {
     {null, "link group leave NAME [forget]", "stop, and forget the key of the group", 'f'},
     {null, "link on|off", "the listener, kept across boots [off]", 'f'},
     {null, "link doctor", "the listener, the udp port, the addresses, a route and discovery, each a pass or a fail with its fix", 'f'},
+    {null, "link discovery [on|off|refresh]", "how this machine is reached: its public address, UDP out, the NAT, the proxy, each interface's addresses; on and off are every lookup at once, refresh looks again [on]", 'f'},
+    {null, "link discovery stun|https on|off", "one lookup: STUN to Cloudflare and Google, or Cloudflare's trace over HTTPS; off sends no packet for it [on]", 'f'},
     {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},
     {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]", 'f'},
     {null, "link modem key", "the key of the audio modem, in hex, made on first use: the receiver needs the same", 'f'},

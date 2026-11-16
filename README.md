@@ -146,6 +146,8 @@ moonwater wired [on|off]               the wired links; off keeps them down
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link state)
+moonwater link discovery [on|off|refresh]  how this machine is reached: its public address, UDP out, the NAT, the proxy, each interface's addresses; on and off are every lookup at once, refresh looks again [on]
+moonwater link discovery stun|https on|off  one lookup: STUN to Cloudflare and Google, or Cloudflare's trace over HTTPS; off sends no packet for it [on]
 moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network that link themselves
 moonwater link group leave NAME [forget]  stop, and forget the key of the group
 moonwater link key                     the public key of this machine, which link add takes

@@ -16,6 +16,7 @@
 #include "../../src/waterlink/seal.c"
 #include "../../src/waterlink/handshake.c"
 #include "../../src/waterlink/discover.c"
+#include "../../src/waterlink/connective.c"
 #define SHARED_counted
 #include "../checks.c"
 #undef SHARED_counted
@@ -4632,6 +4633,209 @@ static positive mdns_expected(p8 address_to out, const p8 address_to instance,
         return at;
 }
 
+/*
+        connective.c's pure parts: STUN against RFC 5769's vectors (the test
+        vectors RFC 8489 names), the request it sends, the trace's line, the
+        NAT's reading, an address's scope and text and an interface's kind.
+*/
+static fn connective_vectors(void)
+{
+        //      RFC 5769 2.2 and 2.3: the IPv4 and IPv6 responses, whole.
+        static const p8 response4[80] = {
+            0x01, 0x01, 0x00, 0x3c, 0x21, 0x12, 0xa4, 0x42, 0xb7, 0xe7, 0xa7, 0x01,
+            0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x0b,
+            0x74, 0x65, 0x73, 0x74, 0x20, 0x76, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x20,
+            0x00, 0x20, 0x00, 0x08, 0x00, 0x01, 0xa1, 0x47, 0xe1, 0x12, 0xa6, 0x43,
+            0x00, 0x08, 0x00, 0x14, 0x2b, 0x91, 0xf5, 0x99, 0xfd, 0x9e, 0x90, 0xc3,
+            0x8c, 0x74, 0x89, 0xf9, 0x2a, 0xf9, 0xba, 0x53, 0xf0, 0x6b, 0xe7, 0xd7,
+            0x80, 0x28, 0x00, 0x04, 0xc0, 0x7d, 0x4c, 0x96};
+        static const p8 response6[92] = {
+            0x01, 0x01, 0x00, 0x48, 0x21, 0x12, 0xa4, 0x42, 0xb7, 0xe7, 0xa7, 0x01,
+            0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x0b,
+            0x74, 0x65, 0x73, 0x74, 0x20, 0x76, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x20,
+            0x00, 0x20, 0x00, 0x14, 0x00, 0x02, 0xa1, 0x47, 0x01, 0x13, 0xa9, 0xfa,
+            0xa5, 0xd3, 0xf1, 0x79, 0xbc, 0x25, 0xf4, 0xb5, 0xbe, 0xd2, 0xb9, 0xd9,
+            0x00, 0x08, 0x00, 0x14, 0xa3, 0x82, 0x95, 0x4e, 0x4b, 0xe6, 0x7b, 0xf1,
+            0x17, 0x84, 0xc9, 0x7c, 0x82, 0x92, 0xc2, 0x75, 0xbf, 0xe3, 0xed, 0x41,
+            0x80, 0x28, 0x00, 0x04, 0xc8, 0xfb, 0x0b, 0x4c};
+        static const p8 transaction[12] = {0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34,
+                                           0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae};
+        static const p8 other[12] = {0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34,
+                                     0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xaf};
+        static const struct
+        {
+                string_address name;
+                p16 type;
+                p8 wireless;
+                string_address driver;
+                positive kind;
+        } kinds[] = {
+            {"wg0", 65534, false, "wireguard", CONNECTIVE_KIND_VPN},
+            {"tailscale0", 65534, false, "tun", CONNECTIVE_KIND_VPN},
+            {"ztks57abcd", 1, false, "tun", CONNECTIVE_KIND_VPN},
+            {"ztks57abcd", 1, false, null, CONNECTIVE_KIND_VPN},
+            {"wlan0", 1, true, null, CONNECTIVE_KIND_WIFI},
+            {"wlp2s0", 1, false, null, CONNECTIVE_KIND_WIFI},
+            {"radio0", 1, true, null, CONNECTIVE_KIND_WIFI},
+            {"enp3s0", 1, false, null, CONNECTIVE_KIND_ETHERNET},
+            {"eth0", 1, false, "veth", CONNECTIVE_KIND_VIRTUAL},
+            {"docker0", 1, false, "bridge", CONNECTIVE_KIND_VIRTUAL},
+            {"lo", 772, false, null, CONNECTIVE_KIND_LOOPBACK},
+            {"can0", 280, false, null, CONNECTIVE_KIND_OTHER},
+        };
+        static const struct
+        {
+                string_address text;
+                positive scope;
+        } scopes[] = {
+            {"10.1.2.3", CONNECTIVE_SCOPE_PRIVATE},
+            {"172.31.0.1", CONNECTIVE_SCOPE_PRIVATE},
+            {"172.32.0.1", CONNECTIVE_SCOPE_GLOBAL},
+            {"192.168.7.1", CONNECTIVE_SCOPE_PRIVATE},
+            {"100.64.0.1", CONNECTIVE_SCOPE_SHARED},
+            {"100.128.0.1", CONNECTIVE_SCOPE_GLOBAL},
+            {"169.254.9.9", CONNECTIVE_SCOPE_LINK},
+            {"127.0.0.1", CONNECTIVE_SCOPE_LOOPBACK},
+            {"203.0.113.9", CONNECTIVE_SCOPE_GLOBAL},
+            {"fe80::1", CONNECTIVE_SCOPE_LINK},
+            {"fd12:3456::1", CONNECTIVE_SCOPE_UNIQUE},
+            {"2001:db8::1", CONNECTIVE_SCOPE_GLOBAL},
+            {"::1", CONNECTIVE_SCOPE_LOOPBACK},
+            {"ff02::1", CONNECTIVE_SCOPE_OTHER},
+        };
+        static const string_address texts[] = {
+            "::1", "2001:db8::1", "fe80::1:0:0:1", "1:0:0:2::3", "1::",
+            "2001:db8:1234:5678:11:2233:4455:6677", "::", "192.0.2.1"};
+        static const string_address refused[] = {
+            "999.1.1.1", "1.2.3", "1.2.3.4.5", "1..2.3", "1:2:3:4:5:6:7:8:9",
+            "1::2::3", ":1::2", "1:2:3:4:5:6:7:", "12345::1", "g::1", "",
+            "1:2:3:4:5:6:7:8::"};
+        p8 copy[92];
+        p8 address[16];
+        p8 text[48];
+        p8 request[CONNECTIVE_STUN_REQUEST];
+        p16 port = 0;
+        positive wrong = 0;
+        p8 read;
+
+        read = connective_stun_read(response4, sizeof response4, transaction,
+                                    address, address_of port);
+        connective_address_text(address, text);
+        check("connective: RFC 5769's IPv4 response is 192.0.2.1 port 32853, "
+              "its FINGERPRINT checked",
+              read && port == 32853 && string_equals((string_address)text, "192.0.2.1") &&
+                  connective_stun_fingerprint(response4, 72) == 0xc07d4c96u);
+        read = connective_stun_read(response6, sizeof response6, transaction,
+                                    address, address_of port);
+        connective_address_text(address, text);
+        check("connective: RFC 5769's IPv6 response is "
+              "2001:db8:1234:5678:11:2233:4455:6677 port 32853",
+              read && port == 32853 &&
+                  string_equals((string_address)text,
+                                "2001:db8:1234:5678:11:2233:4455:6677") &&
+                  connective_stun_fingerprint(response6, 84) == 0xc8fb0b4cu);
+
+        //      Every byte the FINGERPRINT covers, and the fingerprint itself,
+        //      changed is refused. Its attribute's type changed is an unknown
+        //      optional attribute (0x8000 and up), which RFC 8489 says to
+        //      ignore, and an answer with no fingerprint is still taken: a
+        //      server need not send one, and the transaction's 96 random bits
+        //      are what keep a stranger's answer out.
+        for (positive at = 0; at < sizeof response4; at++)
+        {
+                if (at >= 72 && at < 74)
+                        continue;
+                memory_copy(copy, response4, sizeof response4);
+                copy[at] ^= 0x01;
+                wrong += connective_stun_read(copy, sizeof response4, transaction,
+                                              address, address_of port);
+        }
+        check("sec: connective: a STUN answer with any byte its FINGERPRINT "
+              "covers changed is refused",
+              wrong == 0);
+        wrong = 0;
+        for (positive length = 0; length < sizeof response4; length++)
+                wrong += connective_stun_read(response4, length, transaction,
+                                              address, address_of port);
+        wrong += connective_stun_read(response4, sizeof response4, other, address,
+                                      address_of port);
+        check("sec: connective: a cut answer, or another transaction's, is refused",
+              wrong == 0);
+
+        (void)connective_stun_request(request, transaction);
+        check("connective: a Binding request is its header and a FINGERPRINT, "
+              "28 bytes",
+              request[0] == 0 && request[1] == 1 && request[2] == 0 && request[3] == 8 &&
+                  connective_get32(request + 4) == CONNECTIVE_STUN_MAGIC &&
+                  !memory_compare(request + 8, transaction, 12) &&
+                  connective_get32(request + 20) == 0x80280004u &&
+                  connective_get32(request + 24) ==
+                      connective_stun_fingerprint(request, 20));
+
+        wrong = !connective_trace_address(
+                    (p8 address_to) "fl=1f1\nh=cloudflare.com\nip=203.0.113.9\nts=1\n",
+                    44, address) ||
+                (connective_address_text(address, text),
+                 !string_equals((string_address)text, "203.0.113.9"));
+        wrong += !connective_trace_address((p8 address_to) "ip=2001:db8::5\r\nts=2\n",
+                                           21, address) ||
+                 (connective_address_text(address, text),
+                  !string_equals((string_address)text, "2001:db8::5"));
+        wrong += connective_trace_address((p8 address_to) "h=x\nts=1\n", 9, address);
+        wrong += connective_trace_address((p8 address_to) "ip=999.0.0.1\n", 13, address);
+        wrong += connective_trace_address((p8 address_to) "xip=1.2.3.4\n", 12, address);
+        wrong += connective_trace_address((p8 address_to) "ip=\n", 4, address);
+        check("connective: the trace's ip= line is the address, and nothing "
+              "else is", wrong == 0);
+
+        {
+                p8 a[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 198, 51, 100, 7};
+                p8 b[16];
+
+                memory_copy(b, a, 16);
+                b[15] = 8;
+                check("connective: the NAT is told by what two servers saw",
+                      connective_nat_classify(0, a, 1, a, 1, false) == CONNECTIVE_NAT_UNKNOWN &&
+                          connective_nat_classify(1, a, 1, a, 1, false) == CONNECTIVE_NAT_ONE &&
+                          connective_nat_classify(2, a, 1, a, 1, false) == CONNECTIVE_NAT_ONE &&
+                          connective_nat_classify(3, a, 1, a, 1, true) == CONNECTIVE_NAT_NONE &&
+                          connective_nat_classify(3, a, 4000, a, 4000, false) ==
+                              CONNECTIVE_NAT_INDEPENDENT &&
+                          connective_nat_classify(3, a, 4000, a, 4001, false) ==
+                              CONNECTIVE_NAT_DEPENDENT &&
+                          connective_nat_classify(3, a, 4000, b, 4000, false) ==
+                              CONNECTIVE_NAT_DEPENDENT);
+        }
+
+        wrong = 0;
+        for (positive at = 0; at < array_count(kinds); at++)
+                wrong += connective_interface_kind(kinds[at].name, kinds[at].type,
+                                                   kinds[at].wireless,
+                                                   kinds[at].driver) != kinds[at].kind;
+        check("connective: an interface's kind, by its driver, its name and its "
+              "hardware", wrong == 0);
+
+        wrong = 0;
+        for (positive at = 0; at < array_count(scopes); at++)
+                wrong += !connective_parse_address((p8 address_to)scopes[at].text,
+                                                   string_length(scopes[at].text),
+                                                   address) ||
+                         connective_address_scope(address) != scopes[at].scope;
+        check("connective: an address's scope", wrong == 0);
+
+        wrong = 0;
+        for (positive at = 0; at < array_count(texts); at++)
+                wrong += !connective_parse_address((p8 address_to)texts[at],
+                                                   string_length(texts[at]), address) ||
+                         (connective_address_text(address, text),
+                          !string_equals((string_address)text, texts[at]));
+        for (positive at = 0; at < array_count(refused); at++)
+                wrong += connective_parse_address((p8 address_to)refused[at],
+                                                  string_length(refused[at]), address);
+        check("connective: an address read and written back is itself (RFC 5952), "
+              "and a malformed one is refused", wrong == 0);
+}
+
 static fn mdns_wire_exact(void)
 {
         p8 instance[10];
@@ -5263,6 +5467,7 @@ b32 main(void)
         group_pairing();
         mdns_parse();
         mdns_wire_exact();
+        connective_vectors();
         return test_report(null);
 }
 #endif /* CHECK_waterlink */
@@ -12009,6 +12214,58 @@ static fn ipv4_only(void)
               code < 32 && !(code & 16));
 }
 
+/*
+        link discovery's switches, through its verb (command.c): each lookup
+        on when nothing is kept, one switch that lookup alone, discovery off
+        all of them, and a gather under off sends nothing (connective_sent
+        counts every datagram and connection connective.c opens).
+*/
+static fn discovery_switches(void)
+{
+        string_address off[] = {(string_address) "moonwater", (string_address) "link",
+                                (string_address) "discovery", (string_address) "off"};
+        string_address on[] = {(string_address) "moonwater", (string_address) "link",
+                               (string_address) "discovery", (string_address) "on"};
+        string_address stun_off[] = {(string_address) "moonwater", (string_address) "link",
+                                     (string_address) "discovery", (string_address) "stun",
+                                     (string_address) "off"};
+        string_address bad[] = {(string_address) "moonwater", (string_address) "link",
+                                (string_address) "discovery", (string_address) "https",
+                                (string_address) "maybe"};
+        connective_found found;
+        connective_here here;
+        positive before = connective_sent;
+        positive asks_default, asks_off, asks_stun, asks_bad;
+        b32 refused;
+
+        for (positive at = 0; at < array_count(link_discoveries); at++)
+                (void)system_remove_at(AT_FDCWD, link_discoveries[at].path, 0);
+        asks_default = link_discovery_asks();
+        (void)link_discovery_verb(off, 4);
+        asks_off = link_discovery_asks();
+        connective_here_read(address_of here);
+        connective_gather(asks_off, address_of found, address_of here);
+        (void)link_discovery_verb(on, 4);
+        (void)link_discovery_verb(stun_off, 5);
+        asks_stun = link_discovery_asks();
+        refused = link_discovery_verb(bad, 5);
+        asks_bad = link_discovery_asks();
+        log_flush();
+        check("discovery: every lookup is on when nothing is kept",
+              asks_default == (CONNECTIVE_ASK_STUN | CONNECTIVE_ASK_HTTPS));
+        check("sec: discovery off is every lookup off, and a gather then sends "
+              "nothing and says it asked nothing",
+              asks_off == 0 && connective_sent == before &&
+                  found.udp == CONNECTIVE_UDP_NOT_ASKED &&
+                  found.https == CONNECTIVE_HTTPS_NOT_ASKED && !found.answered);
+        check("discovery: one lookup's switch is that lookup alone",
+              asks_stun == CONNECTIVE_ASK_HTTPS);
+        check("discovery: a word that is not on or off is refused and changes "
+              "nothing", refused != 0 && asks_bad == asks_stun);
+        for (positive at = 0; at < array_count(link_discoveries); at++)
+                (void)system_remove_at(AT_FDCWD, link_discoveries[at].path, 0);
+}
+
 static fn indexes_and_commands(void)
 {
         entropy_down = true;
@@ -12769,6 +13026,7 @@ b32 main(void)
         ipv4_only();
         client_never_waits();
         indexes_and_commands();
+        discovery_switches();
         return test_report(null);
 }
 #endif /* CHECK_waterlink_service */
