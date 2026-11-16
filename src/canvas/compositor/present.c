@@ -662,7 +662,23 @@ static struct compositor_wall_job
         int screens[COMPOSITOR_WALL_SCREENS][4];
         unsigned int key[8];     // what it is made from
         positive began, took;    // when it was begun, and how long it took (ns)
+        b64 turn;                // the moon's turn it is made at
+        int step;                // a step of the turn: the wallpaper as it was with each moon's square made again, and those squares its damage
+        const unsigned int *from; // a step's: the wallpaper shown, which it starts from
+        int squares[COMPOSITOR_WALL_SCREENS][4]; // each screen's moon's square, in the space
 } compositor_wall_job;
+
+/*
+        The wallpaper's moon turns while the motion is on and a hand is about (taskbar_motion_about, as the taskbar's moon: it rests with
+        reduced motion, with the motion off and two minutes after the last key or move), slowly: a turn in COMPOSITOR_WALL_TURN_STEPS steps
+        of COMPOSITOR_WALL_STEP each (a fifth of a degree, three pixels at the middle of a 1080 row moon), on the real clock. A step is made
+        on the wallpaper's thread as a whole wallpaper is: a copy of the one shown with each moon's square made again (its rows' sky, then
+        the moon at the new turn), and taken with those squares alone its damage. At rest nothing is asked: no step, no wake.
+*/
+#define COMPOSITOR_WALL_STEP (10ull * 1000000000ull)
+#define COMPOSITOR_WALL_TURN_STEPS 2160
+static b64 compositor_wall_turn;       // the turn the wallpaper shown is at
+static positive compositor_wall_stepped; // the step of the real clock it was made for
 
 static void compositor_kmsg(string_address text, positive value, string_address tail);
 
@@ -701,6 +717,8 @@ static positive compositor_wall_bytes;
 // Make the job's wallpaper: each screen's in its rectangle of the space.
 static void compositor_wall_make(struct compositor_wall_job *job)
 {
+        if (job->step && job->from)
+                memory_copy(job->pixels, job->from, job->bytes);
         for (int at = 0; at < (job->count ? job->count : 1); at++)
         {
                 int x = job->count ? job->screens[at][0] : 0, y = job->count ? job->screens[at][1] : 0;
@@ -708,7 +726,9 @@ static void compositor_wall_make(struct compositor_wall_job *job)
 
                 if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > job->width || y + h > job->height)
                         continue;
-                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark, job->dimmed, job->maria, job->glow, job->accent);
+                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark, job->dimmed, job->maria, job->glow, job->accent,
+                                  job->turn, job->step, job->squares[at < COMPOSITOR_WALL_SCREENS ? at : 0]);
+                job->squares[at][0] += x, job->squares[at][1] += y;
         }
 }
 
@@ -748,10 +768,34 @@ static void compositor_wall_take(void)
                 gpu_forget(compositor_wall, compositor_wall_bytes), compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
         compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
-        job->pixels = null, job->done = 0;
+        job->pixels = null, job->done = 0, compositor_wall_turn = job->turn;
+        if (job->step)
+        {
+                // A step of the turn: the moons' squares alone changed.
+                for (int at = 0; at < (job->count ? job->count : 1); at++)
+                        compositor_damage(job->squares[at][0], job->squares[at][1], job->squares[at][2], job->squares[at][3]);
+                return;
+        }
         compositor_wall_say(null, compositor_wall_w, compositor_wall_h, job->took / 1000000);
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
+
+// The step of the turn the real clock is at now.
+static positive compositor_wall_step_now(void)
+{
+        timespec real = {0, 0};
+
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        return ((positive)real.tv_sec * 1000000000ull + (positive)real.tv_nsec) / COMPOSITOR_WALL_STEP;
+}
+
+// The turn of a step.
+static b64 compositor_wall_turn_of(positive step)
+{
+        return (b64)(step % COMPOSITOR_WALL_TURN_STEPS) * UI_ONE / COMPOSITOR_WALL_TURN_STEPS;
+}
+
+static positive compositor_wall_step_now(void);
 
 // Whether a wallpaper is being made on its thread.
 static int compositor_wall_making(void)
@@ -767,7 +811,61 @@ static positive compositor_wall_due(positive now)
                 return now;
         if (compositor_wall_job.pixels && compositor_wall_knock < 0)
                 return now + (compositor.period ? compositor.period : 16666667ull);
+        // Turning: woken at the next step of the clock, and no sooner.
+        if (compositor_wall && !compositor_wall_job.pixels && taskbar_motion_about(now))
+        {
+                timespec real = {0, 0};
+                positive at;
+
+                clock_gettime(CLOCK_REALTIME, address_of real);
+                at = (positive)real.tv_sec * 1000000000ull + (positive)real.tv_nsec;
+                return compositor_wall_step_now() != compositor_wall_stepped ? now : now + COMPOSITOR_WALL_STEP - at % COMPOSITOR_WALL_STEP + 1000000ull;
+        }
         return 0;
+}
+
+/*
+        A wallpaper begun on its thread for the space: whole (step 0), or a step of the moon's turn (step 1: a copy of the one shown, each
+        moon's square made again at turn). With no memory it is said (whole) or the step is not taken.
+*/
+static void compositor_wall_start(b64 turn, int step)
+{
+        struct compositor_wall_job *job = &compositor_wall_job;
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        job->bytes = (positive)compositor.width * (positive)compositor.height * 4;
+        {
+                long got = (long)compositor_call(syscall(mmap), 0, job->bytes, 3, 0x22, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                {
+                        // Said once for this space and look; looked for again only when something changes.
+                        if (!step)
+                                compositor_wall_say("there was no memory for it", 0, 0, 0), memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
+                        return;
+                }
+                job->pixels = (unsigned int *)got;
+        }
+        // A step's copy of the wallpaper shown is the thread's to make: the one shown is let go only once the step is taken.
+        job->from = step ? compositor_wall : null;
+        if (step)
+                memory_copy(job->key, compositor_wall_key, sizeof(job->key));
+        job->width = compositor.width, job->height = compositor.height, job->count = count < COMPOSITOR_WALL_SCREENS ? (int)count : COMPOSITOR_WALL_SCREENS;
+        for (int at = 0; at < job->count; at++)
+                memory_copy(job->screens[at], screens[at], sizeof(job->screens[at]));
+        job->dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
+        job->dimmed = compositor_wall_rows.dimmed, job->maria = compositor_wall_rows.maria, job->glow = compositor_wall_rows.glow;
+        job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;
+        job->turn = turn, job->step = step;
+        job->worker = thread_start(compositor_wall_run, (address_any)job);
+        // No thread: made here, as it was.
+        if (!job->worker)
+        {
+                compositor_wall_make(job);
+                job->took = clock_monotonic_nanoseconds() - job->began;
+                compositor_wall_take();
+        }
 }
 
 static void compositor_wall_keep(void)
@@ -798,7 +896,16 @@ static void compositor_wall_keep(void)
         now[4] = taskbar_wall_accent(), now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2);
         now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
         if (!memory_compare(compositor_wall_key, now, sizeof(now)))
+        {
+                // Nothing of it changed: a step of the moon's turn, if it is turning and the clock has moved on a step.
+                positive clock = clock_monotonic_nanoseconds(), step = compositor_wall_step_now();
+
+                if (!compositor_wall || !taskbar_motion_about(clock) || step == compositor_wall_stepped)
+                        return;
+                compositor_wall_stepped = step;
+                compositor_wall_start(compositor_wall_turn_of(step), 1);
                 return;
+        }
         // Plain, or a space with nothing in it: the colour, at once.
         if (!compositor_wall_rows.moon || compositor.width <= 0 || compositor.height <= 0)
         {
@@ -817,33 +924,11 @@ static void compositor_wall_keep(void)
                 compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
-        job->bytes = (positive)compositor.width * (positive)compositor.height * 4;
-        {
-                long got = (long)compositor_call(syscall(mmap), 0, job->bytes, 3, 0x22, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
-                {
-                        // Said once for this space and look; looked for again only when something changes.
-                        compositor_wall_say("there was no memory for it", 0, 0, 0);
-                        memory_copy(compositor_wall_key, now, sizeof(now));
-                        return;
-                }
-                job->pixels = (unsigned int *)got;
-        }
-        job->width = compositor.width, job->height = compositor.height, job->count = count < COMPOSITOR_WALL_SCREENS ? (int)count : COMPOSITOR_WALL_SCREENS;
-        for (int at = 0; at < job->count; at++)
-                memory_copy(job->screens[at], screens[at], sizeof(job->screens[at]));
-        job->dark = dark, job->dimmed = compositor_wall_rows.dimmed, job->maria = compositor_wall_rows.maria, job->glow = compositor_wall_rows.glow;
-        job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;
+        // The moon at the turn it is at while it turns, and the step of the clock that is.
+        if (taskbar_motion_about(clock_monotonic_nanoseconds()))
+                compositor_wall_stepped = compositor_wall_step_now(), compositor_wall_turn = compositor_wall_turn_of(compositor_wall_stepped);
         memory_copy(job->key, now, sizeof(now));
-        job->worker = thread_start(compositor_wall_run, (address_any)job);
-        // No thread: made here, as it was.
-        if (!job->worker)
-        {
-                compositor_wall_make(job);
-                job->took = clock_monotonic_nanoseconds() - job->began;
-                compositor_wall_take();
-        }
+        compositor_wall_start(compositor_wall_turn, 0);
 }
 
 // For a check: the wallpaper being made, waited for and taken.

@@ -3189,6 +3189,54 @@ static void check_moon_motion(void)
 }
 
 /*
+        The wallpaper's moon turning: with the motion on and a hand about, the clock's next step makes a step on the wallpaper's thread, taken
+        with each moon's square alone its damage and the rest of the picture as it was; with the motion off (reduced, or none) nothing is
+        made and the loop is not woken for it.
+*/
+static void check_wallpaper_turn(void)
+{
+    static struct windows table;
+    b32 stepped, square, rest, quiet;
+    unsigned int before_corner;
+    positive now = clock_monotonic_nanoseconds();
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&table, sizeof(table));
+    table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
+    compositor.table = &table, compositor.width = 320, compositor.height = 200;
+    compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
+    taskbar.glides = 1, taskbar.moon_at = 0;
+    taskbar_moon_seen(now);
+    compositor_wall_keep();
+    compositor_wall_finish();
+    before_corner = compositor_wall ? compositor_wall[2 * 320 + 2] : 0;
+    // The clock a step on: a step made, its damage the moon's square alone, outside it the same pixels.
+    compositor_wall_stepped -= 1;
+    compositor.damages = 0;
+    compositor_wall_keep();
+    stepped = compositor_wall_job.pixels != null && compositor_wall_job.step;
+    compositor_wall_finish();
+    square = compositor.damages == 1 && compositor.damage[0][1] > 0 && compositor_wall && compositor_wall[2 * 320 + 2] == before_corner;
+    stepped &= compositor_wall_turn == compositor_wall_turn_of(compositor_wall_step_now());
+    // The motion off: nothing made, nothing due.
+    taskbar.glides = 0;
+    compositor_wall_stepped -= 1;
+    compositor.damages = 0;
+    compositor_wall_keep();
+    rest = compositor_wall_job.pixels == null && compositor.damages == 0;
+    quiet = compositor_wall_due(now) == 0;
+    taskbar.glides = 1;
+    compositor_wall_rows.moon = 0;
+    compositor_wall_keep();
+    compositor_wall_rows.moon = 1, compositor_wall_rows.ready = 0;
+    memory_zero(&compositor, sizeof(compositor));
+    check("wallpaper turn: with the motion on and a hand about, the clock's next step turns the moon", stepped);
+    check("wallpaper turn: a step damages the moon's square alone, the rest of the picture as it was", square);
+    check("wallpaper turn: with the motion off nothing is made", rest);
+    check("wallpaper turn: and the loop is not woken for it", quiet);
+}
+
+/*
         The band's arrangement, opened from the moon's menu: the moon ringed with the rest; an item pressed and let go elsewhere moves
         there from the machine's own device and not from a virtual one (WINDOW_EVENT_VIRTUAL: uinput, uhid, the on-screen keyboard, the
         headless pipe), which is counted and moves nothing; and Done keeps the arrangement through the `taskbar` rows' files and words (in

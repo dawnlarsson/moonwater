@@ -9488,6 +9488,7 @@ b32 main()
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
         check_moon_bench();
         check_taskbar_edit();
+        check_wallpaper_turn();
         check_icons();
         check_taskbar_identity();
         check_taskbar_guard();

@@ -1395,7 +1395,9 @@ static void taskbar_spin_set(int seconds);
 static void taskbar_bar_set(int separate, int edge);
 #define TASKBAR_EDGE_LEAST -16 // `taskbar edge`: logical pixels out past the screen's edge at the most (held further by TASKBAR_EDGE_KEEP)
 #define TASKBAR_EDGE_MOST 32   // and in from it
-static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent);
+static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent,
+                              b64 turn, int moon_alone, int rect[4]);
+static int taskbar_motion_about(positive now);
 static unsigned int taskbar_wall_accent(void);
 static b64 taskbar_shift(void);
 static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
@@ -1455,8 +1457,10 @@ static inline int taskbar_moon_more(const struct taskbar_view *view) { (void)vie
 static inline int taskbar_moon_most(int size) { (void)size; return 0; }
 static inline void taskbar_spin_set(int seconds) { (void)seconds; }
 static inline void taskbar_bar_set(int separate, int edge) { (void)separate, (void)edge; }
-static inline void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent)
-{ (void)pixels, (void)pitch, (void)width, (void)height, (void)dark, (void)dimmed, (void)maria, (void)glow, (void)accent; }
+static inline void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent,
+                                     b64 turn, int moon_alone, int rect[4])
+{ (void)pixels, (void)pitch, (void)width, (void)height, (void)dark, (void)dimmed, (void)maria, (void)glow, (void)accent, (void)turn, (void)moon_alone, rect[0] = rect[1] = rect[2] = rect[3] = 0; }
+static inline int taskbar_motion_about(positive now) { (void)now; return 0; }
 static inline unsigned int taskbar_wall_accent(void) { return 0; }
 static inline b64 taskbar_shift(void) { return 0; }
 static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
@@ -17123,7 +17127,7 @@ static decimal ui_moon_sky_at(const struct ui_moon_sky address_to sky, decimal x
 }
 
 static fn ui_moon_paper_ground(struct ui address_to ui, unsigned int options, unsigned int accent, decimal glow, decimal edges, decimal cx, decimal cy,
-                               decimal r)
+                               decimal r, int from, int to)
 {
         int width = ui->width, height = ui->bottom - ui->top, dark = (options & UI_MOON_PAPER_DARK) != 0;
         decimal scale = height / 1080.0;
@@ -17139,18 +17143,19 @@ static fn ui_moon_paper_ground(struct ui address_to ui, unsigned int options, un
                 sky.base[c] = (paper >> (16 - 8 * c) & 255);
                 sky.tint[0][c] = (bloom >> (16 - 8 * c) & 255), sky.tint[1][c] = (cool >> (16 - 8 * c) & 255), sky.tint[2][c] = (warm >> (16 - 8 * c) & 255);
         }
-        for (int y = ui->top; y < ui->bottom; y++)
+        from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to;
+        for (int y = from; y < to; y++)
         {
                 unsigned int address_to row = ui->pixels + (long)y * (long)ui->pitch;
-                decimal from[3], to[3], d0, d1, edge[2] = {r, r + sky.reach};
+                decimal start[3], after[3], d0, d1, edge[2] = {r, r + sky.reach};
 
-                d0 = ui_moon_sky_at(&sky, 0.5, y + 0.5, from);
+                d0 = ui_moon_sky_at(&sky, 0.5, y + 0.5, start);
                 for (int x = 0; x < width; x += 8)
                 {
                         int n = width - x < 8 ? width - x : 8, apart = 0;
                         b32 ramp[6];
 
-                        d1 = ui_moon_sky_at(&sky, x + n + 0.5, y + 0.5, to);
+                        d1 = ui_moon_sky_at(&sky, x + n + 0.5, y + 0.5, after);
                         // The bloom's edges inside the run (the limb, where it starts at once, and its reach): each pixel its own.
                         for (int e = 0; e < 2 && glow > 0; e++)
                         {
@@ -17171,10 +17176,10 @@ static fn ui_moon_paper_ground(struct ui address_to ui, unsigned int options, un
                         else
                         {
                                 for (int c = 0; c < 3; c++)
-                                        ramp[c] = (b32)(from[c] * 65536), ramp[3 + c] = (b32)((to[c] - from[c]) * 65536 / n);
+                                        ramp[c] = (b32)(start[c] * 65536), ramp[3 + c] = (b32)((after[c] - start[c]) * 65536 / n);
                                 memory_ramp_dither_u32((p32 address_to)row + x, (positive)n, (p32)x, (p32)y, ramp);
                         }
-                        memory_copy(from, to, sizeof(from)), d0 = d1;
+                        memory_copy(start, after, sizeof(start)), d0 = d1;
                 }
         }
         // The stars, in dark: a few fine ones, those near the foot with their reflection on still water.
@@ -17187,7 +17192,7 @@ static fn ui_moon_paper_ground(struct ui address_to ui, unsigned int options, un
 
                         for (int y = (int)(sy - dot - 1); y <= (int)(sy + dot + 1); y++)
                                 for (int x = (int)(sx - dot - 1); x <= (int)(sx + dot + 1); x++)
-                                        if (x >= 0 && x < width && y >= ui->top && y < ui->bottom)
+                                        if (x >= 0 && x < width && y >= from && y < to)
                                         {
                                                 decimal dx = x + 0.5 - sx, dy = y + 0.5 - sy, d = square_root(dx * dx + dy * dy);
                                                 unsigned int address_to at = ui->pixels + (long)y * (long)ui->pitch + x;
@@ -17213,7 +17218,7 @@ static fn ui_moon_paper_ground(struct ui address_to ui, unsigned int options, un
                                                 decimal fx = wx - x, fade = light * 0.8 * (1 - a / length);
 
                                                 for (int side = 0; side < 2; side++)
-                                                        if (y >= ui->top && y < ui->bottom && x + side >= 0 && x + side < width)
+                                                        if (y >= from && y < to && x + side >= 0 && x + side < width)
                                                         {
                                                                 unsigned int address_to at = ui->pixels + (long)y * (long)ui->pitch + x + side;
 
@@ -17993,22 +17998,34 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
 /*
         The moon wallpaper (ui_moon_night): the moon in ink (ui_moon_paper), nearly as wide as the picture, in its middle across it and
         low, so the bottom edge cuts it; light or dark (UI_MOON_PAPER_DARK, which has the stars), on its ground with the accent's glow
-        round it (glow) and the edges' colour (edges), each from none. Drawn whole once; again only when the turn steps.
+        round it (glow) and the edges' colour (edges), each from none. Drawn whole once; a step of its turn draws the moon's square alone
+        (ui_moon_night_part, moon_alone: the sky of its rows, then the moon), the rest of the picture the same pixels as it was.
 */
-static fn ui_moon_night(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges)
+static fn ui_moon_night_part(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges, b32 moon_alone,
+                             int rect[4])
 {
         int width = ui->width, height = ui->bottom - ui->top, size = width * 95 / 100, left = (width - size) / 2, top = ui->top + height * 38 / 100;
-
+        int from = moon_alone ? top : ui->top;
         positive clock[2];
 
+        // The moon's square on the picture: all a turn's step changes.
+        rect[0] = left < 0 ? 0 : left, rect[1] = top < ui->top ? ui->top : top;
+        rect[2] = (left + size > width ? width : left + size) - rect[0], rect[3] = (top + size > ui->bottom ? ui->bottom : top + size) - rect[1];
         ui_moon_stage_clock(clock);
-        ui_moon_paper_ground(ui, options, accent, glow, edges, left + size / 2.0, top + size / 2.0, size / 2.0);
+        ui_moon_paper_ground(ui, options, accent, glow, edges, left + size / 2.0, top + size / 2.0, size / 2.0, from, ui->bottom);
         ui_moon_stage_done(UI_MOON_STAGE_SKY, clock);
         ui_moon_paper(ui, left, top, size, turn, options, accent);
         ui_moon_stage_done(UI_MOON_STAGE_CRATERS, clock);
         // (the moon's whole time less its grid and its disc, which ui_moon_paper clocks itself)
         ui_moon_stage_wall[UI_MOON_STAGE_CRATERS] -= ui_moon_stage_wall[UI_MOON_STAGE_GRID] + ui_moon_stage_wall[UI_MOON_STAGE_DISC];
         ui_moon_stage_cpu[UI_MOON_STAGE_CRATERS] -= ui_moon_stage_cpu[UI_MOON_STAGE_GRID] + ui_moon_stage_cpu[UI_MOON_STAGE_DISC];
+}
+
+static fn ui_moon_night(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges)
+{
+        int rect[4];
+
+        ui_moon_night_part(ui, turn, options, accent, glow, edges, false, rect);
 }
 
 /*
