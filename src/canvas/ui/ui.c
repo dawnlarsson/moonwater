@@ -12768,31 +12768,16 @@ static inline fn ui_kit_lift_fill(struct ui address_to ui, const struct ui_box a
 }
 
 /*
-        The row the keys are on, its fill being all that says where they are (a lit row has no ring): on a light opaque surface the
-        highlight, the selection's colour (the bright accent at 28 percent, as a menu's hot item is on that surface) laid over the
-        surface and taken toward the bright accent until it stands UI_LIT_CONTRAST from the surface; the secondary container on a
-        dark opaque one (1.32 to 1 from it); the whole step toward white on a light glass; and on a dark glass a well of the ink
-        (ui_glass_well). On the light surface white, the lightest a fill can be, is 1.07 to 1 from it and not found from across a
-        desk; the highlight is 1.2 to 1 with Dawn's orange and more with the other accents (1.59 with the standard one, whose
-        bright accent is a grey of the ink), the words on it 13 to 1 and more, and the quiet ones 4.5 to 1 and more.
+        The row the keys are on and a column's chosen group, one fill for every list of the kit, its fill being all that says
+        where they are (a lit row has no ring): on a light ground the whole step toward white (opaque: the white of a raised
+        surface, the settings column's chosen tab; glass: UI_GLASS_LIFT of white over the tint), never a darker or tinted grey;
+        on a dark opaque surface the secondary container (1.32 to 1 from it); and on a dark glass a well of the ink (ui_glass_well).
 */
-#define UI_LIT_CONTRAST 120 // a light surface's lit row is at least this far from the surface, as ui_contrast counts (1.2 to 1)
-
-static unsigned int ui_kit_highlight(void)
-{
-        unsigned int surface = ui_role(UI_SURFACE) & 0xffffffu, selection = ui_role(UI_SELECTION), bright = ui_role(UI_ACCENT_BRIGHT) | 0xff000000u;
-        unsigned int cover = selection >> 24, lit = 0xff000000u | window_mix(surface, selection & 0xffffffu, cover + (cover >> 7));
-
-        for (int step = 0; step < 24 && ui_contrast(lit & 0xffffffu, surface) < UI_LIT_CONTRAST; step++)
-                lit = ui_mix(lit, 85, bright);
-        return lit;
-}
-
 static inline unsigned int ui_kit_lit(const struct ui address_to ui)
 {
-        if (ui->glass)
-                return ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SECONDARY_CONTAINER, 36);
-        return ui_kit_light(ui) ? ui_kit_highlight() : ui_role(UI_SECONDARY_CONTAINER);
+        if (ui_kit_light(ui))
+                return ui_kit_lift(ui, 100);
+        return ui->glass ? ui_well(ui, UI_SECONDARY_CONTAINER, 36) : ui_role(UI_SECONDARY_CONTAINER);
 }
 
 // A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink,
@@ -13658,13 +13643,13 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         }
         busy |= ui_kit.busy;
         {
-                // The chosen group is its whole row, square, a touch off the ground: the surface's high face, as a field's well is.
+                // The chosen group is its whole row, square, in the fill every list's lit row has (ui_kit_lit).
                 struct ui_box pip = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
 
                 pip.y0 = (b32)((pip_y * ui->scale / 100) >> 22), pip.y1 = (b32)(((pip_y + ui_q(c->h)) * ui->scale / 100) >> 22);
 
                 if (!c->disabled && c->count > 0) // no items, no chosen one to show
-                        ui_kit_fill(ui, &pip, ui_role(UI_SURFACE_HIGH), null);
+                        ui_kit_fill(ui, &pip, ui_kit_lit(ui), null);
                 // The keys in the column have no ring: the pip is the chosen group and the group the keys are on, and it says so.
         }
         for (int item = 0; item < c->count; item++)
@@ -16447,11 +16432,11 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
         the white that stands out from that ground. Its word asks UI_READABLE and its dot, a shape and not text, UI_MENU_SEEN, so the dot
         keeps more of the colour where a glass is near the middle grey. 0 for an item that is no notice.
 */
-// A menu's hot item's fill, straight: on a light glass the step toward white a lit row is (ui_kit_lit), never a darker grey; else the
-// selection's well.
+// A menu's hot item's fill, straight: the fill every list of the kit lights its row with (ui_kit_lit), so a menu, a dropdown, a
+// list and the settings column all show the chosen row alike.
 static unsigned int ui_popmenu_hot_fill(const struct ui address_to ui)
 {
-        return ui->glass && ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SELECTION, 28);
+        return ui_kit_lit(ui);
 }
 
 static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b32 hot, unsigned int least)
@@ -16509,8 +16494,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         continue;
                 }
                 // The hot item's rect: ui_fill lays a premultiplied tone, and the well is straight (its alpha is its cover), so it is
-                // premultiplied first. On a light glass it is the step toward white a lit row is (ui_kit_lit), never a darker grey; on
-                // a dark one the well. The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
+                // premultiplied first. It is a lit row's fill (ui_kit_lit). The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
                 if (lit)
                         ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_popmenu_hot_fill(ui), UI_FULL));
                 if (at == m->ripple_at)
@@ -21306,8 +21290,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
                 struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
-                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring), and on a light surface
-                // the fill is the highlight (ui_kit_lit), which reads there as the dark theme's does on its own.
+                // The fill is all that says the keys are on the row: a lit row has no ring (ui_kit_focus_ring), and it is the fill
+                // every list of the kit lights its row with (ui_kit_lit), the settings column's chosen tab's.
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
                 // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
                 // its quiet words are the ink too, which stands out from the well (ui_glass_well).

@@ -4975,9 +4975,9 @@ static int pointer_as(struct ui address_to ui, struct ui_scroll address_to s, in
 }
 
 /*
-        A lit row stands out from the ground it lies on in either theme. The row the keys are on is the highlight on a light opaque surface,
-        1.2 to 1 and more from it with every accent, its words and its quiet words readable on it (4.5 to 1 and more), and the secondary
-        container on a dark one. A hovered or pressed row is lighter than its ground: on a light ground a step toward white, six tenths of
+        A lit row stands out from the ground it lies on in either theme. The row the keys are on is the white of a raised surface on a light opaque
+        surface with every accent (the settings column's chosen tab's fill, never a darker or tinted grey), its words and its quiet words
+        readable on it (4.5 to 1 and more), and the secondary container on a dark one. A hovered or pressed row is lighter than its ground: on a light ground a step toward white, six tenths of
         it hovered and all of it pressed, so hover and press read apart, and in a dark one the ink's layer. A light glass (the launcher's, a
         menu's) lifts toward white for all three; a dark glass keeps its wells. A hovered or pressed row is never a darker grey.
 */
@@ -5011,7 +5011,7 @@ static fn check_kit_lit(void)
 
                         ui_kit_theme(UI_THEME_LIGHT, accents[at], 1);
                         lit = ui_kit_lit(&ui) & 0xffffffu;
-                        light_keys = light_keys && ui_contrast(lit, ui_role(UI_SURFACE) & 0xffffffu) >= UI_LIT_CONTRAST &&
+                        light_keys = light_keys && lit == (ui_role(UI_SURFACE_LOWEST) & 0xffffffu) && ui_luminance(lit) > ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) &&
                                      ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, lit) >= 450 && ui_contrast(ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu, lit) >= 450;
                 }
                 ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
@@ -5025,22 +5025,22 @@ static fn check_kit_lit(void)
         ground = 0xffe0e0e2u;
         glass_light = ui_kit_light(&ui) && ui_luminance(window_mix(ground, ui_kit_lit(&ui) & 0xffffffu, ui_kit_lit(&ui) >> 24)) > ui_luminance(ground & 0xffffffu) &&
                       lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu) && lit_lay(&ui, pixels, ground, 10) > lit_lay(&ui, pixels, ground, 6);
-        menu_light = ui_kit_lift(&ui, 100) == ui_kit_lit(&ui);
+        menu_light = ui_kit_lift(&ui, 100) == ui_kit_lit(&ui) && ui_popmenu_hot_fill(&ui) == ui_kit_lit(&ui);
         // A dark glass keeps the well of its ink, which is lighter than its tint there.
         ui_inks(&ui, 0x2b2b2eu);
-        glass_dark = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36);
+        glass_dark = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36) && ui_popmenu_hot_fill(&ui) == ui_kit_lit(&ui);
         ui.glass = 0;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ground = ui_role(UI_SURFACE) | 0xff000000u;
         dark_keys = !ui_kit_light(&ui) && ui_luminance(ui_kit_lit(&ui) & 0xffffffu) > ui_luminance(ground & 0xffffffu);
         dark_hover = lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu);
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
-        check("kit lit: in the light theme the row the keys are on is the highlight, 1.2:1 and more from the surface with every accent and its words 4.5:1 on it, and a hovered row is lighter than its ground",
+        check("kit lit: in the light theme the row the keys are on is the white of a raised surface with every accent, lighter than the surface and its words 4.5:1 on it, and a hovered row is lighter than its ground",
               light_keys && light_hover);
         check("kit lit: in the light theme a pressed row is lighter than a hovered one, so the two states read apart", light_apart);
         check("kit lit: on a light glass (the launcher's, a menu's) the row the keys are on, a hovered row and a pressed one are lighter than the tint, and a menu's hot item is the lit row's fill",
               glass_light && menu_light);
-        check("kit lit: in the dark theme they are lighter than their ground too, and on a dark glass the row the keys are on keeps its well", dark_keys && dark_hover && glass_dark);
+        check("kit lit: in the dark theme they are lighter than their ground too, and on a dark glass the row the keys are on keeps its well, a menu's hot item the same", dark_keys && dark_hover && glass_dark);
 }
 
 /*
@@ -5198,12 +5198,12 @@ static fn check_kit_focus(void)
                         row_bare = focus_at(pixels, x, top) == lit && focus_at(pixels, x, top + 2) == lit && focus_at(pixels, x, top + 3) == lit &&
                                    focus_at(pixels, x, top + height - 1) == lit && focus_at(pixels, x, top + height - 3) == lit;
                 check("kit focus: a list's row the keys are on is lit from edge to edge and has no ring, with the hand on the keys: the fill says where they are", row_bare);
-                // No edge: on a light surface the fill alone says where the keys are (the highlight, ui_kit_lit), so the row is its fill to
-                // its first pixel at either side with the hand on the keys, in a window read from either way, and it stands 1.2 to 1 and
-                // more from the surface; a dark surface's row is its fill to its edges too.
+                // No edge: on a light surface the fill alone says where the keys are (the white a lit row is, ui_kit_lit), so the row is its
+                // fill to its first pixel at either side with the hand on the keys, in a window read from either way, and lighter than
+                // the surface; a dark surface's row is its fill to its edges too.
                 {
                         unsigned int dark_ground, dark_lit;
-                        b32 bare = ui_contrast(lit, ground) >= UI_LIT_CONTRAST, turned, dark;
+                        b32 bare = ui_luminance(lit) > ui_luminance(ground), turned, dark;
 
                         for (int y = top; y < top + height && bare; y++)
                                 bare = focus_at(pixels, 100, y) == lit && focus_at(pixels, 101, y) == lit && focus_at(pixels, 102, y) == lit;
@@ -5223,7 +5223,7 @@ static fn check_kit_focus(void)
                                 dark = focus_at(pixels, 100, y) == dark_lit && focus_at(pixels, 101, y) == dark_lit && focus_at(pixels, 102, y) == dark_lit &&
                                        focus_at(pixels, 399, y) == dark_lit;
                         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
-                        check("kit focus: on a light surface the row the keys are on is its fill to its first pixel, with the hand on the keys, and the fill stands 1.2:1 and more from the surface",
+                        check("kit focus: on a light surface the row the keys are on is its fill to its first pixel, with the hand on the keys, and the fill is lighter than the surface",
                               bare);
                         check("kit focus: reading from the right it is its fill to both ends too, and a dark surface's row the keys are on is its fill from edge to edge",
                               turned && dark);
@@ -5240,13 +5240,13 @@ static fn check_kit_focus(void)
                 ui_kit.now += 2000000000ll;
                 ui_control_draw(&ui, &column);
                 ui_vtabs_row(&column, &rx, &rw);
-                pip = ui_role(UI_SURFACE_HIGH) & 0xffffffu;
-                column_bare = pip != ground && rw > 12;
+                pip = ui_kit_lit(&ui) & 0xffffffu;
+                column_bare = pip != ground && pip == lit && rw > 12;
                 for (int y = 10 + 34; y < 10 + 68 && column_bare; y++)
                         column_bare = focus_at(pixels, rx, y) == pip && focus_at(pixels, rx + 2, y) == pip && focus_at(pixels, rx + 3, y) == pip;
                 for (int x = rx; x < rx + 8 && column_bare; x++)
                         column_bare = focus_at(pixels, x, 10 + 34) == pip && focus_at(pixels, x, 10 + 36) == pip && focus_at(pixels, x, 10 + 37) == pip;
-                check("kit focus: the chosen group of a column the keys are in is under its pip and has no ring: the pip says where they are", column_bare);
+                check("kit focus: the chosen group of a column the keys are in is under its pip and has no ring, the pip the same fill as a list's lit row: the pip says where they are", column_bare);
         }
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
         ui_kit.keyed = 0;
