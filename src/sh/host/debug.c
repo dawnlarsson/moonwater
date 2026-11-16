@@ -587,6 +587,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                : table->overlay < 0 ? (string_address) "none, or refused"
                                                                     : (string_address) "not asked yet");
         host_say(log, "  shown straight  %p frames\n", (positive)table->scanned);
+        //      The machine's wakes: how the last was heard, and the takes after them that set every crtc again or could not yet.
+        host_say(log, "  wake            %p since the start, the last %s; the screens set again %p times, not yet %p times\n",
+                 (positive)table->wakes,
+                 table->wake_how == 3   ? (string_address) "told by the sleep verb and seen by the clocks"
+                 : table->wake_how == 2 ? (string_address) "told by the sleep verb"
+                 : table->wake_how == 1 ? (string_address) "seen by the clocks"
+                                        : (string_address) "none",
+                 (positive)table->wake_sets, (positive)table->wake_refused);
         //      The GPU's compose: the presents the card drew, the presents the processor drew, and why the card was refused the others.
         host_say(log, "  gpu             the GPU composed %p presents, the processor %p\n", (positive)table->gpu_drawn, (positive)table->gpu_processor);
         for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)

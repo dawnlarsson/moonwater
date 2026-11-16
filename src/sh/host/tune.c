@@ -1169,6 +1169,8 @@ static fn tune_suspend_record(p8 address_to text, tune_flag address_to messages,
         tune_flag_back(times);
 }
 
+static bool desktop_woke(void); // desktop.c: the desktop's compositor told the machine woke
+
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
@@ -1222,6 +1224,11 @@ static b32 tune_suspend(string_address verb, string_address state)
         //      before it was listening is news it never heard), and the
         //      settings the machine put in place at boot.
         tune_backlight_restore(address_of lights);
+        //      The desktop's compositor is told at once, and takes the screens
+        //      again (every connector asked, every crtc set anew), where it
+        //      would otherwise wait for a key or its clocks to say so.
+        if (desktop_woke())
+                host_say(log, host_label "the desktop is told it woke\n");
         radio_net_wake();
         tune_restore();
         tune_suspend_record(text, address_of messages, address_of times);

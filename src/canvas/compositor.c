@@ -620,8 +620,8 @@ struct compositor_poll
 #define COMPOSITOR_WHEEL_JOIN 960 // eight notches, in 120ths: the most one wheel event joined from several holds
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 // A machine slept when the clock that runs through a sleep got this far ahead of the one that does
-// not, and the screen is drawn again then, at half a second and at two and a half: a card's driver
-// is still settling after a wake, and the later passes are the ones that land.
+// not (or the sleep verb said so), and the screens are taken again, every crtc set anew, at half a
+// second and at two and a half: a card's driver and a monitor are still settling after a wake.
 #define COMPOSITOR_SLEPT_NS 50000000ull
 #define COMPOSITOR_WAKE_FIRST_NS 500000000ull
 #define COMPOSITOR_WAKE_SECOND_NS 2000000000ull
@@ -807,6 +807,7 @@ static struct
         unsigned long composing_bytes, mirror_bytes; // what compositor_changed_ready mapped, given back with it
         int space_wanted;   // the screens are to be taken again once the card has finished a flip
         int screens_gone;   // a take found no screen connected where there had been some: the next that finds one sets every crtc anew
+        int retrain;        // the machine woke: the next take reads every connector again and sets every crtc anew, as for screens_gone
         positive screens_look; // while they are gone, when the connectors are next asked without a word from the kernel
         int kept_x, kept_y; // where the pointer was last kept on a screen, which a movement starts from
         int absolute;       // the pointer was put by a tablet, whose point comes from no screen
@@ -1057,7 +1058,8 @@ static struct
         unsigned int connector;
         positive asleep;            // the clock that runs through a sleep less the one that does not, when last looked at
         positive wake_at;           // when the next of the redraws after a wake is due
-        int wake_stage;             // 0, or the redraw after a wake that is next: 1 at half a second, 2 at two and a half
+        int wake_stage;             // 0, or the take of the screens after a wake that is next: 1 at half a second, 2 at two and a half
+        unsigned int wakes;         // the wakes heard since the start (compositor_woke)
         positive motion_ts;         // when the hand's oldest movement not yet shown was reported
         int hold;                   // /dev/cpu_dma_latency, open with a zero in it while a person is at the machine, or -1
         positive hold_until;
@@ -1574,14 +1576,16 @@ static void compositor_pipe_ignore(void)
 }
 
 /*
-        SIGTERM, SIGINT and SIGHUP, which end the compositor, and SIGUSR1, which has it read /root again
-        (compositor_root_again), as a descriptor the loop polls; SIGPIPE ignored.
+        SIGTERM, SIGINT and SIGHUP, which end the compositor, SIGUSR1, which has it read /root again
+        (compositor_root_again), and SIGUSR2, the sleep verb's word that the machine woke (compositor_woke), as a
+        descriptor the loop polls; SIGPIPE ignored.
 */
 #define COMPOSITOR_SIGUSR1 10
+#define COMPOSITOR_SIGUSR2 12
 
 static int compositor_signals(void)
 {
-        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1);
+        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1) | 1ul << (COMPOSITOR_SIGUSR2 - 1);
 
         compositor_pipe_ignore();
 
@@ -1648,7 +1652,7 @@ static void compositor_space_retake(void)
                 unsigned int degrees;
         } was[WINDOWS_OUTPUTS];
         b32 status = 0, turned = 0;
-        int gone = compositor.screens_gone;
+        int gone = compositor.screens_gone, wake = compositor.retrain && compositor.card >= 0;
 
         // Each screen's turn before the take, by its name: a screen that turns is one whose turn is another after it (the keyboard is put
         // away for it, compositor_osk_turned).
@@ -1657,10 +1661,32 @@ static void compositor_space_retake(void)
                 memory_copy(was[at].name, compositor.output[at].name, WINDOWS_OUTPUT_NAME);
                 was[at].degrees = compositor.output[at].degrees;
         }
+        // After a wake the card's master is asked for again (the compositor's still, as a rule: then it is nothing), so a take is not refused for it.
+        if (wake && system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
+                compositor_kmsg((string_address) "compositor: wake: the card's master could not be had again", 0, (string_address) "");
         if (compositor.card >= 0)
                 status = compositor_space_take(0);
         else
+        {
+                compositor.retrain = 0;
                 compositor_headless_scale();
+        }
+        // What a wake's take did, in the kernel's log: the screens set, or why not (it is looked at again while they are dark).
+        if (wake && status >= 0 && !compositor.retrain)
+                compositor_kmsg((string_address) "compositor: wake: every crtc set again with a mode set, screens lit ", (positive)compositor.outputs,
+                                (string_address) "");
+        else if (wake && status < 0)
+                compositor_kmsg((string_address) "compositor: wake: the screens could not be set yet, looked at again in 5 s, error ", (positive)-status,
+                                (string_address) "");
+        if (wake && status < 0 && compositor.screens_gone)
+                compositor.retrain = 0; // the looks while they are dark set every crtc anew when one is found (screens_gone)
+        if (wake && compositor.table)
+        {
+                if (status >= 0 && !compositor.retrain)
+                        compositor.table->wake_sets++;
+                else if (status < 0)
+                        compositor.table->wake_refused++;
+        }
         for (unsigned int at = 0; at < compositor.outputs && status >= 0; at++)
                 for (unsigned int each = 0; each < was_count && each < WINDOWS_OUTPUTS; each++)
                         if (!memory_compare(was[each].name, compositor.output[at].name, WINDOWS_OUTPUT_NAME) &&
@@ -1668,7 +1694,7 @@ static void compositor_space_retake(void)
                                 turned = 1;
 
         // Screens that are still gone were said so when they went: the look every COMPOSITOR_SCREEN_LOOK says nothing more.
-        if (status < 0 && !(gone && status == -COMPOSITOR_ENODEV))
+        if (status < 0 && !(gone && (status == -COMPOSITOR_ENODEV || status == -COMPOSITOR_EINVAL)))
                 compositor_say("the screens could not be taken again, error", status);
         else if (status >= 0 && compositor.layout != layout)
                 compositor_screens_say();
@@ -2660,11 +2686,15 @@ static b32 compositor_main()
                         if (wanted[at].returned)
                                 compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at)]++;
 
-                // A signal: /root again for SIGUSR1, and the end for any other (and for a descriptor that cannot be read).
+                // A signal: /root again for SIGUSR1, the wake for SIGUSR2, and the end for any other (and for a descriptor that cannot be read).
                 if (wanted[0].returned)
                 {
-                        if (compositor_signal_taken() == COMPOSITOR_SIGUSR1)
+                        unsigned int taken = compositor_signal_taken();
+
+                        if (taken == COMPOSITOR_SIGUSR1)
                                 compositor_root_again();
+                        else if (taken == COMPOSITOR_SIGUSR2)
+                                compositor_woke(now, COMPOSITOR_WAKE_SIGNAL);
                         else
                                 running = 0;
                 }

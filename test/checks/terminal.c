@@ -370,6 +370,8 @@ static struct
         // The crtc's sets in the order they came, 0 for one that turned it off and 1 for one that turned it on (set_count of them, the first 32 kept).
         unsigned char set_was[32];
         unsigned int set_count;
+        // The sets that turn the crtc on refused (EINVAL) while this counts down: a link not up yet after a wake.
+        unsigned int refuse_sets;
         // A card whose first connector is a ghost: connected at the first look, with a list of modes that grew by the second (so none is read) and an
         // encoder that can have only a crtc the card has not, and whose second connector is the panel, with no encoder of its own yet.
         int ghost;
@@ -706,6 +708,12 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                 }
                 if (!fb || fb > card_fake.fbs)
                         return -2;
+                if (card_fake.refuse_sets)
+                {
+                        card_fake.refuse_sets--;
+                        card_fake.refused++;
+                        return -22;
+                }
                 if (card_fake.set_count < 32)
                         card_fake.set_was[card_fake.set_count] = 1;
                 card_fake.set_count++;

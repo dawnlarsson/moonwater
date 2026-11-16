@@ -13,25 +13,30 @@
 */
 
 /*
-        What a sleep does to the screen. The card is left to the compositor and
-        nothing tells it the machine slept, so it works it out from the clocks:
-        CLOCK_BOOTTIME runs through a sleep and CLOCK_MONOTONIC does not, and
-        the first thing that wakes the loop afterwards (the key that woke the
-        machine, a power button, a lid) finds them further apart than they
-        were. A real card's driver restores the state it saved, and a panel
-        that state says is on and the hardware is not showing is answered by a
-        plane update as if nothing had happened; only an active change makes it
-        program the pipe again, which is turning the crtc off and on. That is
-        done once, at half a second, where the driver has settled, and not for
-        a virtual card, which has no such drift and does not always get its
-        host window back from an off.
-*/
-static int compositor_virtual(void)
-{
-        static const char *const guests[] = {"bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
+        What a sleep does to the screen, and what the compositor does about it. The card is left to the compositor, which
+        hears of a wake in two ways, whichever comes first: the sleep verb, awake again, sends it SIGUSR2 (desktop_woke),
+        and CLOCK_BOOTTIME, which runs through a sleep where CLOCK_MONOTONIC does not, is found further ahead of it than it
+        was by whatever wakes the loop next (a key, the power button, a lid, a uevent, the minute's tick). Either is the
+        same wake (compositor_woke), said once.
 
-        return compositor_driver_in(guests, sizeof(guests) / sizeof(guests[0]));
-}
+        Nothing the compositor knew of the card before the sleep is trusted after it. A flip in flight when the machine
+        slept never sends its event, and while it is pending nothing is presented and the screens are not taken: it is let
+        go of as landed, and the pictures it held are given back. The inputs are looked at again: a device the wake took
+        away answers its descriptor with ENODEV and is let go of, the devices there now are opened, and what no device has
+        down is let go (the Enter of `moonwater sleep`, released while the machine slept). Then the screens are taken again
+        as a screen that came back is (compositor_space_take's regained): every connector asked again, so a monitor that
+        came back as another connector or with other modes is the one set, each crtc turned off and set with ALLOW_MODESET's
+        legacy equal (SETCRTC on a crtc that was off is always a mode set, which is what trains a DisplayPort link again),
+        the pointer's plane set anew and the whole space drawn. That is done at half a second and again at two and a half,
+        where a driver and a monitor slow to wake have settled; a take the card refuses, or that finds no screen yet, leaves
+        the screens looked at every five seconds until one is set (screens_gone). A virtual card's crtcs are set and not
+        turned off first: a guest's display has no link to train, and virtio-gpu does not always get its host window back
+        from an off. The card's GPU is started again before it next draws (compositor_gpu_resumed).
+
+        What a wake did is in the kernel's log (dmesg: the lines that begin "compositor: wake") and in moonwater debug's
+        wake line (the table's wakes, wake_how, wake_sets and wake_refused).
+*/
+static int compositor_virtual(void); // kms.c: a guest's card
 
 // How far ahead of the clock that stops in a sleep the one that does not is, in nanoseconds.
 static positive compositor_slept_clock(void)
@@ -46,31 +51,14 @@ static positive compositor_slept_clock(void)
         return ahead < 0 ? 0 : (positive)ahead;
 }
 
-static void compositor_resume(int cycle)
+// Whether the machine slept between two looks: the boot clock's lead `gap` is more than COMPOSITOR_SLEPT_NS past the lead seen at the last
+// look (kept), which is the length of a sleep. The lead is kept either way.
+static b32 compositor_slept(positive gap, positive *seen)
 {
-        if (compositor.card < 0)
-                return;
+        b32 slept = gap > *seen + COMPOSITOR_SLEPT_NS;
 
-        // Every screen's pipe, each showing its rectangle of the space.
-        for (unsigned int at = 0; cycle && !compositor_virtual() && at < compositor.outputs; at++)
-        {
-                struct compositor_output *output = &compositor.output[at];
-                struct compositor_crtc off = {0, 0, output->crtc, 0, 0, 0, 0, 0, {0}};
-                struct compositor_crtc on = {(unsigned long)address_of output->connector, 1, output->crtc,
-                                             output->fb ? output->fb : compositor.fb,
-                                             output->turned == 2 ? 0 : (unsigned int)compositor.screen[at][0],
-                                             output->turned == 2 ? 0 : (unsigned int)compositor.screen[at][1],
-                                             0, 1, output->mode};
-
-                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
-                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of on);
-        }
-
-        // What the plane wears and where it was is whatever the driver put back: say it all again.
-        compositor.cursor.plane.scale = 0;
-        compositor.mirror_stale = 1;
-        compositor_damage(0, 0, compositor.width, compositor.height);
-        compositor_cursor_move();
+        *seen = gap;
+        return slept;
 }
 
 // A line in the machine's log: the compositor's own output goes where its parent put it.
@@ -98,30 +86,109 @@ static void compositor_kmsg(string_address text, positive value, string_address 
         system_close(handle);
 }
 
+// input.c's, for the wake: a device's reports read (a device gone is let go of there), and what no device has down let go.
+static void compositor_input_read(unsigned int at);
+static void compositor_input_dropped(unsigned int at, positive now);
+static void compositor_input_add(unsigned int number);
+
+/*
+        The inputs after a wake: a device whose descriptor answers ENODEV went with the sleep (a USB device reset on resume is
+        another device under the same name) and is read, which lets it go and all it held; every device there now is opened
+        (one already open is passed over) where /dev/input is watched; and what no device has down is let go. The count of devices let go, and of opened.
+*/
+#define COMPOSITOR_EVIOCGVERSION 0x80044501u
+static void compositor_inputs_woke(positive now, unsigned int *gone, unsigned int *opened)
+{
+        unsigned int before = 0, after = 0;
+
+        *gone = 0;
+        for (unsigned int at = 0; at < compositor.input_count && at < COMPOSITOR_INPUTS; at++)
+        {
+                int version = 0;
+
+                if (compositor.inputs[at] < 0)
+                        continue;
+                before++;
+                if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCGVERSION, address_of version) == -COMPOSITOR_ENODEV)
+                {
+                        compositor_input_read(at);
+                        *gone += compositor.inputs[at] < 0;
+                }
+        }
+        // Looked for again where the compositor watches /dev/input for devices (a check's compositor does not).
+        for (unsigned int number = 0; compositor.watch >= 0 && number < COMPOSITOR_DEVICES; number++)
+                compositor_input_add(number);
+        for (unsigned int at = 0; at < compositor.input_count && at < COMPOSITOR_INPUTS; at++)
+                after += compositor.inputs[at] >= 0;
+        *opened = after + *gone > before ? after + *gone - before : 0;
+        if (compositor.input_count)
+                compositor_input_dropped(0, now);
+}
+
+/*
+        A wake, however it was heard (how: 1 the clocks, 2 the sleep verb's signal). One heard a second way within the first
+        pass's half second is the same wake, and is only said. What a wake lets go of and asks for is above.
+*/
+#define COMPOSITOR_WAKE_CLOCK 1u
+#define COMPOSITOR_WAKE_SIGNAL 2u
+
+static void compositor_woke(positive now, unsigned int how)
+{
+        unsigned int gone = 0, opened = 0;
+        int flip = compositor.flip_pending;
+
+        // The lead the sleep put on the boot clock is this wake's, however it was heard: the next look finds no other in it.
+        (void)compositor_slept(compositor_slept_clock(), &compositor.asleep);
+        if (compositor.wake_stage == 1 && compositor.wake_at > now && compositor.wake_at - now <= COMPOSITOR_WAKE_FIRST_NS)
+        {
+                if (compositor.table)
+                        compositor.table->wake_how |= how;
+                return;
+        }
+        compositor.wakes++;
+        if (compositor.table)
+                compositor.table->wakes = compositor.wakes, compositor.table->wake_how = how;
+        // The flip the sleep cut off is let go of as landed, and what it held back given back; both plates are drawn whole.
+        if (flip)
+                compositor_flip_done();
+        compositor_stale_all(compositor_front_stale, &compositor_front_stale_any, &compositor_front_parts);
+        compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
+        compositor_inputs_woke(now, &gone, &opened);
+        // What the plane wears and where it was is whatever the driver put back: said again, and the whole space drawn.
+        compositor.cursor.plane.scale = 0;
+        compositor.mirror_stale = 1;
+        compositor_damage_space();
+        compositor_cursor_move();
+#ifdef MOONWATER_GPU_C
+        compositor_gpu_resumed();
+#endif
+        compositor.wake_stage = 1;
+        compositor.wake_at = now + COMPOSITOR_WAKE_FIRST_NS;
+        compositor_kmsg(how == COMPOSITOR_WAKE_SIGNAL ? (string_address) "compositor: wake, told by the sleep verb: "
+                                                      : (string_address) "compositor: wake, seen by the clocks: ",
+                        0, flip ? (string_address) "a flip in flight let go of; the screens are set again at +0.5 s and +2.5 s"
+                                : (string_address) "no flip in flight; the screens are set again at +0.5 s and +2.5 s");
+        if (gone)
+                compositor_kmsg((string_address) "compositor: wake: input devices that went with the sleep, let go of: ", gone, (string_address) "");
+        if (opened)
+                compositor_kmsg((string_address) "compositor: wake: input devices opened: ", opened, (string_address) "");
+}
+
 // Looked at whenever the loop wakes: whether the machine slept since it last did.
 static void compositor_wake_check(positive now)
 {
-        positive asleep = compositor_slept_clock();
-
-        if (asleep > compositor.asleep + COMPOSITOR_SLEPT_NS)
-        {
-                compositor_resume(0);
-#ifdef MOONWATER_GPU_C
-                compositor_gpu_resumed();
-#endif
-                compositor.wake_stage = 1;
-                compositor.wake_at = now + COMPOSITOR_WAKE_FIRST_NS;
-        }
-        compositor.asleep = asleep;
+        if (compositor_slept(compositor_slept_clock(), &compositor.asleep))
+                compositor_woke(now, COMPOSITOR_WAKE_CLOCK);
 }
 
-// The redraws that follow a wake, when they are due.
+// The passes after a wake, when they are due: the screens taken again, each crtc set anew (compositor_space_take's regained), once the loop
+// may take them (no flip in flight, no present's jobs on the card: compositor.space_wanted).
 static void compositor_wake_pass(positive now)
 {
         if (!compositor.wake_stage || now < compositor.wake_at)
                 return;
-
-        compositor_resume(compositor.wake_stage == 1);
+        compositor.retrain = 1;
+        compositor.space_wanted = 1;
         if (++compositor.wake_stage == 3)
                 compositor.wake_stage = 0;
         else

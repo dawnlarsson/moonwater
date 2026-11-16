@@ -1367,6 +1367,143 @@ static void check_compositor_card_walk(void)
 }
 
 /*
+        A machine that slept and woke (compositor_woke, compositor_wake_pass, compositor_space_take's regained), on the fake card. The
+        wake is heard by the clocks (the boot clock's lead grew) or by the sleep verb's SIGUSR2, and the two of one wake are one. A flip
+        the sleep cut off never sends its event: it is let go of as landed, with the picture it held, and the whole space is drawn. At
+        the wake's passes every connector is asked again and every crtc turned off and set anew, so a monitor that came back at another
+        mode is the one set; a take that waits for a flip in flight still owes the mode set; one the card refuses is looked at again
+        until one is set; and a guest's card is set without an off. Before this a wake damaged the space and, at half a second, set the
+        crtc off and on again with the connector and the mode it had before, whatever came of it: a refused set left the screen off.
+*/
+static void check_compositor_wake(void)
+{
+    static struct windows table;
+    positive seen = 0, now;
+    unsigned int sets;
+    b32 status;
+
+    check("wake: a lead of the boot clock that grew by less than COMPOSITOR_SLEPT_NS is no sleep",
+          !compositor_slept(COMPOSITOR_SLEPT_NS, &seen) && seen == COMPOSITOR_SLEPT_NS);
+    check("wake: one that grew by a sleep is one, and the lead is kept",
+          compositor_slept(5000000000ull, &seen) && seen == 5000000000ull && !compositor_slept(5000000000ull + 1000, &seen));
+
+    // SIGUSR2, the sleep verb's word, is read off the compositor's descriptor as itself.
+    {
+        bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
+        positive code = 0;
+
+        if (child == 0)
+        {
+            compositor.signals = compositor_signals();
+            system_call_2(syscall(kill), (positive)system_call(syscall(getpid)), COMPOSITOR_SIGUSR2);
+            system_call_1(syscall(exit_group), compositor_signal_taken() == COMPOSITOR_SIGUSR2 ? 0 : 3);
+        }
+        if (child > 0)
+            waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&code, 0, 0);
+        check("wake: the sleep verb's SIGUSR2 is read off the compositor's descriptor, and does not end it",
+              child > 0 && waited == child && (code & 0xffff) == 0);
+    }
+
+    if (!card_walk_begin(1ul << 0, 0, 0, 0) || compositor_cards_walk() != 0)
+    {
+        check("wake: the fake card is taken", false);
+        card_walk_end();
+        return;
+    }
+    memory_zero(&table, sizeof(table));
+    compositor.table = &table;
+    compositor.watch = -1;
+    compositor_table_outputs();
+
+    // A flip in flight when the machine slept, a window's picture held for it.
+    now = clock_monotonic_nanoseconds();
+    compositor.flip_pending = 1, compositor.flip_issued = now - 1000, compositor.flip_row = -1;
+    compositor.held_rows = 1u << 3, compositor.taken_held[3] = 9;
+    compositor.damages = 0;
+    compositor_woke(now, COMPOSITOR_WAKE_CLOCK);
+    check("wake: the flip the sleep cut off is let go of as landed, and the picture it held is said taken",
+          !compositor.flip_pending && !compositor.held_rows && table.shown[3] == 9);
+    {
+        int whole = 0;
+
+        for (unsigned int at = 0; at < compositor.damages; at++)
+            whole |= compositor.damage[at][0] <= 0 && compositor.damage[at][1] <= 0 && compositor.damage[at][2] >= compositor.width &&
+                     compositor.damage[at][3] >= compositor.height;
+        check("wake: the whole space is to be drawn, and the screens are taken again at half a second",
+              whole && compositor.wake_stage == 1 && compositor.wake_at == now + COMPOSITOR_WAKE_FIRST_NS &&
+                  !compositor.retrain);
+    }
+    compositor_woke(now + 1000, COMPOSITOR_WAKE_SIGNAL);
+    check("wake: the sleep verb's word of the same wake is that wake, heard both ways",
+          compositor.wakes == 1 && table.wakes == 1 && table.wake_how == (COMPOSITOR_WAKE_CLOCK | COMPOSITOR_WAKE_SIGNAL) &&
+              compositor.wake_at == now + COMPOSITOR_WAKE_FIRST_NS);
+
+    // The monitor came back at another mode. The pass asks for the take; the loop makes it once nothing holds the card (space_wanted).
+    card_fake.width = 1280, card_fake.height = 720;
+    compositor_wake_pass(now + COMPOSITOR_WAKE_FIRST_NS - 1);
+    check("wake: nothing is taken before the pass is due", !compositor.retrain && compositor.wake_stage == 1);
+    compositor_wake_pass(now + COMPOSITOR_WAKE_FIRST_NS);
+    check("wake: at half a second the screens are asked for again, and the next pass is at two and a half",
+          compositor.retrain && compositor.space_wanted && compositor.wake_stage == 2 &&
+              compositor.wake_at == now + COMPOSITOR_WAKE_FIRST_NS + COMPOSITOR_WAKE_SECOND_NS);
+    sets = card_fake.set_count;
+    compositor_space_retake();
+    check("wake: the connector is asked again and the screen taken at the mode it came back with",
+          compositor.outputs == 1 && compositor.width == 1280 && compositor.height == 720 && compositor.output[0].mode.hdisplay == 1280 &&
+              !compositor.retrain && !compositor.space_wanted && table.wake_sets == 1);
+    check("wake: its crtc is turned off and then set, a mode set, showing the compositor's scanout",
+          card_fake.set_count >= sets + 2 && sets + 1 < 32 && card_fake.set_was[sets] == 0 && card_fake.set_was[sets + 1] == 1 &&
+              card_fake.crtc_fb == compositor.fb && compositor.on_screen == compositor.fb);
+
+    // The second pass, with a flip in flight: the take waits for it, and the mode set is still owed.
+    compositor.flip_pending = 1, compositor.flip_issued = clock_monotonic_nanoseconds(), compositor.flip_row = -1;
+    compositor_wake_pass(now + COMPOSITOR_WAKE_FIRST_NS + COMPOSITOR_WAKE_SECOND_NS);
+    sets = card_fake.set_count;
+    status = compositor_space_take(0);
+    check("wake: a take while a flip is in flight waits for it, and the wake's mode set is still owed",
+          status == 0 && compositor.space_wanted && compositor.retrain && card_fake.set_count == sets && compositor.wake_stage == 0);
+    compositor_flip_done();
+    compositor_space_retake();
+    check("wake: once it has landed the take sets the crtc anew, though nothing of the screen changed",
+          !compositor.retrain && card_fake.set_count >= sets + 2 && card_fake.set_was[sets] == 0 && card_fake.set_was[sets + 1] == 1 &&
+              table.wake_sets == 2);
+
+    // A wake whose set the card refuses (a link not up yet): the screen is looked at again, as one that went, until a take sets it.
+    compositor_woke(now + 60000000000ull, COMPOSITOR_WAKE_SIGNAL);
+    compositor_wake_pass(compositor.wake_at);
+    card_fake.refuse_sets = 8; // every set of the take: the crtc's, and the one a present makes of a flip refused three times running
+    compositor_space_retake();
+    card_fake.refuse_sets = 0;
+    check("wake: a set the card refuses leaves the screen to be looked at again, and says so",
+          compositor.screens_gone && !compositor.retrain && table.wake_refused == 1 && compositor.wakes == 2 && table.wake_how == COMPOSITOR_WAKE_SIGNAL);
+    // Its present's flip was refused too, which swaps the plates: the take freed the scanout it began with, which was the spare by then.
+    check("wake: and the take kept both plates it composes into mapped (a refused flip had swapped them)",
+          compositor.scanout && system_call_3(syscall(msync), (positive)compositor.scanout, compositor.scanout_bytes, 1) == 0 &&
+              (!compositor_spare.fb || system_call_3(syscall(msync), (positive)compositor_spare.pixels, compositor_spare.bytes, 1) == 0));
+    sets = card_fake.set_count;
+    compositor_space_retake();
+    check("wake: the look after it sets the crtc anew, off and on",
+          !compositor.screens_gone && compositor.outputs == 1 && card_fake.set_count >= sets + 2 && card_fake.set_was[sets] == 0 &&
+              card_fake.set_was[sets + 1] == 1 && card_fake.crtc_fb == compositor.fb);
+
+    // A guest's card: set again, never turned off.
+    string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+    compositor.retrain = 1;
+    sets = card_fake.set_count;
+    compositor_space_retake();
+    {
+        unsigned int offs = 0;
+
+        for (unsigned int at = sets; at < card_fake.set_count && at < 32; at++)
+            offs += card_fake.set_was[at] == 0;
+        check("wake: a guest's card has its crtc set again and not turned off",
+              !compositor.retrain && card_fake.set_count > sets && card_fake.set_count < 32 && offs == 0);
+    }
+    compositor.table = 0;
+    card_walk_end();
+}
+
+/*
         The wait for a screen (compositor_screen_wait) on the socket the kernel's uevents come down, here one end of a pair: a
         uevent of the drm subsystem ends it at once, one of another subsystem does not, and with none it ends at its time.
 */

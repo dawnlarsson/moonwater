@@ -1100,6 +1100,9 @@ struct windows
         unsigned int gpu_faults; char gpu_fault[320]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault, GPU_FAULT_BYTES): "" for none yet
         unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
         unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
+        // The machine's wakes the compositor heard (compositor_woke), how it heard the last (1 the clocks, 2 the sleep verb's SIGUSR2, 3 both), and the
+        // takes of the screens after them that set every crtc again and that could not (no screen yet, or the card refused: looked at again in 5 s).
+        unsigned int wakes, wake_how, wake_sets, wake_refused;
         unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
         char gpu_node_bus[32], gpu_display_bus[32]; // the chosen node's bus and the display's ("pci:..."), "" when not known
         unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner

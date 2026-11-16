@@ -691,6 +691,17 @@ static void compositor_crtc_off(unsigned int crtc)
         system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
 }
 
+/*
+        Whether the card is a guest's display (a virtual machine's, or the kernel's own vkms): one with no link to train, whose crtcs a wake
+        sets without turning them off first (virtio-gpu does not always get its host window back from an off).
+*/
+static int compositor_virtual(void)
+{
+        static const char *const guests[] = {"bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
+
+        return compositor_driver_in(guests, sizeof(guests) / sizeof(guests[0]));
+}
+
 // Whether two modes are the same timing: what a crtc scans at, whatever the name says.
 static int compositor_mode_same(const struct compositor_mode *a, const struct compositor_mode *b)
 {
@@ -854,7 +865,7 @@ static b32 compositor_space_take(int first)
         unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
         b32 status;
-        int carried = 0, regained = 0;
+        int carried = 0, regained = 0, later = !first;
 
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
@@ -915,11 +926,16 @@ static b32 compositor_space_take(int first)
                         the screens were on are turned off first, and what follows turns each on: a commit that enables a crtc is
                         always a mode set. Taken as the same, the screen that came back stayed dark with the desktop running.
                 */
-                if (!first && compositor.screens_gone)
+                /*
+                        A wake is the same (compositor_woke, retrain): what the card restored may be a crtc that says it is on and a
+                        link that is not, and a monitor that came back may be another connector or at other modes, which this take
+                        read again. Each crtc is set anew, turned off first but on a guest's card.
+                */
+                if (!first && (compositor.screens_gone || compositor.retrain))
                 {
-                        for (unsigned int at = 0; at < was_count; at++)
+                        for (unsigned int at = 0; at < was_count && (compositor.screens_gone || !compositor_virtual()); at++)
                                 compositor_crtc_off(was_crtc[at]);
-                        compositor.screens_gone = 0;
+                        compositor.screens_gone = compositor.retrain = 0;
                         regained = 1;
                 }
                 same = !first && !regained && lit == compositor.outputs && box[2] == compositor.width && box[3] == compositor.height;
@@ -1124,7 +1140,11 @@ static b32 compositor_space_take(int first)
                                 compositor_crtc_off(found.crtc[n]);
                 for (unsigned int at = 0; at < extras; at++)
                         system_control(compositor.card, COMPOSITOR_RMFB, address_of extra[at]);
-                if (old_fb && old_fb != compositor.fb)
+                // Only a scanout this take replaced (fb is the one it made). A present above whose flip the card refused swaps the
+                // plates, which leaves compositor.fb the other plate and the scanout taken at the start the spare: freed as old, the
+                // spare's mapping went while the compositor still composed into it, and the next present wrote into memory no longer
+                // mapped (the wake's take after a refused one was a compositor that died of it).
+                if (old_fb && old_fb != fb)
                         compositor_scanout_free(old_fb, old_handle, old_pixels, old_bytes);
 
                 if (!refused)
@@ -1134,8 +1154,12 @@ static b32 compositor_space_take(int first)
                         if (refused >> n & 1)
                                 compositor_kmsg((string_address) "compositor: the card refused a screen, which is left dark: ", 0,
                                                 (string_address)found.name[n]);
+                // The only screen refused: it is dark, and is looked at again as a screen that went is, until a take sets it.
                 if (lit == 1)
+                {
+                        compositor.screens_gone = later;
                         return -COMPOSITOR_EINVAL;
+                }
                 dropped |= refused;
                 was_count = compositor.outputs;
                 for (unsigned int at = 0; at < was_count; at++)

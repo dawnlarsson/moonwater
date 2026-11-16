@@ -290,6 +290,19 @@ static bool desktop_alive(positive pid)
 }
 
 /*
+        The machine woke (moonwater sleep and hibernate, awake again): the compositor of the machine's own desktop is told
+        with SIGUSR2, so it takes the screens again at once and does not wait for a key or the clocks to say it slept
+        (compositor_woke). Whether there was one to tell.
+*/
+#define DESKTOP_SIGUSR2 12
+static bool desktop_woke(void)
+{
+        positive compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+
+        return desktop_alive(compositor) && system_call_2(syscall(kill), compositor, DESKTOP_SIGUSR2) == 0;
+}
+
+/*
         The compositor of the machine's own desktop, ended for another desktop to have the display. A profile's
         session (KWin), weston or any other compositor cannot become the card's master while this one is: KWin
         says it has no outputs and Plasma that it has no screen to put a panel on. The supervisor goes first so that
