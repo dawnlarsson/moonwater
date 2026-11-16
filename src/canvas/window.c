@@ -1786,6 +1786,8 @@ static const char *const kernel_notice_quiet[] = {
     "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
     "ACPI BIOS Error",        // firmware's own tables, on most boards
     "Direct firmware load",   // an optional blob that is not there
+    "no codecs found",        // an HD-Audio controller with nothing on its link: a board whose analog sound is a USB card (the box's MSI PRO X670-P has
+                              // 0db0:3130, and says this of 0000:16:00.6 at every boot while the iGPU's HDMI card plays); a machine with no card at all says so in the audio service
     "RDSEED32 is broken",     // a CPU bug the kernel works around
     "kauditd_printk_skb",     // audit's count of the messages it suppressed
     "Moonwater starting",     // the module's own banner, printed at the alert level so a quiet boot still shows it

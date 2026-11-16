@@ -341,7 +341,8 @@ static const struct iss_kernel_line iss_kernel_lines[] = {
     {4, "amdgpu 0000:14:00.0: Failed to setup vendor infoframe on connector HDMI-A-1: -22", 0, 0},
     {5, "amdgpu 0000:14:00.0: GPU reset begin! on a ring timeout", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
     {6, "[drm:amdgpu_dm_init] DM_PPLIB: values for V-Blank", 0, 0},
-    {3, "snd_hda_intel 0000:14:00.6: no codecs found!", WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_ERROR},
+    {3, "snd_hda_intel 0000:16:00.6: no codecs found!", 0, 0},
+    {3, "snd_hda_intel 0000:14:00.6: no codecs found!", 0, 0},
     {4, "snd_hda_intel 0000:14:00.6: codec error timeout", WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_WARNING},
     {4, "FAT-fs (nvme0n1p1): Volume was not properly unmounted. Some data may be corrupt. Please run fsck.", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_WARNING},
     {3, "EXT4-fs error (device sda1): ext4_find_entry:1455: inode #2: comm ls: reading directory lblock 0", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
@@ -421,7 +422,7 @@ static void iss_rows_kernel(void)
 
                 raised += kernel_notices_record(&k, record, n, 1000);
         }
-        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 27);
+        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 26);
         memory_zero(&k, sizeof(k));
         k.fd = -2;
         check("kernel notices: a record with no semicolon is no record", kernel_notices_record(&k, "3,1,2,-", 7, 1) == 0);
