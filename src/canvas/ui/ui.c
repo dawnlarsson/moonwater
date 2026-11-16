@@ -16050,12 +16050,39 @@ static inline unsigned int ui_stretch_blend(unsigned int a, unsigned int b, unsi
 // past the top and positive past the bottom. True when it was.
 static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull);
 
+// Where each row of a picture of view rows, pulled band pixels past an end, is shown: ui_stretch_map, the distance from the pinned end in 256ths of a row.
+static fn ui_stretch_shape(int view, int band)
+{
+        b64 raw, grow;
+
+        band = band > view / 2 ? view / 2 : band;
+        raw = (b64)band * UI_STRETCH_K_Q4 * UI_ONE / 16 / view;
+        grow = ui_qdiv(ui_qmul(raw, (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16), raw + (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16);
+        // Where the picture's row i is shown (the distance from the pinned end, 256ths of a row): u + grow (u - u^2 + u^3/3), of the view
+        for (int i = 0; i <= view; i++)
+        {
+                b64 u = (b64)i * UI_ONE / view, u2 = ui_qmul(u, u), u3 = ui_qmul(u2, u), shown = u + ui_qmul(grow, u - u2 + u3 / 3);
+
+                ui_stretch_map[i] = (int)((shown * view) >> (UI_Q - 8));
+        }
+}
+
+// The row of the picture (256ths, from the pinned end) that is shown d rows from the pinned end; at is where the last one was found, a walk's.
+static int ui_stretch_from(int view, int d, int address_to at)
+{
+        int target = d * 256, from;
+
+        while (*at < view - 1 && ui_stretch_map[*at + 1] <= target)
+                (*at)++;
+        from = *at * 256 + (ui_stretch_map[*at + 1] > ui_stretch_map[*at] ? (target - ui_stretch_map[*at]) * 256 / (ui_stretch_map[*at + 1] - ui_stretch_map[*at]) : 0);
+        return from > (view - 1) * 256 ? (view - 1) * 256 : from < 0 ? 0 : from;
+}
+
 static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull)
 {
         int x0 = x < 0 ? 0 : x, x1 = x + width > ui->width ? ui->width : x + width;
         int y0 = y < 0 ? 0 : y, y1 = y + height > ui->height ? ui->height : y + height;
         int view = y1 - y0, wide = x1 - x0, band = pull < 0 ? -pull : pull, at = 0;
-        b64 raw, grow;
         positive need;
 
         if (!pull || view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
@@ -16066,9 +16093,6 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
                 ui->scene->lost = UI_LOST_STRETCH;
                 return false;
         }
-        band = band > view / 2 ? view / 2 : band;
-        raw = (b64)band * UI_STRETCH_K_Q4 * UI_ONE / 16 / view;
-        grow = ui_qdiv(ui_qmul(raw, (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16), raw + (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16);
         need = (positive)wide * (positive)view;
         if (need > ui_stretch_room)
         {
@@ -16082,26 +16106,16 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
                 ui_stretch_rows = (unsigned int address_to)mapped;
                 ui_stretch_room = room / 4;
         }
-        // Where the picture's row i is shown (the distance from the pinned end, 256ths of a row): u + grow (u - u^2 + u^3/3), of the view
-        for (int i = 0; i <= view; i++)
-        {
-                b64 u = (b64)i * UI_ONE / view, u2 = ui_qmul(u, u), u3 = ui_qmul(u2, u), shown = u + ui_qmul(grow, u - u2 + u3 / 3);
-
-                ui_stretch_map[i] = (int)((shown * view) >> (UI_Q - 8));
-        }
+        ui_stretch_shape(view, band);
         memory_copy_rect_u32(ui_stretch_rows, (unsigned long)wide, ui->pixels + (unsigned long)y0 * ui->pitch + (unsigned long)x0, ui->pitch,
                              (unsigned long)wide, (unsigned long)view);
         for (int d = 0; d < view; d++)
         {
-                int target = d * 256, from, row, next, line = pull < 0 ? d : view - 1 - d;
+                int from = ui_stretch_from(view, d, &at), row, next, line = pull < 0 ? d : view - 1 - d;
                 unsigned int f;
                 const unsigned int address_to a, address_to b;
                 unsigned int address_to to;
 
-                while (at < view - 1 && ui_stretch_map[at + 1] <= target)
-                        at++;
-                from = at * 256 + (ui_stretch_map[at + 1] > ui_stretch_map[at] ? (target - ui_stretch_map[at]) * 256 / (ui_stretch_map[at + 1] - ui_stretch_map[at]) : 0);
-                from = from > (view - 1) * 256 ? (view - 1) * 256 : from < 0 ? 0 : from;
                 // the distance from the pinned end is the row from the top at the top, and from the bottom at the bottom
                 if (pull > 0)
                         from = (view - 1) * 256 - from;
@@ -16144,6 +16158,25 @@ static b32 ui_scroll_pull(struct ui address_to ui, const struct ui_scroll addres
         int rest = ui_scroll_rest(s, drawn, height);
 
         return drawn != rest && ui_stretch(ui, x, y, width, height, drawn - rest);
+}
+
+/*
+        Where a point of the window is on the picture a pull stretched: the row (device pixels) of the region at rest that is drawn at row y of
+        the screen, which is y itself for a region not pulled. A stretched picture shows the rows near the pinned end larger, so what is under
+        the hand is a row nearer the end than the one at rest there, and every hit, hover and press of the region goes through this first.
+*/
+static int ui_scroll_unpull(const struct ui address_to ui, const struct ui_scroll address_to s, int drawn, int top, int height, int y)
+{
+        int pull = drawn - ui_scroll_rest(s, drawn, height), y0 = top < 0 ? 0 : top, y1 = top + height > ui->height ? ui->height : top + height;
+        int view = y1 - y0, at = 0, from;
+
+        if (!pull || view < 8 || view > UI_STRETCH_VIEW || y < y0 || y >= y1)
+                return y;
+        ui_stretch_shape(view, pull < 0 ? -pull : pull);
+        from = ui_stretch_from(view, pull < 0 ? y - y0 : y1 - 1 - y, &at);
+        if (pull > 0)
+                from = (view - 1) * 256 - from;
+        return y0 + (from >> 8);
 }
 
 // A font engine and its atlas, atlas pixels a side, as one mapping. The default, 512, is 256 KiB of the image's address space
@@ -20337,15 +20370,15 @@ static fn ui_list_row_changed(struct ui address_to ui, struct ui_list address_to
 static int ui_list_hit(const struct ui address_to ui, const struct ui_list address_to l, int x, int y)
 {
         // The rows are drawn at rest (ui_list_draw) unless the list is taller than UI_STRETCH_VIEW: a pull past an end stretches the picture
-        // and moves no row, so the hit boxes are where the rows are drawn, at rest too.
+        // and moves no row, so the hit boxes are the rows at rest, and a point is looked for at the row of them it is drawn over (ui_scroll_unpull).
         int at_rest = l->scroll.scroll, most = ui_scroll_most(&l->scroll), inside, across, wide;
 
         if (l->h <= UI_STRETCH_VIEW)
                 at_rest = at_rest < 0 ? 0 : at_rest > most ? most : at_rest;
-        inside = y - l->y + at_rest;
         ui_list_across(l, &across, &wide);
         if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
+        inside = ui_scroll_unpull(ui, &l->scroll, l->scroll.scroll, l->y, l->h, y) - l->y + at_rest;
         if (l->virtual)
         {
                 // A row's number is how many rows are above the point: no place is looked for.
@@ -21837,11 +21870,14 @@ static int ui_page_column_hit(const struct ui address_to ui, const struct ui_pag
 {
         // The groups are drawn at rest (ui_page_column): a pull past an end stretches the picture and moves no group, so the hit boxes
         // are where the groups are drawn, at rest too, as a list's rows are (ui_list_hit).
-        int group = (y - p->top + ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top)) / ui_dev(ui, UI_ROW);
+        int group;
 
-        if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x) || group >= p->column.count)
+        if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x))
                 return -1;
-        return group;
+        group = (ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, p->top, p->bottom - p->top, y) - p->top +
+                 ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top)) / ui_dev(ui, UI_ROW);
+
+        return group >= p->column.count ? -1 : group;
 }
 
 // The column's groups: their names, cut to the column, and how many.

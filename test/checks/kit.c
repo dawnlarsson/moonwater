@@ -5381,6 +5381,65 @@ static int virtual_settle(struct ui address_to ui, struct ui_list address_to l, 
         return frames;
 }
 
+/*
+        A region pulled past an end is its picture stretched (ui_stretch), the rows near the pinned end larger, and what the pointer is over is the
+        row of the picture there: the picture is made of lines that say their own number, stretched, and a point's hit must be on the row of the
+        line drawn under it, for every line of the view, past the top and past the end.
+*/
+static unsigned char pull_shown[200];
+
+static void pull_draw(struct ui address_to ui, unsigned int address_to pixels, int top, int height, int pull)
+{
+        for (int line = 0; line < height; line++)
+                for (int at = 0; at < 400; at++)
+                        pixels[(top + line) * 400 + at] = 0xff000000u | (unsigned int)line;
+        ui_stretch(ui, 0, top, 400, height, pull);
+        for (int line = 0; line < height; line++)
+                pull_shown[line] = (unsigned char)(pixels[(top + line) * 400 + 30] & 0xff);
+}
+
+static fn check_kit_pull_hit(void)
+{
+        static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
+        static struct ui_list l;
+        static struct ui_page p;
+        struct ui ui = terminal.ui;
+        int row, most, off_top = 0, off_far = 0, moved = 0, off_column = 0;
+
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 200, ui.top = 0, ui.bottom = 200, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
+        row = ui_dev(&ui, UI_ROW);
+        virtual_make(&ui, &l, 100);
+        most = ui_scroll_most(&l.scroll);
+        for (int past = 0; past < 2; past++)
+        {
+                int pull = past ? 70 : -70;
+
+                l.scroll.scroll = past ? most + 70 : -70;
+                pull_draw(&ui, pixels, l.y, l.h, pull);
+                for (int line = 0; line < l.h; line++)
+                {
+                        int want = (pull_shown[line] + (past ? most : 0)) / row, got = ui_list_hit(&ui, &l, l.x + 10, l.y + line);
+
+                        moved += want != (line + (past ? most : 0)) / row;
+                        if (got != want)
+                                past ? off_far++ : off_top++;
+                }
+        }
+        check("kit list: a row is hit where the pulled picture draws it, every line of a list pulled past its top and past its end", !off_top && !off_far && moved > 0);
+
+        // The settings column's groups the same: ten groups in a column of five, pulled past the top.
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 5 * row, p.top = 10, p.bottom = 10 + 5 * row, p.column_on = 1, p.seam = 150;
+        p.column.count = 10;
+        p.column_scroll.view = p.column_scroll.height = 5 * row, p.column_scroll.content = 10 * row;
+        p.column_scroll.scroll = -(row - row / 4);
+        pull_draw(&ui, pixels, p.top, 5 * row, p.column_scroll.scroll);
+        for (int line = 0; line < 5 * row; line++)
+                off_column += ui_page_column_hit(&ui, &p, 10, p.top + line) != pull_shown[line] / row;
+        check("kit page: a column's group is hit where the pulled picture draws it, every line of a column pulled past its top", !off_column);
+}
+
 static fn check_kit_virtual(void)
 {
         static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
