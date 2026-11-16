@@ -1091,7 +1091,7 @@ static void case_surface(const char *name, int which)
                 xdg_toplevel_set_max_size(w.top, 300, 300);
                 wl_surface_commit(w.s);
                 break;
-        case 9: // fullscreen, maximized and minimized asked 300 times, every configure acknowledged with a buffer of its size
+        case 9: // fullscreen and maximized set and unset 300 times (minimized between), then a frame at the size the last configure said
         {
                 for (int i = 0; i < 300; i++)
                 {
@@ -1106,6 +1106,10 @@ static void case_surface(const char *name, int which)
                         if (i % 10 == 9)
                                 roundtrip_within(&c, 500);
                 }
+                // A minimized window may be given no frame (the protocol leaves it so): asked to be shown as it was before the last word.
+                xdg_toplevel_unset_fullscreen(w.top);
+                xdg_toplevel_unset_maximized(w.top);
+                wl_surface_commit(w.s);
                 int seen = w.configures;
                 roundtrip_within(&c, 1000);
                 int cw = w.cw > 0 ? w.cw : 500, ch = w.ch > 0 ? w.ch : 400;
@@ -1217,6 +1221,20 @@ static void case_input(const char *name, int which)
         }
         int cw = w.cw > 0 ? w.cw : 400, ch = w.ch > 0 ? w.ch : 300;
         frame_of(&c, w.s, shm_buffer(&c, cw, ch, 0xff303030u), cw, ch, 1000);
+        if (which == 2)
+        {
+                // A window of its own size somewhere: the pointer to the top left corner, then along the diagonal until it is over the window.
+                for (int i = 0; i < 40; i++)
+                        inject(2, 0, -100), inject(2, 1, -100);
+                for (int i = 0; i < 300 && !st.focus; i++)
+                {
+                        inject(2, 0, 8), inject(2, 1, 6);
+                        pump(&c, 3);
+                }
+                for (int i = 0; i < 6 && st.focus; i++)
+                        inject(2, 0, 8), inject(2, 1, 6); // inside, away from the edge
+                pump(&c, 30);
+        }
         for (int i = 0; i < 20 && !st.focus; i++)
         {
                 inject(2, 0, (i & 1) ? 3 : -3);

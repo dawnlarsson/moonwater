@@ -238,7 +238,7 @@ class Moonwater(Compositor):
                     return int(p)
         return None
 
-    def start_x(self):
+    def start_x(self, display=":91"):
         """Xwayland as the bowl's wrapper starts it: rootless, its window manager's connection given as -wm."""
         if self.args.real:
             return bool(self.display)
@@ -247,7 +247,7 @@ class Moonwater(Compositor):
         wm = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         wm.connect(self.WM)
         fd = wm.detach()
-        self.display = ":91"
+        self.display = display
         env = dict(self.env)
         self.t_xspawn = ns()
         self.xproc = subprocess.Popen(["Xwayland", self.display, "-rootless", "-wm", str(fd), "-nolisten", "tcp", "-noreset"],
@@ -655,7 +655,7 @@ def bench(args, comp):
                 results["startup"]["launch_to_first_ms"] = g["launch_to_first_ms"]
         # The X rows: Xwayland's start (the first X client's open and first frame), its animation, and the overlay.
         xs = os.path.join(args.bin, "x-stress")
-        if (not args.only or any(n.startswith("x") for n in args.only)) and os.path.exists(xs):
+        if (not args.only or any(n.startswith("x") or n == "edge" for n in args.only)) and os.path.exists(xs):
             if comp.start_x():
                 xenv = {"DISPLAY": comp.display}
                 xa = run_client(comp, [xs, "-m", "anim", "-t", str(args.seconds)], xenv, t0=True, timeout=args.seconds + 30)
@@ -665,11 +665,176 @@ def bench(args, comp):
                 print("  x-anim: " + " ".join(f"{k}={v}" for k, v in xa.items() if k in SHOWN or k == "_notes"), flush=True)
                 results["x-overlay"] = overlay(args, comp, xs, xenv)
                 print("  x-overlay: %s" % results["x-overlay"], flush=True)
+                if not args.only or "edge" in args.only:
+                    results.setdefault("edge", {}).update(x_edge(args, comp, xs))
             else:
                 results["x-anim"] = {"_notes": ["no Xwayland on this compositor here"]}
+        if not args.only or "edge" in args.only:
+            results.setdefault("edge", {}).update(edge_cases(args, comp))
     finally:
         comp.stop()
     return results
+
+
+def edge_cases(args, comp):
+    """wl-edge's cases, one a run: what the client saw (its CASE line), whether the compositor lived, and a fresh client's first
+    frame after it (the compositor is started again when it died, so the next case has one)."""
+    edge = os.path.join(args.bin, "wl-edge")
+    if not os.path.exists(edge):
+        return {}
+    names = subprocess.run([edge, "-l"], capture_output=True, text=True).stdout.split()
+    out = {}
+    fifo = ["-F", comp.fifo] if comp.fifo else []
+    for name in names:
+        if args.edge and name not in args.edge:
+            continue
+        env = dict(comp.env)
+        try:
+            p = subprocess.run([edge, "-c", name] + fifo, env=env, capture_output=True, text=True, timeout=25)
+            text = p.stdout
+        except subprocess.TimeoutExpired as e:
+            text = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            text = text or f"CASE {name} outcome=timeout ms=-1 detail=the_case_did_not_end"
+        r = {"outcome": "none", "ms": -1, "detail": ""}
+        for line in text.splitlines():
+            if line.startswith("CASE "):
+                for word in line.split()[2:]:
+                    k, _, v = word.partition("=")
+                    r[k] = float(v) if k == "ms" else v
+        time.sleep(0.2)
+        r["alive"] = comp.alive() if not args.real else True
+        rec = run_client(comp, [os.path.join(args.bin, "wl-stress"), "-m", "first"], timeout=8) if r["alive"] else {}
+        r["recover_ms"] = rec.get("connect_to_present_ms", -1)
+        out[name] = r
+        print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % (name, r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
+              flush=True)
+        if not r["alive"] or r["recover_ms"] < 0:
+            note(f"{comp.name}: did not come through edge case {name}" + ("" if r["alive"] else " (it died; started again)"))
+            comp.stop()
+            if not comp.start():
+                note(f"{comp.name}: did not start again after {name}: the rest of its edge cases are not run")
+                break
+    return out
+
+
+X_CASES = ["x-many-windows", "x-override-stacking", "x-grab-then-killed", "x-property-flood", "x-transient-chain", "x-selection-race",
+           "x-argb-overlay-toggle"]
+
+
+def x_alive(args, comp, xs):
+    """Whether the compositor's Xwayland still serves: an X client's first Present completes (ms), -1 when not."""
+    r = run_client(comp, [xs, "-m", "anim", "-t", "0.6", "-w", "200", "-h", "150"], {"DISPLAY": comp.display}, timeout=20)
+    return r.get("first_complete_ms", -1) if r.get("frames", 0) else -1
+
+
+def x_edge(args, comp, xs):
+    """The X edge cases (x-stress -m CASE), each judged as wl-edge's are, and Xwayland killed and started again."""
+    out = {}
+    env = {"DISPLAY": comp.display}
+    for name in X_CASES:
+        if args.edge and name not in args.edge:
+            continue
+        try:
+            p = subprocess.run([xs, "-m", name], env=dict(comp.env, **env), capture_output=True, text=True, timeout=40)
+            text = p.stdout
+        except subprocess.TimeoutExpired:
+            text = f"CASE {name} outcome=timeout ms=-1 detail=the_case_did_not_end"
+        r = {"outcome": "none", "ms": -1, "detail": ""}
+        for line in text.splitlines():
+            if line.startswith("CASE "):
+                for word in line.split()[2:]:
+                    k, _, v = word.partition("=")
+                    r[k] = float(v) if k == "ms" else v
+        r["alive"] = comp.alive() if not args.real else True
+        r["recover_ms"] = x_alive(args, comp, xs) if r["alive"] else -1
+        out[name] = r
+        print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % (name, r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
+              flush=True)
+        if r["recover_ms"] < 0:
+            note(f"{comp.name}: its Xwayland did not come through {name}")
+            return out
+    if args.real or (args.edge and "xwayland-restart" not in args.edge):
+        return out
+    # Xwayland killed: the compositor goes on, and an X client works again (Moonwater's is started again as its bowl would;
+    # the references start theirs again themselves, or do not).
+    t = ns()
+    for pid in comp.x_pids():
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    time.sleep(1.0)
+    r = {"outcome": "ok", "ms": -1, "detail": "-"}
+    if comp.name == "moonwater":
+        if comp.xproc:
+            comp.xproc.wait()
+        comp.xproc = None
+        comp.start_x(display=":92")
+    elif comp.name == "mutter" or comp.name == "kwin":
+        comp.x_before = set()
+        comp.find_display(10)
+    r["alive"] = comp.alive()
+    r["recover_ms"] = x_alive(args, comp, xs) if r["alive"] else -1
+    r["ms"] = (ns() - t) / 1e6
+    if not r["alive"]:
+        r["outcome"] = "closed"
+        r["detail"] = "the_compositor_ended_with_its_Xwayland"
+    elif r["recover_ms"] < 0:
+        r["outcome"] = "fail"
+        r["detail"] = "no_X_after_the_restart"
+    out["xwayland-restart"] = r
+    print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % ("xwayland-restart", r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
+          flush=True)
+    return out
+
+
+def edge_matrix(all_results, names):
+    """The edge cases as a matrix: each compositor's outcome, whether it lived, and Moonwater's verdict against the references'
+    (what they did is the expected behaviour where the protocol leaves it open)."""
+    cases = []
+    for n in names:
+        for k in ((all_results.get(n) or {}).get("edge") or {}):
+            if k not in cases:
+                cases.append(k)
+    if not cases:
+        return []
+    lines = ["", "Edge cases (outcome, then ms; ! = the compositor did not come through):", "%-30s" % "case" +
+             "".join("%-30s" % n for n in names) + "moonwater verdict"]
+    tally = {}
+    for k in cases:
+        row = "%-30s" % k
+        refs = set()
+        best = None
+        for n in names:
+            r = ((all_results.get(n) or {}).get("edge") or {}).get(k)
+            if not r:
+                row += "%-30s" % "-"
+                continue
+            bad = not r.get("alive") or r.get("recover_ms", -1) < 0
+            row += "%-30s" % (("!" if bad else "") + "%s %.0f" % (r["outcome"][:20], r["ms"]))
+            if n != "moonwater" and not bad and r["outcome"] not in ("skip", "none"):
+                refs.add(r["outcome"])
+                if r["ms"] >= 0:
+                    best = r["ms"] if best is None else min(best, r["ms"])
+        m = ((all_results.get("moonwater") or {}).get("edge") or {}).get(k)
+        if not m:
+            verdict = "-"
+        elif not m.get("alive") or m.get("recover_ms", -1) < 0:
+            verdict = "FAIL (did not come through)"
+        elif m["outcome"] in ("skip", "none"):
+            verdict = "not run"
+        elif m["outcome"] in ("stall", "timeout", "fail"):
+            verdict = "FAIL (" + m["outcome"] + ")"
+        elif refs and m["outcome"] not in refs:
+            verdict = "DIFFERS (references: " + ",".join(sorted(refs)) + ")"
+        elif best is not None and m["ms"] > 2 * best and m["ms"] - best > 5:
+            verdict = "SLOW (x%.1f of the best reference)" % (m["ms"] / best if best else 0)
+        else:
+            verdict = "pass" + ("" if refs else " (no reference ran it)")
+        tally[verdict.split()[0]] = tally.get(verdict.split()[0], 0) + 1
+        lines.append(row + verdict)
+    lines.append("moonwater: " + ", ".join(f"{v} {k}" for k, v in sorted(tally.items())))
+    return lines
 
 
 def overlay(args, comp, xs, xenv):
@@ -799,8 +964,10 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--compositors", default="moonwater,weston,kwin,mutter")
     ap.add_argument("--baseline", default="")
+    ap.add_argument("--edge", default="", help="only these edge cases (comma-separated)")
     args = ap.parse_args()
     args.only = [s for s in args.only.split(",") if s]
+    args.edge = [s for s in args.edge.split(",") if s]
     args.moonwater_options = args.moonwater_options.split()
     os.makedirs(args.work, exist_ok=True)
     kinds = {"moonwater": Moonwater, "weston": Weston, "kwin": KWin, "mutter": Mutter}
@@ -811,7 +978,8 @@ def main():
     shown = [n for n in names if all_results.get(n)]
     head = ["Wayland stress bench, %s, %s, %s, %d s a scenario, %s" % (platform.node(), time.strftime("%Y-%m-%d %H:%M"),
             "real machine" if args.real else f"headless {W}x{H}", args.seconds, " ".join(shown))]
-    lines = head + [""] + table(all_results, shown) + [""] + gaps(all_results, shown)
+    edge_free = {n: {k: v for k, v in (r or {}).items() if k != "edge"} for n, r in all_results.items()}
+    lines = head + [""] + table(edge_free, shown) + [""] + gaps(edge_free, shown) + edge_matrix(all_results, shown)
     if args.baseline and os.path.exists(args.baseline):
         old = json.load(open(args.baseline)).get("results", {}).get("moonwater") or {}
         new = all_results.get("moonwater") or {}

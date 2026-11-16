@@ -20,7 +20,10 @@
 #define _GNU_SOURCE
 #include <X11/Xlib-xcb.h>
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -306,6 +309,203 @@ static int run_overlay(Display *dpy, double seconds, int w, int h)
         return 0;
 }
 
+/* ---- the X edge cases: one CASE line each, as wl-edge's (test/wayland_stress/edge.c) ---- */
+static const char *x_case = "?";
+static uint64_t x_t0;
+
+static int x_io_error(Display *d)
+{
+        (void)d;
+        printf("CASE %s outcome=closed ms=%.3f detail=the_X_connection_was_lost\n", x_case, (double)(now_ns() - x_t0) / 1e6);
+        fflush(stdout);
+        _exit(0);
+        return 0;
+}
+
+static int x_error(Display *d, XErrorEvent *e)
+{
+        (void)d, (void)e;
+        return 0;
+}
+
+static Window x_window(Display *dpy, int x, int y, int w, int h, unsigned long colour, int override)
+{
+        XSetWindowAttributes a = {0};
+        a.override_redirect = override ? True : False;
+        a.background_pixel = colour;
+        Window win = XCreateWindow(dpy, DefaultRootWindow(dpy), x, y, (unsigned)w, (unsigned)h, 0, CopyFromParent, InputOutput, CopyFromParent,
+                                   CWOverrideRedirect | CWBackPixel, &a);
+        XMapWindow(dpy, win);
+        return win;
+}
+
+static int run_xcase(Display *dpy, const char *name)
+{
+        char detail[160] = "-";
+        x_case = name, x_t0 = now_ns();
+        XSetIOErrorHandler(x_io_error);
+        XSetErrorHandler(x_error);
+        if (!strcmp(name, "x-many-windows"))
+        {
+                // 120 windows mapped at once: Xwayland makes a surface (and buffers) for each, all as one Wayland client.
+                Window w[120];
+                for (int i = 0; i < 120; i++)
+                        w[i] = x_window(dpy, (i % 12) * 70, (i / 12) * 50, 64, 44, 0x100000u * (unsigned)(i % 16) + 0x3040u, 0);
+                XSync(dpy, False);
+                usleep(1500000);
+                for (int i = 0; i < 120; i++)
+                        XClearWindow(dpy, w[i]);
+                XSync(dpy, False);
+                usleep(500000);
+                snprintf(detail, sizeof(detail), "windows=120");
+        }
+        else if (!strcmp(name, "x-override-stacking"))
+        {
+                Window w[6];
+                for (int i = 0; i < 6; i++)
+                        w[i] = x_window(dpy, 100 + i * 30, 100 + i * 20, 200, 150, 0x203040u * (unsigned)(i + 1), 1);
+                for (int i = 0; i < 300; i++)
+                {
+                        XRaiseWindow(dpy, w[i % 6]);
+                        if (i % 7 == 0)
+                                XLowerWindow(dpy, w[(i / 7) % 6]);
+                        XFlush(dpy);
+                        usleep(2000);
+                }
+                XSync(dpy, False);
+        }
+        else if (!strcmp(name, "x-grab-then-killed"))
+        {
+                pid_t pid = fork();
+                if (pid == 0)
+                {
+                        Display *d2 = XOpenDisplay(NULL);
+                        if (!d2)
+                                _exit(1);
+                        Window g = x_window(d2, 50, 50, 300, 200, 0x804020u, 0);
+                        XSync(d2, False);
+                        usleep(300000);
+                        XGrabPointer(d2, g, False, ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+                        XGrabKeyboard(d2, g, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+                        XSync(d2, False);
+                        kill(getpid(), SIGKILL);
+                }
+                waitpid(pid, NULL, 0);
+                // A window of this client after the grabber is gone: shown, and it can take the keyboard.
+                Window w = x_window(dpy, 80, 80, 300, 200, 0x208040u, 0);
+                XSync(dpy, False);
+                usleep(300000);
+                XSetInputFocus(dpy, w, RevertToParent, CurrentTime);
+                XSync(dpy, False);
+                Window focus;
+                int revert;
+                XGetInputFocus(dpy, &focus, &revert);
+                snprintf(detail, sizeof(detail), "focus_is_new_window=%d", focus == w);
+        }
+        else if (!strcmp(name, "x-property-flood"))
+        {
+                Window w = x_window(dpy, 60, 60, 300, 200, 0x404080u, 0);
+                Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+                Atom state = XInternAtom(dpy, "_NET_WM_STATE", False), above = XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False);
+                XSync(dpy, False);
+                char title[64];
+                for (int i = 0; i < 20000; i++)
+                {
+                        int n = snprintf(title, sizeof(title), "title %d", i);
+                        XStoreName(dpy, w, title);
+                        XChangeProperty(dpy, w, net_name, utf8, 8, PropModeReplace, (unsigned char *)title, n);
+                        XChangeProperty(dpy, w, state, XA_ATOM, 32, PropModeReplace, (unsigned char *)&above, i & 1);
+                        XClassHint hint = {"x-stress", "XStress"};
+                        XSetClassHint(dpy, w, &hint);
+                        if ((i & 1023) == 1023)
+                                XFlush(dpy);
+                }
+                uint64_t t = now_ns();
+                XSync(dpy, False);
+                snprintf(detail, sizeof(detail), "sync_after_ms=%.1f", (double)(now_ns() - t) / 1e6);
+        }
+        else if (!strcmp(name, "x-transient-chain"))
+        {
+                Window w[5];
+                for (int i = 0; i < 5; i++)
+                {
+                        w[i] = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 40 + i * 40, 40 + i * 30, 300, 200, 0, 0, 0x205080u + (unsigned)i * 0x101010u);
+                        if (i)
+                                XSetTransientForHint(dpy, w[i], w[i - 1]);
+                        XMapWindow(dpy, w[i]);
+                }
+                XSetTransientForHint(dpy, w[0], w[4]); // a cycle
+                XSync(dpy, False);
+                usleep(500000);
+                XUnmapWindow(dpy, w[2]); // the middle of the chain goes
+                XDestroyWindow(dpy, w[1]);
+                XSync(dpy, False);
+                usleep(300000);
+        }
+        else if (!strcmp(name, "x-selection-race"))
+        {
+                Window w = x_window(dpy, 60, 60, 200, 100, 0x808040u, 0);
+                Atom clip = XInternAtom(dpy, "CLIPBOARD", False), target = XInternAtom(dpy, "UTF8_STRING", False), prop = XInternAtom(dpy, "XSTRESS", False);
+                XSync(dpy, False);
+                int owned = 0;
+                for (int i = 0; i < 500; i++)
+                {
+                        XSetSelectionOwner(dpy, clip, (i & 1) ? w : None, CurrentTime);
+                        XConvertSelection(dpy, clip, target, prop, w, CurrentTime);
+                        owned += XGetSelectionOwner(dpy, clip) == w;
+                        while (XPending(dpy))
+                        {
+                                XEvent e;
+                                XNextEvent(dpy, &e);
+                        }
+                }
+                XSync(dpy, False);
+                snprintf(detail, sizeof(detail), "owned=%d_of_500", owned);
+        }
+        else if (!strcmp(name, "x-argb-overlay-toggle"))
+        {
+                XVisualInfo tmpl = {0}, *list;
+                int n = 0;
+                tmpl.screen = DefaultScreen(dpy), tmpl.depth = 32, tmpl.class = TrueColor;
+                list = XGetVisualInfo(dpy, VisualScreenMask | VisualDepthMask | VisualClassMask, &tmpl, &n);
+                if (!n)
+                {
+                        printf("CASE %s outcome=skip ms=-1 detail=no_argb_visual\n", name);
+                        return 0;
+                }
+                XSetWindowAttributes a = {0};
+                a.override_redirect = True;
+                a.colormap = XCreateColormap(dpy, DefaultRootWindow(dpy), list[0].visual, AllocNone);
+                Window o = XCreateWindow(dpy, DefaultRootWindow(dpy), 120, 120, 200, 120, 0, 32, InputOutput, list[0].visual,
+                                         CWOverrideRedirect | CWColormap | CWBorderPixel | CWBackPixel, &a);
+                GC gc = XCreateGC(dpy, o, 0, NULL);
+                uint32_t *px = malloc(200 * 120 * 4);
+                for (int i = 0; i < 200 * 120; i++)
+                        px[i] = (i % 200) < 100 ? 0 : 0x80808080u;
+                XImage *img = XCreateImage(dpy, list[0].visual, 32, ZPixmap, 0, (char *)px, 200, 120, 32, 0);
+                for (int i = 0; i < 200; i++)
+                {
+                        XMapRaised(dpy, o);
+                        XPutImage(dpy, o, gc, img, 0, 0, 0, 0, 200, 120);
+                        XFlush(dpy);
+                        usleep(4000);
+                        XUnmapWindow(dpy, o);
+                        XFlush(dpy);
+                        usleep(4000);
+                }
+                XSync(dpy, False);
+        }
+        else
+        {
+                fprintf(stderr, "no X case %s\n", name);
+                return 2;
+        }
+        // The connection still answers.
+        XSync(dpy, False);
+        printf("CASE %s outcome=ok ms=%.3f detail=%s\n", name, (double)(now_ns() - x_t0) / 1e6, detail);
+        return 0;
+}
+
 int main(int argc, char **argv)
 {
         uint64_t t_exec = now_ns();
@@ -335,5 +535,7 @@ int main(int argc, char **argv)
                 return run_anim(dpy, seconds, w, h, t_exec, t_open);
         if (!strcmp(mode, "overlay"))
                 return run_overlay(dpy, seconds, w, h);
+        if (!strncmp(mode, "x-", 2))
+                return run_xcase(dpy, mode);
         return 2;
 }

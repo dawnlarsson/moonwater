@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
         case $1 in
         --real) real=1 ;;
         --out) out=$2; shift ;;
-        --seconds | --only | --compositors | --baseline) pass="$pass $1 $2"; shift ;;
+        --seconds | --only | --compositors | --baseline | --edge) pass="$pass $1 $2"; shift ;;
         --inside) inside=1 ;;
         *) echo "usage: sh test/wayland_stress/run.sh [--real] [--out FILE] [--seconds S] [--only a,b] [--compositors a,b] [--baseline OLD.json]" >&2; exit 2 ;;
         esac
