@@ -1410,12 +1410,16 @@ static int compositor_wl_needs_xform(const struct wayland_picture *picture, long
         return compositor_wl_needs_xform_ordered(picture, width, height, 0);
 }
 
+#ifdef MOONWATER_GPU_C
+static int compositor_gpu_held(void);
+#endif
+
 // Whether the card composes now and may be lent a picture whose red and blue it swaps (an ABGR or XBGR dma-buf: a pool's is the processor's).
 static int compositor_wl_card_swaps(const struct wayland_picture *picture)
 {
 #ifdef MOONWATER_GPU_C
         return picture->sync_fd >= 0 && compositor_wl_fourcc_swapped(picture->fourcc) && compositor_gpu && compositor_gpu_state.up &&
-               !compositor_gpu_state.dead;
+               !compositor_gpu_state.dead && !compositor_gpu_held();
 #else
         (void)picture;
         return 0;
@@ -1678,6 +1682,12 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 return compositor_wl_card_refused(0);
         if (!gpu_ready())
                 return compositor_wl_card_refused(1);
+#ifdef MOONWATER_GPU_C
+        //      A card the compositor has given up (dead), or holds off (a hang's cool-down, a restart due, a lost state), is given no copy either:
+        //      the blits went on after the card's presents stopped, each one more ring the kernel reset.
+        if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held())
+                return compositor_wl_card_refused(1);
+#endif
         if (picture->blend)
                 return compositor_wl_card_refused(3);
         if (!gpu_idle())
