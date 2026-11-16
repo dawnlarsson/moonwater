@@ -20067,6 +20067,10 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_SHARE 8
 #define UI_ROW_SHARE_HIGH 28 // its height, logical pixels at 100 percent of the text's size
 #define UI_ROW_GAP 10 // between two parts of a row, logical pixels
+// A row that is an action: the kit's button at its end (filled in the accent, its words ui_row.words, greyed while the row is dim), the row's
+// note before it, and its label at its start. The whole row is the button's target: its hover, its press and its keys are the row's.
+#define UI_ROW_BUTTON 9
+#define UI_ROW_BUTTON_LEAST 64 // the button's least width, logical pixels: its words and 14 at each side where they are wider
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
 #define UI_ROW_BADGE_ERROR 2
@@ -20521,7 +20525,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 {
         struct ui_control address_to c = ui_list_control(l, id, 1);
         unsigned char kind = row->kind == UI_ROW_TABS ? UI_TABS : row->kind == UI_ROW_SWATCHES ? UI_SWATCHES : row->kind == UI_ROW_SLIDER ? UI_SLIDER
-                             : row->kind == UI_ROW_FIELD ? UI_INPUT : row->badge ? UI_BADGE : 0;
+                             : row->kind == UI_ROW_FIELD ? UI_INPUT : row->kind == UI_ROW_BUTTON ? UI_BUTTON : row->badge ? UI_BADGE : 0;
 
         if (!c || !kind)
                 return null;
@@ -20546,6 +20550,13 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                 c->edit = row->edit, c->focused = l->keys, c->items[0] = row->placeholder;
         else if (kind == UI_BADGE)
                 c->role = row->badge == UI_ROW_BADGE_ERROR ? UI_ERROR : UI_WARNING, c->label = row->badge_words, ui_control_size(ui, c);
+        else if (kind == UI_BUTTON)
+        {
+                int wide = (row->words ? ui_kit_measure(ui, (string_address)row->words, UI_LABEL_LARGE) * 100 / ui->scale : 0) + 28;
+
+                c->variant = UI_BUTTON_PRIMARY, c->label = row->words ? row->words : "", c->disabled = row->dim;
+                c->w = wide > UI_ROW_BUTTON_LEAST ? wide : UI_ROW_BUTTON_LEAST;
+        }
         else
         {
                 ui_items_words(c, row->words);
@@ -20889,7 +20900,8 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         struct ui_node address_to n, address_to zone = null;
         struct ui_control address_to c = ui_list_trailing(ui, l, id, row);
         int gap = ui_dev(ui, UI_ROW_GAP), inset = ui_dev(ui, UI_INSET), lead = ui_dev(ui, 16) - gap, size = ui_dev(ui, 4), marks = 0, own = 0, least = 0;
-        b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER || row->picture_w > 0;
+        b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER ||
+                                                     row->kind == UI_ROW_BUTTON || row->picture_w > 0;
         b32 wraps = l->wrap && !row->tall && ui->regular;
 
         memory_zero(&p->mark, sizeof(*p) - offset_of(struct ui_row_parts, mark));
@@ -20935,7 +20947,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                         p->value_shown = p->number;
                         p->value = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)p->number, UI_BODY_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT;
                 }
-                else if (c && words && row->kind == UI_ROW_TABS && row->note)
+                else if (c && words && (row->kind == UI_ROW_TABS || row->kind == UI_ROW_BUTTON) && row->note)
                         p->note = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT,
                         n->wrap = (short)p->wraps;
                 if (c && held)
@@ -21169,6 +21181,9 @@ static struct ui_control address_to ui_list_row_place(struct ui address_to ui, s
                 return null;
         if (c->kind != UI_INPUT)
                 c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y), c->hover = c->item >= 0 && l->hover == id;
+        // A row's button is the whole row's: lit while the row is under the pointer, pressed while the row is, ringed while the keys are on it.
+        if (c->kind == UI_BUTTON)
+                c->hover = l->hover == id, c->down = l->down == id, c->focused = l->keys && l->lit && l->focus == id;
         if (c->kind == UI_SLIDER)
                 c->hover_x = c->hover ? ui_slider_along(ui, c, l->pointer_x, l->pointer_y) : -1, c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
         return c;
@@ -21388,7 +21403,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 own->row_y = ui_logical(ui, y), own->row_h = ui_logical(ui, height);
                 own->x = own->row_x, own->y = own->row_y, own->w = own->row_w, own->h = own->row_h;
                 own->hover = l->hover == id, own->down = l->down == id;
-                own->disabled = row.kind == UI_ROW_FIELD;
+                own->disabled = row.kind == UI_ROW_FIELD || (row.kind == UI_ROW_BUTTON && row.dim);
                 if (kind == UI_SWITCH)
                         own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                 ui_control_draw(ui, own);
