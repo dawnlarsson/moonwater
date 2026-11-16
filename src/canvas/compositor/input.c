@@ -202,7 +202,7 @@ static void compositor_script_say(const char *name)
         if (length > sizeof(line) - 2)
                 length = sizeof(line) - 2;
         // Said by the doors' thread, which may wait on the FIFO's lock (compositor_doors); a ring that is full drops the line.
-        if (compositor_doors.worker[COMPOSITOR_DOOR_MISC])
+        if (compositor_doors.threads)
         {
                 if (head - __atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) >= 16)
                         return;

@@ -1501,49 +1501,63 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
 }
 
 /*
-        The doors' own threads. Every read, write and open of a pipe takes the pipe's lock first, whatever O_NONBLOCK says,
+        The doors' threads. Every read, write and open of a pipe takes the pipe's lock first, whatever O_NONBLOCK says,
         and poll takes none: a process with an end of one of the compositor's FIFOs can hold that lock for as long as it
         likes (a splice into the pipe from a socket that has nothing to say holds it while it waits, and one out of it into
         a socket that is full), and no signal frees the one that waits for it. So the loop makes no read, write or open of
         a door, a wake, the clipboard's door or keys.fire: it polls the doors (no lock), takes what a knock says from the
-        table at once, and hands the pipe's work to a thread of the row's -- the knock's bytes drained, a closed door opened
-        again, a wake's byte written -- which may wait on a held lock with nothing else waiting for it; the clipboard's door
-        and keys.fire have one thread between them (the last slot). A door is not polled while its thread has it, and the
-        thread says it is done through an eventfd the loop polls: the row is read again then (a knock that came before
-        the drain is taken), and a row whose door closed is let go once its new door is open, so a program that takes the
-        row finds a door to open. With no thread (none could be made, or a check's compositor) it is done on the loop.
+        table at once, and hands the pipe's work to the doors' threads -- the knock's bytes drained, a closed door opened
+        again, a wake's byte written, the clipboard's door drained and keys.fire's lines said (the misc slot, past the
+        rows) -- which may wait on a held lock with nothing else waiting for it. The threads are a few, not one a row: a slot
+        asked of is queued (a bit of its own in queued, its asks in asked with COMPOSITOR_DOOR_QUEUED), the eventfd kick
+        counts the slots queued (a semaphore: each count wakes one thread), and a thread takes a slot whole, so no two work
+        one door; when every thread is in a slot's work (a lock held on each) and another is asked, one more thread is
+        started, so a held lock never waits for another. COMPOSITOR_DOOR_THREADS start with the doors. A door is not polled
+        while a thread has it, and the thread says it is done through an eventfd the loop polls: the row is read again then
+        (a knock that came before the drain is taken), and a row whose door closed is let go once its new door is open, so a
+        program that takes the row finds a door to open. With no thread (none could be made, or a check's compositor) it is
+        done on the loop.
 */
 #define COMPOSITOR_DOOR_DRAIN 1u
 #define COMPOSITOR_DOOR_REOPEN 2u
 #define COMPOSITOR_DOOR_WAKE 4u
 #define COMPOSITOR_DOOR_LINES 8u
+#define COMPOSITOR_DOOR_QUEUED 0x80000000u // the slot is in the queue or in a thread's work
 #define COMPOSITOR_DOOR_MISC WINDOWS // the clipboard's door and keys.fire
 #define COMPOSITOR_DOOR_LINE 34
+#define COMPOSITOR_DOOR_THREADS 4
 
 static struct
 {
-        thread **worker;
-        int *kick;          // eventfds, the loop to a thread
-        unsigned int *asked; // COMPOSITOR_DOOR_* asked of a thread
+        unsigned int *asked;            // COMPOSITOR_DOOR_* asked of each slot (its row's, and the misc one's at WINDOWS)
+        struct compositor_rows queued;  // the slots waiting for a thread, a bit each
+        int kick;                       // the eventfd the threads wait on, a count a slot queued (EFD_SEMAPHORE), or -1
+        int threads, idle;              // the threads started, and those waiting for a slot
         struct compositor_rows busy;     // the slots whose door a thread has: not polled
         struct compositor_rows drained, reopened; // what the threads have done, for the loop to take
         int done;                       // the eventfd a thread knocks the loop with, or -1
-        int clip;                       // the clipboard's door, as the misc thread has it
+        int clip;                       // the clipboard's door, as the threads have it
         char lines[16][COMPOSITOR_DOOR_LINE];
         unsigned int line_head, line_tail; // the lines for keys.fire, the loop's to add and the thread's to say
-} compositor_doors = {.done = -1};
+} compositor_doors = {.kick = -1, .done = -1};
 
 static const char *compositor_keys_fire;
+static int compositor_door_thread(void);
 
-// Something asked of a slot's thread: false when it has none, and the loop does it itself.
+// Something asked of a slot's thread: false when there are no threads, and the loop does it itself.
 static int compositor_door_ask(unsigned int slot, unsigned int what)
 {
         unsigned long one = 1;
 
-        if (!compositor_doors.worker[slot])
+        if (!compositor_doors.threads)
                 return 0;
-        __atomic_or_fetch(&compositor_doors.asked[slot], what, __ATOMIC_RELEASE);
-        compositor_call(syscall(write), (positive)compositor_doors.kick[slot], (positive)&one, sizeof one, 0, 0, 0);
+        if (__atomic_fetch_or(&compositor_doors.asked[slot], what | COMPOSITOR_DOOR_QUEUED, __ATOMIC_ACQ_REL) & COMPOSITOR_DOOR_QUEUED)
+                return 1; // queued already, or in a thread's work, which takes the new asks before it lets the slot go
+        rows_add_atomic(&compositor_doors.queued, slot);
+        // Every thread in a slot's work, each perhaps on a held lock: one more, so this slot waits for none of them.
+        if (!__atomic_load_n(&compositor_doors.idle, __ATOMIC_ACQUIRE))
+                compositor_door_thread();
+        compositor_call(syscall(write), (positive)compositor_doors.kick, (positive)&one, sizeof one, 0, 0, 0);
         return 1;
 }
 
@@ -1565,95 +1579,127 @@ static void compositor_door_told(struct compositor_rows *into, unsigned int slot
         compositor_call(syscall(write), (positive)compositor_doors.done, (positive)&one, sizeof one, 0, 0, 0);
 }
 
-// A row's thread: its wake written, its door drained, and its door opened again when it closed.
-static fn compositor_door_run(address_any context)
+// A row's work: its wake written, its door drained, and its door opened again when it closed.
+static void compositor_door_row(unsigned int row, unsigned int asked)
 {
-        unsigned int row = (unsigned int)(positive)context;
+        char byte = 0;
 
-        for (;;)
+        if (asked & COMPOSITOR_DOOR_WAKE)
+                system_write_once(compositor.wake[row], &byte, 1);
+        if (asked & (COMPOSITOR_DOOR_DRAIN | COMPOSITOR_DOOR_REOPEN))
+                compositor_door_drain(compositor.door[row]);
+        if (asked & COMPOSITOR_DOOR_REOPEN)
         {
-                unsigned long count = 0;
-                unsigned int asked;
-                char byte = 0;
+                p8 name[48];
 
-                // The kick waits in its read (compositor_doors_start), so a wake is this read's return and the write below.
-                if (compositor_call(syscall(read), (positive)compositor_doors.kick[row], (positive)&count, sizeof count, 0, 0, 0) == -4)
-                        continue;
-                asked = __atomic_exchange_n(&compositor_doors.asked[row], 0u, __ATOMIC_ACQ_REL);
-                if (asked & COMPOSITOR_DOOR_WAKE)
-                        system_write_once(compositor.wake[row], &byte, 1);
-                if (asked & (COMPOSITOR_DOOR_DRAIN | COMPOSITOR_DOOR_REOPEN))
-                        compositor_door_drain(compositor.door[row]);
-                if (asked & COMPOSITOR_DOOR_REOPEN)
+                windows_door_name((char *)name, row, 0);
+                system_close(compositor.door[row]);
+                __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC), __ATOMIC_RELEASE);
+                compositor_door_told(&compositor_doors.reopened, row);
+        }
+        else if (asked & COMPOSITOR_DOOR_DRAIN)
+                compositor_door_told(&compositor_doors.drained, row);
+}
+
+// The misc slot's work: the lines for keys.fire said, each an open, a write and a close, and the clipboard's door drained.
+static void compositor_door_misc(unsigned int asked)
+{
+        while (__atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_doors.line_head, __ATOMIC_ACQUIRE))
+        {
+                const char *line = compositor_doors.lines[compositor_doors.line_tail % 16];
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+
+                if (handle >= 0)
                 {
-                        p8 name[48];
-
-                        windows_door_name((char *)name, row, 0);
-                        system_close(compositor.door[row]);
-                        __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC),
-                                         __ATOMIC_RELEASE);
-                        compositor_door_told(&compositor_doors.reopened, row);
+                        system_write_once(handle, line, string_length((string_address)line));
+                        system_close(handle);
                 }
-                else if (asked & COMPOSITOR_DOOR_DRAIN)
-                        compositor_door_told(&compositor_doors.drained, row);
+                __atomic_add_fetch(&compositor_doors.line_tail, 1u, __ATOMIC_RELEASE);
+        }
+        if (asked & COMPOSITOR_DOOR_DRAIN)
+        {
+                compositor_door_drain(compositor_doors.clip);
+                compositor_door_told(&compositor_doors.drained, COMPOSITOR_DOOR_MISC);
         }
 }
 
-// The last slot's thread: the clipboard's door drained, and the lines for keys.fire said, each a open, a write and a close.
-static fn compositor_door_misc(address_any context)
+// A queued slot taken out of the queue, its bit cleared by this thread alone; -1 when there is none.
+static long compositor_door_next(void)
+{
+        for (unsigned int k = 0, walked = rows_walked(); k < walked; k++)
+        {
+                unsigned int w = rows_walk(k);
+                unsigned long long word = __atomic_load_n(&compositor_doors.queued.word[w], __ATOMIC_ACQUIRE);
+
+                while (word)
+                {
+                        unsigned long long bit = word & (0ull - word);
+
+                        if (__atomic_fetch_and(&compositor_doors.queued.word[w], ~bit, __ATOMIC_ACQ_REL) & bit)
+                        {
+                                long at = 0;
+
+                                while (!(bit >> at & 1u))
+                                        at++;
+                                return (long)w * 64 + at;
+                        }
+                        word = __atomic_load_n(&compositor_doors.queued.word[w], __ATOMIC_ACQUIRE);
+                }
+        }
+        return -1;
+}
+
+// A door thread: a kick is a slot queued; the slot taken whole, its asks worked until none is left, and it is let go.
+static fn compositor_door_run(address_any context)
 {
         (void)context;
         for (;;)
         {
                 unsigned long count = 0;
-                unsigned int asked;
+                long slot;
 
-                if (compositor_call(syscall(read), (positive)compositor_doors.kick[COMPOSITOR_DOOR_MISC], (positive)&count, sizeof count, 0, 0, 0) == -4)
+                // The kick waits in its read (EFD_SEMAPHORE: a read takes one), so a slot queued wakes one thread.
+                if (compositor_call(syscall(read), (positive)compositor_doors.kick, (positive)&count, sizeof count, 0, 0, 0) != (long)sizeof count)
                         continue;
-                asked = __atomic_exchange_n(&compositor_doors.asked[COMPOSITOR_DOOR_MISC], 0u, __ATOMIC_ACQ_REL);
-                while (__atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_doors.line_head, __ATOMIC_ACQUIRE))
-                {
-                        const char *line = compositor_doors.lines[compositor_doors.line_tail % 16];
-                        bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire,
-                                                        O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-
-                        if (handle >= 0)
+                __atomic_sub_fetch(&compositor_doors.idle, 1, __ATOMIC_ACQ_REL);
+                while ((slot = compositor_door_next()) >= 0)
+                        for (;;)
                         {
-                                system_write_once(handle, line, string_length((string_address)line));
-                                system_close(handle);
+                                unsigned int asked = __atomic_exchange_n(&compositor_doors.asked[slot], COMPOSITOR_DOOR_QUEUED, __ATOMIC_ACQ_REL) &
+                                                     ~COMPOSITOR_DOOR_QUEUED, queued = COMPOSITOR_DOOR_QUEUED;
+
+                                if (!asked)
+                                {
+                                        // Nothing more: the slot let go, unless an ask came between, which is worked now.
+                                        if (__atomic_compare_exchange_n(&compositor_doors.asked[slot], &queued, 0u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                                                break;
+                                        continue;
+                                }
+                                if (slot == COMPOSITOR_DOOR_MISC)
+                                        compositor_door_misc(asked);
+                                else
+                                        compositor_door_row((unsigned int)slot, asked);
                         }
-                        __atomic_add_fetch(&compositor_doors.line_tail, 1u, __ATOMIC_RELEASE);
-                }
-                if (asked & COMPOSITOR_DOOR_DRAIN)
-                {
-                        compositor_door_drain(compositor_doors.clip);
-                        compositor_door_told(&compositor_doors.drained, COMPOSITOR_DOOR_MISC);
-                }
+                __atomic_add_fetch(&compositor_doors.idle, 1, __ATOMIC_ACQ_REL);
         }
 }
 
-/*
-        A slot's thread: a row's, or the misc one's (COMPOSITOR_DOOR_MISC). A kick is read where its thread waits (EFD_CLOEXEC alone: the
-        read blocks), so a thread asked for a wake makes two calls, the read that ends and the wake's write, where a poll, a read and the
-        write were three. 1 when the thread runs; 0 when the kernel refused its kick or the thread, and the slot is the loop's, as every
-        slot was.
-*/
-static int compositor_door_thread(unsigned int slot)
+// One more door thread: 1 when it runs, 0 when the kernel made none (the slots are then worked by the threads there are, or the loop).
+static int compositor_door_thread(void)
 {
-        compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000, 0, 0, 0, 0);
-        if (compositor_doors.kick[slot] < 0)
+        if (compositor_doors.kick < 0)
                 return 0;
-        compositor_doors.worker[slot] = thread_start(slot < WINDOWS ? compositor_door_run : compositor_door_misc, (address_any)(positive)slot);
-        if (!compositor_doors.worker[slot])
+        __atomic_add_fetch(&compositor_doors.idle, 1, __ATOMIC_ACQ_REL);
+        if (!thread_start(compositor_door_run, null))
         {
-                system_close(compositor_doors.kick[slot]);
-                compositor_doors.kick[slot] = -1;
+                __atomic_sub_fetch(&compositor_doors.idle, 1, __ATOMIC_ACQ_REL);
                 return 0;
         }
+        __atomic_add_fetch(&compositor_doors.threads, 1, __ATOMIC_ACQ_REL);
         return 1;
 }
 
-// The threads, once the doors are open (clip, the clipboard's); a slot that can have none is the loop's, as every slot was.
+// The threads, once the doors are open (clip, the clipboard's); with none, every slot is the loop's, as every slot was.
 static void compositor_doors_start(int clip)
 {
         compositor_doors.clip = clip;
@@ -1661,9 +1707,9 @@ static void compositor_doors_start(int clip)
         if (compositor_doors.done < 0)
                 return;
         compositor_wall_knock = compositor_doors.done; // the wallpaper's thread knocks with it too
-        for (unsigned int slot = 0; slot < compositor_rows_in_use; slot++)
-                compositor_door_thread(slot);
-        compositor_door_thread(COMPOSITOR_DOOR_MISC);
+        compositor_doors.kick = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 1, 0, 0, 0, 0); // EFD_CLOEXEC | EFD_SEMAPHORE
+        for (int each = 0; each < COMPOSITOR_DOOR_THREADS; each++)
+                compositor_door_thread();
 }
 
 // Every row that was given something in this pass is knocked on, once: its byte written by its thread, or here.

@@ -2286,10 +2286,10 @@ static void compositor_band_room(void)
 #define COMPOSITOR_DESCRIPTORS_WANTED (1L << 30) // as many as the kernel's hard limit lets it have: a client's dma-bufs are descriptors the compositor holds
 #define COMPOSITOR_DESCRIPTORS_WARM 4096          // the table grown to at the start (the kernel grows it past this as it is used)
 // The compositor's own that are no row's: the poll list's own, the inputs, the selections' history, the table, the card and the
-// render node with the buffers given to it, the sound server's socket and the transfers' pipes; and three a row (its door, its wake and
-// its thread's kick), the misc slot's kick among them. COMPOSITOR_DESCRIPTORS_OWN for the rows in use: the share grows as rows are made.
+// render node with the buffers given to it, the sound server's socket, the transfers' pipes and the doors' threads' kick; and two a row
+// (its door and its wake). COMPOSITOR_DESCRIPTORS_OWN for the rows in use: the share grows as rows are made.
 #define COMPOSITOR_DESCRIPTORS_FIXED (7 + 32 + 32 + 3 + 64 + 32)
-#define COMPOSITOR_DESCRIPTORS_OWN (COMPOSITOR_DESCRIPTORS_FIXED + 3 * ((long)compositor_rows_in_use + 1))
+#define COMPOSITOR_DESCRIPTORS_OWN (COMPOSITOR_DESCRIPTORS_FIXED + 2 * (long)compositor_rows_in_use)
 static long compositor_descriptors_most = 1024;
 
 static int compositor_descriptor_crowded(long descriptor)
@@ -2488,8 +2488,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTOR
         X(compositor_owed_keys, COMPOSITOR_ROWS_ROW) \
         X(compositor_owed_key_flags, COMPOSITOR_ROWS_ROW) \
         X(compositor_owed_any, COMPOSITOR_ROWS_ROW) \
-        X(compositor_doors.worker, COMPOSITOR_ROWS_ROW1) \
-        X(compositor_doors.kick, COMPOSITOR_ROWS_ROW1) \
         X(compositor_doors.asked, COMPOSITOR_ROWS_ROW1) \
         X(compositor_record_shots[0].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
@@ -2678,12 +2676,6 @@ static unsigned int compositor_rows_grow(unsigned int want)
         {
                 if ((refused = compositor_door_make(row)) < 0)
                         break;
-                if (compositor_doors.done >= 0 && !compositor_door_thread(row))
-                {
-                        system_close(compositor.door[row]), system_close(compositor.wake[row]);
-                        refused = -11; // EAGAIN: the kernel made no thread
-                        break;
-                }
         }
         // Said at each stop, so the log says where a refusal of the kernel's held the rows.
         if (refused)
