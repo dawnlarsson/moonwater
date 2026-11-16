@@ -580,3 +580,7 @@ ui_field_full	fe02	mer ryms inte
 =tray	a12d	meddelandefält
 =tab	2e4c	kapsel
 =Taskbar moon spin (seconds a turn, off or default)	a763	Månens rotation i aktivitetsfältet (sekunder per varv, av eller standard)
+=Taskbar tasks	445b	Uppgifter i aktivitetsfältet
+=Taskbar distance from the edge (pixels)	845c	Aktivitetsfältets avstånd från kanten (pixlar)
+=grouped	8b7d	grupperade
+=separate	bb18	separata

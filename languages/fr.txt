@@ -580,3 +580,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =tray	a12d	zone système
 =tab	2e4c	pastille
 =Taskbar moon spin (seconds a turn, off or default)	a763	Rotation de la lune dans la barre des tâches (secondes par tour, désactivé ou par défaut)
+=Taskbar tasks	445b	Tâches dans la barre des tâches
+=Taskbar distance from the edge (pixels)	845c	Distance de la barre des tâches au bord (pixels)
+=grouped	8b7d	groupées
+=separate	bb18	séparées

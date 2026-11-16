@@ -581,3 +581,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =tray	a12d	سینی
 =tab	2e4c	کپسول
 =Taskbar moon spin (seconds a turn, off or default)	a763	چرخش ماه در نوار وظیفه (ثانیه برای هر دور، خاموش یا پیش‌فرض)
+=Taskbar tasks	445b	وظیفه‌ها در نوار وظیفه
+=Taskbar distance from the edge (pixels)	845c	فاصلهٔ نوار وظیفه از لبه (پیکسل)
+=grouped	8b7d	گروه‌شده
+=separate	bb18	جدا

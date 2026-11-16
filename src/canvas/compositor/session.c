@@ -872,6 +872,15 @@ static void compositor_taskbar_settings_read(void)
                         compositor_setting_kept(items[at], word, &side);
                         before |= (side == 0 ? 1u : 0u) << at;
                 }
+                {
+                        long grouped, edge;
+
+                        compositor_word(SETTING_TASKBAR_GROUPED_PATH, word, sizeof(word));
+                        compositor_setting_kept(SETTING_TASKBAR_GROUPED_PATH, word, &grouped);
+                        compositor_word(SETTING_TASKBAR_EDGE_PATH, word, sizeof(word));
+                        compositor_setting_kept(SETTING_TASKBAR_EDGE_PATH, word, &edge);
+                        taskbar_bar_set(grouped == 1, (int)edge);
+                }
                 compositor_word(SETTING_TASKBAR_MOON_SPIN_PATH, word, sizeof(word));
                 compositor_setting_kept(SETTING_TASKBAR_MOON_SPIN_PATH, word, &side);
                 taskbar_spin_set((int)side);

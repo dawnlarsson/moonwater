@@ -580,3 +580,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =tray	a12d	zasobnik
 =tab	2e4c	pigułka
 =Taskbar moon spin (seconds a turn, off or default)	a763	Obrót księżyca na pasku zadań (sekundy na obrót, wyłączony lub domyślny)
+=Taskbar tasks	445b	Zadania na pasku zadań
+=Taskbar distance from the edge (pixels)	845c	Odległość paska zadań od krawędzi (piksele)
+=grouped	8b7d	zgrupowane
+=separate	bb18	osobno

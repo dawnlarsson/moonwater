@@ -580,3 +580,7 @@ ui_field_full	fe02	that is as much as it holds
 =tray	a12d	tray
 =tab	2e4c	tab
 =Taskbar moon spin (seconds a turn, off or default)	a763	Taskbar moon spin (seconds a turn, off or default)
+=Taskbar tasks	445b	Taskbar tasks
+=Taskbar distance from the edge (pixels)	845c	Taskbar distance from the edge (pixels)
+=grouped	8b7d	grouped
+=separate	bb18	separate

@@ -580,3 +580,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =tray	a12d	Infobereich
 =tab	2e4c	Pille
 =Taskbar moon spin (seconds a turn, off or default)	a763	Drehung des Mondes in der Taskleiste (Sekunden je Umdrehung, aus oder Standard)
+=Taskbar tasks	445b	Aufgaben in der Taskleiste
+=Taskbar distance from the edge (pixels)	845c	Abstand der Taskleiste vom Rand (Pixel)
+=grouped	8b7d	gruppiert
+=separate	bb18	getrennt

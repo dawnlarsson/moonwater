@@ -1371,6 +1371,9 @@ static void taskbar_moon_damaged(int band, const int *rect);
 static int taskbar_moon_more(const struct taskbar_view *view);
 static int taskbar_moon_most(int size);
 static void taskbar_spin_set(int seconds);
+static void taskbar_bar_set(int separate, int edge);
+#define TASKBAR_EDGE_LEAST -16 // `taskbar edge`: logical pixels out past the screen's edge at the most (held further by TASKBAR_EDGE_KEEP)
+#define TASKBAR_EDGE_MOST 32   // and in from it
 static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow);
 static unsigned int taskbar_wall_accent(void);
 static b64 taskbar_shift(void);
@@ -1430,6 +1433,7 @@ static inline void taskbar_moon_damaged(int band, const int *rect) { (void)band,
 static inline int taskbar_moon_more(const struct taskbar_view *view) { (void)view; return 0; }
 static inline int taskbar_moon_most(int size) { (void)size; return 0; }
 static inline void taskbar_spin_set(int seconds) { (void)seconds; }
+static inline void taskbar_bar_set(int separate, int edge) { (void)separate, (void)edge; }
 static inline void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow)
 { (void)pixels, (void)pitch, (void)width, (void)height, (void)dark, (void)dimmed, (void)maria, (void)glow; }
 static inline unsigned int taskbar_wall_accent(void) { return 0; }

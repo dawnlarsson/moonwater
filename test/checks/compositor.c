@@ -2944,6 +2944,67 @@ static void check_taskbar_centre(void)
 }
 
 /*
+        `taskbar tasks grouped separate`: each task a plate of its own, the kit's gap twice between them, split about the moon by turns as
+        grouped ones are, a press on each its own and the highlight still moving from one to the next. `taskbar edge`: the band in from the
+        screen's edge by as many pixels at its scale, out past it by fewer than 0 but no further than shows TASKBAR_EDGE_KEEP of a pill,
+        and what a press finds and what the launcher opens beside it go with it.
+*/
+static void check_bar_options(void)
+{
+    static unsigned char lengths[4] = {5, 15, 30, 8};
+    struct taskbar_view view;
+    int bx, by, bw, bh, x[4][4], which, px, py, pw, ph, plates = 0, gap = TASKBAR_GAP;
+    b32 apart = 1, split, pressed = 1, edges = 1, held, followed = 1;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    memory_zero(&view, sizeof(view));
+    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 4, view.lengths = lengths;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_standard();
+    taskbar_bar_set(1, 0);
+    for (int at = 0; at < 4; at++)
+        taskbar_slot(&view, at, &x[at][0], &x[at][1], &x[at][2], &x[at][3]);
+    for (int at = 0; taskbar_plate(&view, at, &which, &px, &py, &pw, &ph); at++)
+        plates += which >= 0;
+    // Task 0 right of the moon, 1 left, 2 right of 0, 3 left of 1: each pair on a side the gap twice apart.
+    apart = plates == 4 && x[2][0] - (x[0][0] + x[0][2]) == 2 * gap && x[1][0] - (x[3][0] + x[3][2]) == 2 * gap;
+    split = x[0][0] > BAND_W / 2 && x[1][0] < BAND_W / 2;
+    for (int at = 0; at < 4; at++)
+        pressed &= taskbar_hit_reach(&view, x[at][0] + x[at][2] / 2, x[at][1] + x[at][3] / 2, 0) == at &&
+                   taskbar_hit_reach(&view, x[at][0] + x[at][2] + gap, x[at][1] + x[at][3] / 2, 0) != at;
+    taskbar_bar_set(0, 0);
+    taskbar_band(&view, &bx, &by, &bw, &bh);
+    for (int each = 0; each < 4; each++)
+    {
+        static const int asked[4] = {16, 32, -12, 8};
+        int ex, ey, ew, eh, mx, my, mw, mh;
+
+        taskbar_bar_set(0, asked[each]);
+        taskbar_band(&view, &ex, &ey, &ew, &eh);
+        edges &= ey == by - asked[each] && eh == bh;
+        followed &= taskbar_anchor(&view, TASKBAR_LAUNCHER, &mx, &my, &mw, &mh) && my == ey &&
+                    taskbar_hit_reach(&view, mx + mw / 2, ey + eh / 2, 0) == TASKBAR_LAUNCHER;
+    }
+    // Past the edge, no further than shows TASKBAR_EDGE_KEEP of a pill.
+    taskbar_bar_set(0, TASKBAR_EDGE_LEAST);
+    {
+        int ex, ey, ew, eh, inset = taskbar_inset(100), high = bh - 2 * inset;
+
+        taskbar_band(&view, &ex, &ey, &ew, &eh);
+        held = ey > by && ey - by <= high * (100 - TASKBAR_EDGE_KEEP) / 100 + inset && BAND_H - (ey + inset) >= high * TASKBAR_EDGE_KEEP / 100;
+    }
+    taskbar_bar_set(0, 0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    check("taskbar tasks separate: each task a plate of its own, the kit's gap twice between them", apart);
+    check("taskbar tasks separate: still split about the moon by turns", split);
+    check("taskbar tasks separate: a press finds each task, and none in the gap after it", pressed);
+    check("taskbar edge: the band in from the screen's edge by the pixels asked, or out past it", edges);
+    check("taskbar edge: out, held to show the share of a pill that keeps it usable", held);
+    check("taskbar edge: the moon's press and the launcher's anchor go with it", followed);
+}
+
+/*
         The wallpaper as the ground: once the rows are read, `canvas wallpaper moon` makes it for the space, and what the ground was
         filled with is copied from it (a rectangle, a pixel under a blended picture); made again only when a row, the theme or the space
         changes, the whole space damaged then and nothing at a present after; `plain` lets it go and the ground is the colour again.
@@ -4633,10 +4694,10 @@ static void pictures_write(const char *path, const unsigned char *rgb, int width
 // The bottom of the screen with the band on it, appended to pictures_out at *at: rows of the screen's width.
 static int pictures_shot(const struct taskbar_view *view, positive *at)
 {
-    int bx, by, bw, bh, top, picture_h, plates[8][5], count = 0, which;
+    int bx, by, bw, bh, top, picture_h, plates[40][5], count = 0, which;
 
     taskbar_band(view, &bx, &by, &bw, &bh);
-    while (count < 8 && taskbar_plate(view, count, &which, &plates[count][0], &plates[count][1], &plates[count][2], &plates[count][3]))
+    while (count < 40 && taskbar_plate(view, count, &which, &plates[count][0], &plates[count][1], &plates[count][2], &plates[count][3]))
         count++;
     picture_h = bh + 16 * view->scale / 100;
     top = view->height - picture_h;
@@ -4812,6 +4873,19 @@ static void band_pictures(string_address face_path)
     pictures_bold = bold > 0 && font_load(&band_bold, bold_bytes, (positive)bold, 0) == 0 ? &band_bold : null;
     font_start(&band_engine, band_atlas, 128, 128);
     memory_zero(&compositor, sizeof(compositor));
+    // The tasks grouped and separate, and the bar at -12, 0 and +16 from the screen's edge: dark at 200 percent.
+    {
+        static const char *const names[5] = {"options-grouped.ppm", "options-separate.ppm", "options-edge-minus-12.ppm", "options-edge-0.ppm",
+                                             "options-edge-plus-16.ppm"};
+        static const int separate[5] = {0, 1, 0, 0, 0}, edges[5] = {0, 0, -12, 0, 16};
+
+        for (int each = 0; each < 5; each++)
+        {
+            taskbar_bar_set(separate[each], edges[each]);
+            pictures_one((string_address)TASKBAR_PICTURES, names[each], &standard, 200, 1, 5, 0);
+        }
+        taskbar_bar_set(0, 0);
+    }
     // The clock's four places, dark at 200 percent in twelve hours: in the moon, none, in the tray and a pill of its own.
     {
         static const char *const names[4] = {"clock-moon.ppm", "clock-none.ppm", "clock-tray.ppm", "clock-tab.ppm"};

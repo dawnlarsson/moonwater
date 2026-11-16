@@ -580,3 +580,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =tray	a12d	περιοχή ειδοποιήσεων
 =tab	2e4c	κάψουλα
 =Taskbar moon spin (seconds a turn, off or default)	a763	Περιστροφή της σελήνης στη γραμμή εργασιών (δευτερόλεπτα ανά στροφή, ανενεργή ή προεπιλογή)
+=Taskbar tasks	445b	Εργασίες στη γραμμή εργασιών
+=Taskbar distance from the edge (pixels)	845c	Απόσταση της γραμμής εργασιών από την άκρη (εικονοστοιχεία)
+=grouped	8b7d	ομαδοποιημένες
+=separate	bb18	χωριστές

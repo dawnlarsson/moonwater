@@ -580,3 +580,7 @@ ui_field_full	fe02	não cabe mais que isso
 =tray	a12d	bandeja
 =tab	2e4c	pílula
 =Taskbar moon spin (seconds a turn, off or default)	a763	Giro da lua na barra de tarefas (segundos por volta, desligado ou padrão)
+=Taskbar tasks	445b	Tarefas na barra de tarefas
+=Taskbar distance from the edge (pixels)	845c	Distância da barra de tarefas até a borda (pixels)
+=grouped	8b7d	agrupadas
+=separate	bb18	separadas

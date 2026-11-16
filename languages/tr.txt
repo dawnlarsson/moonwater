@@ -580,3 +580,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =tray	a12d	tepsi
 =tab	2e4c	kapsül
 =Taskbar moon spin (seconds a turn, off or default)	a763	Görev çubuğunda ayın dönüşü (tur başına saniye, kapalı veya varsayılan)
+=Taskbar tasks	445b	Görev çubuğundaki görevler
+=Taskbar distance from the edge (pixels)	845c	Görev çubuğunun kenara uzaklığı (piksel)
+=grouped	8b7d	gruplu
+=separate	bb18	ayrı

@@ -1127,19 +1127,28 @@ static fn check_registry(void)
                 check("registry: default puts it back", setting_parse(row, (string_address) "default", kept, sizeof(kept), &value) && value == setting_standard(row));
                 check("registry: and a word with nothing in it, with blanks, or in capitals is none",
                       !setting_parse(row, (string_address) "", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "1 ", kept, sizeof(kept), &value) &&
-                      !setting_parse(row, (string_address) "ON", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "-1", kept, sizeof(kept), &value));
+                      !setting_parse(row, (string_address) "ON", kept, sizeof(kept), &value) &&
+                          // -1 is a word only of a row whose least is under 0 (taskbar edge)
+                          (row->low < 0 || !setting_parse(row, (string_address) "-1", kept, sizeof(kept), &value)));
                 if (row->type == SETTING_NUMBER)
                 {
                         char edge[16];
 
                         check("registry: a number's standard is in its range", setting_standard(row) >= row->low && setting_standard(row) <= row->high);
-                        positive_into_string((p8 address_to)edge, (positive)row->low);
+                        // A least under 0 is written with its minus (taskbar edge's).
+                        if (row->low < 0)
+                                edge[0] = '-', positive_into_string((p8 address_to)edge + 1, (positive)-row->low);
+                        else
+                                positive_into_string((p8 address_to)edge, (positive)row->low);
                         check("registry: its least is a word", setting_parse(row, (string_address)edge, kept, sizeof(kept), &value) && value == row->low && !string_compare(kept, (string_address)edge));
                         positive_into_string((p8 address_to)edge, (positive)row->high);
                         check("registry: its greatest is a word", setting_parse(row, (string_address)edge, kept, sizeof(kept), &value) && value == row->high);
                         positive_into_string((p8 address_to)edge, (positive)row->high + 1);
                         check("registry: one past it is none", !setting_parse(row, (string_address)edge, kept, sizeof(kept), &value));
-                        positive_into_string((p8 address_to)edge, (positive)row->low - 1);
+                        if (row->low - 1 < 0)
+                                edge[0] = '-', positive_into_string((p8 address_to)edge + 1, (positive)(1 - row->low));
+                        else
+                                positive_into_string((p8 address_to)edge, (positive)row->low - 1);
                         check("registry: nor one before it", !setting_parse(row, (string_address)edge, kept, sizeof(kept), &value));
                         check("registry: nor a zero in front, a sign, a fraction or nine digits and more",
                               !setting_parse(row, (string_address) "0150", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "+150", kept, sizeof(kept), &value) &&

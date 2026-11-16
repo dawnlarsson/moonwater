@@ -581,3 +581,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =tray	a12d	ٹرے
 =tab	2e4c	کیپسول
 =Taskbar moon spin (seconds a turn, off or default)	a763	ٹاسک بار میں چاند کی گردش (فی چکر سیکنڈ، بند یا طے شدہ)
+=Taskbar tasks	445b	ٹاسک بار میں کام
+=Taskbar distance from the edge (pixels)	845c	ٹاسک بار کا کنارے سے فاصلہ (پکسل)
+=grouped	8b7d	اکٹھے
+=separate	bb18	الگ

@@ -580,3 +580,7 @@ ui_field_full	fe02	meer past er niet in
 =tray	a12d	systeemvak
 =tab	2e4c	pil
 =Taskbar moon spin (seconds a turn, off or default)	a763	Draaiing van de maan op de taakbalk (seconden per omwenteling, uit of standaard)
+=Taskbar tasks	445b	Taken op de taakbalk
+=Taskbar distance from the edge (pixels)	845c	Afstand van de taakbalk tot de rand (pixels)
+=grouped	8b7d	gegroepeerd
+=separate	bb18	apart

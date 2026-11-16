@@ -111,6 +111,8 @@
 #define SETTING_TASKBAR_MOON_PATH "/root/taskbar.moon"
 #define SETTING_TASKBAR_MOON_LOOK_PATH "/root/taskbar.moon.look"
 #define SETTING_TASKBAR_MOON_SPIN_PATH "/root/taskbar.moon.spin"
+#define SETTING_TASKBAR_GROUPED_PATH "/root/taskbar.tasks.grouped"
+#define SETTING_TASKBAR_EDGE_PATH "/root/taskbar.edge"
 #define SETTING_TASKBAR_TASKS_PATH "/root/taskbar.tasks"
 #define SETTING_TASKBAR_NEWEST_PATH "/root/taskbar.newest"
 #define SETTING_TASKBAR_ORDER_PATH "/root/taskbar.order"
@@ -693,6 +695,17 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TASKBAR_TASKS_PATH, .standard = "split",
                       .usage = "taskbar tasks [split|start|center|end]",
                       .help = "where the tasks are: split either side of the moon by turns, or together at the start, the center or the end of the taskbar [split]"),
+    SETTING_PLAIN_ROW(null, "Taskbar tasks", SETTINGS_CHOICE, 0, ("taskbar", "tasks", "grouped"), "grouped ", "grouped separate",
+                      .path = SETTING_TASKBAR_GROUPED_PATH, .standard = "grouped",
+                      .usage = "taskbar tasks grouped [grouped|separate]",
+                      .help = "the tasks of a side in one glass pill, or each in a pill of its own with the gap between them; the tray stays one pill [grouped]"),
+    //  How far the pills float from the screen's edge: in by a number above 0, out past it below 0, so less of the screen is the bar's.
+    //  Out, the compositor keeps 60 percent of a pill's thickness on the screen whatever the number, so the clock and the controls stay
+    //  usable; the room the windows fill follows what is on the screen.
+    SETTING_PLAIN_ROW(null, "Taskbar distance from the edge (pixels)", SETTINGS_SLIDER, 0, ("taskbar", "edge"), "edge ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_EDGE_PATH, .standard = "0", .unit = "px", .low = -16, .high = 32,
+                      .usage = "taskbar edge [PX|default]",
+                      .help = "how far the pills float in from the edge of the screen, -16 to 32 pixels at the taskbar scale; below 0 they reach past it, held to show 60 percent of their thickness [0]"),
     SETTING_PLAIN_ROW(null, "Taskbar newest task side", SETTINGS_CHOICE, 0, ("taskbar", "newest"), "newest ", "left right",
                       .path = SETTING_TASKBAR_NEWEST_PATH, .standard = "left",
                       .usage = "taskbar newest [left|right]",
@@ -1096,7 +1109,11 @@ static bool setting_typed_number(const struct settings_row address_to row, strin
         positive digits = 0, length = string_length(word);
         p8 digit[12];
         string_address rest;
+        // A row whose least is under 0 (taskbar edge) takes a minus before the digits, and no other row does.
+        bool minus = row->low < 0 && word[0] == '-';
 
+        if (minus)
+                word++, length--;
         while (digits < length && byte_is_digit(word[digits]))
                 digits++;
         if (!digits || digits >= sizeof(digit))
@@ -1105,6 +1122,8 @@ static bool setting_typed_number(const struct settings_row address_to row, strin
         digit[digits] = end;
         if (!setting_whole((string_address)digit, into))
                 return false;
+        if (minus)
+                address_to into = -address_to into;
         if (digits == length)
                 return true;
         if (!row->unit)
@@ -1176,7 +1195,10 @@ static bool setting_parse(const struct settings_row address_to row, string_addre
                 // The kept word is the number alone, digits as the file holds them, whatever unit was typed after it.
                 if (!setting_typed_number(row, word, &number) || number < row->low || number > row->high)
                         return false;
-                positive_into_string((p8 address_to)kept, (positive)number);
+                if (number < 0)
+                        kept[0] = '-', positive_into_string((p8 address_to)kept + 1, (positive)-number);
+                else
+                        positive_into_string((p8 address_to)kept, (positive)number);
                 address_to value = number;
                 return true;
         }
@@ -1279,7 +1301,7 @@ static string_address setting_shown(const struct settings_row address_to row, st
                 string_copy_bounded(into, (string_address)row->standard, room);
         else
                 string_copy_bounded(into, kept, room);
-        if (row->type == SETTING_NUMBER && byte_is_digit(into[0]) && row->unit)
+        if (row->type == SETTING_NUMBER && (byte_is_digit(into[0]) || (into[0] == '-' && byte_is_digit(into[1]))) && row->unit)
         {
                 length = string_length(into);
                 string_copy_bounded(into + length, (string_address) " ", room - length);

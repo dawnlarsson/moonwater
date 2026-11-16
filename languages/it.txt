@@ -580,3 +580,7 @@ ui_field_full	fe02	non ce ne sta di più
 =tray	a12d	area di notifica
 =tab	2e4c	pillola
 =Taskbar moon spin (seconds a turn, off or default)	a763	Rotazione della luna nella barra delle applicazioni (secondi per giro, spenta o predefinita)
+=Taskbar tasks	445b	Attività nella barra delle applicazioni
+=Taskbar distance from the edge (pixels)	845c	Distanza della barra delle applicazioni dal bordo (pixel)
+=grouped	8b7d	raggruppate
+=separate	bb18	separate

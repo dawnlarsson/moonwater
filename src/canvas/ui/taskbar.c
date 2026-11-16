@@ -99,6 +99,8 @@ static struct taskbar_state
         int clock_read;                         // how the clock's digits stood out the last time they were drawn, hundredths (4.5 to 1 is 450)
         long long moon_at;                      // the time the moon is drawn at, seconds (a check's or a picture's); 0: now
         int spin;                               // `taskbar moon spin`: seconds the moon takes to turn once, 0 not at all
+        int separate;                           // `taskbar tasks separate`: each task a pill of its own, the kit's gap twice between them
+        int edge_in;                            // `taskbar edge`: logical pixels the pills float in from the screen's edge (less than 0: past it)
         int moon_hover;                         // the band whose moon the pointer is over, plus one; 0 none
         positive moon_seen;                     // when a hand last did anything (the monotonic clock): the moon stops turning a while after
         long long moon_step;                    // the step of the turn the moon is drawn at (TASKBAR_MOON_STEPS a second on the real clock)
@@ -150,10 +152,26 @@ static int taskbar_thick(int scale)
 // How far a band at a shift is moved from its place across its edge, in device pixels: off that edge, which is toward the end of
 // its output for a bottom or a right band and toward the start of it for a top or a left one (UI_ONE is all of its thickness,
 // which is off the output).
+/*
+        `taskbar edge` in device pixels at the band's scale: in from the screen's edge for more than 0, out past it for less. Out, it is held
+        to TASKBAR_EDGE_KEEP of the pills' thickness on the screen, so the clock and every control can still be read and pressed.
+*/
+static int taskbar_inset(int scale);
+
+#define TASKBAR_EDGE_KEEP 60 // percent of a pill's thickness that stays on the screen at the most negative edge
+
+static int taskbar_edge_px(const struct taskbar_view *view)
+{
+        int scale = taskbar_scaled(view->scale), thick = taskbar_thick(view->scale), inset = taskbar_inset(scale), high = thick - 2 * inset;
+        int edge = taskbar.edge_in * scale / 100, least = -(high * (100 - TASKBAR_EDGE_KEEP) / 100 + inset);
+
+        return edge < least ? least : edge;
+}
+
 static int taskbar_off(const struct taskbar_view *view, b64 shift)
 {
-        int thick = taskbar_thick(view->scale);
-        int off = (int)(((long long)thick * (long long)shift) / (long long)UI_ONE);
+        int thick = taskbar_thick(view->scale), in = taskbar_edge_px(view);
+        int off = (int)(((long long)(thick + in) * (long long)shift) / (long long)UI_ONE) - in;
 
         return view->position == TASKBAR_BOTTOM || view->position == TASKBAR_RIGHT ? off : -off;
 }
@@ -347,6 +365,7 @@ static int taskbar_before(int slot)
         the battery and a format of the person's a text. Its length, or with t its tree's elements too, margin the room before it.
 */
 static int taskbar_clocked; // the clock's cell, as long as its text (taskbar_lay sets it before it lays the tray)
+static int taskbar_apart;   // the kit's gap twice, between one pill and the next (taskbar_lay sets it before it lays the tasks)
 
 static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int margin, int scale, int glyph, int square, int cell, int text_w, int high)
 {
@@ -396,17 +415,19 @@ static fn taskbar_clock_lay(struct ui_tree address_to t, int m, int margin, int 
 static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, const int *list, int listed, const int *widths, const int *titled, int m, int margin,
                             int pad, int side, int gap, int high)
 {
-        int length = 0;
+        int length = 0, apart = taskbar_apart;
 
         for (int k = 0; k < listed; k++)
                 length += widths[list[k]];
         if (!length)
                 return;
-        taskbar_open(t, slot, m, margin, length, high);
+        // Grouped, one pill of them all; separate, each task a pill of its own in the zone, the kit's gap twice between them.
+        if (!taskbar.separate)
+                taskbar_open(t, slot, m, margin, length, high);
         for (int k = 0; k < listed; k++)
         {
                 int at = list[k];
-                struct ui_node address_to n = taskbar_open(t, at, m, 0, widths[at], high), address_to part;
+                struct ui_node address_to n = taskbar_open(t, at, m, taskbar.separate ? (k ? apart : margin) : 0, widths[at], high), address_to part;
 
                 n->align = UI_CENTER;
                 if (titled[at])
@@ -426,7 +447,8 @@ static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, const int *li
                 }
                 ui_tree_close(t);
         }
-        ui_tree_close(t);
+        if (!taskbar.separate)
+                ui_tree_close(t);
 }
 
 // The tasks' widths for room: each what its icon and title ask, or an equal share when they ask for more, and under a share with the room
@@ -436,6 +458,10 @@ static int taskbar_tasks_fit(const struct taskbar_view *view, const int *list, i
                              int *widths, int *titled)
 {
         int sum = 0, share, tabs = 0, side = taskbar_icon_side(high, scale), alone = taskbar_tab_length(high, pad, scale, 7);
+        int gaps = taskbar.separate && listed > 1 ? (listed - 1) * taskbar_apart : 0;
+
+        // Separate, the gaps between the pills are the tasks' too: the room less them, and the length with them.
+        room -= gaps, tabs = gaps;
 
         for (int k = 0; k < listed; k++)
         {
@@ -481,7 +507,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         square = glyph + 2 * pad, cell = taskbar_text(high, pad, 4);
         clocked = taskbar_text(high, pad, taskbar.clock_chars > 0 ? taskbar.clock_chars : 5);
         tab = taskbar.clock_tab ? clocked : 0;
-        taskbar_clocked = clocked;
+        taskbar_clocked = clocked, taskbar_apart = apart;
         if (taskbar.tray_custom)
                 text_w = taskbar_text(high, pad, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
         most = length / 2 - moon - apart;
@@ -754,7 +780,7 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                   taskbar.moon_zone | taskbar.tasks_zone << 2 | taskbar.tasks_right << 4 | (int)taskbar.tray_before << 5 |
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
-                                      taskbar.clock_chars << 5, {0}};
+                                      taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, {0}};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -1143,6 +1169,14 @@ static void taskbar_moon_damaged(int band, const int *rect)
                 return;
         memory_copy(taskbar_bands[band].moon_damage, rect, sizeof(taskbar_bands[band].moon_damage));
         taskbar_bands[band].moon_own = 1;
+}
+
+// `taskbar tasks grouped|separate` (separate 1) and `taskbar edge` (logical pixels, TASKBAR_EDGE_LEAST to TASKBAR_EDGE_MOST, else 0).
+static void taskbar_bar_set(int separate, int edge)
+{
+        taskbar.separate = separate != 0;
+        taskbar.edge_in = edge >= TASKBAR_EDGE_LEAST && edge <= TASKBAR_EDGE_MOST ? edge : 0;
+        taskbar.stale = 1;
 }
 
 // `taskbar moon spin`: seconds a turn, 10 to 3600, or 0 for none.

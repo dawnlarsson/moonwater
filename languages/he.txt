@@ -581,3 +581,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =tray	a12d	מגש
 =tab	2e4c	גלולה
 =Taskbar moon spin (seconds a turn, off or default)	a763	סיבוב הירח בשורת המשימות (שניות לסיבוב, כבוי או ברירת מחדל)
+=Taskbar tasks	445b	משימות בשורת המשימות
+=Taskbar distance from the edge (pixels)	845c	מרחק שורת המשימות מהקצה (פיקסלים)
+=grouped	8b7d	מקובצות
+=separate	bb18	נפרדות

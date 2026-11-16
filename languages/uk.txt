@@ -580,3 +580,7 @@ ui_field_full	fe02	більше не вміщається
 =tray	a12d	трей
 =tab	2e4c	плашка
 =Taskbar moon spin (seconds a turn, off or default)	a763	Обертання місяця на панелі завдань (секунд на оберт, вимк. або типово)
+=Taskbar tasks	445b	Завдання на панелі завдань
+=Taskbar distance from the edge (pixels)	845c	Відступ панелі завдань від краю (пікселі)
+=grouped	8b7d	разом
+=separate	bb18	окремо

@@ -1540,7 +1540,8 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
         struct taskbar_view view = compositor_taskbar_view();
         unsigned int count = 0, own = band->builtin ? band->mark_count : 0;
 
-        for (int slot = 0; slot <= (int)own + (band->builtin ? 2 : 6); slot++)
+        // With a font: the band's plates, as many as it has (each task one when they are separate).
+        for (int slot = 0; slot <= (int)own + (band->builtin ? 2 : 7 + WINDOWS); slot++)
         {
                 int which = slot < (int)own ? slot : slot == (int)own ? TASKBAR_LAUNCHER : slot == (int)own + 1 ? TASKBAR_TABS : -2;
                 int x, y, width, height;

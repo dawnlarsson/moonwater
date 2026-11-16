@@ -581,3 +581,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =tray	a12d	منطقة الإعلام
 =tab	2e4c	كبسولة
 =Taskbar moon spin (seconds a turn, off or default)	a763	دوران القمر في شريط المهام (ثوانٍ لكل دورة، أو إيقاف، أو الافتراضي)
+=Taskbar tasks	445b	المهام في شريط المهام
+=Taskbar distance from the edge (pixels)	845c	بعد شريط المهام عن الحافة (بكسل)
+=grouped	8b7d	مجمّعة
+=separate	bb18	منفصلة
