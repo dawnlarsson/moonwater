@@ -420,13 +420,14 @@ static unsigned int ui_ink_on(unsigned int fill)
         return ui_contrast(0xff000000u, fill) >= white ? 0xff000000u : 0xffffffffu;
 }
 
-// An ink for text on a container, from a start mixed toward black (or white on dark) till it stands out 4.5:1.
-static unsigned int ui_ink_deepened(unsigned int start, unsigned int container, unsigned int toward)
+// An ink deepened: from a start, mixed toward black (or white on dark) a step at a time, keeping its hue, until it stands out least
+// (hundredths: 450 is 4.5:1) from both grounds (the same twice for one). Text on a container, a role's words, the focus ring's ink.
+static unsigned int ui_ink_deepened(unsigned int start, unsigned int one, unsigned int two, unsigned int least, unsigned int toward)
 {
         unsigned int ink = start;
 
-        for (int step = 0; step < 24 && ui_contrast(ink, container) < 450; step++)
-                ink = ui_mix(ink, 85, toward);
+        for (int step = 0; step < 24 && (ui_contrast(ink, one) < least || ui_contrast(ink, two) < least); step++)
+                ink = ui_mix(ink | 0xff000000u, 85, toward);
         return ink;
 }
 
@@ -449,13 +450,15 @@ static fn ui_theme_make(struct ui_theme address_to theme, unsigned int dark, uns
         if (dark)
         {
                 theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 22, theme->role[UI_SURFACE_HIGH]);
-                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 40, 0xffffffffu), theme->role[UI_PRIMARY_CONTAINER], 0xffffffffu);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 40, 0xffffffffu), theme->role[UI_PRIMARY_CONTAINER],
+                                                                                 theme->role[UI_PRIMARY_CONTAINER], 450, 0xffffffffu);
                 theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, theme->role[UI_SURFACE_HIGHEST]);
         }
         else
         {
                 theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 20, 0xffffffffu);
-                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 29, 0xff000000u), theme->role[UI_PRIMARY_CONTAINER], 0xff000000u);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 29, 0xff000000u), theme->role[UI_PRIMARY_CONTAINER],
+                                                                                 theme->role[UI_PRIMARY_CONTAINER], 450, 0xff000000u);
                 theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, 0xffffffffu);
         }
 }
@@ -11173,9 +11176,7 @@ static unsigned int ui_ink_readable(unsigned int ink)
         unsigned int surface = ui_role(UI_SURFACE) & 0xffffffu, well = ui_role(UI_SURFACE_HIGHEST) & 0xffffffu;
         unsigned int toward = ui_luminance(surface) > 32768 ? 0xff000000u : 0xffffffffu;
 
-        for (int step = 0; step < 24 && (ui_contrast(ink & 0xffffffu, surface) < 450 || ui_contrast(ink & 0xffffffu, well) < 450); step++)
-                ink = ui_mix(ink | 0xff000000u, 85, toward);
-        return ink;
+        return ui_ink_deepened(ink, surface, well, 450, toward);
 }
 
 /*
@@ -12633,9 +12634,7 @@ static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
 
         if (ui->glass)
                 return 0xff000000u | (ui->ink & 0xffffffu);
-        for (int step = 0; step < 24 && (ui_contrast(ink & 0xffffffu, ground & 0xffffffu) < 300 || ui_contrast(ink & 0xffffffu, lit & 0xffffffu) < 300); step++)
-                ink = ui_mix(ink, 85, toward);
-        return ink;
+        return ui_ink_deepened(ink, ground, lit, 300, toward);
 }
 
 static fn ui_kit_focus_ring(struct ui address_to ui, const struct ui_box address_to box)
@@ -13518,7 +13517,7 @@ static int ui_tab_left(struct ui address_to ui, const struct ui_control address_
         for (int k = 0; k < item; k++)
                 x += ui_tab_width(ui, c, k) + gap;
         // Reading from the right the first tab is at the box's right end, and the strip runs to the left from it.
-        return ui_rtl() ? c->x + c->w - (x - c->x) - ui_tab_width(ui, c, item) : x;
+        return ui_mirror(x, ui_tab_width(ui, c, item), c->x, c->w);
 }
 
 // The length of the strip's tabs and the gaps between them, whichever way it reads.
@@ -13914,7 +13913,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
                 fill = ui_role(UI_SURFACE_HIGHEST), ink = ui_role(UI_ON_SURFACE_VARIANT);
         // A status's words keep its colour, deepened on its container till they read 4.5:1 (Failed was 3.9:1, Degraded 4.0, Healthy 4.4 light).
         else if (role > 0 && fill)
-                ink = ui_ink_deepened(ink, fill, ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768 ? 0xff000000u : 0xffffffffu);
+                ink = ui_ink_deepened(ink, fill, fill, 450, ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768 ? 0xff000000u : 0xffffffffu);
         ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(22), ui_q(6));
         if (fill)
@@ -17583,7 +17582,7 @@ struct ui_trail
 
 static inline int ui_trail_flip(const struct ui_trail address_to t, int x, int w)
 {
-        return ui_rtl() ? t->x + t->w - (x - t->x) - w : x;
+        return ui_mirror(x, w, t->x, t->w);
 }
 
 // The trail laid out in its box: every place measured, the places that show chosen outward from the current one, each put in its place.
@@ -17650,7 +17649,7 @@ static int ui_trail_hit(const struct ui address_to ui, const struct ui_trail add
 
         if (x < t->x || x >= t->x + t->w || y < t->y || y >= t->y + t->h)
                 return -1;
-        x = ui_rtl() ? t->x + t->w - 1 - (x - t->x) : x; // as laid from the left
+        x = ui_point(x, t->x, t->w); // as laid from the left
         for (int k = t->first; k <= t->last; k++)
                 if (x >= t->at[k] - gap / 2 && x < t->at[k] + t->wide[k] + gap / 2)
                         return k;
