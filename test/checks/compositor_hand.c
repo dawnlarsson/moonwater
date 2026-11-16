@@ -868,6 +868,14 @@ static void check_popup_ground_steady(void)
     ui_kit.now = 1000;
     ui_popmenu_pump(&popup);
     check("popup: the menu's pump takes the kit's clock, not the parent's last frame's", ui_kit.now > 1000);
+    /* A motion over the menu is in the menu's own coordinates: the pump leaves the app window's pointer and the shape it sends as they
+       were, or the window lit what was under the place the pointer had on the menu (fbfcb90b). */
+    ui_kit.pointer_x = 300, ui_kit.pointer_y = 200, ui_kit_shape = WINDOW_POINTER_HAND;
+    compositor_post(3, WINDOW_EVENT_MOTION, 0, 12, 14);
+    ui_popmenu_pump(&popup);
+    check("popup: a motion over the menu leaves the window's pointer and the shape it sends where they were",
+          ui_kit.pointer_x == 300 && ui_kit.pointer_y == 200 && ui_kit_shape == WINDOW_POINTER_HAND && popup.x == 12 && popup.y == 14);
+    ui_kit.pointer_x = ui_kit.pointer_y = 0, ui_kit_shape = WINDOW_POINTER_ARROW;
     for (int hot = 0; hot < 4; hot++)
     {
         if (hot == 2)
