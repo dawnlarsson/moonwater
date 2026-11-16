@@ -120,11 +120,21 @@ settings_battery_discharging	7964	، ڈسچارج ہو رہی ہے
 settings_battery_full	ded8	، مکمل چارج
 settings_battery_idle	1635	، چارج نہیں ہو رہی
 settings_busy	34e0	moonwater مصروف ہے: اس سے پہلے کی تبدیلیاں ابھی مکمل نہیں ہوئیں
+settings_button_discover	c0ee	دریافت کریں
+settings_button_end	adad	سب ختم کریں
+settings_button_pair	f1d1	جوڑیں
+settings_button_run	e66a	چلائیں
+settings_button_running	25ec	چل رہا ہے
+settings_button_set	bd5b	ابھی سیٹ کریں
+settings_button_stop	7705	روکیں
 settings_cannot_join	dfa4	moonwater اس نیٹ ورک کے مطالبے کے مطابق منسلک نہیں ہو سکتا
 settings_cannot_run	954f	moonwater کمانڈ چلائی نہ جا سکی
 settings_card_back	db52	Escape یا کلک واپسی کے لیے
 settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
 settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
+settings_copy_both	257a	لیبل اور قدر کاپی کریں
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	قدر کاپی کریں
 settings_device_drive	8683	ڈرائیو، %s
 settings_device_name	5f12	ڈیوائس کا نام
 settings_device_none	3cd5	کوئی ڈرائیو یا USB آلہ نہیں ملا

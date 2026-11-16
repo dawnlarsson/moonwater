@@ -120,11 +120,21 @@ settings_battery_discharging	7964	، قيد التفريغ
 settings_battery_full	ded8	، مشحونة بالكامل
 settings_battery_idle	1635	، لا يتم الشحن
 settings_busy	34e0	moonwater مشغول: لم تكتمل التغييرات السابقة بعد
+settings_button_discover	c0ee	اكتشف
+settings_button_end	adad	إنهاء الكل
+settings_button_pair	f1d1	إقران
+settings_button_run	e66a	تشغيل
+settings_button_running	25ec	قيد التشغيل
+settings_button_set	bd5b	اضبط الآن
+settings_button_stop	7705	إيقاف
 settings_cannot_join	dfa4	لا يستطيع moonwater تلبية ما تطلبه تلك الشبكة للاتصال
 settings_cannot_run	954f	تعذر تشغيل أمر moonwater
 settings_card_back	db52	Escape أو نقرة للرجوع
 settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
 settings_copied	0bd7	نُسخ إلى الحافظة
+settings_copy_both	257a	نسخ التسمية والقيمة
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	نسخ القيمة
 settings_device_drive	8683	محرك، %s
 settings_device_name	5f12	اسم الجهاز
 settings_device_none	3cd5	لم يُعثر على محركات أو أجهزة USB

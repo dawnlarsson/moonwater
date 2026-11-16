@@ -119,11 +119,21 @@ settings_battery_discharging	7964	, розряджається
 settings_battery_full	ded8	, заряджена
 settings_battery_idle	1635	, не заряджається
 settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
+settings_button_discover	c0ee	Виявити
+settings_button_end	adad	Завершити всі
+settings_button_pair	f1d1	Зв'язати
+settings_button_run	e66a	Запустити
+settings_button_running	25ec	Виконується
+settings_button_set	bd5b	Встановити зараз
+settings_button_stop	7705	Зупинити
 settings_cannot_join	dfa4	moonwater не може підключитися до того, що вимагає ця мережа
 settings_cannot_run	954f	команду moonwater не вдалося виконати
 settings_card_back	db52	Escape або клацання — назад
 settings_card_stopped	e24d	зупинено: Escape або клацання — назад
 settings_copied	0bd7	скопійовано до буфера обміну
+settings_copy_both	257a	Копіювати назву та значення
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Копіювати значення
 settings_device_drive	8683	диск, %s
 settings_device_name	5f12	Назва пристрою
 settings_device_none	3cd5	Диски та USB-пристрої не знайдено

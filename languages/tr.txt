@@ -119,11 +119,21 @@ settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
 settings_battery_idle	1635	, şarj olmuyor
 settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
+settings_button_discover	c0ee	Keşfet
+settings_button_end	adad	Tümünü sonlandır
+settings_button_pair	f1d1	Eşleştir
+settings_button_run	e66a	Çalıştır
+settings_button_running	25ec	Çalışıyor
+settings_button_set	bd5b	Şimdi ayarla
+settings_button_stop	7705	Durdur
 settings_cannot_join	dfa4	moonwater bu ağın istediğine katılamıyor
 settings_cannot_run	954f	moonwater komutu çalıştırılamadı
 settings_card_back	db52	Escape veya bir tıklama geri döner
 settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
 settings_copied	0bd7	panoya kopyalandı
+settings_copy_both	257a	Etiketi ve değeri kopyala
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Değeri kopyala
 settings_device_drive	8683	sürücü, %s
 settings_device_name	5f12	Aygıtın adı
 settings_device_none	3cd5	Sürücü veya USB aygıtı bulunamadı

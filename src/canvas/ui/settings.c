@@ -87,7 +87,12 @@
         word and a triple the line, the middle button pastes and the right
         button opens its menu. With the mouse, a press on a group chooses
         it, a press on a row is Enter on it, and the wheel scrolls what is
-        under the pointer.
+        under the pointer. An action (Discover now, Pair a machine) is the
+        kit's button at its row's end, which a press, Enter or a tap on the
+        row runs once, and which says so while its verb waits. The right
+        button on a row that has a value, or the menu key or Shift-F10 on
+        the row the keys are on, opens its copies: the value, or the label
+        and the value, put on the clipboard, which sets nothing.
 
         A choice opens a list of all its choices, under its row (over it
         where there is more room there, and slid up where it fits the window
@@ -741,10 +746,13 @@ static struct
         struct ui_text filter_edit;
         b32 filter_open;
         // The field a row is typed in (the engine's, with the row's rules: a name's characters, a passphrase's dots, the
-        // room its value has), open while editing is a row; and the context menu of either field.
+        // room its value has), open while editing is a row; and the context menu of either field, of a choice, or of a row's copies.
         struct ui_text edit;
         char edit_from[SETTINGS_VALUE];
         struct ui_popup popup;
+        // The menu open is a row's copies (settings_copy_open), alone or after a row's field's own items: the row they copy.
+        b32 copy_open;
+        int copy_row;
         char status[SETTINGS_STATUS];
         int width, height;
         int least_w, least_h;      // the window's least size, device pixels (settings_least), and what it was worked out for
@@ -2963,6 +2971,21 @@ static positive settings_slot(int row)
         return at;
 }
 
+// Whether a row is an action: a verb run by its button, with no value to set.
+static b32 settings_action_row(int row)
+{
+        return row >= 0 && row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_ACTION;
+}
+
+/*
+        Whether an action's verb waits to run or runs now: its button says so and is greyed, and a press, Enter or a tap asks for it
+        no second time (a pairing that waits is no such action: its button stops the wait).
+*/
+static b32 settings_action_busy(int row)
+{
+        return settings_slot(row) < settings.queued || (settings.child > 0 && settings.job == row && settings.job_sets);
+}
+
 static fn settings_feed_drop(void);
 
 /*
@@ -3045,6 +3068,9 @@ static fn settings_change(int row, const char address_to value)
         string_copy_bounded((string_address)settings.queue[at].value, (string_address)value, sizeof(settings.queue[at].value));
         settings_say((string_address) "...");
         settings_next_job();
+        // An action's button says it is busy from now (settings_describe).
+        if (settings_action_row(row))
+                ui_page_redraw(&settings.page);
 }
 
 // What a command of All commands said, now it has ended: a line is the status, more is a card.
@@ -4048,6 +4074,31 @@ static b32 settings_pair_waiting(int row)
         return settings.child > 0 && settings.job_sets && settings.job == row && settings_pair_row(row);
 }
 
+// What an action's button says: what it does (the last word of its verb says which), Running while it is busy, and Stop while a pairing waits.
+static const char address_to settings_button_words(int row)
+{
+        const struct settings_row address_to which = &settings_rows[row];
+        const char address_to last = null;
+
+        if (settings_pair_waiting(row))
+                return WORDS(settings_button_stop);
+        if (settings_action_busy(row))
+                return WORDS(settings_button_running);
+        for (positive k = 0; k < SETTING_WORDS && which->set[k]; k++)
+                last = which->set[k];
+        if (!last)
+                return WORDS(settings_button_run);
+        if (string_equals((string_address)last, (string_address) "sync"))
+                return WORDS(settings_button_set);
+        if (string_equals((string_address)last, (string_address) "refresh"))
+                return WORDS(settings_button_discover);
+        if (string_equals((string_address)last, (string_address) "pair"))
+                return WORDS(settings_button_pair);
+        if (string_equals((string_address)last, (string_address) "end"))
+                return WORDS(settings_button_end);
+        return WORDS(settings_button_run);
+}
+
 // The code, from the CLI's first line: NAME CODE: on the other machine, moonwater link NAME CODE (the name is before the first blank).
 static fn settings_pair_parse(const char address_to line, positive size)
 {
@@ -4140,6 +4191,7 @@ static fn settings_waiting_say(void)
 static fn settings_complete(b32 killed, positive status)
 {
         int row = settings.job;
+        b32 action = settings.job_sets && settings_action_row(row);
 
         if (settings.job_sets)
         {
@@ -4205,6 +4257,9 @@ static fn settings_complete(b32 killed, positive status)
         }
 
         settings_next_job();
+        // An action's button is ready again (or says the next of it is still waiting).
+        if (action)
+                ui_page_redraw(&settings.page);
 
         // The first reading of every row, said once where the machine's log is: how many were unread or not understood.
         if (!settings.told && !settings_unread_any() && settings.child <= 0 && !settings.queued)
@@ -4812,6 +4867,8 @@ static fn settings_menu_open(int row)
                 return;
         if (settings_rows[row].flags & SETTINGS_BATTERIES)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
+        settings.copy_open = false; // the popup is the choice's now, not a row's copies
+
         if (!ui_page_menu_open(&settings.ui, &settings.page, &settings.list, &settings.popup, &settings.own, row, settings_menu_label, settings_shown_value(row)))
                 return;
         settings_say((string_address)WORDS(settings_menu_keys));
@@ -5065,7 +5122,7 @@ static fn settings_activate(int row, int way)
         }
         case SETTINGS_ACTION:
                 // A set asked for while one is running or waiting is that set: the clock is set once for it.
-                if (settings_slot(row) < settings.queued || (settings.child > 0 && settings.job == row && settings.job_sets))
+                if (settings_action_busy(row))
                         return;
                 settings_change(row, "");
                 return;
@@ -5171,9 +5228,13 @@ static fn settings_edit_commit(void)
         settings_edit_end();
 }
 
-// What the field a row is typed in asked after an event: Enter keeps it, Escape leaves it, a refusal is said.
+static fn settings_field_menu(void);
+
+// What the field a row is typed in asked after an event: Enter keeps it, Escape leaves it, a refusal is said, its menu opened.
 static fn settings_edit_asked(p32 asks)
 {
+        if (asks & UI_TEXT_MENU)
+                settings_field_menu();
         if (asks & UI_TEXT_REFUSED)
                 settings_say((string_address)settings.edit.refused);
         if (asks & (UI_TEXT_SUBMIT | UI_TEXT_COMMIT))
@@ -5190,7 +5251,8 @@ static fn settings_type(const struct window_event address_to event)
         if (event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD)
                 ui_confirm_drop(&settings.confirm);
         ui_field_focus(&settings.edit, true);
-        settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, 0, 0));
+        // No popup is the field's to open: its menu is the window's, with the row's copies after the field's own (settings_field_menu).
+        settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, null, event, 0, 0));
 }
 
 // The filter's field, made the first time it is wanted: one line of the text engine, its clipboard this window's.
@@ -5413,13 +5475,15 @@ static b32 settings_map_key(const struct window_event address_to event)
 
 // What the page's keys ask of the settings: a row's step and its action, the said line, the group the column chose, and Delete.
 static const struct ui_page_keys settings_page_keys = {settings_steps, settings_activate, settings_said_of, settings_group_choose, settings_forget};
+static b32 settings_menu_key(const struct window_event address_to event);
+static fn settings_copy_keys(void);
 
 static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
-        // A choice's menu has every key: its popup has them while it is open, and a key that comes here is the menu's too.
-        if (settings.page.menu_row >= 0)
+        // A choice's menu has every key, and so has a row's copies: its popup has them while it is open, and a key that comes here is the menu's too.
+        if (settings.page.menu_row >= 0 || (settings.copy_open && settings.popup.open && !settings.popup.field))
         {
                 settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
@@ -5442,6 +5506,12 @@ static b32 settings_key(const struct window_event address_to event)
         if (settings.page.card)
         {
                 settings_card_key(event);
+                return true;
+        }
+        // The menu key, or Shift-F10, with the keys in the rows: the copies of the row they are on (the search field's menu is its right button's).
+        if (settings.page.pane && settings_menu_key(event))
+        {
+                settings_copy_keys();
                 return true;
         }
         // Delete on a kernel notice's line dismisses its class (the feeder starts it again from nothing); a line is no row, so the keys stop there.
@@ -5774,6 +5844,27 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 settings_describe_output(id, row);
                 return;
         }
+        /*
+                An action is the kit's button at the row's end, its label at the start as every row's: the button says what it does,
+                and while the verb waits to run or runs it says so and is greyed (settings_action_busy). What a verb reads for it (the
+                clock) is said before the button; an action that reads nothing says nothing there.
+        */
+        if (which->kind == SETTINGS_ACTION)
+        {
+                row->kind = UI_ROW_BUTTON, row->words = settings_button_words(id);
+                row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT || (settings_action_busy(id) && !settings_pair_waiting(id));
+                if (!which->read[0])
+                        row->note = null;
+                else if (state == SETTINGS_UNREAD)
+                        row->note = "...";
+                else if (state == SETTINGS_ABSENT)
+                        row->note = WORDS(settings_not_here);
+                else if (state == SETTINGS_FAILED || !shown[0])
+                        row->note = WORDS(settings_unknown);
+                else
+                        row->note = settings_number_shown(id, shown);
+                return;
+        }
         row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
         row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? WORDS(settings_not_here)
                      : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_number_shown(id, shown);
@@ -5806,6 +5897,161 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
                 row->step = settings_slider_step(which), row->words = setting_percent(which) ? "%" : language_of(which->unit);
         }
+}
+
+/*
+        A row's copies: the right button on a row that has a value (an info row's line, a switch's word, a choice's, a field's, a
+        number with its unit, a list's word) opens the kit's menu at the pointer, and the menu key or Shift-F10 opens it under the
+        row the keys are on: Copy value puts on the clipboard the value as the row shows it, and Copy label and value the row's
+        label with it. A row typed in has them after its field's own items. A copy is read only: it is the clipboard's and sets
+        nothing, so a virtual device's right button copies as a hand's does, and no verb is run for it.
+*/
+#define SETTINGS_COPY_VALUE 0x100 // the items' ids, past the field menu's own (UI_TEXT_MENU_*)
+#define SETTINGS_COPY_BOTH 0x101
+#define SETTINGS_KEY_MENU 127 // the keyboard's menu key, as the compositor numbers it
+#define SETTINGS_KEY_F10 68   // and F10, which with Shift opens a menu as the menu key does
+
+// The value a row shows, as it is copied: none for a row that shows none (not read, not on this machine, a verb with no value).
+static const char address_to settings_copy_text(int id)
+{
+        struct ui_row row;
+
+        if (id < 0 || id >= (int)SETTINGS_ALL || settings_try_of(id) >= 0 || !settings_large)
+                return null;
+        if (id < SETTINGS_ANY && settings_rows[id].output == SETTINGS_OUT_NONE)
+        {
+                if (settings.state[id] != SETTINGS_READ || !settings.value[id][0])
+                        return null;
+                return settings_number_shown(id, settings.value[id]);
+        }
+        if (id >= SETTINGS_ANY && !settings_item(id))
+                return null;
+        memory_zero(&row, sizeof(row));
+        settings_describe(id, &row);
+        if (row.dim && id < SETTINGS_ANY)
+                return null;
+        if ((settings_item(id) && settings_item(id)->kind == SETTINGS_NOTE) || !row.value || !row.value[0])
+                return null;
+        return row.value;
+}
+
+// The row's copies, each greyed where the row has no value.
+static fn settings_copy_items(struct ui_popmenu address_to m, int id)
+{
+        p32 none = settings_copy_text(id) ? 0 : UI_MENU_DISABLED;
+
+        ui_popmenu_add(m, WORDS(settings_copy_value), null, none, SETTINGS_COPY_VALUE);
+        ui_popmenu_add(m, WORDS(settings_copy_both), null, none, SETTINGS_COPY_BOTH);
+}
+
+// A copy chosen: the value, or the label and the value, on the clipboard (the one path every copy of the window takes), and said.
+static fn settings_copy_row(int id, b32 both)
+{
+        char line[2 * SETTINGS_SUB_TEXT];
+        const char address_to value = settings_copy_text(id);
+
+        if (!value)
+                return;
+        if (both)
+                language_format(line, sizeof(line), WORDS(settings_copy_line), id < SETTINGS_ANY ? settings_label_window(id) : settings_label_shown(id), value);
+        else
+                string_copy_bounded((string_address)line, (string_address)value, sizeof(line));
+        windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, line, string_length((string_address)line));
+        settings_say((string_address)WORDS(settings_copied));
+        ui_page_redraw(&settings.page);
+}
+
+/*
+        A row's copies opened at a point of the window: at the pointer, or for the keys under the row with its first item lit, at its
+        start. False, and nothing opened, for a row with no value or a menu that takes no row of the table.
+*/
+static b32 settings_copy_open(int id, int x, int y, b32 keys)
+{
+        struct ui_popmenu address_to m = &settings.popup.menu;
+
+        if (!settings_copy_text(id) || settings.ui.scale <= 0)
+                return false;
+        settings_menu_close();
+        m->count = 0, m->typed_length = 0;
+        memory_zero(&m->press, sizeof(m->press));
+        settings_copy_items(m, id);
+        settings.popup.field = null;
+        if (!ui_popmenu_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
+                return false;
+        settings.copy_open = true, settings.copy_row = id;
+        if (keys)
+        {
+                m->hot = 0;
+                ui_popmenu_present(&settings.popup);
+        }
+        return true;
+}
+
+// The right button's press at a point: the row under it has the keys, and its copies open there. A press on no row opens nothing.
+static fn settings_copy_press(int x, int y)
+{
+        int row = ui_page_target(&settings.ui, &settings.page, &settings.list, x, y);
+
+        if (row < 0 || row >= UI_PAGE_GROUP)
+                return;
+        if (row != settings.list.focus)
+        {
+                int before = settings.list.focus;
+
+                ui_confirm_drop(&settings.confirm);
+                settings.list.focus = row;
+                settings_said_of(before);
+        }
+        settings.page.pane = 1;
+        settings_copy_open(row, x, y, false);
+        ui_page_redraw(&settings.page);
+}
+
+// The menu key, or Shift-F10, on the rows: the copies of the row the keys are on, under it, the row revealed first.
+static fn settings_copy_keys(void)
+{
+        int id = settings.list.focus, at = ui_list_at(&settings.list, id), x, y;
+        struct ui measure = settings.ui;
+        struct ui_popmenu address_to m = &settings.popup.menu;
+
+        if (at < 0 || !settings_copy_text(id))
+                return;
+        ui_list_reveal(&settings.ui, &settings.list);
+        m->count = 0;
+        settings_copy_items(m, id);
+        ui_popmenu_size(&measure, m, settings.page.height);
+        y = ui_list_row_y(&settings.list, at) + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, UI_GAP1);
+        x = ui_rtl() ? settings.list.x + settings.list.w - ui_dev(&settings.ui, UI_INSET) - m->width : settings.list.x + ui_dev(&settings.ui, UI_INSET);
+        settings_copy_open(id, x < 0 ? 0 : x, y, true);
+        ui_page_redraw(&settings.page);
+}
+
+// Whether a key asks for a menu: the menu key, or Shift-F10.
+static b32 settings_menu_key(const struct window_event address_to event)
+{
+        return event->a == SETTINGS_KEY_MENU || (event->a == SETTINGS_KEY_F10 && (event->flags & WINDOW_KEY_SHIFT));
+}
+
+// The menu of the field a row is typed in: the kit's items for its text, and after them the row's copies when it is a setting's.
+static fn settings_field_menu(void)
+{
+        struct ui_text address_to t = &settings.edit;
+        struct ui_popmenu address_to m = &settings.popup.menu;
+        int row = settings_editing();
+        b32 copies = row >= 0 && row < SETTINGS_ANY;
+
+        if (!t->own)
+                return;
+        m->count = 0, m->typed_length = 0;
+        ui_text_menu_items(m, t, false);
+        if (copies)
+        {
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                settings_copy_items(m, row);
+        }
+        settings.popup.field = t;
+        settings.copy_open = ui_popmenu_open(&settings.popup, t->own, &settings.ui, t->menu_x, t->menu_y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch) && copies;
+        settings.copy_row = row;
 }
 
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
@@ -5956,7 +6202,7 @@ static b32 settings_event_take(const struct window_event address_to event)
                         unless that is the row typed in, whose label a press only leaves.
                 */
                 if (settings_editing() >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.sel.dragging) &&
-                    (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
+                    (asks = ui_field_event(&settings.ui, &settings.edit, null, event, x, y)))
                 {
                         b32 outside = event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL);
                         b32 own = outside && ui_page_target(&settings.ui, &settings.page, &settings.list, x, y) == settings_editing();
@@ -5977,6 +6223,13 @@ static b32 settings_event_take(const struct window_event address_to event)
                                 return true;
                         }
                 }
+        }
+        // The right button on a row opens its copies (a finger held still is the right button too); it is no press of the row's.
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !settings.page.card && settings.page.menu_row < 0)
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                        settings_copy_press(ui_kit.pointer_x, ui_kit.pointer_y);
+                return true;
         }
         switch (event->type)
         {
@@ -6324,6 +6577,21 @@ static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
 
+        // A row's copies, alone or after its field's items: a copy is done here, and any other answer closed them (a field's item is the field's, below).
+        if (settings.copy_open)
+        {
+                settings.copy_open = false;
+                if (id == SETTINGS_COPY_VALUE || id == SETTINGS_COPY_BOTH)
+                {
+                        settings_copy_row(settings.copy_row, id == SETTINGS_COPY_BOTH);
+                        return;
+                }
+                if (!t)
+                {
+                        ui_page_redraw(&settings.page);
+                        return;
+                }
+        }
         // A choice's menu: the item it chose, or a negative id when it closed (the compositor's press outside, or Escape).
         if (!t && settings.page.menu_row >= 0)
         {

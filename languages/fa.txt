@@ -120,11 +120,21 @@ settings_battery_discharging	7964	، در حال تخلیه
 settings_battery_full	ded8	، شارژ کامل
 settings_battery_idle	1635	، در حال شارژ نیست
 settings_busy	34e0	moonwater مشغول است: تغییرات پیش از این هنوز انجام نشده‌اند
+settings_button_discover	c0ee	کشف کن
+settings_button_end	adad	پایان همه
+settings_button_pair	f1d1	جفت کردن
+settings_button_run	e66a	اجرا
+settings_button_running	25ec	در حال اجرا
+settings_button_set	bd5b	اکنون تنظیم کن
+settings_button_stop	7705	توقف
 settings_cannot_join	dfa4	moonwater نمی‌تواند خواسته‌های آن شبکه را برای اتصال برآورده کند
 settings_cannot_run	954f	فرمان moonwater اجرا نشد
 settings_card_back	db52	Escape یا کلیک برای بازگشت
 settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
 settings_copied	0bd7	در کلیپ‌بورد کپی شد
+settings_copy_both	257a	کپی برچسب و مقدار
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	کپی مقدار
 settings_device_drive	8683	درایو، %s
 settings_device_name	5f12	نام دستگاه
 settings_device_none	3cd5	هیچ درایو یا دستگاه USB پیدا نشد

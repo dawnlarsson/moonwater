@@ -7703,11 +7703,21 @@ LANGUAGE_ID(settings_battery_discharging, ", Discharging") \
 LANGUAGE_ID(settings_battery_full, ", Full") \
 LANGUAGE_ID(settings_battery_idle, ", Not charging") \
 LANGUAGE_ID(settings_busy, "moonwater is busy: the changes before this one are not done") \
+LANGUAGE_ID(settings_button_discover, "Discover") \
+LANGUAGE_ID(settings_button_end, "End all") \
+LANGUAGE_ID(settings_button_pair, "Pair") \
+LANGUAGE_ID(settings_button_run, "Run") \
+LANGUAGE_ID(settings_button_running, "Running") \
+LANGUAGE_ID(settings_button_set, "Set now") \
+LANGUAGE_ID(settings_button_stop, "Stop") \
 LANGUAGE_ID(settings_cannot_join, "moonwater cannot join what that network asks for") \
 LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run") \
 LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
 LANGUAGE_ID(settings_copied, "copied to the clipboard") \
+LANGUAGE_ID(settings_copy_both, "Copy label and value") \
+LANGUAGE_ID(settings_copy_line, "%1$s: %2$s") \
+LANGUAGE_ID(settings_copy_value, "Copy value") \
 LANGUAGE_ID(settings_device_drive, "drive, %s") \
 LANGUAGE_ID(settings_device_name, "Name of the device") \
 LANGUAGE_ID(settings_device_none, "No drives or USB devices found") \

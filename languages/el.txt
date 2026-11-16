@@ -119,11 +119,21 @@ settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
 settings_battery_idle	1635	, δεν φορτίζει
 settings_busy	34e0	το moonwater είναι απασχολημένο: οι προηγούμενες αλλαγές δεν έχουν ολοκληρωθεί
+settings_button_discover	c0ee	Ανακάλυψη
+settings_button_end	adad	Τερματισμός όλων
+settings_button_pair	f1d1	Σύνδεση
+settings_button_run	e66a	Εκτέλεση
+settings_button_running	25ec	Σε εξέλιξη
+settings_button_set	bd5b	Ρύθμιση τώρα
+settings_button_stop	7705	Διακοπή
 settings_cannot_join	dfa4	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
 settings_cannot_run	954f	η εντολή moonwater δεν μπόρεσε να εκτελεστεί
 settings_card_back	db52	Το Escape ή ένα κλικ επιστρέφει
 settings_card_stopped	e24d	διακόπηκε: το Escape ή ένα κλικ επιστρέφει
 settings_copied	0bd7	αντιγράφηκε στο πρόχειρο
+settings_copy_both	257a	Αντιγραφή ετικέτας και τιμής
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Αντιγραφή τιμής
 settings_device_drive	8683	δίσκος, %s
 settings_device_name	5f12	Όνομα της συσκευής
 settings_device_none	3cd5	Δεν βρέθηκαν δίσκοι ή συσκευές USB

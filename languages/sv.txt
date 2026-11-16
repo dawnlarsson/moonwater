@@ -119,11 +119,21 @@ settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte
 settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
+settings_button_discover	c0ee	Upptäck
+settings_button_end	adad	Avsluta alla
+settings_button_pair	f1d1	Para ihop
+settings_button_run	e66a	Kör
+settings_button_running	25ec	Pågår
+settings_button_set	bd5b	Ställ nu
+settings_button_stop	7705	Stoppa
 settings_cannot_join	dfa4	moonwater kan inte ansluta till det som nätverket kräver
 settings_cannot_run	954f	moonwater-kommandot kunde inte köras
 settings_card_back	db52	Escape eller ett klick går tillbaka
 settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
 settings_copied	0bd7	kopierat till urklippet
+settings_copy_both	257a	Kopiera etikett och värde
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Kopiera värde
 settings_device_drive	8683	disk, %s
 settings_device_name	5f12	Enhetens namn
 settings_device_none	3cd5	Inga diskar eller USB-enheter hittades

@@ -117,11 +117,21 @@ settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
 settings_battery_idle	1635	, Not charging
 settings_busy	34e0	moonwater is busy: the changes before this one are not done
+settings_button_discover	c0ee	Discover
+settings_button_end	adad	End all
+settings_button_pair	f1d1	Pair
+settings_button_run	e66a	Run
+settings_button_running	25ec	Running
+settings_button_set	bd5b	Set now
+settings_button_stop	7705	Stop
 settings_cannot_join	dfa4	moonwater cannot join what that network asks for
 settings_cannot_run	954f	the moonwater command could not be run
 settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_copied	0bd7	copied to the clipboard
+settings_copy_both	257a	Copy label and value
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Copy value
 settings_device_drive	8683	drive, %s
 settings_device_name	5f12	Name of the device
 settings_device_none	3cd5	No drives or USB devices found

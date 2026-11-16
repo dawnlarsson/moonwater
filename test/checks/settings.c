@@ -5319,6 +5319,291 @@ static fn drive_fold_run(b64 for_ns)
         }
 }
 
+/*
+        The action rows and a row's copies, drawn into the window's pixels as the drive rows are (check_settings_drive_rows runs this
+        on its window). Every action of the table is the kit's button at its row's end; a press, Enter and a finger's tap each run it,
+        once: while its verb waits it says Running, greyed, and a second asks nothing. The right button on a row with a value opens
+        its copies, and so do the menu key and Shift-F10; Copy value puts the value as the row shows it on the clipboard, byte for
+        byte, and Copy label and value the label with it. A virtual device's right button copies too, and changes nothing.
+*/
+static int actions_first(unsigned char kind, b32 reads, b32 deliberate)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].kind == kind && settings_rows[at].output == SETTINGS_OUT_NONE && (settings_rows[at].read[0] != null) == reads &&
+                    (!deliberate || settings_rows[at].deliberate))
+                        return (int)at;
+        return -1;
+}
+
+static positive actions_clock = 5000000000ull;
+
+// A row's group in the window, the keys on the row and the row in view, drawn whole.
+static fn actions_show(int row)
+{
+        ui_kit.rtl = 0;
+        ui_kit_settle();
+        settings.ui.scale = 100;
+        settings_size(SETTINGS_WIDTH, 760);
+        settings_filter_clear();
+        settings.page.card = 0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1;
+        settings.focused = 0, settings.list.hover = -1, settings.page.pane = 1;
+        settings.page.chosen = settings_group_of(row);
+        settings_refilter();
+        settings.list.focus = row;
+        ui_list_reveal(&settings.ui, &settings.list);
+        ui_scroll_set(&settings.list.scroll, (int)(scroll_aim(&settings.list.scroll) >> 8));
+        // Drawn twice, the second a second on, when what the first set going (a button's fill, which comes in over .2s) is at rest.
+        for (int frame = 0; frame < 2; frame++)
+        {
+                actions_clock += 1000000000ull;
+                ui_kit.now = actions_clock;
+                ui_kit.busy = 0;
+                settings_draw_rows(settings_frames_whole, 0, 0);
+        }
+}
+
+// The middle of a row as the list has it, in the window's pixels.
+static fn actions_middle(int row, int address_to x, int address_to y)
+{
+        int at = settings_pos(row);
+
+        *x = (settings.page.left + settings.page.right) / 2;
+        *y = at >= 0 ? ui_list_row_y(&settings.list, at) + settings.list.tall[at] / 2 : -1;
+}
+
+// A press of a button at a point, as the hand sends it (flags: a finger's, a virtual device's).
+static fn actions_press(int button, int x, int y, unsigned int flags)
+{
+        struct window_event over = {WINDOW_EVENT_MOTION, flags & WINDOW_KEY_TOUCH, x, y};
+        struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | flags, button, 0};
+        struct window_event lift = {WINDOW_EVENT_BUTTON, flags, button, 0};
+
+        settings_event_at(&over);
+        settings_event_at(&land);
+        settings_event_at(&lift);
+}
+
+// An item of the menu open, chosen by a press on it (flags as above), as the popup's runner answers it.
+static fn actions_pick(int k, unsigned int flags)
+{
+        int row = popmenu_row(&settings.popup.menu), x = settings.popup.menu.width / 2, y = ui_px(&settings.ui, UI_MENU_PAD) + k * row + row / 2;
+        struct window_event over = {WINDOW_EVENT_MOTION, flags & WINDOW_KEY_TOUCH, x, y};
+        struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | flags, UI_POINTER_LEFT, 0};
+        struct window_event lift = {WINDOW_EVENT_BUTTON, flags, UI_POINTER_LEFT, 0};
+
+        settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, &over, x, y));
+        settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, &land, x, y));
+        settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, &lift, x, y));
+}
+
+// What the window last put on the clipboard is want, exactly, and it was put there since serial.
+static b32 actions_clipboard(unsigned int serial, const char address_to want)
+{
+        char got[512];
+        long size;
+
+        if (settings.own.table->clip_offer_serial[settings.own.row] == serial)
+                return false;
+        size = (long)system_call_4(syscall(pread64), (positive)settings.own.table->clip_offer_fd[settings.own.row], (positive)got, sizeof(got) - 1, 0);
+        if (size < 0)
+                return false;
+        got[size] = 0;
+        return string_equals((string_address)got, (string_address)want);
+}
+
+// Whether the menu open is a row's copies: its two items in order, each choosable.
+static b32 actions_copies(int row)
+{
+        const struct ui_popmenu address_to m = &settings.popup.menu;
+
+        return settings.popup.open && settings.copy_open && settings.copy_row == row && m->count == 2 && m->items[0].id == SETTINGS_COPY_VALUE &&
+               m->items[1].id == SETTINGS_COPY_BOTH && !(m->items[0].flags & UI_MENU_DISABLED) &&
+               string_equals((string_address)m->items[0].label, (string_address)WORDS(settings_copy_value)) &&
+               string_equals((string_address)m->items[1].label, (string_address)WORDS(settings_copy_both));
+}
+
+static fn check_settings_actions(void)
+{
+        int discover = actions_first(SETTINGS_ACTION, false, false), clock = actions_first(SETTINGS_ACTION, true, false);
+        int info = actions_first(SETTINGS_INFO, true, false), server = actions_first(SETTINGS_SWITCH, true, true), name = SETTINGS_NAME_ROW;
+        int x = 0, y = 0, actions = 0, buttons = 0;
+        b32 drawn = false, pressed = false, once = false, busy = false, entered = false, tapped = false, stops = false, clocked = false;
+        b32 opened = false, copied = false, both = false, keyed = false, shifted = false, plain = false, virtual_copy = false, field = false;
+        unsigned int serial;
+        struct ui_row row;
+        char line[256];
+
+        if (discover < 0 || clock < 0 || info < 0 || server < 0)
+        {
+                check("settings actions: the table has an action, a clock, an info row and a deliberate switch", false);
+                return;
+        }
+        settings.child = 1, settings.job = SETTINGS_JOB_HELP, settings.job_sets = false, settings.queued = 0; // a stand-in: no verb is started
+        popup_fake.screen = SETTINGS_HEIGHT, popup_fake.themed = ui_kit.themed;
+        ui_confirm_drop(&settings.confirm);
+
+        // Every action of the table is a button at its row's end, with words, its label beside it.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                if (settings_rows[at].kind != SETTINGS_ACTION || settings_rows[at].output != SETTINGS_OUT_NONE)
+                        continue;
+                actions++;
+                settings.state[at] = SETTINGS_READ;
+                memory_zero(&row, sizeof(row));
+                settings_describe((int)at, &row);
+                buttons += row.kind == UI_ROW_BUTTON && row.words && row.words[0] && row.label && !row.value && !row.dim;
+        }
+        check("settings actions: every action row of the table is a button at the row's end with its words, the row's label beside it",
+              actions >= 3 && buttons == actions);
+
+        // Drawn: the kit's outlined button, its outline and its words in the pixels at the row's end.
+        actions_show(discover);
+        {
+                const struct ui_control address_to c = ui_list_control(&settings.list, discover, 1);
+                positive inked = 0;
+
+                if (c && c->kind == UI_BUTTON && c->variant == UI_BUTTON_PRIMARY && c->w > 0 && c->h > 0 && c->x > 8)
+                {
+                        unsigned int ground = settings_frames_whole[(positive)(c->y + c->h / 2) * SETTINGS_FRAMES_W + (positive)(c->x - 6)];
+
+                        for (int py = c->y; py < c->y + c->h; py++)
+                                for (int px = c->x; px < c->x + c->w; px++)
+                                        inked += settings_frames_whole[(positive)py * SETTINGS_FRAMES_W + (positive)px] != ground;
+                        drawn = string_equals((string_address)c->label, (string_address)WORDS(settings_button_discover)) && inked > (positive)(c->w * c->h / 2);
+                        x = c->x + c->w / 2, y = c->y + c->h / 2;
+                }
+                string_format(log, "  settings actions: the button %p by %p, %p pixels inked\n", (positive)(c ? c->w : 0), (positive)(c ? c->h : 0), inked);
+        }
+        check("settings actions: Discover now draws the kit's button, filled in the accent, with its words at its row's end", drawn);
+
+        // A press on the button runs it, once: a second press while it waits asks nothing, and the button says Running, greyed.
+        actions_press(UI_POINTER_LEFT, x, y, 0);
+        pressed = settings.queued == 1 && settings.queue[0].row == discover;
+        actions_press(UI_POINTER_LEFT, x, y, 0);
+        once = settings.queued == 1;
+        memory_zero(&row, sizeof(row));
+        settings_describe(discover, &row);
+        actions_show(discover);
+        busy = row.kind == UI_ROW_BUTTON && row.dim && string_equals((string_address)row.words, (string_address)WORDS(settings_button_running)) &&
+               ui_list_control(&settings.list, discover, 1)->disabled;
+        // So is it while it runs.
+        settings.queued = 0, settings.job = discover, settings.job_sets = true;
+        actions_press(UI_POINTER_LEFT, x, y, 0);
+        busy = busy && settings.queued == 0;
+        settings.job = SETTINGS_JOB_HELP, settings.job_sets = false;
+        check("settings actions: a press on the button runs the row's verb", pressed);
+        check("settings actions: and while it waits or runs a second press asks nothing, the button saying Running and greyed", once && busy);
+        // Enter on the row, and a finger's tap, run it the same: once each.
+        settings.queued = 0;
+        actions_show(discover);
+        settings_press(UI_KEY_ENTER);
+        entered = settings.queued == 1 && settings.queue[0].row == discover;
+        settings_press(UI_KEY_ENTER);
+        entered = entered && settings.queued == 1;
+        settings.queued = 0;
+        actions_show(discover);
+        actions_press(UI_POINTER_LEFT, x, y, WINDOW_KEY_TOUCH);
+        tapped = settings.queued == 1 && settings.queue[0].row == discover;
+        actions_press(UI_POINTER_LEFT, x, y, WINDOW_KEY_TOUCH);
+        tapped = tapped && settings.queued == 1;
+        settings.queued = 0;
+        check("settings actions: Enter on the row runs it, and a finger's tap on it, each once while it waits", entered && tapped);
+        // A pairing that waits says Stop and is not greyed (a press stops the wait); the clock's reading is said before its button.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_pair_row((int)at))
+                {
+                        settings.job = (int)at, settings.job_sets = true;
+                        memory_zero(&row, sizeof(row));
+                        settings_describe((int)at, &row);
+                        stops = row.kind == UI_ROW_BUTTON && !row.dim && string_equals((string_address)row.words, (string_address)WORDS(settings_button_stop));
+                        settings.job = SETTINGS_JOB_HELP, settings.job_sets = false;
+                }
+        settings.state[clock] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[clock], (string_address) "2026-11-16 09:30:00 CET", SETTINGS_VALUE);
+        memory_zero(&row, sizeof(row));
+        settings_describe(clock, &row);
+        clocked = row.kind == UI_ROW_BUTTON && row.note && string_equals((string_address)row.note, (string_address) "2026-11-16 09:30:00 CET") &&
+                  string_equals((string_address)row.words, (string_address)WORDS(settings_button_set));
+        check("settings actions: a pairing that waits says Stop, not greyed, and the clock says its reading before its button", stops && clocked);
+
+        // The right button on an info row opens its copies at the pointer; Copy value puts its line on the clipboard as it is.
+        settings.state[info] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[info], (string_address) "203.0.113.7 via stun, 2 min ago", SETTINGS_VALUE);
+        actions_show(info);
+        actions_middle(info, &x, &y);
+        actions_press(UI_POINTER_RIGHT, x, y, 0);
+        opened = actions_copies(info) && settings.popup.menu.hot < 0;
+        serial = settings.own.table->clip_offer_serial[settings.own.row];
+        actions_pick(0, 0);
+        copied = !settings.popup.open && !settings.copy_open && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") &&
+                 string_equals((string_address)settings.status, (string_address)WORDS(settings_copied)) && settings.queued == 0;
+        actions_press(UI_POINTER_RIGHT, x, y, 0);
+        serial = settings.own.table->clip_offer_serial[settings.own.row];
+        actions_pick(1, 0);
+        language_format(line, sizeof(line), WORDS(settings_copy_line), settings_label_window(info), "203.0.113.7 via stun, 2 min ago");
+        both = actions_clipboard(serial, line) && settings.queued == 0;
+        check("settings copies: the right button on a row with a value opens Copy value and Copy label and value at the pointer", opened);
+        check("settings copies: Copy value puts the row's value on the clipboard, exactly", copied);
+        check("settings copies: and Copy label and value its label and its value", both);
+        // The menu key, and Shift-F10, open them under the row the keys are on, the first lit: Enter copies.
+        actions_show(info);
+        settings_press(SETTINGS_KEY_MENU);
+        keyed = actions_copies(info) && settings.popup.menu.hot == 0;
+        serial = settings.own.table->clip_offer_serial[settings.own.row];
+        settings_press(UI_KEY_ENTER);
+        keyed = keyed && !settings.copy_open && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") && settings.queued == 0;
+        settings_chord(SETTINGS_KEY_F10, 0, WINDOW_KEY_SHIFT);
+        shifted = actions_copies(info);
+        settings_press(UI_KEY_ESCAPE);
+        shifted = shifted && !settings.popup.open && !settings.copy_open && settings.queued == 0;
+        check("settings copies: the menu key opens them under the row the keys are on, the first lit, and Enter copies", keyed);
+        check("settings copies: Shift-F10 opens them too, and Escape closes them with nothing done", shifted);
+        // A row with no value opens none.
+        actions_show(discover);
+        actions_middle(discover, &x, &y);
+        actions_press(UI_POINTER_RIGHT, x, y, 0);
+        plain = !settings.popup.open && !settings.copy_open && settings.queued == 0;
+        check("settings copies: the right button on a row with no value opens nothing and runs nothing", plain);
+
+        // A virtual device's right button on the SSH server's switch copies its word, and the switch is as it was.
+        settings.state[server] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[server], (string_address) "off", SETTINGS_VALUE);
+        actions_show(server);
+        actions_middle(server, &x, &y);
+        actions_press(UI_POINTER_RIGHT, x, y, WINDOW_EVENT_VIRTUAL);
+        virtual_copy = actions_copies(server);
+        serial = settings.own.table->clip_offer_serial[settings.own.row];
+        actions_pick(0, WINDOW_EVENT_VIRTUAL);
+        virtual_copy = virtual_copy && actions_clipboard(serial, "off") && settings.queued == 0 && settings.state[server] == SETTINGS_READ &&
+                       string_equals((string_address)settings.value[server], (string_address) "off");
+        check("settings copies: a virtual device's right button copies a switch's word and changes nothing", virtual_copy);
+
+        // A row typed in: its field's menu is the kit's items, then the row's copies, which copy what the row holds and keep the typing.
+        settings.state[name] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
+        actions_show(name);
+        settings_activate(name, 1);
+        settings_chord(SETTINGS_KEY_F10, 0, WINDOW_KEY_SHIFT);
+        {
+                const struct ui_popmenu address_to m = &settings.popup.menu;
+
+                field = settings_editing() == name && settings.popup.open && settings.popup.field == &settings.edit && settings.copy_open && m->count > 3 &&
+                        m->items[0].id == UI_TEXT_MENU_UNDO && (m->items[m->count - 3].flags & UI_MENU_SEPARATOR) &&
+                        m->items[m->count - 2].id == SETTINGS_COPY_VALUE && m->items[m->count - 1].id == SETTINGS_COPY_BOTH;
+        }
+        serial = settings.own.table->clip_offer_serial[settings.own.row];
+        ui_popmenu_close(&settings.popup);
+        settings_chose(SETTINGS_COPY_VALUE);
+        field = field && actions_clipboard(serial, "patient-cricket") && settings_editing() == name && settings.queued == 0;
+        check("settings copies: a row typed in has its field's items and then the row's copies, which copy its value and keep the typing", field);
+
+        ui_popmenu_close(&settings.popup);
+        settings.copy_open = false;
+        settings_edit_end();
+        popup_fake.screen = 0;
+        settings.queued = 0, settings.child = 0, settings.job_sets = false;
+}
+
 static fn check_settings_drive_rows(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -5788,6 +6073,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 check("settings devices: a section with no rows is not drawn, and a list with nothing in it says so under no header", alone);
         }
 
+        // The action rows and a row's copies, on the same window.
+        check_settings_actions();
         memory_zero(settings_drives_open, sizeof(settings_drives_open));
         memory_copy(settings_expanded, drive_expanded_kept, sizeof(drive_expanded_kept));
         memory_copy(settings_fold_at, drive_fold_kept, sizeof(drive_fold_kept));

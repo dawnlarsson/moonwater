@@ -119,11 +119,21 @@ settings_battery_discharging	7964	, in scarica
 settings_battery_full	ded8	, carica
 settings_battery_idle	1635	, non in carica
 settings_busy	34e0	moonwater è occupato: le modifiche precedenti non sono finite
+settings_button_discover	c0ee	Rileva
+settings_button_end	adad	Termina tutte
+settings_button_pair	f1d1	Abbina
+settings_button_run	e66a	Esegui
+settings_button_running	25ec	In corso
+settings_button_set	bd5b	Imposta ora
+settings_button_stop	7705	Ferma
 settings_cannot_join	dfa4	moonwater non può soddisfare ciò che questa rete richiede
 settings_cannot_run	954f	impossibile eseguire il comando moonwater
 settings_card_back	db52	Escape o un clic torna indietro
 settings_card_stopped	e24d	interrotto: Escape o un clic torna indietro
 settings_copied	0bd7	copiato negli appunti
+settings_copy_both	257a	Copia etichetta e valore
+settings_copy_line	56a6	%1$s: %2$s
+settings_copy_value	f3e5	Copia valore
 settings_device_drive	8683	unità, %s
 settings_device_name	5f12	Nome del dispositivo
 settings_device_none	3cd5	Nessuna unità o dispositivo USB trovato
