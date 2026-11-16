@@ -11016,6 +11016,56 @@ static COLD fn exec_trace(b32 count, b32 assignments)
 }
 
 /*
+        dash's trace of a command whose redirections are already open. It
+        goes to the standard error the command started with, which dash keeps
+        aside for it (REDIR_SAVEFD2): `echo hi 2>/dev/null` is traced where
+        the script's stderr is, and `x=1 echo two 2>f` does not trace into
+        f, as it did. exec_simple holds a copy of descriptor 2 from before
+        the first redirection (exec_trace_hold); it is put back on 2 for the
+        trace, the command's own taken back after, and the copy closed.
+*/
+static COLD bipolar exec_trace_hold(parse_node address_to node)
+{
+        if (shell_bash_compat || !node->redirect_count || !exec_trace_on())
+                return -1;
+
+        return exec_save_duplicate(2, node, 10);
+}
+
+static COLD fn exec_trace_past_redirects(bipolar address_to held, b32 count,
+                                         b32 assignments)
+{
+        bipolar mine;
+
+        if (address_to held < 0)
+        {
+                exec_trace(count, assignments);
+                return;
+        }
+        if (!exec_trace_on())
+        {
+                system_close((b32)address_to held);
+                address_to held = -1;
+                return;
+        }
+
+        log_flush();
+        mine = exec_save_duplicate(2, null, 10);
+        system_duplicate((b32)address_to held, 2, 0);
+        exec_trace(count, assignments);
+        log_flush();
+        if (mine >= 0)
+        {
+                system_duplicate((b32)mine, 2, 0);
+                system_close((b32)mine);
+        }
+        else
+                system_close(2);
+        system_close((b32)address_to held);
+        address_to held = -1;
+}
+
+/*
         Bash writes the source of a for header once per trip, a select
         header once when the menu is first drawn, and a case header once.
         The words are the ones the parser kept, quotes and all, so
@@ -12989,6 +13039,8 @@ static HOT b32 exec_simple(b32 index)
         b32 kept_count = 0;
         b32 expanded_count = 0;
         b32 mark = exec_save_count;
+        //      dash's stderr from before the redirections, for its trace.
+        bipolar trace_stderr = -1;
         b32 count = 0;
         b32 first = 0;
         b32 declaration_from = -1;
@@ -13213,6 +13265,7 @@ static HOT b32 exec_simple(b32 index)
         if (!shell_bash_compat && leading && node->redirect_count &&
             !exec_line_aborted())
         {
+                trace_stderr = exec_trace_hold(node);
                 if (!exec_redirect_apply(index))
                 {
                         exec_redirect_unwind(mark, true);
@@ -13428,11 +13481,17 @@ static HOT b32 exec_simple(b32 index)
                         env_export_restore(kept[at].binding.name, true);
         }
 
-        if (exec_trace_on())
+        /* Bash traces a command and then opens its redirections; dash opens
+           them first, so under set -x a command whose redirection fails is
+           not traced at all (`echo b > made` under -C writes only its
+           refusal), where it was traced and then refused. */
+        if (shell_bash_compat && exec_trace_on())
                 exec_trace(count, first);
 
         if (node->redirect_count && !redirects_applied)
         {
+                if (trace_stderr < 0)
+                        trace_stderr = exec_trace_hold(node);
                 if (!exec_redirect_apply(index))
                 {
                         exec_redirect_unwind(mark, true);
@@ -13451,6 +13510,10 @@ static HOT b32 exec_simple(b32 index)
 
                 redirects_applied = true;
         }
+
+        if (!shell_bash_compat)
+                exec_trace_past_redirects(address_of trace_stderr, count,
+                                          first);
 
         if (first == count)
         {
@@ -13584,6 +13647,8 @@ static HOT b32 exec_simple(b32 index)
                 them left the arena behind.
         */
 fail:
+        if (trace_stderr >= 0)
+                system_close((b32)trace_stderr);
         if (redirects_applied)
                 exec_redirect_unwind(mark, true);
         if (kept && !exec_finish_prefixes(kept, kept_count) && !status)
