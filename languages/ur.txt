@@ -254,6 +254,7 @@ tray_day_thu	308c	جمعرات
 tray_day_tue	f425	منگل
 tray_day_wed	5757	بدھ
 tray_discharging	41a0	ڈسچارج ہو رہی ہے
+tray_done	1791	ہو گیا
 tray_month_apr	1df2	اپریل
 tray_month_aug	8fd4	اگست
 tray_month_dec	7a73	دسمبر

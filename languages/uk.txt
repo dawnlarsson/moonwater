@@ -253,6 +253,7 @@ tray_day_thu	308c	чт
 tray_day_tue	f425	вт
 tray_day_wed	5757	ср
 tray_discharging	41a0	розряджається
+tray_done	1791	Готово
 tray_month_apr	1df2	кві
 tray_month_aug	8fd4	сер
 tray_month_dec	7a73	гру

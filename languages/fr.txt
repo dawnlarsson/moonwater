@@ -253,6 +253,7 @@ tray_day_thu	308c	jeu
 tray_day_tue	f425	mar
 tray_day_wed	5757	mer
 tray_discharging	41a0	en décharge
+tray_done	1791	Terminé
 tray_month_apr	1df2	avr.
 tray_month_aug	8fd4	août
 tray_month_dec	7a73	déc.
@@ -554,7 +555,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar sound place	e2a1	Place du son dans la barre des tâches
 =Taskbar battery place	3413	Place de la batterie dans la barre des tâches
 =Taskbar tray text place	c235	Place du texte de la zone système dans la barre des tâches
-=Taskbar tray clock place	c2e6	Place de l'horloge de la zone système dans la barre des tâches
+=Taskbar tray clock place	c2e6	Place de l'horloge de la zone système
 =Taskbar order	ccfd	Ordre de la barre des tâches
 =Taskbar clock place	c144	Place de l'horloge dans la barre des tâches
 =Taskbar clock bulge (percent)	fa6c	Bombement de l'horloge dans la barre des tâches (pourcentage)

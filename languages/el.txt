@@ -253,6 +253,7 @@ tray_day_thu	308c	Πέμ
 tray_day_tue	f425	Τρί
 tray_day_wed	5757	Τετ
 tray_discharging	41a0	αποφορτίζεται
+tray_done	1791	Τέλος
 tray_month_apr	1df2	Απρ
 tray_month_aug	8fd4	Αυγ
 tray_month_dec	7a73	Δεκ
@@ -553,8 +554,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar microphone place	76d8	Θέση του μικροφώνου στη γραμμή εργασιών
 =Taskbar sound place	e2a1	Θέση του ήχου στη γραμμή εργασιών
 =Taskbar battery place	3413	Θέση της μπαταρίας στη γραμμή εργασιών
-=Taskbar tray text place	c235	Θέση του κειμένου της περιοχής ειδοποιήσεων στη γραμμή εργασιών
-=Taskbar tray clock place	c2e6	Θέση του ρολογιού της περιοχής ειδοποιήσεων στη γραμμή εργασιών
+=Taskbar tray text place	c235	Θέση κειμένου ειδοποιήσεων στη γραμμή εργασιών
+=Taskbar tray clock place	c2e6	Θέση ρολογιού ειδοποιήσεων στη γραμμή εργασιών
 =Taskbar order	ccfd	Σειρά της γραμμής εργασιών
 =Taskbar clock place	c144	Θέση του ρολογιού στη γραμμή εργασιών
 =Taskbar clock bulge (percent)	fa6c	Καμπύλωση του ρολογιού στη γραμμή εργασιών (ποσοστό)

@@ -253,6 +253,7 @@ tray_day_thu	308c	tors
 tray_day_tue	f425	tis
 tray_day_wed	5757	ons
 tray_discharging	41a0	laddar ur
+tray_done	1791	Klar
 tray_month_apr	1df2	apr
 tray_month_aug	8fd4	aug
 tray_month_dec	7a73	dec

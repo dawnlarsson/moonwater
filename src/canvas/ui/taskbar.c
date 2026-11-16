@@ -1965,7 +1965,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 case TASKBAR_TRAY_BEFORE:
                         break;
                 case TASKBAR_DONE: // its word on its lit face
-                        taskbar_say(view, t, n, "Done", ink, ground);
+                        taskbar_say(view, t, n, (const char *)WORDS(tray_done), ink, ground);
                         break;
                 case -9: // a format of the person's is drawn in its text cell after the tray icons
                         if (taskbar.tray_custom)

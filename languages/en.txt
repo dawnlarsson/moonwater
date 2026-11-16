@@ -253,6 +253,7 @@ tray_day_thu	308c	Thu
 tray_day_tue	f425	Tue
 tray_day_wed	5757	Wed
 tray_discharging	41a0	discharging
+tray_done	1791	Done
 tray_month_apr	1df2	Apr
 tray_month_aug	8fd4	Aug
 tray_month_dec	7a73	Dec

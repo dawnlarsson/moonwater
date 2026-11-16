@@ -254,6 +254,7 @@ tray_day_thu	308c	الخميس
 tray_day_tue	f425	الثلاثاء
 tray_day_wed	5757	الأربعاء
 tray_discharging	41a0	قيد التفريغ
+tray_done	1791	تم
 tray_month_apr	1df2	أبريل
 tray_month_aug	8fd4	أغسطس
 tray_month_dec	7a73	ديسمبر

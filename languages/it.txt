@@ -253,6 +253,7 @@ tray_day_thu	308c	gio
 tray_day_tue	f425	mar
 tray_day_wed	5757	mer
 tray_discharging	41a0	in scarica
+tray_done	1791	Fatto
 tray_month_apr	1df2	apr
 tray_month_aug	8fd4	ago
 tray_month_dec	7a73	dic
@@ -546,15 +547,15 @@ ui_field_full	fe02	non ce ne sta di più
 =Wallpaper seas (percent grey)	6836	Mari dell'immagine di sfondo (percentuale di grigio)
 =Wallpaper glow	57c6	Bagliore dell'immagine di sfondo
 =Taskbar moon place	6f19	Posto della luna nella barra delle applicazioni
-=Taskbar moon look	a24d	Aspetto della luna nella barra delle applicazioni
-=Taskbar tasks place	bfd0	Posto delle attività nella barra delle applicazioni
-=Taskbar newest task side	b5a9	Lato dell'attività più recente nella barra delle applicazioni
+=Taskbar moon look	a24d	Aspetto della luna sulla barra
+=Taskbar tasks place	bfd0	Posto delle attività sulla barra
+=Taskbar newest task side	b5a9	Lato dell'attività più recente sulla barra
 =Taskbar notices place	a793	Posto degli avvisi nella barra delle applicazioni
 =Taskbar microphone place	76d8	Posto del microfono nella barra delle applicazioni
 =Taskbar sound place	e2a1	Posto dell'audio nella barra delle applicazioni
 =Taskbar battery place	3413	Posto della batteria nella barra delle applicazioni
-=Taskbar tray text place	c235	Posto del testo dell'area di notifica nella barra delle applicazioni
-=Taskbar tray clock place	c2e6	Posto dell'orologio dell'area di notifica nella barra delle applicazioni
+=Taskbar tray text place	c235	Posto del testo dell'area di notifica
+=Taskbar tray clock place	c2e6	Posto dell'orologio dell'area di notifica
 =Taskbar order	ccfd	Ordine della barra delle applicazioni
 =Taskbar clock place	c144	Posto dell'orologio nella barra delle applicazioni
 =Taskbar clock bulge (percent)	fa6c	Curvatura dell'orologio nella barra delle applicazioni (percentuale)
@@ -580,7 +581,7 @@ ui_field_full	fe02	non ce ne sta di più
 =tray	a12d	area di notifica
 =tab	2e4c	pillola
 =Taskbar moon spin (seconds a turn, off or default)	a763	Rotazione della luna nella barra delle applicazioni (secondi per giro, spenta o predefinita)
-=Taskbar tasks	445b	Attività nella barra delle applicazioni
+=Taskbar tasks	445b	Attività sulla barra
 =Taskbar distance from the edge (pixels)	845c	Distanza della barra delle applicazioni dal bordo (pixel)
 =grouped	8b7d	raggruppate
 =separate	bb18	separate

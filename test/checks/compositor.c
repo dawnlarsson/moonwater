@@ -4219,7 +4219,9 @@ static void check_taskbar_text(string_address face_path)
                     continue;
                 if (bottom - top - flat[2 * at] > 1 || flat[2 * at] - (bottom - top) > 1 || right - left - flat[2 * at + 1] > 1 || flat[2 * at + 1] - (right - left) > 1)
                     string_format(log, "  taskbar text: tab %p on side %p (edge %p) is %p by %p, the bottom band's %p by %p\n", (positive)at, (positive)position,
-                                  (positive)edge, (positive)(bottom - top), (positive)(right - left), (positive)flat[2 * at], (positive)flat[2 * at + 1]);
+                                  (positive)edge, (positive)(bottom - top), (positive)(right - left), (positive)flat[2 * at], (positive)flat[2 * at + 1]),
+                    string_format(log, "  taskbar text: its slot %p by %p at %p,%p, the bottom's %p long; ink from %p to %p\n", (positive)slot[at][2], (positive)slot[at][3],
+                                  (positive)slot[at][0], (positive)slot[at][1], (positive)along[at], (positive)top, (positive)bottom);
                 sized &= bottom - top - flat[2 * at] <= 1 && flat[2 * at] - (bottom - top) <= 1 &&
                          right - left - flat[2 * at + 1] <= 1 && flat[2 * at + 1] - (right - left) <= 1;
                 for (int x = 1; x < slot[at][2]; x++)

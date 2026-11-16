@@ -253,6 +253,7 @@ tray_day_thu	308c	cz
 tray_day_tue	f425	wt
 tray_day_wed	5757	śr
 tray_discharging	41a0	rozładowanie
+tray_done	1791	Gotowe
 tray_month_apr	1df2	kwi
 tray_month_aug	8fd4	sie
 tray_month_dec	7a73	gru

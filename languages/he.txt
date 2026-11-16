@@ -254,6 +254,7 @@ tray_day_thu	308c	ה׳
 tray_day_tue	f425	ג׳
 tray_day_wed	5757	ד׳
 tray_discharging	41a0	בפריקה
+tray_done	1791	סיום
 tray_month_apr	1df2	אפר׳
 tray_month_aug	8fd4	אוג׳
 tray_month_dec	7a73	דצמ׳

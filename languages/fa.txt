@@ -254,6 +254,7 @@ tray_day_thu	308c	پنجشنبه
 tray_day_tue	f425	سه‌شنبه
 tray_day_wed	5757	چهارشنبه
 tray_discharging	41a0	در حال تخلیه
+tray_done	1791	انجام شد
 tray_month_apr	1df2	آوریل
 tray_month_aug	8fd4	اوت
 tray_month_dec	7a73	دسامبر

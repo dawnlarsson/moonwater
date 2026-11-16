@@ -253,6 +253,7 @@ tray_day_thu	308c	Per
 tray_day_tue	f425	Sal
 tray_day_wed	5757	Çar
 tray_discharging	41a0	boşalıyor
+tray_done	1791	Bitti
 tray_month_apr	1df2	Nis
 tray_month_aug	8fd4	Ağu
 tray_month_dec	7a73	Ara

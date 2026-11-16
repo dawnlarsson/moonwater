@@ -7911,6 +7911,7 @@ LANGUAGE_ID(tray_day_thu, "Thu") \
 LANGUAGE_ID(tray_day_tue, "Tue") \
 LANGUAGE_ID(tray_day_wed, "Wed") \
 LANGUAGE_ID(tray_discharging, "discharging") \
+LANGUAGE_ID(tray_done, "Done") \
 LANGUAGE_ID(tray_month_apr, "Apr") \
 LANGUAGE_ID(tray_month_aug, "Aug") \
 LANGUAGE_ID(tray_month_dec, "Dec") \
@@ -20464,13 +20465,15 @@ static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int
         font_metrics grid = font_metrics_at(ui->regular, em);
         font_target here = {ui->pixels + (long)y * (long)ui->pitch + x, (positive)ui->pitch, width, height};
         char fitted[WINDOWS_TITLE + 4];
-        int capital = (int)((grid.cap_height + 32768) >> 16), pad;
+        int pad;
         positive length = string_length((string_address)text);
         int advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
 
         if (advance > height)
         {
-                length = ui_cell_fit(ui, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
+                // Cut to the cell's whole length, as an upright cell's is to its whole width (ui_cell_line): the cell is the room the
+                // band left for the words, its padding already outside it.
+                length = ui_cell_fit(ui, faces, text, em, height, fitted, sizeof(fitted));
                 text = fitted;
                 advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
         }
