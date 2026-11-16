@@ -804,7 +804,7 @@ def soak(args, comp):
     return out
 
 
-X_CASES = ["x-many-windows", "x-override-stacking", "x-grab-then-killed", "x-property-flood", "x-transient-chain", "x-selection-race",
+X_CASES = ["x-many-windows", "x-windows-2000", "x-override-stacking", "x-grab-then-killed", "x-property-flood", "x-transient-chain", "x-selection-race",
            "x-argb-overlay-toggle"]
 
 

@@ -359,6 +359,23 @@ static int run_xcase(Display *dpy, const char *name)
                 usleep(500000);
                 snprintf(detail, sizeof(detail), "windows=120");
         }
+        else if (!strcmp(name, "x-windows-2000"))
+        {
+                // Two thousand windows mapped at once, past the window manager's old table of 64 and the desktop's 32 rows: the server and
+                // its window manager keep going, and the last one mapped is answered.
+                static Window w[2000];
+                for (int i = 0; i < 2000; i++)
+                {
+                        w[i] = x_window(dpy, (i % 40) * 20, (i / 40) * 12, 18, 10, 0x010101u * (unsigned)(i % 200) + 0x2000u, 0);
+                        if ((i & 255) == 255)
+                                XSync(dpy, False);
+                }
+                XSync(dpy, False);
+                usleep(2000000);
+                XClearWindow(dpy, w[1999]);
+                XSync(dpy, False);
+                snprintf(detail, sizeof(detail), "windows=2000");
+        }
         else if (!strcmp(name, "x-override-stacking"))
         {
                 Window w[6];

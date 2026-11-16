@@ -31,9 +31,12 @@
 
         WHAT IT KEEPS
 
-        A fixed table of COMPOSITOR_XWM_WINDOWS records, one for each top-level window the server reports (CreateNotify) or
-        the client maps (MapRequest) or the shim names (serial). A window past the table's room is refused and counted.
-        The output queue and the input buffer are fixed too. No allocation, no thread, no fork.
+        A table of records that grows (the shim's struct wayland_table: its records never move), one for each top-level window the
+        server reports (CreateNotify) or the client maps (MapRequest) or the shim names (serial), found by its X id through an index
+        (open addressing, half full at most), and the property requests waited for in a ring that grows. A record the memory is not
+        there for is refused and counted, as one past the fixed table of 64 was. The output queue and the input buffer are fixed: the
+        queue holds back the reads of the server while it is full (flow, not a count), and the input is the largest message the
+        protocol has. No thread, no fork.
 */
 #ifndef COMPOSITOR_XWM_INCLUDED
 #define COMPOSITOR_XWM_INCLUDED
@@ -44,7 +47,6 @@
 #define COMPOSITOR_XWM_PATH "/run/moonwater/xwm/wm-0"
 #define COMPOSITOR_XWM_BACKLOG 4
 #define COMPOSITOR_XWM_POLLS 2                       // what compositor_xwm_poll adds to the loop's list: the listening socket and the connection
-#define COMPOSITOR_XWM_WINDOWS 64                    // the top-level windows the window manager keeps records of
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 16384                     // what is queued for the server; a queue that would overflow closes the connection
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
@@ -86,7 +88,6 @@
 #define COMPOSITOR_XWM_XA_WM_NORMAL_HINTS 40
 #define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_TITLE 128              // a title's bytes, its NUL included (the shim takes fewer)
-#define COMPOSITOR_XWM_PENDING 512            // the property requests whose replies are waited for, in the order they were asked (a full table closes the connection)
 #define COMPOSITOR_XWM_PROP_NET_NAME 1
 #define COMPOSITOR_XWM_PROP_NAME 2
 #define COMPOSITOR_XWM_PROP_PROTOCOLS 3
@@ -165,9 +166,12 @@ struct compositor_xwm
         long in_len, out_len;
         positive since;
         unsigned char in[COMPOSITOR_XWM_IN], out[COMPOSITOR_XWM_OUT];
-        struct compositor_xwm_window window[COMPOSITOR_XWM_WINDOWS];
-        struct compositor_xwm_pending pending[COMPOSITOR_XWM_PENDING];
-        unsigned int pending_at, pending_count; // the oldest request waited for (a ring), and how many are waited for
+        struct wayland_table window_table, window_index; // the records, and the index by X id (each bucket a record's slot and one)
+        struct compositor_xwm_window *window;
+        long windows;                  // records in use
+        struct wayland_table pending_table; // the ring of property requests waited for: pending_room of them, grown by doubling
+        struct compositor_xwm_pending *pending;
+        unsigned int pending_at, pending_count, pending_room; // the oldest request waited for, how many are, and the ring's size
         int focus_row;                 // the row with the keys at the last pass
 };
 
@@ -452,6 +456,26 @@ static void compositor_xwm_composite(const unsigned char *in, long size)
 /* GetProperty for a window's property (the first 128 bytes of it), the reply to be found by its sequence. The replies come back in
    the order of the requests, so the table is a queue: a reply or an error to the oldest one asked is its answer. 0 when the request
    is queued and its reply waited for, and -1 when it is not (nothing will answer it, so nothing is to wait for it). */
+static int compositor_xwm_pending_grow(void)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned int room = x->pending_room ? 2 * x->pending_room : 512;
+        struct wayland_table grown = {0, sizeof(struct compositor_xwm_pending), 0, 0, 0, 0, 0, 0, 0, 0};
+        struct compositor_xwm_pending *to;
+
+        if (!wayland_table_reach(&grown, room))
+                return 0;
+        to = (struct compositor_xwm_pending *)grown.at;
+        for (unsigned int k = 0; k < x->pending_count; k++)
+                to[k] = x->pending[(x->pending_at + k) % x->pending_room];
+        wayland_table_drop(&x->pending_table);
+        x->pending_table = grown;
+        x->pending = to;
+        x->pending_at = 0;
+        x->pending_room = room;
+        return 1;
+}
+
 static int compositor_xwm_ask(unsigned int window, unsigned int what, unsigned int property, unsigned int type)
 {
         struct compositor_xwm *x = &compositor_xwm;
@@ -461,14 +485,14 @@ static int compositor_xwm_ask(unsigned int window, unsigned int what, unsigned i
 
         if (n <= 0 || compositor_xwm_queue(req, n) != 0)
                 return -1;
-        // A table that is full is a server that does not answer: the connection is closed at the pass (a reply that is forgotten
-        // leaves its window without the word it waits for, so the window is never shown).
-        if (x->pending_count == COMPOSITOR_XWM_PENDING)
+        // A ring that is full doubles: the requests waited for are laid in order at the start of a new one. Only the memory not being
+        // there closes the connection (a reply that is forgotten leaves its window without the word it waits for, so it is never shown).
+        if (x->pending_count == x->pending_room && !compositor_xwm_pending_grow())
         {
                 x->broken = 1;
                 return -1;
         }
-        p = &x->pending[(x->pending_at + x->pending_count) % COMPOSITOR_XWM_PENDING];
+        p = &x->pending[(x->pending_at + x->pending_count) % x->pending_room];
         p->seq = x->seq;
         p->window = window;
         p->what = what;
@@ -481,7 +505,7 @@ static void compositor_xwm_pending_done(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
 
-        x->pending_at = (x->pending_at + 1) % COMPOSITOR_XWM_PENDING;
+        x->pending_at = (x->pending_at + 1) % x->pending_room;
         x->pending_count--;
 }
 
@@ -680,28 +704,114 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
 
 /* ---- the window table ---- */
 
+static unsigned long compositor_xwm_hash(unsigned int id, long buckets)
+{
+        return ((unsigned long)id * 0x9e3779b97f4a7c15ul >> 24) & (unsigned long)(buckets - 1);
+}
+
+static void compositor_xwm_index_put(struct wayland_table *index, long slot)
+{
+        unsigned int *bucket = (unsigned int *)index->at;
+        unsigned long b = compositor_xwm_hash(compositor_xwm.window[slot].id, index->count);
+
+        while (bucket[b])
+                b = (b + 1) & (unsigned long)(index->count - 1);
+        bucket[b] = (unsigned int)(slot + 1);
+}
+
+// The record's slot for an X window, or -1; *at the bucket it is in.
+static long compositor_xwm_slot(unsigned int id, unsigned long *at)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        long buckets = x->window_index.count;
+        const unsigned int *bucket = (const unsigned int *)x->window_index.at;
+
+        for (unsigned long b = buckets ? compositor_xwm_hash(id, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets;
+             n++, b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                if (!bucket[b])
+                        return -1;
+                if (x->window[bucket[b] - 1].id == id)
+                {
+                        if (at)
+                                *at = b;
+                        return (long)bucket[b] - 1;
+                }
+        }
+        return -1;
+}
+
+// The record of an X window let go of: out of the index (backward shift), its slot free to be taken again.
+static void compositor_xwm_release(struct compositor_xwm_window *w)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        long buckets = x->window_index.count, slot;
+        unsigned int *bucket = (unsigned int *)x->window_index.at;
+        unsigned long hole = 0;
+
+        if (!w->id || (slot = compositor_xwm_slot(w->id, &hole)) < 0)
+        {
+                w->id = 0;
+                return;
+        }
+        bucket[hole] = 0;
+        for (unsigned long b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                unsigned long home = compositor_xwm_hash(x->window[bucket[b] - 1].id, buckets);
+
+                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
+                {
+                        bucket[hole] = bucket[b];
+                        bucket[b] = 0;
+                        hole = b;
+                }
+        }
+        w->id = 0;
+        wayland_table_give(&x->window_table, slot);
+        x->windows--;
+}
+
 static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int add)
 {
         struct compositor_xwm *x = &compositor_xwm;
-        struct compositor_xwm_window *free = 0;
+        struct compositor_xwm_window *free;
+        long slot;
 
         if (!id)
                 return 0;
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
-        {
-                if (x->window[at].id == id)
-                        return &x->window[at];
-                if (!x->window[at].id && !free)
-                        free = &x->window[at];
-        }
+        slot = compositor_xwm_slot(id, 0);
+        if (slot >= 0)
+                return &x->window[slot];
         if (!add)
                 return 0;
-        if (!free)
+        // The index doubles at half full (64 buckets first), every record put in the new one; then the record's slot.
+        if (2 * (x->windows + 1) > x->window_index.count)
+        {
+                struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
+
+                if (!wayland_table_reach(&grown, x->window_index.count ? 2 * x->window_index.count : 64))
+                {
+                        x->refused++;
+                        return 0;
+                }
+                for (long at = 0; at < x->window_table.count; at++)
+                        if (x->window[at].id)
+                                compositor_xwm_index_put(&grown, at);
+                wayland_table_drop(&x->window_index);
+                x->window_index = grown;
+        }
+        x->window_table.unit = sizeof(struct compositor_xwm_window);
+        slot = wayland_table_take(&x->window_table);
+        if (slot < 0)
         {
                 x->refused++;
                 return 0;
         }
+        x->window = (struct compositor_xwm_window *)x->window_table.at;
+        free = &x->window[slot];
         free->id = id;
+        x->windows++;
+        compositor_xwm_index_put(&x->window_index, slot);
         free->state = 0;
         free->serial = 0;
         free->row = -1;
@@ -724,7 +834,7 @@ static void compositor_xwm_forget(unsigned int id)
         struct compositor_xwm_window *w = compositor_xwm_find(id, 0);
 
         if (w)
-                w->id = 0;
+                compositor_xwm_release(w);
 }
 
 /*
@@ -1354,13 +1464,13 @@ static void compositor_xwm_close_rows(void)
 
         // The windows the connection made are taken away, and their surfaces are shown no more (those of an Xwayland that has died
         // are gone with it, and the shim finds none).
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
+        for (long at = 0; at < x->window_table.count; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
 
                 if (w->id && (w->state & COMPOSITOR_XWM_SERIAL))
                         wayland_xwindow_gone(w->serial);
-                w->id = 0;
+                compositor_xwm_release(w);
         }
         x->pending_at = x->pending_count = 0;
         x->focus_row = -2;
@@ -1593,7 +1703,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 compositor_xwm_drop("a message the codec refused, or a queue that overflowed");
                 return;
         }
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS && x->fd >= 0 && !x->broken; at++)
+        for (long at = 0; at < x->window_table.count && x->fd >= 0 && !x->broken; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
 
@@ -1644,7 +1754,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 int focused = 0;
 
                 x->focus_row = (int)compositor.focus;
-                for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
+                for (long at = 0; at < x->window_table.count; at++)
                 {
                         struct compositor_xwm_window *w = &x->window[at];
 
@@ -1663,7 +1773,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 if (!focused)
                         compositor_xwm_focus(0);
                 // The window that took the keys has its transient dialogs over it, as it had them.
-                for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
+                for (long at = 0; at < x->window_table.count; at++)
                 {
                         struct compositor_xwm_window *w = &x->window[at], *parent;
 
