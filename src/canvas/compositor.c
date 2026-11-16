@@ -64,6 +64,7 @@
             gpu-gfx10         gpu.c, gpu_start: the cards of family 143 (RDNA1 and 2) let in, which no one has run the kernels on
             gpu-round-off     gpu.c, gpu_start: a blended window whose picture reaches into a round corner is the processor's, as before
                               the card drew that case
+            gpu-cut-off       gpu.c, gpu_start: the bins made without the cut at binning, every record a cell touches in its list, as before
             touch-trace       window.c, window_trace_touch, at each touch-down, the compositor's and each program's: the trace appended
                               to touch-trace.log
             layers-off        wayland_host.c, compositor_wl_start, once: a client's subsurfaces laid into its window's picture as before,
