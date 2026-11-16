@@ -1422,6 +1422,9 @@ static void compositor_table_outputs(void)
                 table->output_software[at] = compositor.output[at].turn_software;
                 compositor_table_refusals(table, at, name);
         }
+        // A frame follows the screens too: the fastest one's period, which every kit window paces its frames by (ui_app_run, ui_kit_frame_ns).
+        // Set once at the table's making, a take at another rate (a wake's, a hotplug's, the settings') left the windows at the old one.
+        table->period = (unsigned int)compositor.period;
         // The largest a window may be follows the screens, inside the room its buffer has for the session.
         table->output_width = (unsigned int)compositor_most_width();
         table->output_height = (unsigned int)compositor_most_height();

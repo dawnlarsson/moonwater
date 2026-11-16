@@ -1513,6 +1513,101 @@ static void check_compositor_wake(void)
 }
 
 /*
+        A 144 Hz monitor whose preferred mode, the one the kernel lists first, is its 60 Hz one (2560 by 1440 at 60, 144 and 120, as
+        the owner's lists them): Canvas set it at 144 at the start, the largest mode at its fastest, and the compositor's take, with no
+        displays line, went to the first mode listed at the size, 60 Hz, so every frame was 16.7 ms (e19e9b94), and every wake set it at
+        60 again (c66ca914). The take drives it at the fastest mode at its size; a frame is 6.94 ms for the compositor's presents, for the
+        refresh the Wayland shim says, for the vblanks it measures and for the table every kit window paces by, a wake's take keeping
+        all of it; and a throw in a kit window asks for its next step a frame of that on, not 16 ms.
+*/
+static void check_compositor_rate_fastest(void)
+{
+    static struct windows table;
+    static const unsigned int rates[3] = {60, 144, 120};
+    struct windows address_to kept_kit = ui_kit_table;
+    positive period = 1000000000ull / 144, presented;
+
+    if (!card_walk_begin(1ul << 0, 0, 0, 0))
+    {
+        check("rate: the fake card is made", false);
+        return;
+    }
+    memory_copy(card_fake.rates, rates, sizeof(rates));
+    card_fake.rate_count = 3, card_fake.crtc_rate = 144;
+    memory_zero(&table, sizeof(table));
+    if (compositor_cards_walk() != 0)
+    {
+        check("rate: the fake card at 144 Hz is taken", false);
+        card_walk_end();
+        return;
+    }
+    compositor.table = &table;
+    compositor.watch = -1;
+    compositor_table_outputs();
+    check("rate: a 144 Hz monitor whose preferred mode is 60 Hz is driven at 144, the fastest mode at its size",
+          compositor.outputs == 1 && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144 && table.output_now[0] == 144);
+    check("rate: and it lists its rates the fastest first, the one the settings recommend",
+          table.output_rates[0] == 3 && table.output_hz[0][0] == 144 && table.output_hz[0][1] == 120 && table.output_hz[0][2] == 60);
+    check("rate: a frame is 6.94 ms, and the table every kit window paces by says so",
+          compositor.period == period && period > 6900000ull && period < 6990000ull && table.period == (unsigned int)period);
+    presented = 5000000000ull;
+    check("rate: the next present is due a 144 Hz frame after the last, not 16.7 ms",
+          compositor_present_due(presented, compositor.period, 0, 0, presented + 1000) == presented + period &&
+              compositor_present_due(presented, compositor.period, 0, 0, presented + period + 1) == presented + period + 1);
+    // The Wayland shim's wl_output mode and wp_presentation's refresh are compositor.period's (wayland_host.c), in mHz: 144 Hz.
+    check("rate: the refresh the Wayland shim says, and its frame callbacks' period, is 144 Hz",
+          compositor.period && 1000000000000ull / compositor.period >= 143990 && 1000000000000ull / compositor.period <= 144010);
+
+    // The flips' stamps: the vblanks measure the period, a missed vblank between two flips measuring one all the same.
+    {
+        p8 events[32];
+        unsigned int type = COMPOSITOR_EVENT_FLIP_COMPLETE, length = 32, sequence = 1000, sec = 7, usec = 0;
+        positive serial;
+
+        for (unsigned int flip = 0; flip < 4; flip++)
+        {
+            serial = compositor.flip_serial + 1;
+            compositor.flip_serial = serial, compositor.flip_pending = 1, compositor.flip_row = -1;
+            memory_zero(events, sizeof(events));
+            memory_copy(events, &type, 4), memory_copy(events + 4, &length, 4), memory_copy(events + 8, &serial, 8);
+            memory_copy(events + 16, &sec, 4), memory_copy(events + 20, &usec, 4), memory_copy(events + 24, &sequence, 4);
+            compositor_card_events(events, 32);
+            // The next flip lands at the next vblank, the third two vblanks on (it missed one).
+            sequence += flip == 1 ? 2 : 1, usec += flip == 1 ? 13889 : 6944;
+        }
+        check("rate: the vblanks measure the period, a flip that missed one included",
+              table.period_seen >= 6940000u && table.period_seen <= 6950000u);
+    }
+
+    // A wake's take asks every connector again and sets the crtc anew: still at 144 Hz, the table with it.
+    compositor.retrain = 1;
+    compositor_space_retake();
+    check("rate: a wake's take sets the screen at 144 Hz again, not at the 60 Hz the monitor prefers",
+          !compositor.retrain && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144 && compositor.period == period &&
+              table.period == (unsigned int)period);
+    // The monitor back at 60 Hz alone (another monitor, or a fallback list): the take is at 60, and the table follows it.
+    card_fake.rate_count = 1, card_fake.rates[0] = 60, card_fake.crtc_rate = 60;
+    compositor.retrain = 1;
+    compositor_space_retake();
+    check("rate: a take at another rate is the table's period too (it was the first take's for the session)",
+          compositor.output[0].mode.vrefresh == 60 && compositor.period == 1000000000ull / 60 && table.period == 1000000000u / 60);
+    card_fake.rate_count = 3, memory_copy(card_fake.rates, rates, sizeof(rates)), card_fake.crtc_rate = 60;
+    compositor.retrain = 1;
+    compositor_space_retake();
+    check("rate: and with the 144 back, the screen goes back to it", compositor.output[0].mode.vrefresh == 144 && table.period == (unsigned int)period);
+
+    // A kit window's frame is the table's: a throw, a drag's scroll past an edge and a menu's ripple step at 144 Hz.
+    ui_kit_table = &table;
+    check("rate: a kit window steps what moves a 144 Hz frame on", ui_kit_frame_ns() == (long)period);
+    ui_kit_table = 0;
+    check("rate: and a 60 Hz frame with no table", ui_kit_frame_ns() == 16666667l);
+    ui_kit_table = kept_kit;
+
+    compositor.table = 0;
+    card_walk_end();
+}
+
+/*
         The wait for a screen (compositor_screen_wait) on the socket the kernel's uevents come down, here one end of a pair: a
         uevent of the drm subsystem ends it at once, one of another subsystem does not, and with none it ends at its time.
 */

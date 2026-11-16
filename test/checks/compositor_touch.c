@@ -1069,6 +1069,20 @@ static void check_field_flick(struct ui address_to wui)
     ui_kit.now = now += 16000000ull;
     ui_field_event(wui, &field, null, &up, x, y - 400);
     thrown = ui_body_going(&field.sel.fling);
+    // On a 144 Hz screen (the table's period) the throw's next step is a 144 Hz frame on, not 16 ms: it moves at every frame shown.
+    {
+        static struct windows fast;
+        struct windows address_to kept = ui_kit_table;
+        long asked;
+
+        fast.period = 1000000000u / 144;
+        ui_kit_table = &fast;
+        ui_kit.now = now += 6944444ull;
+        asked = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
+        ui_kit_table = kept;
+        check("field flick: on a 144 Hz screen the throw asks for its next step a 144 Hz frame on, not 16 ms",
+              thrown && ui_body_going(&field.sel.fling) && asked > 0 && asked <= (long)fast.period);
+    }
     for (int step = 1; step <= 150; step++)
         ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
     check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !ui_body_going(&field.sel.fling));

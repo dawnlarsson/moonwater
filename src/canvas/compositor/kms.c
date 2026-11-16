@@ -59,13 +59,30 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
 /*
         The mode a screen is driven at for the rate its displays line asks for: the first mode it lists at the size it
         has now and that rate (windows_mode_at), in mode. A rate no mode of the screen has keeps the mode it has, and
-        the kernel log says so. A preferred rate, which a screen with no line has too, is the first mode it lists at that
-        size (or the one the kernel's command line forced there, video=), which a screen at another rate than it goes
-        back to: the mode it has is the one it was switched to, so keeping that was no switch back, and the settings'
-        first rate, the recommended one, never took after another. The settings write that rate as no line at all once
-        nothing else of the screen is asked (a line of the defaults is not kept), so a screen with none is not a screen
-        whose mode is its own to keep.
+        the kernel log says so. A preferred rate, which a screen with no line has too, is the fastest mode it lists at that
+        size, the first of those (compositor_fastest_at; or the one the kernel's command line forced there, video=), which a
+        screen at another rate than it goes back to: the mode it has is the one it was switched to, so keeping that was no
+        switch back, and the settings' first rate, the recommended one, never took after another. The settings write that
+        rate as no line at all once nothing else of the screen is asked (a line of the defaults is not kept), so a screen
+        with none is not a screen whose mode is its own to keep. The fastest and not the first: the kernel lists the mode
+        the monitor prefers first, and a 144 Hz monitor's is often its 60 Hz one, which Canvas had passed over for the 144
+        at the start and the compositor then drove the screen at, a frame every 16.7 ms. An interlaced or doubled mode
+        is no rate of the screen's (its refresh is its fields').
 */
+#define COMPOSITOR_MODE_INTERLACED 48u // DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN
+
+static unsigned int compositor_fastest_at(const struct compositor_mode *modes, unsigned int count, unsigned int width,
+                                          unsigned int height)
+{
+        unsigned int best = count;
+
+        for (unsigned int at = 0; at < count; at++)
+                if (modes[at].hdisplay == width && modes[at].vdisplay == height && !(modes[at].flags & COMPOSITOR_MODE_INTERLACED) &&
+                    (best == count || modes[at].vrefresh > modes[best].vrefresh))
+                        best = at;
+        return best;
+}
+
 static void compositor_refresh_pick(const char *name, unsigned int count, const struct compositor_mode *modes,
                                     struct compositor_mode *mode)
 {
@@ -77,7 +94,8 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
 
         for (at = 0; at < count && at < 128; at++)
                 rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
-        at = windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, asked);
+        at = asked ? windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, asked)
+                   : compositor_fastest_at(modes, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay);
         // No rate asked: the mode the command line forced at this size, if one was, is the screen's own.
         for (unsigned int forced = 0; !asked && forced < count && forced < 128; forced++)
                 if ((modes[forced].type & COMPOSITOR_MODE_USERDEF) && rates[forced][0] == mode->hdisplay &&
@@ -173,16 +191,23 @@ struct compositor_connected
 };
 
 // Adds a mode's refresh rate to a screen's list when the mode is the screen's size and the list has no such rate yet:
-// the rates a screen lists at its size, which the Displays field offers.
+// the rates a screen lists at its size, which the Displays field offers, the fastest first (the preferred rate the
+// settings recommend, compositor_refresh_pick's), an interlaced mode's none.
 static void compositor_rate_add(unsigned int *hz, unsigned int *count, const struct compositor_mode *mode, int width,
                                 int height)
 {
-        if (mode->hdisplay != width || mode->vdisplay != height || !mode->vrefresh || *count >= WINDOWS_OUTPUT_HZ)
+        unsigned int at;
+
+        if (mode->hdisplay != width || mode->vdisplay != height || !mode->vrefresh || *count >= WINDOWS_OUTPUT_HZ ||
+            (mode->flags & COMPOSITOR_MODE_INTERLACED))
                 return;
-        for (unsigned int at = 0; at < *count; at++)
+        for (at = 0; at < *count; at++)
                 if (hz[at] == mode->vrefresh)
                         return;
-        hz[(*count)++] = mode->vrefresh;
+        for (at = *count; at > 0 && hz[at - 1] < mode->vrefresh; at--)
+                hz[at] = hz[at - 1];
+        hz[at] = mode->vrefresh;
+        (*count)++;
 }
 
 #define COMPOSITOR_OBJECT_CONNECTOR 0xc0c0c0c0u // DRM_MODE_OBJECT_CONNECTOR
@@ -286,8 +311,8 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
 
 /*
         The rates screen n lists at the size its panel has: the size of the mode it is at, which is not the size it is laid
-        out at when it is turned a quarter (its width and height the other way round: no mode has that), each rate once, in
-        the order the screen lists them, which is the order the settings list them in.
+        out at when it is turned a quarter (its width and height the other way round: no mode has that), each rate once, the
+        fastest first, which is the order the settings list them in.
 */
 static void compositor_rates_take(struct compositor_connected *found, unsigned int n, const struct compositor_mode *modes,
                                   unsigned int count)
@@ -1021,7 +1046,11 @@ static b32 compositor_space_take(int first)
                         compositor.scale = compositor.output[0].scale;
                 if (lit && compositor.table)
                         compositor.table->scale = (unsigned int)compositor.scale;
+                // A frame is the fastest screen's period; what its vblanks measure is measured again from the next flip.
+                if (period != compositor.period && compositor.table)
+                        compositor.table->period_seen = 0;
                 compositor.period = period;
+                compositor_vblank_last.when = 0;
                 compositor.crtc = compositor.output[0].crtc;
                 compositor.crtc_index = compositor.output[0].crtc_index;
                 compositor.connector = compositor.output[0].connector;

@@ -556,7 +556,27 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  screen %p        %w, %px%p at %b,%b%s\n", (positive)at, writer_terminal_name,
                          name[0] ? (string_address)name : (string_address) "-", (positive)width, (positive)height, (bipolar)x,
                          (bipolar)y, at ? (string_address) "" : (string_address) ", primary");
+                //      The mode it is driven at: its refresh, and the rates it lists at its size, the fastest first (the recommended one).
+                {
+                        char rates[WINDOWS_OUTPUT_HZ * 6 + 1];
+                        unsigned int count = table->output_rates[at] <= WINDOWS_OUTPUT_HZ ? table->output_rates[at] : WINDOWS_OUTPUT_HZ;
+                        positive length = 0;
+
+                        for (unsigned int each = 0; each < count && length + 6 < sizeof(rates); each++)
+                        {
+                                if (each)
+                                        rates[length++] = ' ';
+                                length += positive_into_string((p8 address_to)rates + length, (positive)(table->output_hz[at][each] % 10000));
+                        }
+                        rates[length] = 0;
+                        host_say(log, "    mode          %p Hz, of %s Hz at its size\n", (positive)table->output_now[at],
+                                 length ? (string_address)rates : (string_address) "no listed");
+                }
         }
+        //      A frame: the fastest screen's period, which the compositor presents and every kit window draws by, and what the card's vblanks measure.
+        host_say(log, "  frame           %p us (%p Hz), the vblanks measure %p us%s\n", (positive)table->period / 1000,
+                 table->period ? (positive)((1000000000ull + table->period / 2) / table->period) : (positive)0,
+                 (positive)table->period_seen / 1000, table->period_seen ? (string_address) "" : (string_address) " (no flip measured yet)");
         //      The windows the table holds, each where the compositor put it: its row, its title (a program's, so
         //      spelled), its place in the space and the size of its picture.
         for (unsigned int row = 0; row < WINDOWS; row++)

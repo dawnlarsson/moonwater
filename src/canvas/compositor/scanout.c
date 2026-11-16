@@ -652,6 +652,33 @@ static int compositor_flip_lost(positive now)
         window's buffer the card still showed was said free to its program, and the card refused each present that followed. Such an
         event is passed over, and so is one that comes with no flip in flight. The count of flips it let go of.
 */
+/*
+        The period the card's vblanks measure: the time between the stamps of two flips over the vblanks between them, so a flip
+        that missed one still measures one, eased an eighth at a time into the table's period_seen for moonwater debug. A pair
+        a mode set came between (the vblank count gone back, or more than a second of vblanks) measures nothing; a take of the
+        screens begins it again (compositor_vblank_last.when 0).
+*/
+static struct
+{
+        positive when;
+        unsigned int sequence;
+} compositor_vblank_last;
+
+static void compositor_vblank_measure(positive when, unsigned int sequence)
+{
+        unsigned int vblanks = sequence - compositor_vblank_last.sequence;
+
+        if (compositor_vblank_last.when && when > compositor_vblank_last.when && sequence > compositor_vblank_last.sequence && vblanks <= 1000 &&
+            compositor.table)
+        {
+                positive seen = (when - compositor_vblank_last.when) / vblanks, was = compositor.table->period_seen;
+
+                if (seen < 1000000000ull)
+                        compositor.table->period_seen = (unsigned int)(was ? (was * 7 + seen) / 8 : seen);
+        }
+        compositor_vblank_last.when = when, compositor_vblank_last.sequence = sequence;
+}
+
 static unsigned int compositor_card_events(const p8 *events, long got)
 {
         unsigned int landed = 0;
@@ -686,6 +713,7 @@ static unsigned int compositor_card_events(const p8 *events, long got)
                                 compositor.flip_when = (positive)sec * 1000000000ull + (positive)usec * 1000ull;
                                 compositor.flip_seq = sequence;
                                 compositor.flip_stamped = 1;
+                                compositor_vblank_measure(compositor.flip_when, sequence);
                                 compositor_late_landed(compositor.flip_when);
                         }
                         compositor_flip_done();

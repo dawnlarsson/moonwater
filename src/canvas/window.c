@@ -1103,6 +1103,9 @@ struct windows
         // The machine's wakes the compositor heard (compositor_woke), how it heard the last (1 the clocks, 2 the sleep verb's SIGUSR2, 3 both), and the
         // takes of the screens after them that set every crtc again and that could not (no screen yet, or the card refused: looked at again in 5 s).
         unsigned int wakes, wake_how, wake_sets, wake_refused;
+        // The frame period the card's vblanks measure, ns (the stamps of two flips over the vblanks between them, eased; 0 before two have landed),
+        // beside period, which is the fastest screen's mode's: moonwater debug says both.
+        unsigned int period_seen;
         unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
         char gpu_node_bus[32], gpu_display_bus[32]; // the chosen node's bus and the display's ("pci:..."), "" when not known
         unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner

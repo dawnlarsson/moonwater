@@ -1381,7 +1381,7 @@ static void check_compositor_refresh(void)
     compositor_display[0].refresh = 50;
     mode = modes[1];
     compositor_refresh_pick("B-1", 4, modes, &mode);
-    check("refresh: a screen with no line is at the first mode it lists at its size, as a line of the preferred rate says",
+    check("refresh: a screen with no line is at the fastest mode it lists at its size, as a line of the preferred rate says",
           mode.vrefresh == 60 && mode.clock == modes[0].clock);
     mode = modes[0];
     compositor_refresh_pick("B-1", 4, modes, &mode);
@@ -1406,7 +1406,7 @@ static void check_compositor_refresh(void)
         found.mode[0] = modes[1];
         found.size[0][0] = 1920, found.size[0][1] = 1080;
         compositor_rates_take(&found, 0, modes, 4);
-        check("refresh: a screen lists the rates it has at its size, the first first",
+        check("refresh: a screen lists the rates it has at its size, the fastest first",
               found.hz_count[0] == 2 && found.hz[0][0] == 60 && found.hz[0][1] == 50);
         memory_zero(&found, sizeof(found));
         found.mode[0] = modes[1];
@@ -1414,6 +1414,35 @@ static void check_compositor_refresh(void)
         compositor_rates_take(&found, 0, modes, 4);
         check("refresh: and a screen turned a quarter lists the same, not the none that a size no mode has gives",
               found.hz_count[0] == 2 && found.hz[0][0] == 60 && found.hz[0][1] == 50);
+    }
+
+    // A 144 Hz monitor whose preferred mode, listed first, is its 60 Hz one: the preferred rate is its fastest at the size, 144, and its
+    // rates are listed the fastest first; an interlaced mode at the size is no rate of it.
+    {
+        static const unsigned int fast[4] = {60, 144, 120, 200};
+        struct compositor_mode listed_fast[4];
+        static struct compositor_connected found;
+
+        memory_zero(listed_fast, sizeof(listed_fast));
+        for (unsigned int at = 0; at < 4; at++)
+            listed_fast[at].hdisplay = 2560, listed_fast[at].vdisplay = 1440, listed_fast[at].vrefresh = fast[at], listed_fast[at].clock = 200000 + at;
+        listed_fast[0].type = 8;                        // DRM_MODE_TYPE_PREFERRED: the kernel lists it first
+        listed_fast[3].flags = COMPOSITOR_MODE_INTERLACED; // its refresh is its fields'
+        compositor_display[0].refresh = 0;
+        mode = listed_fast[1];
+        compositor_refresh_pick("B-1", 4, listed_fast, &mode);
+        check("refresh: a 144 Hz monitor that prefers its 60 Hz mode and has no line is at 144", mode.vrefresh == 144 && mode.clock == listed_fast[1].clock);
+        mode = listed_fast[0];
+        compositor_refresh_pick("A-1", 4, listed_fast, &mode);
+        check("refresh: and a line of the preferred rate takes it from 60 to 144", mode.vrefresh == 144 && mode.clock == listed_fast[1].clock);
+        compositor_display[0].refresh = 60;
+        compositor_refresh_pick("A-1", 4, listed_fast, &mode);
+        check("refresh: while a line asking 60 by number is at 60", mode.vrefresh == 60 && mode.clock == listed_fast[0].clock);
+        memory_zero(&found, sizeof(found));
+        found.mode[0] = listed_fast[1];
+        compositor_rates_take(&found, 0, listed_fast, 4);
+        check("refresh: its rates are 144, 120 and 60, the fastest first, and the interlaced one is none",
+              found.hz_count[0] == 3 && found.hz[0][0] == 144 && found.hz[0][1] == 120 && found.hz[0][2] == 60);
     }
 
     compositor_displays = 0;

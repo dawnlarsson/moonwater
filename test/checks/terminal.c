@@ -372,6 +372,9 @@ static struct
         unsigned int set_count;
         // The sets that turn the crtc on refused (EINVAL) while this counts down: a link not up yet after a wake.
         unsigned int refuse_sets;
+        // The rates the panel lists at its size, in the kernel's order (the preferred first, then the fastest), rate_count of them (0: its one mode
+        // at 60 Hz), and the rate of the mode on the crtc (0: 60): what Canvas set at the start, then the last set's.
+        unsigned int rates[8], rate_count, crtc_rate;
         // A card whose first connector is a ghost: connected at the first look, with a list of modes that grew by the second (so none is read) and an
         // encoder that can have only a crtc the card has not, and whose second connector is the panel, with no encoder of its own yet.
         int ghost;
@@ -404,8 +407,25 @@ static long card_fake_node(unsigned int minor)
         return node;
 }
 
+static void card_fake_mode_at(struct compositor_mode address_to mode, unsigned int hz, unsigned int type)
+{
+        memory_zero(mode, sizeof(*mode));
+        mode->clock = 100000 * hz / 60; // the panel's timings at hz
+        mode->hdisplay = card_fake.width, mode->hsync_start = card_fake.width + 8, mode->hsync_end = card_fake.width + 16;
+        mode->htotal = card_fake.width + 32;
+        mode->vdisplay = card_fake.height, mode->vsync_start = card_fake.height + 2, mode->vsync_end = card_fake.height + 4;
+        mode->vtotal = card_fake.height + 8;
+        mode->vrefresh = hz;
+        mode->type = type;
+}
+
 static void card_fake_mode(struct compositor_mode address_to mode)
 {
+        if (card_fake.rate_count || card_fake.crtc_rate)
+        {
+                card_fake_mode_at(mode, card_fake.crtc_rate ? card_fake.crtc_rate : 60, card_fake.crtc_rate == card_fake.rates[0] ? 8 : 0);
+                return;
+        }
         memory_zero(mode, sizeof(*mode));
         mode->clock = 100000;
         mode->hdisplay = card_fake.width, mode->hsync_start = card_fake.width + 8, mode->hsync_end = card_fake.width + 16;
@@ -485,11 +505,20 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                         c->connection = 1;
                         return 0;
                 }
-                if (connected && c->mode_count >= 1 && c->modes)
+                if (connected && card_fake.rate_count)
+                {
+                        // Its modes at its size, copied only when they fit what was asked for, as the kernel does: the preferred one first.
+                        if (c->mode_count >= card_fake.rate_count && c->modes)
+                                for (unsigned int at = 0; at < card_fake.rate_count; at++)
+                                        card_fake_mode_at((struct compositor_mode address_to)c->modes + at, card_fake.rates[at], at ? 0 : 8);
+                }
+                else if (connected && c->mode_count >= 1 && c->modes)
                         card_fake_mode((struct compositor_mode address_to)c->modes);
                 if (connected && c->encoder_count >= 1 && c->encoders)
                         ((unsigned int address_to)c->encoders)[0] = CARD_FAKE_ENCODER;
                 c->mode_count = c->encoder_count = (unsigned int)connected;
+                if (connected && card_fake.rate_count)
+                        c->mode_count = card_fake.rate_count;
                 c->prop_count = 0;
                 c->encoder_id = connected ? CARD_FAKE_ENCODER : 0;
                 if (card_fake.ghost)
@@ -726,6 +755,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                         return -28;
                 }
                 card_fake.crtc_fb = s->fb_id, card_fake.crtc_x = s->x, card_fake.crtc_y = s->y;
+                if (card_fake.rate_count)
+                        card_fake.crtc_rate = s->mode.vrefresh;
                 return 0;
         }
         case COMPOSITOR_ATOMIC:

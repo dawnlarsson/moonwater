@@ -9315,6 +9315,7 @@ b32 main()
         check_compositor_card_edid();
         check_compositor_card_walk();
         check_compositor_wake();
+        check_compositor_rate_fastest();
         check_compositor_screen_wait();
         check_compositor_start_room();
         check_compositor_setting_opens();

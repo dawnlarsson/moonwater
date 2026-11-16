@@ -3871,7 +3871,7 @@ static long terminal_tick(long timeout, long address_to other)
         if (ui_body_going(&terminal.bar.body))
         {
                 terminal_bar_step();
-                timeout = timeout < 0 || timeout > UI_BODY_FRAME_NS ? UI_BODY_FRAME_NS : timeout;
+                timeout = timeout < 0 || timeout > ui_kit_frame_ns() ? ui_kit_frame_ns() : timeout;
         }
 
         // The view a finger threw on the alternate screen goes on a frame at a time, slowing, until it is still.
@@ -3885,7 +3885,7 @@ static long terminal_tick(long timeout, long address_to other)
                 if (!moved)
                         ui_body_hold(&terminal.alt, ui_kit_time());
                 if (ui_body_going(&terminal.alt))
-                        timeout = timeout < 0 || timeout > UI_BODY_FRAME_NS ? UI_BODY_FRAME_NS : timeout;
+                        timeout = timeout < 0 || timeout > ui_kit_frame_ns() ? ui_kit_frame_ns() : timeout;
         }
 
         // The actions bar comes back when the view has been still for a while (ui_select_bar_tick).

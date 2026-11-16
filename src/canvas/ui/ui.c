@@ -14532,6 +14532,16 @@ static unsigned int ui_kit_shape_sent;
 static struct windows address_to ui_kit_table;
 static unsigned int ui_kit_row;
 
+/*
+        A frame of the display, ns: the period the compositor's table says (its fastest screen's, 6.94 ms at 144 Hz), and a 60 Hz
+        screen's with no table. Whatever moves a frame at a time (a throw, a spring, a drag's scroll past an edge, a menu's ripple)
+        asks for its next step this long on, so it steps at every frame the display shows and not at every 16 ms of 60 Hz.
+*/
+static long ui_kit_frame_ns(void)
+{
+        return ui_kit_table && ui_kit_table->period ? (long)ui_kit_table->period : 16666667l;
+}
+
 // The window's pointer is the last motion's place: a press or a key carries none, so an app asks the kit for it (ui_text_event).
 static fn ui_kit_track(const struct window_event address_to event)
 {
@@ -14994,7 +15004,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 #define BODY_HELD_NS 2000000000ll            // a hold the hand has not moved in this long is let go where it is (ui_body_step): its release was lost
 #define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
 #define BODY_FREE_AT ((b64)1 << 50)          // a free throw starts 2^20 pixels along, and its far end is as far again (ui_body_free)
-#define UI_BODY_FRAME_NS 16000000l           // a body that moves is stepped again this long later: a frame
+#define UI_BODY_FRAME_NS 16000000l           // a 60 Hz frame, less a little: what a check steps a body by (the kit steps it by ui_kit_frame_ns)
 
 #define BODY_NOTCH_RATE 18                   // a wheel's notches move a target, and the position runs to it at once and eases out: e to the minus this, per second, of the gap is left (a quarter of a notch in the first frame, 83 percent at 100 ms, all but 3 percent at 200)
 #define BODY_BUMP_K 36                       // a notch into an end gives the band a push of this many times its pixels past the end, a second (100 px: 3600 a second, a bounce of 55 px)
@@ -25234,7 +25244,7 @@ static int ui_app_run(struct ui_app address_to app)
                                 app->chose(chosen);
                         // A menu's ripple is moving: its next picture is due a display period on.
                         if (app->popup->open && app->popup->menu.moving)
-                                timeout = 16666667;
+                                timeout = ui_kit_frame_ns();
                 }
 
                 if (windows_close_asked(app->own))
@@ -26725,8 +26735,8 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
 
                 if (t->top_line != was)
                         *redraw = true;
-                if (flying && (timeout < 0 || (long)UI_BODY_FRAME_NS < timeout))
-                        timeout = UI_BODY_FRAME_NS;
+                if (flying && (timeout < 0 || ui_kit_frame_ns() < timeout))
+                        timeout = ui_kit_frame_ns();
         }
         due = ui_text_tick(t, redraw), scroll = ui_select_autoscroll(ui, s, redraw), bar = ui_select_bar_tick(s, redraw);
         if (due && (timeout < 0 || (long)(due - now) < timeout))
@@ -27849,13 +27859,13 @@ static positive ui_select_autoscroll(struct ui address_to ui, struct ui_select a
         }
         steps = ui_edge_steps(&s->edge, ui->scale, b.field ? 1000l : 1000l * b.line_height);
         if (steps <= 0)
-                return now + UI_BODY_FRAME_NS;
+                return now + (positive)ui_kit_frame_ns();
         s->ops->scroll(ui, s->self, s->edge.past < 0 ? -steps : steps, true);
         edge_x = s->drag_x < b.left ? b.left : s->drag_x >= b.right ? b.right - 1 : s->drag_x;
         edge_y = s->drag_y < b.top ? b.top : s->drag_y >= b.bottom ? b.bottom - 1 : s->drag_y;
         ui_select_drag_to(ui, s, s->ops->place(ui, s->self, edge_x, edge_y), false);
         *redraw = true;
-        return now + UI_BODY_FRAME_NS;
+        return now + (positive)ui_kit_frame_ns();
 }
 
 // The bar's coming and going as a tick sees it: it is wanted and the view is still and it was not shown (or the other way round),
