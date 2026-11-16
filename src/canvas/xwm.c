@@ -463,6 +463,7 @@ static int compositor_xwm_pending_grow(void)
         struct wayland_table grown = {0, sizeof(struct compositor_xwm_pending), 0, 0, 0, 0, 0, 0, 0, 0};
         struct compositor_xwm_pending *to;
 
+        wayland_tables_host(&compositor_wl_host);
         if (!wayland_table_reach(&grown, room))
                 return 0;
         to = (struct compositor_xwm_pending *)grown.at;
@@ -789,6 +790,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         {
                 struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
 
+                wayland_tables_host(&compositor_wl_host);
                 if (!wayland_table_reach(&grown, x->window_index.count ? 2 * x->window_index.count : 64))
                 {
                         x->refused++;

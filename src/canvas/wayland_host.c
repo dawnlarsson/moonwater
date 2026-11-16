@@ -580,12 +580,16 @@ static void compositor_wl_map_put(struct wayland_table *index, long slot)
         bucket[b] = (unsigned int)(slot + 1);
 }
 
+static const struct wayland_host compositor_wl_host;
+
 // The index made room for one more mapping: at half full, one of twice the buckets is made and every live mapping put in it. 0 when the memory is not there.
+// The tables are the compositor's, made by its host whether or not the shim has started (a pool is mapped before, and with no shim).
 static int compositor_wl_map_room(void)
 {
         long buckets = compositor_wl.map_index.count;
         struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
 
+        wayland_tables_host(&compositor_wl_host);
         if (buckets && 2 * (compositor_wl.map_live + 1) <= buckets)
                 return 1;
         if (!wayland_table_reach(&grown, buckets ? 2 * buckets : 64))

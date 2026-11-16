@@ -826,6 +826,24 @@ static struct
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L             // elements committed first
 
+/*
+        The host a table's memory is made by: the shim's, once it is started, and before that (or with none) the one the compositor
+        named for tables of its own (wayland_tables_host: the mappings it tracks, the window manager of Xwayland's records), which
+        are made before a client connects and in a compositor with no shim at all. A table with neither has no memory: its take is
+        refused, where it read through a host that was not there.
+*/
+static const struct wayland_host *wayland_tables_by;
+
+WAYLAND_API void wayland_tables_host(const struct wayland_host *host)
+{
+        wayland_tables_by = host;
+}
+
+static const struct wayland_host *wayland_table_host(void)
+{
+        return wayland.host ? wayland.host : wayland_tables_by;
+}
+
 static long wayland_round_page(long bytes)
 {
         return (bytes + WAYLAND_TABLE_PAGE - 1) & ~(WAYLAND_TABLE_PAGE - 1);
@@ -834,27 +852,30 @@ static long wayland_round_page(long bytes)
 // A table's memory committed for `want` elements, its reservation made first: 1 when it is, 0 when the memory is not there.
 static int wayland_table_room(struct wayland_table *t, long want)
 {
+        const struct wayland_host *h = wayland_table_host();
         long usable, need, stack_need;
 
         if (want <= t->usable)
                 return 1;
+        if (!h)
+                return 0;
         if (!t->at)
         {
                 long bytes = WAYLAND_TABLE_WANT;
                 void *at;
 
-                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
-                        at = wayland.host->reserve(wayland.host->context, &bytes);
+                if (h->reserve && h->commit && h->unreserve)
+                        at = h->reserve(h->context, &bytes);
                 else
-                        bytes = WAYLAND_TABLE_FALLBACK, at = wayland.host->alloc(wayland.host->context, bytes);
+                        bytes = WAYLAND_TABLE_FALLBACK, at = h->alloc(h->context, bytes);
                 if (!at || bytes < 2 * WAYLAND_TABLE_PAGE + t->unit + 4)
                 {
                         if (at)
                         {
-                                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
-                                        wayland.host->unreserve(wayland.host->context, at, bytes);
+                                if (h->reserve && h->commit && h->unreserve)
+                                        h->unreserve(h->context, at, bytes);
                                 else
-                                        wayland.host->release(wayland.host->context, at, bytes);
+                                        h->release(h->context, at, bytes);
                         }
                         return 0;
                 }
@@ -870,14 +891,14 @@ static int wayland_table_room(struct wayland_table *t, long want)
         usable = usable > t->reserved ? t->reserved : usable;
         need = wayland_round_page(usable * t->unit);
         stack_need = wayland_round_page(usable * 4);
-        if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
+        if (h->reserve && h->commit && h->unreserve)
         {
-                if (need > t->committed && !wayland.host->commit(wayland.host->context, t->at + t->committed, need - t->committed))
+                if (need > t->committed && !h->commit(h->context, t->at + t->committed, need - t->committed))
                         return 0;
                 if (need > t->committed)
                         t->committed = need;
                 if (stack_need > t->stack_committed &&
-                    !wayland.host->commit(wayland.host->context, t->at + t->stack + t->stack_committed, stack_need - t->stack_committed))
+                    !h->commit(h->context, t->at + t->stack + t->stack_committed, stack_need - t->stack_committed))
                         return 0;
         }
         t->committed = need > t->committed ? need : t->committed;
@@ -915,12 +936,14 @@ static int wayland_table_reach(struct wayland_table *t, long count)
 
 static void wayland_table_drop(struct wayland_table *t)
 {
-        if (t->at)
+        const struct wayland_host *h = wayland_table_host();
+
+        if (t->at && h)
         {
-                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
-                        wayland.host->unreserve(wayland.host->context, t->at, t->bytes);
+                if (h->reserve && h->commit && h->unreserve)
+                        h->unreserve(h->context, t->at, t->bytes);
                 else
-                        wayland.host->release(wayland.host->context, t->at, t->bytes);
+                        h->release(h->context, t->at, t->bytes);
         }
         t->at = 0;
         t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
