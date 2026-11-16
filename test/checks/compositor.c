@@ -1770,6 +1770,125 @@ static void check_compositor_aside(void)
 }
 
 /*
+        A blended frame with the ground alone under it in the damage is a piece of the scene's plan, laid over a row of the
+        ground (compositor_blend_alone, memory_over_under_u32_rect), where every blended frame was drawn the painter's way:
+        the damage filled with the ground and every frame drawn over the last. The picture is the painter's, bit for bit,
+        here drawn as the scene drew it before (ground_painted), for a blended window with a round corner and a line under
+        an opaque one that covers part of it; with a snap preview's tint over it; with a shared edge's mark over the one
+        above; with an opaque window under it that meets it in some rows only, so a band or a slice that holds those rows
+        draws the two the painter's way and the others the plan's; the blended window partly off the target; drawn at
+        another size (a landing); with square corners; and two blended windows side by side; the blended window 300 wide, so
+        a target only written takes the out variant's streamed rows. Over the whole target, a
+        damage inside it, and one that cuts a round corner. Composed in place (compositor_scene) and in bands into a target
+        only written (compositor_scene_banded), which reads nothing; and composed in place into such a target, the plan
+        reads nothing where every blended window has the ground alone under it and no tint or mark is drawn.
+*/
+#define GROUND_W 640
+#define GROUND_H 160
+static void ground_painted(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
+{
+    int radii[COMPOSITOR_FRAMES];
+
+    compositor_radii(frames, count, radii);
+    compositor_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1, compositor_ground);
+    for (unsigned int each = 0; each < count; each++)
+        compositor_draw_with(t, &frames[each], radii[each]);
+    compositor_preview_draw(t, frames, count, radii);
+}
+
+static void check_compositor_ground(void)
+{
+    static unsigned int got[GROUND_W * GROUND_H], want[GROUND_W * GROUND_H], banded[GROUND_W * GROUND_H];
+    static unsigned int glassy[300 * 90], window[200 * 90];
+    static const int damage[3][4] = {{0, 0, GROUND_W, GROUND_H}, {37, 21, 411, 117}, {50, 20, 40, 40}};
+    static const int preview_rect[4] = {40, 20, 320, 110}, mark_rect[4] = {200, 60, 120, 30};
+    unsigned int ground_was = compositor_ground;
+    unsigned long wrong = 0, wrong_banded = 0, read = 0, quiet = 0, quiet_asked = 0, loud = 0;
+
+    compositor_ground = 0x00314159u;
+    // The blended window is 300 wide, past the 256 words a row the out variant streams from.
+    for (unsigned int at = 0; at < 300 * 90; at++)
+    {
+        // Premultiplied, every alpha, a run of the clear and a run of the opaque among them.
+        unsigned int a = at % 300 < 30 ? 0 : at % 300 < 60 ? 255 : at * 37u & 255u, c = (at * 91u) % (a + 1);
+
+        glassy[at] = a << 24 | c << 16 | (c / 2) << 8 | (a - c);
+    }
+    for (unsigned int at = 0; at < 200 * 90; at++)
+        window[at] = 0xc06020u + at * 77u;
+    for (int kind = 0; kind < 8; kind++)
+        for (int d = 0; d < 3; d++)
+        {
+            struct compositor_target t = {got, GROUND_W, GROUND_W, GROUND_H, damage[d][0], damage[d][1], damage[d][0] + damage[d][2],
+                                          damage[d][1] + damage[d][3], 0, 0, 0};
+            struct compositor_target r = t, b = t;
+            struct compositor_frame frames[4];
+            unsigned int count = 0;
+            int rows[2];
+
+            if (kind == 3)
+                frames[count++] = (struct compositor_frame){.x = 20, .y = 100, .width = 300, .height = 50, .scale = 100, .pixels = window,
+                                                            .pitch = 200, .radius = 6, .line = 1, .edge = 0x445566u};
+            frames[count++] = (struct compositor_frame){.x = kind == 4 ? -40 : 60, .y = kind == 4 ? -10 : 30, .width = 300, .height = 90,
+                                                        .scale = 100, .pixels = glassy, .pitch = 300, .radius = 12, .line = 2,
+                                                        .edge = 0x335577u, .blend = 1, .square = kind == 6 ? 5 : 0,
+                                                        .source_w = kind == 5 ? 150 : 0, .source_h = kind == 5 ? 70 : 0};
+            if (kind == 1)
+            {
+                memory_copy(frames[count - 1].preview, preview_rect, sizeof(preview_rect));
+                frames[count - 1].preview_ink = 0x9f0a0b0cu, frames[count - 1].preview_radius = 10, frames[count - 1].preview_line = 3,
+                                 frames[count - 1].preview_edge = 0xc0405060u;
+            }
+            if (kind == 7)
+                frames[count++] = (struct compositor_frame){.x = 400, .y = 40, .width = 120, .height = 70, .scale = 100, .pixels = glassy + 50,
+                                                            .pitch = 300, .radius = 9, .line = 1, .edge = 0x112233u, .blend = 1};
+            frames[count++] = (struct compositor_frame){.x = 200, .y = 70, .width = 100, .height = 60, .scale = 100, .pixels = window,
+                                                        .pitch = 200, .radius = 6, .line = 1, .edge = 0x445566u};
+            if (kind == 2)
+            {
+                memory_copy(frames[count - 1].mark, mark_rect, sizeof(mark_rect));
+                frames[count - 1].mark_ink = 0x80ffffffu;
+            }
+            compositor_corner_masks_ready(frames, count);
+            for (unsigned int at = 0; at < GROUND_W * GROUND_H; at++)
+                want[at] = got[at] = banded[at] = 0x5a5a5a5au + at * 2654435761u;
+            r.pixels = want;
+            ground_painted(&r, frames, count);
+            compositor_scene(&t, frames, count);
+            wrong += memory_compare(got, want, sizeof(got)) != 0;
+            b.pixels = banded, b.out = 1;
+            compositor_out_reads = 0;
+            compositor_scene_banded(&b, frames, count, 0, rows);
+            read += compositor_out_reads;
+            wrong_banded += memory_compare(banded, want, sizeof(banded)) != 0;
+            // In place into a target only written: nothing is read where the ground alone is under every blended window and
+            // nothing mixes over the target; with a window under it in the damage, something is.
+            {
+                struct compositor_target in_place = t;
+
+                in_place.pixels = banded, in_place.out = 1;
+                compositor_out_reads = 0;
+                compositor_scene(&in_place, frames, count);
+                if (kind == 3 && d != 2)
+                    loud += compositor_out_reads != 0;
+                else if (kind != 1 && kind != 2)
+                    quiet += compositor_out_reads == 0, quiet_asked++;
+            }
+        }
+    compositor_ground = ground_was;
+    check("ground: a blended window with the ground alone under it is the painter's picture, bit for bit, composed in place, "
+          "with a round corner, a line, an opaque window over it, a tint, a mark, a window under it in some rows, partly off the "
+          "target, landing, square corners and two side by side, over the whole target, a damage inside it and one through a corner",
+          wrong == 0);
+    check("ground: and composed in bands into a target only written, the same picture", wrong_banded == 0);
+    check("ground: which those bands do not read", read == 0);
+    check("ground: composed in place into a target only written, the plan reads nothing where the ground alone is under every "
+          "blended window and nothing mixes over the target",
+          quiet == quiet_asked && quiet_asked == 6 * 3 - 2);
+    check("ground: and reads it where a window lies under the blended one in the damage", loud == 2);
+}
+
+/*
         The chip over a target that does not meet its box: a slice of a scene composed apart above or below it, a target left
         or right of it, writes nothing, and one that meets it by a row or a column has that row or column of it and nothing
         else. The target is a page with a page that faults on each side, so a count made of a clip that went negative (a width

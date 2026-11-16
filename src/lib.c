@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        509 routines (482 public, 27 local), 497 of them on all three and 12 local to one.
+        511 routines (484 public, 27 local), 499 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -326,6 +326,8 @@
           memory_over_cover_u32_rect     public  yes     yes     yes
           memory_over_tone_u32           public  yes     yes     yes
           memory_over_u32_rect           public  yes     yes     yes
+          memory_over_under_out_u32_rect public  yes     yes     yes
+          memory_over_under_u32_rect     public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
           memory_resample_u32_rect       public  yes     yes     yes
@@ -14561,6 +14563,167 @@ __asm__(
     "69: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 61b\n"
     "vzeroupper\n" ASM_RET
     ASM_END(memory_over_u32_rect)
+
+    //
+    //       memory_over_under_u32_rect -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words, r8
+    //       under, r9 under_stride in words, 8(%rsp) width in words, 16(%rsp) height: memory_over_u32_rect with what
+    //       is under read from under and the answer written to into, so into is never read and may be a scanout. The
+    //       bodies are memory_over_u32_rect's, the target's load from under, each pointer moved to its next row by its
+    //       stride less the width (an under stride of none, a row of the ground, goes back to the row's start); the
+    //       opaque path stores the source and reads under no more than into. Into and under the same, at the same
+    //       stride, is memory_over_u32_rect: each turn reads under before it writes into.
+    //
+    ASM_FUNC(memory_over_under_u32_rect)
+    "mov 8(%rsp), %r10\n   mov 16(%rsp), %r11\n   test %r10, %r10\n   jz 90f\n   test %r11, %r11\n   jz 90f\n"
+    "mov %r10, %rax\n   shl $2, %rax\n   shl $2, %rsi\n   sub %rax, %rsi\n   shl $2, %rcx\n   sub %rax, %rcx\n   shl $2, %r9\n   sub %rax, %r9\n"
+    ASM_WIDER("cpu_has_avx512", "60f")
+    ASM_WIDER("cpu_has_avx2", "50f")
+    "push %rbx\n"
+    "pxor %xmm7, %xmm7\n   pcmpeqd %xmm10, %xmm10\n"
+    "movdqa " ASM_LABEL(over_words255) "(%rip), %xmm6\n   movdqa " ASM_LABEL(over_words128) "(%rip), %xmm5\n   movdqa " ASM_LABEL(over_alpha) "(%rip), %xmm8\n"
+    "movdqa " ASM_LABEL(over_colours) "(%rip), %xmm11\n"
+    "10: mov %r10, %rax\n"
+    "cmp $4, %rax\n   jb 80f\n"
+    "40: movdqu (%rdx), %xmm0\n"
+    "movdqa %xmm0, %xmm9\n   por %xmm11, %xmm9\n   pcmpeqd %xmm10, %xmm9\n   pmovmskb %xmm9, %ebx\n   cmp $0xffff, %ebx\n   jne 41f\n"
+    "movdqu %xmm0, (%rdi)\n   jmp 42f\n"
+    "41: movdqu (%r8), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
+    "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n"
+    "movdqa %xmm1, %xmm4\n   punpcklbw %xmm7, %xmm4\n   punpckhbw %xmm7, %xmm1\n"
+    "movdqa %xmm3, %xmm2\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
+    "pmullw %xmm2, %xmm4\n   paddw %xmm5, %xmm4\n   movdqa %xmm4, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm4\n   psrlw $8, %xmm4\n"
+    "pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm1, %xmm4\n   paddusb %xmm4, %xmm0\n   por %xmm8, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "42: add $16, %rdi\n   add $16, %rdx\n   add $16, %r8\n   sub $4, %rax\n   cmp $4, %rax\n   jae 40b\n"
+    "80: test %rax, %rax\n   jz 89f\n"
+    "81: movl (%rdx), %ebx\n   cmp $0xff000000, %ebx\n   jb 83f\n   movl %ebx, (%rdi)\n   jmp 84f\n"
+    "83: movd (%rdx), %xmm0\n   movd (%r8), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   psrld $24, %xmm2\n   movdqa %xmm2, %xmm3\n   pslld $16, %xmm3\n   por %xmm3, %xmm2\n"
+    "movdqa %xmm6, %xmm3\n   psubw %xmm2, %xmm3\n   punpckldq %xmm3, %xmm3\n"
+    "punpcklbw %xmm7, %xmm1\n   pmullw %xmm3, %xmm1\n   paddw %xmm5, %xmm1\n   movdqa %xmm1, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm1\n   psrlw $8, %xmm1\n"
+    "packuswb %xmm7, %xmm1\n   paddusb %xmm1, %xmm0\n   por %xmm8, %xmm0\n   movd %xmm0, (%rdi)\n"
+    "84: add $4, %rdi\n   add $4, %rdx\n   add $4, %r8\n   dec %rax\n   jnz 81b\n"
+    "89: add %rsi, %rdi\n   add %rcx, %rdx\n   add %r9, %r8\n   dec %r11\n   jnz 10b\n"
+    "pop %rbx\n"
+    "90: " ASM_RET
+    //  AVX2 and AVX-512: memory_over_u32_rect's registers and steps, under in place of into for the load.
+    "50: vpxor %xmm7, %xmm7, %xmm7\n   vpcmpeqd %ymm10, %ymm10, %ymm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %ymm5\n   mov $0x01010101, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastd %xmm6, %ymm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %ymm8\n"
+    "vbroadcasti128 " ASM_LABEL(over_pick_lo) "(%rip), %ymm12\n   vbroadcasti128 " ASM_LABEL(over_pick_hi) "(%rip), %ymm13\n"
+    "51: mov %r10, %rax\n"
+    "cmp $8, %rax\n   jb 54f\n"
+    "52: vmovdqu (%rdx), %ymm0\n   vptest %ymm8, %ymm0\n   jc 53f\n"
+    "vmovdqu (%r8), %ymm1\n"
+    OVER_BLEND_WIDE("y", "")
+    "53: vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rdx\n   add $32, %r8\n   sub $8, %rax\n   cmp $8, %rax\n   jae 52b\n"
+    "54: cmp $4, %rax\n   jb 56f\n"
+    "vmovdqu (%rdx), %xmm0\n   vptest %xmm8, %xmm0\n   jc 55f\n"
+    "vmovdqu (%r8), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "55: vmovdqu %xmm0, (%rdi)\n   add $16, %rdi\n   add $16, %rdx\n   add $16, %r8\n   sub $4, %rax\n"
+    "56: test %rax, %rax\n   jz 59f\n"
+    "57: vmovd (%rdx), %xmm0\n   cmpl $0xff000000, (%rdx)\n   jae 58f\n"
+    "vmovd (%r8), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "58: vmovd %xmm0, (%rdi)\n   add $4, %rdi\n   add $4, %rdx\n   add $4, %r8\n   dec %rax\n   jnz 57b\n"
+    "59: add %rsi, %rdi\n   add %rcx, %rdx\n   add %r9, %r8\n   dec %r11\n   jnz 51b\n"
+    "vzeroupper\n" ASM_RET
+    //  k2 the lanes of a row's last turn, width mod sixteen of them, made in r11 before the height is taken again.
+    "60: vpxor %xmm7, %xmm7, %xmm7\n   vpternlogd $0xff, %zmm10, %zmm10, %zmm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %zmm5\n   mov $0x01010101, %eax\n   vpbroadcastd %eax, %zmm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %zmm8\n"
+    "vbroadcasti32x4 " ASM_LABEL(over_pick_lo) "(%rip), %zmm12\n   vbroadcasti32x4 " ASM_LABEL(over_pick_hi) "(%rip), %zmm13\n"
+    "mov %r10d, %eax\n   and $15, %eax\n   mov $-1, %r11d\n   bzhi %eax, %r11d, %r11d\n   kmovw %r11d, %k2\n   mov 16(%rsp), %r11\n"
+    "61: mov %r10, %rax\n"
+    "cmp $16, %rax\n   jb 64f\n"
+    "62: vmovdqu32 (%rdx), %zmm0\n   vpcmpud $1, %zmm8, %zmm0, %k1\n   kortestw %k1, %k1\n   jz 63f\n"
+    "vmovdqu32 (%r8), %zmm1\n"
+    OVER_BLEND_WIDE("z", "d")
+    "63: vmovdqu32 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rdx\n   add $64, %r8\n   sub $16, %rax\n   cmp $16, %rax\n   jae 62b\n"
+    "64: test %rax, %rax\n   jz 69f\n"
+    "vmovdqu32 (%rdx), %zmm0{%k2}{z}\n   vpcmpud $1, %zmm8, %zmm0, %k1{%k2}\n   kortestw %k1, %k1\n   jz 65f\n"
+    "vmovdqu32 (%r8), %zmm1{%k2}{z}\n"
+    OVER_BLEND_WIDE("z", "d")
+    "65: vmovdqu32 %zmm0, (%rdi){%k2}\n"
+    "lea (%rdi,%rax,4), %rdi\n   lea (%rdx,%rax,4), %rdx\n   lea (%r8,%rax,4), %r8\n"
+    "69: add %rsi, %rdi\n   add %rcx, %rdx\n   add %r9, %r8\n   dec %r11\n   jnz 61b\n"
+    "vzeroupper\n" ASM_RET
+    ASM_END(memory_over_under_u32_rect)
+
+    //
+    //       memory_over_under_out_u32_rect -- memory_over_under_u32_rect's arguments: the same answer, for an into
+    //       nothing reads back (a scanout). With AVX2 and a row of 256 words or more, each row's pixels up to into's
+    //       first 64-byte line are laid one at a time (AVX2) or as one turn under a mask (AVX-512), its aligned turns
+    //       (eight with AVX2, sixteen with AVX-512) are stored non-temporally, the opaque ones too, so no store reads
+    //       the line it writes (each store into a plate the processor caches read its line first; one into a
+    //       write-combined plate does not), and the rest of the row is laid as the head is; the rectangle ends with
+    //       sfence. A narrower row, a machine without AVX2 and a kernel build are memory_over_under_u32_rect.
+    //
+    ASM_FUNC(memory_over_under_out_u32_rect)
+    "cmpq $256, 8(%rsp)\n   jb memory_over_under_u32_rect\n   cmpq $0, 16(%rsp)\n   je memory_over_under_u32_rect\n"
+    ASM_NARROW("cpu_has_avx2", "memory_over_under_u32_rect")
+    "mov 8(%rsp), %r10\n   mov 16(%rsp), %r11\n"
+    "mov %r10, %rax\n   shl $2, %rax\n   shl $2, %rsi\n   sub %rax, %rsi\n   shl $2, %rcx\n   sub %rax, %rcx\n   shl $2, %r9\n   sub %rax, %r9\n"
+    "push %rbx\n   push %r12\n"
+    ASM_WIDER("cpu_has_avx512", "60f")
+    "vpxor %xmm7, %xmm7, %xmm7\n   vpcmpeqd %ymm10, %ymm10, %ymm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %ymm5\n   mov $0x01010101, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastd %xmm6, %ymm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %ymm8\n"
+    "vbroadcasti128 " ASM_LABEL(over_pick_lo) "(%rip), %ymm12\n   vbroadcasti128 " ASM_LABEL(over_pick_hi) "(%rip), %ymm13\n"
+    "51: mov %r10, %rax\n"
+    //  The head: a pixel at a time to into's first 64-byte line.
+    "52: test $63, %dil\n   jz 54f\n   test %rax, %rax\n   jz 59f\n"
+    "vmovd (%rdx), %xmm0\n   cmpl $0xff000000, (%rdx)\n   jae 53f\n"
+    "vmovd (%r8), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "53: vmovd %xmm0, (%rdi)\n   add $4, %rdi\n   add $4, %rdx\n   add $4, %r8\n   dec %rax\n   jmp 52b\n"
+    "54: cmp $8, %rax\n   jb 56f\n"
+    "55: vmovdqu (%rdx), %ymm0\n   vptest %ymm8, %ymm0\n   jc 1f\n"
+    "vmovdqu (%r8), %ymm1\n"
+    OVER_BLEND_WIDE("y", "")
+    "1:  vmovntdq %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rdx\n   add $32, %r8\n   sub $8, %rax\n   cmp $8, %rax\n   jae 55b\n"
+    "56: test %rax, %rax\n   jz 59f\n"
+    "57: vmovd (%rdx), %xmm0\n   cmpl $0xff000000, (%rdx)\n   jae 58f\n"
+    "vmovd (%r8), %xmm1\n"
+    OVER_BLEND_WIDE("x", "")
+    "58: vmovd %xmm0, (%rdi)\n   add $4, %rdi\n   add $4, %rdx\n   add $4, %r8\n   dec %rax\n   jnz 57b\n"
+    "59: add %rsi, %rdi\n   add %rcx, %rdx\n   add %r9, %r8\n   dec %r11\n   jnz 51b\n"
+    "sfence\n   vzeroupper\n   pop %r12\n   pop %rbx\n" ASM_RET
+    //  AVX-512: the head to the line and the tail each one turn under a mask in k3 (bzhi of its count, in r12).
+    "60: vpxor %xmm7, %xmm7, %xmm7\n   vpternlogd $0xff, %zmm10, %zmm10, %zmm10\n"
+    "vpbroadcastd " ASM_LABEL(over_words128) "(%rip), %zmm5\n   mov $0x01010101, %eax\n   vpbroadcastd %eax, %zmm6\n"
+    "vpbroadcastd " ASM_LABEL(over_alpha) "(%rip), %zmm8\n"
+    "vbroadcasti32x4 " ASM_LABEL(over_pick_lo) "(%rip), %zmm12\n   vbroadcasti32x4 " ASM_LABEL(over_pick_hi) "(%rip), %zmm13\n"
+    "61: mov %r10, %rax\n"
+    "mov %rdi, %rbx\n   neg %rbx\n   shr $2, %rbx\n   and $15, %ebx\n   cmp %rax, %rbx\n   cmova %rax, %rbx\n"
+    "test %rbx, %rbx\n   jz 62f\n"
+    "mov $-1, %r12d\n   bzhi %ebx, %r12d, %r12d\n   kmovw %r12d, %k3\n"
+    "vmovdqu32 (%rdx), %zmm0{%k3}{z}\n   vpcmpud $1, %zmm8, %zmm0, %k1{%k3}\n   kortestw %k1, %k1\n   jz 1f\n"
+    "vmovdqu32 (%r8), %zmm1{%k3}{z}\n"
+    OVER_BLEND_WIDE("z", "d")
+    "1:  vmovdqu32 %zmm0, (%rdi){%k3}\n"
+    "lea (%rdi,%rbx,4), %rdi\n   lea (%rdx,%rbx,4), %rdx\n   lea (%r8,%rbx,4), %r8\n   sub %rbx, %rax\n"
+    "62: cmp $16, %rax\n   jb 64f\n"
+    "63: vmovdqu32 (%rdx), %zmm0\n   vpcmpud $1, %zmm8, %zmm0, %k1\n   kortestw %k1, %k1\n   jz 2f\n"
+    "vmovdqu32 (%r8), %zmm1\n"
+    OVER_BLEND_WIDE("z", "d")
+    "2:  vmovntdq %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rdx\n   add $64, %r8\n   sub $16, %rax\n   cmp $16, %rax\n   jae 63b\n"
+    "64: test %rax, %rax\n   jz 69f\n"
+    "mov $-1, %r12d\n   bzhi %eax, %r12d, %r12d\n   kmovw %r12d, %k3\n"
+    "vmovdqu32 (%rdx), %zmm0{%k3}{z}\n   vpcmpud $1, %zmm8, %zmm0, %k1{%k3}\n   kortestw %k1, %k1\n   jz 3f\n"
+    "vmovdqu32 (%r8), %zmm1{%k3}{z}\n"
+    OVER_BLEND_WIDE("z", "d")
+    "3:  vmovdqu32 %zmm0, (%rdi){%k3}\n"
+    "lea (%rdi,%rax,4), %rdi\n   lea (%rdx,%rax,4), %rdx\n   lea (%r8,%rax,4), %r8\n"
+    "69: add %rsi, %rdi\n   add %rcx, %rdx\n   add %r9, %r8\n   dec %r11\n   jnz 61b\n"
+    "sfence\n   vzeroupper\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_over_under_out_u32_rect)
 #undef OVER_BLEND_WIDE
 
     ASM_FUNC(memory_add_sat_u8_rect)
@@ -26683,6 +26846,46 @@ __asm__(
     "9: " ASM_RET
     ASM_END(memory_over_u32_rect)
 
+    //       memory_over_under_u32_rect -- x0 into, x1 into_stride in words, x2 from, x3 from_stride in words, x4 under,
+    //       x5 under_stride in words, x6 width, x7 height: memory_over_u32_rect's body with the target's load from under
+    //       (x16 its cursor). The x86_64 block carries the contract.
+    ASM_FUNC(memory_over_under_u32_rect)
+    "cbz x6, 9f\n   cbz x7, 9f\n"
+    "lsl x1, x1, #2\n   lsl x3, x3, #2\n   lsl x5, x5, #2\n"
+    "movi v31.8h, #128\n   movi v30.4s, #0xff, lsl #24\n"
+    "mov x9, #0x0303\n   movk x9, #0x0303, lsl #16\n   movk x9, #0x0707, lsl #32\n   movk x9, #0x0707, lsl #48\n"
+    "mov x10, #0x0b0b\n   movk x10, #0x0b0b, lsl #16\n   movk x10, #0x0f0f, lsl #32\n   movk x10, #0x0f0f, lsl #48\n"
+    "ins v29.d[0], x9\n   ins v29.d[1], x10\n"
+    "0: mov x11, x0\n   mov x12, x2\n   mov x13, x6\n   mov x16, x4\n"
+    "1: cmp x13, #4\n   b.lo 2f\n"
+    "ld1 {v0.16b}, [x12], #16\n"
+    "ushr v6.4s, v0.4s, #24\n   uminv s6, v6.4s\n   fmov w14, s6\n   cmp w14, #255\n   b.ne 4f\n"
+    "st1 {v0.16b}, [x11], #16\n   add x16, x16, #16\n   sub x13, x13, #4\n   b 1b\n"
+    "4: ld1 {v1.16b}, [x16], #16\n"
+    "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v1.8b, v2.8b\n   umull2 v4.8h, v1.16b, v2.16b\n"
+    "add v3.8h, v3.8h, v31.8h\n   add v4.8h, v4.8h, v31.8h\n"
+    "usra v3.8h, v3.8h, #8\n   usra v4.8h, v4.8h, #8\n"
+    "shrn v5.8b, v3.8h, #8\n   shrn2 v5.16b, v4.8h, #8\n"
+    "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
+    "st1 {v0.16b}, [x11], #16\n   sub x13, x13, #4\n   b 1b\n"
+    "2: cbz x13, 3f\n"
+    "ldr w14, [x12]\n   lsr w15, w14, #24\n   cmp w15, #255\n   b.ne 5f\n"
+    "str w14, [x11], #4\n   add x12, x12, #4\n   add x16, x16, #4\n   sub x13, x13, #1\n   b 2b\n"
+    "5: ld1 {v0.s}[0], [x12]\n   ld1 {v1.s}[0], [x16]\n"
+    "tbl v2.16b, {v0.16b}, v29.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v1.8b, v2.8b\n   add v3.8h, v3.8h, v31.8h\n   usra v3.8h, v3.8h, #8\n   shrn v5.8b, v3.8h, #8\n"
+    "uqadd v0.16b, v0.16b, v5.16b\n   orr v0.16b, v0.16b, v30.16b\n"
+    "st1 {v0.s}[0], [x11], #4\n   add x12, x12, #4\n   add x16, x16, #4\n   sub x13, x13, #1\n   b 2b\n"
+    "3: add x0, x0, x1\n   add x2, x2, x3\n   add x4, x4, x5\n   sub x7, x7, #1\n   cbnz x7, 0b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_under_u32_rect)
+
+    //       memory_over_under_out_u32_rect: memory_over_under_u32_rect (the x86_64 block says why it streams there).
+    ASM_FUNC(memory_over_under_out_u32_rect)
+    "b memory_over_under_u32_rect\n"
+    ASM_END(memory_over_under_out_u32_rect)
+
     ASM_FUNC(memory_add_sat_u8_rect)
     "cbz x4, 9f\n   cbz x5, 9f\n"
     "0: mov x11, x0\n   mov x12, x2\n   mov x13, x4\n"
@@ -37158,6 +37361,62 @@ __asm__(
 #endif
     ASM_END(memory_over_u32_rect)
     ".option pop\n"
+
+    //       memory_over_under_u32_rect -- a0 into, a1 into_stride in words, a2 from, a3 from_stride in words, a4 under,
+    //       a5 under_stride in words, a6 width, a7 height: memory_over_u32_rect's bodies with the target's load from
+    //       under, its cursor in s0 (and 255 and the answer in s1 and s2 without V, 0x01010101 in s1 with it), which are
+    //       given back. The x86_64 block carries the contract.
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(memory_over_under_u32_rect)
+    "beqz a6, 9f\n   beqz a7, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 70f\n   bnez t3, 10f\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a5, 0(sp)\n   sd a6, 8(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 24(sp)\n   ld a5, 0(sp)\n   ld a6, 8(sp)\n   addi sp, sp, 32\n"
+    "j memory_over_under_u32_rect\n"
+#endif
+    "10: addi sp, sp, -32\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n"
+    "slli a1, a1, 2\n   slli a3, a3, 2\n   slli a5, a5, 2\n   li s1, 255\n"
+    "0: mv t0, a0\n   mv t1, a2\n   mv t2, a6\n   mv s0, a4\n"
+    "1: lwu t3, 0(t1)\n   srli t5, t3, 24\n   bne t5, s1, 5f\n   sw t3, 0(t0)\n   j 6f\n"
+    "5: lwu t4, 0(s0)\n"
+    "sub t5, s1, t5\n"
+    "andi t6, t4, 255\n   mul t6, t6, t5\n   addi t6, t6, 127\n   divu t6, t6, s1\n"
+    "andi s2, t3, 255\n   add t6, t6, s2\n   ble t6, s1, 2f\n   mv t6, s1\n"
+    "2: mv s2, t6\n"
+    "srli t6, t4, 8\n   andi t6, t6, 255\n   mul t6, t6, t5\n   addi t6, t6, 127\n   divu t6, t6, s1\n"
+    "srli t4, t4, 16\n   andi t4, t4, 255\n   mul t4, t4, t5\n   addi t4, t4, 127\n   divu t4, t4, s1\n"
+    "srli t5, t3, 8\n   andi t5, t5, 255\n   add t6, t6, t5\n   ble t6, s1, 3f\n   mv t6, s1\n"
+    "3: slli t6, t6, 8\n   or s2, s2, t6\n"
+    "srli t5, t3, 16\n   andi t5, t5, 255\n   add t4, t4, t5\n   ble t4, s1, 4f\n   mv t4, s1\n"
+    "4: slli t4, t4, 16\n   or s2, s2, t4\n"
+    "li t6, 0xff000000\n   or s2, s2, t6\n   sw s2, 0(t0)\n"
+    "6: addi t0, t0, 4\n   addi t1, t1, 4\n   addi s0, s0, 4\n   addi t2, t2, -1\n   bnez t2, 1b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   add a4, a4, a5\n   addi a7, a7, -1\n   bnez a7, 0b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   addi sp, sp, 32\n"
+    "9: " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "70: addi sp, sp, -16\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n"
+    "slli a1, a1, 2\n   slli a3, a3, 2\n   slli a5, a5, 2\n   li t5, 0xff000000\n   li s1, 0x01010101\n   li t6, 128\n"
+    "71: mv t0, a0\n   mv t1, a2\n   mv t2, a6\n   mv s0, a4\n"
+    "72: vsetvli t3, t2, e32, m2, ta, ma\n   vle32.v v8, (t1)\n   vmsltu.vx v0, v8, t5\n   vfirst.m t4, v0\n   bltz t4, 73f\n"
+    "vle32.v v10, (s0)\n   vnot.v v12, v8\n   vsrl.vi v12, v12, 24\n   vmul.vx v12, v12, s1\n   slli t4, t3, 2\n"
+    "vsetvli zero, t4, e8, m2, ta, ma\n   vwmulu.vv v16, v10, v12\n"
+    "vsetvli zero, t4, e16, m4, ta, ma\n   vadd.vx v16, v16, t6\n   vsrl.vi v20, v16, 8\n   vadd.vv v16, v16, v20\n"
+    "vsetvli zero, t4, e8, m2, ta, ma\n   vnsrl.wi v24, v16, 8\n   vsaddu.vv v8, v8, v24\n"
+    "vsetvli zero, t3, e32, m2, ta, ma\n   vor.vx v8, v8, t5\n"
+    "73: vse32.v v8, (t0)\n"
+    "slli t4, t3, 2\n   add t0, t0, t4\n   add t1, t1, t4\n   add s0, s0, t4\n   sub t2, t2, t3\n   bnez t2, 72b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   add a4, a4, a5\n   addi a7, a7, -1\n   bnez a7, 71b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   addi sp, sp, 16\n" ASM_RET
+#endif
+    ASM_END(memory_over_under_u32_rect)
+    ".option pop\n"
+
+    //       memory_over_under_out_u32_rect: memory_over_under_u32_rect (the x86_64 block says why it streams there).
+    ASM_FUNC(memory_over_under_out_u32_rect)
+    "j memory_over_under_u32_rect\n"
+    ASM_END(memory_over_under_out_u32_rect)
 
     ASM_FUNC(memory_add_sat_u8_rect)
     "beqz a4, 9f\n   beqz a5, 9f\n   li a6, 255\n"
@@ -55022,6 +55281,20 @@ fn memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 ad
 // height touches nothing.
 fn memory_over_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// memory_over_u32_rect with what is under taken from under (under_stride words a row) and the answer written to into:
+// each pixel of into becomes from's over under's, through = 255 - (over >> 24), each colour clamp255(over_ch +
+// (under_ch * through + 127) / 255), alpha 0xff, and into is never read, so it may be memory only written (a scanout).
+// An under_stride of 0 reads one row for every row: a row of the ground is the scene's ground filled and laid over at
+// once. A source pixel of alpha 255 is stored as it is, with nothing of under read. Into and under are the same at the
+// same stride (memory_over_u32_rect) or apart, and from apart from both. Zero width or height touches nothing.
+fn memory_over_under_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                              const p32 address_to under, positive under_stride, positive width, positive height);
+// memory_over_under_u32_rect for a destination nothing reads back (a scanout), the same pixels: on x86_64 with AVX2 a
+// row of 256 words or more has its 64-byte lines of into stored non-temporally, the head to the first of them and the
+// tail plain, and the rectangle ends with sfence; a narrower row, a machine without AVX2, kernel builds, arm64 and
+// riscv64 are memory_over_under_u32_rect. Into and under apart (a non-temporal line is not read again here).
+fn memory_over_under_out_u32_rect(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                                  const p32 address_to under, positive under_stride, positive width, positive height);
 // height rows of width bytes of from saturating-added into into (into[i] = min(255, into[i] + from[i])),
 // into_stride and from_stride bytes apart. Zero width or height touches nothing.
 fn memory_add_sat_u8_rect(p8 address_to into, positive into_stride, const p8 address_to from, positive from_stride,

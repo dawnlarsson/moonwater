@@ -1231,6 +1231,14 @@ static fn reference_memory_over_u32_rect(p32 address_to to, positive pitch, cons
         }
 }
 
+static fn reference_memory_over_under_u32_rect(p32 address_to to, positive pitch, const p32 address_to pixels, positive stride,
+                                               const p32 address_to under, positive under_stride, positive width, positive height)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                        to[r * pitch + c] = reference_compositor_wl_over(pixels[r * stride + c], under[r * under_stride + c]);
+}
+
 static fn reference_memory_scale_u8(p8 address_to table, const p8 address_to cover, positive cells, unsigned int alpha)
 {
         for (positive i = 0; i < cells; i++)
@@ -1817,6 +1825,118 @@ static fn pixel_over_opaque(void)
         }
 }
 
+/*
+        memory_over_under_u32_rect: what is under from read from under and the answer written to into, which is not read.
+        Over every shape and place the other rows walk, under three ways: apart, in its own room at a stride of its own
+        (the width and a gap of each pair, so a row of it is not the target's); the target itself at the target's stride,
+        which is memory_over_u32_rect's reference; and a row of one colour at a stride of none, the ground, against the
+        C the scene ran before it, the rectangle filled with that colour and the picture laid over it. The sources are
+        the kinds that decide the blend and the opaque test: noise, all opaque, opaque and none by turns of eight, and
+        opaque but one pixel at each place of a turn of sixteen. Then every alpha over every byte under it, as
+        memory_over_u32_rect's rows have it, the under apart. memory_over_under_out_u32_rect walks the same, the under
+        apart and the ground's row (its into is never the under), its streamed rows the widths of 256 words and more at
+        every residue the places give the head to the line, and the sweep again with into a word to eight words off a
+        line.
+*/
+static fn pixel_over_under(void)
+{
+        for (positive shape = 0; shape < PIXEL_SHAPES; shape++)
+        {
+                positive width, height, gi, gf;
+
+                if (!pixel_shape(shape, &width, &height, &gi, &gf))
+                        continue;
+                positive is = width + gi, fs = width + gf;
+                positive into_span = height ? 4 * ((height - 1) * is + width) : 0, from_span = height ? 4 * ((height - 1) * fs + width) : 0;
+
+                PIXEL_EACH(k, width)
+                        for (positive which = 0; which < 2; which++)
+                        for (positive mode = 0; mode < 3; mode += which && mode == 0 ? 2 : 1)
+                                for (positive kind = 0; kind < 4; kind++)
+                                {
+                                        struct pixel_window out, in[2];
+                                        positive us = mode == 0 ? width + gf + gi + 1 : mode == 1 ? is : 0;
+                                        positive under_span = !height ? 0 : mode == 2 ? 4 * width : 4 * ((height - 1) * us + width);
+                                        p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape + mode, k, 4));
+                                        p8 address_to from = pixel_place(&pixel_rooms[1], from_span, 0, k < 8, pixel_residue(shape * 3 + kind, k, 4));
+                                        p8 address_to under = mode == 1 ? into : pixel_place(&pixel_rooms[2], under_span, 0, k < 8, pixel_residue(shape * 5 + kind, k, 4));
+                                        p8 address_to want = pixel_out(&out, 0, into, into_span, 0, PIXEL_WORDS);
+                                        p32 address_to over = (p32 address_to)from;
+                                        p32 ground = pixel_word(next());
+                                        positive lone = (shape + k) % 16;
+
+                                        pixel_in(&in[0], 0, 1, from, from_span, 0, PIXEL_WORDS);
+                                        for (positive r = 0; r < height; r++)
+                                                for (positive c = 0; c < width; c++)
+                                                {
+                                                        positive i = r * width + c;
+                                                        p32 address_to at = over + r * fs + c;
+
+                                                        if (kind == 1 || (kind == 2 && i / 8 % 2 == 0) || (kind == 3 && i % 16 != lone))
+                                                                *at |= 0xff000000u;
+                                                        else if (kind == 2)
+                                                                *at = 0;
+                                                        else if (kind == 3)
+                                                                *at &= 0xfeffffffu;
+                                                }
+                                        memory_copy(pixel_kept[0], in[0].from, in[0].size);
+                                        if (mode != 1)
+                                        {
+                                                pixel_in(&in[1], 1, 2, under, under_span, 0, PIXEL_WORDS);
+                                                if (mode == 2)
+                                                {
+                                                        for (positive c = 0; height && c < width; c++)
+                                                                ((p32 address_to)under)[c] = ground;
+                                                        memory_copy(pixel_kept[1], in[1].from, in[1].size);
+                                                }
+                                        }
+                                        if (mode == 0)
+                                                reference_memory_over_under_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs,
+                                                                                     (const p32 address_to)under, us, width, height);
+                                        else if (mode == 1)
+                                                reference_memory_over_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs, width, height);
+                                        else
+                                        {
+                                                //  The scene's way before the routine: the rectangle filled with the ground, then the picture over it.
+                                                for (positive r = 0; r < height; r++)
+                                                        for (positive c = 0; c < width; c++)
+                                                                ((p32 address_to)want)[r * is + c] = ground;
+                                                reference_memory_over_u32_rect((p32 address_to)want, is, (const p32 address_to)from, fs, width, height);
+                                        }
+                                        PIXEL_CALL();
+                                        (which ? memory_over_under_out_u32_rect : memory_over_under_u32_rect)(
+                                            (p32 address_to)into, is, (const p32 address_to)from, fs, (const p32 address_to)under, us, width, height);
+                                        pixel_after(which ? "memory_over_under_out_u32_rect" : "memory_over_under_u32_rect", &out, in, mode == 1 ? 1 : 2,
+                                                    PIXEL_SHAPE_CODE(width, height, gi, gf, k), mode << 8 | kind);
+                                }
+        }
+        //  Every alpha over every byte under it: a row of 256 alphas whose colours are each alpha's every fraction.
+        for (positive turn = 0; turn < 16; turn++)
+        {
+                struct pixel_window out, in[2];
+                p8 address_to into = pixel_place(&pixel_rooms[0], 4 * 256 * 256, 0, true, turn >= 8 ? 4 * (turn - 7) : 0);
+                p8 address_to from = pixel_place(&pixel_rooms[1], 4 * 256 * 256, 0, true, 0);
+                p8 address_to under = pixel_place(&pixel_rooms[2], 4 * 256 * 256, 0, true, 0);
+                p8 address_to want = pixel_out(&out, 0, into, 4 * 256 * 256, 0, PIXEL_WORDS);
+                p32 address_to over = (p32 address_to)from;
+
+                pixel_in(&in[0], 0, 1, from, 4 * 256 * 256, 0, PIXEL_WORDS);
+                pixel_in(&in[1], 1, 2, under, 4 * 256 * 256, 0, PIXEL_WORDS);
+                for (positive at = 0; at < 256 * 256; at++)
+                {
+                        p32 a = (p32)(at >> 8), c = (p32)(at & 255) * (turn & 1 ? 255 : a) / 255;
+
+                        over[at] = a << 24 | c << ((turn >> 1) % 3 * 8) | (p32)(next() & (turn & 2 ? 0 : 0xff)) << ((turn >> 1) % 3 * 8 + 8) % 24;
+                }
+                memory_copy(pixel_kept[0], in[0].from, in[0].size);
+                reference_memory_over_under_u32_rect((p32 address_to)want, 256, over, 256, (const p32 address_to)under, 256, 256, 256);
+                PIXEL_CALL();
+                (turn >= 8 ? memory_over_under_out_u32_rect : memory_over_under_u32_rect)((p32 address_to)into, 256, over, 256,
+                                                                                         (const p32 address_to)under, 256, 256, 256);
+                pixel_after(turn >= 8 ? "memory_over_under_out_u32_rect" : "memory_over_under_u32_rect", &out, in, 2, 256, turn);
+        }
+}
+
 static fn pixel_scale(void)
 {
         static const p32 scales[] = {0, 1, 2, 127, 128, 180, 254, 255, 256, 257, 511, 0x80000000u, 0xffffffffu};
@@ -2134,12 +2254,14 @@ static fn pixel_saved(void)
         static const string_address names[] = {
             "memory_add_sat_u8_rect", "memory_copy_rect_reverse_u32", "memory_lerp_u32_row", "memory_mix_const_u32_rect",
             "memory_or_u32", "memory_over_cover_u32_rect", "memory_over_u32_rect", "memory_scale_u8",
-            "memory_swizzle_rb_u32", "memory_transpose_u8", "string_first_of_either_or_end"};
+            "memory_swizzle_rb_u32", "memory_transpose_u8", "string_first_of_either_or_end", "memory_over_under_u32_rect",
+            "memory_over_under_out_u32_rect"};
         address_any const routines[] = {
             (address_any)memory_add_sat_u8_rect, (address_any)memory_copy_rect_reverse_u32, (address_any)memory_lerp_u32_row,
             (address_any)memory_mix_const_u32_rect, (address_any)memory_or_u32, (address_any)memory_over_cover_u32_rect,
             (address_any)memory_over_u32_rect, (address_any)memory_scale_u8, (address_any)memory_swizzle_rb_u32,
-            (address_any)memory_transpose_u8, (address_any)string_first_of_either_or_end};
+            (address_any)memory_transpose_u8, (address_any)string_first_of_either_or_end, (address_any)memory_over_under_u32_rect,
+            (address_any)memory_over_under_out_u32_rect};
         positive changed[array_count(names)] = {0}, calls[array_count(names)] = {0};
         positive a = (positive)pixel_rooms[0].low, b = (positive)pixel_rooms[1].low, c = (positive)pixel_rooms[2].low;
         p8 address_to text = pixel_rooms[3].low;
@@ -2166,6 +2288,8 @@ static fn pixel_saved(void)
                             {a, b, n * rows, ends << 24},
                             {a, n, b, rows + 3, turn ? (positive)-1 : 1, rows, n},
                             {(positive)text + n, turn ? '"' : '\\', '\''},
+                            {a, s, b, s, c, turn ? 0 : s, n, rows},
+                            {a, s, b, s, c, turn ? 0 : s, n, rows},
                         };
 
                         for (positive r = 0; r < array_count(names); r++)
@@ -2267,6 +2391,7 @@ fn check_pixel_rows(void)
         PIXEL_ROUTINE(pixel_over_cover);
         PIXEL_ROUTINE(pixel_over);
         PIXEL_ROUTINE(pixel_over_opaque);
+        PIXEL_ROUTINE(pixel_over_under);
         PIXEL_ROUTINE(pixel_scale);
         PIXEL_ROUTINE(pixel_transpose);
         PIXEL_ROUTINE(pixel_either);

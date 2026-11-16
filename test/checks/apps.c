@@ -9282,6 +9282,7 @@ b32 main()
         check_compositor_snap_tint();
         check_compositor_preview_held();
         check_compositor_aside();
+        check_compositor_ground();
         check_compositor_chip_clip();
         check_compositor_shared();
         check_compositor_cycle();

@@ -123,6 +123,9 @@ struct compositor_frame
         // The card's address of the first pixel, for a picture the card reads by an import of a client's dma-buf (0 for one its pages map).
         positive gpu_base;
         // A client's premultiplied ARGB8888 picture that is not opaque: blended over what lies under it (op 11 on the card).
+        // 2 on the copy of one the scene draws a piece of through its plan (compositor_scene_plan): nothing is under it in
+        // the damage but the ground (compositor_blend_alone), so it is laid over a row of the ground and the target is
+        // written and not read.
         int blend;
         // A layer of its row's window (a client's subsurface read where it keeps it, compositor_wl_layers_frames): a frame after the row's own,
         // with the row in rows[] as the window's own frame has, and nothing of a window but its picture (no line, corners, buttons or runs).
@@ -225,20 +228,52 @@ static inline unsigned int compositor_over_weighted(unsigned int dst, unsigned i
         return compositor_over_pixel(dst, rb | ga);
 }
 
+/*
+        A blended picture over what the target holds, or, ground set, over the ground alone: the scene's plan draws a frame
+        that nothing is under that way (compositor_blend_alone), and then the target is only written. The ground is a row
+        of COMPOSITOR_GROUND_RUN words on the stack, read at a stride of none for every row, so a rectangle wider than it
+        is laid a run of columns at a time; the answer is the ground filled and the picture laid over it, bit for bit. A
+        target only written (out: a scanout, never one the next present reads back) takes memory_over_under_out_u32_rect,
+        whose stores stream and so read no line they write, as memory_copy_rect_out_u32's do for an opaque window: laid
+        with plain stores into the headless plate, which the processor caches, an opaque ARGB root at 3840x2160 cost 7.7 ms
+        of compositor time a frame against 6.7 ms composed aside, every store reading its line first.
+*/
+#define COMPOSITOR_GROUND_RUN 1024
+
+static void compositor_over_ground(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
+                                   unsigned long width, unsigned long height, int out)
+{
+        unsigned int ground[COMPOSITOR_GROUND_RUN];
+        fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
+            out ? memory_over_under_out_u32_rect : memory_over_under_u32_rect;
+
+        memory_fill_u32(ground, (positive)(width < COMPOSITOR_GROUND_RUN ? width : COMPOSITOR_GROUND_RUN), compositor_ground);
+        for (unsigned long at = 0; at < width; at += COMPOSITOR_GROUND_RUN)
+                over(into + at, (positive)into_pitch, from + at, (positive)from_pitch, ground, 0,
+                     (positive)(width - at < COMPOSITOR_GROUND_RUN ? width - at : COMPOSITOR_GROUND_RUN), (positive)height);
+}
+
 static void compositor_blit_blend(const struct compositor_target *t, int x, int y, int width,
-                                  int height, const unsigned int *source, unsigned long pitch)
+                                  int height, const unsigned int *source, unsigned long pitch, int ground)
 {
         int x1 = x > t->x1 ? x : t->x1;
         int y1 = y > t->y1 ? y : t->y1;
         int x2 = x + width < t->x2 ? x + width : t->x2;
         int y2 = y + height < t->y2 ? y + height : t->y2;
+        unsigned int *into;
+        const unsigned int *from;
 
         if (x2 <= x1 || y2 <= y1)
                 return;
+        into = t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+        from = source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x);
+        if (ground)
+        {
+                compositor_over_ground(into, t->pitch, from, pitch, (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), t->out);
+                return;
+        }
         compositor_reading(t);
-        memory_over_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
-                             source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
-                             (positive)(x2 - x1), (positive)(y2 - y1));
+        memory_over_u32_rect(into, t->pitch, from, pitch, (positive)(x2 - x1), (positive)(y2 - y1));
 }
 
 // Whether two run rows hold the same runs.
@@ -663,7 +698,8 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
 
         if (w <= 0 || y2 <= y1 || width <= 0 || height <= 0)
                 return;
-        compositor_reading(t);
+        if (frame->blend != 2)
+                compositor_reading(t);
         if (w <= 4096)
         {
                 unsigned int scratch[4096];
@@ -679,7 +715,10 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                                                  (unsigned long)frame->source_w, (unsigned long)frame->source_h,
                                                  (unsigned long)width, (unsigned long)height,
                                                  (unsigned long)(x1 - x), (unsigned long)(py - y));
-                        memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows);
+                        if (frame->blend == 2)
+                                compositor_over_ground(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows, t->out);
+                        else
+                                memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows);
                 }
                 return;
         }
@@ -688,7 +727,8 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                 unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
 
                 for (int px = x1; px < x2; px++)
-                        into[px - x1] = compositor_over_pixel(into[px - x1], compositor_picture_at(frame, px - x, py - y));
+                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground : into[px - x1],
+                                                              compositor_picture_at(frame, px - x, py - y));
         }
 }
 
@@ -705,7 +745,8 @@ static void compositor_contents(const struct compositor_target *t, const struct 
                 if (compositor_scaled(frame))
                         compositor_blit_scaled_blend(t, frame);
                 else
-                        compositor_blit_blend(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
+                        compositor_blit_blend(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
+                                              frame->blend == 2);
         }
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
@@ -1948,6 +1989,44 @@ static int compositor_preview_lift(struct compositor_frame *frames, unsigned int
 }
 
 // Every frame's radius, as compositor_radius gives it: made once for the frames of a damage, and read by every band of it.
+/*
+        Whether the blended frame at has nothing under it in t but the ground: no frame before it whose outline meets its
+        own inside t. The frames below are taken cut to t, the damage, the band or the slice being drawn and not the
+        screen, so a band that a window under the blended one does not reach draws the blended one over the ground and the
+        band that it reaches draws the two as they lie. A frame that does not meet t has nothing to draw there and answers
+        yes. The rows where one does meet a frame under it are compositor_blend_under's.
+*/
+static int compositor_blend_under(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int at,
+                                  int *top, int *bottom)
+{
+        int ax, ay, aw, ah, x1, y1, x2, y2, under = 0;
+
+        compositor_outline(&frames[at], &ax, &ay, &aw, &ah);
+        x1 = ax > t->x1 ? ax : t->x1, y1 = ay > t->y1 ? ay : t->y1;
+        x2 = ax + aw < t->x2 ? ax + aw : t->x2, y2 = ay + ah < t->y2 ? ay + ah : t->y2;
+        if (x2 <= x1 || y2 <= y1)
+                return 0;
+        for (unsigned int below = 0; below < at; below++)
+        {
+                int bx, by, bw, bh;
+
+                compositor_outline(&frames[below], &bx, &by, &bw, &bh);
+                if (bx >= x2 || bx + bw <= x1 || by >= y2 || by + bh <= y1)
+                        continue;
+                *top = (by > y1 ? by : y1) < *top ? (by > y1 ? by : y1) : *top;
+                *bottom = (by + bh < y2 ? by + bh : y2) > *bottom ? (by + bh < y2 ? by + bh : y2) : *bottom;
+                under = 1;
+        }
+        return under;
+}
+
+static int compositor_blend_alone(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int at)
+{
+        int top = t->y2, bottom = t->y1;
+
+        return !compositor_blend_under(t, frames, at, &top, &bottom);
+}
+
 static void compositor_radii(const struct compositor_frame *frames, unsigned int count, int *radii)
 {
         for (unsigned int at = 0; at < count; at++)
@@ -2028,8 +2107,10 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         const unsigned char *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
 
+        // A blended frame with a frame under it here: every frame drawn over the last, from the ground up. One with the ground
+        // alone under it is a piece of the plan, as an opaque one is, laid over the ground (blend 2 on the copy drawn).
         for (unsigned int at = 0; at < count; at++)
-                if (frames[at].blend)
+                if (frames[at].blend && !compositor_blend_alone(t, frames, at))
                 {
                         compositor_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1, compositor_ground);
                         for (unsigned int each = 0; each < count; each++)
@@ -2075,7 +2156,15 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                                 cell.y1 = top;
                                 cell.x2 = x2;
                                 cell.y2 = bottom;
-                                compositor_draw_with(&cell, &frames[owner[at]], radii[owner[at]]);
+                                if (frames[owner[at]].blend)
+                                {
+                                        struct compositor_frame alone = frames[owner[at]];
+
+                                        alone.blend = 2;
+                                        compositor_draw_with(&cell, &alone, radii[owner[at]]);
+                                }
+                                else
+                                        compositor_draw_with(&cell, &frames[owner[at]], radii[owner[at]]);
 
                                 if (low < x1 && x2 < high)
                                 {
@@ -2196,10 +2285,11 @@ struct compositor_banding
 /*
         What of a scene reads the target it is composed into, which a scanout cannot pay for: it is write-combined memory on
         most cards, where a word loaded is a trip across the bus (about ten megabytes a second, compositor_changed_ready).
-        A frame blended over what is under it (frame->blend) has every frame of the damage drawn over the last in the target,
-        so the whole damage reads it; a tint (a snap preview, a shared edge's mark) mixes over the target and has the frames
-        over it drawn again over its rectangle, so its rows do. Answers whether any row reads, and the rows from *top to
-        *bottom, inside the target's.
+        A frame blended over another frame (frame->blend, compositor_blend_under) has every frame drawn over the last in the
+        target, in each band or slice that holds a row of the two meeting, so those rows read it; one with the ground alone
+        under it is laid over a row of the ground and reads nothing. A tint (a snap preview, a shared edge's mark) mixes over
+        the target and has the frames over it drawn again over its rectangle, so its rows do. Answers whether any row reads,
+        and the rows from *top to *bottom, inside the target's.
 */
 static int compositor_scene_reads(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
                                   int *top, int *bottom)
@@ -2208,10 +2298,7 @@ static int compositor_scene_reads(const struct compositor_target *t, const struc
         for (unsigned int at = 0; at < count; at++)
         {
                 if (frames[at].blend)
-                {
-                        *top = t->y1, *bottom = t->y2;
-                        break;
-                }
+                        compositor_blend_under(t, frames, at, top, bottom);
                 for (int k = 0; k < 2; k++)
                 {
                         const int *r = k ? frames[at].mark : frames[at].preview;

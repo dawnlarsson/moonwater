@@ -421,6 +421,13 @@ cover('correctness_only', 'test/checks.c#CHECK_verify', 'memory_copy_rect_out_u3
       'V and none); its timing is the headless compositor\'s 3840x2160 present A/B on the box recorded with the change, CPU '
       'time a frame, and not a BENCH row: the destination it is for is a scanout nothing reads back, which a paired loop '
       'over cached memory is not', {'memory_copy_rect_nt_row_ymm': 'memory_copy_rect_out_u32'})
+cover('correctness_only', 'test/checks.c#CHECK_verify', 'memory_over_under_u32_rect memory_over_under_out_u32_rect',
+      'held to memory_over_u32_rect\'s reference with the under apart, the same as into, and a row of the ground at a '
+      'stride of none against the ground filled and the picture laid over it, over pages that fault on both sides at '
+      'every tier (AVX-512, AVX2, neither; V and none) on all three machines; its timing is the headless compositor\'s '
+      '3840x2160 present A/B of an ARGB root recorded with the change, CPU time a frame, and not a BENCH row: what it '
+      'saves is the ground\'s fill and the slices composed aside and copied out, which a loop of the routine alone is not',
+      {'memory_over_under_out_u32_rect': 'memory_over_under_u32_rect'})
 cover('direct_benchmark', 'test/checks.c#BENCH_runs', 'memory_runs_u32',
       'paired timing against the C loop of the same chunk walk, over 64 rows 1160 words wide with rows 2560 apart: '
       'a blank window, lines of text and noise, with AVX-512 and without, NEON, and riscv64')

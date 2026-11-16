@@ -492,6 +492,14 @@ cover('folds_already', 'count', 'memory_lerp_u32_row',
       'ui_stretch hands it a row of the stretched view width at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_over_u32_rect',
       'compositor_wl_row_picture hands it the clipped damage rectangle width and height at run time; no reachable call site passes a literal')
+cover('folds_already', 'width', 'memory_over_under_u32_rect',
+      'compositor_over_ground hands it the width of a run of a blended window\'s clipped rectangle, which the damage sets at '
+      'run time; its literals are a height of one (a row of a run streamed out) and an under stride of none (the ground\'s '
+      'row), neither of which changes the work: the row loop runs once, and the under pointer goes back to its row')
+cover('folds_already', 'width', 'memory_over_under_out_u32_rect',
+      'compositor_over_ground hands it the width of a run of a blended window\'s clipped rectangle in a target only '
+      'written, which the damage sets at run time; its one literal is an under stride of none (the ground\'s row), which '
+      'changes nothing of the work')
 cover('folds_already', 'width', 'memory_add_sat_u8_rect',
       'font_cluster_plan hands it the clipped glyph box width and height at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_over_cover_u32_rect',
