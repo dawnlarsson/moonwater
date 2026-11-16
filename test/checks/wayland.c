@@ -3493,18 +3493,27 @@ static void test_caps(void)
                 leak_check("growth point");
         }
 
-        /* the client slots */
+        /* the client slots: as many as connect, grown a slot at a time (no count of clients is a cap), given back with the last */
         {
-                long slots[WAYLAND_CLIENTS + 1], got = 0;
+                static long slots[200];
+                long got = 0, distinct = 1;
 
-                for (int at = 0; at < WAYLAND_CLIENTS + 1; at++)
+                for (int at = 0; at < 200; at++)
                 {
                         slots[at] = wayland_connect(1, 1);
                         got += slots[at] >= 0;
+                        distinct &= slots[at] == at;
                 }
-                WLCHECK(got == WAYLAND_CLIENTS && slots[WAYLAND_CLIENTS] < 0, "one more client than the slots is refused");
-                for (int at = 0; at < WAYLAND_CLIENTS; at++)
+                WLCHECK(got == 200 && distinct && wayland_client_slots() == 200, "two hundred clients each have a slot of their own (%ld, %ld slots)", got,
+                        wayland_client_slots());
+                // A client of the 200th slot has its bytes marked to flush past the first word of bits.
+                wayland_out_mark(199);
+                WLCHECK(wayland_out_dirty(199) && !wayland_out_dirty(198) && !wayland_out_dirty(63), "a slot past 64 has its own bit to flush");
+                wayland_out_clear(199);
+                for (int at = 0; at < 200; at++)
                         wayland_drop(slots[at]);
+                WLCHECK(wayland_client_slots() == 0, "the slots are given back with the last client");
+                leak_check("client slots");
         }
 
         /* a client that never reads is dropped when its queue is full, and nothing blocks */

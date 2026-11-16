@@ -11,7 +11,7 @@
 import array, os, select, socket, struct, sys, time
 
 PATH = '/run/moonwater/wayland-0'
-CLIENTS = 32   # wayland.c's WAYLAND_CLIENTS
+CLIENTS = 32   # the clients it opens (the compositor makes a slot for as many as connect)
 EACH = 28      # wayland.c's WAYLAND_FDS
 pid = int(sys.argv[1])
 

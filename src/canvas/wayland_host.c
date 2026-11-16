@@ -11,9 +11,9 @@
         the shim checks first, and every call below is one the compositor makes for its own programs.
 
         The socket is /run/moonwater/wayland-0, mode 0666, so any program of the machine may connect and is held to
-        the same caps whoever it is; the peer's pid and uid are kept for the table and for the per-user cap (a user
-        may hold at most COMPOSITOR_WL_PER_USER of the slots, root as many as are free), so one user cannot take every
-        slot and starve the others. A pool is mapped read-only once; the one thing a client can do to a mapping is
+        the same rules whoever it is; the peer's pid and uid are kept for the table. The slots are as many as connect (each
+        grown when a client finds none), so no user's clients leave another none; what bounds them is the descriptors and
+        the memory the kernel gives the compositor, which keeps its own share of the descriptors apart. A pool is mapped read-only once; the one thing a client can do to a mapping is
         shrink its file, which raises SIGBUS where the compositor reads it, and the handler maps zero pages over the
         pool and marks it, and the copy that was in progress finishes on zeros and is refused.
 */
@@ -22,7 +22,6 @@
 
 #define COMPOSITOR_WL_PATH "/run/moonwater/wayland-0"
 #define COMPOSITOR_WL_BACKLOG 16
-#define COMPOSITOR_WL_PER_USER 8
 #define COMPOSITOR_WL_READ 16384        // one read; a client gets at most COMPOSITOR_WL_READS of them a pass
 #define COMPOSITOR_WL_READS 32
 #define COMPOSITOR_WL_ACCEPTS 4
@@ -48,9 +47,13 @@
 static struct
 {
         int listen;
-        int fd[WAYLAND_CLIENTS];
-        int uid[WAYLAND_CLIENTS], pid[WAYLAND_CLIENTS];
-        unsigned char asked[WAYLAND_CLIENTS]; // the connection's first window has been opened, so its launch is not read again
+        // Each client slot's (slots of them, the shim's, grown with it: compositor_wl_slots_reach): its connection (-1 for none), the peer's
+        // uid and pid, and whether its first window has been opened (so its launch is not read again).
+        int *fd;
+        int *uid, *pid;
+        unsigned char *asked;
+        long slots;
+        struct wayland_table fd_table, uid_table, pid_table, asked_table, slow_table;
         int started, handler;
         unsigned long frames;
         // The picture being laid on each window: whether one is begun, the buffer of the table it goes in, what it has touched so
@@ -118,7 +121,7 @@ static struct
                 int eventfd, armed;
                 unsigned long long armed_point;
         } syncobj[COMPOSITOR_WL_SYNCOBJS];
-        positive slow_until[WAYLAND_CLIENTS];
+        positive *slow_until; // a client's dma-bufs are not waited for until this (compositor_wl_slow)
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut: a table that grows and never moves (the
         // handler reads it as it is), with an index by each mapping's start (open addressing, a power of two of buckets, each a slot and
         // one), so a pool let go of or resized is found at once; map_hint is the mapping the last question about a pixel was answered by.
@@ -581,6 +584,32 @@ static void compositor_wl_map_put(struct wayland_table *index, long slot)
 
 static const struct wayland_host compositor_wl_host;
 
+/*
+        The host's arrays of a client slot reached to `slots` (the shim's own grow first, wayland_connect): tables that never move,
+        made by the compositor's host, a new slot's connection none. 1 when they are; 0 when the memory is not there.
+*/
+static int compositor_wl_slots_reach(long slots)
+{
+        long was = compositor_wl.slots;
+
+        if (slots <= was)
+                return 1;
+        wayland_tables_host(&compositor_wl_host);
+        compositor_wl.fd_table.unit = compositor_wl.uid_table.unit = compositor_wl.pid_table.unit = sizeof(int);
+        compositor_wl.asked_table.unit = 1, compositor_wl.slow_table.unit = sizeof(positive);
+        if (!wayland_table_reach(&compositor_wl.fd_table, slots) || !wayland_table_reach(&compositor_wl.uid_table, slots) ||
+            !wayland_table_reach(&compositor_wl.pid_table, slots) || !wayland_table_reach(&compositor_wl.asked_table, slots) ||
+            !wayland_table_reach(&compositor_wl.slow_table, slots))
+                return 0;
+        compositor_wl.fd = (int *)compositor_wl.fd_table.at, compositor_wl.uid = (int *)compositor_wl.uid_table.at;
+        compositor_wl.pid = (int *)compositor_wl.pid_table.at, compositor_wl.asked = compositor_wl.asked_table.at;
+        compositor_wl.slow_until = (positive *)compositor_wl.slow_table.at;
+        for (long at = was; at < slots; at++)
+                compositor_wl.fd[at] = -1, compositor_wl.uid[at] = compositor_wl.pid[at] = 0, compositor_wl.asked[at] = 0, compositor_wl.slow_until[at] = 0;
+        compositor_wl.slots = slots;
+        return 1;
+}
+
 // The index made room for one more mapping: at half full, one of twice the buckets is made and every live mapping put in it. 0 when the memory is not there.
 // The tables are the compositor's, made by its host whether or not the shim has started (a pool is mapped before, and with no shim).
 static int compositor_wl_map_room(void)
@@ -869,7 +898,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         struct windows *table = compositor.table;
 
         (void)context;
-        if (!table || client < 0 || client >= WAYLAND_CLIENTS)
+        if (!table || client < 0 || client >= compositor_wl.slots)
                 return -1;
         // With every row taken, rows are made (compositor_rows_grow) and the walk goes on into them.
         for (int row = 0; row < (int)compositor_rows_in_use || (row == (int)compositor_rows_in_use && compositor_rows_grow(compositor_rows_in_use + COMPOSITOR_ROWS_SPARE) > (unsigned int)row); row++)
@@ -3880,7 +3909,7 @@ static int compositor_wl_sync_start(long client, int fd)
         positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
 
-        if (client >= 0 && client < WAYLAND_CLIENTS && compositor_wl.slow_until[client] > clock_monotonic_nanoseconds())
+        if (client >= 0 && client < compositor_wl.slots && compositor_wl.slow_until[client] > clock_monotonic_nanoseconds())
                 return 0;
 
         compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
@@ -3888,7 +3917,7 @@ static int compositor_wl_sync_start(long client, int fd)
         compositor_call(syscall(setitimer), 0, (positive)off, 0, 0, 0, 0);
         if (got != -4) // EINTR: the timer ended the wait; anything else is read as it always was
                 return 1;
-        if (client >= 0 && client < WAYLAND_CLIENTS)
+        if (client >= 0 && client < compositor_wl.slots)
                 compositor_wl.slow_until[client] = clock_monotonic_nanoseconds() + COMPOSITOR_WL_DMABUF_SLOW_NS;
         return 0;
 }
@@ -4223,7 +4252,7 @@ static positive compositor_wl_due(void)
 {
         positive first = 0;
 
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 long fd, due = compositor_wl.fd[slot] >= 0 ? wayland_stall_due(slot, &fd) : 0;
                 positive at = due > 0 ? ((positive)due + 1) * 1000000ull : 0; // the shim's clock is this one in ms
@@ -4379,7 +4408,7 @@ static void compositor_wl_start(void)
                 return;
         }
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_WL_PATH, 0666, 0, 0, 0);
-        for (long at = 0; at < WAYLAND_CLIENTS; at++)
+        for (long at = 0; at < compositor_wl.slots; at++)
                 compositor_wl.fd[at] = -1;
         for (long at = 0; at < 16; at++)
                 compositor_wl.keymap[at] = -1;
@@ -4428,7 +4457,7 @@ static void compositor_wl_accept(void)
 {
         for (int tries = 0; tries < COMPOSITOR_WL_ACCEPTS; tries++)
         {
-                int credentials[3] = {0, 0, 0}, per_user = 0;
+                int credentials[3] = {0, 0, 0};
                 unsigned int size = sizeof credentials;
                 long fd = compositor_call(syscall(accept4), (positive)compositor_wl.listen, 0, 0, 0x800 | 0x80000, 0, 0), slot;
 
@@ -4447,14 +4476,13 @@ static void compositor_wl_accept(void)
                         system_close((int)fd);
                         continue;
                 }
-                for (slot = 0; slot < WAYLAND_CLIENTS; slot++)
-                        per_user += compositor_wl.fd[slot] >= 0 && compositor_wl.uid[slot] == credentials[1];
-                if (credentials[1] != 0 && per_user >= COMPOSITOR_WL_PER_USER)
-                {
-                        system_close((int)fd);
-                        continue;
-                }
                 slot = wayland_connect(credentials[0], credentials[1]);
+                // A slot the host has no room for yet: its arrays grown with the shim's, or the client refused when the memory is not there.
+                if (slot >= 0 && !compositor_wl_slots_reach(slot + 1))
+                {
+                        wayland_drop(slot);
+                        slot = -1;
+                }
                 if (slot < 0)
                 {
                         system_close((int)fd);
@@ -4595,30 +4623,23 @@ static void compositor_wl_flush(long slot)
 
 static void compositor_wl_flush_all(void)
 {
-        unsigned int dirty = (unsigned int)wayland_out_mask();
-
-        while (dirty)
-        {
-                int slot = (int)bottom_bit_known((positive)dirty);
-
-                dirty &= dirty - 1;
-                if (compositor_wl.fd[slot] >= 0)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot))
                         compositor_wl_flush(slot);
-        }
 }
 
 /* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
    the loop's list is sized by (COMPOSITOR_POLLS): the socket, every client, the transfers' knock, the dma-buf of every client
    stalled on one, and the X window manager's. An entry added here is added to it. */
-#define COMPOSITOR_WL_POLLS (1 + WAYLAND_CLIENTS + 1 + WAYLAND_CLIENTS + COMPOSITOR_XWM_POLLS)
+#define COMPOSITOR_WL_POLLS (1 + compositor_wl.slots + 1 + compositor_wl.slots + COMPOSITOR_XWM_POLLS)
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
-        unsigned int base = count, dirty = (unsigned int)wayland_out_mask();
+        unsigned int base = count;
 
         if (!compositor_wl.started)
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 const unsigned char *bytes;
                 const long *fds;
@@ -4626,14 +4647,14 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 // A client whose commit waits for its GPU is not read (a hangup is told all the same), and the loop wakes to ask.
                 short events = compositor_wl.fd[slot] >= 0 && wayland_stalled(slot) ? 0 : COMPOSITOR_POLLIN;
 
-                if (compositor_wl.fd[slot] >= 0 && (dirty & (1u << slot)) && wayland_out(slot, &bytes, &fds, &fd_count))
+                if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot) && wayland_out(slot, &bytes, &fds, &fd_count))
                         events |= COMPOSITOR_POLLOUT;
                 wanted[count++] = (struct compositor_poll){compositor_wl.fd[slot], events, 0};
         }
         // The knock of a transfer's thread that has ended, after the clients (a descriptor of -1, with no eventfd, is not polled).
         wanted[count++] = (struct compositor_poll){compositor_wl.wake, COMPOSITOR_POLLIN, 0};
         // The dma-bufs that stalled clients wait for, readable when their GPU is done (nothing is read of them: the pass resumes).
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 long fd = -1;
 
@@ -4649,7 +4670,7 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         if (!compositor_wl.started)
                 return;
         // The commits that waited for their GPU, made when it is done, before what else the clients sent this pass.
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
                 {
                         wayland_resume(slot);
@@ -4658,7 +4679,7 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
                 }
         if (wanted[0].returned)
                 compositor_wl_accept();
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 short returned = wanted[1 + slot].returned;
 
@@ -4675,11 +4696,11 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
                         compositor_wl_flush(slot);
         }
         // The transfers whose threads have ended: each thread ends itself at its deadline, so the loop waits on nothing else of them.
-        if (wanted[1 + WAYLAND_CLIENTS].returned)
+        if (wanted[1 + compositor_wl.slots].returned)
                 compositor_wl_transfers_done();
         compositor_xwm_pass(wanted);
         // A commit that waited for the window manager to say what an X window is, made now that it has.
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
                 {
                         wayland_resume(slot);
@@ -4904,7 +4925,7 @@ static void compositor_wl_wake(void)
 /* Resume clients whose frame-barrier hold cleared when wayland_frame() advanced the frame count. */
 static void compositor_wl_resume_stalled(void)
 {
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
                 {
                         wayland_resume(slot);
@@ -5037,7 +5058,7 @@ static void compositor_wl_stop(void)
 {
         if (!compositor_wl.started)
                 return;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_drop(slot);
         wayland_stop();

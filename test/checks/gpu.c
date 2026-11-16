@@ -2705,7 +2705,7 @@ static void gpu_card_rows(void)
         const int one[1][4] = {{0, 0, 64, 64}}, three[3][4] = {{0, 0, 64, 64}, {1024, 0, 1088, 64}, {1984, 0, 2048, 64}};
         const unsigned int rows[1] = {3};
         const unsigned short clip[1][4] = {{0, 0, 64, 64}};
-        struct compositor_poll *wanted = compositor_polls;
+        struct compositor_poll *wanted = compositor_polls();
         struct compositor_slots held, open;
         positive now, drew;
 
@@ -2906,7 +2906,7 @@ static void gpu_lists_nowait_rows(void)
         unsigned int address_to present_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_OPS_AT);
         unsigned int address_to list_ops = (unsigned int address_to)((p8 address_to)gpu_card_buffer + COMPOSITOR_GPU_LIST_OPS_AT);
         int kept_gpu_on = compositor_gpu, damage[4] = {-1, -1, -1, -1}, drawn;
-        struct compositor_poll *wanted = compositor_polls;
+        struct compositor_poll *wanted = compositor_polls();
         struct compositor_slots slots;
         positive now, sequence;
         b32 published;
@@ -3385,7 +3385,10 @@ static void descriptor_rows(void)
         struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct windows *kept = compositor.table;
         long most = compositor_descriptors_most, memfd, lowest, after;
-        int pair[2] = {-1, -1}, slot = WAYLAND_CLIENTS - 1, was = compositor_wl.fd[WAYLAND_CLIENTS - 1];
+        int pair[2] = {-1, -1}, slot = 31, was;
+
+        compositor_wl_slots_reach(32); // a client's slot the host has arrays for, as the shim's connect makes them
+        was = compositor_wl.fd[slot];
 
         check("descriptors: a number below the compositor's own share is a client's to have",
               !compositor_descriptor_crowded(3) && !compositor_descriptor_crowded(most - COMPOSITOR_DESCRIPTORS_OWN - 1));

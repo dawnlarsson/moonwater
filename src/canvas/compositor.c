@@ -2348,10 +2348,36 @@ static int compositor_picture_poll(int row)
 #define COMPOSITOR_WL_POLLS 0
 #endif
 #define COMPOSITOR_POLLS_OWN 7
-// The list's room for `rows` rows in use: the list is the rows' (compositor_polls, compositor_rows_make), grown with them.
+// The list's room for `rows` rows in use and the clients there are (COMPOSITOR_WL_POLLS): the list grows with them (compositor_polls).
 #define COMPOSITOR_POLLS_FOR(rows) (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + (unsigned long)(rows) + COMPOSITOR_WL_POLLS)
-#define COMPOSITOR_POLLS COMPOSITOR_POLLS_FOR(WINDOWS)
-static struct compositor_poll *compositor_polls;
+#define COMPOSITOR_POLLS_MOST (1L << 26) // the entries the list's reservation has room for: address space only
+static struct compositor_poll *compositor_polls_at;
+static long compositor_polls_room;
+
+// The loop's list with room for this pass (its rows and its clients), committed a doubling at a time; 0 when the memory is not there.
+static struct compositor_poll *compositor_polls(void)
+{
+        long want = (long)COMPOSITOR_POLLS_FOR(compositor_rows_in_use), room;
+
+        if (want <= compositor_polls_room)
+                return compositor_polls_at;
+        if (want > COMPOSITOR_POLLS_MOST)
+                return 0;
+        if (!compositor_polls_at)
+        {
+                long got = compositor_call(syscall(mmap), 0, (positive)(COMPOSITOR_POLLS_MOST * (long)sizeof(struct compositor_poll)), 0, 0x4022, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return 0;
+                compositor_polls_at = (struct compositor_poll *)got;
+        }
+        room = compositor_polls_room ? 2 * compositor_polls_room : 1024;
+        room = room < want ? want : room > COMPOSITOR_POLLS_MOST ? COMPOSITOR_POLLS_MOST : room;
+        if (compositor_call(syscall(mprotect), (positive)compositor_polls_at, (positive)((room * (long)sizeof(struct compositor_poll) + 4095) & ~4095L), 3, 0, 0, 0) != 0)
+                return 0;
+        compositor_polls_room = room;
+        return compositor_polls_at;
+}
 // The compositor's own descriptors that are no row's fit the share kept for them (COMPOSITOR_DESCRIPTORS_FIXED): the poll list's (but the
 // clients'), the selections and their history, the table, the card, the render node and the buffers given to it, the sound server's
 // socket and each transfer's pipe; a row's three are counted with it.
@@ -2377,7 +2403,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTOR
 #define COMPOSITOR_ROWS_EDGES(rows) (2 * COMPOSITOR_PIECES_FOR(rows) + 2)
 #define COMPOSITOR_ROWS_SPANS(rows) (COMPOSITOR_PIECES_FOR(rows) + 1)
 #define COMPOSITOR_ROWS_LAYERED(rows) ((unsigned long)(rows) + COMPOSITOR_LAYERS)
-#define COMPOSITOR_ROWS_POLLS(rows) COMPOSITOR_POLLS_FOR(rows)
 
 #define COMPOSITOR_ROWS_OWN(X) \
         X(compositor.scan_fb, COMPOSITOR_ROWS_ROW) \
@@ -2497,7 +2522,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTOR
         X(compositor_tab_apps, COMPOSITOR_ROWS_ROW) \
         X(compositor_tab_icons, COMPOSITOR_ROWS_ROW) \
         X(compositor_tab_seqs, COMPOSITOR_ROWS_ROW) \
-        X(compositor_polls, COMPOSITOR_ROWS_POLLS) \
         X(compositor_present_frame_room, COMPOSITOR_ROWS_FRAMES) \
         X(compositor_present_row_room, COMPOSITOR_ROWS_LAYERED) \
         X(compositor_scene_radii, COMPOSITOR_ROWS_FRAMES) \
@@ -3050,7 +3074,7 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll *wanted = compositor_polls; // every part of it is counted where it is added (COMPOSITOR_POLLS_FOR the rows in use)
+                struct compositor_poll *wanted = compositor_polls(); // every part of it is counted where it is added (COMPOSITOR_POLLS_FOR)
                 struct compositor_slots slots;
                 static unsigned int turns;
                 unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, done_at;
@@ -3068,6 +3092,14 @@ static b32 compositor_main()
                 }
                 // The clients wait while a present's jobs read their pictures, GPU_LATE_NS at the most (compositor_card_clients_held).
                 held = compositor_card_clients_held(clock_monotonic_nanoseconds());
+                // No memory for the list this pass: the pass is made again a moment later, when the kernel may have it.
+                if (!wanted)
+                {
+                        positive nap[2] = {0, 10000000};
+
+                        compositor_call(syscall(nanosleep), (positive)nap, 0, 0, 0, 0, 0);
+                        continue;
+                }
                 compositor_loop_wanted(wanted, &slots, held);
                 count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at, fence_at = slots.fence_at;
                 uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;

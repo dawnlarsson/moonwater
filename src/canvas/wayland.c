@@ -58,7 +58,6 @@
         The caps. A client's record is one block of these, so a record is
         (about) WAYLAND_BLOCK bytes whatever the client does.
 */
-#define WAYLAND_CLIENTS 32
 // A client's ids run from 1 up to as many as it has made, as libwayland's do: a new id is the next or one it let go of.
 #define WAYLAND_IDS 0xff000000UL
 /*
@@ -781,7 +780,13 @@ struct wayland_token
 static struct
 {
         const struct wayland_host *host;
-        struct wayland_client *client[WAYLAND_CLIENTS];
+        // The clients, a slot each (client_slots of them, grown as a client finds none free, never moving), and a bit for each that
+        // has bytes queued or is dead and waiting to be flushed (out_dirty, a word a 64): tables (struct wayland_table), as a client's
+        // own are, given back with the last client.
+        struct wayland_client **client;
+        unsigned long long *out_dirty;
+        struct wayland_table client_table, out_table;
+        long client_slots;
         // Each row of the compositor's table the shim has been given (row_made of them, grown as a row past them is opened, never
         // moving): the client and the surface whose window it is (-1 for none), and the percent the window was last told its scale
         // for (0 before the first). Tables (struct wayland_table) as a client's are, so the rows are as many as the compositor makes.
@@ -813,7 +818,6 @@ static struct
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
         unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
         long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
-        unsigned int out_dirty;                      // bitmask of clients with queued bytes or dead state waiting to flush
         long idle_notifies;                          // live ext_idle_notification_v1 count across all clients
         unsigned long pool_id;                       // monotonic pool identity counter
         // The pointer's picture a client drew (wl_pointer.set_cursor with a surface, wayland_cursor_picture): the client (its slot, -1 for
@@ -973,6 +977,48 @@ static int wayland_rows_reach(long row)
                 wayland.row_client[at] = wayland.row_surface[at] = -1, wayland.row_percent[at] = 0;
         wayland.row_made = row + 1;
         return 1;
+}
+
+// A client's slot marked as having bytes queued (or dead state) to flush, and cleared once it has none.
+static void wayland_out_mark(long slot)
+{
+        if (slot >= 0 && slot < wayland.client_slots)
+                wayland.out_dirty[slot / 64] |= 1ull << (slot % 64);
+}
+
+static void wayland_out_clear(long slot)
+{
+        if (slot >= 0 && slot < wayland.client_slots)
+                wayland.out_dirty[slot / 64] &= ~(1ull << (slot % 64));
+}
+
+/*
+        One more client slot, past those made: the clients' table and the dirty bits grown (their elements never move). The new slot,
+        empty, or -1 when the memory is not there (the connection is refused, as with any other no_memory).
+*/
+static long wayland_client_slot_grow(void)
+{
+        long slot = wayland.client_slots;
+
+        wayland.client_table.unit = sizeof(struct wayland_client *);
+        wayland.out_table.unit = sizeof(unsigned long long);
+        if (!wayland_table_reach(&wayland.client_table, slot + 1) || !wayland_table_reach(&wayland.out_table, slot / 64 + 1))
+                return -1;
+        wayland.client = (struct wayland_client **)wayland.client_table.at;
+        wayland.out_dirty = (unsigned long long *)wayland.out_table.at;
+        wayland.client[slot] = 0;
+        if (slot % 64 == 0)
+                wayland.out_dirty[slot / 64] = 0;
+        wayland.client_slots = slot + 1;
+        return slot;
+}
+
+// The slots given back with the last client: the next connection makes them again.
+static void wayland_client_slots_drop(void)
+{
+        wayland_table_drop(&wayland.client_table);
+        wayland_table_drop(&wayland.out_table);
+        wayland.client = 0, wayland.out_dirty = 0, wayland.client_slots = 0;
 }
 
 // A client's tables made ready (their units) and their arrays pointed at, once a table has its reservation.
@@ -1178,7 +1224,7 @@ static struct wayland_event wayland_begin(struct wayland_client *c, unsigned lon
         if (!e.ok && !c->dead)
         {
                 c->dead = 2; // a queue that is full: a client that does not read
-                wayland.out_dirty |= 1u << c->slot;
+                wayland_out_mark(c->slot);
         }
         wayland_put(e.at, object);
         wayland_put(e.at + 4, (unsigned long)opcode);
@@ -1228,7 +1274,7 @@ static void wayland_send(struct wayland_client *c, unsigned long object, long op
         if (ok)
                 c->out_length += size;
         if (c->out_length || c->dead)
-                wayland.out_dirty |= 1u << c->slot;
+                wayland_out_mark(c->slot);
 }
 
 static void wayland_end(struct wayland_event *e)
@@ -1240,7 +1286,7 @@ static void wayland_end(struct wayland_event *e)
         if (e->ok)
         {
                 e->client->out_length += size;
-                wayland.out_dirty |= 1u << e->client->slot;
+                wayland_out_mark(e->client->slot);
         }
 }
 
@@ -1256,7 +1302,7 @@ static int wayland_fail(struct wayland_client *c, unsigned long object, unsigned
                 wayland_string(&e, text);
                 wayland_end(&e);
                 c->dead = 1;
-                wayland.out_dirty |= 1u << c->slot;
+                wayland_out_mark(c->slot);
         }
         return WAYLAND_DEAD;
 }
@@ -6467,7 +6513,7 @@ WAYLAND_API void wayland_repeat_changed(void)
 {
         if (!wayland.host)
                 return;
-        for (long client = 0; client < WAYLAND_CLIENTS; client++)
+        for (long client = 0; client < wayland.client_slots; client++)
         {
                 struct wayland_client *c = wayland.client[client];
                 long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
@@ -6482,7 +6528,7 @@ WAYLAND_API void wayland_keymap_changed(void)
 {
         if (!wayland.host)
                 return;
-        for (long client = 0; client < WAYLAND_CLIENTS; client++)
+        for (long client = 0; client < wayland.client_slots; client++)
         {
                 struct wayland_client *c = wayland.client[client];
                 long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
@@ -6811,7 +6857,7 @@ WAYLAND_API void wayland_selection_changed(long which)
 */
 WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
 {
-        struct wayland_client *c = client >= 0 && client < WAYLAND_CLIENTS && wayland.host ? wayland.client[client] : 0;
+        struct wayland_client *c = client >= 0 && client < wayland.client_slots && wayland.host ? wayland.client[client] : 0;
         long index;
 
         if (!c || which < 0 || which > 1 || !c->pending[which])
@@ -7276,7 +7322,7 @@ static void wayland_feedback_queue(struct wayland_client *c, unsigned long id)
                 {
                         c->feedback[at].need = 1;
                         c->feedback_pending = 1;
-                        wayland.out_dirty |= 1u << c->slot;
+                        wayland_out_mark(c->slot);
                         return;
                 }
 }
@@ -7357,7 +7403,7 @@ static void wayland_feedback_flush(struct wayland_client *c)
                         more = 1;
         c->feedback_pending = (unsigned char)more;
         if (c->feedback_pending)
-                wayland.out_dirty |= 1u << c->slot;
+                wayland_out_mark(c->slot);
 }
 
 /*
@@ -7422,7 +7468,7 @@ static void wayland_global_flip_notify(long iface, int was_on, int now_on)
 
         if (!name)
                 return;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -7463,7 +7509,7 @@ WAYLAND_API void wayland_dmabuf_changed(void)
         wayland_global_flip_notify(WLI_wp_linux_drm_syncobj_manager_v1, was_syncobj, now_syncobj);
         if (!now_dmabuf)
                 return;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -7954,7 +8000,7 @@ static void wayland_constraints_update(void)
 
         if (!wayland.host || (!wayland.constraints && !wayland.hold_mode))
                 return;
-        for (long slot = 0; slot < WAYLAND_CLIENTS && chosen < 0; slot++)
+        for (long slot = 0; slot < wayland.client_slots && chosen < 0; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -7973,7 +8019,7 @@ static void wayland_constraints_update(void)
                         }
                 }
         }
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -8578,7 +8624,7 @@ static long wayland_inhibitors_now(void)
 {
         long count = 0;
 
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
                 long seen = 0;
@@ -9007,6 +9053,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         // The rows of a shim started before are let go of by the host they were made by.
         if (wayland.host)
         {
+                wayland_client_slots_drop();
                 wayland_table_drop(&wayland.row_client_table);
                 wayland_table_drop(&wayland.row_surface_table);
                 wayland_table_drop(&wayland.row_percent_table);
@@ -9059,14 +9106,19 @@ WAYLAND_API long wayland_connect(long pid, long uid)
 
         if (!wayland.host)
                 return -1;
-        for (long at = 0; at < WAYLAND_CLIENTS && slot < 0; at++)
+        for (long at = 0; at < wayland.client_slots && slot < 0; at++)
                 if (!wayland.client[at])
                         slot = at;
-        if (slot < 0)
+        // Every slot taken: one more is made (no count of clients is a cap; the memory for them is).
+        if (slot < 0 && (slot = wayland_client_slot_grow()) < 0)
                 return -1;
         c = (struct wayland_client *)wayland.host->alloc(wayland.host->context, (long)sizeof *c);
         if (!c)
+        {
+                if (!wayland.clients)
+                        wayland_client_slots_drop();
                 return -1;
+        }
         c->live = 1;
         c->slot = slot;
         c->pid = pid;
@@ -9082,6 +9134,8 @@ WAYLAND_API long wayland_connect(long pid, long uid)
                 wayland.client[slot] = 0;
                 wayland.clients--;
                 wayland.host->release(wayland.host->context, c, (long)sizeof *c);
+                if (!wayland.clients)
+                        wayland_client_slots_drop();
                 return -1;
         }
         return slot;
@@ -9108,7 +9162,7 @@ static void wayland_out_fds_let_go(struct wayland_client *c)
 */
 WAYLAND_API void wayland_drop(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
 
         if (!c)
                 return;
@@ -9190,18 +9244,21 @@ WAYLAND_API void wayland_drop(long slot)
                         if (wayland.idle_notifies > 0)
                                 wayland.idle_notifies--;
                 }
-        wayland.out_dirty &= ~(1u << slot);
+        wayland_out_clear(slot);
         wayland.client[slot] = 0;
         wayland.clients--;
         wayland_tables_drop(c);
         wayland.host->release(wayland.host->context, c, (long)sizeof *c);
+        // The last client gone: the slots are given back, made again by the next connection.
+        if (!wayland.clients)
+                wayland_client_slots_drop();
 }
 
 WAYLAND_API void wayland_stop(void)
 {
         if (!wayland.host)
                 return;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
                 wayland_drop(slot);
         wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
         wayland.syncobj_ok = 0;
@@ -9212,7 +9269,7 @@ WAYLAND_API void wayland_stop(void)
 /* What the client is: 0 alive, 1 sent a protocol error (flush, then drop), 2 cannot be sent more (drop). */
 WAYLAND_API long wayland_dead(long slot)
 {
-        return slot >= 0 && slot < WAYLAND_CLIENTS && wayland.client[slot] ? wayland.client[slot]->dead : 2;
+        return slot >= 0 && slot < wayland.client_slots && wayland.client[slot] ? wayland.client[slot]->dead : 2;
 }
 
 /*
@@ -9310,7 +9367,7 @@ static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, lo
 
 WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length, const long *fds, long count)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
 
         for (long at = 0; at < count; at++)
         {
@@ -9343,7 +9400,7 @@ WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length,
 /* Whether a client waits for a buffer to be ready, which the host does not read it for, and asks wayland_resume of. */
 WAYLAND_API long wayland_stalled(long slot)
 {
-        return slot >= 0 && slot < WAYLAND_CLIENTS && wayland.client[slot] && !wayland.client[slot]->dead && wayland.client[slot]->stalled;
+        return slot >= 0 && slot < wayland.client_slots && wayland.client[slot] && !wayland.client[slot]->dead && wayland.client[slot]->stalled;
 }
 
 /*
@@ -9353,7 +9410,7 @@ WAYLAND_API long wayland_stalled(long slot)
 */
 WAYLAND_API long wayland_stall_due(long slot, long *fd)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
 
         *fd = -1;
         if (!c || c->dead || !c->stalled)
@@ -9386,7 +9443,7 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
 */
 WAYLAND_API int wayland_resume(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
         long length;
 
         if (!c || c->dead || !c->stalled)
@@ -9432,7 +9489,7 @@ WAYLAND_API int wayland_resume(long slot)
 */
 WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long **fds, long *fd_count)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
 
         *bytes = 0;
         *fds = 0;
@@ -9447,7 +9504,7 @@ WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long 
 
 WAYLAND_API void wayland_sent(long slot, long count)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
 
         if (!c || count <= 0 || count > c->out_length)
                 return;
@@ -9457,12 +9514,18 @@ WAYLAND_API void wayland_sent(long slot, long count)
         wayland_out_fds_let_go(c);
         wayland_feedback_flush(c);
         if (!c->out_length && !c->dead && !c->feedback_pending)
-                wayland.out_dirty &= ~(1u << slot);
+                wayland_out_clear(slot);
 }
 
-WAYLAND_API unsigned long wayland_out_mask(void)
+// Whether a client has bytes queued or dead state waiting to flush; and how many slots there are to ask of.
+WAYLAND_API int wayland_out_dirty(long slot)
 {
-        return (unsigned long)wayland.out_dirty;
+        return slot >= 0 && slot < wayland.client_slots && (wayland.out_dirty[slot / 64] >> (slot % 64) & 1u);
+}
+
+WAYLAND_API long wayland_client_slots(void)
+{
+        return wayland.client_slots;
 }
 
 /*
@@ -9481,7 +9544,7 @@ WAYLAND_API void wayland_screens_changed(void)
         wayland.screens = wayland.host->screens(wayland.host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
                 wayland.screens = 0;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -9765,7 +9828,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                                 wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
                 }
         }
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->gones)
                         wayland_gone_drawn(wayland.client[slot], 1);
 }
@@ -9792,7 +9855,7 @@ static void wayland_drawn_rows(int dmabuf_busy_row)
                         continue;
                 wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
         }
-        for (long slot = 0; wayland.host && slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; wayland.host && slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->gones)
                         wayland_gone_drawn(wayland.client[slot], 0);
 }
@@ -9857,7 +9920,7 @@ static int wayland_presentings_wanted(struct wayland_client *c, long row)
 WAYLAND_API long wayland_frame_wanted(void)
 {
         // A commit held for a barrier is waited for a frame at a time: each frame drawn is the one that clears it.
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->stalled && wayland.client[slot]->hold && !wayland.client[slot]->hold_at)
                         return 1;
         for (long row = 0; wayland.host && row < wayland.row_made; row++)
@@ -10028,7 +10091,7 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
 /* The window of the surface whose xwayland_surface_v1 gave this X11 serial: its row, -1 while it has none, -2 when no surface has the serial. */
 WAYLAND_API long wayland_serial_row(unsigned long long serial)
 {
-        for (long at = 0; at < WAYLAND_CLIENTS; at++)
+        for (long at = 0; at < wayland.client_slots; at++)
         {
                 struct wayland_client *c = wayland.client[at];
 
@@ -10045,7 +10108,7 @@ WAYLAND_API long wayland_serial_row(unsigned long long serial)
 
 static struct wayland_surface *wayland_xserial_surface(unsigned long long serial)
 {
-        for (long at = 0; at < WAYLAND_CLIENTS; at++)
+        for (long at = 0; at < wayland.client_slots; at++)
         {
                 struct wayland_client *c = wayland.client[at];
 
@@ -10087,7 +10150,7 @@ WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, lo
                 struct wayland_client *c = 0;
                 long px = 0, py = 0;
 
-                for (long at = 0; at < WAYLAND_CLIENTS && !c; at++)
+                for (long at = 0; at < wayland.client_slots && !c; at++)
                 {
                         struct wayland_client *o = wayland.client[at];
 
@@ -10122,7 +10185,7 @@ WAYLAND_API void wayland_xwindow_gone(unsigned long long serial)
 
         if (!s || !s->xsurface)
                 return;
-        for (long at = 0; at < WAYLAND_CLIENTS && !c; at++)
+        for (long at = 0; at < wayland.client_slots && !c; at++)
         {
                 struct wayland_client *o = wayland.client[at];
 
@@ -10234,7 +10297,7 @@ WAYLAND_API void wayland_idle_tick(void)
         if (!wayland.host || !wayland.idle_notifies)
                 return;
         now = wayland.host->now(wayland.host->context);
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -10280,7 +10343,7 @@ WAYLAND_API long wayland_idle_due(void)
 
         if (!wayland.host)
                 return 0;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
@@ -10312,7 +10375,7 @@ WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idle
         *input_ms = wayland.host ? wayland.input_at : 0;
         *inhibitors = wayland_inhibitors_now();
         *idled = 0;
-        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && !wayland.client[slot]->dead)
                         for (long at = 0; at < WAYLAND_NOTIFIES; at++)
                                 *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
@@ -10368,7 +10431,7 @@ struct wayland_cursor
 
 WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
 {
-        struct wayland_client *c = wayland.cursor_client >= 0 && wayland.cursor_client < WAYLAND_CLIENTS ? wayland.client[wayland.cursor_client] : 0;
+        struct wayland_client *c = wayland.cursor_client >= 0 && wayland.cursor_client < wayland.client_slots ? wayland.client[wayland.cursor_client] : 0;
         struct wayland_surface *s = c && wayland.cursor_surface >= 0 && wayland.cursor_surface < c->surface_table.count ? &c->surfaces[wayland.cursor_surface] : 0;
         const struct wayland_buffer *b;
         const struct wayland_pool *p;
