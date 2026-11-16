@@ -297,6 +297,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Boost	a6cc	Boost
 =Boot	38f5	Inicialização
 =Brightness	324a	Brilho
+=Build	7543	Compilação
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Velocidade de piscar do cursor de texto
 =Caret thickness	1e9a	Espessura do cursor de texto
@@ -435,6 +436,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Linhas do terminal por passo da roda
 =Text size (percent, or default)	51d7	Tamanho do texto (porcentagem ou default)
+=The commit this system was built from	160b	O commit a partir do qual este sistema foi compilado
 =The internet prefers	3dbe	A internet prefere
 =The layout the keys type in	c104	O layout em que as teclas digitam
 =The page glides with each notch instead of jumping	0357	A página desliza a cada passo da roda em vez de pular

@@ -4530,6 +4530,95 @@ static bool build_tool_on(build_tool_entry address_to one)
         return build_category_on(one->category) && build_tool_switched(one);
 }
 
+/*
+        The commit this tree is at, taken once per build: twelve hex digits
+        of HEAD, "-dirty" after them when the tree has changes, and the
+        commit's date as git spells it. Outside a git checkout, or with no git
+        to ask, both are "unknown", and the build goes on: the identity is for
+        telling a stick's build from another and is never a reason to stop.
+        What git says is kept only when it has the shape it is given here, so
+        a header line made of it is always one clean string.
+*/
+static string_address build_commit_hash;
+static string_address build_commit_date;
+
+static string_address build_commit_ask(string_address address_to words,
+                                       positive room, bool date)
+{
+        p8 said[128];
+        positive used = 0;
+
+        if (build_capture_words(words, said, sizeof(said)) <= 0)
+                return null;
+
+        while (said[used] && said[used] != '\n')
+                used++;
+        said[used] = end;
+
+        if (!used || used > room)
+                return null;
+
+        for (positive at = 0; at < used; at++)
+        {
+                bool digit = said[at] >= '0' && said[at] <= '9';
+                bool hex = digit || (said[at] >= 'a' && said[at] <= 'f');
+                bool stamp = digit || said[at] == '-' || said[at] == ':' ||
+                             said[at] == '+' || said[at] == 'T' ||
+                             said[at] == 'Z';
+
+                if (!(date ? stamp : hex))
+                        return null;
+        }
+
+        return build_text_keep((string_address)said, used);
+}
+
+static fn build_commit_take()
+{
+        string_address words[8];
+        string_address hash;
+        string_address date;
+        p8 changes[8];
+
+        if (build_commit_hash)
+                return;
+
+        build_commit_hash = "unknown";
+        build_commit_date = "unknown";
+
+        if (!build_have("git") ||
+            (!build_is_type(".git", S_IFDIR) && !build_is_type(".git", S_IFREG)))
+                return;
+
+        words[0] = "git";
+        words[1] = "rev-parse";
+        words[2] = "--short=12";
+        words[3] = "HEAD";
+        words[4] = null;
+        hash = build_commit_ask((string_address address_to)words, 40, false);
+
+        words[1] = "log";
+        words[2] = "-1";
+        words[3] = "--format=%cI";
+        words[4] = null;
+        date = build_commit_ask((string_address address_to)words, 40, true);
+
+        if (!hash || string_length(hash) != 12)
+                return;
+
+        words[1] = "status";
+        words[2] = "--porcelain";
+        words[3] = null;
+
+        if (build_capture_words((string_address address_to)words, changes,
+                                sizeof(changes)) > 0)
+                hash = build_join(hash, "-dirty", null);
+
+        build_commit_hash = hash;
+        if (date)
+                build_commit_date = date;
+}
+
 static string_address build_config_header(string_address from,
                                           string_address address_to record)
 {
@@ -4544,6 +4633,13 @@ static string_address build_config_header(string_address from,
                 text = build_join(text, "#define SHELL_NO_UTIL_LINUX 1\n", null);
         if (!build_category_on("MONITOR"))
                 text = build_join(text, "#define SHELL_NO_MONITOR 1\n", null);
+
+        //      Part of the text the record below is a hash of, so a new
+        //      commit is a new record and what embeds it is built again.
+        build_commit_take();
+        text = build_join(text, "#define MOONWATER_COMMIT \"", build_commit_hash,
+                          "\"\n#define MOONWATER_COMMIT_DATE \"", build_commit_date,
+                          "\"\n", null);
 
         text = build_join(text, "#define MOONWATER_STRICT ",
                           build_number(build_moon_strict), "\n", null);
@@ -5687,9 +5783,11 @@ static b32 build_local(string_address address_to profiles, positive count,
 
         build_label("", "DISTRO INFO");
 
+        build_commit_take();
         {
                 string_address text = build_join(
                         "CONFIG_LOCALVERSION=\"", build_setting_get("full_name"),
+                        "-", build_commit_hash,
                         "\"\nCONFIG_DEFAULT_HOSTNAME=\"",
                         build_setting_get("name"), "-box\"\n", null);
 

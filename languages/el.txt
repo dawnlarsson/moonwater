@@ -297,6 +297,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Boost	a6cc	Boost
 =Boot	38f5	Εκκίνηση
 =Brightness	324a	Φωτεινότητα
+=Build	7543	Κατασκευή
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Ταχύτητα αναβοσβήματος του δρομέα κειμένου
 =Caret thickness	1e9a	Πάχος του δρομέα κειμένου
@@ -435,6 +436,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Terminal	62d1	Τερματικό
 =Terminal lines per wheel notch	3800	Γραμμές τερματικού ανά βήμα τροχού
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
+=The commit this system was built from	160b	Το commit από το οποίο δημιουργήθηκε αυτό το σύστημα
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =The layout the keys type in	c104	Η διάταξη με την οποία γράφουν τα πλήκτρα
 =The page glides with each notch instead of jumping	0357	Η σελίδα γλιστρά σε κάθε εγκοπή αντί να πηδά

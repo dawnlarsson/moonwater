@@ -65,6 +65,21 @@
 #define HOST_MACHINE_DIRTY HOST_STATE "/machine.dirty"
 #define HOST_MACHINE_SOURCED HOST_STATE "/machine.sourced"
 
+/*
+        The commit this build was made from and its date, which build writes
+        into artifacts/moonwater_config.h (build.c, build_commit_take): twelve
+        hex digits and -dirty when the tree had changes, or unknown outside a
+        git checkout. A compile that names no header says unknown.
+*/
+#ifndef MOONWATER_COMMIT
+#define MOONWATER_COMMIT "unknown"
+#endif
+#ifndef MOONWATER_COMMIT_DATE
+#define MOONWATER_COMMIT_DATE "unknown"
+#endif
+static const char host_commit[] = MOONWATER_COMMIT;
+static const char host_commit_date[] = MOONWATER_COMMIT_DATE;
+
 #include "../moonwater/moonwater.c"
 #include "../audio/state.c" // the sound server's page, which bare `moonwater audio` reads
 #include "../moonwater/splash.c" // the boot splash: its file, and the parser the loader checks it with too
@@ -233,6 +248,7 @@ static bool host_init_list_runs(void);
 //      included after this file. The commands are shell.c's REBOOT_*.
 fn shell_stop(writer write, positive command);
 static b32 host_machine_run(void);
+static b32 host_version_verb(string_address address_to arguments, positive count);
 static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
@@ -996,6 +1012,7 @@ static b32 host_main()
             {"ssh", ssh_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
+            {"version", host_version_verb, true},
             {"boot", host_boot_verb, false},
             {"ask", host_ask_verb, false},
         };

@@ -276,6 +276,10 @@ struct settings_row
 static const struct settings_row settings_rows[] = {
     {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
+    //  The commit this build was made from, as moonwater version says it: what tells one build on a stick from another.
+    {null, "Build", SETTINGS_INFO, 0, SETTINGS_LINE, {"version"}, "commit ", null, {null}, null, 0,
+     .help = "the commit this system was built from, with -dirty when the tree had changes; moonwater version also says its date and the kernel's release",
+     .about = "The commit this system was built from"},
     //  What the system's own windows say, in which language: one file of languages/ read by every window of the kit, taken
     //  from the window table so a change reaches them at once. Bare, the verb adds what is installed and which are machine-made.
     SETTING_PLAIN_ROW(null, "Language", SETTINGS_CHOICE, SETTINGS_LANGUAGE, ("language"), "language ", SETTINGS_LANGUAGE_CODES,

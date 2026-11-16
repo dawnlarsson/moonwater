@@ -4630,6 +4630,55 @@ static fn settings_sections(void)
 }
 
 /*
+        The commit this build was made from (host.c's host_commit, which build
+        writes into the configuration header): twelve hex digits and perhaps
+        -dirty, or unknown outside a git checkout, and the date likewise; and
+        moonwater version says them, with the kernel's release, a line each.
+*/
+static fn build_commit(void)
+{
+        p8 said[256];
+        string_address words[2] = {(string_address) "moonwater", (string_address) "version"};
+        positive digits = 0;
+        bipolar kept = system_duplicate(1, 101, 0);
+        bipolar handle = system_call_2(syscall(memfd_create), (positive)(string_address) "version", 0);
+        positive got = 0;
+        bool shaped;
+        bool dated;
+        bool printed;
+
+        while (digits < sizeof(host_commit) - 1 &&
+               ((host_commit[digits] >= '0' && host_commit[digits] <= '9') ||
+                (host_commit[digits] >= 'a' && host_commit[digits] <= 'f')))
+                digits++;
+        shaped = (digits == 12 && (!host_commit[12] || string_equals(host_commit + 12, "-dirty"))) ||
+                 string_equals(host_commit, "unknown");
+        dated = string_equals(host_commit_date, "unknown") || (sizeof(host_commit_date) > 20 && host_commit_date[4] == '-');
+
+        host_verb = (string_address) "version";
+        if (handle >= 0 && kept >= 0)
+        {
+                system_duplicate(handle, 1, 0);
+                (void)host_version_verb(words, 2);
+                log_flush();
+                system_duplicate(kept, 1, 0);
+                got = storage_read(handle, said, sizeof(said) - 1, 0);
+        }
+        said[got] = end;
+        printed = string_has_prefix((string_address)said, "commit ") &&
+                  memory_search(said, got, (address_any) "\ndate ", 6) &&
+                  memory_search(said, got, (address_any) "\nkernel ", 8) &&
+                  memory_search(said, got, (address_any)host_commit, sizeof(host_commit) - 1);
+        if (kept >= 0)
+                system_close(kept);
+        if (handle >= 0)
+                system_close(handle);
+
+        check("version: the commit in the build is twelve hex digits with -dirty or none, or unknown, and its date is a date or unknown", shaped && dated);
+        check("version: moonwater version says the commit, the date and the kernel's release, a line each, the commit as embedded", printed);
+}
+
+/*
         Which build an image is, read the way this machine's images carry it:
         x86's setup header, or on arm64 and riscv64 the kernel's own banner
         in an image that is the kernel uncompressed. The banner is looked for
@@ -6261,6 +6310,7 @@ b32 main(void)
         settings_sections();
         settings_hostile();
         image_builds();
+        build_commit();
 #if X64
         image_hostile();
 #endif

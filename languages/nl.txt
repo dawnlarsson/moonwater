@@ -297,6 +297,7 @@ ui_field_full	fe02	meer past er niet in
 =Boost	a6cc	Boost
 =Boot	38f5	Opstarten
 =Brightness	324a	Helderheid
+=Build	7543	Build
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Knippersnelheid van de tekstcursor
 =Caret thickness	1e9a	Dikte van de tekstcursor
@@ -435,6 +436,7 @@ ui_field_full	fe02	meer past er niet in
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalregels per wielstap
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
+=The commit this system was built from	160b	De commit waaruit dit systeem is gebouwd
 =The internet prefers	3dbe	Internet verkiest
 =The layout the keys type in	c104	De indeling waarin de toetsen typen
 =The page glides with each notch instead of jumping	0357	De pagina glijdt bij elke klik van het wiel in plaats van te springen

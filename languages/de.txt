@@ -297,6 +297,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Boost	a6cc	Boost
 =Boot	38f5	Start
 =Brightness	324a	Helligkeit
+=Build	7543	Build
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Blinkgeschwindigkeit des Textcursors
 =Caret thickness	1e9a	Dicke des Textcursors
@@ -435,6 +436,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalzeilen pro Mausradraste
 =Text size (percent, or default)	51d7	Textgröße (Prozent oder default)
+=The commit this system was built from	160b	Der Commit, aus dem dieses System gebaut wurde
 =The internet prefers	3dbe	Internet bevorzugt
 =The layout the keys type in	c104	Die Belegung, in der die Tasten schreiben
 =The page glides with each notch instead of jumping	0357	Die Seite gleitet bei jeder Raste, statt zu springen

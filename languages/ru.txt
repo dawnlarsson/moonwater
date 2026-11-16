@@ -297,6 +297,7 @@ ui_field_full	fe02	больше не помещается
 =Boost	a6cc	Boost
 =Boot	38f5	Загрузка
 =Brightness	324a	Яркость
+=Build	7543	Сборка
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Скорость мигания текстового курсора
 =Caret thickness	1e9a	Толщина текстового курсора
@@ -435,6 +436,7 @@ ui_field_full	fe02	больше не помещается
 =Terminal	62d1	Терминал
 =Terminal lines per wheel notch	3800	Строк терминала на щелчок колеса
 =Text size (percent, or default)	51d7	Размер текста (проценты или default)
+=The commit this system was built from	160b	Коммит, из которого собрана эта система
 =The internet prefers	3dbe	Интернет предпочитает
 =The layout the keys type in	c104	Раскладка, в которой печатают клавиши
 =The page glides with each notch instead of jumping	0357	Страница плавно скользит с каждым щелчком колеса, а не прыгает

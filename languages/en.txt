@@ -297,6 +297,7 @@ ui_field_full	fe02	that is as much as it holds
 =Boost	a6cc	Boost
 =Boot	38f5	Boot
 =Brightness	324a	Brightness
+=Build	7543	Build
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Caret blink speed
 =Caret thickness	1e9a	Caret thickness
@@ -435,6 +436,7 @@ ui_field_full	fe02	that is as much as it holds
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminal lines per wheel notch
 =Text size (percent, or default)	51d7	Text size (percent, or default)
+=The commit this system was built from	160b	The commit this system was built from
 =The internet prefers	3dbe	The internet prefers
 =The layout the keys type in	c104	The layout the keys type in
 =The page glides with each notch instead of jumping	0357	The page glides with each notch instead of jumping

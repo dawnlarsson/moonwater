@@ -298,6 +298,7 @@ moonwater setup use [DISK]             run this build with the data of an instal
 moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater splash [FILE|default|off]    the picture the loader draws before the kernel starts, kept on the system partition: a binary PPM of at most 1 MiB, the built-in one, or off
 moonwater status                       this session as one page
+moonwater version                      the commit this build was made from, its date and the kernel's release, one to a line
 moonwater window                       the windows on the desktop: name, pid, place, size, title
 moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
 moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says: center, at X,Y, maximized, fullscreen, screen N, size WxH, name NAME (what it is remembered by)

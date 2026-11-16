@@ -297,6 +297,7 @@ ui_field_full	fe02	mer ryms inte
 =Boost	a6cc	Boost
 =Boot	38f5	Start
 =Brightness	324a	Ljusstyrka
+=Build	7543	Bygge
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Textmarkörens blinkhastighet
 =Caret thickness	1e9a	Textmarkörens tjocklek
@@ -435,6 +436,7 @@ ui_field_full	fe02	mer ryms inte
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalrader per hjulsteg
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
+=The commit this system was built from	160b	Committen som det här systemet byggdes från
 =The internet prefers	3dbe	Internet föredrar
 =The layout the keys type in	c104	Layouten som tangenterna skriver i
 =The page glides with each notch instead of jumping	0357	Sidan glider vid varje hack i stället för att hoppa

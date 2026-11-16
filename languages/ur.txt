@@ -298,6 +298,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Boost	a6cc	Boost
 =Boot	38f5	بوٹ
 =Brightness	324a	چمک
+=Build	7543	بلڈ
 =Canvas	5091	Canvas
 =Caret blink speed	4085	ٹیکسٹ کرسر کے جھپکنے کی رفتار
 =Caret thickness	1e9a	ٹیکسٹ کرسر کی موٹائی
@@ -436,6 +437,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Terminal	62d1	ٹرمینل
 =Terminal lines per wheel notch	3800	ہر وہیل نوچ پر ٹرمینل کی لائنیں
 =Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
+=The commit this system was built from	160b	وہ commit جس سے یہ نظام بنایا گیا
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
 =The layout the keys type in	c104	وہ ترتیب جس میں کلیدیں ٹائپ کرتی ہیں
 =The page glides with each notch instead of jumping	0357	صفحہ ہر نوچ پر اچھلنے کے بجائے پھسلتا ہے

@@ -298,6 +298,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Boost	a6cc	Boost
 =Boot	38f5	بوت
 =Brightness	324a	روشنایی
+=Build	7543	ساخت
 =Canvas	5091	Canvas
 =Caret blink speed	4085	سرعت چشمک‌زدن مکان‌نما
 =Caret thickness	1e9a	ضخامت مکان‌نما
@@ -436,6 +437,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Terminal	62d1	پایانه
 =Terminal lines per wheel notch	3800	خطوط پایانه در هر گام چرخ
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
+=The commit this system was built from	160b	کامیتی که این سیستم از آن ساخته شده است
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
 =The layout the keys type in	c104	چیدمانی که کلیدها با آن تایپ می‌کنند
 =The page glides with each notch instead of jumping	0357	صفحه با هر ضامن چرخ نرم می‌لغزد نه پرشی

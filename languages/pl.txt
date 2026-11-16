@@ -297,6 +297,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Boost	a6cc	Boost
 =Boot	38f5	Uruchamianie
 =Brightness	324a	Jasność
+=Build	7543	Kompilacja
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Szybkość migania kursora tekstowego
 =Caret thickness	1e9a	Grubość kursora tekstowego
@@ -435,6 +436,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Wiersze terminala na skok kółka
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
+=The commit this system was built from	160b	Commit, z którego zbudowano ten system
 =The internet prefers	3dbe	Internet preferuje
 =The layout the keys type in	c104	Układ, w którym piszą klawisze
 =The page glides with each notch instead of jumping	0357	Strona płynie z każdym ząbkiem kółka zamiast skakać

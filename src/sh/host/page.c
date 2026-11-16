@@ -39,6 +39,7 @@ typedef struct
 
 static const host_row host_rows[] = {
     {null, "status", "this session as one page", 'b'},
+    {null, "version", "the commit this build was made from, its date and the kernel's release", 'b'},
     {null, "help [VERB]", "these commands, or the page of one", 'b'},
     {null, "setup", "where it runs: install, update, use, live", 'm'},
     {null, "setup", "where this session runs, and the installs found", 'f'},
@@ -1222,7 +1223,7 @@ static fn host_setup_state(void)
         host_medium_search search;
 
         if (host_running_build(running, sizeof(running)))
-                string_format(log, "  this is %s\n", running);
+                string_format(log, "  this is %s, commit %s\n", running, host_commit);
         else
                 string_format(log, "  this build's version cannot be read\n");
 
@@ -1701,6 +1702,22 @@ static b32 host_wipe_verb(string_address address_to arguments, positive count)
 
         return_if(count > 3 || (count == 3 && !said_yes), host_usage());
         return host_wipe(said_yes);
+}
+
+/* The build, one fact a line: the commit, its date and the kernel's release; a script reads them by their first word. */
+static b32 host_version_verb(string_address address_to arguments, positive count)
+{
+        file_machine machine;
+
+        (void)arguments;
+        return_if(count != 2, host_usage());
+        host_say(log, "commit %s\n", host_commit);
+        host_say(log, "date %s\n", host_commit_date);
+        if (file_machine_read(address_of machine))
+                host_say(log, "kernel %s\n", machine.release);
+        else
+                host_say(log, "kernel unknown\n");
+        return 0;
 }
 
 static b32 host_machine_verb(string_address address_to arguments, positive count)

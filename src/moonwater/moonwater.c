@@ -2712,6 +2712,8 @@ static b32 host_machine_run(void)
         if (!bowl_is_root())
                 return host_refuse("moonwater machine needs root\n");
 
+        host_say(log, host_label "commit %s (%s)\n", host_commit, host_commit_date);
+
         host_state_ready();
         host_input_none();
         system_call_1(syscall(chdir), (positive)(string_address) "/root");

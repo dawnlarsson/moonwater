@@ -298,6 +298,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Boost	a6cc	Boost
 =Boot	38f5	אתחול
 =Brightness	324a	בהירות
+=Build	7543	בנייה
 =Canvas	5091	Canvas
 =Caret blink speed	4085	מהירות הבהוב סמן הטקסט
 =Caret thickness	1e9a	עובי סמן הטקסט
@@ -436,6 +437,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Terminal	62d1	מסוף
 =Terminal lines per wheel notch	3800	שורות במסוף לכל צעד של הגלגלת
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
+=The commit this system was built from	160b	ה-commit שממנו נבנתה המערכת הזו
 =The internet prefers	3dbe	האינטרנט מעדיף
 =The layout the keys type in	c104	הפריסה שבה המקשים מקלידים
 =The page glides with each notch instead of jumping	0357	הדף גולש בכל שנת גלגלת במקום לקפוץ

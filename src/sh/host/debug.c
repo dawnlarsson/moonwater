@@ -529,6 +529,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
 
         (void)arguments;
         return_if(count > 2, host_usage());
+        host_say(log, "build\n  commit          %s (%s)\n", host_commit, host_commit_date);
         table = host_windows_header();
         if (!table)
         {

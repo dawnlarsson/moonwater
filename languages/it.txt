@@ -297,6 +297,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Boost	a6cc	Boost
 =Boot	38f5	Avvio
 =Brightness	324a	Luminosità
+=Build	7543	Build
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Velocità di lampeggio del cursore di testo
 =Caret thickness	1e9a	Spessore del cursore di testo
@@ -435,6 +436,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Terminal	62d1	Terminale
 =Terminal lines per wheel notch	3800	Righe del terminale per scatto della rotellina
 =Text size (percent, or default)	51d7	Dimensione del testo (percentuale o default)
+=The commit this system was built from	160b	Il commit da cui è stato compilato questo sistema
 =The internet prefers	3dbe	Internet preferisce
 =The layout the keys type in	c104	Il layout con cui scrivono i tasti
 =The page glides with each notch instead of jumping	0357	La pagina scorre fluida a ogni scatto invece di saltare
