@@ -49643,11 +49643,54 @@ while True:
               repr((seen.get("back list"), ids)))
         #       A boot whose desktop cannot be started (no process can be made) says so,
         #       and takes its marker away so that the next boot asks again. The shell
-        #       cannot fork under the limit, so the verb is the last thing it runs.
-        #       The sandbox's shell is dash, which has no ulimit -u, so the limit is
-        #       set by prlimit, the same process limit, on the verb.
+        #       cannot fork once the verb is denied it, so the verb is the last thing it
+        #       runs. No fork is had by a seccomp filter that answers every clone,
+        #       clone3, fork and vfork with EAGAIN, which is what a full process table
+        #       answers: the process limit (prlimit --nproc=1) it was is not held against
+        #       uid 0 at all (kernel/fork.c lets INIT_USER past RLIMIT_NPROC), and the
+        #       sandbox runs as root where the lane is root, as on the box, where the
+        #       verb then forked, said nothing and left its marker.
+        nofork = sandbox / "tmp/nofork"
+        (sandbox / "tmp/nofork.c").write_text(r"""
+#include <errno.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#define DENY(nr) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1), \
+                 BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EAGAIN)
+int main(int count, char **words)
+{
+        struct sock_filter filter[] = {
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+                DENY(__NR_clone),
+#ifdef __NR_clone3
+                DENY(__NR_clone3),
+#endif
+#ifdef __NR_fork
+                DENY(__NR_fork),
+#endif
+#ifdef __NR_vfork
+                DENY(__NR_vfork),
+#endif
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog program = {sizeof(filter) / sizeof(filter[0]), filter};
+
+        if (count < 2 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program))
+                return 125;
+        execv(words[1], words + 1);
+        return 126;
+}
+""")
+        made = subprocess.run([args.cc, "-O1", "-o", str(nofork), str(sandbox / "tmp/nofork.c")],
+                              capture_output=True, text=True)
+        check(made.returncode == 0, "the helper that denies a process its forks builds", made.stderr[-400:])
         lines, finished = session("rm -f /run/moonwater/desktop.booted\n"
-                                  "exec prlimit --nproc=1 /tmp/moonwater desktop boot 2>&1\n")
+                                  "exec /tmp/nofork /tmp/moonwater desktop boot 2>&1\n")
         left, _ = session("test -e /run/moonwater/desktop.booted && echo @@left || echo @@gone\n")
         check(not finished and any(line.startswith("[Moonwater] desktop: ") for line in lines) and
               "@@gone" in left,
