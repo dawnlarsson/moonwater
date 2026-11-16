@@ -230,6 +230,10 @@ def run(index):
     open(os.path.join(d, path), "w").write(text.replace(old, new, 1))
     os.symlink(os.path.join(root, "artifacts"), d + "/artifacts") if os.path.exists(os.path.join(root, "artifacts")) else None
     os.symlink(check, d + "/test/checks.c")
+    for split_part in os.listdir(os.path.join(os.path.dirname(check), "checks")):  # test/checks.c's parts (test/split.py)
+        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
+        os.symlink(os.path.join(os.path.dirname(check), "checks", split_part),
+                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
     exe = d + "/check"
     cc = subprocess.run(["gcc", "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w", "-T",
                          os.path.join(root, "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-DCHECK_terminal",

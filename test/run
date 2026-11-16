@@ -382,7 +382,7 @@ seam_of_path()
         src/sh/languages.c | languages/*) echo machine desktop ;;
         src/sh/edit.c | src/canvas/* | src/audio/* | src/dbus/* | fonts/*) echo desktop ;;
         src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
-        test/checks.c | test/run | test/differential.py) echo suite ;;
+        test/checks.c | test/checks/* | test/run | test/differential.py) echo suite ;;
         test/codec_floor/*) echo compress ;;
         test/assembly/* | test/insns | test/insn_sizes | test/insn_sizes.c) echo lib ;;
         test/insn.c) echo lib net ;;
@@ -15865,7 +15865,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
         done
         same 'every benchmark compiles' '' "$bench_broken"
         bench_orphans=""
-        for section in $(grep -o 'BENCH_[a-z][a-z0-9_]*' test/checks.c | sort -u); do
+        for section in $(cat test/checks.c test/checks/*.c | grep -o 'BENCH_[a-z][a-z0-9_]*' | sort -u); do
                 case $bench_sections in
                 *" ${section#BENCH_} "*) ;;
                 *) bench_orphans="$bench_orphans $section" ;;

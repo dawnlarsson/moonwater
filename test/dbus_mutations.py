@@ -133,6 +133,10 @@ def run(index):
     os.makedirs(d + "/src/dbus")
     os.makedirs(d + "/test")
     os.symlink(checks, d + "/test/checks.c")
+    for split_part in os.listdir(os.path.join(os.path.dirname(checks), "checks")):  # test/checks.c's parts (test/split.py)
+        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
+        os.symlink(os.path.join(os.path.dirname(checks), "checks", split_part),
+                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
     open(d + "/src/dbus/dbus.c", "w").write(source.replace(old, new))
     exe = d + "/check"
     cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_dbus", d + "/test/checks.c", "-o", exe],

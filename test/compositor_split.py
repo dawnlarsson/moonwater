@@ -33,6 +33,24 @@ import subprocess
 import sys
 import tempfile
 
+
+def source_text(path, **options):
+    """path's text, and for a file test/split.py cut in parts (path.c includes each part, path/part.c, where its text
+       stood) the text it had before the cut: each part put back in its place, without its header, its includes as
+       path.c had them."""
+    path = pathlib.Path(path)
+    text = path.read_text(**options)
+    folder = path.parent / path.stem
+    if path.suffix != ".c" or not folder.is_dir():
+        return text
+
+    def part(match):
+        body = (folder / match.group(1)).read_text(**options)
+        head = re.match(r"/\*\n {8}\S*%s/%s: .*?\n\*/\n\n" % (re.escape(path.stem), re.escape(match.group(1))), body, re.S)
+        return re.sub(r'^(\s*#\s*include\s+")\.\./', r"\1", body[head.end():] if head else body, flags=re.M)
+    return re.sub(r'^#include "%s/([\w.]+)".*\n' % re.escape(path.stem), part, text, flags=re.M)
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'test/assembly'))
 from inventory import function_header, lex  # noqa: E402
@@ -416,7 +434,7 @@ def first_difference(a, b):
 def compare_views(before_tree, after_tree):
     """gcc -E -P of every view in before_tree and in after_tree: byte-identical, or identical but for the indentation GCC gives
        a line once it has stopped tracking columns."""
-    sections = check_sections((before_tree / 'test/checks.c').read_text())
+    sections = check_sections(source_text(before_tree / 'test/checks.c'))
     for source, flags in VIEWS + [('test/checks.c', FREESTANDING + ['-D' + name]) for name in sections]:
         before, after = preprocessed(before_tree, source, flags), preprocessed(after_tree, source, flags)
         label = 'gcc -E -P %s %s' % (' '.join(flags), source)

@@ -446,6 +446,10 @@ def build_and_run(index):
         if entry != 'lib.c':
             os.symlink(os.path.join(root, 'src', entry), os.path.join(tree, 'src', entry))
     os.symlink(os.path.join(root, 'test', 'checks.c'), os.path.join(tree, 'test', 'checks.c'))
+    for split_part in os.listdir(os.path.join(os.path.dirname(os.path.join(root, 'test', 'checks.c')), "checks")):  # test/checks.c's parts (test/split.py)
+        os.makedirs(os.path.join(os.path.dirname(os.path.join(tree, 'test', 'checks.c')), "checks"), exist_ok=True)
+        os.symlink(os.path.join(os.path.dirname(os.path.join(root, 'test', 'checks.c')), "checks", split_part),
+                   os.path.join(os.path.dirname(os.path.join(tree, 'test', 'checks.c')), "checks", split_part))
     text = open(os.path.join(root, 'src', 'lib.c')).read()
     if text.count(old) == 0:
         return name, 'NOT FOUND', ''

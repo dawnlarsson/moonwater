@@ -2451,7 +2451,7 @@ def bench_entry(args):
         lib_text = (root / "src/lib.c").read_text()
         shape, ret, params = bench_prototype(lib_text, routine)
         reference = BENCH_REFERENCE.get(routine)
-        reference_text = bench_reference((root / "test/checks.c").read_text(), reference) if reference else ""
+        reference_text = bench_reference(source_text(root / "test/checks.c"), reference) if reference else ""
         if shape == "scalar":
             sizes = [1]
             if args.sizes and args.sizes.strip() not in ("1", ""):
@@ -68694,7 +68694,7 @@ int main(int argc, char **argv)
         return 0;
 }
 """
-    source = tls_verify_hosted_source(net, (HARNESS_ROOT / "test/checks.c").read_text(), driver)
+    source = tls_verify_hosted_source(net, source_text(HARNESS_ROOT / "test/checks.c"), driver)
     (work / "verify.c").write_text(source)
     built = build_run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
                             "-o", str(work / "verify")], capture_output=True, text=True)
@@ -68771,7 +68771,7 @@ def harness_tls_verify_fuzz(argv):
     """
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    checks = source_text(HARNESS_ROOT / "test/checks.c")
     #   The leaf's caIssuers location serves link 1 while fuzz_aia is set.
     aia = r"""
         static const char named[] = "http://example.com/link1.der";
@@ -69211,7 +69211,7 @@ def sntp_fuzz_source(host):
     from there."""
     sec = src_slice
     lib = (HARNESS_ROOT / "src/lib.util.c").read_text()
-    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    checks = source_text(HARNESS_ROOT / "test/checks.c")
     parts = (
         sec(lib, "static bipolar clock_floor_divide(", "/*\n        The calendar, closed form"),
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
@@ -72668,7 +72668,7 @@ def harness_crypto_fuzz(argv):
     """
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    checks = source_text(HARNESS_ROOT / "test/checks.c")
     oracle = not moonwater_msan_requested()
     #   MemorySanitizer sees nothing an assembly body stores, so under it
     #   x25519 is the C reference; otherwise lib.c's own body is the one held
@@ -73570,7 +73570,7 @@ def harness_bowl_sig_fuzz(argv):
     try:
         source = bowl_sig_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
                                       (HARNESS_ROOT / "src/bowl.c").read_text(),
-                                      (HARNESS_ROOT / "test/checks.c").read_text())
+                                      source_text(HARNESS_ROOT / "test/checks.c"))
     except (ValueError, RuntimeError) as exc:
         print("  FAIL bowl sig fuzz: " + str(exc))
         write_tally("bowl-sig-fuzz", 0, 1)
@@ -78364,7 +78364,7 @@ def harness_security_hygiene(argv):
            + ", ".join(stale[:8]))
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    checks_c = (HARNESS_ROOT / "test/checks.c").read_text()
+    checks_c = source_text(HARNESS_ROOT / "test/checks.c")
 
     #   No network call may sleep past a deadline. Readiness is only a hint (a
     #   datagram can be gone between the poll and the read), so every receive in
@@ -83062,6 +83062,8 @@ def harness_net_epoch_mutants(argv):
         shutil.copytree(HARNESS_ROOT / "src", top / "src")
         (top / "test").mkdir()
         shutil.copy(HARNESS_ROOT / "test/checks.c", top / "test/checks.c")
+        shutil.copytree(os.path.join(os.path.dirname(HARNESS_ROOT / "test/checks.c"), "checks"),  # test/checks.c's parts (test/split.py)
+                        os.path.join(os.path.dirname(top / "test/checks.c"), "checks"))
         for what, before, after in chosen:
             checks(original.count(before) == 1,
                    "mutant '%s': its text is in src/sh/net.c once" % what)
@@ -86468,7 +86470,7 @@ def harness_wifi_key_state(argv):
         return 2
     host = source_text(HARNESS_ROOT / "src/sh/host.c")
     source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
-                                   host, (HARNESS_ROOT / "test/checks.c").read_text())
+                                   host, source_text(HARNESS_ROOT / "test/checks.c"))
     source += src_slice(host, "static COLD fn wifi_roam(",
                         "static COLD fn wifi_keep(")
     source += r'''
@@ -86897,7 +86899,7 @@ def harness_wifi_eapol_fuzz(argv):
     try:
         source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
                                         source_text(HARNESS_ROOT / "src/sh/host.c"),
-                                        (HARNESS_ROOT / "test/checks.c").read_text())
+                                        source_text(HARNESS_ROOT / "test/checks.c"))
     except (ValueError, RuntimeError) as exc:
         print("  FAIL wifi eapol fuzz: " + str(exc))
         write_tally("wifi-eapol-fuzz", 0, 1)
@@ -87696,7 +87698,7 @@ def harness_wifi_sae_fuzz(argv):
     try:
         source = wifi_sae_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
                                       source_text(HARNESS_ROOT / "src/sh/host.c"),
-                                      (HARNESS_ROOT / "test/checks.c").read_text())
+                                      source_text(HARNESS_ROOT / "test/checks.c"))
     except (ValueError, RuntimeError) as exc:
         print("  FAIL wifi sae fuzz: " + str(exc))
         write_tally("wifi-sae-fuzz", 0, 1)
@@ -90564,7 +90566,7 @@ def harness_waterlink_sanitized(argv, lift=False):
         return 2
 
     def read(path):
-        return (root / path).read_text()
+        return source_text(root / path)
 
     def sec(text, first, following):
         i = text.index(first)
@@ -101436,7 +101438,7 @@ def harness_text_tables(argv):
         return 2
     ucd = Path(rest[0])
     places = [(HARNESS_ROOT / "src/canvas/ui/ui.c", "// TEXT_TABLES BEGIN\n", "// TEXT_TABLES END", text_table(ucd)),
-              (HARNESS_ROOT / "test/checks.c", None, "// TEXT_VECTORS END",
+              (HARNESS_ROOT / "test/checks/canvas.c", None, "// TEXT_VECTORS END",
                text_slice("text_grapheme_vectors", ucd / "GraphemeBreakTest.txt", 4) +
                text_slice("text_word_vectors", ucd / "WordBreakTest.txt", 6))]
     for path, begin, end, made in places:

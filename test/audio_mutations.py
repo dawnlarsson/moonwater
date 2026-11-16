@@ -407,6 +407,10 @@ def run(index):
     os.makedirs(d + "/src/audio")
     os.makedirs(d + "/test")
     os.symlink(checks, d + "/test/checks.c")
+    for split_part in os.listdir(os.path.join(os.path.dirname(checks), "checks")):  # test/checks.c's parts (test/split.py)
+        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
+        os.symlink(os.path.join(os.path.dirname(checks), "checks", split_part),
+                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
     for k, v in engines.items():
         shutil.copy(v, d + "/src/audio/" + k + ".c")
     open(d + "/src/audio/" + target_file.get(which, which) + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))

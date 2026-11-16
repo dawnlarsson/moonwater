@@ -18,6 +18,24 @@ import sys
 from collections import Counter
 
 
+def source_text(path, **options):
+    """path's text, and for a file test/split.py cut in parts (path.c includes each part, path/part.c, where its text
+       stood) the text it had before the cut: each part put back in its place, without its header, its includes as
+       path.c had them."""
+    path = pathlib.Path(path)
+    text = path.read_text(**options)
+    folder = path.parent / path.stem
+    if path.suffix != ".c" or not folder.is_dir():
+        return text
+
+    def part(match):
+        body = (folder / match.group(1)).read_text(**options)
+        head = re.match(r"/\*\n {8}\S*%s/%s: .*?\n\*/\n\n" % (re.escape(path.stem), re.escape(match.group(1))), body, re.S)
+        return re.sub(r'^(\s*#\s*include\s+")\.\./', r"\1", body[head.end():] if head else body, flags=re.M)
+    return re.sub(r'^#include "%s/([\w.]+)".*\n' % re.escape(path.stem), part, text, flags=re.M)
+
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LIBRARY = ROOT / 'src/lib.c'
 INVENTORY_TOOL = pathlib.Path(__file__).resolve().parent / 'inventory.py'
@@ -107,7 +125,7 @@ def anchor(row, cache, errors):
                       (row.routine, file))
         return False
     if row.evidence not in cache:
-        text = evidence_path.read_text(encoding='utf-8', errors='replace')
+        text = source_text(evidence_path, encoding='utf-8', errors='replace')
         if section:
             text = conditional_section(text, section)
             if text is None:

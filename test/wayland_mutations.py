@@ -52,6 +52,8 @@ def one(index, name, old, new):
     os.makedirs(os.path.join(place, 'src/canvas'))
     os.makedirs(os.path.join(place, 'test'))
     shutil.copy(os.path.join(root, 'test/checks.c'), os.path.join(place, 'test/checks.c'))
+    shutil.copytree(os.path.join(os.path.dirname(os.path.join(root, 'test/checks.c')), "checks"),  # test/checks.c's parts (test/split.py)
+                    os.path.join(os.path.dirname(os.path.join(place, 'test/checks.c')), "checks"))
     shutil.copy(os.path.join(root, 'src/canvas/wayland_protocol.inc'), os.path.join(place, 'src/canvas/wayland_protocol.inc'))
     text = open(os.path.join(root, 'src/canvas/wayland.c')).read()
     if text.count(old) != 1:
