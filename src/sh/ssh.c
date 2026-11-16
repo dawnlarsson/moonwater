@@ -2417,6 +2417,33 @@ static fn ssh_stop_ring(b32 number)
         ssh_stop_asked = true;
 }
 
+// The children of this process that are a server's (sshd, sshd-session, sshd-auth), each sent signal, and the dead reaped: how many.
+static positive ssh_strays(b32 signal)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        positive self = (positive)system_call(syscall(getpid));
+        positive found = 0;
+        positive status;
+
+        while (system_call_4(syscall(wait4), (positive)-1, (positive)address_of status, 1, 0) > 0)
+                ;
+        if (!file_walk_open(address_of walk, AT_FDCWD, "/proc"))
+                return 0;
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                positive pid = (positive)string_digits(entry->d_name, null);
+                positive parent = 0;
+                p8 name[32];
+
+                if (pid && ssh_process(pid, &parent, name, sizeof(name), null) && parent == self &&
+                    ssh_named_server((string_address)name))
+                        found += ssh_signal(pid, signal, (string_address)name);
+        }
+        file_walk_close(address_of walk);
+        return found;
+}
+
 static fn ssh_supervisor_end(positive listener, string_address why)
 {
         positive status = 0;
@@ -2438,6 +2465,12 @@ static fn ssh_supervisor_end(positive listener, string_address why)
                 }
                 host_pause(50000000);
         }
+        //      A connection's half that outlived its listener is this process's now (it is the subreaper): a second
+        //      for it to go on SIGTERM, then SIGKILL, so nothing of the server is left for the next look to find.
+        until = system_clock_ns(HOST_CLOCK_BOOTTIME) + 1000000000ull;
+        while (ssh_strays(15) && system_clock_ns(HOST_CLOCK_BOOTTIME) < until)
+                host_pause(50000000);
+        (void)ssh_strays(9);
         system_remove_at(AT_FDCWD, SSH_RUNNING, 0);
         count[positive_into_string(count, sessions)] = end;
         (void)string_join(line, sizeof(line), "stopped: ", why, "; ", (string_address)count, " sessions ended");
@@ -2478,6 +2511,10 @@ static b32 ssh_serve(bipolar ready)
                 return 1;
         (void)system_signal_install(15, (positive)ssh_stop_ring, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART,
                                     SIGNAL_CATCH_RESTORER, previous);
+        //      The subreaper of what the server starts (PR_SET_CHILD_SUBREAPER): a connection's half whose listener went
+        //      is this process's to end, and not init's to keep.
+        if (system_call_5(syscall(prctl), 36, 1, 0, 0, 0) < 0)
+                ssh_log_line("the supervisor is no subreaper: a connection that outlives the listener is ended at the next look", false);
         child = system_fork();
         if (child < 0)
                 return 1;
@@ -2507,9 +2544,14 @@ static b32 ssh_serve(bipolar ready)
                 //      then and not after sshd's next line; and the read as the call is, interrupted by it.
                 {
                         timespec second = {1, 0};
+                        bipolar ready_now = link_wait_readable((bipolar)ends[0], address_of second);
 
-                        if (link_wait_readable((bipolar)ends[0], address_of second) == 0)
+                        //      A second gone, or the wait cut short by SIGTERM: the look at the top again, and no
+                        //      read that would wait on sshd.
+                        if (ready_now == 0 || ready_now == -EINTR)
                                 continue;
+                        if (ready_now < 0)
+                                break;
                 }
                 got = system_call_3(syscall(read), (positive)ends[0], (positive)(chunk + kept), sizeof(chunk) - 1 - kept);
                 if (got == -EINTR)
