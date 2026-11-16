@@ -8100,8 +8100,31 @@ PURE bool shell_option_on(positive index)
 
 fn job_monitor_told(bool on);
 
+/*
+        What each reference's option reader holds while the command line is
+        still being read, which is what a listing asked for there writes
+        (shell_options_listed_at_start): the options told either way so far,
+        and bash's line editor, which is on and emacs until -o vi, +o of the
+        mode in force or --noediting turns it.
+*/
+static positive shell_options_said;
+static bool shell_start_editing = true;
+static bool shell_start_vi;
+
 fn shell_option_told(positive index, bool on)
 {
+        shell_options_said |= (positive)1 << index;
+        if (index == SHELL_OPTION_VI || index == SHELL_OPTION_EMACS)
+        {
+                if (on)
+                {
+                        shell_start_vi = index == SHELL_OPTION_VI;
+                        shell_start_editing = true;
+                }
+                else if (shell_start_vi == (index == SHELL_OPTION_VI))
+                        shell_start_editing = false;
+        }
+
         if (shell_option_names[index].value >= 'a' &&
             shell_option_names[index].value <= 'z')
         {
@@ -8391,6 +8414,49 @@ fn shell_options_listed_wanted(writer write, bool as_commands, bipolar want)
 fn shell_options_listed(writer write, bool as_commands)
 {
         shell_options_listed_wanted(write, as_commands, 0);
+}
+
+/*
+        The listing `bash -o` and `dash -o` write when -o is the last word of
+        the command line, from the option reader's state and not the
+        settled shell's. dash marks every option it has not been given with
+        a 2 while it reads them, and its listing writes a 2 as on, so every
+        row not turned off on the line reads on (and +o writes set -o for
+        it); bash's editor is still its default there, so emacs reads on
+        until -o vi, +o of the mode in force or --noediting says otherwise,
+        though a shell that is not interactive then runs without one. The
+        state is lent for the listing and given back.
+*/
+fn shell_options_listed_at_start(writer write, bool as_commands)
+{
+        positive letters = shell_options;
+        positive named = shell_options_named;
+
+        if (shell_bash_compat)
+        {
+                positive emacs = (positive)1 << SHELL_OPTION_EMACS;
+                positive vi = (positive)1 << SHELL_OPTION_VI;
+
+                shell_options_named &= ~(emacs | vi);
+                if (shell_start_editing)
+                        shell_options_named |= shell_start_vi ? vi : emacs;
+        }
+        else
+                for (positive index = 0; index < SHELL_OPTION_NAMES; index++)
+                {
+                        p8 letter = shell_option_names[index].value;
+
+                        if (shell_options_said & ((positive)1 << index))
+                                continue;
+                        if (letter >= 'a' && letter <= 'z')
+                                shell_options |= SHELL_FLAG(letter);
+                        else
+                                shell_options_named |= (positive)1 << index;
+                }
+
+        shell_options_listed(write, as_commands);
+        shell_options = letters;
+        shell_options_named = named;
 }
 
 

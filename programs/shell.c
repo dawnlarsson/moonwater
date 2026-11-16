@@ -514,6 +514,9 @@ static positive shell_start_long_options(string_address address_to arguments,
                         shell_rcfile = arguments[at + 1];
                 else if (word_is(name, "norc"))
                         shell_norc = true;
+                //      Still the editor a listing on this line reads back.
+                else if (word_is(name, "noediting"))
+                        shell_start_editing = false;
                 else if (word_is(name, "version"))
                 {
                         /*
@@ -607,7 +610,11 @@ static bool shell_start_options(string_address address_to arguments,
                         if (value == 'c')
                                 invocation->command = true;
                         else if (value == 'm')
+                        {
                                 invocation->monitor = on;
+                                shell_options_said |=
+                                    (positive)1 << SHELL_OPTION_MONITOR;
+                        }
                         else if (value == 'l')
                         {
                                 if (on)
@@ -640,10 +647,12 @@ static bool shell_start_options(string_address address_to arguments,
                         else if (value == 'o')
                         {
                                 if (at + 1 == count)
-                                        shell_options_listed(log, !on);
+                                        shell_options_listed_at_start(log, !on);
                                 else if (word_is(arguments[at + 1], "monitor"))
                                 {
                                         invocation->monitor = on;
+                                        shell_options_said |=
+                                            (positive)1 << SHELL_OPTION_MONITOR;
                                         at++;
                                 }
                                 else if (!shell_option_named(arguments[++at],
