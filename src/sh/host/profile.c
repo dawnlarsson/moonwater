@@ -41,6 +41,7 @@
 #define PROFILE_SYMBOLS_PATH "/shell.symbols"
 #define PROFILE_MAPS_ROOM (1024 * 1024)
 #define PROFILE_MAPPINGS 4096
+#define PROFILE_CALLS 6           // the system calls kept a thread, the most seen
 
 //      perf_event_attr, as far as PERF_ATTR_SIZE_VER5 (112 bytes): the type, the size, the clock, the rate, what a sample holds, and
 //      the flags word. Laid out as the kernel reads it on every machine.
@@ -90,6 +91,10 @@ struct profile_thread
         positive ring_bytes;
         p64 samples, kernel;
         char name[16];
+        //      The system calls the thread was found in at the drains when its last samples were the kernel's: the number and how often.
+        p16 calls[PROFILE_CALLS];
+        p32 call_seen[PROFILE_CALLS];
+        p64 kernel_before;
 };
 
 static struct profile_state
@@ -161,7 +166,19 @@ static fn profile_read_maps(p32 process, p8 address_to text)
         positive at = 0;
 
         string_copy(path + length, "/maps");
-        got = file_slurp_once_at(AT_FDCWD, (string_address)path, text, PROFILE_MAPS_ROOM - 1);
+        //      Read to its end: the kernel hands /proc/PID/maps out a page or so a read, so one read is its first few mappings.
+        {
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+                bipolar part;
+
+                if (handle < 0)
+                        return;
+                got = 0;
+                while (got < PROFILE_MAPS_ROOM - 1 &&
+                       (part = system_read_retry((positive)handle, text + got, (positive)(PROFILE_MAPS_ROOM - 1 - got))) > 0)
+                        got += part;
+                system_close(handle);
+        }
         if (got <= 0)
                 return;
         text[got] = end;
@@ -377,6 +394,41 @@ static fn profile_drain(positive index)
         __atomic_store_n((p64 address_to)(page + PROFILE_RING_TAIL), tail, __ATOMIC_RELEASE);
 }
 
+//      Which system call a thread is in now (/proc/PID/task/TID/syscall's first number), counted when its samples since the last drain were
+//      the kernel's: what the kernel's share of it was spent in (a GPU's ioctl, a futex, a read).
+static fn profile_call_note(positive index)
+{
+        struct profile_thread address_to thread = &profile.threads[index];
+        p8 path[64] = "/proc/", text[32];
+        positive length, number;
+        bipolar got;
+
+        if (thread->kernel == thread->kernel_before)
+                return;
+        thread->kernel_before = thread->kernel;
+        length = positive_into_string(path + 6, (positive)profile.processes[thread->process]) + 6;
+        string_copy(path + length, "/task/");
+        length += 6;
+        length += positive_into_string(path + length, (positive)thread->tid);
+        string_copy(path + length, "/syscall");
+        got = host_read_kernel((string_address)path, text, sizeof(text));
+        if (got <= 0 || text[0] < '0' || text[0] > '9')
+                return;
+        number = string_digits_max(text, 5, null);
+        for (positive at = 0; at < PROFILE_CALLS; at++)
+                if (thread->call_seen[at] && thread->calls[at] == number)
+                {
+                        thread->call_seen[at]++;
+                        return;
+                }
+        for (positive at = 0; at < PROFILE_CALLS; at++)
+                if (!thread->call_seen[at])
+                {
+                        thread->calls[at] = (p16)number, thread->call_seen[at] = 1;
+                        return;
+                }
+}
+
 //      One thread's report: its share of a core, the kernel's part, and the functions or files of the rest.
 static fn profile_say_thread(positive index, positive seconds, p64 address_to counts, positive count_room)
 {
@@ -388,6 +440,20 @@ static fn profile_say_thread(positive index, positive seconds, p64 address_to co
                  thread->name[0] ? (string_address)thread->name : (string_address) "?",
                  (positive)(thread->samples * 100 / (PROFILE_HZ * seconds)),
                  (positive)(thread->samples ? thread->kernel * 100 / thread->samples : 0));
+        if (thread->kernel)
+        {
+                bool any = false;
+
+                for (positive at = 0; at < PROFILE_CALLS; at++)
+                        if (thread->call_seen[at])
+                        {
+                                if (!any)
+                                        host_say(log, "    in the kernel, in system calls:"), any = true;
+                                host_say(log, " %p (%p times)", (positive)thread->calls[at], (positive)thread->call_seen[at]);
+                        }
+                if (any)
+                        host_say(log, "\n");
+        }
         if (!user)
                 return;
         memory_zero(counts, count_room * sizeof(p64));
@@ -476,7 +542,10 @@ static b32 host_profile(string_address address_to arguments, positive count)
         {
                 host_pause(100000000);
                 for (positive at = 0; at < profile.thread_count; at++)
+                {
                         profile_drain(at);
+                        profile_call_note(at);
+                }
         }
 
         count_room = profile.symbol_count > profile.mapping_count ? profile.symbol_count : profile.mapping_count;
