@@ -9257,12 +9257,16 @@ COLD fn shell_set(writer write)
                                                 //      one is the restriction
                                                 //      speaking rather than a
                                                 //      mistyped option, and
-                                                //      bash answers 1 for it.
+                                                //      bash answers 1 for it
+                                                //      -- a failure, not a
+                                                //      usage error, so a
+                                                //      posix-mode script goes
+                                                //      on past it, where a
+                                                //      special builtin's
+                                                //      usage error ends one.
                                                 shell_set_refused_letter('+',
                                                                          'r');
-                                                shell_answer(
-                                                    shell_bash_compat ? 1 : 2);
-                                                exec_special_error_note();
+                                                shell_answer(1);
                                                 return;
                                         }
                                         if (on)
