@@ -4358,12 +4358,15 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
 /*
         The compositor asked for rows past the `had` in use, which every program found taken: the clipboard's door knocked (it wakes the
         compositor's loop, whose pass makes rows when fewer than its spares are free, compositor_rows_spare), and the table watched for
-        WINDOWS_ROWS_WAIT_MS for the rows to grow. 1 when they did; 0 when the table has no room for more (its capacity), no compositor
-        reads the door, or none came: the take is refused then, as a full table was.
+        the rows to grow, for as long as the compositor reads the door: while a busy compositor is making rows for others (a thousand
+        windows opened at once), the wait goes on, and it ends when the rows stop growing for WINDOWS_ROWS_WAIT_MS or the door has no
+        reader. 1 when they grew past `had`; 0 when the table has no room for more (its capacity), no compositor reads the door, or none
+        came: the take is refused then, as a full table was.
 */
-#define WINDOWS_ROWS_WAIT_MS 2000
+#define WINDOWS_ROWS_WAIT_MS 30000
 static int windows_rows_ask(const struct windows *table, unsigned int had)
 {
+        unsigned int seen = windows_rows(table);
         long door;
 
         if (had >= windows_room(table))
@@ -4376,8 +4379,11 @@ static int windows_rows_ask(const struct windows *table, unsigned int had)
                 long nap[2] = {0, 1000000}; // a millisecond, then the table looked at again
                 char byte = 0;
 
-                if (waited % 100 == 0)
-                        window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0);
+                // Rows made for others since the last look: the compositor is at it, and the wait starts again.
+                if (windows_rows(table) != seen)
+                        seen = windows_rows(table), waited = 0;
+                if (waited % 100 == 0 && window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0) == -32) // EPIPE: no compositor
+                        break;
                 window_call(WINDOW_SYS_PPOLL, 0, 0, (long)nap, 0, 8, 0);
         }
         window_call(WINDOW_SYS_CLOSE, door, 0, 0, 0, 0, 0);

@@ -2664,17 +2664,29 @@ static unsigned int compositor_rows_grow(unsigned int want)
 {
         unsigned int row = compositor_rows_in_use, to = want < compositor_rows_room ? want : compositor_rows_room;
 
-        if (!compositor.table || to <= row || !compositor_rows_make(to))
+        long refused = 0;
+
+        if (!compositor.table || to <= row)
                 return compositor_rows_in_use;
-        for (; row < to; row++)
+        if (!compositor_rows_make(to))
+                refused = -12; // ENOMEM
+        for (; !refused && row < to; row++)
         {
-                if (compositor_door_make(row) < 0)
+                if ((refused = compositor_door_make(row)) < 0)
                         break;
                 if (compositor_doors.done >= 0 && !compositor_door_thread(row))
                 {
                         system_close(compositor.door[row]), system_close(compositor.wake[row]);
+                        refused = -11; // EAGAIN: the kernel made no thread
                         break;
                 }
+        }
+        // Said at each stop, so the log says where a refusal of the kernel's held the rows.
+        if (refused)
+        {
+                string_format(log, "compositor: rows made to %p of the %p asked, the kernel refused the next (error %b)\n", (positive)row,
+                              (positive)to, (bipolar)refused);
+                log_flush();
         }
         if (row > compositor_rows_in_use)
         {
