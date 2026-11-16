@@ -1283,6 +1283,13 @@ class Runner:
         self.root.mkdir(parents=True, exist_ok=True)
         self.emulator = emulator
         self.locale = locale
+        #       MW_LOCPATH=DIR: the locales a case may name, from DIR (what
+        #       localedef writes, en_US.UTF-8/LC_CTYPE and the rest) rather
+        #       than the system's, for a box that lacks one and should not be
+        #       changed. Every case's environment is made afresh below, so
+        #       nothing of the caller's reaches either program but this, and
+        #       it reaches the reference and the candidate alike.
+        self.locpath = os.environ.get("MW_LOCPATH") or None
         self.names = self.root / "names"
         self.confinement = Confinement(self.root)
         self.shell = None
@@ -1372,6 +1379,8 @@ class Runner:
                        "LANG": self.locale, "TZ": "UTC0", "HOME": str(directory),
                        "TMPDIR": str(directory), "COLUMNS": "80", "LINES": "24",
                        "TERM": "dumb"}
+        if self.locpath:
+            environment["LOCPATH"] = self.locpath
         if spec is not None:
             environment.update(dict(spec.env))
         environment.update(dict(case.env))
@@ -1438,6 +1447,45 @@ class Runner:
 
 def loose_stderr(data):
     return b"said" if data.strip() else b""
+
+
+#       What a reference says when it cannot set the locale a case asks for:
+#       bash's warning, at startup or at the assignment ("bash: warning:
+#       setlocale: LC_ALL: cannot change locale (en_US.UTF-8)", then ": No
+#       such file or directory" after an export). dash sets no locale and the
+#       GNU tools fall back to C without a word, so bash's is the only one.
+LOCALE_REFUSED = re.compile(rb"setlocale: [A-Z_]+: cannot change locale \(([^()\s]+)\)")
+_LOCALES_SUPPORTED = []
+
+
+def locale_lacked(want):
+    """The locale a reference could not set, when that is a locale this box
+    lacks and a box can have, else None. Such a reference answered in C
+    under a warning the candidate never gives, which is an answer about the
+    box and not the case: the case is an invalid oracle here. A name no C
+    library builds (glibc's SUPPORTED list, where there is one, says which)
+    is the case's to ask about, and stays a case."""
+    match = LOCALE_REFUSED.search(want["stderr"])
+    if not match:
+        return None
+    name = match.group(1).decode("utf-8", "replace")
+    if not _LOCALES_SUPPORTED:
+        try:
+            text = Path("/usr/share/i18n/SUPPORTED").read_text(errors="replace")
+            _LOCALES_SUPPORTED.append({_locale_key(line.split()[0]) for line in text.splitlines()
+                                       if line.strip() and not line.startswith("#")})
+        except OSError:
+            _LOCALES_SUPPORTED.append(None)
+    supported = _LOCALES_SUPPORTED[0]
+    return name if supported is None or _locale_key(name) in supported else None
+
+
+def _locale_key(name):
+    """en_US.UTF-8 and en_US.utf8 are one locale: glibc folds a codeset to
+    lower case without its punctuation."""
+    language, dot, codeset = name.partition(".")
+    codeset, at, modifier = codeset.partition("@")
+    return language + dot + re.sub(r"[^a-z0-9]", "", codeset.lower()) + at + modifier
 
 
 def differences(want, got, policy="loose"):
@@ -2725,6 +2773,7 @@ def main(argv=None):
     unstable = collections.Counter()
     absent = collections.Counter()
     invalid = 0
+    lacked = collections.defaultdict(collections.Counter)
     tiers = collections.Counter()
     failures = collections.defaultdict(collections.Counter)
     shown = collections.Counter()
@@ -2823,6 +2872,14 @@ def main(argv=None):
                 invalid += 1
                 print(f"  INVALID ORACLE {key} {label_of(case)} status={want['status']} "
                       f"timeout={want['timeout']}: {case.words()}")
+                continue
+            #       So is one that could not set the locale the case asks for,
+            #       on a box that lacks it: NOT RUN, said once for the run and
+            #       on its family's line, never a FAIL nor an agreement.
+            missing = locale_lacked(want)
+            if missing:
+                invalid += 1
+                lacked[tally_key][missing] += 1
                 continue
             total[tally_key] += 1
             tiers[case.tier] += 1
@@ -2982,12 +3039,14 @@ def main(argv=None):
     #       narrowed run walks a different set and cannot be held to them.
     whole_run = not (args.replay or selected or modes or families or args.budget)
 
-    for key in sorted(set(total) | set(absent)):
+    for key in sorted(set(total) | set(absent) | set(lacked)):
         line = f"  {key:28} {passed[key]} of {total[key]}"
         if unstable[key]:
             line += f"  ({unstable[key]} recorded unstable, counted in neither column)"
         if absent[key]:
             line += f"  ({absent[key]} NOT RUN -- no reference or candidate program)"
+        for name, count in sorted(lacked[key].items()):
+            line += f"  ({count} NOT RUN -- no {name} locale here (locale -a))"
         print(line)
         #       The runner adds every row up and calls a shortfall a
         #       failure. That is right for a domain meant to agree on
@@ -3037,6 +3096,13 @@ def main(argv=None):
                 print(f"  floor {domain}: {agreed} of {ran}, within the {slack} "
                       f"the recorded {want} allows for")
     distinct = sum(len(v) for v in failures.values())
+    lacked_all = collections.Counter()
+    for names in lacked.values():
+        lacked_all.update(names)
+    for name, count in sorted(lacked_all.items()):
+        print(f"  NOT RUN -- no {name} locale here (locale -a): {count} cases whose reference could "
+              f"not set it, counted with the invalid oracles (MW_LOCPATH=DIR gives both programs "
+              f"the locales in DIR)")
     print(f"  tiers: " + " ".join(f"{k}={v}" for k, v in sorted(tiers.items())))
     print(f"  differential {all_passed} of {all_total}; failure classes={distinct}, "
           f"invalid oracles={invalid}, unstable={sum(unstable.values())}, "

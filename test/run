@@ -150,6 +150,73 @@ TEST_TIMES="$work/times"
 export TEST_TIMES
 [ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_TIMES"
 
+#       Every run of a check binary a lane built is bounded: one that hangs (a
+#       FIFO open, a lost wakeup, a qemu-user deadlock) is ended after
+#       MW_BINARY_TIMEOUT seconds and fails its lane with a line that names it
+#       and says "timed out after N s", and the lane goes on to its next
+#       binary, where it held the run, and a slot of a shared machine, until
+#       something outside killed it. The default, 1800, is from the slowest
+#       runs there are, timed one by one on the shared box (4 processors) on
+#       2026-11-16 at d3962807: verify's riscv64 check under qemu-user took
+#       308 s at a load of 7.7 and its arm64 one 124 s at 9.0, and nothing
+#       else in the verify, format, stream and lock lanes passed 11 s. That
+#       is six times the slowest, and the slowest at a load of 30 (a fourth
+#       of the processor it had) still finishes with a third of the limit to
+#       spare. MW_BINARY_TIMEOUT=0 is no limit: a run under gdb, or a machine
+#       slower than that.
+#
+#       run_limit is a word in front of the runner at each site and never part
+#       of target_runner, because an empty runner is how a lane knows the
+#       target is this machine. --foreground keeps the binary in the run's own
+#       process group, so Ctrl-C, and a kill of the whole run's group (an
+#       outer timeout's), reach it at once as they did; without it timeout(1)
+#       takes a group of its own, which none of those reach, and the run they
+#       meant to stop waits out the limit first. The limit ends the binary
+#       itself, a KILL ten seconds after the TERM, and a child of it left
+#       hanging is not waited for. Where there is no timeout(1) that takes -k
+#       (macOS has none) the binaries run unbounded and the run says so once,
+#       before its first lane.
+binary_timeout=${MW_BINARY_TIMEOUT:-1800}
+run_limit=
+run_limit_missing=
+case $binary_timeout in
+'' | *[!0-9]*)
+        echo "run: MW_BINARY_TIMEOUT=$binary_timeout is not a number of seconds (0 for no limit)" >&2
+        exit 2 ;;
+esac
+if [ "$binary_timeout" = 0 ]; then
+        :
+elif ! timeout -k 10 5 true 2> /dev/null; then
+        run_limit_missing="no timeout(1) that takes -k here"
+elif timeout --foreground -k 10 5 true 2> /dev/null; then
+        run_limit="timeout --foreground -k 10 $binary_timeout"
+else
+        run_limit="timeout -k 10 $binary_timeout"
+fi
+
+#       After a run under run_limit, its status: true when the limit ended it,
+#       with run_limit_why saying how. timeout(1) answers 124 when its TERM
+#       ended the run and 137 when the KILL ten seconds on did, which is also
+#       how a binary the OOM killer took ends, so 137 says both.
+run_limit_ended()
+{
+        [ -n "$run_limit" ] || return 1
+        case $1 in
+        124) run_limit_why="timed out after $binary_timeout s" ;;
+        137) run_limit_why="timed out after $binary_timeout s and was killed when TERM did not end it, or the OOM killer took it" ;;
+        *) return 1 ;;
+        esac
+}
+
+#       The same said as a line of the lane that names the binary, for a site
+#       whose failures are notes, and false then: run_limit_said STATUS BINARY.
+run_limit_said()
+{
+        run_limit_ended "$1" || return 0
+        note "${2##*/} $run_limit_why"
+        return 1
+}
+
 #       The build cache, shared with differential.py's build_run: a compile
 #       is answered from it when the compiler, the command line, the files on
 #       it and the preprocessed text are the ones that made an entry.
@@ -3150,7 +3217,9 @@ lane_standard()
 {
         freestanding_check standard "$work/standard" || return 1
 
-        "$work/standard" > "$work/standard.out" 2>&1
+        $run_limit "$work/standard" > "$work/standard.out" 2>&1
+        standard_limited=0
+        run_limit_said $? "$work/standard" || standard_limited=1
         sed -n '/FAILED/p' "$work/standard.out"
 
         line=$(sed -n 's/^\([0-9]*\) passed, \([0-9]*\) failed$/\1 \2/p' \
@@ -3162,6 +3231,7 @@ lane_standard()
         failed=${line#* }
 
         tally standard "$passed" "$((passed + failed))"
+        failed=$((failed + standard_limited))
 
         #       The library is meant to be usable with nothing under it. The
         #       platform layer is what talks to a kernel; this is the half
@@ -3579,9 +3649,10 @@ kernel_narrow_one()
                         "$kernel_narrow_object.k.o" ||
                         { kernel_narrow_failed=1; continue; }
 
-                $target_runner "$kernel_narrow_object" \
+                $run_limit $target_runner "$kernel_narrow_object" \
                         > "$kernel_narrow_object.out" 2>&1
                 kernel_narrow_run=$?
+                run_limit_said "$kernel_narrow_run" "$kernel_narrow_object"
                 sed -n '/FAIL/p' "$kernel_narrow_object.out"
                 line=$(sed -n 's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
                         "$kernel_narrow_object.out")
@@ -3654,8 +3725,9 @@ lane_libdiff()
                 exit 1
         }
         ASAN_OPTIONS=allow_user_segv_handler=1:detect_leaks=0 \
-                "$libdiff_work/libdiff" > "$libdiff_work/out" 2>&1
+                $run_limit "$libdiff_work/libdiff" > "$libdiff_work/out" 2>&1
         libdiff_status=$?
+        run_limit_said "$libdiff_status" "$libdiff_work/libdiff"
         sed -n '/FAIL\|runtime error\|ERROR: AddressSanitizer/p' "$libdiff_work/out" | head -40
         libdiff_line=$(sed -n 's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
                 "$libdiff_work/out" | tail -1)
@@ -3673,8 +3745,9 @@ text_asm_one()
                 src/sh/text.c text_blank_field > "$work/text_asm.h" || return 1
         target_build freestanding_check text_asm "$work/text_asm.$target" "$target" \
                 "-I$work" || return 1
-        $target_runner "$work/text_asm.$target" > "$work/text_asm.$target.out" 2>&1
+        $run_limit $target_runner "$work/text_asm.$target" > "$work/text_asm.$target.out" 2>&1
         status=$?
+        run_limit_said "$status" "$work/text_asm.$target"
         sed -n '/FAIL/p' "$work/text_asm.$target.out"
         line=$(sed -n 's/.*[^0-9]\([0-9][0-9]*\) checks, \([0-9][0-9]*\) failures.*/\1 \2/p' \
                 "$work/text_asm.$target.out" | tail -1)
@@ -3701,8 +3774,9 @@ shell_asm_one()
                 src/sh/expand.c arith_plain_natural arith_plain_scalar; } > "$work/shell_asm.h" || return 1
         target_build freestanding_check shell_asm "$work/shell_asm.$target" "$target" \
                 "-I$work" || return 1
-        $target_runner "$work/shell_asm.$target" > "$work/shell_asm.$target.out" 2>&1
+        $run_limit $target_runner "$work/shell_asm.$target" > "$work/shell_asm.$target.out" 2>&1
         status=$?
+        run_limit_said "$status" "$work/shell_asm.$target"
         sed -n '/FAIL/p' "$work/shell_asm.$target.out"
         line=$(sed -n 's/.*[^0-9]\([0-9][0-9]*\) checks, \([0-9][0-9]*\) failures.*/\1 \2/p' \
                 "$work/shell_asm.$target.out" | tail -1)
@@ -3727,13 +3801,15 @@ known_one()
         runner=$target_runner
         checks=0
         bad=0
+        known_limited=0
 
         for one in $KNOWN_FILES; do
                 target_build freestanding_check "$one" \
                         "$work/known.$name.$one" "$name" || return 1
 
-                $runner "$work/known.$name.$one" > "$work/known.$name.$one.out" 2>&1
+                $run_limit $runner "$work/known.$name.$one" > "$work/known.$name.$one.out" 2>&1
                 status=$?
+                run_limit_said "$status" "$work/known.$name.$one" || known_limited=1
 
                 sed -n '/FAIL/p' "$work/known.$name.$one.out"
 
@@ -3755,7 +3831,7 @@ known_one()
 
         tally "known-$name" "$((checks - bad))" "$checks"
 
-        [ "$bad" = 0 ]
+        [ "$bad" = 0 ] && [ "$known_limited" = 0 ]
 }
 
 #       A section's _reference twin: the same cases built by the host compiler
@@ -3773,8 +3849,9 @@ glibc_twin()
                 sed 's/^/    /' "$work/$twin_name.reference.err" | head -10
                 return 1
         fi
-        "$work/$twin_name.reference" > "$work/$twin_name.reference.out" 2>&1
+        $run_limit "$work/$twin_name.reference" > "$work/$twin_name.reference.out" 2>&1
         twin_status=$?
+        run_limit_said "$twin_status" "$work/$twin_name.reference"
         twin_line=$(sed -n 's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
                 "$work/$twin_name.reference.out")
         [ -n "$twin_line" ] || { note "$twin_name-glibc printed no verdict"; return 1; }
@@ -4293,10 +4370,14 @@ environment_sizes_one()
                         sweep_index=$((sweep_index + 1))
                 done
                 sweep_total=$((sweep_total + 1))
+                #       The limit in front of env, so env -i still hands the
+                #       binary the entries and nothing else.
                 # shellcheck disable=SC2086
-                if ! "$sweep_env_command" -i $sweep_fill $sweep_runner \
+                $run_limit "$sweep_env_command" -i $sweep_fill $sweep_runner \
                         "$sweep_binary" > "$work/$sweep_suite.$target.env" 2>&1
-                then
+                sweep_status=$?
+                if [ "$sweep_status" != 0 ]; then
+                        run_limit_said "$sweep_status" "$sweep_binary"
                         note "$target: $sweep_suite fails with $sweep_size environment entries:"
                         sed -n '/FAILED/p' "$work/$sweep_suite.$target.env" | sed 's/^/    /' | head -5
                         sweep_bad=$((sweep_bad + 1))
@@ -4358,7 +4439,8 @@ numbers_against_glibc()
                 exit 2
         fi
 
-        "$reference" 0 "$blocks" > "$reference.out" || {
+        $run_limit "$reference" 0 "$blocks" > "$reference.out" || {
+                run_limit_said $? "$reference"
                 note "numbers-glibc: the reference did not finish"
                 exit 1
         }
@@ -4376,7 +4458,8 @@ numbers_against_glibc()
                 target_build freestanding_check number_differential \
                         "$program" "$target" || { failed=1; continue; }
 
-                $target_runner "$program" 0 "$count" > "$program.out" 2>&1
+                $run_limit $target_runner "$program" 0 "$count" > "$program.out" 2>&1
+                numbers_status=$?
                 head -n "$count" "$reference.out" > "$program.expected"
 
                 differing=$(diff "$program.expected" "$program.out" | grep -c '^>')
@@ -4384,6 +4467,7 @@ numbers_against_glibc()
                 tally "numbers-glibc-$target" \
                         "$(( (count - differing) * 65536 ))" "$total"
 
+                run_limit_said "$numbers_status" "$program" || { failed=1; continue; }
                 [ "$differing" = 0 ] && continue
                 failed=1
 
@@ -4392,8 +4476,10 @@ numbers_against_glibc()
                 note "numbers-glibc $target: $differing of $count blocks differ from glibc; block ${block:-?} case by case:"
                 [ -n "$block" ] || continue
 
-                "$reference" "$block" 1 "$block" > "$program.cases.expected"
-                $target_runner "$program" "$block" 1 "$block" > "$program.cases" 2>&1
+                $run_limit "$reference" "$block" 1 "$block" > "$program.cases.expected"
+                run_limit_said $? "$reference"
+                $run_limit $target_runner "$program" "$block" 1 "$block" > "$program.cases" 2>&1
+                run_limit_said $? "$program"
                 diff "$program.cases.expected" "$program.cases" |
                         sed 's/^/    /' | head -24
         done
@@ -4425,10 +4511,13 @@ lane_scan()
         scan_outcome=0
         freestanding_checks_lane scan scan || scan_outcome=$?
 
-        if ! ${CC:-gcc} -O2 -w -o "$work/scan_reference" \
-                -DCHECK_scan_differential_reference test/checks.c ||
-                ! "$work/scan_reference" > "$work/scan_reference.out"
-        then
+        scan_reference_status=0
+        ${CC:-gcc} -O2 -w -o "$work/scan_reference" \
+                -DCHECK_scan_differential_reference test/checks.c &&
+                $run_limit "$work/scan_reference" > "$work/scan_reference.out" ||
+                scan_reference_status=$?
+        if [ "$scan_reference_status" != 0 ]; then
+                run_limit_said "$scan_reference_status" "$work/scan_reference"
                 note "scan_differential: the glibc reference did not build or finish"
                 return 1
         fi
@@ -4442,20 +4531,24 @@ scan_differential_one()
         sd_binary=$work/scan_differential.$target
         target_build freestanding_check scan_differential "$sd_binary" \
                 "$target" || return 1
-        $target_runner "$sd_binary" > "$sd_binary.out" 2>&1
+        $run_limit $target_runner "$sd_binary" > "$sd_binary.out" 2>&1
+        sd_status=$?
         sd_cases=$(sed -n 's/^cases //p' "$work/scan_reference.out")
         sd_agreed=$(awk -v cases="$sd_cases" 'NR == FNR { want[FNR] = $0; next }
                 $0 == want[FNR] && $1 == "block" {
                         same += ($2 + 1) * 65536 > cases ? cases - $2 * 65536 : 65536
                 } END { print same + 0 }' "$work/scan_reference.out" "$sd_binary.out")
         tally "scan_differential-$target" "$sd_agreed" "$sd_cases"
+        run_limit_said "$sd_status" "$sd_binary" || return 1
         cmp -s "$work/scan_reference.out" "$sd_binary.out" && return 0
 
         sd_block=$(diff "$work/scan_reference.out" "$sd_binary.out" |
                 sed -n 's/^< block \([0-9]*\) .*/\1/p' | head -1)
         note "scan_differential-$target: block ${sd_block:-?} differs from glibc:"
-        "$work/scan_reference" $((${sd_block:-0} * 65536)) 65536 detail > "$sd_binary.want"
-        $target_runner "$sd_binary" $((${sd_block:-0} * 65536)) 65536 detail > "$sd_binary.got" 2>&1
+        $run_limit "$work/scan_reference" $((${sd_block:-0} * 65536)) 65536 detail > "$sd_binary.want"
+        run_limit_said $? "$work/scan_reference"
+        $run_limit $target_runner "$sd_binary" $((${sd_block:-0} * 65536)) 65536 detail > "$sd_binary.got" 2>&1
+        run_limit_said $? "$sd_binary"
         diff "$sd_binary.want" "$sd_binary.got" | head -20 | sed 's/^/    /'
         return 1
 }
@@ -4490,7 +4583,8 @@ transcript_against_glibc()
                 return 1
         fi
         tg_failed=0
-        "$tg_reference" > "$tg_reference.out" || {
+        $run_limit "$tg_reference" > "$tg_reference.out" || {
+                run_limit_said $? "$tg_reference"
                 note "$tg_name: glibc itself failed a check, which is a bug here"
                 sed -n '/FAIL/p' "$tg_reference.out" | head -10
                 tg_failed=1
@@ -4570,7 +4664,7 @@ lane_math()
         math_outcome=$?
         if ${CC:-gcc} -O2 -w -o "$work/math_reference" \
                 -DCHECK_math_differential_reference test/checks.c -lm &&
-                "$work/math_reference" > "$work/math_reference.out"
+                $run_limit "$work/math_reference" > "$work/math_reference.out"
         then
                 check_input=$work/math_reference.out
                 freestanding_checks_lane math_differential math_differential
@@ -4580,6 +4674,7 @@ lane_math()
                 esac
                 check_input=
         else
+                run_limit_said $? "$work/math_reference"
                 note "math_differential: the glibc reference did not build or finish"
                 math_outcome=1
         fi
@@ -4658,13 +4753,16 @@ format_differential()
                 return 2
         fi
 
-        if ! $fd_host -O2 -w -o "$work/format_reference" \
+        fd_reference_status=0
+        $fd_host -O2 -w -o "$work/format_reference" \
                 -DCHECK_format_differential_reference test/checks.c \
-                2> "$work/format_reference.err" ||
-                ! "$work/format_reference" 0 $((fd_most * 65536)) \
-                        > "$work/format_reference.out" ||
-                ! "$work/format_reference" grid > "$work/format_reference.grid"
-        then
+                2> "$work/format_reference.err" &&
+                $run_limit "$work/format_reference" 0 $((fd_most * 65536)) \
+                        > "$work/format_reference.out" &&
+                $run_limit "$work/format_reference" grid > "$work/format_reference.grid" ||
+                fd_reference_status=$?
+        if [ "$fd_reference_status" != 0 ]; then
+                run_limit_said "$fd_reference_status" "$work/format_reference"
                 note "format_differential: the glibc reference did not build or finish"
                 sed 's/^/    /' "$work/format_reference.err" | head -10
                 return 1
@@ -4703,9 +4801,14 @@ format_differential_one()
         target_build freestanding_check format_differential "$fd_binary" \
                 "$fd_name" $fd_flags || return 1
 
-        $fd_runner "$fd_binary" 0 $((fd_count * 65536)) > "$fd_binary.out" 2>&1
+        fd_limited=0
+        $run_limit $fd_runner "$fd_binary" 0 $((fd_count * 65536)) > "$fd_binary.out" 2>&1
         fd_status=$?
-        $fd_runner "$fd_binary" grid >> "$fd_binary.out" 2>&1 || fd_status=$?
+        run_limit_said "$fd_status" "$fd_binary" || fd_limited=1
+        $run_limit $fd_runner "$fd_binary" grid >> "$fd_binary.out" 2>&1 || {
+                fd_status=$?
+                run_limit_said "$fd_status" "$fd_binary grid" || fd_limited=1
+        }
 
         head -n "$fd_count" "$work/format_reference.out" > "$fd_binary.want"
         cat "$work/format_reference.grid" >> "$fd_binary.want"
@@ -4721,6 +4824,7 @@ format_differential_one()
                 } END { print same + 0 }' "$fd_binary.want" "$fd_binary.out")
 
         tally "$fd_suite-$fd_name" "$fd_agreed" "$fd_total"
+        [ "$fd_limited" = 0 ] || return 1
 
         [ "$fd_status" = 0 ] && [ "$fd_agreed" = "$fd_total" ] &&
                 cmp -s "$fd_binary.want" "$fd_binary.out" && return 0
@@ -4736,9 +4840,11 @@ format_differential_one()
 
         note "$fd_suite-$fd_name: status $fd_status, ${fd_line%% *} $fd_block differs from glibc:"
         # shellcheck disable=SC2086 # the space is several arguments
-        "$work/format_reference" $fd_space > "$fd_binary.want.detail"
+        $run_limit "$work/format_reference" $fd_space > "$fd_binary.want.detail"
+        run_limit_said $? "$work/format_reference"
         # shellcheck disable=SC2086
-        $fd_runner "$fd_binary" $fd_space > "$fd_binary.detail" 2>&1
+        $run_limit $fd_runner "$fd_binary" $fd_space > "$fd_binary.detail" 2>&1
+        run_limit_said $? "$fd_binary"
         diff "$fd_binary.want.detail" "$fd_binary.detail" | head -20 |
                 sed 's/^/    /'
         return 1
@@ -4835,7 +4941,12 @@ then
         exit 2
 fi
 
-"$work/reference.elf" > "$work/reference.out" 2>&1
+$run_limit "$work/reference.elf" > "$work/reference.out" 2>&1
+if run_limit_ended $?; then
+        lost reference "$run_limit_why"
+        counted 1
+        exit 1
+fi
 
 if [ ! -s "$work/reference.out" ]; then
         printf '  the glibc reference printed nothing -- not run\n'
@@ -4857,8 +4968,12 @@ spool_one()
                 return 0
         fi
 
-        if $runner "$work/spool.$target" > "$work/$target.out" 2>&1; then
+        $run_limit $runner "$work/spool.$target" > "$work/$target.out" 2>&1
+        spool_status=$?
+        if [ "$spool_status" = 0 ]; then
                 won
+        elif run_limit_ended "$spool_status"; then
+                lost "$target" "$run_limit_why"
         else
                 lost "$target" "internal invariant failed"
         fi
@@ -4955,7 +5070,8 @@ $host -O2 -w -o "$work/s.reference" -DCHECK_stream_standard_reference \
 $host -O2 -w -o "$work/b.reference" -DCHECK_stream_buffering_reference \
         test/checks.c 2>> "$work/ref.err" || exit 2
 
-"$work/t.reference" > "$work/t.reference.out" 2>&1
+$run_limit "$work/t.reference" > "$work/t.reference.out" 2>&1
+! run_limit_ended $? || lost 'reference internal invariants' "$run_limit_why"
 if timeout 10 "$work/t.reference" --allocation; then
         won
 else
@@ -4964,12 +5080,18 @@ fi
 
 printf 'alpha\nbeta\n\ngamma' > "$work/input.txt"
 
-"$work/s.reference" < "$work/input.txt" \
+$run_limit "$work/s.reference" < "$work/input.txt" \
         > "$work/s.reference.out" 2> "$work/s.reference.err" 3> "$work/s.reference.trace"
+! run_limit_ended $? || lost 'reference standard on files' "$run_limit_why"
 
+#       The run's status, which a pipeline's middle does not give, kept in a
+#       file beside it.
 printf 'alpha\nbeta\n\ngamma' |
-        "$work/s.reference" 2> "$work/p.reference.err" 3> "$work/p.reference.trace" |
+        { $run_limit "$work/s.reference" 2> "$work/p.reference.err" 3> "$work/p.reference.trace"
+          echo $? > "$work/p.reference.status"; } |
         cat > "$work/p.reference.out"
+! run_limit_ended "$(cat "$work/p.reference.status")" ||
+        lost 'reference standard on pipes' "$run_limit_why"
 
 #
 #       What is on disk while the program is still holding it. script's own
@@ -4982,18 +5104,23 @@ if command -v script > /dev/null 2>&1; then
         terminal_ready=yes
 fi
 
+#       Both are given the run with run_limit in front of it, and a run the
+#       limit ended leaves held.why for held_limited, which makes it a row of
+#       its own: what was held at the pause is said either way. script -e
+#       answers the run's status, which is all -e changes.
 held_on_file() {
-        rm -f "$work/held.out"
+        rm -f "$work/held.out" "$work/held.why"
         "$@" > "$work/held.out" 2>/dev/null &
         held=$!
         sleep 0.35
         wc -c < "$work/held.out" | tr -d ' '
         wait $held 2>/dev/null
+        ! run_limit_ended $? || echo "$run_limit_why" > "$work/held.why"
 }
 
 held_on_terminal() {
-        rm -f "$work/held.tty"
-        script -q -f -c "$*" "$work/held.tty" > /dev/null 2>&1 &
+        rm -f "$work/held.tty" "$work/held.why"
+        script -q -e -f -c "$*" "$work/held.tty" > /dev/null 2>&1 &
         held=$!
         sleep 0.35
         # The typescript carries a header line of its own; only what follows
@@ -5004,17 +5131,25 @@ held_on_terminal() {
                 echo no
         fi
         wait $held 2>/dev/null
+        ! run_limit_ended $? || echo "$run_limit_why" > "$work/held.why"
+}
+
+held_limited() {
+        [ -s "$work/held.why" ] || return 0
+        lost "$1" "$(cat "$work/held.why")"
 }
 
 #       won always succeeds, so each "&& won ||" below loses only on the test.
-reference_on_file=$(held_on_file "$work/b.reference")
+reference_on_file=$(held_on_file $run_limit "$work/b.reference")
 [ "$reference_on_file" = 0 ] && won ||
         lost 'reference blocks on a file' "held $reference_on_file bytes, wanted 0"
+held_limited 'reference blocks on a file'
 
 if [ "$terminal_ready" = yes ]; then
-        reference_on_terminal=$(held_on_terminal "$work/b.reference")
+        reference_on_terminal=$(held_on_terminal "$run_limit $work/b.reference")
         [ "$reference_on_terminal" = yes ] && won ||
                 lost 'reference lines on a terminal' 'nothing had been written'
+        held_limited 'reference lines on a terminal'
 fi
 
 #
@@ -5070,11 +5205,14 @@ stream_one()
                 return 0
         fi
 
-        if timeout 30 $runner "$work/t.$target" > "$work/t.$target.out" 2>&1; then
-                won
-        else
-                lost "$target internal invariants" "test returned failure"
-        fi
+        #       Its own limit, tighter than run_limit, and said as one when it is
+        #       what ended the run.
+        timeout 30 $runner "$work/t.$target" > "$work/t.$target.out" 2>&1
+        case $? in
+        0) won ;;
+        124) lost "$target internal invariants" "timed out after 30 s" ;;
+        *) lost "$target internal invariants" "test returned failure" ;;
+        esac
 
         if diff -q "$work/t.reference.out" "$work/t.$target.out" > /dev/null; then
                 won
@@ -5090,13 +5228,17 @@ stream_one()
                         "$(diff -r "$work/reference" "$work/$target" 2>&1 | head -4 | tr '\n' '|')"
         fi
 
-        $runner "$work/s.$target" < "$work/input.txt" \
+        $run_limit $runner "$work/s.$target" < "$work/input.txt" \
                 > "$work/s.$target.out" 2> "$work/s.$target.err" 3> "$work/s.$target.trace"
+        ! run_limit_ended $? || lost "$target standard on files" "$run_limit_why"
 
         printf 'alpha\nbeta\n\ngamma' |
-                $runner "$work/s.$target" \
-                        2> "$work/p.$target.err" 3> "$work/p.$target.trace" |
+                { $run_limit $runner "$work/s.$target" \
+                        2> "$work/p.$target.err" 3> "$work/p.$target.trace"
+                  echo $? > "$work/p.$target.status"; } |
                 cat > "$work/p.$target.out"
+        ! run_limit_ended "$(cat "$work/p.$target.status")" ||
+                lost "$target standard on pipes" "$run_limit_why"
 
         for shape in s:files p:pipes; do
                 for part in out err trace; do
@@ -5111,14 +5253,16 @@ stream_one()
                 done
         done
 
-        held=$(held_on_file $runner "$work/b.$target")
+        held=$(held_on_file $run_limit $runner "$work/b.$target")
         [ "$held" = 0 ] && won ||
                 lost "$target blocks on a file" "held $held bytes, wanted 0"
+        held_limited "$target blocks on a file"
 
         if [ "$terminal_ready" = yes ]; then
-                held=$(held_on_terminal "$runner $work/b.$target")
+                held=$(held_on_terminal "$run_limit $runner $work/b.$target")
                 [ "$held" = yes ] && won ||
                         lost "$target lines on a terminal" 'nothing had been written'
+                held_limited "$target lines on a terminal"
         fi
 }
 
@@ -5173,8 +5317,11 @@ then
         exit 1
 fi
 
-if ! "$work/allocator.reference" > "$work/allocator.reference.out"
+$run_limit "$work/allocator.reference" > "$work/allocator.reference.out"
+allocator_reference_status=$?
+if [ "$allocator_reference_status" != 0 ]
 then
+        run_limit_said "$allocator_reference_status" "$work/allocator.reference"
         note "allocator: glibc itself failed the test, which is a bug here"
         failed=1
 fi
@@ -5247,16 +5394,17 @@ freestanding_checks_one()
              [ "$suite" = net ] || [ "$suite" = storage_io ] ||
              [ "$suite" = bowl ] || [ "$suite" = socket ]; } &&
                 [ -n "$runner" ]; then
-                $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
+                $run_limit $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?
         elif [ -n "${check_input-}" ]; then
-                $runner "$work/$suite.$name" < "$check_input" \
+                $run_limit $runner "$work/$suite.$name" < "$check_input" \
                         > "$work/$suite.$name.out" 2>&1
                 status=$?
         else
-                $runner "$work/$suite.$name" > "$work/$suite.$name.out" 2>&1
+                $run_limit $runner "$work/$suite.$name" > "$work/$suite.$name.out" 2>&1
                 status=$?
         fi
+        run_limit_said "$status" "$work/$suite.$name"
 
         if [ "$suite" = verify ]; then
                 sed -n '/FAIL/p;/ABSENT/p;/under neither name here/p;/NOT RUN/p' \
@@ -5400,8 +5548,9 @@ tight_check_one()
         [ "$target" = "$host_arch" ] && [ -z "$target_runner" ] || return 0
         target_build freestanding_check "$1" "$work/$1.tight" "$target" \
                 -DMOONWATER_STRICT=2 || return 1
-        "$work/$1.tight" > "$work/$1.tight.out" 2>&1
+        $run_limit "$work/$1.tight" > "$work/$1.tight.out" 2>&1
         tight_status=$?
+        run_limit_said "$tight_status" "$work/$1.tight"
         sed -n '/FAIL/p;/NOT RUN/p' "$work/$1.tight.out"
         tight_line=$(sed -n \
                 's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
@@ -7553,10 +7702,15 @@ clang_one()
         mkdir -p "$work/clang-bin.$clang_target" &&
                 ln -sf "$work/clang-shell.$clang_target" "$work/clang-bin.$clang_target/sort" ||
                 return 1
-        clang_said=$($clang_runner "$work/clang-shell.$clang_target" \
+        #       A run the limit ended answers what it said, and how it ended.
+        clang_said=$($run_limit $clang_runner "$work/clang-shell.$clang_target" \
                 -c 'printf "%s|" "$((6 * 7))" "${0##*/}"' 2>&1)
+        ! run_limit_ended $? || clang_said="$clang_said ($run_limit_why)"
         clang_sorted=$(printf 'b\na\n' |
-                $clang_runner "$work/clang-bin.$clang_target/sort" 2>&1 | tr '\n' ,)
+                { $run_limit $clang_runner "$work/clang-bin.$clang_target/sort" 2>&1
+                  echo $? > "$work/clang-sort.$clang_target.status"; } | tr '\n' ,)
+        ! run_limit_ended "$(cat "$work/clang-sort.$clang_target.status")" ||
+                clang_sorted="$clang_sorted ($run_limit_why)"
         [ "$clang_said" = "42|clang-shell.$clang_target|" ] && [ "$clang_sorted" = "a,b," ]
         verdict "clang-shell-$clang_target" - \
                 'the clang shell for $clang_target answered [$clang_said] and sort [$clang_sorted]'
@@ -12358,7 +12512,7 @@ else
                         lost "terminal frames ($target): the check did not build" ''
                         continue
                 fi
-                { $target_runner "$work/terminal-check.$target" "$render_font" $render_fonts \
+                { $run_limit $target_runner "$work/terminal-check.$target" "$render_font" $render_fonts \
                         > "$work/terminal-check.$target.out" 2>&1
                   echo $? > "$work/terminal-check.$target.status"; } &
                 render_ran="$render_ran $target"
@@ -12370,6 +12524,9 @@ else
                 render_status=$(cat "$work/terminal-check.$target.status")
                 if [ "$render_status" = 0 ]; then
                         won
+                elif run_limit_ended "$render_status"; then
+                        lost "terminal frames ($target) against a full draw" \
+                                "terminal-check.$target $run_limit_why"
                 else
                         #       A check that died (a sanitizer's trap, a fault) printed no verdict: its status says how.
                         lost "terminal frames ($target) against a full draw" \
@@ -28550,10 +28707,13 @@ bench_target()
         fi
 
         if [ -z "$bench_runner" ] && command -v taskset > /dev/null 2>&1; then
-                taskset -c 0 "$bench_binary" "$@"
+                $run_limit taskset -c 0 "$bench_binary" "$@"
         else
-                $bench_runner "$bench_binary" "$@"
+                $run_limit $bench_runner "$bench_binary" "$@"
         fi
+        bench_status=$?
+        run_limit_said "$bench_status" "$bench_binary"
+        return "$bench_status"
 }
 
 #       A C benchmark is the same section on all three machines. A target
@@ -29770,7 +29930,10 @@ bench_routine()
         "${CC:-cc}" -O2 -fno-builtin -DBENCH_routine test/checks.c "$work/routine.lib.o" \
                 -o "$work/bench.routine" || return 1
 
-        "$work/bench.routine" "$@"
+        $run_limit "$work/bench.routine" "$@"
+        routine_status=$?
+        run_limit_said "$routine_status" "$work/bench.routine"
+        return "$routine_status"
 }
 
 bench_one()
@@ -29834,6 +29997,9 @@ bench_main()
 
         broken=""
         notrun=""
+
+        [ -z "$run_limit_missing" ] ||
+                echo "  NOTE: $run_limit_missing, so a benchmark that hangs is not ended (MW_BINARY_TIMEOUT)"
 
         for name in $requested; do
                 bench_about "$name"
@@ -30059,6 +30225,9 @@ fi
 
 broken=""
 notrun=""
+
+[ -z "$run_limit_missing" ] ||
+        echo "  NOTE: $run_limit_missing, so a check binary that hangs is not ended (MW_BINARY_TIMEOUT)"
 
 #       A lane that passed and counted nothing ran nothing: a passing lane
 #       whose checks were all skipped, or whose harness wrote no row, read as
