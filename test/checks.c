@@ -244760,6 +244760,23 @@ static void metric_present_rows(void)
               table.metric_late >= 59 && table.metric_late <= 60 && table.metric_missed >= 1 && table.metric_missed <= 2 && table.metric_present_most == 4321 &&
                   table.metric_flip_jobs >= 29 && table.metric_flip_jobs <= 30 && table.metric_flip_jobs_most == 2);
         check("metrics: a headless compositor says no lead", table.metric_lead == 0);
+        {
+                unsigned int kept_kinds[3], kept_waited = gpu_jobs_waited, kept_unwaited = gpu_jobs_unwaited;
+                unsigned long long kept_kind_ns[3], kept_submit = gpu_job_submit_ns, kept_wait = gpu_job_wait_ns;
+
+                memory_copy(kept_kinds, gpu_jobs_kind, sizeof(kept_kinds)), memory_copy(kept_kind_ns, gpu_job_ns_kind, sizeof(kept_kind_ns));
+                gpu_jobs_kind[0] = 11, gpu_jobs_kind[1] = 22, gpu_jobs_kind[2] = 33;
+                gpu_job_ns_kind[0] = 5000000000ull, gpu_job_ns_kind[1] = 6000000ull, gpu_job_ns_kind[2] = 7000ull;
+                gpu_jobs_waited = 44, gpu_jobs_unwaited = 55, gpu_job_submit_ns = 4400000000ull, gpu_job_wait_ns = 8800ull;
+                compositor_metric_publish();
+                check("metrics: the card's jobs by kind, each with its time waited, and those waited for against those not with the submit's time, are the table's",
+                      table.metric_gpu_jobs_scene == 11 && table.metric_gpu_job_ns_scene == 5000000000ull && table.metric_gpu_jobs_copy == 22 &&
+                          table.metric_gpu_job_ns_copy == 6000000ull && table.metric_gpu_jobs_scale == 33 && table.metric_gpu_job_ns_scale == 7000ull &&
+                          table.metric_jobs_waited == 44 && table.metric_jobs_unwaited == 55 && table.metric_job_submit_ns == 4400000000ull &&
+                          table.metric_job_wait_ns == 8800ull);
+                memory_copy(gpu_jobs_kind, kept_kinds, sizeof(kept_kinds)), memory_copy(gpu_job_ns_kind, kept_kind_ns, sizeof(kept_kind_ns));
+                gpu_jobs_waited = kept_waited, gpu_jobs_unwaited = kept_unwaited, gpu_job_submit_ns = kept_submit, gpu_job_wait_ns = kept_wait;
+        }
         check("metrics: and the next second starts from nothing", compositor_metric_loop_most == 0 && compositor_metric_flip_jobs_most == 0 &&
                                                                       compositor_metric_waited_then == gpu_job_ns);
         gpu_job_ns -= 2500000ull, compositor_metric_waited_then = kept_waited;

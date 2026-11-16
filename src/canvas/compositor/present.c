@@ -68,6 +68,14 @@ static void compositor_metric_publish(void)
         table->metric_wakes = gpu_wakes, table->metric_jobs = gpu_jobs;
         table->metric_job_mean = gpu_jobs ? (unsigned int)(gpu_job_ns / gpu_jobs / 1000) : 0;
         waited = gpu_job_ns;
+        // The card's jobs since the start by kind (gpu.c's GPU_JOB_KIND: a scene, a present's or a list's; a copy of a client's damage; a picture
+        // scaled), each with the time the loop waited for the waited ones; and the jobs waited for against those submitted without a wait, with the
+        // waited ones' time in the submit and from there to their end.
+        table->metric_gpu_jobs_scene = gpu_jobs_kind[0], table->metric_gpu_job_ns_scene = gpu_job_ns_kind[0];
+        table->metric_gpu_jobs_copy = gpu_jobs_kind[1], table->metric_gpu_job_ns_copy = gpu_job_ns_kind[1];
+        table->metric_gpu_jobs_scale = gpu_jobs_kind[2], table->metric_gpu_job_ns_scale = gpu_job_ns_kind[2];
+        table->metric_jobs_waited = gpu_jobs_waited, table->metric_jobs_unwaited = gpu_jobs_unwaited;
+        table->metric_job_submit_ns = gpu_job_submit_ns, table->metric_job_wait_ns = gpu_job_wait_ns;
 #endif
         if (!compositor_metric_since)
                 compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists,
