@@ -50973,13 +50973,26 @@ int main(int count, char **words)
                              if not found.group(1).endswith(".next")})
         check(len(kept_names) > 20 and "link.stamps" in kept_names and "name" in kept_names,
               "the source names the files /root keeps", repr(kept_names))
+        #   And the few a macro names that are state the link makes itself, not what a person set:
+        #   wipe takes them, each listed with why and where the code says so, so a file a new macro
+        #   names is either kept by wipe or listed here with its reason, and red until it is one.
+        wiped_state = {
+            "link.modem.gz": "a send's passing gzip copy, LINK_MODEM_ZIP_PATH: \"The copy is removed when "
+                             "the send is over, however it ended\" (src/waterlink/modem.c)",
+            "link.places": "the addresses the peers were last heard at, LINK_PLACES_PATH's struct link_place: "
+                           "\"seen ... when it was heard\" (src/waterlink/service.c), learned again by listening",
+        }
+        check(set(wiped_state) <= set(kept_names),
+              "each file wipe takes as state is still one a macro names", sorted(set(wiped_state) - set(kept_names)))
+        made_names = kept_names
+        kept_names = [name for name in kept_names if name not in wiped_state]
         script = ("rm -rf /home/* /root/* /root/.[!.]*\n"
                   "mkdir -p /home/stick /home/u/inner /home/u/gone /root/data /root/junk\n"
                   "mount -t tmpfs tmpfs /home/stick && mount -t tmpfs tmpfs /home/u/inner && "
                   "mount -t tmpfs tmpfs /root/data\n"
                   "echo a > /home/stick/file; echo b > /home/u/inner/file; echo c > /root/data/file\n"
                   "echo d > /home/u/gone/f; echo e > /home/loose; echo f > /root/junk/f\n" +
-                  "".join(f"echo {name} > /root/{name}\n" for name in kept_names) +
+                  "".join(f"echo {name} > /root/{name}\n" for name in made_names) +
                   say("wipe yes") +
                   "echo \"@@mounts $(cat /home/stick/file /home/u/inner/file /root/data/file | tr '\\n' ,) "
                   "$(ls /home | tr '\\n' ,) $(ls /home/u | tr '\\n' ,) $(ls /root | tr '\\n' ,)\"\n")
