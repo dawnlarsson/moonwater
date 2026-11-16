@@ -1998,6 +1998,7 @@ static void wayland_relative_send(struct wayland_client *c, long scale120, long 
 static void wayland_let_go(struct wayland_client *c, long index);
 static void wayland_lent_let(struct wayland_client *c, long row, unsigned int index1);
 static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s);
+static void wayland_presentings_discard(struct wayland_client *c, struct wayland_surface *s);
 
 static void wayland_texts_row_gone(struct wayland_client *c, long row);
 
@@ -2034,6 +2035,7 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
                         wayland_lent_let(c, s->row, held[at]);
         }
         wayland.rows--;
+        wayland_presentings_discard(c, s);
         s->row = -1;
         // What was said of that window (a close, a popup's done) was said of it alone: the surface's next window is asked to go anew.
         s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
@@ -2098,6 +2100,31 @@ static void wayland_feedback_discard(struct wayland_client *c, unsigned int id)
                 wayland_end(&e);
         }
         wayland_object_delete(c, slot);
+}
+
+/*
+        A window let go takes its feedbacks of frames not yet drawn with it: no frame of that window will come, so each is answered
+        discarded, here and on its subsurfaces, and the surface is no longer counted as presenting.
+*/
+static void wayland_presenting_drop(struct wayland_client *c, struct wayland_surface *o)
+{
+        for (long at = 0; at < o->presentings; at++)
+                wayland_feedback_discard(c, o->presenting[at]);
+        if (o->presentings)
+                c->presenting_surfaces--;
+        o->presentings = 0;
+}
+
+static void wayland_presentings_discard(struct wayland_client *c, struct wayland_surface *s)
+{
+        wayland_presenting_drop(c, s);
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
+        {
+                struct wayland_surface *o = &c->surfaces[sub_it.at];
+
+                if (o != s && wayland_root_of(c, o) == s)
+                        wayland_presenting_drop(c, o);
+        }
 }
 
 /*
@@ -2964,6 +2991,17 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
 
         if (root->row < 0 || !(root->flags & WAYLAND_SURFACE_MAPPED))
         {
+                // A root with no window has no frame to wait for: the child's callbacks are answered now, as a commit's are.
+                if (root->row < 0)
+                {
+                        for (long at = 0; at < s->callbacks; at++)
+                                if (s->readies < WAYLAND_CALLBACKS)
+                                        wayland_ready_add(c, s, s->callback[at]);
+                                else
+                                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
+                        s->callbacks = 0;
+                        wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
+                }
                 s->sub_dirty = 1;
                 return;
         }
@@ -9997,6 +10035,24 @@ WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, lo
                 s->xpopup = popup ? 1 : 0;
                 s->xx = x;
                 s->xy = y;
+        }
+        else if (s->xpopup && wayland.host && (s->xx != x || s->xy != y))
+        {
+                // A popup its window manager moved while it is shown goes to its new place in the host, relative to its parent.
+                struct wayland_client *c = 0;
+                long px = 0, py = 0;
+
+                for (long at = 0; at < WAYLAND_CLIENTS && !c; at++)
+                {
+                        struct wayland_client *o = wayland.client[at];
+
+                        if (o && s >= o->surfaces && s < o->surfaces + o->surface_table.count)
+                                c = o;
+                }
+                s->xx = x;
+                s->xy = y;
+                if (c && wayland_xparent(c, s, &px, &py) >= 0)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, px, py);
         }
         for (; title && title[at] && at < WAYLAND_TEXT - 1; at++)
                 text[at] = title[at];

@@ -1149,6 +1149,9 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 w = compositor_xwm_find(e->window, 0);
                 if (w)
                 {
+                        // A popup Xwayland moves while it is shown is adopted again: its new place is sent to the host there.
+                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & COMPOSITOR_XWM_POPUPISH) && w->row >= 0)
+                                w->dirty = 1;
                         w->x = e->x;
                         w->y = e->y;
                         w->width = e->width;

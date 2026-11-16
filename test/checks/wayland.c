@@ -8242,6 +8242,121 @@ static void test_syncobj_viewporter_and_formats(void)
         wayland_stop();
 }
 
+/* An override-redirect X popup moved by its window manager (adopted again with its new place) is sent to the host at the new place. */
+static void test_xwm_moves(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long parent, popup, pbuf, qbuf, xwin, xpopup;
+        long prow;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        parent = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, parent);
+        xwin = wlc_id(c, WLI_xwayland_surface_v1, 1);
+        wlc_send(c, s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, parent);
+        wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, 0x5151UL, 0UL);
+        wayland_xwindow_adopt(0x5151, 0, 0, 0, "parent");
+        pbuf = wl_buffer_of(&s, 32, 24, 0xff111111, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, parent, WLQ_wl_surface_attach, pbuf, 0L, 0L);
+        wlc_send(c, parent, WLQ_wl_surface_commit);
+        popup = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, popup);
+        xpopup = wlc_id(c, WLI_xwayland_surface_v1, 1);
+        wlc_send(c, s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xpopup, popup);
+        wlc_send(c, xpopup, WLQ_xwayland_surface_v1_set_serial, 0x5252UL, 0UL);
+        wayland_xwindow_adopt(0x5252, 1, 5, 6, "popup");
+        qbuf = wl_buffer_of(&s, 8, 8, 0xff222222, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, popup, WLQ_wl_surface_attach, qbuf, 0L, 0L);
+        wlc_send(c, popup, WLQ_wl_surface_commit);
+        prow = wayland_xwindow_adopt(0x5252, 1, 5, 6, "popup");
+        WLCHECK(c->errors == 0 && prow >= 0, "an override-redirect popup under a parent is shown (%ld, %s)", prow, c->error_text);
+        prow = wayland_xwindow_adopt(0x5252, 1, 10, 12, "popup");
+        WLCHECK(prow >= 0 && fake.row[prow].x == 10 && fake.row[prow].y == 12,
+                "a popup moved by its window manager is placed at its new place in the host (%ld, %ld)", prow >= 0 ? fake.row[prow].x : -1L,
+                prow >= 0 ? fake.row[prow].y : -1L);
+        wlc_end(c);
+        leak_check("xwm popup moved");
+        wayland_stop();
+}
+
+/* A feedback of a frame that was not drawn, its window let go (a null buffer), is discarded, never answered presented later. */
+static void test_presented_discard_row(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long presentation, feedback, buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        presentation = wl_global(c, s.registry, WLI_wp_presentation, 2);
+        wlc_forget(c);
+        feedback = wlc_id(c, WLI_wp_presentation_feedback, 1);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, feedback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && !fake.row[0].used && wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 1,
+                "a window let go with a feedback still waiting answers that feedback discarded (%s)", c->error_text);
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        buffer = wl_buffer_of(&s, 32, 24, 0xff556677, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_frame();
+        wayland_presented(6000000000ul, 16666667ul, 9, 0ul);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 0,
+                "the window shown again presents no feedback of the frame that was let go (%s)", c->error_text);
+        wlc_end(c);
+        leak_check("presenting let go");
+        wayland_stop();
+}
+
+/* A child committed under a root with no buffer yet (not mapped): its frame callback is answered without the root mapping. */
+static void test_sub_root_unmapped(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long root, child, sub, subcompositor, callback;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        subcompositor = wl_global(c, s.registry, WLI_wl_subcompositor, 1);
+        root = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, root);
+        child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, child);
+        sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, subcompositor, WLQ_wl_subcompositor_get_subsurface, sub, child, root);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_desync);
+        callback = wlc_id(c, WLI_wl_callback, 1);
+        wlc_forget(c);
+        wlc_send(c, child, WLQ_wl_surface_frame, callback);
+        wlc_send(c, child, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1,
+                "a subsurface's frame callback under a root that is not mapped is answered at once (%s)", c->error_text);
+        wlc_end(c);
+        leak_check("sub root unmapped");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -8260,6 +8375,9 @@ int main(int argc, char **argv)
         test_destroy_orders();
         test_shm();
         test_frames();
+        test_xwm_moves();
+        test_presented_discard_row();
+        test_sub_root_unmapped();
         test_frame_overflow();
         test_presentation();
         test_touch();
