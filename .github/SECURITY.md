@@ -834,6 +834,19 @@ attacker gets its invariants here once there is a lane that proves them.
   settings window builds its `moonwater` commands as an argv, never a shell line,
   and the Canvas terminal answers DA, DSR, DECRQM and XTWINOPS with fixed or
   numeric text only, never the title or any attacker string).
+- **SH-D1, the environment a shell starts with is data, not the shell's
+  policy.** Whoever sets the environment of a script (a `system()` in a
+  setuid program, a service's unit, a cron line) does not choose how the
+  script's words are read: IFS is the shell's own three bytes (the
+  `system()` attack); a root shell takes no PS4 (bash's rule since 4.4, kept
+  for every personality); and GLOBIGNORE, which bash applies only once the
+  shell assigns it (its `sv_globignore` runs on assignment, never for the
+  environment), is a plain variable until then in the bash personalities,
+  whatever the ids and -p, where it was taken as the ignore list and chose
+  which files the script's globs reached (MW-2026-203); dash has no
+  GLOBIGNORE. Held by the shell lane's `globignore-environment` family (every
+  personality, root, nobody and the privileged utility's two mixed
+  identities, with -p and +p) and its `privileged` utility.
 
 ## The clipboard (Canvas)
 

@@ -41,6 +41,54 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-203: a GLOBIGNORE in a script's environment chose which files the script's globs reached
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-16, the commit that adds this entry (`git log -S 'MW-2026-203' -- incident_response.md`) |
+| Class | Shell policy taken from the environment: the pathname expansion of a script filtered by a list its caller chose |
+| Attacker | 1, and 8 against a more privileged script: whoever sets the environment a shell script runs with (the caller of a `system()` or `popen()` in a setuid program, a service or cron line that passes its environment on, a sudo rule that keeps the variable) |
+| Reachable | src/sh/expand.c, the pathname expansion's `env_get("GLOBIGNORE")`, in the bash and bash --posix personalities (`bash`, `rbash`, and whatever runs `bash -c` or a bash script) |
+
+**What happened.** Bash takes GLOBIGNORE as the list of names a pathname
+expansion leaves out only when the shell assigns it while -p is off (its
+`sv_globignore` runs on assignment and never for a variable that came with the
+environment): a GLOBIGNORE the shell was started with is visible as a variable
+and filters nothing, for every identity and with or without -p. Measured with
+the pinned bash 5.3.20 and Ubuntu's 5.2.21, as root, as nobody, with real and
+effective ids 65534 and the saved id 0, and with real 65534 and effective and
+saved 0. This shell read the list from the variable at every expansion, so a
+GLOBIGNORE in the environment applied from the script's first line:
+`GLOBIGNORE='*'` left every pattern the script globbed as its literal self
+(an `rm -f /tmp/build/*` removed nothing, a `for f in /etc/x.d/*` ran once on
+the pattern), and a narrower list hid exactly the files the caller chose from a
+check that globbed for them. The privileged utility's rows showed it with
+GLOBIGNORE=* under the saved identity (`glob:<*>` where bash lists the
+directory). dash has no GLOBIGNORE, and the dash and sh personalities never
+read it.
+
+**The fix.** The pathname expansion reads GLOBIGNORE only once the shell has
+assigned it with -p off (`glob_ignore_assigned`, set by `env_write_noted`, the
+step the variable table's writes go through); a value from the environment
+stays a plain variable, and `GLOBIGNORE=$GLOBIGNORE` in the script is how a
+script that wants it takes it, as in bash.
+
+**Tests that fail without the fix.** The shell lane's `globignore-environment`
+family (test/differential.py `shell_lang_globignore_environment`): the shell
+started with GLOBIGNORE `*`, `one` or `t*` in its environment, as root, as
+nobody and under the privileged utility's two mixed identities, with -p, +p,
+`-p -o privileged +o privileged` or none, in all four personalities, globbing
+before and after assigning the variable; against the pinned bash 5.3.20 and
+dash 0.5.13.4, 48 of 96 on the parent (every bash and bash --posix case red)
+and 96 of 96 with the fix. The `privileged` utility, 134 of 136 on the parent
+(fcb1a34fc1e0c25d and d257e427ba932a33, identity saved, GLOBIGNORE=*) and 136
+of 136 with the fix.
+
+**Still open.** NOT RUN on arm64 and riscv64 (the lane builds the host shell
+only). An assignment under -p after one without it changes the list here,
+where bash keeps the list the earlier one set. Other variables bash reads only
+on assignment were not audited for the same shape.
+
 ### MW-2026-202: a key a program made was the same to a window as a key the person pressed
 
 | | |

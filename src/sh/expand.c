@@ -10925,6 +10925,20 @@ static bool glob_exists(string_address path)
 */
 static string_address glob_ignoring;
 
+/*
+        Whether this shell has assigned GLOBIGNORE. Bash takes the list only
+        from an assignment (sv_globignore runs when the variable is set, and
+        never for one that came in with the environment): a GLOBIGNORE in the
+        environment it was started with is a plain variable, visible and
+        filtering nothing, whatever its ids and -p say, until the shell
+        assigns it while -p is off (an assignment under -p is not taken
+        either). It used to be read from the environment, so whoever set a
+        script's environment chose which files its globs reached: GLOBIGNORE=*
+        left every pattern a script globbed as its literal self (MW-2026-203).
+        Set by env_write_noted, which every assignment of the shell passes.
+*/
+static bool glob_ignore_assigned;
+
 static bool glob_ignore_component(string_address pattern, positive pattern_length,
                                   string_address name, positive name_length)
 {
@@ -11476,7 +11490,8 @@ static HOT bool expand_emit(positive at, positive stop, shell_words address_to o
         {
                 p8 built[GLOB_PATH];
 
-                string_address ignore = shell_bash_compat
+                string_address ignore = shell_bash_compat &&
+                                                glob_ignore_assigned
                                             ? env_get("GLOBIGNORE") : null;
 
                 glob_count = 0;

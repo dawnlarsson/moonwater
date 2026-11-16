@@ -3345,6 +3345,8 @@ positive env_names_prefix(string_address prefix, positive length,
 #define ENV_ATTRIBUTE_VALUE                                                  \
         (SHELL_ARRAY_INTEGER | SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER)
 
+static PURE bool shell_privileged_on();
+
 static HOT bool env_write_noted(const_string name, positive length, bool written)
 {
         if (written)
@@ -3362,6 +3364,11 @@ static HOT bool env_write_noted(const_string name, positive length, bool written
                 history_size_changed();
         else if (memory_is_word((address_any)name, length, "HISTFILESIZE"))
                 history_file_size_changed();
+        //      From here the list filters globs; one imported never did,
+        //      and one assigned under -p does not (sv_globignore asks).
+        else if (memory_is_word((address_any)name, length, "GLOBIGNORE") &&
+                 !shell_privileged_on())
+                glob_ignore_assigned = true;
         return written;
 }
 

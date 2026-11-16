@@ -18899,6 +18899,68 @@ def shell_lang_globignore(rng):
             ("command", "stdin", "file"))
 
 
+#       A GLOBIGNORE the shell was started with: bash keeps it a plain variable
+#       that filters nothing until the shell assigns it, for every identity
+#       and -p; dash has no GLOBIGNORE at all. This shell took the list from
+#       the environment, so whoever set a script's environment chose which
+#       files its globs reached (MW-2026-203). The shell runs under each
+#       identity the privileged utility has, and nobody besides, in a
+#       directory every one of them can read; -p and +p are bash's alone.
+shell_GLOBIGNORE_DRIVER = r'''
+import os, shutil, sys, tempfile
+shell, name, identity, value = sys.argv[1:5]
+flags = sys.argv[5:]
+place = tempfile.mkdtemp(prefix="globignore-", dir="/tmp")
+home = tempfile.mkdtemp(prefix="globignore-shell-", dir="/tmp")
+for path in (place, home):
+    os.chmod(path, 0o755)
+for leaf in ("one", "two"):
+    open(os.path.join(place, leaf), "w").close()
+started = os.path.join(home, name)
+try:
+    os.link(os.path.realpath(shell), started)
+except OSError:
+    shutil.copy2(os.path.realpath(shell), started)
+os.chmod(started, 0o755)
+probe = 'printf "<%s>" "${GLOBIGNORE-unset}" *; GLOBIGNORE=$GLOBIGNORE; printf "[%s]" *; echo'
+sys.stdout.flush()
+child = os.fork()
+if child == 0:
+    os.chdir(place)
+    if identity == "nobody":
+        os.setgroups([])
+        os.setresgid(65534, 65534, 65534)
+        os.setresuid(65534, 65534, 65534)
+    elif identity == "saved":
+        os.setresgid(65534, 65534, 0)
+        os.setresuid(65534, 65534, 0)
+    elif identity == "mismatch":
+        os.setresgid(65534, 0, 0)
+        os.setresuid(65534, 0, 0)
+    os.execve(started, [name] + flags + ["-c", probe],
+              {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "GLOBIGNORE": value})
+_, status = os.waitpid(child, 0)
+shutil.rmtree(place, ignore_errors=True)
+shutil.rmtree(home, ignore_errors=True)
+print("status=%d" % (os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status)))
+'''
+
+
+def shell_lang_globignore_environment(rng):
+    identity = rng.choice(("plain", "nobody", "saved", "mismatch"))
+    flags = rng.choice(("", "-p", "+p", "-p -o privileged +o privileged"))
+    value = rng.choice(("*", "one", "t*"))
+    runner = "" if identity == "plain" else "sudo -n "
+    return ("globignore-environment", shell_ALL, shell_program(
+        'shell_name=${0##*/}; set --',
+        'case :${SHELLOPTS-}: in *:posix:*) set -- --posix;; esac',
+        '[ -n "${BASH_VERSION+x}" ] && set -- "$@" ' + flags,
+        runner + 'python3 - "$(readlink /proc/$$/exe)" "$shell_name" ' + identity + " " +
+        shlex.quote(value) + ' "$@" <<\'PY\' 2>&1',
+        shell_GLOBIGNORE_DRIVER + "PY",
+        'echo "end=$?"'))
+
+
 #       FUNCNEST caps how deep functions may call; one call past it is
 #       refused and the command it was part of dropped. It was not read.
 def shell_lang_funcnest(rng):
@@ -23161,6 +23223,7 @@ SHELL_FAMILIES = (
     shell_lang_debug_trap_pipelines,
     shell_lang_query_table,
     shell_lang_globignore,
+    shell_lang_globignore_environment,
     shell_lang_funcnest,
     shell_lang_not_found_handle,
     shell_lang_readonly_arrays,
