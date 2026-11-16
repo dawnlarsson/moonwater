@@ -1107,9 +1107,7 @@ b32 main()
                           : (!script_file && shell_interactive());
         shell_signals_settle(interactive);
         shell_options_started(interactive, invocation.monitor);
-        if (interactive && shell_option_on(SHELL_OPTION_MONITOR) &&
-            !job_terminal_owned)
-                shell_option_told(SHELL_OPTION_MONITOR, false);
+        job_monitor_settled(interactive, invocation.monitor);
         history_start();
         exec_function_import_environment(environ);
 

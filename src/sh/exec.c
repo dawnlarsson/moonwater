@@ -1047,15 +1047,92 @@ static fn job_monitor_stop()
         job_terminal = -1;
 }
 
+// Whether startup has settled the monitor, after which an interactive
+// dash's set -m that finds no terminal says so (job_monitor_told).
+static bool job_monitor_settled_done;
+
 fn job_monitor_told(bool on)
 {
         /* dash 0.5.13 turns the monitor on with or without a terminal, and
            without one it goes on arbitrating nothing, as a shell started
-           without one does. */
+           without one does -- unless it is interactive: then set -m says
+           what its startup says, after the builtin's name, and m stays off.
+           bash's set -m turns m on either way. */
         if (on)
                 job_monitor_start();
         else
                 job_monitor_stop();
+
+        if (on && !shell_bash_compat && shell_is_interactive &&
+            job_monitor_settled_done && !job_terminal_owned)
+        {
+                shell_told("set: can't access tty; job control turned off\n");
+                shell_options &= ~SHELL_FLAG('m');
+                job_monitor_stop();
+        }
+}
+
+/*
+        Job control at startup, where no terminal answers.
+
+        bash sets job control up in every interactive shell, +m or not, and
+        in one that is not interactive but was started with -m or -o
+        monitor. Where the terminal will not say its process group it says
+        so twice, by the name it was invoked as (the base name when
+        interactive), and goes on with m off:
+
+            bash: cannot set terminal process group (-1): Inappropriate ioctl for device
+            bash: no job control in this shell
+
+        dash asks only when it is interactive with m on, and says it once
+        with its $0 and line nought, m off:
+
+            ./dash: 0: can't access tty; job control turned off
+
+        An interactive shell's terminal is the one job_monitor_start
+        arbitrates, standard input; bash's -m without -i asks standard error,
+        a duplicate of which is the terminal bash would arbitrate. Before
+        this the startup turned m off without a word, and bash -m kept m on.
+*/
+fn job_monitor_settled(bool interactive, b32 monitor)
+{
+        b32 group = 0;
+        bipolar refused;
+
+        job_monitor_settled_done = true;
+
+        if (shell_bash_compat ? !interactive && monitor <= 0
+                              : !interactive ||
+                                    !shell_option_on(SHELL_OPTION_MONITOR))
+                return;
+
+        refused = system_control(interactive ? 0 : 2, JOB_TERMINAL_GET_GROUP,
+                                 address_of group);
+        if (refused >= 0)
+                return;
+
+        if (shell_bash_compat)
+        {
+                string_address name = interactive ? shell_invocation_name
+                                                  : shell_invoked_as;
+                string_address why = system_error_message(-refused);
+
+                if (!name || !string_get(name))
+                        name = (string_address) "bash";
+
+                string_format(log_error,
+                              "%s: cannot set terminal process group (-1): %s\n",
+                              name, why ? why : (string_address) "Unknown error");
+                string_format(log_error, "%s: no job control in this shell\n",
+                              name);
+        }
+        else
+                string_format(log_error,
+                              "%s: 0: can't access tty; job control turned off\n",
+                              shell_where_self());
+
+        if (shell_option_on(SHELL_OPTION_MONITOR))
+                shell_option_told(SHELL_OPTION_MONITOR, false);
 }
 
 // How many jobs the shell holds, which a prompt's \j says.
