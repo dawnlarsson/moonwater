@@ -14862,6 +14862,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 #define BODY_STILL (UI_ONE * 20)             // a coast under 20 units a second has stopped
 #define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
+#define BODY_HELD_NS 2000000000ll            // a hold the hand has not moved in this long is let go where it is (ui_body_step): its release was lost
 #define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
 #define BODY_FREE_AT ((b64)1 << 50)          // a free throw starts 2^20 pixels along, and its far end is as far again (ui_body_free)
 #define UI_BODY_FRAME_NS 16000000l           // a body that moves is stepped again this long later: a frame
@@ -14901,6 +14902,7 @@ struct ui_body
         b64 sent;            // a free throw's position already given as whole pixels (ui_body_given)
         b64 tau;             // this coast's speed falls by e in this long, ns: a pad's (BODY_TAU_NS) or a finger's (ui_body_finger_tau)
         int follow;          // a notch's run to its target: e to the minus this a second (0: BODY_NOTCH_RATE). A stream's is the rate its notches come at
+        b64 tracked;         // when the hand last moved it while BODY_TRACK, ns (ui_body_track)
 };
 
 static b64 ui_body_far(const struct ui_body address_to b)
@@ -15041,6 +15043,7 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
         b->raw += delta;
         ui_body_pin(b);
         b->state = BODY_TRACK;
+        b->tracked = at;
         b->vel = 0;
         b->bounce = b->bounce_v = 0;
         b->drive = 0;
@@ -15332,6 +15335,11 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
 {
         b64 left = at - b->at;
 
+        // A hold no hand has moved for BODY_HELD_NS is over: its release was lost (a program gone with the press, a ring that dropped
+        // it, a screen switched under a finger), and a pull it held past an end would stay stretched for good, the frames going on.
+        // It is let go where it is drawn: a pull springs home, and a body inside the ends rests.
+        if (b->state == BODY_TRACK && at - b->tracked > BODY_HELD_NS)
+                ui_body_settle(b);
         b->at = at;
         while (left > 0)
         {

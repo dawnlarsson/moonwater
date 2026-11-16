@@ -7681,6 +7681,35 @@ static void check_terminal_wheel_curve(void)
                       terminal.bar.body.state != BODY_TRACK);
                 ui_kit.test_clock = 0;
         }
+        // A finger's drag that pulled the grid past its top, whose lift never came (the press's program gone, a ring that dropped it):
+        // the pull is held while the hand could still be on it, and then springs home in the frames, which stop.
+        {
+                b32 held, home;
+                int frames = 0;
+
+                terminal_view_set(0);
+                terminal_bar_follow();
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                clock += 1000000000ll, ui_kit.now += 1000000000ll, ui_kit.test_clock = clock;
+                ui_body_track(&terminal.bar.body, -(b64)120 * UI_ONE, ui_kit_time());
+                for (int k = 0; k < 60; k++)
+                {
+                        clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                        terminal_bar_step();
+                }
+                held = terminal_grid_pull() < 0 && terminal.bar.body.state == BODY_TRACK;
+                while (ui_body_going(&terminal.bar.body) && frames < 600)
+                {
+                        clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                        terminal_bar_step();
+                        frames++;
+                }
+                home = !ui_body_going(&terminal.bar.body) && terminal_grid_pull() == 0 && terminal.bar.scroll == 0;
+                check("terminal scrollback: a pull past the top whose lift never came is held a second, then springs home and the frames stop",
+                      held && home && frames < 240);
+                ui_kit.test_clock = 0;
+        }
         terminal_view_live();
         terminal_bar_follow();
 }
@@ -12256,7 +12285,7 @@ static void check_kit_body(void)
         static const long finger_00[] = { 1, 8, 25, 33, 30, 23, 20, 13, 10, 9, 6 };
         static const long coast_06[] = { 4026, 3924, 3839, 3770, 3715, 3672, 3638, 3617 };
         static const long dip_02[] = { -24, -19, -11, -6, -3, -2, -1, -1, -1, -1, -1, 0 }; // T02's dip (the recording's was -21 -21 -17 -12 -8 -5 -4 -2 -2 -1 0 0 at the Mac's spring, 11 a second), at the spring that is 20
-        struct ui_body b;
+        struct ui_body b, inside;
         b64 now, drawn, reach_small, reach_big, far_small;
         long worst_coast, worst_dip, dip_low;
         b32 finger_ok, coast_ok, dip_ok, driven_ok, rubber_ok;
@@ -12341,6 +12370,19 @@ static void check_kit_body(void)
         ui_body_let_go(&b, 0, 0, 100, false);
         ui_body_step(&b, 2000000000ll);
         check("kit body: momentum off, a finger 300 px past the top still springs home to 0", ui_body_drawn(&b) == 0 && !ui_body_going(&b));
+        ui_kit.scroll_off = 0;
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
+        ui_body_track(&b, -300ll << UI_Q, 0);
+        ui_body_step(&b, 1000000000ll);
+        drawn = ui_body_drawn(&b) >> UI_Q;
+        ui_body_set(&inside, 772ll << UI_Q, 30000ll << UI_Q, 500ll << UI_Q, 0);
+        ui_body_track(&inside, 20ll << UI_Q, 0);
+        ui_body_step(&inside, 1000000000ll);
+        driven_ok = drawn < 0 && b.state == BODY_TRACK && inside.state == BODY_TRACK;
+        ui_body_step(&b, 4000000000ll);
+        ui_body_step(&inside, 4000000000ll);
+        check("kit body: a hold no hand has moved for two seconds is let go, a pull past the top springing home and a body inside resting where it is",
+              driven_ok && ui_body_drawn(&b) == 0 && !ui_body_going(&b) && ui_body_drawn(&inside) == 520ll << UI_Q && !ui_body_going(&inside));
         ui_kit.scroll_off = 0;
 
         reach_small = ui_body_rubber(&b, 50ll << UI_Q);
