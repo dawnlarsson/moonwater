@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        508 routines (481 public, 27 local), 496 of them on all three and 12 local to one.
+        509 routines (482 public, 27 local), 497 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -79,6 +79,7 @@
           bf16_to_f32                    public  yes     yes     yes
           bins_count                     public  yes     yes     yes
           bins_place                     public  yes     yes     yes
+          bins_skip                      public  yes     yes     yes
           bins_starts                    public  yes     yes     yes
           bipolar_into                   public  yes     yes     yes
           bipolar_into_core              local   yes     yes     yes
@@ -13876,6 +13877,18 @@ __asm__(
     ASM_END(bins_place)
 
     //
+    //       bins_skip: rdi the first cell, rsi the pitch, rdx the columns, rcx
+    //       the rows. r8d a count, added to its start, then a zero stored.
+    //
+    ASM_FUNC(bins_skip)
+    "test %rdx, %rdx\n   jz 3f\n   test %rcx, %rcx\n   jz 3f\n   shl $3, %rsi\n"
+    "1:  xor %eax, %eax\n"
+    "2:  mov 4(%rdi,%rax,8), %r8d\n   add %r8d, (%rdi,%rax,8)\n   movl $0, 4(%rdi,%rax,8)\n   add $1, %rax\n   cmp %rdx, %rax\n   jb 2b\n"
+    "add %rsi, %rdi\n   sub $1, %rcx\n   jnz 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_skip)
+
+    //
     //       hash_fnv_u32: rdi the words, rsi how many, edx the hash so far.
     //
     ASM_FUNC(hash_fnv_u32)
@@ -26294,6 +26307,14 @@ __asm__(
     "5:\n" ASM_RET
     ASM_END(bins_place)
 
+    ASM_FUNC(bins_skip)
+    "cbz x2, 3f\n   cbz x3, 3f\n   lsl x1, x1, #3\n"
+    "1:  mov x8, x0\n   mov x9, x2\n"
+    "2:  ldp w10, w11, [x8]\n   add w10, w10, w11\n   stp w10, wzr, [x8], #8\n   subs x9, x9, #1\n   b.ne 2b\n"
+    "add x0, x0, x1\n   subs x3, x3, #1\n   b.ne 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_skip)
+
     ASM_FUNC(hash_fnv_u32)
     "mov w8, #0x0193\n   movk w8, #0x0100, lsl #16\n   cbz x1, 2f\n"
     "1:  ldr w9, [x0], #4\n   eor w2, w2, w9\n   mul w2, w2, w8\n   subs x1, x1, #1\n   b.ne 1b\n"
@@ -36692,6 +36713,14 @@ __asm__(
     "add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 1b\n"
     "5:\n" ASM_RET
     ASM_END(bins_place)
+
+    ASM_FUNC(bins_skip)
+    "beqz a2, 3f\n   beqz a3, 3f\n   slli a1, a1, 3\n"
+    "1:  mv t0, a0\n   mv t1, a2\n"
+    "2:  lw t2, 0(t0)\n   lw t3, 4(t0)\n   addw t2, t2, t3\n   sw t2, 0(t0)\n   sw zero, 4(t0)\n   addi t0, t0, 8\n   addi t1, t1, -1\n   bnez t1, 2b\n"
+    "add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "3:\n" ASM_RET
+    ASM_END(bins_skip)
 
     ASM_FUNC(hash_fnv_u32)
     "li t0, 16777619\n   beqz a1, 2f\n"
@@ -54702,6 +54731,14 @@ positive automaton_scan(const p16 address_to moves, const p8 address_to classes,
         checked against a size, the records are not in the lists they are
         copied to, and the cells and the words lie at a multiple of four.
 
+        bins_skip passes over the records a cell's list has so far, for
+        every cell of a rectangle given as bins_count takes it: its start
+        grows by its count and its count is zero, so a record bins_place
+        puts there after is the first the list's reader sees. The records
+        passed over stay where they are. A caller passes over them when
+        the record it places next covers the cell whole and so hides them;
+        the room the lists were counted for is the same.
+
         hash_fnv_u32 is the FNV-1a walk over 32-bit words, a word a step:
         from `hash`, each of `count` words is folded in by an exclusive
         or and a multiplication by 16777619, in 32 bits. No words answers
@@ -54711,6 +54748,7 @@ positive bins_starts(p32 address_to cells, positive count);
 fn bins_count(p32 address_to cells, positive pitch, positive columns, positive rows, positive add);
 fn bins_place(p32 address_to cells, positive pitch, positive columns, positive rows, p32 address_to lists,
               const p32 address_to records, positive count);
+fn bins_skip(p32 address_to cells, positive pitch, positive columns, positive rows);
 PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive hash);
 /*
         A hand's reports on their way to a program: what a device says

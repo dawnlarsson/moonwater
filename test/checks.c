@@ -15277,8 +15277,8 @@ fn check_reverse()
 }
 
 /*
-        bins_count, bins_starts, bins_place and hash_fnv_u32 against the loops
-        they stand for.
+        bins_count, bins_starts, bins_place, bins_skip and hash_fnv_u32 against
+        the loops they stand for.
 
         Grids of every pitch and height in the lists, with rectangles drawn at
         random inside them (some with no columns or no rows), each given a
@@ -15327,6 +15327,17 @@ static fn reference_bins_place(p32 address_to cells, positive pitch, positive co
                 }
 }
 
+static fn reference_bins_skip(p32 address_to cells, positive pitch, positive columns, positive rows)
+{
+        for (positive row = 0; row < rows; row++)
+                for (positive column = 0; column < columns; column++)
+                {
+                        p32 address_to cell = cells + 2 * (row * pitch + column);
+
+                        cell[0] += cell[1], cell[1] = 0;
+                }
+}
+
 static positive reference_hash_fnv_u32(const p32 address_to words, positive count, positive hash)
 {
         p32 now = (p32)hash;
@@ -15348,7 +15359,7 @@ fn check_bins()
         p8 address_to list_pages = memory(LISTS + 4096);
         p8 mapped = (bipolar)(positive)cell_pages > 0 && (bipolar)(positive)record_pages > 0 && (bipolar)(positive)list_pages > 0;
         p64 seed = 0x243f6a8885a308d3ull;
-        positive counted = 1, started = 1, placed = 1, hashes = 1, grids = 0, entries = 0, empties = 0;
+        positive counted = 1, started = 1, placed = 1, hashes = 1, grids = 0, entries = 0, empties = 0, skipped = 1, skips = 0;
 
         same("bins_place", "guard mappings", mapped, 1);
         if (!mapped)
@@ -15399,6 +15410,16 @@ fn check_bins()
 
                                                 for (positive word = 0; word < 8 * rect[r][4]; word++)
                                                         records[word] = (p32)BINS_NEXT();
+                                                // Before some of the places, the cells of another rectangle passed over (bins_skip, a covering record's), as gpu.c's cut does
+                                                // before it places that record: the starts move on by the counts so far and the counts are none.
+                                                if (BINS_NEXT() % 3 == 0)
+                                                {
+                                                        positive sx = BINS_NEXT() % pitch, sy = BINS_NEXT() % height, sw = BINS_NEXT() % (pitch - sx + 1), sh = BINS_NEXT() % (height - sy + 1);
+
+                                                        (bins_skip)(cells + 2 * (sy * pitch + sx), pitch, sw, sh);
+                                                        reference_bins_skip(want_cells + 2 * (sy * pitch + sx), pitch, sw, sh);
+                                                        skipped &= !memory_compare(cells, want_cells, 8 * count), skips++;
+                                                }
                                                 (bins_place)(cells + 2 * (rect[r][1] * pitch + rect[r][0]), pitch, rect[r][2], rect[r][3], lists, records, rect[r][4]);
                                                 reference_bins_place(want_cells + 2 * (rect[r][1] * pitch + rect[r][0]), pitch, rect[r][2], rect[r][3], want_lists, records,
                                                                      rect[r][4]);
@@ -15435,6 +15456,9 @@ fn check_bins()
         (bins_place)((p32 address_to)(cell_pages + 8192), 9, 0, 5, (p32 address_to)(list_pages + LISTS), (const p32 address_to)(record_pages + 4096), 3);
         (bins_place)((p32 address_to)(cell_pages + 8192), 9, 5, 0, (p32 address_to)(list_pages + LISTS), (const p32 address_to)(record_pages + 4096), 3);
         same("bins_place", "no columns or no rows touches no cell, list or record", 1, 1);
+        same("bins_skip", "the cells of every rectangle passed over between the places, every pitch and height, the cells ending at a page that cannot be touched", skipped && skips > 1000, 1);
+        (bins_skip)((p32 address_to)(cell_pages + 8192), 9, 0, 5), (bins_skip)((p32 address_to)(cell_pages + 8192), 9, 5, 0);
+        same("bins_skip", "no columns or no rows touches no cell", 1, 1);
         memory_free(cell_pages, 3 * 4096);
         memory_free(record_pages, 2 * 4096);
         memory_free(list_pages, LISTS + 4096);
@@ -243999,8 +244023,8 @@ static void gpu_import_rows(void)
         gpu_lost = kept_lost, gpu_userptr_off = kept_off, gpu_userptr_gone = kept_gone, gpu_map_why = kept_why, compositor_gpu = kept_on;
 }
 
-#define GPU_BENCH_HASH 899857414u
-#define GPU_BENCH_ENTRIES 6799u
+#define GPU_BENCH_HASH 1713744629u // (the cut at binning: a cell's list starts at the record that covers it whole, 2395 entries the waves read of the 6799 placed)
+#define GPU_BENCH_ENTRIES 2395u
 /*
         The processor's share of a frame the card draws, with no card (the fake card: the buffer is memory, the submit is taken, the fence answers done): a
         desktop's scene of 85 records on 1920 by 1080 (a ground, twelve windows of 900 by 650, each a picture, a rounded box with one change of cover and
@@ -250051,6 +250075,58 @@ static unsigned int model_hash(void)
         return gpu_test_hash();
 }
 
+// gpu_scene with the cut at binning off (gpu.c's gpu_cut_off): the drawing the cut is held to.
+static b32 model_draw_uncut(positive ops_at, unsigned int n, positive bins_at, positive pic_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
+                            unsigned int dy0, unsigned int dx1, unsigned int dy1)
+{
+        b32 drawn;
+
+        gpu_cut_off = 1, drawn = gpu_model_draw_shipped(ops_at, n, bins_at, pic_at, pitch, w, h, dx0, dy0, dx1, dy1), gpu_cut_off = 0;
+        return drawn;
+}
+
+// A desktop on 1920 by 1080 as the compositor's records draw it: a ground, then 12 windows, each its picture copied (4) from the card's buffer, its rounded
+// line as an opaque box under it and a tone of a shadow, overlapping one another; drawn once without the cut and once with it (cut), the list entries of each
+// counted in model_entries, the pictures compared. Answers the pixels that differ (0 when cut is 0: the first drawing is the reference).
+static positive model_entries[2];
+static unsigned int model_desktop_picture[1920 * 1080];
+static positive model_desktop(int cut)
+{
+        enum { DW = 1920, DH = 1080 };
+        positive ops_at = GPU_DATA, bins_at = GPU_DATA + (1 << 20), pic_at = GPU_DATA + (4 << 20), src_at = GPU_DATA + (13 << 20), differ = 0;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at);
+        unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);
+        unsigned int n = 0, seed = 4242u, entries = 0;
+
+#define MODEL_OP(a, b, c, d, e, f, g, h) (ops[8 * n] = (a), ops[8 * n + 1] = (unsigned int)(b), ops[8 * n + 2] = (unsigned int)(c), ops[8 * n + 3] = (unsigned int)(d), \
+                                          ops[8 * n + 4] = (unsigned int)(e), ops[8 * n + 5] = (f), ops[8 * n + 6] = (g), ops[8 * n + 7] = (h), n++)
+        for (unsigned int i = 0; i < 1024 * 768; i++)
+                seed = seed * 1664525u + 1013904223u, src[i] = seed | 0xff000000u;
+        MODEL_OP(0, 0, 0, DW, DH, 0xff203040u, 0, 0);
+        for (int k = 0; k < 12; k++)
+        {
+                int x = 40 + k * 80, y = 20 + k * 34;
+
+                MODEL_OP(1, x - 8, y - 4, x + 908, y + 666, 0x30000000u, 0, 0);
+                MODEL_OP(2, (x - 2) * 256, (y - 2) * 256, (x + 902) * 256, (y + 652) * 256, 0xff404040u, 12 * 256, 12 * 256);
+                MODEL_OP(4, x, y, x + 900, y + 650, (unsigned int)(GPU_VA + src_at), (unsigned int)((GPU_VA + src_at) >> 32), 1024);
+        }
+#undef MODEL_OP
+        memory_zero(pic, (positive)DW * DH * 4);
+        gpu_cut_off = !cut;
+        gpu_scene(ops_at, n, bins_at, pic_at, DW, DW, DH, 0, 0, DW, DH);
+        gpu_cut_off = 0;
+        for (unsigned int c = 0; c < ((DW + 63) >> 6) * ((DH + 63) >> 6); c++)
+                entries += tab[2 * c + 1];
+        model_entries[cut] = entries;
+        if (!cut)
+                memory_copy(model_desktop_picture, pic, sizeof(model_desktop_picture));
+        else
+                for (unsigned int i = 0; i < DW * DH; i++)
+                        differ += pic[i] != model_desktop_picture[i];
+        return differ;
+}
+
 static b32 model_has(const char address_to text, const char address_to words)
 {
         return string_find((string_address)text, (string_address)words) != 0;
@@ -250252,7 +250328,7 @@ b32 main()
                 check("gpu model: its cost says what ran: four waves, the stores of 200 lanes", gpu_model.cost.waves == 4 && gpu_model.cost.lane_stores == 200);
         }
 
-        if (!gpu_model_card_start(8 << 20))
+        if (!gpu_model_card_start(24 << 20)) // (the cut's desktop of 1920 by 1080 and its pictures, from GPU_DATA to 16 MiB on)
         {
                 check("gpu model: the model card's buffer is made", false);
                 return test_report(null);
@@ -250351,6 +250427,36 @@ b32 main()
                               (positive)d.x, (positive)d.y, (positive)d.one, (positive)d.two);
                 check("gpu model: and with the mutant staged in its place, pixels differ and the first is named", staged && wrong > 0 && !d.failed);
                 gpu_model_card.staged_words = 0;
+                // The cut at binning (gpu.c's gpu_record_holds and bins_skip): the same scenes binned without it and with it draw the same, and what the waves
+                // ran with each (the model's cost) says what it saved; then over scenes of a desktop's stack, windows whole over one another, where it is meant to.
+                {
+                        struct gpu_model_cost whole, cut;
+
+                        gpu_model_card_reset();
+                        wrong = gpu_model_card_differential(model_draw_uncut, model_draw_uncut, 0x2545f491u, 200, &d);
+                        whole = gpu_model.cost;
+                        gpu_model_card_reset();
+                        wrong = gpu_model_card_differential(gpu_model_draw_shipped, gpu_model_draw_shipped, 0x2545f491u, 200, &d);
+                        cut = gpu_model.cost;
+                        wrong = gpu_model_card_differential(model_draw_uncut, gpu_model_draw_shipped, 0x2545f491u, 200, &d);
+                        string_format(log, "gpu model cut: 200 random scenes binned without the cut and with it, %p records, %p pixels: %p differ, %p failed; the waves ran %p instructions "
+                                           "(%p lane loads, %p lane stores) without it and %p (%p, %p) with it\n",
+                                      d.records, d.pixels, wrong, (positive)d.failed, whole.instructions / 2, whole.lane_loads / 2, whole.lane_stores / 2, cut.instructions / 2,
+                                      cut.lane_loads / 2, cut.lane_stores / 2);
+                        check("gpu model: the scenes binned with the cut (a record that covers a cell whole passes over the ones before it there) draw what they draw without it, "
+                              "pixel for pixel",
+                              !wrong && !d.failed && d.records > 1000);
+                        gpu_model_card_reset();
+                        model_desktop(0);
+                        whole = gpu_model.cost;
+                        gpu_model_card_reset();
+                        wrong = model_desktop(1);
+                        cut = gpu_model.cost;
+                        string_format(log, "gpu model cut: a desktop of 12 windows over a ground on 1920 by 1080, list entries %p without the cut and %p with it; the waves ran %p "
+                                           "instructions (%p lane loads) without it and %p (%p) with it, the pictures %s\n",
+                                      model_entries[0], model_entries[1], whole.instructions, whole.lane_loads, cut.instructions, cut.lane_loads, wrong ? "DIFFER" : "the same");
+                        check("gpu model: on a desktop's stack of windows the cut passes over the hidden records, and draws the same picture", !wrong && model_entries[1] < model_entries[0]);
+                }
         }
 
         // Bounds: a record that reaches past every buffer the job named is refused with the address, and no wave past it runs.
@@ -251186,10 +251292,19 @@ b32 main()
                 unsigned int address_to got_b = (unsigned int address_to)((p8 address_to)gpu.at + d_at), corners_12 = 0;
                 int kept_width = compositor.width, kept_height = compositor.height;
 
+                static const unsigned int poisons[3] = {0, 0xdeadbeefu, 0xffffffffu};
+                positive differ[3] = {0, 0, 0};
+                unsigned int kept_seed = gpu_seed;
+
                 compositor_gpu_layout();
+                for (int pass = 0; pass < 3; pass++)
                 for (int round = 0; round < BROUNDS; round++)
                 {
                         struct compositor_frame f;
+                        positive before_pass = blend_bad;
+
+                        if (round == 0)
+                                gpu_seed = kept_seed, gpu_model.poison = poisons[pass];
                         struct compositor_target t;
                         unsigned int ground = gpu_random() | 0xff000000u;
                         int pw = 24 + (int)(gpu_random() % 170), ph = 24 + (int)(gpu_random() % 130);
@@ -251240,15 +251355,19 @@ b32 main()
                         for (int y = dy0; y < dy1; y++)
                                 for (int x = dx0; x < dx1; x++, compared++)
                                         if (got_b[y * BW + x] != want_b[y * BW + x] && (++model_wrong, ++blend_bad) < 6)
-                                                string_format(log, "  FAIL gpu blend round %p (square %p, radius %p, line %p, at %p,%p): pixel %p,%p is %p, wanted %p\n", (positive)round,
-                                                              (positive)f.square, (positive)f.radius, (positive)f.line, (positive)(f.x + 1000), (positive)(f.y + 1000), (positive)x, (positive)y,
-                                                              (positive)got_b[y * BW + x], (positive)want_b[y * BW + x]);
+                                                string_format(log, "  FAIL gpu blend round %p, poison %p (square %p, radius %p, line %p, at %p,%p): pixel %p,%p is %p, wanted %p\n",
+                                                              (positive)round, (positive)poisons[pass], (positive)f.square, (positive)f.radius, (positive)f.line, (positive)(f.x + 1000),
+                                                              (positive)(f.y + 1000), (positive)x, (positive)y, (positive)got_b[y * BW + x], (positive)want_b[y * BW + x]);
+                        differ[pass] += blend_bad - before_pass;
                 }
+                gpu_model.poison = 0;
+                string_format(log, "gpu model kit: the blended windows' pixels that differ with every register nothing writes 0: %p, 0xdeadbeef: %p, all ones: %p\n",
+                              differ[0], differ[1], differ[2]);
                 compositor.width = kept_width, compositor.height = kept_height;
                 check("gpu model kit: a blended window with round corners (kind 12 in its corners) drawn by the model card is compositor_draw's, pixel for pixel, over every "
-                      "corner state, radius, line, place and damage",
+                      "corner state, radius, line, place and damage, with every register nothing writes started as 0, 0xdeadbeef and all ones",
                       blend_bad == 0 && corners_12 > 0 && !gpu_model.fault.code);
-                string_format(log, "gpu model kit: %p blended windows, %p corner records of kind 12, %p pixels compared, %p differ\n", (positive)BROUNDS, (positive)corners_12, compared,
+                string_format(log, "gpu model kit: %p blended windows under each of three poisons, %p corner records of kind 12, %p pixels compared, %p differ\n", (positive)BROUNDS, (positive)corners_12, compared,
                               blend_bad);
         }
 

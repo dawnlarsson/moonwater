@@ -2010,6 +2010,34 @@ static void gpu_radii(unsigned int address_to r)
         if (i + (unsigned int)m >= n) return -1; \
         x0 = x0 < (int)dx0 ? (int)dx0 : x0, y0 = y0 < (int)dy0 ? (int)dy0 : y0, x1 = x1 > (int)dx1 ? (int)dx1 : x1, y1 = y1 > (int)dy1 ? (int)dy1 : y1; \
         if (x0 < x1 && y0 < y1) { unsigned int tx0 = (unsigned int)x0 >> 6, ty0 = (unsigned int)y0 >> 6, tx1 = (unsigned int)(x1 - 1) >> 6, ty1 = (unsigned int)(y1 - 1) >> 6; body } i += m; }
+// A check's switch: the bins made without the cut (gpu_record_holds), for the differential that holds the cut to the picture the kernel draws without it.
+static b32 gpu_cut_off;
+
+/*
+        The cells of the bins a record covers whole as the scene kernel draws it, by the kernel's own rule for a first record that holds its patch (gpu.asm's
+        .scene_first_rect and .scene_first_box): a fill (word 0 is 0: its colour is written over the pixel, whatever its alpha), a picture copied (4), or a box (word 0
+        is 2: no change of cover after it) of alpha 255 whose corners are in no row of the cell (its rows inside its vertical radius are not the cell's), with its
+        radii fitted (gpu_radii); each cell's part of the damage the lists are binned for (dx0 dy0 dx1 dy1) inside it. Every record of the cell's list before it
+        is then hidden by it: none of their pixels can show. cells: the first and last column and row of them; false for none.
+*/
+static b32 gpu_record_holds(const unsigned int address_to r, unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int cells[4])
+{
+        long long x0, y0, x1, y1, ry = (int)r[7];
+
+        if (r[0] == 0 || r[0] == 4)
+                x0 = (int)r[1], y0 = (int)r[2], x1 = (int)r[3], y1 = (int)r[4];
+        else if (r[0] == 2 && r[5] >> 24 == 255 && ry >= 0 && (int)r[6] >= 0)
+                x0 = ((long long)(int)r[1] + 255) >> 8, x1 = (long long)(int)r[3] >> 8, y0 = ((long long)(int)r[2] + ry + 255) >> 8, y1 = ((long long)(int)r[4] - ry) >> 8;
+        else
+                return false;
+        x0 = x0 <= (long long)dx0 ? (long long)dx0 : (x0 + 63) & ~63ll, y0 = y0 <= (long long)dy0 ? (long long)dy0 : (y0 + 63) & ~63ll;
+        x1 = x1 >= (long long)dx1 ? (long long)dx1 : x1 & ~63ll, y1 = y1 >= (long long)dy1 ? (long long)dy1 : y1 & ~63ll;
+        if (x0 >= x1 || y0 >= y1)
+                return false;
+        cells[0] = (unsigned int)(x0 >> 6), cells[1] = (unsigned int)(y0 >> 6), cells[2] = (unsigned int)((x1 - 1) >> 6), cells[3] = (unsigned int)((y1 - 1) >> 6);
+        return true;
+}
+
 // The scene's job built: its records binned into the bins at bins_at (room bytes there for the table and the lists), and the arguments of the slot the job is
 // built in (gpu_slot) written. 1 built; 0 nothing to draw (the damage is empty); -1 refused (a record that runs past the scene, a scene the kernels by hand do not
 // draw, bins that do not fit: gpu_end OVERFLOW). binned is the damage the lists hold (whole patches of 64 by 4).
@@ -2017,9 +2045,9 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
                            unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int binned[4])
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);
-        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, scene_op = 4, i, address_to list = tab + 2 * cw * ch, record[16 * 8];
+        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, scene_op = 4, i, address_to list = tab + 2 * cw * ch, record[16 * 8], held[4];
         struct gpu_args address_to a = GPU_ARGS;
-        b32 aligned = !(w & 3) && !(pitch & 3) && !(d_at & 15), partial;
+        b32 aligned = !(w & 3) && !(pitch & 3) && !(d_at & 15), partial, cut;
 
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (dx0 >= dx1 || dy0 >= dy1)
@@ -2043,6 +2071,7 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
         dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u; // the kernel draws whole patches: so the ops are binned for them
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         binned[0] = dx0, binned[1] = dy0, binned[2] = dx1, binned[3] = dy1;
+        cut = aligned && !gpu_cut_off; // (the kernels by hand: the hidden records are passed over in the lists of the cells a later record covers whole)
         if (bins_at >= gpu.size || room > gpu.size - bins_at || 8ull * cw * ch > room)
                 return gpu_end = GPU_END_OVERFLOW, -1;
         {
@@ -2091,7 +2120,10 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
                 }
                 // A record goes into the list of each square it is in as it is, a box with its corners fitted to its sides (gpu_radii): fitted once, and the same words
                 // put in every list (they were fitted again in each square: two divisions a square for a box of a whole window).
+                // A record that covers a cell whole hides every record before it there: the cell's list starts at it (bins_skip), the ones before passed over.
                 GPU_RECORDS(memory_copy(record, q, 32 * (1 + (positive)m)); if (e) for (int j = 0; j <= m; j++) gpu_radii(record + 8 * j);
+                            if (cut && !m && gpu_record_holds(record, dx0, dy0, dx1, dy1, held))
+                                    bins_skip(tab + 2 * (held[1] * cw + held[0]), cw, held[2] - held[0] + 1, held[3] - held[1] + 1);
                             bins_place(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, list, record, 1 + (positive)m);)
                 if (staged)
                         memory_copy_apart((p8 address_to)gpu.at + bins_at, tab, need);
