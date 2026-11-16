@@ -3903,7 +3903,14 @@ static void compositor_input_read_device(unsigned int at)
                         }
                         if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE &&
                             compositor.touch.device == (int)at)
+                        {
+                                // A long press it held is let go of in the row it landed on, as its lift would have: no lift comes now.
+                                if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)
+                                        compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
+                                                        WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
+                                compositor.touch.hold_row = COMPOSITOR_NONE;
                                 ui_touch_reset(&compositor.touch.gesture);
+                        }
                         if (compositor.touchscreen[at])
                                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                                         compositor_spot_lift(slot, clock_monotonic_nanoseconds());

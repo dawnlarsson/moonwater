@@ -709,6 +709,12 @@ static void check_compositor_popup(void)
     check("popup keys: a press outside it asks it to go", (table->state[3] & WINDOW_CLOSING) != 0);
     check("popup keys: a popup asked to go has none, and the window has them", compositor_popup_top(1) == 1 && compositor.focus == 1);
 
+    // The window's door goes while the popup asked to go is still on the screen: its link is cut, and the keys go to the window
+    // or to nothing, never to the popup on its way out.
+    compositor_popup_leave(1);
+    compositor_refocus();
+    check("popup keys: a popup asked to go, still on the screen when its window's door goes, is given no keys", compositor.focus != 3);
+
     // The window goes (its program hung up) while that popup is still on the screen, and a new window takes its row.
     compositor_popup_leave(1);
     compositor_stack_remove(1);

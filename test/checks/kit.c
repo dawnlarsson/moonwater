@@ -4378,6 +4378,16 @@ static fn check_hand_settings(void)
         holds = holds && ui_hold_ns == 800 * UI_MS;
         check("hand settings: a long press kept at 800 ms is no hold at 600 ms and a hold at 800, in the touch recogniser and, through the table, in a window",
               holds);
+        {
+                struct ui_touch_out out;
+
+                // A long press whose events are lost (a device gone, a dropped report) ends as a lift: its hold is let go of.
+                memory_zero(&touch, sizeof(touch));
+                touch.mode = UI_TOUCH_HELD;
+                ui_touch_drop(&touch, &out);
+                check("touch drop: a long press dropped ends its hold with a HOLD_END, and the gesture is none",
+                      out.count == 1 && out.event[0].kind == UI_TOUCH_HOLD_END && touch.mode == UI_TOUCH_NONE);
+        }
 
         // The terminal's lines a notch: three as standard, and five when kept so, carried by the table.
         ui_kit.wheel_lines = 0;

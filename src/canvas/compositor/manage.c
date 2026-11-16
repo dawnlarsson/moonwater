@@ -105,7 +105,7 @@ static void compositor_refocus(void)
 
         for (unsigned int at = compositor.stacked; at-- && next < 0;)
                 if (compositor_visible(compositor.stack[at]) && compositor_popup_parent[compositor.stack[at]] < 0 &&
-                    compositor_cycles(compositor.stack[at]))
+                    !(compositor.state[compositor.stack[at]] & WINDOW_CLOSING) && compositor_cycles(compositor.stack[at]))
                         next = compositor.stack[at];
 
         compositor_focus(next);
@@ -974,7 +974,7 @@ static unsigned int compositor_grid_under(const int *screen, int x, int y)
 // already fills it, or else the snap target of the window's rectangle box (compositor_snap). touch is the edges it touches.
 static unsigned int compositor_target(int row, int x, int y, const int *box, int *screen, unsigned int *touch)
 {
-        unsigned int count, tile, snap = compositor_snap(box, touch, screen);
+        unsigned int count, tile;
         const int (*screens)[4] = compositor_screens(&count);
         int at = compositor_screen_at(screens, count, x, y);
 
@@ -986,10 +986,11 @@ static unsigned int compositor_target(int row, int x, int y, const int *box, int
                         unsigned int how = compositor_grid_regions[tile];
 
                         *screen = at;
+                        *touch = 0;
                         return compositor_region_cells(how) & compositor_occupied(row, at) ? COMPOSITOR_FLOATING : how;
                 }
         }
-        return snap;
+        return compositor_snap(box, touch, screen);
 }
 
 // The tiles a set of free cells is cut into, the larger first: a half where it holds one, then quarters.

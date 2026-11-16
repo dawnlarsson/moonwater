@@ -1093,6 +1093,8 @@ static inline void ui_touch_drop(struct ui_touch *t, struct ui_touch_out *out)
                 ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
         if (t->mode == UI_TOUCH_TWO && t->turned)
                 ui_touch_put(out, UI_TOUCH_TURN_END, 0, 0);
+        if (t->mode == UI_TOUCH_HELD)
+                ui_touch_put(out, UI_TOUCH_HOLD_END, 0, 0);
         t->mode = UI_TOUCH_NONE;
         t->pending = 0;
         t->pinching = 0;

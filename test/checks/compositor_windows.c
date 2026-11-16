@@ -1523,6 +1523,26 @@ static void check_compositor_touch_hold_gone(void)
           table->event_head[1] == head && compositor.touch.gesture.mode == UI_TOUCH_NONE);
     check("touch hold gone: and the next program in the row is given no gesture of the person's for the clipboard",
           compositor_clip.gesture[1] == 0);
+
+    // The finger's device goes away while the press is held, so no lift will come: the hold ends with the device, its row let go.
+    {
+        int dead[2];
+
+        compositor.touch.gesture.mode = UI_TOUCH_HELD;
+        compositor.touch.device = 0;
+        compositor.touch.hold_row = 1;
+        compositor.touchscreen[0] = 1;
+        if (system_call_2(syscall(pipe2), (positive)dead, 0) == 0)
+        {
+            system_close(dead[0]);
+            system_close(dead[1]);
+            compositor.inputs[0] = dead[0];
+            compositor.input_count = 1;
+            compositor_input_read(0);
+        }
+        check("touch hold gone: a device gone while its finger is held ends the hold: the row is let go of, and the gesture is none",
+              compositor.touch.hold_row == COMPOSITOR_NONE && compositor.touch.gesture.mode == UI_TOUCH_NONE);
+    }
     life_close(1);
     compositor.touchscreen[0] = 0;
 }
@@ -4138,6 +4158,11 @@ static void check_compositor_grid_drag(void)
               "preview, the window is its own picture",
               inside && (layout_pixels[below * 256 + 130] & 0xffffffu) == (picture & 0xffffffu));
     }
+    /* The hand moves within the top left tile with the grid up: that frame's target is the tile, which has no snap edges, so the
+       next frame's dead zone reads none (snap_held), not the edges of a snap the tile replaced. */
+    screens_hand(122, 4, 0);
+    check("grid drag: the window moved within a grid tile leaves no snap edges for the next frame's dead zone (snap_held 0)",
+          compositor.grid_on && compositor.snap_held == 0);
     screens_hand(120, 4, -1);
     compositor.press = COMPOSITOR_NONE;
 }
