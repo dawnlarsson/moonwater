@@ -4893,6 +4893,13 @@ static fn windows_client(void)
         windows_door_name(name, 17, 1);
         check("row 17's wake",
               string_compare((string_address)name, (string_address) "/run/moonwater/window.17.wake") == 0);
+        windows_door_name(name, 100, 0);
+        check("row 100's door, its every digit", string_compare((string_address)name, (string_address) "/run/moonwater/window.100") == 0);
+        windows_door_name(name, 2550, 1);
+        check("row 2550's wake (once '/0', a path through no directory)",
+              string_compare((string_address)name, (string_address) "/run/moonwater/window.2550.wake") == 0);
+        windows_door_name(name, WINDOWS - 1, 1);
+        check("the layout's last row's wake", string_compare((string_address)name, (string_address) "/run/moonwater/window.1048575.wake") == 0);
 
         //      The compositor runs as root and frees a row when its door's last
         //      writer closes, so a door the whole machine may write is one it

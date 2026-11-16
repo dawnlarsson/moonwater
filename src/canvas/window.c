@@ -3382,11 +3382,18 @@ static void windows_door_name(char *into, unsigned int row, int wake)
         const char *wake_name = ".wake";
         unsigned int at = 0;
 
+        char digits[10];
+        unsigned int count = 0;
+
         for (const char *from = WINDOWS_DOOR; *from; from++)
                 into[at++] = *from;
-        if (row >= 10)
-                into[at++] = (char)('0' + row / 10);
-        into[at++] = (char)('0' + row % 10);
+        // The row in decimal, every digit of it: a row past 99 had its tens written as one character past '9' (row 100 ':0'),
+        // and row 2550 '/0', a path through a directory that is not there.
+        do
+                digits[count++] = (char)('0' + row % 10), row /= 10;
+        while (row);
+        while (count)
+                into[at++] = digits[--count];
         for (; wake && *wake_name; wake_name++)
                 into[at++] = *wake_name;
         into[at] = 0;
