@@ -39,6 +39,19 @@
         (compositor_tab_target), with a finger's reach (taskbar_hit_reach).
 */
 
+/*
+        The moon moves two ways, each with the kit's motion and none with reduced motion (taskbar.glides). It turns, once in
+        `taskbar moon spin` seconds (TASKBAR_MOON_SPIN), in TASKBAR_MOON_STEPS steps a second on the real clock, and stops
+        TASKBAR_MOON_IDLE after the last thing a hand did; each step redraws the moon's square alone. And it grows about its middle by
+        TASKBAR_MOON_GROW percent while the pointer is over it or the launcher is up, over TASKBAR_MOON_GROW_MS on --ease, out into the
+        band's gap round it: the tasks do not move, and what a press finds is the disc at rest.
+*/
+#define TASKBAR_MOON_SPIN 60
+#define TASKBAR_MOON_STEPS 5
+#define TASKBAR_MOON_IDLE (120ull * 1000000000ull)
+#define TASKBAR_MOON_GROW 12
+#define TASKBAR_MOON_GROW_MS 180
+
 // The taskbar's own state: what the settings say, the minute the tray shows, and the battery it has read.
 static struct taskbar_state
 {
@@ -85,8 +98,13 @@ static struct taskbar_state
         int moon_ink;                           // `taskbar moon look ink`: the moon drawn in ink (ui_moon_paper), not as it is (realistic, the standard)
         int clock_read;                         // how the clock's digits stood out the last time they were drawn, hundredths (4.5 to 1 is 450)
         long long moon_at;                      // the time the moon is drawn at, seconds (a check's or a picture's); 0: now
+        int spin;                               // `taskbar moon spin`: seconds the moon takes to turn once, 0 not at all
+        int moon_hover;                         // the band whose moon the pointer is over, plus one; 0 none
+        positive moon_seen;                     // when a hand last did anything (the monotonic clock): the moon stops turning a while after
+        long long moon_step;                    // the step of the turn the moon is drawn at (TASKBAR_MOON_STEPS a second on the real clock)
+        b64 moon_turn;                          // how far round it is then, Q30 of a turn
 } taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0, .scale = TASKBAR_SCALE_STANDARD, .padding = TASKBAR_PADDING_STANDARD, .glides = 1,
-   .moon_zone = TASKBAR_ZONE_CENTRE, .tasks_zone = TASKBAR_ZONE_SPLIT, .tray_before = 1u << 1 | 1u << 2, .clock_bulge = 60, .order = {TASKBAR_PILL_MOON, TASKBAR_PILL_TASKS, TASKBAR_PILL_TRAY}};
+   .spin = TASKBAR_MOON_SPIN, .moon_zone = TASKBAR_ZONE_CENTRE, .tasks_zone = TASKBAR_ZONE_SPLIT, .tray_before = 1u << 1 | 1u << 2, .clock_bulge = 60, .order = {TASKBAR_PILL_MOON, TASKBAR_PILL_TASKS, TASKBAR_PILL_TRAY}};
 
 _Static_assert(TASKBAR_GAP == UI_GAP1, "the gap between the band's items is the kit's gap between pieces that go together");
 
@@ -722,6 +740,9 @@ static struct taskbar_band
         struct taskbar_key key;
         struct ui_tree tree;
         struct taskbar_lit lit;
+        struct ui_tween grow;   // how far the moon has grown, Q30 of TASKBAR_MOON_GROW
+        int moon_damage[4];     // the damage the moon made of itself (left, top, right, bottom), which nothing under the band is
+        int moon_own;           // and that it is there to be told apart
 } taskbar_bands[WINDOWS_OUTPUTS];
 
 static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
@@ -798,6 +819,12 @@ static int taskbar_plate(const struct taskbar_view *view, int at, int *which, in
                         {
                                 *which = t->node[k].id - 1;
                                 taskbar_rect(&t->node[k], x, y, width, height);
+                                if (*which == TASKBAR_LAUNCHER)
+                                {
+                                        int more = taskbar_moon_more(view);
+
+                                        *x -= more, *y -= more, *width += 2 * more, *height += 2 * more;
+                                }
                                 return 1;
                         }
         return 0;
@@ -872,8 +899,12 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
                 reach[0] -= COMPOSITOR_GLASS_REACH, reach[1] -= COMPOSITOR_GLASS_REACH;
                 for (unsigned int at = 0; at < damages; at++)
                 {
+                        const struct taskbar_band address_to own = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
                         int meet[4];
 
+                        // What the moon damaged of itself is no change under the band: it is the moon's to draw again, not the others'.
+                        if (which != TASKBAR_LAUNCHER && own->moon_own && !memory_compare(damage[at], own->moon_damage, sizeof(meet)))
+                                continue;
                         memory_copy(meet, damage[at], sizeof(meet));
                         compositor_meet(meet, reach);
                         if (meet[2] > meet[0] && meet[3] > meet[1])
@@ -1068,6 +1099,123 @@ static fn taskbar_lit_to(struct taskbar_lit address_to lit, const struct ui_tree
 static int taskbar_tween_moving(const struct ui_tween address_to t, positive now)
 {
         return t->pending || (t->start && (b64)now - t->start < t->duration);
+}
+
+// How far the moon of the band being drawn has grown, Q30 of TASKBAR_MOON_GROW (none with no band).
+static b64 taskbar_moon_share(void)
+{
+        b32 live = 0;
+        b64 share = ui_tween_at(&taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0].grow, &live);
+
+        return share < 0 ? 0 : share > UI_ONE ? UI_ONE : share;
+}
+
+// The most the moon of size pixels grows each side: what its square is grown by in the band at its largest, and its stripe.
+static int taskbar_moon_most(int size)
+{
+        return (int)((positive)size * TASKBAR_MOON_GROW / 200 + 1);
+}
+
+// How far the moon's plate reaches past its square each side now: as far as the grown disc.
+static int taskbar_moon_more(const struct taskbar_view *view)
+{
+        int size = taskbar_thick(view->scale);
+
+        return (int)(((positive)size * TASKBAR_MOON_GROW * (positive)taskbar_moon_share() / UI_ONE + 199) / 200);
+}
+
+// The pointer is over the moon of a band (its number), or of none (-1).
+static void taskbar_moon_hover(int band)
+{
+        taskbar.moon_hover = band + 1;
+}
+
+// A hand did something: the moon turns again, if it had stopped.
+static void taskbar_moon_seen(positive now)
+{
+        taskbar.moon_seen = now;
+}
+
+// The compositor damaged rect of the band for the moon alone (left, top, right, bottom).
+static void taskbar_moon_damaged(int band, const int *rect)
+{
+        if (band < 0 || band >= WINDOWS_OUTPUTS)
+                return;
+        memory_copy(taskbar_bands[band].moon_damage, rect, sizeof(taskbar_bands[band].moon_damage));
+        taskbar_bands[band].moon_own = 1;
+}
+
+// `taskbar moon spin`: seconds a turn, 10 to 3600, or 0 for none.
+static void taskbar_spin_set(int seconds)
+{
+        taskbar.spin = seconds >= 10 && seconds <= 3600 ? seconds : seconds == 0 ? 0 : TASKBAR_MOON_SPIN;
+}
+
+// Whether the moon is turning at now: the motion on, a spin, a hand seen within TASKBAR_MOON_IDLE, and no check's time.
+static int taskbar_moon_turning(positive now)
+{
+        return taskbar.glides && taskbar.spin > 0 && !taskbar.moon_at && now - taskbar.moon_seen < TASKBAR_MOON_IDLE;
+}
+
+/*
+        The moon's motion at now, asked on every pass of the compositor's loop before a frame (launcher: whether the launcher is up): the turn
+        taken on to the step the real clock is at, and each band's growth toward its pointer and its launcher. Answers whether the moon is
+        to be drawn again: a step taken, or a growth still going.
+*/
+static int taskbar_moon_tick(positive now, int launcher)
+{
+        int changed = 0;
+        b32 motion = ui_kit.motion;
+
+        if (!taskbar.moon_seen)
+                taskbar.moon_seen = now;
+        if (taskbar_moon_turning(now))
+        {
+                timespec real = {0, 0};
+                long long step, period = (long long)taskbar.spin * TASKBAR_MOON_STEPS;
+
+                clock_gettime(CLOCK_REALTIME, address_of real);
+                step = (long long)real.tv_sec * TASKBAR_MOON_STEPS + real.tv_nsec / (1000000000l / TASKBAR_MOON_STEPS);
+                if (step != taskbar.moon_step)
+                {
+                        taskbar.moon_step = step;
+                        taskbar.moon_turn = (b64)(step % period) * UI_ONE / (b64)period;
+                        changed = 1;
+                }
+        }
+        ui_kit.now = ui_kit_clock();
+        ui_kit.motion = !taskbar.glides;
+        for (int at = 0; at < WINDOWS_OUTPUTS; at++)
+        {
+                struct ui_tween address_to grow = &taskbar_bands[at].grow;
+                b64 want = launcher || taskbar.moon_hover == at + 1 ? UI_ONE : 0;
+
+                if (!grow->placed)
+                        ui_tween_put(grow, 0, UI_TWEEN_NUMBER);
+                if (want != (grow->pending ? grow->want : grow->to))
+                {
+                        b32 live = 0;
+
+                        // Begun now, not at the next draw.
+                        ui_kit_number_to(grow, want, TASKBAR_MOON_GROW_MS, &ui_ease), changed = 1;
+                        ui_tween_at(grow, &live);
+                }
+                changed |= taskbar_tween_moving(grow, ui_kit.now);
+        }
+        ui_kit.motion = motion;
+        return changed;
+}
+
+// When the moon is next to be drawn for its turn (the monotonic clock), or 0 while it is not turning.
+static positive taskbar_moon_due(positive now)
+{
+        timespec real = {0, 0};
+        positive each = 1000000000ull / TASKBAR_MOON_STEPS;
+
+        if (!taskbar_moon_turning(now))
+                return 0;
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        return now + each - (positive)real.tv_nsec % each + 1000000ull;
 }
 
 // Whether a band's highlight is still moving at now: its band is damaged again after each present until it settles.
@@ -1428,6 +1576,50 @@ static unsigned int taskbar_accent(void)
         return most - least < 40 ? 0x5b7fa6u : accent;
 }
 
+/*
+        The moon's disc at rest, kept a frame for each step of its turn: the steps of one turn (`taskbar moon spin` seconds,
+        TASKBAR_MOON_STEPS a second) at one size and one look, so after the first turn a step is a copy of its square and no more. The disc
+        is drawn on its own square (UI_MOON_FULL_SQUARE), so what is behind it is no part of it. Up to TASKBAR_MOON_KEPT bytes; a moon
+        larger, grown, at a check's time or in ink is drawn each time.
+*/
+#define TASKBAR_MOON_KEPT (8ul << 20)
+
+static unsigned int address_to taskbar_moon_kept(int size, unsigned int look, b32 address_to fresh)
+{
+        static struct
+        {
+                unsigned int address_to frames;
+                unsigned char address_to have;
+                positive bytes;
+                int size, period;
+                unsigned int look;
+        } kept;
+        int period = taskbar.spin * TASKBAR_MOON_STEPS;
+        positive frame = (positive)size * (positive)size, bytes = frame * 4 * (positive)period + (positive)period;
+        long step = (long)(taskbar.moon_step % (period > 0 ? period : 1));
+
+        *fresh = 0;
+        if (period <= 0 || size <= 0 || bytes > TASKBAR_MOON_KEPT || taskbar.moon_at)
+                return null;
+        if (kept.size != size || kept.period != period || kept.look != look || !kept.frames)
+        {
+                if (kept.frames)
+                        compositor_call(syscall(munmap), (positive)kept.frames, kept.bytes, 0, 0, 0, 0);
+                kept.frames = null;
+                {
+                        long got = ui_map(bytes);
+
+                        if (got < 0 && got > -4096)
+                                return null;
+                        kept.frames = (unsigned int address_to)got, kept.have = (unsigned char address_to)(got + (long)(frame * 4 * (positive)period));
+                }
+                kept.bytes = bytes, kept.size = size, kept.period = period, kept.look = look;
+        }
+        *fresh = !kept.have[step];
+        kept.have[step] = 1;
+        return kept.frames + frame * (positive)step;
+}
+
 static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int hours, int minutes, int lit)
 {
         struct ui ui;
@@ -1435,6 +1627,9 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
         const struct ui_node address_to mark = taskbar_ui(&ui, view, t, n, &x, &y);
         int size = mark->w < mark->h ? mark->w : mark->h;
         long long seconds = taskbar.moon_at;
+        b64 turn;
+        decimal grow = (decimal)taskbar_moon_share() / (decimal)UI_ONE * TASKBAR_MOON_GROW / 100;
+        int grown = size + (int)(size * grow + 0.5), left = x + (size - grown) / 2, top = y + (size - grown) / 2;
         // The rim is light alone: brighter toward white on a dark theme, darker toward a mid grey on a light one, so the disc's edge shows
         // on either; white while the launcher is up.
         int light = window_light(compositor_tab_target(0));
@@ -1447,6 +1642,9 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                 clock_gettime(CLOCK_REALTIME, address_of now);
                 seconds = now.tv_sec;
         }
+        // A check's or a picture's moon at its time, a step a minute; else where its turn has got to (taskbar_moon_tick).
+        turn = taskbar.moon_at ? (taskbar.glides ? (b64)(seconds / 60 % 60) * UI_ONE / 60 : 0) : taskbar.moon_turn;
+        look.grow = grow;
         if (taskbar.moon_ink)
         {
                 // In ink (`taskbar moon look ink`): the wallpaper's moon held to the button's size, ink on the paper's tone in light and
@@ -1454,16 +1652,31 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                 unsigned int paper, ink;
 
                 ui_moon_paper_tones(light ? 0 : UI_MOON_PAPER_DARK, &paper, &ink);
-                for (int row = 0; row < size; row++)
-                        for (int column = 0; column < size; column++)
-                                if (y + row >= 0 && y + row < ui.height && x + column >= 0 && x + column < ui.width)
-                                        ui.pixels[(long)(y + row) * (long)ui.pitch + x + column] = ink;
-                ui_moon_paper(&ui, x, y, size, taskbar.glides ? (b64)(seconds / 60 % 60) * UI_ONE / 60 : 0, light ? 0 : UI_MOON_PAPER_DARK, 0);
+                for (int row = 0; row < grown; row++)
+                        for (int column = 0; column < grown; column++)
+                                if (top + row >= 0 && top + row < ui.height && left + column >= 0 && left + column < ui.width)
+                                        ui.pixels[(long)(top + row) * (long)ui.pitch + left + column] = ink;
+                ui_moon_paper(&ui, left, top, grown, turn, light ? 0 : UI_MOON_PAPER_DARK, 0);
         }
         else
-                ui_moon(&ui, x, y, size, UI_ONE / 2, taskbar.glides ? (b64)(seconds / 60 % 60) * UI_ONE / 60 : 0, &look);
-        // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim).
-        ui_moon_rim(&ui, x, y, size, taskbar_accent(), 0.9);
+        {
+                b32 fresh = 0;
+                unsigned int address_to frame = grow > 0 || x < 0 || y < 0 || x + size > ui.width || y + size > ui.height ? null
+                                                                                                                          : taskbar_moon_kept(size, look.rim, &fresh);
+
+                if (frame && !fresh)
+                        for (int row = 0; row < size; row++)
+                                memory_copy(ui.pixels + (long)(y + row) * (long)ui.pitch + x, frame + row * size, (positive)size * 4);
+                else
+                {
+                        ui_moon(&ui, x, y, size, UI_ONE / 2, turn, &look);
+                        for (int row = 0; frame && row < size; row++)
+                                memory_copy(frame + row * size, ui.pixels + (long)(y + row) * (long)ui.pitch + x, (positive)size * 4);
+                }
+        }
+        // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim), a third stronger than it was.
+        ui_moon_rim(&ui, left, top, grown, taskbar_accent(), 1.2);
+        x = left, y = top, size = grown;
         if (taskbar.clock_tray || taskbar.clock_tab || taskbar.clock_none || hours < 0 || !view->engine || !view->face)
                 return;
         {
@@ -1600,12 +1813,23 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         char clock[6] = {0}, text[8];
 
         taskbar.stale = 0;
+        taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0].moon_own = 0;
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
         for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)
                 if (which != -4 && (which != -3 || taskbar.clock_tab) && which != TASKBAR_TABS && (redo & taskbar_bit(which)) &&
                     taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
                 {
+                        // The moon's along the band as far as it grows, into the gap round it.
+                        if (which == TASKBAR_LAUNCHER)
+                        {
+                                int most = taskbar_moon_most(stripe[band->dir ? 3 : 2]);
+
+                                if (band->dir)
+                                        stripe[1] -= most, stripe[3] += 2 * most;
+                                else
+                                        stripe[0] -= most, stripe[2] += 2 * most;
+                        }
                         stripe[2] += stripe[0], stripe[3] += stripe[1];
                         compositor_union(span, stripe);
                 }

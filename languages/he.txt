@@ -580,3 +580,4 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =tray-tasks-moon	fda8	מגש-משימות-ירח
 =tray	a12d	מגש
 =tab	2e4c	גלולה
+=Taskbar moon spin (seconds a turn, off or default)	a763	סיבוב הירח בשורת המשימות (שניות לסיבוב, כבוי או ברירת מחדל)

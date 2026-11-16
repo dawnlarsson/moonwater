@@ -110,6 +110,7 @@
 #define SETTING_TASKBAR_FULLSCREEN_PATH "/root/taskbar.fullscreen"
 #define SETTING_TASKBAR_MOON_PATH "/root/taskbar.moon"
 #define SETTING_TASKBAR_MOON_LOOK_PATH "/root/taskbar.moon.look"
+#define SETTING_TASKBAR_MOON_SPIN_PATH "/root/taskbar.moon.spin"
 #define SETTING_TASKBAR_TASKS_PATH "/root/taskbar.tasks"
 #define SETTING_TASKBAR_NEWEST_PATH "/root/taskbar.newest"
 #define SETTING_TASKBAR_ORDER_PATH "/root/taskbar.order"
@@ -682,6 +683,12 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TASKBAR_MOON_LOOK_PATH, .standard = "realistic",
                       .usage = "taskbar moon look [realistic|ink]",
                       .help = "the moon on the taskbar as it is, lit and turning, or drawn in ink as the wallpaper can be [realistic]"),
+    //  The moon's turn: once in this many seconds, five small steps a second, each the moon's square drawn again and nothing else; none
+    //  with reduced motion, with off, or two minutes after the last thing a hand did.
+    SETTING_PLAIN_ROW(null, "Taskbar moon spin (seconds a turn, off or default)", SETTINGS_FIELD, 0, ("taskbar", "moon", "spin"), "spin ", "off",
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_MOON_SPIN_PATH, .standard = "60", .unit = "seconds", .low = 10, .high = 3600,
+                      .usage = "taskbar moon spin [SECONDS|off|default]",
+                      .help = "how long the moon on the taskbar takes to turn once, 10 to 3600 seconds, or off; it rests with reduced motion and two minutes after the last key or move [60]"),
     SETTING_PLAIN_ROW(null, "Taskbar tasks place", SETTINGS_CHOICE, 0, ("taskbar", "tasks"), "tasks ", "split start center end",
                       .path = SETTING_TASKBAR_TASKS_PATH, .standard = "split",
                       .usage = "taskbar tasks [split|start|center|end]",

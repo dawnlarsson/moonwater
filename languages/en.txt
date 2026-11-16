@@ -579,3 +579,4 @@ ui_field_full	fe02	that is as much as it holds
 =tray-tasks-moon	fda8	tray-tasks-moon
 =tray	a12d	tray
 =tab	2e4c	tab
+=Taskbar moon spin (seconds a turn, off or default)	a763	Taskbar moon spin (seconds a turn, off or default)

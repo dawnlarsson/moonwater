@@ -852,6 +852,9 @@ static void compositor_taskbar_settings_read(void)
                         compositor_setting_kept(items[at], word, &side);
                         before |= (side == 0 ? 1u : 0u) << at;
                 }
+                compositor_word(SETTING_TASKBAR_MOON_SPIN_PATH, word, sizeof(word));
+                compositor_setting_kept(SETTING_TASKBAR_MOON_SPIN_PATH, word, &side);
+                taskbar_spin_set((int)side);
                 compositor_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof(word));
                 taskbar_arrange_set((int)kept[0], (int)kept[1], (int)kept[2], (int)kept[3], before, (int)kept[4], (int)kept[5], (int)kept[6],
                                     string_equals((string_address)word, (string_address) "12h"));

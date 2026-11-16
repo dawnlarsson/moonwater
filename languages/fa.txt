@@ -580,3 +580,4 @@ ui_field_full	fe02	بیش از این جا ندارد
 =tray-tasks-moon	fda8	سینی-وظیفه‌ها-ماه
 =tray	a12d	سینی
 =tab	2e4c	کپسول
+=Taskbar moon spin (seconds a turn, off or default)	a763	چرخش ماه در نوار وظیفه (ثانیه برای هر دور، خاموش یا پیش‌فرض)

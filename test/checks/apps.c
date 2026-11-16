@@ -9398,6 +9398,7 @@ b32 main()
         check_taskbar_highlight();
         check_launcher_centred();
         check_clock_places();
+        check_moon_motion();
         check_taskbar_tree();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY
@@ -9478,6 +9479,7 @@ b32 main()
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
+        check_moon_bench();
         check_icons();
         check_taskbar_identity();
         check_taskbar_guard();

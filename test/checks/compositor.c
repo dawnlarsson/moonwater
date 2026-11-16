@@ -2944,6 +2944,94 @@ static void check_taskbar_centre(void)
 }
 
 /*
+        The moon's motion. It grows about its middle while the pointer is over it, over the kit's ease, its plate with it, and back when the
+        pointer leaves; what a press finds stays the disc at rest. With reduced motion it is grown at once. It turns a step at a time on the
+        real clock while a hand has been about, the loop woken for the next step and no sooner, and rests two minutes after the last. And the
+        damage it makes of itself meets the moon alone, so no other plate of the band is made again for it.
+*/
+static void check_moon_motion(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    struct taskbar_view view;
+    int sx, sy, sw, sh, which, px, py, pw, ph, damage[1][4];
+    positive now = 5000000000000ull;
+    b32 rest, half, full, hit, back, reduced, turns, due, idle, own;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    memory_zero(&view, sizeof(view));
+    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_standard();
+    taskbar.glides = 1, taskbar.moon_seen = 0, taskbar.moon_step = 0;
+    taskbar_spin_set(0); // the growth alone first, no turn
+    ui_kit.test_clock = 1000000000ll;
+    taskbar_slot(&view, TASKBAR_LAUNCHER, &sx, &sy, &sw, &sh);
+    taskbar_moon_hover(-1);
+    taskbar_moon_tick(now, 0);
+    rest = taskbar_moon_share() == 0 && taskbar_moon_more(&view) == 0;
+    // The pointer over it: half way through, between; after, grown by the whole share and its plate with it.
+    taskbar_moon_hover(0);
+    taskbar_moon_tick(now, 0);
+    ui_kit.test_clock += (b64)ui_paced(TASKBAR_MOON_GROW_MS * UI_MS) / 2;
+    half = taskbar_moon_tick(now, 0) && taskbar_moon_share() > 0 && taskbar_moon_share() < UI_ONE;
+    ui_kit.test_clock += 1000000000ll;
+    taskbar_moon_tick(now, 0);
+    full = taskbar_moon_share() == UI_ONE && taskbar_moon_more(&view) == (sw * TASKBAR_MOON_GROW + 199) / 200;
+    {
+        int found = 0;
+
+        for (int at = 0; taskbar_plate(&view, at, &which, &px, &py, &pw, &ph); at++)
+            if (which == TASKBAR_LAUNCHER)
+                found = pw == sw + 2 * taskbar_moon_more(&view) && px == sx - taskbar_moon_more(&view);
+        full &= found;
+    }
+    // A press just past the disc at rest, inside the grown one, is not the moon's.
+    hit = taskbar_hit_reach(&view, sx - 1, sy + sh / 2, 0) != TASKBAR_LAUNCHER && taskbar_hit_reach(&view, sx + sw / 2, sy + sh / 2, 0) == TASKBAR_LAUNCHER;
+    taskbar_moon_hover(-1);
+    taskbar_moon_tick(now, 0);
+    ui_kit.test_clock += 1000000000ll;
+    taskbar_moon_tick(now, 0);
+    back = taskbar_moon_share() == 0 && !taskbar_moon_tick(now, 0);
+    // The launcher up grows it as the pointer does; with reduced motion at once.
+    taskbar.glides = 0;
+    taskbar_moon_tick(now, 1);
+    reduced = taskbar_moon_share() == UI_ONE;
+    taskbar_moon_tick(now, 0);
+    reduced &= taskbar_moon_share() == 0;
+    taskbar.glides = 1;
+    taskbar_spin_set(TASKBAR_MOON_SPIN);
+    // The turn: a hand seen, a step taken, the next due within a step; two minutes on, at rest and not due.
+    taskbar_moon_seen(now);
+    taskbar.moon_step = 0;
+    turns = taskbar_moon_tick(now, 0) && taskbar.moon_step != 0 && taskbar.moon_turn >= 0 && taskbar.moon_turn < UI_ONE;
+    due = taskbar_moon_due(now) > now && taskbar_moon_due(now) <= now + 1000000000ull / TASKBAR_MOON_STEPS + 1000000ull;
+    idle = !taskbar_moon_due(now + TASKBAR_MOON_IDLE + 1) && taskbar_moon_due(now + TASKBAR_MOON_IDLE - 1000000000ull);
+    taskbar_spin_set(0);
+    idle &= !taskbar_moon_due(now);
+    taskbar_spin_set(TASKBAR_MOON_SPIN);
+    // Its own damage meets the moon and nothing else; the same rectangle from under the band meets the tasks beside it too.
+    damage[0][0] = sx - 2, damage[0][1] = sy - 2, damage[0][2] = sx + sw + 2, damage[0][3] = sy + sh + 2;
+    taskbar_moon_damaged(0, damage[0]);
+    own = taskbar_meets(&view, damage, 1) == taskbar_bit(TASKBAR_LAUNCHER);
+    taskbar_bands[0].moon_own = 0;
+    own &= taskbar_meets(&view, damage, 1) != taskbar_bit(TASKBAR_LAUNCHER);
+    ui_kit.test_clock = 0;
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    taskbar_moon_hover(-1);
+    check("moon: at rest it is its square, its plate the same", rest);
+    check("moon: the pointer over it grows it over the kit's ease, half way between", half);
+    check("moon: grown by its share, its plate as far round it as the disc", full);
+    check("moon: a press finds the disc at rest, not the grown one", hit);
+    check("moon: it settles back when the pointer leaves, and asks for nothing then", back);
+    check("moon: the launcher up grows it too, with reduced motion at once", reduced);
+    check("moon: it turns a step at a time on the real clock while a hand is about", turns);
+    check("moon: the loop is woken for the next step and no sooner", due);
+    check("moon: two minutes after the last hand, or with no spin, it rests and wakes nothing", idle);
+    check("moon: what it damages of itself meets the moon alone, not the tasks beside it", own);
+}
+
+/*
         Where the clock is (`taskbar clock`), in twelve hours as in twenty-four (`time format`): in the moon, with no cell of its own in the
         tray and the tray the standard one (no format of its own, which a twelve-hour clock used to make, and drew the clock as a cell of
         text beside the moon); none, the moon alone; a cell of the tray, inside its pill after the tasks, as long as its text in the hours
@@ -4082,6 +4170,79 @@ static void check_taskbar_text(string_address face_path)
     }
     taskbar_text_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
+}
+
+/*
+        A bench of the moon's turn (a row of the log, not a check's verdict): one step of it is the moon's square drawn again and nothing
+        else, the clock on it too; what that takes at 100 and 200 percent, and so what the turn costs a second at TASKBAR_MOON_STEPS steps
+        a second. At rest the turn costs nothing: no step is taken and the loop is not woken for one (check_moon_motion).
+*/
+static void check_moon_bench(void)
+{
+    for (int scale = 100; scale <= 200; scale += 100)
+    {
+        struct taskbar_view view = band_view(TASKBAR_BOTTOM, null);
+        int rect[4], steps = 200, drawn = 1;
+        positive began, took;
+
+        if (scale == 200)
+            view.pixels = launcher_band_pixels, view.band_bytes = sizeof(launcher_band_pixels), view.scale = 200;
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_draw(&view, ~0ul, band_glass, null, rect);
+        began = clock_monotonic_nanoseconds();
+        for (int at = 0; at < steps; at++)
+        {
+            taskbar.moon_step = 1000000 + at, taskbar.moon_turn = (b64)at * UI_ONE / (TASKBAR_MOON_SPIN * TASKBAR_MOON_STEPS);
+            drawn &= taskbar_draw(&view, taskbar_bit(TASKBAR_LAUNCHER), band_glass, null, rect) == 1;
+        }
+        took = clock_monotonic_nanoseconds() - began;
+        // And a second turn: each step's disc is kept from the first, a copy of its square.
+        {
+            positive second = clock_monotonic_nanoseconds(), again;
+
+            for (int at = 0; at < steps; at++)
+            {
+                taskbar.moon_step = at, taskbar.moon_turn = (b64)at * UI_ONE / (TASKBAR_MOON_SPIN * TASKBAR_MOON_STEPS);
+                taskbar_draw(&view, taskbar_bit(TASKBAR_LAUNCHER), band_glass, null, rect);
+            }
+            second = clock_monotonic_nanoseconds();
+            for (int at = 0; at < steps; at++)
+            {
+                taskbar.moon_step = at, taskbar.moon_turn = (b64)at * UI_ONE / (TASKBAR_MOON_SPIN * TASKBAR_MOON_STEPS);
+                taskbar_draw(&view, taskbar_bit(TASKBAR_LAUNCHER), band_glass, null, rect);
+            }
+            again = clock_monotonic_nanoseconds() - second;
+            string_format(log, "  moon bench: the second turn at %p percent, each step's disc kept: %p us a step, %p us of each second\n", (positive)scale,
+                          again / (positive)steps / 1000, again / (positive)steps * TASKBAR_MOON_STEPS / 1000);
+        }
+        string_format(log, "  moon bench: a step of the turn at %p percent (a %p pixel moon, the clock on it) draws in %p us; %p steps a second cost %p us of each second, %p in a thousand\n",
+                      (positive)scale, (positive)taskbar_thick(scale), took / (positive)steps / 1000, (positive)TASKBAR_MOON_STEPS,
+                      took / (positive)steps * TASKBAR_MOON_STEPS / 1000, took / (positive)steps * TASKBAR_MOON_STEPS / 1000000);
+        check("moon bench: each step of the turn draws the moon", drawn && rect[2] < view.width / 4);
+    }
+    taskbar.moon_turn = 0, taskbar.moon_step = 0;
+    // Its parts at 32 pixels: the disc, the rim's light and the clock.
+    {
+        static unsigned int field[64 * 64];
+        static const struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0, 0};
+        struct ui ui;
+        positive at[4];
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = field, ui.pitch = 64, ui.width = 64, ui.height = 64, ui.bottom = 64, ui.scale = 100;
+        at[0] = clock_monotonic_nanoseconds();
+        for (int k = 0; k < 50; k++)
+            ui_moon(&ui, 0, 0, 32, UI_ONE / 2, (b64)k * UI_ONE / 300, &look);
+        at[1] = clock_monotonic_nanoseconds();
+        for (int k = 0; k < 50; k++)
+            ui_moon_rim(&ui, 0, 0, 32, 0xffffffu, 1.2);
+        at[2] = clock_monotonic_nanoseconds();
+        for (int k = 0; k < 50; k++)
+            ui_moon_label(&ui, &band_engine, &band_face, 0, 0, 32, "21", "47", 0.6, 0xffffffu);
+        at[3] = clock_monotonic_nanoseconds();
+        string_format(log, "  moon bench: at 32 pixels the disc draws in %p us, the rim's light in %p us, the clock in %p us\n", (at[1] - at[0]) / 50000,
+                      (at[2] - at[1]) / 50000, (at[3] - at[2]) / 50000);
+    }
 }
 
 static int settings_row_named(const char address_to label);

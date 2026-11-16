@@ -2623,6 +2623,9 @@ static b32 compositor_main()
                         until = !until || frame < until ? frame : until;
                 }
 
+                // The moon's next step of its turn, while it turns.
+                if (compositor.band && taskbar_moon_due(now))
+                        until = !until || taskbar_moon_due(now) < until ? taskbar_moon_due(now) : until;
                 if (compositor.band || compositor.theme_word == 2)
                 {
                         timespec real = {0, 0};
@@ -2847,6 +2850,7 @@ static b32 compositor_main()
 
                 // The taskbar's place for this frame, before the frame is drawn: a slide is one step a pass.
                 compositor_taskbar_slide(now);
+                compositor_moon_keep(now);
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.

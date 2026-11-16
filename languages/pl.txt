@@ -579,3 +579,4 @@ ui_field_full	fe02	więcej się nie zmieści
 =tray-tasks-moon	fda8	zasobnik-zadania-księżyc
 =tray	a12d	zasobnik
 =tab	2e4c	pigułka
+=Taskbar moon spin (seconds a turn, off or default)	a763	Obrót księżyca na pasku zadań (sekundy na obrót, wyłączony lub domyślny)

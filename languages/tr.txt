@@ -579,3 +579,4 @@ ui_field_full	fe02	daha fazlası sığmaz
 =tray-tasks-moon	fda8	tepsi-görevler-ay
 =tray	a12d	tepsi
 =tab	2e4c	kapsül
+=Taskbar moon spin (seconds a turn, off or default)	a763	Görev çubuğunda ayın dönüşü (tur başına saniye, kapalı veya varsayılan)

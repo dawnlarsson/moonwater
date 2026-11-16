@@ -579,3 +579,4 @@ ui_field_full	fe02	não cabe mais que isso
 =tray-tasks-moon	fda8	bandeja-tarefas-lua
 =tray	a12d	bandeja
 =tab	2e4c	pílula
+=Taskbar moon spin (seconds a turn, off or default)	a763	Giro da lua na barra de tarefas (segundos por volta, desligado ou padrão)

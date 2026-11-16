@@ -580,3 +580,4 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =tray-tasks-moon	fda8	ٹرے-کام-چاند
 =tray	a12d	ٹرے
 =tab	2e4c	کیپسول
+=Taskbar moon spin (seconds a turn, off or default)	a763	ٹاسک بار میں چاند کی گردش (فی چکر سیکنڈ، بند یا طے شدہ)

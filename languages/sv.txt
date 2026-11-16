@@ -579,3 +579,4 @@ ui_field_full	fe02	mer ryms inte
 =tray-tasks-moon	fda8	fält-uppgifter-måne
 =tray	a12d	meddelandefält
 =tab	2e4c	kapsel
+=Taskbar moon spin (seconds a turn, off or default)	a763	Månens rotation i aktivitetsfältet (sekunder per varv, av eller standard)

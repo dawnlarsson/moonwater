@@ -128,6 +128,7 @@ moonwater taskbar item text [before|after]  which side of the tasks the tray tex
 moonwater taskbar launcher [on|off]    a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again, as the logo key alone does [on]
 moonwater taskbar moon [start|center|end]  where the moon is along the taskbar while the tasks are not split about it: its start, its center or its end [center]
 moonwater taskbar moon look [realistic|ink]  the moon on the taskbar as it is, lit and turning, or drawn in ink as the wallpaper can be [realistic]
+moonwater taskbar moon spin [SECONDS|off|default]  how long the moon on the taskbar takes to turn once, 10 to 3600 seconds, or off; it rests with reduced motion and two minutes after the last key or move [60]
 moonwater taskbar newest [left|right]  the end of the tasks the newest one is at, left or right [left]
 moonwater taskbar order [moon-tasks-tray|...]  the order of the moon, the tasks and the tray where they share a place on the taskbar, any of the six [moon-tasks-tray]
 moonwater taskbar padding [PX|default]  the room inside each taskbar button before what it shows and after it (the icon and title of a task, the moon, a tray item), 0 to 24 pixels at the taskbar scale [12]

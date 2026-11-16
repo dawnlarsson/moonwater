@@ -579,3 +579,4 @@ ui_field_full	fe02	mehr passt nicht hinein
 =tray-tasks-moon	fda8	Infobereich-Aufgaben-Mond
 =tray	a12d	Infobereich
 =tab	2e4c	Pille
+=Taskbar moon spin (seconds a turn, off or default)	a763	Drehung des Mondes in der Taskleiste (Sekunden je Umdrehung, aus oder Standard)

@@ -580,3 +580,4 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =tray-tasks-moon	fda8	الإعلام-المهام-القمر
 =tray	a12d	منطقة الإعلام
 =tab	2e4c	كبسولة
+=Taskbar moon spin (seconds a turn, off or default)	a763	دوران القمر في شريط المهام (ثوانٍ لكل دورة، أو إيقاف، أو الافتراضي)

@@ -579,3 +579,4 @@ ui_field_full	fe02	больше не помещается
 =tray-tasks-moon	fda8	трей-задачи-луна
 =tray	a12d	трей
 =tab	2e4c	плашка
+=Taskbar moon spin (seconds a turn, off or default)	a763	Вращение луны на панели задач (секунд на оборот, выкл. или по умолчанию)

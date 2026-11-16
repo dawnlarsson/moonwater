@@ -1363,6 +1363,14 @@ static int taskbar_thick(int scale);
 static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
 static int taskbar_sliding(positive now);
 static int taskbar_moving(positive now);
+static int taskbar_moon_tick(positive now, int launcher);
+static positive taskbar_moon_due(positive now);
+static void taskbar_moon_hover(int band);
+static void taskbar_moon_seen(positive now);
+static void taskbar_moon_damaged(int band, const int *rect);
+static int taskbar_moon_more(const struct taskbar_view *view);
+static int taskbar_moon_most(int size);
+static void taskbar_spin_set(int seconds);
 static b64 taskbar_shift(void);
 static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
 static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
@@ -1412,6 +1420,14 @@ static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b
 { (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
 static inline int taskbar_sliding(positive now) { (void)now; return 0; }
 static inline int taskbar_moving(positive now) { (void)now; return 0; }
+static inline int taskbar_moon_tick(positive now, int launcher) { (void)now, (void)launcher; return 0; }
+static inline positive taskbar_moon_due(positive now) { (void)now; return 0; }
+static inline void taskbar_moon_hover(int band) { (void)band; }
+static inline void taskbar_moon_seen(positive now) { (void)now; }
+static inline void taskbar_moon_damaged(int band, const int *rect) { (void)band, (void)rect; }
+static inline int taskbar_moon_more(const struct taskbar_view *view) { (void)view; return 0; }
+static inline int taskbar_moon_most(int size) { (void)size; return 0; }
+static inline void taskbar_spin_set(int seconds) { (void)seconds; }
 static inline b64 taskbar_shift(void) { return 0; }
 static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
 { (void)view, (void)before, *x = *y = *width = *height = 0; }
@@ -16170,6 +16186,7 @@ struct ui_moon_look
         unsigned int dark, lit, glow, rim; // straight 0xaarrggbb: no light, the most light, the glow's, the rim's (its alpha its strength)
         unsigned int options;              // UI_MOON_*
         int halo;                          // the glow's width, device pixels
+        decimal grow;                      // how much larger than size the disc is drawn about its middle (0.12: 12 percent), 0 none
 };
 
 // A map of the surface: level 0 width by width / 2, each level after it half the last, one after another; albedo 0 to 65535, height in
@@ -16560,7 +16577,8 @@ static decimal ui_moon_light(const struct ui_moon_map address_to map, int level,
 static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phase, b64 turn, const struct ui_moon_look address_to look)
 {
         const struct ui_moon_map address_to map = ui_moon_map_for(size);
-        decimal radius = size / 2.0, cx = left + radius, cy = top + radius, angle = (decimal)phase / (decimal)UI_ONE * 2 * UI_MOON_PI;
+        decimal radius = size / 2.0 * (1 + (look->grow > 0 ? look->grow : 0)), cx = left + size / 2.0, cy = top + size / 2.0;
+        decimal angle = (decimal)phase / (decimal)UI_ONE * 2 * UI_MOON_PI;
         decimal t = (decimal)(turn & (UI_ONE - 1)) / (decimal)UI_ONE * 2 * UI_MOON_PI, ct = cosine(t), st = sine(t), sun[3], earth = 0;
         int halo = look->options & UI_MOON_GLOW ? look->halo : 0, x0 = left - halo, y0 = top - halo, x1 = left + size + halo, y1 = top + size + halo;
         int samples = size < 48 ? 4 : size < 160 ? 2 : 1, level = 0;
@@ -16569,6 +16587,14 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
 
         if (size <= 0 || !map)
                 return;
+        // Grown, the square it is drawn in is grown with it, the same about the middle.
+        if (look->grow > 0)
+        {
+                int more = (int)(size * look->grow / 2 + 0.999);
+
+                left -= more, top -= more, size += 2 * more;
+                x0 = left - halo, y0 = top - halo, x1 = left + size + halo, y1 = top + size + halo;
+        }
         if (look->options & UI_MOON_FULL_SQUARE)
                 for (int py = top > ui->top ? top : ui->top; py < top + size && py < ui->bottom; py++)
                         for (int px = left > 0 ? left : 0; px < left + size && px < ui->width; px++)
@@ -16773,7 +16799,7 @@ static fn ui_moon_rim(struct ui address_to ui, int left, int top, int size, unsi
                                 continue;
                         band = (1 - square_root(1 - rr)) * (1 - square_root(1 - rr)) * strength;
                         hue = ui_moon_glow_hue(accent, dx);
-                        target = window_mix(ui_luminance(*at & 0xffffffu) > 26000 ? 0xffffffu : 0x7a7a7au, hue, 130);
+                        target = window_mix(ui_luminance(*at & 0xffffffu) > 26000 ? 0xffffffu : 0x7a7a7au, hue, 180);
                         h = ui_moon_hash((unsigned int)x * 2246822519u ^ (unsigned int)y * 3266489917u);
                         for (int c = 0; c < 3; c++)
                         {
@@ -17401,6 +17427,24 @@ static unsigned int ui_moon_label(struct ui address_to ui, font_engine address_t
                 ui_moon_label_cover = (float address_to)(got + UI_MOON_LABEL_HIGH * UI_MOON_LABEL_HIGH * 4);
         }
         cover = ui_moon_label_cover, backing = cover + UI_MOON_LABEL_MOST * UI_MOON_LABEL_MOST, grown = backing + UI_MOON_LABEL_MOST * UI_MOON_LABEL_MOST;
+        // The digits' coverage on the sphere is kept: the same digits at the same size, bulge and face (the next step of the moon's turn, the
+        // rest of the minute) are only laid on what is behind them again.
+        {
+                static struct
+                {
+                        char upper[3], lower[3];
+                        int size;
+                        decimal bulge;
+                        const font_face address_to face;
+                } kept;
+                b32 same = kept.face == face && kept.size == size && kept.bulge == bulge && kept.upper[0] == upper[0] && kept.upper[1] == upper[1] &&
+                           kept.lower[0] == lower[0] && kept.lower[1] == lower[1];
+
+                kept.face = face, kept.size = size, kept.bulge = bulge;
+                kept.upper[0] = upper[0], kept.upper[1] = upper[0] ? upper[1] : 0, kept.lower[0] = lower[0], kept.lower[1] = lower[0] ? lower[1] : 0;
+                if (same)
+                        goto laid;
+        }
         memory_zero(ui_moon_label_high, (positive)high * (positive)high * 4);
         // The digits, large: the em that makes the caps three tenths of the disc, the widest digit's cell, two lines a tenth apart.
         em = (p32)(high * 40 / 100) << 6, grid = font_metrics_at(face, em), cap = (int)((grid.cap_height + 32768) >> 16);
@@ -17459,6 +17503,7 @@ static unsigned int ui_moon_label(struct ui address_to ui, font_engine address_t
                                 }
                         cover[y * size + x] = (float)(sum / 9);
                 }
+laid:
         // The ink: black on a light face, white on a dark one, by the mean light of what is behind the digits.
         for (int y = 0; y < size; y++)
                 for (int x = 0; x < size; x++)

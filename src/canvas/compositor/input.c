@@ -855,6 +855,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count, target;
 
+        taskbar_moon_seen(clock_monotonic_nanoseconds());
+
         // Escape while the hand moves or resizes a window puts it back as it was at the press, and is no window's key.
         if (code == CK_KEY_ESC && value && (compositor.drag >= 0 || compositor.resize >= 0))
         {
@@ -1152,12 +1154,31 @@ static int compositor_asked_shape(int row)
         return shape < CP_SHAPES ? (int)shape : CP_ARROW;
 }
 
+// The band whose moon is at a point, or -1: the moon grows while the pointer is over it (taskbar_moon_hover).
+static int compositor_moon_band(int x, int y)
+{
+        int found = -1;
+
+        for (compositor.band_at = 0; compositor.table && compositor.band_at < compositor_bands() && found < 0; compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_band_view();
+
+                if (taskbar_hit_reach(&view, x, y, 0) == TASKBAR_LAUNCHER)
+                        found = compositor.band_at;
+        }
+        compositor.band_at = 0;
+        return found;
+}
+
 static void compositor_motion(void)
 {
         int under, tab;
 
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        // The moon turns while a hand is about, and grows while the pointer is over it.
+        taskbar_moon_seen(clock_monotonic_nanoseconds());
+        taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
 
         // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
         // the shape its client asked for with wp_cursor_shape, or the program's controls publish (the arrow when it has none).

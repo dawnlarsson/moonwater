@@ -579,3 +579,4 @@ ui_field_full	fe02	meer past er niet in
 =tray-tasks-moon	fda8	systeemvak-taken-maan
 =tray	a12d	systeemvak
 =tab	2e4c	pil
+=Taskbar moon spin (seconds a turn, off or default)	a763	Draaiing van de maan op de taakbalk (seconden per omwenteling, uit of standaard)

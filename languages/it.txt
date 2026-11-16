@@ -579,3 +579,4 @@ ui_field_full	fe02	non ce ne sta di più
 =tray-tasks-moon	fda8	area-attività-luna
 =tray	a12d	area di notifica
 =tab	2e4c	pillola
+=Taskbar moon spin (seconds a turn, off or default)	a763	Rotazione della luna nella barra delle applicazioni (secondi per giro, spenta o predefinita)

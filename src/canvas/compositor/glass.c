@@ -392,6 +392,32 @@ static void compositor_taskbar_slide(positive now)
                 compositor_taskbar_damage(before);
 }
 
+/*
+        The moon's motion, asked on every pass of the loop before a frame: a step of its turn, or its growth toward the pointer over it and
+        the launcher, damages the moon's square on each band as far as it grows, and that alone; the band's other plates are not made
+        again for it (taskbar_moon_damaged, which taskbar_meets tells apart from a change under them). At rest, nothing.
+*/
+static void compositor_moon_keep(positive now)
+{
+        if (!compositor.band || !compositor.table || !taskbar_moon_tick(now, compositor_launcher_row() >= 0))
+                return;
+        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_taskbar_view();
+                int x, y, w, h, most, rect[4];
+
+                if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
+                        continue;
+                most = taskbar_moon_most(w < h ? w : h);
+                compositor_band_damage(x - most, y - most, w + 2 * most, h + 2 * most);
+                rect[0] = x - most < 0 ? 0 : x - most, rect[1] = y - most < 0 ? 0 : y - most;
+                rect[2] = x + w + most > compositor.width ? compositor.width : x + w + most;
+                rect[3] = y + h + most > compositor.height ? compositor.height : y + h + most;
+                taskbar_moon_damaged(compositor.band_at, rect);
+        }
+        compositor.band_at = 0;
+}
+
 // After a present: a slide still going, or the highlight of the tab with the keys still moving from one tab to the next, is damaged
 // again, so the next frame draws the band where it has got to.
 static void compositor_taskbar_keep(positive now)
