@@ -7220,11 +7220,6 @@ HOT fn shell_echo(writer write)
 */
 COLD fn shell_exec(writer write)
 {
-
-        //      rbash: replacing the shell would replace the restriction
-        //      with whatever was named.
-        return_if(shell_restricted, shell_refuse(1, "exec: restricted\n"));
-
         p8 address_to found = null;
         positive found_room = 0;
         scope_exit(if (found) memory_free(found, found_room));
@@ -7279,6 +7274,13 @@ COLD fn shell_exec(writer write)
         // With nothing to run, exec is only there for the redirections that
         // were already applied to get here.
         return_if(shell_argc < 2, shell_answer(0));
+
+        //      rbash: replacing the shell would replace the restriction
+        //      with whatever was named. Only a command is refused, after the
+        //      options, as bash's exec does: `exec 2>&1` keeps its
+        //      redirections, which the restricted checks have already let
+        //      through, where it was refused with them in place.
+        return_if(shell_restricted, shell_refuse(1, "exec: restricted\n"));
 
         /*
                 An empty operand is still a name. Dash treats it as a path
