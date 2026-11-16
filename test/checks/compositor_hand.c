@@ -18,9 +18,9 @@
 */
 
 /*
-        A held button (compositor_pointer_press): while the left one is down the pointer is smaller by the squeeze the settings give,
-        while the right one alone is down it is larger by half that, and with none down it is its own size; it eases from one to the
-        other over CP_SWAY_NS (compositor_sway_at) and does not jump. The setting off, or a squeeze of 0, leaves it its size. At every
+        A held button (compositor_pointer_press): while any button is down the pointer is a little larger, by half the squeeze the
+        settings give, and with none down it is its own size; it eases from one to the other over CP_SWAY_NS (compositor_sway_at) and
+        does not jump. The setting off, or a squeeze of 0, leaves it its size. At every
         size the pixel the pointer is on is still a pixel of the shape's own hot cell.
 */
 static void check_compositor_click(void)
@@ -48,19 +48,16 @@ static void check_compositor_click(void)
     compositor.cursor.squeeze = 25;
 
     compositor_pointer_press(COMPOSITOR_BTN_LEFT, 1);
-    check("press: the left button held is on its way to a quarter smaller, and has not jumped there",
-          compositor.cursor.press.to == -64 && compositor.cursor.press.from == 0 && compositor.cursor.press.at != 0);
+    check("press: the left button held is on its way to an eighth larger, and has not jumped there",
+          compositor.cursor.press.to == 32 && compositor.cursor.press.from == 0 && compositor.cursor.press.at != 0);
     compositor.cursor.press.at = 0; // arrived
     compositor_pointer_now(&p);
-    check("press: there, a pointer of two pixels a cell is one and a half", p.scale == 2 * 192);
-    compositor_pointer_press(COMPOSITOR_BTN_RIGHT, 1);
-    check("press: the right button with the left is still the left's", compositor.cursor.press.to == -64);
-    compositor_pointer_press(COMPOSITOR_BTN_LEFT, 0);
-    check("press: the right button alone is on its way to an eighth larger, from where the pointer was",
-          compositor.cursor.press.to == 32 && compositor.cursor.press.from == -64);
-    compositor.cursor.press.at = 0;
-    compositor_pointer_now(&p);
     check("press: there, a pointer of two pixels a cell is two and a quarter", p.scale == 2 * 288);
+    compositor_pointer_press(COMPOSITOR_BTN_RIGHT, 1);
+    check("press: the right button with the left is the same size", compositor.cursor.press.to == 32);
+    compositor_pointer_press(COMPOSITOR_BTN_LEFT, 0);
+    check("press: the right button alone is the same size too, every button the same click",
+          compositor.cursor.press.to == 32);
     compositor_pointer_press(COMPOSITOR_BTN_RIGHT, 0);
     check("press: every button let go, it is on its way back to its own size", compositor.cursor.press.to == 0 && compositor.cursor.held == 0);
     compositor.cursor.press.at = 0;
@@ -90,8 +87,8 @@ static void check_compositor_click(void)
 
 /*
         The cursor style (compositor.c): classic draws the bitmap with its tip on the pointer; dynamic draws one filled shape and nothing
-        in it, a circle of CP_DYN_RADIUS cells about the pointer whatever the state, and a rounded rectangle one wide and two tall over
-        text; a fast hand stretches it along its motion and squashes it across, a slow one does not, and the stretch lets go; a touch
+        in it, a circle of CP_DYN_RADIUS cells about the pointer whatever the state, a rounded rectangle one wide and three tall over
+        text, and a lens along the way a window's edge moves over the edge; a fast hand stretches it along its motion and squashes it across, a slow one does not, and the stretch lets go; a touch
         is always dynamic; and the setting rows say dynamic and 25 when nothing is kept.
 */
 static int settings_row_named(const char address_to label);
@@ -217,13 +214,13 @@ static void check_compositor_cursor_style(void)
           circle.dyn && circle.hw == 8 * 256 && circle.hh == 8 * 256 && circle.c == 8 * 256 && !circle.grow &&
               compositor_pointer_span(&circle, &hot_x, &hot_y) == CP_DYN_CELL && hot_x == CP_DYN_CELL / 2 && hot_y == CP_DYN_CELL / 2);
     for (unsigned int shape = 0; shape < CP_SHAPES; shape++)
-        if (shape != CP_TEXT)
+        if (shape != CP_TEXT && (shape < CP_RESIZE_H || shape > CP_RESIZE_NESW))
         {
             compositor.cursor.shape = shape;
             compositor_pointer_now(&other);
             same &= !memory_compare(&other, &circle, sizeof(circle));
         }
-    check("cursor style: and the same one filled shape whatever the state, with no mark in it", same);
+    check("cursor style: and the same one filled shape whatever the state but text and a window's edge, with no mark in it", same);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &circle, fill, edge);
     check("cursor style: the circle is all fill inside, its line at 8 from the middle in the edge ink in four directions, and clear past it "
@@ -237,14 +234,41 @@ static void check_compositor_cursor_style(void)
     check("cursor style: over text the shape is on its way to the rectangle", compositor.cursor.morph.to == 256 && compositor.cursor.morph.at != 0);
     compositor.cursor.morph.at = 0;
     compositor_pointer_now(&other);
-    check("cursor style: which is a touch taller than a terminal cell, one wide and two and a half tall, with round corners",
-          other.hw == 4 * 256 && other.hh == 10 * 256 && other.c == 2 * 256);
+    check("cursor style: which is taller than a terminal cell, one wide and three tall, with round corners",
+          other.hw == 4 * 256 && other.hh == 12 * 256 && other.c == 2 * 256);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: it is filled, 4 from the middle across and 10 up and down, clear past that and at its corner",
-          plane[32 * 64 + 32] == fill && plane[40 * 64 + 34] == fill && (plane[32 * 64 + 36] >> 24) && plane[32 * 64 + 37] == 0 &&
-              (plane[42 * 64 + 32] >> 24) && plane[43 * 64 + 32] == 0 && plane[42 * 64 + 36] == 0 && (plane[22 * 64 + 32] >> 24) &&
-              plane[21 * 64 + 32] == 0);
+    check("cursor style: it is filled, 4 from the middle across and 12 up and down, clear past that and at its corner",
+          plane[32 * 64 + 32] == fill && plane[42 * 64 + 34] == fill && (plane[32 * 64 + 36] >> 24) && plane[32 * 64 + 37] == 0 &&
+              (plane[44 * 64 + 32] >> 24) && plane[45 * 64 + 32] == 0 && plane[44 * 64 + 36] == 0 && (plane[20 * 64 + 32] >> 24) &&
+              plane[19 * 64 + 32] == 0);
+    compositor.cursor.stretch = (struct compositor_sway){CP_DYN_STRETCH, CP_DYN_STRETCH, 0};
+    compositor.cursor.ux = 0, compositor.cursor.uy = 64;
+    compositor_pointer_now(&other);
+    check("cursor style: a fast hand over text stretches the rectangle no longer than its square",
+          other.grow > 0 && other.hh * (256 + other.grow) / 256 <= CP_DYN_CELL / 2 * 256);
+    compositor.cursor.stretch = (struct compositor_sway){0, 0, 0};
+
+    compositor.cursor.shape = CP_RESIZE_H;
+    compositor_pointer_now(&other);
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
+    check("cursor style: over a window's side edge the shape is a lens along it, filled, 13 out to either point and 5 thick, round above "
+          "and below and pointed at its ends",
+          other.lens && !other.grow && plane[32 * 64 + 32] == fill && plane[35 * 64 + 32] == fill && (plane[32 * 64 + 44] >> 24) &&
+              plane[32 * 64 + 46] == 0 && (plane[32 * 64 + 20] >> 24) && plane[32 * 64 + 18] == 0 && (plane[37 * 64 + 32] >> 24) &&
+              plane[38 * 64 + 32] == 0 && plane[35 * 64 + 43] == 0 && plane[29 * 64 + 21] == 0);
+    compositor.cursor.shape = CP_RESIZE_V;
+    compositor_pointer_now(&other);
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
+    check("cursor style: over a top or bottom edge it is the lens stood up", (plane[44 * 64 + 32] >> 24) && plane[46 * 64 + 32] == 0 &&
+                                                                                   (plane[32 * 64 + 37] >> 24) && plane[32 * 64 + 38] == 0);
+    compositor.cursor.shape = CP_RESIZE_NWSE;
+    compositor_pointer_now(&other);
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
+    check("cursor style: and over a corner it lies along the diagonal", plane[38 * 64 + 38] == fill && plane[26 * 64 + 38] == 0);
     compositor.cursor.shape = CP_ARROW;
     compositor.cursor.morph = (struct compositor_sway){0, 0, 0};
 

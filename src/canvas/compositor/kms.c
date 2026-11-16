@@ -1420,17 +1420,33 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                 p->shape = compositor.cursor.shape < CP_SHAPES ? compositor.cursor.shape : CP_ARROW;
                 return;
         }
+        // Over a window's edge the shape is the lens along the way the edge moves (45 is 64 over the square root of two), never stretched.
+        if (compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW)
+        {
+                static const signed char way[4][2] = {{64, 0}, {0, 64}, {45, 45}, {45, -45}};
+
+                p->lens = 1;
+                p->hw = 256 * CP_DYN_LENS_W, p->hh = 256 * CP_DYN_LENS_H, p->c = 0;
+                p->ux = way[compositor.cursor.shape - CP_RESIZE_H][0], p->uy = way[compositor.cursor.shape - CP_RESIZE_H][1];
+                return;
+        }
         p->hw = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_W - CP_DYN_RADIUS) * morph;
         p->hh = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_H - CP_DYN_RADIUS) * morph;
         p->c = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_R - CP_DYN_RADIUS) * morph;
+        // A stretch never takes the shape's long side past its square (CP_DYN_CELL): the rectangle over text is the longest.
+        {
+                int longest = p->hw > p->hh ? p->hw : p->hh, room = (CP_DYN_CELL / 2 * 256) * 256 / longest - 256;
+
+                grow = grow < room ? grow : room > 0 ? room : 0;
+        }
         p->grow = grow;
         p->ux = grow ? compositor.cursor.ux : 0, p->uy = grow ? compositor.cursor.uy : 0;
 }
 
 /*
-        A button held or let go. While the left one (or any but the right) is down the pointer is smaller by the squeeze the settings give
-        (`moonwater canvas cursor squeeze`, 0 to 50 percent, 25 by default); while the right one alone is down it is larger by half that;
-        with none down it is its own size, and it eases from one to the other. `moonwater canvas cursor click off` leaves it its size.
+        A button held or let go. While any button is down the pointer is a little larger, by half the squeeze the settings give
+        (`moonwater canvas cursor squeeze`, 0 to 50 percent, 25 by default, so 12.5 percent), in every style and shape; with none down it
+        is its own size, and it eases from one to the other. `moonwater canvas cursor click off` leaves it its size.
 */
 static void compositor_pointer_press(unsigned int code, int down)
 {
@@ -1438,7 +1454,7 @@ static void compositor_pointer_press(unsigned int code, int down)
         int by = compositor.cursor.click_off ? 0 : compositor.cursor.squeeze * 256 / 100;
 
         compositor.cursor.held = down ? compositor.cursor.held | bit : compositor.cursor.held & ~bit;
-        compositor_sway_to(&compositor.cursor.press, !compositor.cursor.held ? 0 : compositor.cursor.held == 2 ? by / 2 : -by, clock_monotonic_nanoseconds());
+        compositor_sway_to(&compositor.cursor.press, !compositor.cursor.held ? 0 : by / 2, clock_monotonic_nanoseconds());
         compositor_cursor_move();
 }
 
