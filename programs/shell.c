@@ -354,6 +354,9 @@ static bool shell_shopt_asked_apply(string_address self)
 //      otherwise.
 static string_address shell_rcfile;
 static bool shell_norc;
+//      --debugger, which bash answers by sourcing its debugger's start file
+//      once the startup files have run (main, after shell_startup_file).
+static bool shell_debugger_asked;
 
 static const shell_long_option shell_long_options[] = {
     {"debug", false}, {"debugger", false}, {"dump-po-strings", false},
@@ -517,6 +520,8 @@ static positive shell_start_long_options(string_address address_to arguments,
                 //      Still the editor a listing on this line reads back.
                 else if (word_is(name, "noediting"))
                         shell_start_editing = false;
+                else if (word_is(name, "debugger"))
+                        shell_debugger_asked = true;
                 else if (word_is(name, "version"))
                 {
                         /*
@@ -1137,6 +1142,24 @@ b32 main()
                         shell_parser_source_end();
                 log_flush();
                 return shell_status ? shell_status : 1;
+        }
+
+        /* bash --debugger sources its debugger's start file here and, where
+           there is none, warns that debugging is off -- after the file's own
+           "No such file" -- and turns errtrace and functrace off with it, by
+           $0, or its base name when interactive. This shell carries no
+           debugger, so it is always the warning, and not the path of a
+           file it never looked for. */
+        if (shell_debugger_asked && shell_bash_compat)
+        {
+                string_address name = interactive ? shell_invocation_name
+                                                  : shell_script_name;
+
+                string_format(log_error,
+                              "%s: warning: cannot start debugger; debugging mode disabled\n",
+                              name && *name ? name : (string_address) "bash");
+                shell_extra_told("errtrace", false);
+                shell_extra_told("functrace", false);
         }
 
         /* Startup files may change directory. Bash opens the named script
