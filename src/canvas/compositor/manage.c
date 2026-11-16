@@ -245,26 +245,9 @@ static int compositor_reach_most(void)
                    compositor.scale / 100 + line + 1;
 }
 
-/*
-        The last entry of the stack below count whose rectangle, grown by reach on every side, holds the point, or -1: two compares a
-        window, the point's offset from a rectangle's start taken as a number with no sign against its extent and twice the reach. It
-        is rects_point's rule (src/lib.c), whose order is a byte a row; the stack is a word a row, which names every row.
-*/
-static bipolar compositor_stack_point(positive count, int x, int y, positive reach)
-{
-        while (count--)
-        {
-                unsigned int row = compositor.stack[count];
-
-                if ((positive)((bipolar)x + (bipolar)reach - compositor.x[row]) < (positive)compositor.w[row] + 2 * reach &&
-                    (positive)((bipolar)y + (bipolar)reach - compositor.y[row]) < (positive)compositor.h[row] + 2 * reach)
-                        return (bipolar)count;
-        }
-        return -1;
-}
-
 static int compositor_under(int x, int y, int *tab)
 {
+        const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
 
         *tab = compositor_band_hit(x, y);
@@ -272,12 +255,12 @@ static int compositor_under(int x, int y, int *tab)
                 return COMPOSITOR_NONE;
 
         // The stack is asked from the top for a window whose rectangle, grown by the furthest a grip reaches, holds the point
-        // (compositor_stack_point: two compares a window), and only such a window is asked what it has there, where every
+        // (rects_point_w, src/lib.c: two compares a window, the stack a word a row), and only such a window is asked what it has there, where every
         // window above the one found, and every window when none was, had its grip worked out at each motion.
         reach = (positive)compositor_reach_most();
         while (count)
         {
-                bipolar at = compositor_stack_point(count, x, y, reach);
+                bipolar at = rects_point_w(columns, compositor.stack, count, x, y, reach);
                 int row;
 
                 if (at < 0)

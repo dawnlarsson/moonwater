@@ -914,7 +914,7 @@ cover('correctness_only', 'test/modem.c', 'modem_tone_scan',
 # harness times one. The wire routines were timed by hand when the shim was switched to them (da0b6ea: a quarter more
 # instructions a request than the C the compiler had inline, the time level), which is a commit's word and not a harness.
 cover('correctness_only', 'test/checks.c#CHECK_verify', '''
-automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point
+automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point rects_point_w
 bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv_u32 pointer_gain pointer_scale ring_post
 ''', 'against the C reference over hostile inputs with guard pages, on x86-64, arm64 and riscv64; no timing claim')
 # The size classes of f32_pair_to_s16 the routine driver names in its rows.

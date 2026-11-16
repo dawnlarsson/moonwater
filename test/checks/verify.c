@@ -3131,6 +3131,24 @@ static bipolar reference_rects_point(const address_any address_to columns, const
         return -1;
 }
 
+// rects_point_w's reference: rects_point's with an order of 32-bit entries.
+static bipolar reference_rects_point_w(const address_any address_to columns, const p32 address_to order, positive count, bipolar x, bipolar y,
+                                       positive grow)
+{
+        const b32 address_to xs = columns[0], address_to ys = columns[1];
+        const p32 address_to widths = columns[2], address_to heights = columns[3];
+
+        for (positive at = count; at--;)
+        {
+                positive row = order[at];
+
+                if ((positive)x - (positive)(bipolar)xs[row] + grow < (positive)widths[row] + grow + grow &&
+                    (positive)y - (positive)(bipolar)ys[row] + grow < (positive)heights[row] + grow + grow)
+                        return (bipolar)at;
+        }
+        return -1;
+}
+
 static positive reference_ring_post(const address_any address_to ring, positive cells, const p64 address_to record, positive replace)
 {
         p16 address_to types = ring[0], address_to flags = ring[1];
@@ -3202,7 +3220,7 @@ fn check_hand()
                                     0xffffffffffffffff};
         p8 address_to raw = memory(3 * 4096);
         p8 address_to out = memory(3 * 4096);
-        p8 address_to cols = memory(10 * 4096);
+        p8 address_to cols = memory(12 * 4096);
         p8 address_to rings = memory(14 * 4096);
         p8 mapped = (bipolar)(positive)raw > 0 && (bipolar)(positive)out > 0 && (bipolar)(positive)cols > 0 && (bipolar)(positive)rings > 0;
         p64 seed = 0x9e3779b97f4a7c15ull;
@@ -3213,8 +3231,8 @@ fn check_hand()
         p8 protected = system_call_3(syscall(mprotect), (positive)(raw + 8192), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)(out + 8192), 4096, 0) == 0;
 
-        //      The columns and the order: five stretches of a page, each before a page that cannot be read.
-        for (positive at = 0; at < 5; at++)
+        //      The columns and the orders (a byte an entry, and a word): six stretches of a page, each before a page that cannot be read.
+        for (positive at = 0; at < 6; at++)
                 protected &= system_call_3(syscall(mprotect), (positive)(cols + at * 8192 + 4096), 4096, 0) == 0;
         //      The ring: its five columns and its head each before a page that cannot be written or read, and its tail in a page
         //      that can only be read (made so once it is set, each round).
@@ -3355,7 +3373,7 @@ fn check_hand()
         {
                 static const bipolar places[] = {-2147483647 - 1, -16777216, -1000, -46, -45, -7, -6, -1, 0, 1, 5, 6, 7, 44, 45, 46, 99, 100, 101, 145, 146, 1000, 16777216, 2147483647};
                 static const positive grows[] = {0, 1, 6, 45, 1000, 0x7fffffff, 0x10000000000, 0x7fffffffffffffff, 0xffffffffffffffff};
-                positive agreed = 1, runs = 0, hits = 0, misses = 0, under = 0;
+                positive agreed = 1, agreed_w = 1, runs = 0, hits = 0, misses = 0, under = 0;
 
                 for (positive round = 0; round < 40000; round++)
                 {
@@ -3364,6 +3382,7 @@ fn check_hand()
                         b32 address_to xs = (b32 address_to)(cols + 4096 - rows * 4), address_to ys = (b32 address_to)(cols + 8192 + 4096 - rows * 4);
                         p32 address_to widths = (p32 address_to)(cols + 2 * 8192 + 4096 - rows * 4), address_to heights = (p32 address_to)(cols + 3 * 8192 + 4096 - rows * 4);
                         p8 address_to order = cols + 4 * 8192 + 4096 - count;
+                        p32 address_to order_w = (p32 address_to)(cols + 5 * 8192 + 4096 - count * 4);
                         const address_any columns[4] = {xs, ys, widths, heights};
                         positive grow = round % 5 == 0 ? grows[HAND_NEXT() % array_count(grows)] : round % 5 == 1 ? 6 : 0;
                         bipolar x, y;
@@ -3378,7 +3397,7 @@ fn check_hand()
                                 heights[at] = kind == 5 ? 0 : kind == 3 ? 0xffffffffu : kind == 6 ? 1 : (p32)(HAND_NEXT() % 200);
                         }
                         for (positive at = 0; at < count; at++)
-                                order[at] = (p8)(HAND_NEXT() % rows);
+                                order[at] = (p8)(HAND_NEXT() % rows), order_w[at] = order[at];
                         //  The point: on a corner of a rectangle, a pixel or the growth either side of one, or anywhere.
                         if (round % 3)
                         {
@@ -3396,6 +3415,7 @@ fn check_hand()
                         bipolar wanted = reference_rects_point(columns, order, count, x, y, grow);
 
                         agreed &= (rects_point)(columns, order, count, x, y, grow) == wanted;
+                        agreed_w &= (rects_point_w)(columns, order_w, count, x, y, grow) == wanted;
                         runs++;
                         hits += wanted >= 0;
                         misses += wanted < 0 && count > 0;
@@ -3405,6 +3425,37 @@ fn check_hand()
                 //  Found, not found, and found under entries that did not hold it: or the row above proves nothing.
                 same("rects_point", "lists with the point in one, in none, and in one under others", hits > 3000 && misses > 3000 && under > 1000, 1);
                 same("rects_point", "lists compared", runs, 40000);
+                same("rects_point_w", "the same lists with a word an entry: the same entry", agreed_w, 1);
+                {
+                        //  A thousand and twenty-four rectangles, the most a stretch holds, named by entries past a byte's reach: the entry that
+                        //  holds the point is found among them, and none is found where none holds it.
+                        b32 address_to xs = (b32 address_to)cols, address_to ys = (b32 address_to)(cols + 8192);
+                        p32 address_to widths = (p32 address_to)(cols + 2 * 8192), address_to heights = (p32 address_to)(cols + 3 * 8192);
+                        const address_any columns[4] = {xs, ys, widths, heights};
+                        positive wide = 1, far = 0, none = 0, compared = 0;
+
+                        for (positive at = 0; at < 1024; at++)
+                                xs[at] = (b32)(at * 10), ys[at] = 0, widths[at] = 10, heights[at] = (p32)(10 + HAND_NEXT() % 10);
+                        for (positive round = 0; round < 4000; round++)
+                        {
+                                positive count = 1 + HAND_NEXT() % 1024, grow = round % 3 == 0 ? HAND_NEXT() % 8 : 0;
+                                p32 address_to order_w = (p32 address_to)(cols + 5 * 8192 + 4096 - count * 4);
+                                bipolar x = (bipolar)(HAND_NEXT() % 10300) - 50, y = (bipolar)(HAND_NEXT() % 30) - 5, wanted;
+
+                                for (positive at = 0; at < count; at++)
+                                        order_w[at] = (p32)(HAND_NEXT() % 1024);
+                                wanted = reference_rects_point_w(columns, order_w, count, x, y, grow);
+                                wide &= (rects_point_w)(columns, order_w, count, x, y, grow) == wanted;
+                                far += wanted >= 0 && order_w[wanted] > 255;
+                                none += wanted < 0;
+                                compared++;
+                        }
+                        same("rects_point_w", "a thousand rectangles named past a byte, four thousand lists: the entry the reference finds", wide, 1);
+                        same("rects_point_w", "lists whose entry found names a rectangle past 255, and lists with none found", far > 300 && none > 300, 1);
+                        same("rects_point_w", "no entries is none, with no column and no order read",
+                             (positive)(rects_point_w)(columns, (const p32 address_to)(cols + 5 * 8192 + 4096), 0, 5, 5, 6), (positive)-1);
+                        same("rects_point_w", "wide lists compared", compared, 4000);
+                }
                 {
                         const address_any nowhere[4] = {cols + 4096, cols + 8192 + 4096, cols + 2 * 8192 + 4096, cols + 3 * 8192 + 4096};
 

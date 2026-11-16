@@ -437,6 +437,7 @@
           program_initial_identity       public  yes     yes     yes
           rects_clip                     public  yes     yes     yes
           rects_point                    public  yes     yes     yes
+          rects_point_w                  public  yes     yes     yes
           resample_polyphase2_f32        public  yes     yes     yes
           resample_polyphase2_f32_rows   public  yes     yes     yes
           ring_post                      public  yes     yes     yes
@@ -13983,6 +13984,22 @@ __asm__(
     ASM_END(rects_point)
 
     //
+    //       rects_point_w: rects_point with an order of 32-bit entries, for a
+    //       list that names more rectangles than a byte does (the
+    //       compositor's stack, a word a row). The same registers.
+    //
+    ASM_FUNC(rects_point_w)
+    "add %r9, %rcx\n   add %r9, %r8\n   add %r9, %r9\n"
+    "1:  sub $1, %rdx\n   jb 8f\n   mov (%rsi,%rdx,4), %eax\n"
+    "mov (%rdi), %r10\n   movslq (%r10,%rax,4), %r10\n   mov %rcx, %r11\n   sub %r10, %r11\n"
+    "mov 16(%rdi), %r10\n   mov (%r10,%rax,4), %r10d\n   add %r9, %r10\n   cmp %r10, %r11\n   jae 1b\n"
+    "mov 8(%rdi), %r10\n   movslq (%r10,%rax,4), %r10\n   mov %r8, %r11\n   sub %r10, %r11\n"
+    "mov 24(%rdi), %r10\n   mov (%r10,%rax,4), %r10d\n   add %r9, %r10\n   cmp %r10, %r11\n   jae 1b\n"
+    "mov %rdx, %rax\n" ASM_RET
+    "8:  mov $-1, %rax\n" ASM_RET
+    ASM_END(rects_point_w)
+
+    //
     //       ring_post: rdi the ring's seven addresses, rsi its cells, rdx
     //       the record, rcx whether an unread last record of the record's
     //       type is written over. r8d the head, r10 the unread, r11 the
@@ -26785,6 +26802,16 @@ __asm__(
     "8:  mov x0, #-1\n" ASM_RET
     ASM_END(rects_point)
 
+    //       rects_point_w: rects_point's registers, the entry a word.
+    ASM_FUNC(rects_point_w)
+    "ldp x8, x9, [x0]\n   ldp x10, x11, [x0, #16]\n   add x3, x3, x5\n   add x4, x4, x5\n   lsl x5, x5, #1\n"
+    "1:  cbz x2, 8f\n   sub x2, x2, #1\n   ldr w12, [x1, x2, lsl #2]\n"
+    "ldrsw x13, [x8, x12, lsl #2]\n   sub x13, x3, x13\n   ldr w14, [x10, x12, lsl #2]\n   add x14, x14, x5\n   cmp x13, x14\n   b.hs 1b\n"
+    "ldrsw x13, [x9, x12, lsl #2]\n   sub x13, x4, x13\n   ldr w14, [x11, x12, lsl #2]\n   add x14, x14, x5\n   cmp x13, x14\n   b.hs 1b\n"
+    "mov x0, x2\n" ASM_RET
+    "8:  mov x0, #-1\n" ASM_RET
+    ASM_END(rects_point_w)
+
     ASM_FUNC(ring_post)
     "ldr x8, [x0, #40]\n   ldr w9, [x8]\n   ldr x10, [x0, #48]\n   ldar w10, [x10]\n   sub w10, w9, w10\n   sub x11, x1, #1\n"
     "cbz x3, 2f\n   cbz w10, 2f\n   cmp x10, x1\n   b.hi 2f\n"
@@ -37421,6 +37448,17 @@ __asm__(
     "mv a0, a2\n" ASM_RET
     "8:  li a0, -1\n" ASM_RET
     ASM_END(rects_point)
+
+    //       rects_point_w: rects_point's registers, the entry a word (lwu, a
+    //       place in the columns is never negative), times four in t4.
+    ASM_FUNC(rects_point_w)
+    "ld t0, 0(a0)\n   ld t1, 8(a0)\n   ld t2, 16(a0)\n   ld t3, 24(a0)\n   add a3, a3, a5\n   add a4, a4, a5\n   slli a5, a5, 1\n"
+    "1:  beqz a2, 8f\n   addi a2, a2, -1\n   slli t4, a2, 2\n   add t4, a1, t4\n   lwu t4, 0(t4)\n   slli t4, t4, 2\n"
+    "add t5, t0, t4\n   lw t5, 0(t5)\n   sub t5, a3, t5\n   add t6, t2, t4\n   lwu t6, 0(t6)\n   add t6, t6, a5\n   bgeu t5, t6, 1b\n"
+    "add t5, t1, t4\n   lw t5, 0(t5)\n   sub t5, a4, t5\n   add t6, t3, t4\n   lwu t6, 0(t6)\n   add t6, t6, a5\n   bgeu t5, t6, 1b\n"
+    "mv a0, a2\n" ASM_RET
+    "8:  li a0, -1\n" ASM_RET
+    ASM_END(rects_point_w)
 
     ASM_FUNC(ring_post)
     "ld t0, 40(a0)\n   lwu t1, 0(t0)\n   ld t2, 48(a0)\n   lwu t2, 0(t2)\n   fence r, rw\n   subw t2, t1, t2\n   slli t2, t2, 32\n   srli t2, t2, 32\n   addi t3, a1, -1\n"
@@ -55622,6 +55660,9 @@ PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive 
         every side, and holds a point from its first pixel to the one
         before its end.
 
+        rects_point_w is rects_point with each entry of `order` 32 bits,
+        for a list that names more rectangles than a byte can.
+
         ring_post puts a record in a ring a program reads. `ring` is
         seven addresses: of the cells' types and flags (16 bits each),
         their two numbers (32 bits each) and their stamps (64 bits), of
@@ -55641,6 +55682,7 @@ positive evdev_decode(const p8 address_to bytes, positive size, p64 address_to r
 PURE positive pointer_gain(bipolar dx, bipolar dy, positive interval);
 bipolar pointer_scale(bipolar delta, b32 address_to remainder, positive gain);
 PURE bipolar rects_point(const address_any address_to columns, const p8 address_to order, positive count, bipolar x, bipolar y, positive grow);
+PURE bipolar rects_point_w(const address_any address_to columns, const p32 address_to order, positive count, bipolar x, bipolar y, positive grow);
 positive ring_post(const address_any address_to ring, positive cells, const p64 address_to record, positive replace);
 /*
         The wire of a protocol whose messages are words of thirty-two

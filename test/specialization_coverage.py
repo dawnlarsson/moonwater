@@ -1051,7 +1051,7 @@ cover('folds_already', 'divisor', 'positive_divide_wide',
 # The table machines and the wire: the tables, the bytes and the lists are run-time memory of their callers (a client's
 # message, a commit's damage, a device's records), and the counts with them.
 cover('nothing_to_fold', None, '''
-automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point
+automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point rects_point_w
 bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv_u32 pointer_gain pointer_scale ring_post
 ''', 'pointers into memory the caller owns and counts read from it at run time; no call site hands one a literal')
 cover('nothing_to_fold', None, '''
