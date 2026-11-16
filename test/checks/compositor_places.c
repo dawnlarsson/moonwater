@@ -49,9 +49,9 @@ static fn check_compositor_place(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
         static const char address_to const sides[4] = {"bottom", "top", "left", "right"};
-        static const int rooms[4][4] = {{0, 0, 2560, 1416}, {0, 24, 2560, 1416}, {24, 0, 2536, 1440}, {0, 0, 2536, 1440}};
-        const int whole[4] = {0, 0, 2560, 1440}, none[4] = {0, 0, 0, 0}, elsewhere[4] = {2560, 1416, 1920, 24};
-        const int big[4] = {0, 0, 1000, 800}, low[4] = {0, 0, 1000, 776}, left[4] = {24, 0, 976, 800};
+        static const int rooms[4][4] = {{0, 0, 2560, 1440 - COMPOSITOR_PANEL}, {0, COMPOSITOR_PANEL, 2560, 1440 - COMPOSITOR_PANEL}, {COMPOSITOR_PANEL, 0, 2560 - COMPOSITOR_PANEL, 1440}, {0, 0, 2560 - COMPOSITOR_PANEL, 1440}};
+        const int whole[4] = {0, 0, 2560, 1440}, none[4] = {0, 0, 0, 0}, elsewhere[4] = {2560, 1440 - COMPOSITOR_PANEL, 1920, COMPOSITOR_PANEL};
+        const int big[4] = {0, 0, 1000, 800}, low[4] = {0, 0, 1000, 800 - COMPOSITOR_PANEL}, left[4] = {COMPOSITOR_PANEL, 0, 1000 - COMPOSITOR_PANEL, 800};
         const int screens[3][4] = {{0, 0, 1000, 800}, {1000, 0, 800, 600}, {-1280, 100, 1280, 1024}};
         struct window_place place;
         struct windows address_to table;
@@ -80,8 +80,8 @@ static fn check_compositor_place(void)
         check("place: with no band the room is the whole screen", place_same(room, 0, 0, 2560, 1440));
         place_room(whole, elsewhere, TASKBAR_BOTTOM, room);
         check("place: and so it is with the band on another screen", place_same(room, 0, 0, 2560, 1440));
-        place_room(rooms[0], (const int[4]){0, 0, 2560, 1416}, TASKBAR_BOTTOM, room);
-        check("place: a band as large as the screen leaves it whole rather than nothing", place_same(room, 0, 0, 2560, 1416));
+        place_room(rooms[0], (const int[4]){0, 0, 2560, 1440 - COMPOSITOR_PANEL}, TASKBAR_BOTTOM, room);
+        check("place: a band as large as the screen leaves it whole rather than nothing", place_same(room, 0, 0, 2560, 1440 - COMPOSITOR_PANEL));
 
         x = 900, y = 700;
         place_clamp(big, 400, 300, 1, &x, &y);
@@ -100,23 +100,23 @@ static fn check_compositor_place(void)
         place.how = WINDOW_PLACE_CENTER;
         check("place: centre is the middle of the room, the taskbar's strip left out",
               place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
-                  place_same(rect, 300, 238, 400, 300));
+                  place_same(rect, 300, (800 - COMPOSITOR_PANEL - 300) / 2, 400, 300));
         check("place: and of a room the band takes the left of",
               place_rect(&place, big, left, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
-                  place_same(rect, 312, 250, 400, 300));
+                  place_same(rect, COMPOSITOR_PANEL + (1000 - COMPOSITOR_PANEL - 400) / 2, 250, 400, 300));
         place.how = WINDOW_PLACE_CENTER | WINDOW_PLACE_SIZE;
         place.width = 5000, place.height = 5000;
         check("place: a size larger than the room is the room's, the line inside it",
               place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
-                  place_same(rect, 1, 1, 998, 774));
+                  place_same(rect, 1, 1, 998, 800 - COMPOSITOR_PANEL - 2));
         place.width = 10, place.height = 1;
         check("place: and one under the least a window is made is the least",
               place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
-                  place_same(rect, 452, 364, 96, 48));
+                  place_same(rect, 452, (800 - COMPOSITOR_PANEL - 48) / 2, 96, 48));
         check("place: a picture of nothing is placed at the least as well",
               (place.how = WINDOW_PLACE_CENTER, place_rect(&place, big, low, 5, 5, 0, 0, 1, 96, 48, rect)) ==
                       COMPOSITOR_FLOATING &&
-                  place_same(rect, 452, 364, 96, 48));
+                  place_same(rect, 452, (800 - COMPOSITOR_PANEL - 48) / 2, 96, 48));
         place.how = WINDOW_PLACE_AT;
         place.x = 250, place.y = 120;
         check("place: at is the top left asked for, from the screen's own top left",
@@ -137,7 +137,7 @@ static fn check_compositor_place(void)
                   place_same(rect, 1, 1, 998, 798));
         place.how = WINDOW_PLACE_MAXIMIZED;
         check("place: maximized fills the room",
-              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_ROOM && place_same(rect, 0, 0, 1000, 776));
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_ROOM && place_same(rect, 0, 0, 1000, 800 - COMPOSITOR_PANEL));
         place.how = WINDOW_PLACE_FULLSCREEN;
         check("place: fullscreen fills the screen, under the taskbar too",
               place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_MAXIMIZED &&
@@ -153,7 +153,7 @@ static fn check_compositor_place(void)
                   place_screen_at(1500, 700, screens, 3) == 1 && place_screen_at(10, 10, screens, 3) == 0 &&
                   place_screen_at(10, 10, screens, 0) == 0);
 
-        // In the compositor: a 256 by 256 output, its band 24 high along the bottom, so its room is 256 by 232.
+        // In the compositor: a 256 by 256 output, its band COMPOSITOR_PANEL high along the bottom, so its room is 256 by 256 less that.
         memory_zero(&compositor, sizeof(compositor));
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -171,35 +171,35 @@ static fn check_compositor_place(void)
 
         place_paint(1, WINDOW_PLACE_CENTER, 0, 0, 0, 0, 3, 3, 100, 60);
         check("place: a window asked for the centre is in the middle of the room, the band's height left out",
-              compositor.x[1] == 78 && compositor.y[1] == 86 && table->x[1] == 78 && table->y[1] == 86 &&
+              compositor.x[1] == 78 && compositor.y[1] == (256 - COMPOSITOR_PANEL - 60) / 2 && table->x[1] == 78 && table->y[1] == (256 - COMPOSITOR_PANEL - 60) / 2 &&
                   compositor.arranged[1] == COMPOSITOR_FLOATING);
         place_paint(2, WINDOW_PLACE_AT, 10, 20, 0, 0, 3, 3, 100, 60);
         check("place: one asked to be at 10,20 is there", compositor.x[2] == 10 && compositor.y[2] == 20);
         place_paint(3, WINDOW_PLACE_MAXIMIZED, 0, 0, 0, 0, 30, 40, 100, 60);
         check("place: maximized fills the room and is asked for its size",
               compositor.arranged[3] == COMPOSITOR_ROOM && compositor.x[3] == 0 && compositor.y[3] == 0 &&
-                  compositor.w[3] == 256 && compositor.h[3] == 232 && table->want_width[3] == 256 &&
-                  table->want_height[3] == 232);
+                  compositor.w[3] == 256 && compositor.h[3] == 256 - COMPOSITOR_PANEL && table->want_width[3] == 256 &&
+                  table->want_height[3] == 256 - COMPOSITOR_PANEL);
         check("place: and keeps the place and size it would have had with none, to be given back",
               compositor.saved_x[3] == 30 && compositor.saved_y[3] == 40 && compositor.saved_w[3] == 100 &&
                   compositor.saved_h[3] == 60);
         taskbar_settings_set("left", "primary", "battery none\n");
         compositor_room_follow();
         check("place: the band moved to the left, the maximized window fills the room it leaves",
-              compositor.arranged[3] == COMPOSITOR_ROOM && compositor.x[3] == 24 && compositor.y[3] == 0 &&
-                  compositor.w[3] == 232 && compositor.h[3] == 256 && table->want_width[3] == 232 &&
+              compositor.arranged[3] == COMPOSITOR_ROOM && compositor.x[3] == COMPOSITOR_PANEL && compositor.y[3] == 0 &&
+                  compositor.w[3] == 256 - COMPOSITOR_PANEL && compositor.h[3] == 256 && table->want_width[3] == 256 - COMPOSITOR_PANEL &&
                   table->want_height[3] == 256);
         taskbar_settings_set("top", "primary", "battery none\n");
         compositor_room_follow();
         check("place: and moved to the top, the room under it",
-              compositor.x[3] == 0 && compositor.y[3] == 24 && compositor.w[3] == 256 && compositor.h[3] == 232);
+              compositor.x[3] == 0 && compositor.y[3] == COMPOSITOR_PANEL && compositor.w[3] == 256 && compositor.h[3] == 256 - COMPOSITOR_PANEL);
         taskbar_settings_set("bottom", "primary", "battery none\n");
         compositor_room_follow();
-        check("place: a window that asked for nothing does not move with the band", compositor.x[1] == 78 && compositor.y[1] == 86);
+        check("place: a window that asked for nothing does not move with the band", compositor.x[1] == 78 && compositor.y[1] == (256 - COMPOSITOR_PANEL - 60) / 2);
 
         place_paint(4, WINDOW_PLACE_CENTER | WINDOW_PLACE_SIZE, 0, 0, 120, 80, 3, 3, 100, 60);
         check("place: a size asked with the centre is asked of the program, and centred at it",
-              compositor.x[4] == 68 && compositor.y[4] == 76 && table->want_width[4] == 120 && table->want_height[4] == 80 &&
+              compositor.x[4] == 68 && compositor.y[4] == (256 - COMPOSITOR_PANEL - 80) / 2 && table->want_width[4] == 120 && table->want_height[4] == 80 &&
                   compositor.w[4] == 120 && compositor.h[4] == 80);
         place_paint(5, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
         place_paint(6, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
@@ -251,7 +251,7 @@ static fn check_compositor_place(void)
                 table->moved[2]++;
                 compositor_take(2);
                 check("place: moved to the centre at a size, it is asked for the size and centred in the room at it",
-                      compositor.x[2] == 68 && compositor.y[2] == 76 && table->want_width[2] == 120 && table->want_height[2] == 80);
+                      compositor.x[2] == 68 && compositor.y[2] == (256 - COMPOSITOR_PANEL - 80) / 2 && table->want_width[2] == 120 && table->want_height[2] == 80);
                 moving.how = WINDOW_PLACE_AT, moving.x = 10, moving.y = 12;
                 windows_place_set(table, 7, &moving);
                 table->moved[7]++;
@@ -264,19 +264,19 @@ static fn check_compositor_place(void)
                 table->moved[7]++;
                 compositor_take(7);
                 check("place: and moved to maximized it fills the room", compositor.arranged[7] == COMPOSITOR_ROOM &&
-                                                                              compositor.w[7] == 256 && compositor.h[7] == 232);
+                                                                              compositor.w[7] == 256 && compositor.h[7] == 256 - COMPOSITOR_PANEL);
                 moving.how = WINDOW_PLACE_AT, moving.x = 5, moving.y = 5;
                 windows_place_set(table, 2, &moving);
                 table->moved[2]++;
                 compositor.drag = 2;
                 compositor_take(2);
                 compositor.drag = COMPOSITOR_NONE;
-                check("place: a window the hand holds is left to the hand", compositor.x[2] == 68 && compositor.y[2] == 76);
+                check("place: a window the hand holds is left to the hand", compositor.x[2] == 68 && compositor.y[2] == (256 - COMPOSITOR_PANEL - 80) / 2);
                 moving.how = 0;
                 windows_place_set(table, 2, &moving);
                 table->moved[2]++;
                 compositor_take(2);
-                check("place: and a placement of nothing leaves a window where it is", compositor.x[2] == 68 && compositor.y[2] == 76);
+                check("place: and a placement of nothing leaves a window where it is", compositor.x[2] == 68 && compositor.y[2] == (256 - COMPOSITOR_PANEL - 80) / 2);
         }
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
                         0, 0);

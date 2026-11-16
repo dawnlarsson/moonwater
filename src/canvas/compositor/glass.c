@@ -392,10 +392,11 @@ static void compositor_taskbar_slide(positive now)
                 compositor_taskbar_damage(before);
 }
 
-// After a present: a slide still going is damaged again, so the next frame draws the band where it has got to.
+// After a present: a slide still going, or the highlight of the tab with the keys still moving from one tab to the next, is damaged
+// again, so the next frame draws the band where it has got to.
 static void compositor_taskbar_keep(positive now)
 {
-        if (taskbar_sliding(now))
+        if (taskbar_sliding(now) || taskbar_moving(now))
                 compositor_taskbar_damage(taskbar_shift());
 }
 

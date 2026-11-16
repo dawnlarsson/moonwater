@@ -1166,27 +1166,26 @@ static void dl_probes(void)
         ui_spinner_draw(&probe, &control);
         check("draw list: the spinner records its ring and arc, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
 
-        // The launcher's grid of dots at four scales: nine kit boxes (round corners, in 256ths: the replay above reads plain pixel rectangles, which these
-        // are not; the GPU's kit boxes are proven by CHECK_gpu_kit) are recorded and nothing is painted, and the same call with no scene paints the nine
-        // dots on the processor. The button is the one of a band along the bottom of the picture, where the band's layout puts it and its dots.
-        taskbar_launcher_set(1);
+        // The apps mark (UI_ICON_APPS) at four scales: four kit boxes (round corners, in 256ths: the replay above reads plain pixel rectangles,
+        // which these are not; the GPU's kit boxes are proven by CHECK_gpu_kit) are recorded and nothing is painted, and the same call with no
+        // scene paints the four tiles on the processor.
         for (int k = 0; k < 4; k++)
         {
                 unsigned int s = scales[k], painted = 0;
+                struct ui mark;
 
-                memory_zero(&view, sizeof(view));
-                view.width = DL_W, view.height = DL_H, view.scale = (int)s, view.pixels = cpu;
+                memory_zero(&mark, sizeof(mark));
                 memory_zero(cpu, sizeof(cpu));
-                taskbar_launcher_glyph(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_LAUNCHER), 0xff3a8f5cu);
+                mark.pixels = cpu, mark.pitch = DL_W, mark.width = DL_W, mark.height = DL_H, mark.top = 0, mark.bottom = DL_H, mark.scale = (int)s;
+                ui_icon(&mark, UI_ICON_APPS, 10, 10, (int)(16 * s / 100), 0, 0xff3a8f5cu);
                 for (unsigned long i = 0; i < DL_W * DL_H; i++)
                         painted += cpu[i] != 0;
                 dl_probe_reset();
-                view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene;
-                taskbar_launcher_glyph(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_LAUNCHER), 0xff3a8f5cu);
-                failed += dl_probe_writes() != 0 || dl_probe_scene.lost || dl_probe_scene.count != 9 || painted == 0;
+                mark.pixels = dl_probe_pixels, mark.scene = &dl_probe_scene;
+                ui_icon(&mark, UI_ICON_APPS, 10, 10, (int)(16 * s / 100), 0, 0xff3a8f5cu);
+                failed += dl_probe_writes() != 0 || dl_probe_scene.lost || dl_probe_scene.count != 4 || painted == 0;
         }
-        taskbar_launcher_set(0);
-        check("draw list: the launcher's grid of dots records its nine dots at 100, 150, 200 and 300 percent and paints nothing, and paints them with no scene", failed == 0);
+        check("draw list: the apps mark records its four tiles at 100, 150, 200 and 300 percent and paints nothing, and paints them with no scene", failed == 0);
 
         // The speaker and the microphone cells: their rings and boxes are recorded (kit boxes, proven on the GPU by CHECK_gpu_kit).
         // The cells are those of the same band's tray, with the sound server there and a program recording.
@@ -1206,7 +1205,7 @@ static void dl_probes(void)
 
         dl_probe_reset();
         view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene, view.glass = glass, view.scale = 100;
-        taskbar_glass_tab(&view, 0, 0, 64, 0, 0, DL_W, 5, 5, 20, 20, 0, 0);
+        taskbar_glass_tab(&view, 0, 0, 64, 0, 0, DL_W, 5, 5, 20, 20);
         string_format(log, "  known diff: taskbar_glass_tab (R3): the frame is the picture's, lost=%p, writes=%p\n", (positive)dl_probe_scene.lost,
                       (positive)dl_probe_writes());
         if (fonts)

@@ -1072,6 +1072,7 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.band_bytes = compositor.band_at > 0 ? compositor.band_more_bytes[compositor.band_at] : compositor.band_bytes;
         view.glass = compositor.glass;
         view.face = &compositor.face;
+        view.bold = compositor.bold_ok ? &compositor.bold : null;
         view.engine = compositor.engine;
         view.count = compositor.listing;
         view.launcher_lit = compositor_launcher_row() >= 0;

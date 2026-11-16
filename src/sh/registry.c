@@ -606,10 +606,10 @@ static const struct settings_row settings_rows[] = {
                       .usage = "taskbar scale [PERCENT|default]",
                       .help = "how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]"),
     SETTING_PLAIN_ROW(null, "Taskbar padding (pixels)", SETTINGS_SLIDER, 0, ("taskbar", "padding"), "padding ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "6",
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "12",
                       .unit = "px", .low = 0, .high = 24,
                       .usage = "taskbar padding [PX|default]",
-                      .help = "the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]"),
+                      .help = "the room inside each taskbar button before what it shows and after it (the icon and title of a task, the moon, a tray item), 0 to 24 pixels at the taskbar scale [12]"),
     //  On by default: the band has a tab with the launcher's mark at its leading end (the left of a bottom or top band, the top of a
     //  side one) that opens and closes the launcher beside it, and the logo key pressed and let go alone is a press on it. Off, the
     //  band has no such tab and the launcher opens from its chord alone, in the middle of the screen.

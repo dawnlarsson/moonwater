@@ -1942,6 +1942,21 @@ static void check_compositor_chip_clip(void)
 }
 
 
+/* The arrangement rows written before the split ask for: every tray item after the tasks and the clock a cell of the tray, as `taskbar item ...
+   after` and `taskbar clock tray` set; and the standard one back. */
+static void taskbar_classic(void)
+{
+    taskbar.tray_before = 0, taskbar.clock_tray = 1;
+    taskbar_changed();
+}
+
+static void taskbar_standard(void)
+{
+    taskbar.tray_before = 1u << 1 | 1u << 2, taskbar.clock_tray = 0;
+    taskbar.moon_zone = TASKBAR_ZONE_CENTRE, taskbar.tasks_zone = TASKBAR_ZONE_SPLIT, taskbar.tasks_right = 0;
+    taskbar_changed();
+}
+
 /*
         A shared edge: two windows that meet edge to edge with the same extent take a press anywhere along their edge, from
         one end to the other, as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint
@@ -1979,9 +1994,13 @@ static void check_compositor_shared(void)
     struct compositor_target t;
     int mark[4], differs = 0, outside = 0;
 
+    // The moon and the tasks at the band's start, so the shared edge in the middle of the screen is no pill's down to its last row.
+    taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_START;
+    taskbar_changed();
     if (mapped < 0 && mapped > -4096)
     {
         check("shared: the table is mapped", false);
+        taskbar_standard();
         return;
     }
     memory_zero(&compositor, sizeof(compositor));
@@ -2163,6 +2182,7 @@ static void check_compositor_shared(void)
           compositor.resize == COMPOSITOR_NONE && compositor.shared_row == COMPOSITOR_NONE &&
               compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale / 100 && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
               compositor.x[3] + (int)compositor.w[3] == SHARED_W);
+    taskbar_standard();
 }
 
 /*
@@ -2334,13 +2354,14 @@ static void check_taskbar_tray(void)
     taskbar_tray_set("");
 }
 
-/* The taskbar's geometry with no card and no font: where the band sits for each position, that the tray is at the far end
-   of it, that a point in the tray is the tray and a point off the band is none, and that the battery's cell sits left of
-   the clock (or above it on a side band) when a battery is shown, and that none is shown when there is none to show. */
+/* The taskbar's geometry with no card and no font: where the band sits for each position, that the tray (here the battery, the clock
+   being the moon's) is inside it and after the moon along it, that a point in the tray is the tray and a point off the band is none,
+   and that none is shown when there is none to show. */
 static void check_taskbar_geometry(void)
 {
     static const char *const positions[4] = {"bottom", "top", "left", "right"};
-    static const int band[4][4] = {{0, 1416, 2560, 24}, {0, 0, 2560, 24}, {0, 0, 24, 1440}, {2536, 0, 24, 1440}};
+    static const int band[4][4] = {{0, 1440 - COMPOSITOR_PANEL, 2560, COMPOSITOR_PANEL}, {0, 0, 2560, COMPOSITOR_PANEL}, {0, 0, COMPOSITOR_PANEL, 1440},
+                                   {2560 - COMPOSITOR_PANEL, 0, COMPOSITOR_PANEL, 1440}};
 
     for (int at = 0; at < 4; at++)
     {
@@ -2351,16 +2372,21 @@ static void check_taskbar_geometry(void)
         compositor.width = 2560;
         compositor.height = 1440;
         compositor.scale = 100;
+        int mx, my, mw, mh;
+
         taskbar_settings_set(positions[at], "primary", "battery none\n");
         view = compositor_taskbar_view();
+        check("taskbar: with the battery none, no battery cell is drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+        taskbar.battery_item = 1, taskbar.battery_percent = 50;
+        taskbar_changed();
+        view = compositor_taskbar_view();
         taskbar_band(&view, &x, &y, &w, &h);
-        check("taskbar: the band is on its own edge of a 2560 by 1440 output, as thick as a tab", x == band[at][0] && y == band[at][1] && w == band[at][2] && h == band[at][3]);
-        check("taskbar: the tray is inside the band; a row's tray is at its right end, a side band's sits 4 pixels above its bottom", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) &&
-              tx >= x && ty >= y && tx + tw <= x + w && ty + th <= y + h &&
-              (at < 2 ? x + w - (tx + tw) <= 8 : ty + th == y + h - 4));
+        check("taskbar: the band is on its own edge of a 2560 by 1440 output, as thick as the panel", x == band[at][0] && y == band[at][1] && w == band[at][2] && h == band[at][3]);
+        check("taskbar: the tray is inside the band, after the moon along it", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && taskbar_slot(&view, TASKBAR_LAUNCHER, &mx, &my, &mw, &mh) &&
+              tx >= x && ty >= y && tx + tw <= x + w && ty + th <= y + h && (at < 2 ? tx >= mx + mw : ty >= my + mh));
         check("taskbar: a point in the tray is the tray, a point off the band is none", taskbar_hit_reach(&view, tx + tw / 2, ty + th / 2, 0) == -2 &&
               taskbar_hit_reach(&view, 1280, 700, 0) == TASKBAR_HIT_NONE);
-        check("taskbar: with the battery none, no battery cell is drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+        taskbar.battery_item = 0;
     }
 
     /* The battery follows the "battery" line of the kept settings (/root/tune, as the battery verb writes it): none
@@ -2405,8 +2431,8 @@ static void check_taskbar_geometry(void)
 }
 
 /* A language that reads from the right turns the compositor's chrome over: a window's close button is at its top left and the minimise
-   button on its inside, and a bottom band has its launcher button at the right end, its tabs in the order the windows showed from the
-   right and its tray at the left end. Each box is the mirror, in the window or the band, of the one a language that reads from the left
+   button on its inside, and a bottom band is turned over its length: the first task to the moon's left and the second to its right, the
+   third further out on the left, and the tray (here the battery) outermost at the left. Each box is the mirror, in the window or the band, of the one a language that reads from the left
    has, and a press at the mirrored place is on the same thing. */
 static void check_rtl_chrome(void)
 {
@@ -2442,6 +2468,7 @@ static void check_rtl_chrome(void)
     compositor.width = 2560, compositor.height = 1440, compositor.scale = 100;
     taskbar_settings_set("bottom", "primary", "battery none\n");
     taskbar_launcher_set(1);
+    taskbar.battery_item = 1, taskbar.battery_percent = 50;
     for (int mode = 0; mode < 2; mode++)
     {
         language_take(mode ? ('a' | 'r' << 8) : 0);
@@ -2464,10 +2491,12 @@ static void check_rtl_chrome(void)
     for (int at = 0; at < 5; at++)
         turned &= left[at][2] > 0 && mirrored[at][2] == left[at][2] && mirrored[at][1] == left[at][1] && mirrored[at][3] == left[at][3] &&
                   mirrored[at][0] == 2 * band_x + band_w - left[at][0] - left[at][2];
-    order = left[1][0] < left[2][0] && left[2][0] < left[3][0] && mirrored[1][0] > mirrored[2][0] && mirrored[2][0] > mirrored[3][0] &&
-            left[0][0] < left[1][0] && mirrored[0][0] > mirrored[1][0] && left[4][0] > left[3][0] && mirrored[4][0] < mirrored[3][0];
-    check("rtl chrome: a bottom band's launcher button, three tabs and tray are each the mirror in the band of what they are reading from the left", turned && taken == 5);
-    check("rtl chrome: the launcher button is at the band's right end, the tabs go from the right in the order they were shown, the tray is at the left end", order);
+    // Reading from the left: the second task, the moon, the first, the third, the tray; from the right the same turned over.
+    order = left[2][0] < left[0][0] && left[0][0] < left[1][0] && left[1][0] < left[3][0] && left[3][0] < left[4][0] &&
+            mirrored[2][0] > mirrored[0][0] && mirrored[0][0] > mirrored[1][0] && mirrored[1][0] > mirrored[3][0] && mirrored[3][0] > mirrored[4][0];
+    taskbar.battery_item = 0;
+    check("rtl chrome: a bottom band's moon, three tasks and tray are each the mirror in the band of what they are reading from the left", turned && taken == 5);
+    check("rtl chrome: the split is turned over: the first task to the moon's left, the second to its right, the third further out, the tray outermost at the left", order);
     check("rtl chrome: a press at the middle of each is on what it is", hit);
     taskbar_launcher_set(0);
 }
@@ -2676,22 +2705,15 @@ static void check_taskbar_fullscreen(void)
     check("taskbar fullscreen: a fullscreen window that is put away does not hide the band", minimised_stays);
 }
 
-/*
-        The launcher button of the panel (`taskbar launcher on`). Off, which is the default, the band is what it was: the tabs and
-        the tray are where the band's own formula puts them with nothing taken from its start, whatever the position and the scale.
-        On, the button is a tab-sized square a gap in from the leading end of the band (the left of a bottom or top one, the top of
-        a side one), its own slot to hit and to damage, the tabs are laid out in what it leaves, and its grid of dots is drawn whole at
-        every scale. The formula is written out here again, as it was before the button, so a layout that moves with the button off
-        is a red row.
-*/
 // A tab's length, written out again: the padding, the icon (16 logical pixels, or what the tab's height leaves with two above and below),
-// the kit's gap and the title's characters at a width each, or the icon and the padding alone for no title; never under the tab's height.
+// the kit's gap between an icon and its words and the title's characters at a width each, or the icon and the padding alone for no title;
+// never under the tab's height.
 static int tab_oracle(int high, int pad, int scale, int characters)
 {
     int icon = 16 * scale / 100 > high - 4 * scale / 100 ? high - 4 * scale / 100 : 16 * scale / 100, wide;
 
     icon = icon < 1 ? 1 : icon;
-    wide = 2 * pad + icon + (characters ? UI_GAP1 * scale / 100 + characters * high * 308 / 1000 : 0);
+    wide = 2 * pad + icon + (characters ? UI_GAP2 * scale / 100 + characters * high * 308 / 1000 : 0);
     return wide < high ? high : wide;
 }
 
@@ -2703,159 +2725,62 @@ static int tab_longest(int high, int thick, int scale)
     return 8 * thick + (icon < 1 ? 1 : icon) + UI_GAP1 * scale / 100;
 }
 
-static void launcher_oracle(unsigned int position, int scale, int count, const unsigned char *lengths, int length, int origin, int lead,
-                            int *start, int *wide, int *tray_at, int *tray_length)
-{
-    int thick = COMPOSITOR_PANEL * scale / 100, gap = UI_GAP1 * scale / 100, high = thick - 3 * scale / 100;
-    int pad = TASKBAR_PADDING_STANDARD * scale / 100, tray = 5 * high * 308 / 1000 + 2 * pad, room, most, windows = 0;
-
-    tray = tray < high ? high : tray;
-    room = length - lead - tray - (count + 2) * gap;
-    most = count && room > 0 ? room / count : 0;
-    most = most > tab_longest(high, thick, scale) ? tab_longest(high, thick, scale) : most;
-    for (int at = 0; at < count; at++)
-    {
-        int width = tab_oracle(high, pad, scale, lengths[at]);
-
-        wide[at] = width < most ? width : most;
-        windows += wide[at] + gap;
-    }
-    *tray_at = origin + length - gap - tray;
-    *tray_length = tray;
-    // Along a bottom or top band the tabs are centred on the band, held off the button and the tray; along a side one they start below a gap.
-    if (position == TASKBAR_LEFT || position == TASKBAR_RIGHT)
-        *start = origin + gap + lead;
-    else
-    {
-        int group = windows > gap ? windows - gap : 0;
-
-        *start = origin + (length - group) / 2;
-        *start = *start > *tray_at - gap - group ? *tray_at - gap - group : *start;
-        *start = *start < origin + lead + gap ? origin + lead + gap : *start;
-    }
-}
-
-static unsigned int launcher_band_pixels[BAND_W * 2 * COMPOSITOR_PANEL];
-
-// The launcher tab's length along the edge at a screen scale, the taskbar's own at 100: the grid of its mark (taskbar_lay's, written out
-// again) and the standard padding either side of it, never under the tab's height.
-static int launcher_tab_length(int scale)
-{
-    int high = COMPOSITOR_PANEL * scale / 100 - 3 * scale / 100, pad = TASKBAR_PADDING_STANDARD * scale / 100;
-    int step = (high * 28 + 50) / 100, dot = (step * 65 + 50) / 100, wide;
-
-    dot = dot < 1 ? 1 : dot;
-    step = step < dot + 1 ? dot + 1 : step;
-    wide = 2 * step + dot + 2 * pad;
-    return wide < high ? high : wide;
-}
+/*
+        The moon: the launcher's button, bare on the band (no glass, no padding), as long and as high as the band is thick, and in the band's
+        middle along it in the standard arrangement (the tasks split round it), on every edge and at every scale. It is a slot of its own to
+        hit (and across the band's whole thickness, so the screen's last row is the moon), to anchor a popup and to damage; drawn alone it
+        writes nothing outside its square, and it is drawn otherwise while the launcher is up.
+*/
+static unsigned int launcher_band_pixels[BAND_W * 3 * COMPOSITOR_PANEL];
 
 static void check_taskbar_launcher(void)
 {
     static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
     static const char *const words[4] = {"bottom", "top", "left", "right"};
-    static const int scales[6] = {50, 75, 100, 125, 150, 200};
+    static const int scales[4] = {50, 100, 150, 200};
     static const unsigned char lengths[3] = {5, 15, 30};
-    int off_same = 1, button_square = 1, button_leads = 1, tabs_after = 1, hits = 1, anchored = 1, damaged = 1, glyphs = 1, lit_differs = 1,
-        outside = 1, scale_ok = 1;
+    int shaped = 1, middle = 1, hits = 1, anchored = 1, damaged = 1, outside = 1, lit_differs = 1;
 
     memory_zero(&compositor, sizeof(compositor));
-    compositor.width = BAND_W;
-    compositor.height = BAND_H;
-    compositor.scale = 100;
+    compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
-    // The button's redo bit is its own: not the tray's, and not any tab's.
     {
         int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(WINDOWS - 1);
 
         for (int tab = 0; tab < WINDOWS; tab++)
             own &= taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(tab);
-        check("launcher button: its redo bit is its own, not the tray's and not a tab's", own);
+        check("moon: its redo bit is its own, not the tray's and not a tab's", own);
     }
     for (int at = 0; at < 4; at++)
-        for (int each = 0; each < 6; each++)
+        for (int each = 0; each < 4; each++)
         {
             struct taskbar_view view;
-            unsigned int position = positions[at];
-            int scale = scales[each], vertical = position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
-            int x, y, w, h, bx, by, bw, bh, tx, ty, tw, th, start, wide[3], tray_at, tray_length, length, origin, lead, thick, gap, high, inset;
-            int along[3], span[3], tab;
+            int scale = scales[each], vertical = at >= 2, thick = COMPOSITOR_PANEL * taskbar_scaled(scale) / 100, x, y, w, h, bx, by, bw, bh, tx, ty, tw, th;
 
             memory_zero(&view, sizeof(view));
-            view.width = BAND_W;
-            view.height = BAND_H;
-            view.scale = scale;
-            view.position = position;
-            view.count = 3;
-            view.lengths = lengths;
-            thick = COMPOSITOR_PANEL * scale / 100;
-            gap = UI_GAP1 * scale / 100;
-            inset = 3 * scale / 100;
-            high = thick - inset;
+            view.width = BAND_W, view.height = BAND_H, view.scale = scale, view.position = positions[at], view.count = 3, view.lengths = lengths;
             taskbar_settings_set(words[at], "primary", "battery none\n");
-
-            // Off: no slot of its own, and every other slot as it was.
-            taskbar_launcher_set(0);
             taskbar_band(&view, &bx, &by, &bw, &bh);
-            length = vertical ? bh : bw;
-            origin = vertical ? by : bx;
-            launcher_oracle(position, scale, 3, lengths, length, origin, 0, &start, wide, &tray_at, &tray_length);
-            off_same &= !taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) && taskbar_hit_reach(&view, bx + gap + 1, by + 1, 0) != TASKBAR_LAUNCHER &&
-                        !taskbar_anchor(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h);
-            for (int tab = 0, place = start; tab < 3; place += wide[tab] + gap, tab++)
-            {
-                int got = taskbar_slot(&view, tab, &x, &y, &w, &h);
-
-                off_same &= got && (vertical ? y : x) == place && (vertical ? h : w) == wide[tab];
-            }
-            off_same &= taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (vertical ? ty : tx) == tray_at && (vertical ? th : tw) == tray_length;
-
-            // On: the button, a gap in from the leading end.
-            taskbar_launcher_set(1);
-            tab = launcher_tab_length(scale);
-            lead = gap + tab;
-            launcher_oracle(position, scale, 3, lengths, length, origin, lead, &start, wide, &tray_at, &tray_length);
             if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
             {
-                button_square = button_leads = tabs_after = hits = anchored = damaged = glyphs = 0;
+                shaped = middle = hits = anchored = damaged = 0;
                 continue;
             }
-            button_square &= vertical ? w == high && h == tab : w == tab && h == high; // a tab as high as the others, as long as its mark and the padding
-            button_leads &= (vertical ? y : x) == origin + gap && x >= bx && y >= by && x + w <= bx + bw && y + h <= by + bh &&
-                            (position == TASKBAR_TOP ? y == by : position == TASKBAR_BOTTOM ? y == by + inset
-                                                             : position == TASKBAR_LEFT ? x == bx : x == bx + inset);
-            for (int tab = 0, place = start; tab < 3; place += wide[tab] + gap, tab++)
-            {
-                int tx2, ty2, tw2, th2, got = taskbar_slot(&view, tab, &tx2, &ty2, &tw2, &th2);
-
-                along[tab] = vertical ? ty2 : tx2;
-                span[tab] = vertical ? th2 : tw2;
-                tabs_after &= got && along[tab] == place && span[tab] == wide[tab];
-            }
-            tabs_after &= along[0] >= (vertical ? y + h : x + w) + gap && along[2] + span[2] <= tray_at &&
-                          taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (vertical ? ty : tx) == tray_at;
-
-            // Hit: the button, a tab, the tray, and the gap between the button and the first tab is none.
-            hits &= taskbar_hit_reach(&view, x + w / 2, y + h / 2, 0) == TASKBAR_LAUNCHER &&
-                    taskbar_hit_reach(&view, vertical ? x + w / 2 : along[0] + span[0] / 2, vertical ? along[0] + span[0] / 2 : y + h / 2, 0) == 0 &&
-                    taskbar_hit_reach(&view, tx + tw / 2, ty + th / 2, 0) == -2 &&
-                    taskbar_hit_reach(&view, vertical ? x + w / 2 : x + w + gap / 2, vertical ? y + h + gap / 2 : y + h / 2, 0) == TASKBAR_HIT_NONE &&
-                    taskbar_hit_reach(&view, x + w / 2, y + h / 2, 4) == TASKBAR_LAUNCHER;
-
-            // The anchor: the button along the edge, the band's whole thickness across it.
+            shaped &= w == thick && h == thick && x >= bx && y >= by && x + w <= bx + bw && y + h <= by + bh;
+            middle &= vertical ? (y + h / 2) - (by + bh / 2) >= -1 && (y + h / 2) - (by + bh / 2) <= 1
+                               : (x + w / 2) - (bx + bw / 2) >= -1 && (x + w / 2) - (bx + bw / 2) <= 1;
+            hits &= taskbar_hit_reach(&view, x + w / 2, y + h / 2, 0) == TASKBAR_LAUNCHER && taskbar_hit_reach(&view, x + w / 2, y + h / 2, 4) == TASKBAR_LAUNCHER;
+            // The edge of the screen beside the moon is the moon: a press at the band's outermost row or column.
+            if (positions[at] == TASKBAR_BOTTOM)
+                hits &= taskbar_hit_reach(&view, x + w / 2, by + bh - 1, 0) == TASKBAR_LAUNCHER;
             anchored &= taskbar_anchor(&view, TASKBAR_LAUNCHER, &tx, &ty, &tw, &th) &&
                         (vertical ? tx == bx && tw == bw && ty == y && th == h : tx == x && tw == w && ty == by && th == bh);
-
-            // Damage over the button redoes the button's slot and not the tray's, which is the other end of the band.
             {
-                int hurt[1][4] = {{x + w / 2, y + h / 2, x + w / 2 + 1, y + h / 2 + 1}}; // x1, y1, x2, y2
+                int hurt[1][4] = {{x + w / 2, y + h / 2, x + w / 2 + 1, y + h / 2 + 1}};
                 unsigned long redo = taskbar_meets(&view, hurt, 1);
 
-                damaged &= (redo & taskbar_bit(TASKBAR_LAUNCHER)) != 0 && !(redo & taskbar_bit(-2)) &&
-                           taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(WINDOWS - 1);
+                damaged &= (redo & taskbar_bit(TASKBAR_LAUNCHER)) != 0 && !(redo & taskbar_bit(-2));
             }
-
-            // Drawn: the glass, lit or not, and nothing outside the slot.
             {
                 unsigned int shot[2] = {0, 0};
                 int rect[4];
@@ -2865,19 +2790,15 @@ static void check_taskbar_launcher(void)
                     struct taskbar_view drawn = view;
 
                     memory_zero(launcher_band_pixels, sizeof(launcher_band_pixels));
-                    drawn.pixels = launcher_band_pixels;
-                    drawn.band_bytes = sizeof(launcher_band_pixels);
-                    drawn.glass = band_glass_pixels;
+                    drawn.pixels = launcher_band_pixels, drawn.band_bytes = sizeof(launcher_band_pixels), drawn.glass = band_glass_pixels;
                     drawn.launcher_lit = (unsigned int)lit;
                     if (taskbar_draw(&drawn, taskbar_bit(TASKBAR_LAUNCHER), band_glass, null, rect) != 1)
                     {
-                        glyphs = 0;
+                        outside = 0;
                         continue;
                     }
-                    shot[lit] = launcher_band_pixels[(unsigned long)(y - by + 1) * (unsigned long)bw + (unsigned long)(x - bx + 1)];
-                    if (lit)
-                        continue;
-                    // Nothing outside the slot is drawn: the rest of the band is the zeroes it was cleared to.
+                    // The rim, a pixel in from the moon's top middle.
+                    shot[lit] = launcher_band_pixels[(unsigned long)(y - by + 1) * (unsigned long)bw + (unsigned long)(x - bx + w / 2)];
                     for (int row = 0; row < bh; row++)
                         for (int column = 0; column < bw; column++)
                             if ((column + bx < x || column + bx >= x + w || row + by < y || row + by >= y + h) &&
@@ -2886,157 +2807,191 @@ static void check_taskbar_launcher(void)
                 }
                 lit_differs &= shot[0] != shot[1];
             }
-
-            // The mark alone on a cleared band: a grid of three by three round dots, a whole number of device pixels across and apart,
-            // every pixel of it in the slot and in a dot's box, each box drawn, all nine the same pixels, the grid centred on the
-            // button to a pixel, and (from a dot of 3 pixels) the middle of each dot the ink whole.
-            {
-                struct taskbar_view alone = view;
-                unsigned int ink = 0xffe0d0c0u;
-                int side = w < h ? w : h, pitch = (side * 28 + 50) / 100, dot, span, left, top, count[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, stray = 0, whole = 1;
-                int least_x = 1 << 30, least_y = 1 << 30, most_x = -1, most_y = -1;
-                unsigned long sum[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-
-                dot = (pitch * 65 + 50) / 100;
-                dot = dot < 1 ? 1 : dot;
-                pitch = pitch < dot + 1 ? dot + 1 : pitch;
-                span = 2 * pitch + dot;
-                left = x + (w - span) / 2;
-                top = y + (h - span) / 2;
-                memory_zero(launcher_band_pixels, sizeof(launcher_band_pixels));
-                alone.pixels = launcher_band_pixels;
-                alone.band_bytes = sizeof(launcher_band_pixels);
-                alone.scene = null;
-                taskbar_launcher_glyph(&alone, taskbar_tree(&alone), taskbar_node(&alone, TASKBAR_LAUNCHER), ink);
-                for (int row = 0; row < bh; row++)
-                    for (int column = 0; column < bw; column++)
-                    {
-                        unsigned int pixel = launcher_band_pixels[(unsigned long)row * (unsigned long)bw + (unsigned long)column];
-                        int px = column + bx, py = row + by, cx = (px - left) / pitch, cy = (py - top) / pitch;
-                        int in_dot = px >= left && py >= top && cx < 3 && cy < 3 && (px - left) % pitch < dot && (py - top) % pitch < dot;
-
-                        if (!pixel)
-                            continue;
-                        stray += !in_dot;
-                        if (in_dot)
-                            count[cy * 3 + cx]++, sum[cy * 3 + cx] += pixel & 0xffffu;
-                        least_x = px < least_x ? px : least_x, most_x = px > most_x ? px : most_x;
-                        least_y = py < least_y ? py : least_y, most_y = py > most_y ? py : most_y;
-                    }
-                for (int cell = 0; cell < 9; cell++)
-                {
-                    int mx = left + cell % 3 * pitch + dot / 2, my = top + cell / 3 * pitch + dot / 2;
-
-                    whole &= count[cell] > 0 && count[cell] == count[0] && sum[cell] == sum[0];
-                    if (dot >= 3)
-                        whole &= launcher_band_pixels[(unsigned long)(my - by) * (unsigned long)bw + (unsigned long)(mx - bx)] == ink;
-                }
-                glyphs &= !stray && whole && span <= side && most_x >= 0 && (least_x - x) - (x + w - 1 - most_x) >= -1 &&
-                          (least_x - x) - (x + w - 1 - most_x) <= 1 && (least_y - y) - (y + h - 1 - most_y) >= -1 &&
-                          (least_y - y) - (y + h - 1 - most_y) <= 1;
-                // The grid is the same whole pixels at every scale: a dot is 1 to 9 pixels and the grid over half the button across.
-                scale_ok &= dot >= 1 && 2 * span >= side;
-            }
         }
-    check("launcher button: with it off the tabs and the tray are where the band's own formula puts them, at every position and scale, and no slot is the button's", off_same);
-    check("launcher button: on, it is a tab as high as the others, as long as its mark and the padding, a gap in from the leading end of the band, inside it", button_square && button_leads);
-    check("launcher button: and the tabs are laid out in what it leaves, clear of it and of the tray", tabs_after);
-    check("launcher button: a point on it is the launcher button, a point on a tab or the tray is theirs, and the gap between is none", hits);
-    check("launcher button: its anchor is its length along the edge and the band's whole thickness across it", anchored);
-    check("launcher button: damage over it redoes its slot and not the tray's, on a bit of its own", damaged);
-    check("launcher button: its mark is a grid of three by three round dots, whole device pixels, nine of the same pixels, centred on it, at every position and scale", glyphs && scale_ok);
-    check("launcher button: lit while the launcher is up it is drawn as the tab with the keys is, and nothing outside it is drawn", lit_differs && outside);
-    check("launcher button: in the shapes the panel draws with no font it is the lit tab's ink when lit and the shadow's when not",
+    check("moon: it is as long and as high as the band is thick, inside the band, at every position and scale", shaped);
+    check("moon: with the tasks split round it, it is in the band's middle along it, to a pixel", middle);
+    check("moon: a point on it is the moon, with a finger's reach too, and so is the screen's edge beside it", hits);
+    check("moon: its anchor is its length along the edge and the band's whole thickness across it", anchored);
+    check("moon: damage over it redoes its slot and not the tray's, on a bit of its own", damaged);
+    check("moon: drawn alone it writes nothing outside its square, and its rim is brighter while the launcher is up", outside && lit_differs);
+    check("moon: in the shapes the panel draws with no font it is the lit tab's ink when lit and the shadow's when not",
           taskbar_tab_ink(TASKBAR_LAUNCHER, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) &&
           taskbar_tab_ink(TASKBAR_LAUNCHER, 0) == taskbar_tab_ink(0, 0) && taskbar_tab_ink(-2, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(-2, 0));
-    taskbar_launcher_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
 }
 
 /*
-        The tabs of a bottom or top band are centred on the band itself and not in what the tray leaves of it: the space before the first
-        tab and the space after the last are the same to a pixel, whatever the tray takes at the far end (the standard tray; with the
-        microphone, the volume and the notices dot added; a long format of the person's) and with the launcher button on or off, reading
-        from the left and from the right. Only when the tabs are too many to be centred are they moved off the middle, and then they keep
-        clear of the button and of the tray.
+        The band's arrangement. In the standard one the tasks are split round the moon, a task to its right and the next to its left, each
+        further out than the last; the sound and the microphone are a pill at the far left and the notices and the battery one at the far
+        right; every pill is inside the band, none meets another, and between two of them is the kit's gap twice. The same holds at three
+        output widths with 3 and 8 tasks, and with 30 the tasks are each their icon alone and still clear of the moon and the trays. A point
+        in the middle of anything drawn is that thing, and a point between two pills is nothing. The other arrangements: all in the middle
+        (the moon, then the tasks, then the tray), the moon at the start and the tasks at the end; and reading from the right, the split
+        turned over (the first task to the moon's left).
 */
+static int centre_slots(const struct taskbar_view *view, int *rect, int which)
+{
+    return taskbar_slot(view, which, &rect[0], &rect[1], &rect[2], &rect[3]);
+}
+
 static void check_taskbar_centre(void)
 {
-    static const unsigned char few[3] = {5, 15, 30};
-    static const unsigned char many[12] = {30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30};
-    static const char *const formats[4] = {"", "", "", "{time.24h.hour}:{time.24h.min}  {date.year}-{date.month}-{date.day}  {cpu.load} {mem.used} {host}"};
-    b32 centred = true, still = true, clear = true;
-    int first_start = 0;
+    static const unsigned char lengths[30] = {5, 15, 30, 8, 12, 20, 6, 10, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30};
+    static const int widths[3] = {1280, 1920, 3840}, counts[3] = {3, 8, 30};
+    b32 alternate = true, trays = true, apart = true, inside = true, bare = true, hits = true, gaps_none = true;
 
     language_directory = "languages/";
     memory_zero(&compositor, sizeof(compositor));
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
-    for (int mode = 0; mode < 2; mode++)
-    {
-        language_take(mode ? ('a' | 'r' << 8) : 0);
-        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_TOP; position++)
-            for (int launcher = 0; launcher < 2; launcher++)
-                for (int tray = 0; tray < 4; tray++)
-                {
-                    struct taskbar_view view;
-                    int bx, by, bw, bh, x, y, w, h, ex, ey, ew, eh, lo, hi;
-
-                    memory_zero(&view, sizeof(view));
-                    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = position;
-                    view.count = 3, view.lengths = few;
-                    taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
-                    taskbar_launcher_set(launcher);
-                    taskbar_tray_set(formats[tray]);
-                    taskbar_volume_set(tray == 1 || tray == 2, 50, 0, 0);
-                    taskbar_mic_set(tray == 2, 0);
-                    taskbar_notices_set(tray == 2, WINDOWS_ISSUE_WARNING);
-                    taskbar_band(&view, &bx, &by, &bw, &bh);
-                    if (!taskbar_slot(&view, 0, &x, &y, &w, &h) || !taskbar_slot(&view, 2, &ex, &ey, &ew, &eh))
-                    {
-                        centred = false;
-                        continue;
-                    }
-                    lo = x < ex ? x : ex, hi = x + w > ex + ew ? x + w : ex + ew;
-                    // The group's two ends are as far from the band's two ends as each other, to a pixel.
-                    centred &= (lo - bx) - (bx + bw - hi) >= -1 && (lo - bx) - (bx + bw - hi) <= 1 && lo > bx;
-                    // And the tray's width is not in it: the first tab is where it is with the standard tray, whatever else the tray holds.
-                    if (position == TASKBAR_BOTTOM && !launcher && !mode)
-                    {
-                        first_start = tray == 0 ? x : first_start;
-                        still &= x == first_start;
-                    }
-                }
-        // Too many to be centred: they keep clear of the button and of the tray.
-        for (int launcher = 0; launcher < 2; launcher++)
+    taskbar_tray_set("");
+    taskbar_volume_set(1, 50, 0, 0);
+    taskbar_mic_set(1, 0);
+    taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
+    for (int wi = 0; wi < 3; wi++)
+        for (int ci = 0; ci < 3; ci++)
         {
             struct taskbar_view view;
-            int x, y, w, h, ex, ey, ew, eh, tx, ty, tw, th, kx = 0, ky = 0, kw = 0, kh = 0, lo, hi;
+            int moon[4], band[4], slot[WINDOWS][4], before[4], after[4], count = counts[ci], gap = TASKBAR_GAP * 2, pills[64][4], listed = 0, which;
 
             memory_zero(&view, sizeof(view));
-            view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM;
-            view.count = 12, view.lengths = many;
+            view.width = widths[wi], view.height = 1080, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = (unsigned int)count, view.lengths = lengths;
             taskbar_settings_set("bottom", "primary", "battery none\n");
-            taskbar_launcher_set(launcher);
-            taskbar_tray_set("");
-            taskbar_volume_set(1, 50, 0, 0);
-            taskbar_mic_set(1, 0);
-            taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
-            clear &= taskbar_slot(&view, 0, &x, &y, &w, &h) && taskbar_slot(&view, 11, &ex, &ey, &ew, &eh) &&
-                     taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (!launcher || taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh));
-            lo = x < ex ? x : ex, hi = x + w > ex + ew ? x + w : ex + ew;
-            clear &= (hi <= tx || lo >= tx + tw) && (!launcher || hi <= kx || lo >= kx + kw);
+            taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+            if (!centre_slots(&view, moon, TASKBAR_LAUNCHER) || !centre_slots(&view, before, TASKBAR_TRAY_BEFORE) || !centre_slots(&view, after, TASKBAR_TRAY))
+            {
+                alternate = trays = false;
+                continue;
+            }
+            for (int at = 0; at < count; at++)
+                if (!centre_slots(&view, slot[at], at))
+                    alternate = false;
+            // A task to the moon's right, the next to its left, each further out than the last on its side.
+            for (int at = 0; at < count && alternate; at++)
+            {
+                int right = at % 2 == 0;
+
+                alternate &= right ? slot[at][0] >= moon[0] + moon[2] : slot[at][0] + slot[at][2] <= moon[0];
+                if (at >= 2)
+                    alternate &= right ? slot[at][0] >= slot[at - 2][0] + slot[at - 2][2] : slot[at][0] + slot[at][2] <= slot[at - 2][0];
+            }
+            // The sound and the microphone outermost at the left, the notices and the battery at the right.
+            for (int at = 0; at < count; at++)
+                trays &= before[0] + before[2] <= slot[at][0] && after[0] >= slot[at][0] + slot[at][2];
+            // The pills, in order along the band: inside it, and the kit's gap twice between each and the next.
+            while (listed < 64 && taskbar_plate(&view, listed, &which, &pills[listed][0], &pills[listed][1], &pills[listed][2], &pills[listed][3]))
+                listed++;
+            for (int k = 0; k < listed; k++)
+            {
+                inside &= pills[k][0] >= band[0] && pills[k][0] + pills[k][2] <= band[0] + band[2] && pills[k][1] >= band[1] && pills[k][1] + pills[k][3] <= band[1] + band[3];
+                if (k)
+                {
+                    apart &= pills[k][0] - (pills[k - 1][0] + pills[k - 1][2]) >= gap;
+                    // A point in the middle of the space between two pills is nothing.
+                    gaps_none &= taskbar_hit_reach(&view, (pills[k - 1][0] + pills[k - 1][2] + pills[k][0]) / 2, pills[k][1] + pills[k][3] / 2, 0) == TASKBAR_HIT_NONE;
+                }
+            }
+            // A point in the middle of anything drawn is it.
+            hits &= taskbar_hit_reach(&view, moon[0] + moon[2] / 2, moon[1] + moon[3] / 2, 0) == TASKBAR_LAUNCHER;
+            for (int at = 0; at < count; at++)
+                hits &= taskbar_hit_reach(&view, slot[at][0] + slot[at][2] / 2, slot[at][1] + slot[at][3] / 2, 0) == at;
+            {
+                static const int cells[3] = {TASKBAR_MIC, TASKBAR_VOLUME, TASKBAR_NOTICES};
+
+                for (int k = 0; k < 3; k++)
+                {
+                    int cell[4];
+
+                    hits &= centre_slots(&view, cell, cells[k]) && taskbar_hit_reach(&view, cell[0] + cell[2] / 2, cell[1] + cell[3] / 2, 0) == cells[k];
+                }
+            }
+            // Thirty: each task its icon alone, its padding either side of it.
+            if (count == 30 && widths[wi] <= 1920)
+                for (int at = 0; at < count; at++)
+                    bare &= slot[at][2] <= 16 + 2 * TASKBAR_PADDING_STANDARD;
         }
+    check("taskbar arrangement: split round the moon, the first task to its right and the next to its left, each further out than the last, at three widths and 3, 8 and 30 tasks", alternate);
+    check("taskbar arrangement: the sound and the microphone are the outermost pill at the left, the notices and the battery at the right", trays);
+    check("taskbar arrangement: every pill is inside the band, the kit's gap twice from the next, and none meets another", inside && apart);
+    check("taskbar arrangement: a point in the middle of the moon, a task or a tray cell is it, and a point between two pills is nothing", hits && gaps_none);
+    check("taskbar arrangement: thirty tasks are each their icon alone, still clear of the moon and the trays", bare);
+
+    // The earlier arrangements, and the split read from the right.
+    {
+        struct taskbar_view view;
+        int moon[4], first[4], second[4], tray[4];
+        b32 together, ends, turned;
+
+        memory_zero(&view, sizeof(view));
+        view.width = 1920, view.height = 1080, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
+        taskbar.tasks_zone = TASKBAR_ZONE_CENTRE, taskbar.tray_before = 0;
+        together = centre_slots(&view, moon, TASKBAR_LAUNCHER) && centre_slots(&view, first, 0) && centre_slots(&view, second, 2) && centre_slots(&view, tray, TASKBAR_TRAY) &&
+                   moon[0] + moon[2] <= first[0] && first[0] < second[0] && second[0] + second[2] <= tray[0];
+        taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_END;
+        ends = centre_slots(&view, moon, TASKBAR_LAUNCHER) && centre_slots(&view, tray, TASKBAR_TRAY) && moon[0] < 40 && tray[0] + tray[2] > 1920 - 40;
+        taskbar.moon_zone = TASKBAR_ZONE_CENTRE, taskbar.tasks_zone = TASKBAR_ZONE_SPLIT, taskbar.tray_before = 1u << 1 | 1u << 2;
+        language_take('a' | 'r' << 8);
+        turned = centre_slots(&view, moon, TASKBAR_LAUNCHER) && centre_slots(&view, first, 0) && first[0] + first[2] <= moon[0];
+        language_take(0);
+        check("taskbar arrangement: all in the middle is the moon, then the tasks, then the tray; the moon at the start and the tasks at the end are at the band's ends; read from the right the split is turned over",
+              together && ends && turned);
     }
-    language_take(0);
-    taskbar_launcher_set(0);
-    taskbar_tray_set("");
     taskbar_volume_set(0, 0, 0, 0);
     taskbar_mic_set(0, 0);
     taskbar_notices_set(0, 0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
-    check("taskbar centre: the tabs of a bottom and a top band are centred on the band, to a pixel, with any tray and the launcher button on or off, from the left and from the right", centred);
-    check("taskbar centre: a tray of more cells, or a long format, does not move the tabs", still);
-    check("taskbar centre: tabs too many to be centred are kept clear of the launcher button and of the tray", clear);
+}
+
+/*
+        The highlight of the task with the keys moves to the next one's when the keys do, as the kit's tabs move their pip: half way through
+        its 350 ms it is between the two, it is still moving (taskbar_moving, which keeps the band drawn), and after them it is over the new
+        task exactly and has stopped. A task that keeps the keys while the band is laid out again has it put where the task is now, at once.
+*/
+static void check_taskbar_highlight(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    static unsigned char marks[3];
+    struct taskbar_view view;
+    struct taskbar_lit address_to lit = &taskbar_bands[0].lit;
+    int rect[4], one[4], other[4], band[4];
+    b64 between;
+    b32 moved, settled, still;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
+    memory_zero(&view, sizeof(view));
+    memory_zero(band_pixels, sizeof(band_pixels));
+    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths, view.marks = marks;
+    view.pixels = band_pixels, view.band_bytes = sizeof(band_pixels), view.glass = band_glass_pixels;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+    centre_slots(&view, one, 0), centre_slots(&view, other, 1);
+    ui_kit.test_clock = 1000000000ll;
+    marks[0] = COMPOSITOR_TAB_LIT, marks[1] = marks[2] = 0;
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    ui_kit.test_clock += 1000000000ll;
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    marks[0] = 0, marks[1] = COMPOSITOR_TAB_LIT;
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    ui_kit.test_clock += (b64)ui_paced(TASKBAR_LIT_MS * UI_MS) / 2;
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    between = lit->at.from + (lit->at.to - lit->at.from) / 2;
+    moved = taskbar_moving((positive)ui_kit.test_clock) && lit->at.to == ui_q(other[0] - band[0]) &&
+            ui_tween_at(&lit->at, &(b32){0}) != lit->at.to && ui_tween_at(&lit->at, &(b32){0}) != lit->at.from;
+    (void)between;
+    ui_kit.test_clock += (b64)ui_paced(TASKBAR_LIT_MS * UI_MS);
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    settled = !taskbar_moving((positive)ui_kit.test_clock) && ui_tween_at(&lit->at, &(b32){0}) == ui_q(other[0] - band[0]) &&
+              ui_tween_at(&lit->length, &(b32){0}) == ui_q(other[2]);
+    // The same task keeps the keys while its title grows, which moves it: the highlight is put where the task is now, not moved there.
+    lengths[1] = 25;
+    taskbar_draw(&view, ~0ul, band_glass, null, rect);
+    centre_slots(&view, other, 1);
+    still = !taskbar_moving((positive)ui_kit.test_clock) && ui_tween_at(&lit->at, &(b32){0}) == ui_q(other[0] - band[0]);
+    lengths[1] = 15;
+    ui_kit.test_clock = 0;
+    check("taskbar highlight: when the keys go to another task the highlight moves to it on the kit's ease, and the band is kept drawn while it moves", moved);
+    check("taskbar highlight: after 350 ms it is over the new task exactly and has stopped", settled);
+    check("taskbar highlight: a task that keeps the keys while the band is laid out again has it put where the task is now, at once", still);
 }
 
 /*
@@ -3066,7 +3021,7 @@ static void check_taskbar_tree(void)
     lengths[0] = 30;
     grew = taskbar_slot(&view, 0, &x, &y, &w, &h) && w > first && !tree->node[0].spare;
     lengths[0] = 5, view.lengths = null, tree->node[0].spare = 77;
-    bare = taskbar_slot(&view, 0, &x, &y, &w, &h) && w == 8 * COMPOSITOR_PANEL + 16 + UI_GAP1 && !tree->node[0].spare;
+    bare = taskbar_slot(&view, 0, &x, &y, &w, &h) && w == 8 * COMPOSITOR_PANEL + 16 + UI_GAP2 && !tree->node[0].spare;
     view.lengths = lengths;
     taskbar_band(&view, &bx, &by, &bw, &bh);
     view.x = 2560, view.y = 100, tree->node[0].spare = 77;
@@ -3125,15 +3080,17 @@ static void check_taskbar_scale(void)
                 bytes_ok &= band >= (unsigned long)bw * (unsigned long)bh * 4 && glass >= (unsigned long)bw * (unsigned long)bh * 4;
             }
 
-    // The gap is fixed, between the tabs, from the band's start to the button and from the tray to the band's end; the padding is the room round
-    // the text inside a tab: the first tab (a title of five characters) is the text's width and the padding either side, never under its height.
+    // The tasks of a side meet, the pills are the kit's gap twice apart (the moon and the pill of the tasks to its right), and the padding is the
+    // room round a task's icon and title: the first task (a title of five characters) is the text's width, the gap after the icon, the icon and
+    // the padding either side, never under its height; all whatever the padding.
     for (int screen = 0; screen < 3; screen++)
         for (int each = 0; each < 6; each++)
             for (int pad = 0; pad < 5; pad++)
             {
                 struct taskbar_view view;
-                int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1, kx, ky, kw, kh, tx, ty, tw, th;
-                int eff = screens[screen] * scales[each] / 100, high = COMPOSITOR_PANEL * eff / 100 - 3 * eff / 100, gap = TASKBAR_GAP * eff / 100;
+                int bx, by, bw, bh, x0, y0, w0, h0, x2, y2, w2, h2, kx, ky, kw, kh, px, py, pw, ph;
+                int eff = screens[screen] * scales[each] / 100, inset = 2 * eff / 100 > 1 ? 2 * eff / 100 : 1;
+                int high = COMPOSITOR_PANEL * eff / 100 - 2 * inset, gap = TASKBAR_GAP * eff / 100;
                 int wide = tab_oracle(high, paddings[pad] * eff / 100, eff, 5);
 
                 memory_zero(&view, sizeof(view));
@@ -3143,15 +3100,16 @@ static void check_taskbar_scale(void)
                 taskbar_scale_set(scales[each]);
                 taskbar_padding_set(paddings[pad]);
                 taskbar_band(&view, &bx, &by, &bw, &bh);
-                if (!taskbar_slot(&view, 0, &x0, &y0, &w0, &h0) || !taskbar_slot(&view, 1, &x1, &y1, &w1, &h1) ||
-                    !taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh) || !taskbar_slot(&view, -2, &tx, &ty, &tw, &th))
+                if (!taskbar_slot(&view, 0, &x0, &y0, &w0, &h0) || !taskbar_slot(&view, 2, &x2, &y2, &w2, &h2) ||
+                    !taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh) || !taskbar_slot(&view, TASKBAR_TABS, &px, &py, &pw, &ph))
                 {
                     gap_ok = ends_ok = pad_ok = false;
                     continue;
                 }
-                gap_ok &= x1 - (x0 + w0) == gap;
-                ends_ok &= kx == bx + gap && tx + tw == bx + bw - gap;
-                pad_ok &= w0 == wide;
+                gap_ok &= x2 == x0 + w0;
+                ends_ok &= px - (kx + kw) == 2 * gap;
+                // Where the side has the room for its tasks whole (a quarter of the band holds two); a side too short shares it out, none wider.
+                pad_ok &= 2 * wide <= bw / 4 ? w0 == wide : w0 <= wide;
             }
 
     // What is outside the choices and the range is the standard.
@@ -3175,8 +3133,8 @@ static void check_taskbar_scale(void)
         {
             taskbar_padding_set(bad_paddings[at]);
             taskbar_slot(&view, 0, &x0, &y0, &w0, &h0);
-            taskbar_slot(&view, 1, &x1, &y1, &w1, &h1);
-            standard_ok &= w0 == 5 * 21 * 308 / 1000 + 2 * TASKBAR_PADDING_STANDARD + 16 + UI_GAP1 && x1 - (x0 + w0) == TASKBAR_GAP;
+            taskbar_slot(&view, 2, &x1, &y1, &w1, &h1);
+            standard_ok &= w0 == 5 * (COMPOSITOR_PANEL - 4) * 308 / 1000 + 2 * TASKBAR_PADDING_STANDARD + 16 + UI_GAP2 && x1 == x0 + w0;
         }
     }
 
@@ -3227,9 +3185,9 @@ static void check_taskbar_scale(void)
     taskbar_settings_set("bottom", "primary", "battery none\n");
     check("taskbar scale: the band is as thick as the screen's scale and the taskbar's make it, on every edge, at 50 to 200 percent of each", thick_ok);
     check("taskbar scale: the memory kept for the band and its glass holds it at every scale", bytes_ok);
-    check("taskbar padding: the gap between the tabs is fixed whatever the padding, at the scale", gap_ok);
-    check("taskbar padding: the launcher button is a gap in from the band's start and the tray a gap from its end, whatever the padding", ends_ok);
-    check("taskbar padding: a tab is its text's width and the padding either side, from 0 to 24 pixels, at every scale", pad_ok);
+    check("taskbar padding: the tasks of a side meet whatever the padding, at the scale", gap_ok);
+    check("taskbar padding: the moon and the tasks' pill beside it are the kit's gap twice apart, whatever the padding", ends_ok);
+    check("taskbar padding: a task is its text's width, the gap after its icon, the icon and the padding either side, from 0 to 24 pixels, at every scale", pad_ok);
     check("taskbar scale: a scale and a padding outside their ranges are the standard", standard_ok);
     check("taskbar scale: the rows' words are the numbers the compositor reads, any in range", rows_ok);
     check("taskbar scale: a whole band at 200 percent, the widest padding and every cell is drawn inside its memory", drawn);
@@ -3654,7 +3612,8 @@ static void check_taskbar_identity(void)
         for (int each = 0; each < 3; each++)
             for (int rtl = 0; rtl < 2; rtl++)
             {
-                int m = position >= TASKBAR_LEFT, scale = scales[each], thick = COMPOSITOR_PANEL * scale / 100, high = thick - 3 * scale / 100;
+                int m = position >= TASKBAR_LEFT, scale = scales[each], thick = COMPOSITOR_PANEL * scale / 100, high = thick - 2 * (2 * scale / 100 > 1 ? 2 * scale / 100 : 1);
+                int gap = UI_GAP2 * scale / 100;
                 int pad = TASKBAR_PADDING_STANDARD * scale / 100, side = 16 * scale / 100 > high - 4 * scale / 100 ? high - 4 * scale / 100 : 16 * scale / 100;
                 const struct ui_tree address_to t;
 
@@ -3678,14 +3637,14 @@ static void check_taskbar_identity(void)
                     placed &= icon->w == side && icon->h == side && (m ? icon->x - n->x : icon->y - n->y) == (high - side) / 2 &&
                               (m ? icon->y - n->y == pad : turned ? n->x + n->w - (icon->x + icon->w) == pad : icon->x - n->x == pad);
                     // The title has all the icon leaves, to the tab's other end, and the tab's whole height.
-                    placed &= m ? label->y == icon->y + icon->h && label->y + label->h == n->y + n->h && label->w == high
-                                : turned ? label->x == n->x && label->x + label->w == icon->x && label->h == high
-                                         : label->x == icon->x + icon->w && label->x + label->w == n->x + n->w && label->h == high;
+                    placed &= m ? label->y == icon->y + icon->h + gap && label->y + label->h == n->y + n->h - pad && label->w == high
+                                : turned ? label->x == n->x + pad && label->x + label->w == icon->x - gap && label->h == high
+                                         : label->x == icon->x + icon->w + gap && label->x + label->w == n->x + n->w - pad && label->h == high;
                     mirrored &= !turned || icon->x > label->x;
                 }
             }
     language_take(0);
-    check("taskbar identity: a tab's icon is the padding in from its leading end and in its middle across the band, 16 pixels at the scale, and its title has the rest, on every edge at 100 to 200 percent",
+    check("taskbar identity: a tab's icon is the padding in from its leading end and in its middle across the band, 16 pixels at the scale, and its title has the rest less the gap and the padding, on every edge at 100 to 200 percent",
           placed);
     check("taskbar identity: reading from the right the icon is at the right end of its tab and the title to its left", mirrored);
 
@@ -3838,6 +3797,7 @@ static void check_taskbar_text(string_address face_path)
     memory_zero(&standard_table, sizeof(standard_table));
     standard_table.themed = 1, standard_table.theme = 1, standard_table.accent = 0xffffffu;
     compositor.table = &standard_table;
+    taskbar.moon_at = 1794865620ll; // the moon and the clock in it at one time, so the bytes are the same at any hour
     for (int edge = 0; edge < 2; edge++)
     {
         p64 hash = 0xcbf29ce484222325ull;
@@ -3862,6 +3822,7 @@ static void check_taskbar_text(string_address face_path)
                  !taskbar_turn(TASKBAR_TOP);
     }
     compositor.table = kept_table;
+    taskbar.moon_at = 0;
     check("taskbar text: center turns a side band's tops toward the middle of the output, edge toward its edge, a bottom or top band none", turns);
 
     /* A band on each side with each word, after a bottom one: every tab is written in (the band with its titles is not
@@ -3945,6 +3906,7 @@ static void check_taskbar_text(string_address face_path)
     {
         int along[2][2] = {{0, 0}, {0, 0}}, lengths[3][2], laid = 1, written = 1, turned = 1;
 
+        taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
         for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position += position == TASKBAR_BOTTOM ? 2 : 1)
         {
             static const char *const words[4] = {"bottom", "top", "left", "right"};
@@ -3960,7 +3922,7 @@ static void check_taskbar_text(string_address face_path)
             memory_copy(lit, band_pixels, sizeof(band_pixels));
             laid &= taskbar_slot(&view, -2, &tray[0], &tray[1], &tray[2], &tray[3]);
             band_glass(null, rect[0], rect[1], rect[2], rect[3]);
-            taskbar_glass_tab(&view, rect[0], rect[1], rect[2], bx, by, bw, tray[0], tray[1], tray[2], tray[3], -2, 0);
+            taskbar_glass_tab(&view, rect[0], rect[1], rect[2], bx, by, bw, tray[0], tray[1], tray[2], tray[3]);
             for (int at = 0; at < 2; at++)
             {
                 int left = bw, right = -1, top = bh, bottom = -1;
@@ -3990,6 +3952,8 @@ static void check_taskbar_text(string_address face_path)
         check("taskbar text: a side band's tray is the bottom band's, the battery before the clock and each as long", laid);
         check("taskbar text: its clock and battery are written in", written);
         check("taskbar text: turned, taller than wide and as long and thick as the bottom band's are wide and high, to a pixel", turned);
+        taskbar.battery_item = 0;
+        taskbar_standard();
     }
     taskbar_text_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
@@ -4063,7 +4027,7 @@ static void check_compositor_look(void)
             memory_zero(&tv, sizeof(tv));
             tv.pixels = band;
             tv.glass = glass;
-            tab = taskbar_glass_tab(&tv, 0, 0, 64, 0, 0, 64, 4, 4, 40, 20, 0, lit ? COMPOSITOR_TAB_LIT : 0);
+            tab = taskbar_glass_tab(&tv, 0, 0, 64, 0, 0, 64, 4, 4, 40, 20);
             ink = window_contrast(tab);
             thin += look_luma(ink) - look_luma(tab) < 100 && look_luma(tab) - look_luma(ink) < 100;
         }
@@ -4236,4 +4200,404 @@ static void check_compositor_look(void)
                   setting_cursor_pixels((string_address) "2") == 48 && setting_cursor_pixels((string_address) "auto") == 19);
     }
 }
+
+
+#ifdef TASKBAR_PICTURES
+/*
+        Pictures of the band (built only with -DTASKBAR_PICTURES='"directory/"', never by a check): for each look the bottom band of a
+        1920 by 1080 output at 100 and 200 percent, light and dark, with 3 and 12 windows, and a strip of frames of the moon turning
+        and the highlight moving; and the moon as a wallpaper, 1080p and 4K, light and dark. Each is a PPM in device pixels: a wash for
+        the wallpaper, the band's plates over it as the compositor puts them (each a pill, its pixels the band's, its corners covered
+        by sixteen samples a pixel as compositor_corner_mask's are). The glass under the band is the wash, which is smooth, as a
+        wallpaper blurred is. Then the program ends.
+*/
+#define PICTURES_W 3840
+#define PICTURES_THICK 64
+#define PICTURES_FRAMES 5
+static unsigned int pictures_band[PICTURES_W * PICTURES_THICK], pictures_glass_pixels[(PICTURES_W + 64) * (PICTURES_THICK + 64)];
+static unsigned char pictures_out[PICTURES_W * 120 * 3 * PICTURES_FRAMES];
+static unsigned int pictures_wall[3840 * 2160];
+static int pictures_dark, pictures_height, pictures_width;
+
+static unsigned int pictures_wash(int x, int y)
+{
+    int r, g, b, along = x * 256 / (pictures_width ? pictures_width : 1), down = y * 256 / (pictures_height ? pictures_height : 1);
+
+    if (pictures_dark)
+        r = 18 + along / 6 + down / 16, g = 26 + along / 10, b = 52 + (256 - along) / 5;
+    else
+        r = 196 + along / 6, g = 206 + (256 - along) / 12, b = 228 - down / 16;
+    r = r > 255 ? 255 : r, g = g > 255 ? 255 : g, b = b > 255 ? 255 : b;
+    return (unsigned int)(r << 16 | g << 8 | b);
+}
+
+static int pictures_glass(void *context, int x, int y, int width, int height)
+{
+    (void)context;
+    for (int row = 0; row < height; row++)
+        for (int column = 0; column < width; column++)
+            pictures_glass_pixels[row * width + column] = pictures_wash(x + column, y + row);
+    return width;
+}
+
+// How much of a pixel a pill covers: sixteen samples.
+static int pictures_cover(int px, int py, int x, int y, int w, int h)
+{
+    int r = (w < h ? w : h) * 8, inside = 0;
+
+    for (int sy = 0; sy < 4; sy++)
+        for (int sx = 0; sx < 4; sx++)
+        {
+            int fx = (px - x) * 16 + sx * 4 + 2, fy = (py - y) * 16 + sy * 4 + 2, cx, cy;
+
+            if (fx < 0 || fy < 0 || fx >= w * 16 || fy >= h * 16)
+                continue;
+            cx = fx < r ? r : fx > w * 16 - r ? w * 16 - r : fx;
+            cy = fy < r ? r : fy > h * 16 - r ? h * 16 - r : fy;
+            inside += (fx - cx) * (fx - cx) + (fy - cy) * (fy - cy) <= r * r;
+        }
+    return inside;
+}
+
+static void pictures_write(const char *path, const unsigned char *rgb, int width, int height)
+{
+    char header[64];
+    positive length = 3;
+    bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+    if (handle < 0)
+        return;
+    string_copy((string_address)header, (string_address) "P6\n");
+    length += positive_into_string((string_address)header + length, (positive)width);
+    header[length++] = ' ';
+    length += positive_into_string((string_address)header + length, (positive)height);
+    string_copy((string_address)header + length, (string_address) "\n255\n");
+    length += 5;
+    system_write_all((b32)handle, header, length);
+    system_write_all((b32)handle, rgb, (positive)width * (positive)height * 3);
+    system_close(handle);
+}
+
+// The bottom of the screen with the band on it, appended to pictures_out at *at: rows of the screen's width.
+static int pictures_shot(const struct taskbar_view *view, positive *at)
+{
+    int bx, by, bw, bh, top, picture_h, plates[8][5], count = 0, which;
+
+    taskbar_band(view, &bx, &by, &bw, &bh);
+    while (count < 8 && taskbar_plate(view, count, &which, &plates[count][0], &plates[count][1], &plates[count][2], &plates[count][3]))
+        count++;
+    picture_h = bh + 16 * view->scale / 100;
+    top = view->height - picture_h;
+    for (int y = 0; y < picture_h; y++)
+        for (int x = 0; x < view->width; x++)
+        {
+            unsigned int pixel = pictures_wash(x, top + y);
+            int oy = top + y;
+
+            for (int p = 0; p < count; p++)
+            {
+                int sx = plates[p][0], sy = plates[p][1], sw = plates[p][2], sh = plates[p][3];
+
+                if (x < sx || x >= sx + sw || oy < sy || oy >= sy + sh)
+                    continue;
+                pixel = window_mix(pixel, pictures_band[(oy - by) * bw + (x - bx)], (unsigned int)(pictures_cover(x, oy, sx, sy, sw, sh) * 16));
+            }
+            pictures_out[(*at)++] = (unsigned char)(pixel >> 16), pictures_out[(*at)++] = (unsigned char)(pixel >> 8), pictures_out[(*at)++] = (unsigned char)pixel;
+        }
+    return picture_h;
+}
+
+// The band arranged one way: the moon's place, the tasks' place, whether the newest task is at their right, which items are before them.
+struct pictures_arrange
+{
+    int moon, tasks, right;
+    unsigned int before;
+    int editing, clock_tray;
+};
+
+static font_face *pictures_bold; // the bold face the moon's clock is in, when it loaded
+
+static void pictures_one(string_address directory, const char *name, const struct pictures_arrange *arrange, int scale, int dark, int count, int strip)
+{
+    static const char *const titles[12] = {"Terminal", "Settings", "Files \xe2\x80\x94 /home", "Editor: notes.txt", "Mixer", "Firefox",
+                                           "Notices", "Gallery", "Terminal 2", "build.log", "Chromium", "Mail"};
+    static const char *const apps[12] = {"terminal", "settings", "files", "editor", "mixer", "org.mozilla.firefox", "notices", "gallery",
+                                         "terminal", "editor", "chromium", "org.gnome.Geary"};
+    static unsigned char marks[WINDOWS], lengths[WINDOWS], rows[WINDOWS];
+    static struct windows table;
+    struct taskbar_view view;
+    char path[512];
+    int rect[4], high = 0;
+    positive at = 0;
+
+    memory_zero(&table, sizeof(table));
+    table.themed = 1, table.theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT, table.accent = dark ? UI_ACCENT_STANDARD : 0x2563ebu;
+    compositor.table = &table;
+    compositor.band_at = 0;
+    pictures_dark = dark;
+    taskbar.moon_zone = arrange->moon, taskbar.tasks_zone = arrange->tasks, taskbar.tasks_right = arrange->right;
+    taskbar.tray_before = arrange->before, taskbar.editing = arrange->editing, taskbar.clock_tray = arrange->clock_tray;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_launcher_set(1);
+    taskbar_volume_set(1, 60, 0, 0);
+    taskbar_notices_set(count > 3, WINDOWS_ISSUE_WARNING);
+    taskbar_mic_set(count > 3, 0);
+    taskbar.battery_item = 1, taskbar.battery_percent = 82, taskbar.battery_charging = 0;
+    memory_zero(&view, sizeof(view));
+    view.width = 1920 * scale / 100, view.height = 1080 * scale / 100, view.scale = scale, view.position = TASKBAR_BOTTOM;
+    pictures_height = view.height, pictures_width = view.width;
+    view.pixels = pictures_band, view.band_bytes = sizeof(pictures_band), view.glass = pictures_glass_pixels;
+    view.face = &band_face, view.bold = pictures_bold, view.engine = &band_engine, view.count = (unsigned int)count, view.marks = marks, view.lengths = lengths, view.rows = rows;
+    for (int k = 0; k < count; k++)
+    {
+        view.titles[k] = titles[k % 12], view.apps[k] = apps[k % 12];
+        lengths[k] = compositor_title_length(titles[k % 12], WINDOWS_TITLE), rows[k] = (unsigned char)k;
+        marks[k] = k == 1 ? COMPOSITOR_TAB_LIT : k == 2 ? COMPOSITOR_TAB_AWAY : 0;
+    }
+    // 21:47 on 16 November 2026, UTC: the moon's minute.
+    taskbar.moon_at = 1794865620ll;
+    ui_kit.test_clock = 1000000000ll;
+    memory_zero(pictures_band, sizeof(pictures_band));
+    taskbar_changed();
+    taskbar_draw(&view, ~0ul, pictures_glass, null, rect);
+    ui_kit.test_clock += 1000000000ll;
+    taskbar_draw(&view, ~0ul, pictures_glass, null, rect);
+    if (!strip)
+        high = pictures_shot(&view, &at);
+    else
+    {
+        // The keys go from the second tab to the first; each frame a quarter of the highlight's way on, and the moon 12 minutes on.
+        marks[1] = 0, marks[0] = COMPOSITOR_TAB_LIT;
+        for (int frame = 0; frame < PICTURES_FRAMES; frame++)
+        {
+            taskbar_draw(&view, ~0ul, pictures_glass, null, rect);
+            high += pictures_shot(&view, &at);
+            ui_kit.test_clock += (b64)ui_paced(TASKBAR_LIT_MS * UI_MS) / (PICTURES_FRAMES - 1);
+            taskbar.moon_at += 12 * 60;
+        }
+    }
+    string_copy(string_copy((string_address)path, directory) + string_length(directory), (string_address)name);
+    pictures_write(path, pictures_out, view.width, high);
+    ui_kit.test_clock = 0;
+    taskbar.moon_at = 0, taskbar.editing = 0, taskbar.tray_before = 0, taskbar.tasks_right = 0;
+    taskbar.moon_zone = TASKBAR_ZONE_CENTRE, taskbar.tasks_zone = TASKBAR_ZONE_SPLIT, taskbar.tray_before = 1u << 1 | 1u << 2, taskbar.clock_tray = 0;
+}
+
+// A star's place and brightness from its number: the same sky every time.
+static unsigned int pictures_hash(unsigned int n)
+{
+    n = (n ^ 61) ^ (n >> 16), n *= 9, n ^= n >> 4, n *= 0x27d4eb2d, n ^= n >> 15;
+    return n;
+}
+
+static void pictures_rgb(const unsigned int *pixels, unsigned char *rgb, long count)
+{
+    for (long at = 0; at < count; at++)
+        rgb[3 * at] = (unsigned char)(pixels[at] >> 16), rgb[3 * at + 1] = (unsigned char)(pixels[at] >> 8), rgb[3 * at + 2] = (unsigned char)pixels[at];
+}
+
+static unsigned char pictures_rgb_out[3840 * 2160 * 3];
+
+static void pictures_save(string_address directory, const char *name, const unsigned int *pixels, int width, int height)
+{
+    char path[512];
+
+    pictures_rgb(pixels, pictures_rgb_out, (long)width * height);
+    string_copy(string_copy((string_address)path, directory) + string_length(directory), (string_address)name);
+    pictures_write(path, pictures_rgb_out, width, height);
+}
+
+// A field of the picture's buffer for moons on their own: the dark of space round them.
+static struct ui pictures_field(int width, int height)
+{
+    struct ui ui;
+
+    for (long at = 0; at < (long)width * height; at++)
+        pictures_wall[at] = 0x050608u;
+    memory_zero(&ui, sizeof(ui));
+    ui.pixels = pictures_wall, ui.pitch = (unsigned long)width, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
+    return ui;
+}
+
+static const struct ui_moon_look pictures_space = {0xff050608u, 0xfff7f5efu, 0, 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_EARTHSHINE, 0};
+
+// The moon wallpaper (ui_moon_night) at a size: light or dark, at a strength of fumes.
+static void pictures_night(string_address directory, const char *name, int width, int height, int dark, decimal glow, decimal edges)
+{
+    struct ui ui;
+
+    memory_zero(&ui, sizeof(ui));
+    ui.pixels = pictures_wall, ui.pitch = (unsigned long)width, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
+    ui_moon_night(&ui, 0, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS : 0, 0x5b7fa6u, glow, edges);
+    pictures_save(directory, name, pictures_wall, width, height);
+}
+
+static font_face band_bold;
+
+// A line of the clock's readings, appended to text at *at: a name and the least contrast in hundredths.
+static void pictures_say(char *text, positive *at, const char *name, unsigned int read)
+{
+    string_copy((string_address)text + *at, (string_address)name);
+    *at += string_length((string_address)name);
+    text[(*at)++] = ' ';
+    *at += positive_into_string((string_address)text + *at, (positive)read);
+    text[(*at)++] = '\n';
+    text[*at] = 0;
+}
+
+static void band_pictures(string_address face_path)
+{
+    static p8 bytes[1 << 19], bold_bytes[1 << 19];
+    static const struct pictures_arrange standard = {TASKBAR_ZONE_CENTRE, TASKBAR_ZONE_SPLIT, 0, 1u << 1 | 1u << 2, 0, 0};
+    static char readings[4096];
+    positive said = 0;
+    bipolar got = face_path ? file_slurp_regular_at(AT_FDCWD, face_path, bytes, sizeof(bytes), 0) : -1;
+    bipolar bold = program_argument_count() > 4 ? file_slurp_regular_at(AT_FDCWD, program_argument(4), bold_bytes, sizeof(bold_bytes), 0) : -1;
+    char into[512], path[600];
+
+    if (got <= 0 || font_load(&band_face, bytes, (positive)got, 0) != 0)
+        return;
+    pictures_bold = bold > 0 && font_load(&band_bold, bold_bytes, (positive)bold, 0) == 0 ? &band_bold : null;
+    font_start(&band_engine, band_atlas, 128, 128);
+    memory_zero(&compositor, sizeof(compositor));
+    string_copy(string_copy((string_address)into, (string_address)TASKBAR_PICTURES) + string_length((string_address)TASKBAR_PICTURES), (string_address) "round9/");
+    system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)into, 0755);
+    // The bar, light and dark, at 100 and 200 percent, with 8 tasks, its moon as it is and in ink; the clock's reading of each.
+    for (int ink = 0; ink < 2; ink++)
+        for (int dark = 0; dark < 2; dark++)
+            for (int scale = 100; scale <= 200; scale += 100)
+            {
+                char name[64];
+                positive length;
+
+                string_copy((string_address)name, (string_address)(dark ? "bar-dark-" : "bar-light-"));
+                length = string_length((string_address)name);
+                length += positive_into_string((string_address)name + length, (positive)scale);
+                string_copy((string_address)name + length, (string_address)(ink ? "-ink-moon.ppm" : "-realistic-moon.ppm"));
+                taskbar.moon_ink = ink;
+                pictures_one((string_address)into, name, &standard, scale, dark, 8, 0);
+                pictures_say(readings, &said, name, (unsigned int)taskbar.clock_read);
+            }
+    taskbar.moon_ink = 0;
+    // The clock on the moon close up, eight times larger (a pixel a block of eight): at 32 and 64 pixels, on a light glass and a dark
+    // one, the moon as it is and in ink, the digits at the standard bulge.
+    {
+        static const unsigned int grounds[2] = {0xdcdedcu, 0x1d1a2eu};
+        static const int sizes[2] = {32, 64};
+        int width = 4 * 80, height = 2 * 80;
+        struct ui ui;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = pictures_wall, ui.pitch = (unsigned long)width, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
+        for (int z = 0; z < 2; z++)
+            for (int k = 0; k < 4; k++)
+                for (int y = 0; y < 80; y++)
+                    for (int x = 0; x < 80; x++)
+                        pictures_wall[(long)(z * 80 + y) * width + k * 80 + x] = grounds[k & 1];
+        for (int z = 0; z < 2; z++)
+            for (int k = 0; k < 4; k++)
+            {
+                int size = sizes[z], left = k * 80 + (80 - size) / 2, top = z * 80 + (80 - size) / 2, dark = k & 1, ink = k >> 1;
+                unsigned int paper, outline, read;
+                char name[64];
+                positive length;
+
+                if (ink)
+                {
+                    ui_moon_paper_tones(dark ? UI_MOON_PAPER_DARK : 0, &paper, &outline);
+                    for (int y = 0; y < size; y++)
+                        for (int x = 0; x < size; x++)
+                            pictures_wall[(long)(top + y) * width + left + x] = outline;
+                    ui_moon_paper(&ui, left, top, size, UI_ONE * 7 / 60, dark ? UI_MOON_PAPER_DARK : 0, 0);
+                }
+                else
+                {
+                    static const struct ui_moon_look bar = {0xff0c0d10u, 0xfff7f5efu, 0, 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0};
+
+                    ui_moon(&ui, left, top, size, UI_ONE / 2, UI_ONE * 7 / 60, &bar);
+                }
+                // The round frame the compositor cuts the disc out with: what is outside the circle is the ground again.
+                for (int y = 0; y < size; y++)
+                    for (int x = 0; x < size; x++)
+                    {
+                        decimal dx = x + 0.5 - size / 2.0, dy = y + 0.5 - size / 2.0, d = square_root(dx * dx + dy * dy), cover = size / 2.0 + 0.5 - d;
+                        unsigned int address_to at = pictures_wall + (long)(top + y) * width + left + x;
+
+                        if (cover < 1)
+                            *at = window_mix(grounds[dark], *at, (unsigned int)((cover < 0 ? 0 : cover) * 256));
+                    }
+                ui_moon_rim(&ui, left, top, size, 0x5b7fa6u, 0.9);
+                read = ui_moon_label(&ui, &band_engine, pictures_bold ? pictures_bold : &band_face, left, top, size, "17", "24", 0.6, 0x5b7fa6u);
+                string_copy((string_address)name, (string_address)(ink ? "clock-ink-" : "clock-realistic-"));
+                length = string_length((string_address)name);
+                string_copy((string_address)name + length, (string_address)(dark ? "dark-" : "light-"));
+                length = string_length((string_address)name);
+                length += positive_into_string((string_address)name + length, (positive)size);
+                name[length] = 0;
+                pictures_say(readings, &said, name, read);
+            }
+        pictures_save((string_address)into, "clock-closeups.ppm", pictures_wall, width, height);
+        {
+            static unsigned int big[4 * 80 * 8 * 2 * 80 * 8];
+            int bw = width * 8, bh = height * 8;
+
+            for (int y = 0; y < bh; y++)
+                for (int x = 0; x < bw; x++)
+                    big[(long)y * bw + x] = pictures_wall[(long)(y / 8) * width + x / 8];
+            pictures_save((string_address)into, "clock-closeups-8x.ppm", big, bw, bh);
+        }
+    }
+    // The wallpaper in ink: light and dark, 1080p and 4K, with no fumes, subtle ones and stronger ones; and an ultrawide.
+    // Light, dark (the ink light on the dark) and dark dimmed (the real arrangement, dim), at 1080p and 4K, with the glow; an ultrawide.
+    for (int mode = 0; mode < 3; mode++)
+        for (int big = 0; big < 2; big++)
+        {
+            char name[96];
+            static const char *const modes[3] = {"wallpaper-light-", "wallpaper-dark-inverted-", "wallpaper-dark-"};
+            if (mode == 1)
+                continue;
+            struct ui ui;
+            int width = big ? 3840 : 1920, height = big ? 2160 : 1080;
+
+            string_copy((string_address)name, (string_address)modes[mode]);
+            string_copy((string_address)name + string_length((string_address)name), (string_address)(big ? "4k-glow.ppm" : "1080p-glow.ppm"));
+            memory_zero(&ui, sizeof(ui));
+            ui.pixels = pictures_wall, ui.pitch = (unsigned long)width, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
+            ui_moon_night(&ui, 0, mode == 0 ? 0 : UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | (mode == 2 ? UI_MOON_PAPER_DIM : 0), 0x5b7fa6u, 1, 0);
+            pictures_save((string_address)into, name, pictures_wall, width, height);
+        }
+    // The dimmed moon's maria at three shares of the highlands' tone, side by side to choose from.
+    {
+        static const decimal seas[3] = {0.35, 0.45, 0.55};
+        static const char *const names[3] = {"wallpaper-dark-maria-35-percent-1080p.ppm", "wallpaper-dark-maria-45-percent-1080p.ppm",
+                                             "wallpaper-dark-maria-55-percent-1080p.ppm"};
+
+        for (int k = 0; k < 3; k++)
+        {
+            struct ui ui;
+
+            ui_moon_dim_seas = seas[k];
+            memory_zero(&ui, sizeof(ui));
+            ui.pixels = pictures_wall, ui.pitch = 1920, ui.width = 1920, ui.height = 1080, ui.top = 0, ui.bottom = 1080, ui.scale = 100;
+            ui_moon_night(&ui, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
+            pictures_save((string_address)into, names[k], pictures_wall, 1920, 1080);
+        }
+        ui_moon_dim_seas = 0.45;
+    }
+    {
+        bipolar handle;
+
+        string_copy(string_copy((string_address)path, (string_address)into) + string_length((string_address)into), (string_address) "clock-contrast.txt");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle >= 0)
+        {
+            system_write_all((b32)handle, readings, said);
+            system_close(handle);
+        }
+    }
+}
+#endif
+
+
+
 

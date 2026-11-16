@@ -1485,23 +1485,24 @@ refused:
 #endif
 
 /*
-        The tabs of a panel as frames of their own, each its tab's rectangle
-        and nothing of the band between them: shapes the scene draws when
-        there is no font, and otherwise each the part of the band's pixels
-        its tab is. Round on the side towards the middle of the output and
-        square on the side that is off its edge (taskbar_square). Answers how many.
+        The plates of a panel as frames of their own, each a plate's rectangle and nothing of the band round them, every corner
+        round at half its height, so each is a pill floating in the band: the launcher's button, the tabs' plate (TASKBAR_TABS) and
+        the tray, each the part of the band's pixels it is. With no font they are shapes the scene draws in one ink each, and then
+        each tab is a pill of its own, so the tab with the keys keeps its ink (taskbar_tab_ink). Answers how many.
 */
 static unsigned int compositor_panel_tabs(const struct compositor_frame *band, struct compositor_frame *tabs)
 {
         struct taskbar_view view = compositor_taskbar_view();
-        unsigned int count = 0;
+        unsigned int count = 0, own = band->builtin ? band->mark_count : 0;
 
-        for (int slot = 0; slot <= (int)band->mark_count + 1; slot++)
+        for (int slot = 0; slot <= (int)own + (band->builtin ? 2 : 6); slot++)
         {
-                int which = slot < (int)band->mark_count ? slot : slot == (int)band->mark_count ? -2 : TASKBAR_LAUNCHER;
+                int which = slot < (int)own ? slot : slot == (int)own ? TASKBAR_LAUNCHER : slot == (int)own + 1 ? TASKBAR_TABS : -2;
                 int x, y, width, height;
 
-                if (!taskbar_slot(&view, which, &x, &y, &width, &height))
+                // With a font each plate is a frame (taskbar_plate: the band's plates in order); with none each slot is.
+                if (band->builtin ? which == TASKBAR_TABS || !taskbar_slot(&view, which, &x, &y, &width, &height)
+                                  : !taskbar_plate(&view, slot, &which, &x, &y, &width, &height))
                         continue;
                 tabs[count] = *band;
                 tabs[count].x = x;
@@ -1510,9 +1511,9 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 tabs[count].height = height;
                 tabs[count].slot = which;
                 tabs[count].launcher_lit = band->launcher_lit;
-                tabs[count].radius = UI_RADIUS * band->scale / 100;
+                tabs[count].radius = (width < height ? width : height) / 2;
                 tabs[count].line = 0;
-                tabs[count].square = taskbar_square(band->position);
+                tabs[count].square = 0;
                 if (!band->builtin)
                         tabs[count].pixels = band->pixels + (unsigned long)(y - band->y) * band->pitch + (unsigned long)(x - band->x);
                 count++;

@@ -1810,6 +1810,9 @@ static void check_compositor_edges(void)
     long value = -1;
     int band_rect[4] = {0, 0, 256, 256}, second_rect[4] = {256, 0, 1920, 1080};
 
+    // The moon and the tasks at the band's end, so the bottom edge's middle, where these swipes start, is no pill's.
+    taskbar.moon_zone = TASKBAR_ZONE_END, taskbar.tasks_zone = TASKBAR_ZONE_END;
+    taskbar_changed();
     /* The Settings rows' words are the choices the compositor reads: off, windows, and the launcher (left) or the volume popup (right). */
     check("edge settings: the Left edge and Right edge words are the choices the compositor reads",
           compositor_setting_kept(SETTING_TOUCH_LEFT_PATH, "windows", &value) && value == COMPOSITOR_SIDE_WINDOWS &&
@@ -2144,6 +2147,7 @@ static void check_compositor_edges(void)
     edge_at(60, 100, 1, 10000);
     compositor.side_left = COMPOSITOR_SIDE_OFF;
     compositor.side_right = COMPOSITOR_SIDE_OFF;
+    taskbar_standard();
 }
 
 static void check_compositor_touch(void)
@@ -2172,6 +2176,9 @@ static void check_compositor_touch(void)
         return;
     }
     table = compositor.table;
+    // The moon and the tasks at the band's start, so a finger in the lower right, within a finger's reach of the band, is the window's.
+    taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_START;
+    taskbar_changed();
     table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
     glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
     table->x[2] = 150, table->y[2] = 120, table->width[2] = 90, table->height[2] = 100;
@@ -2621,6 +2628,7 @@ static void check_compositor_touch(void)
     system_close(wheel_pipe[0]);
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;
+    taskbar_standard();
 }
 #endif // COMPOSITOR_LINE
 

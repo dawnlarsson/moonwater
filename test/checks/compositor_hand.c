@@ -1688,6 +1688,7 @@ static void check_compositor_tray(void)
     int tx, ty, tw, th;
 
     memory_zero(&compositor, sizeof(compositor));
+    taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1698,6 +1699,7 @@ static void check_compositor_tray(void)
     if (!glass_table_map())
     {
         check("tray: the table is mapped", false);
+        taskbar_standard();
         return;
     }
     table = compositor.table;
@@ -1719,6 +1721,7 @@ static void check_compositor_tray(void)
     if (!taskbar_slot(&view, -2, &tx, &ty, &tw, &th))
     {
         check("tray: the band has a tray", false);
+        taskbar_standard();
         return;
     }
     compositor.pointer_x = tx + tw / 2;
@@ -1758,6 +1761,7 @@ static void check_compositor_tray(void)
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     check("tray: a third press right after the pair starts a new one", compositor.settings_asked == 1);
+        taskbar_standard();
 }
 
 /*
@@ -2908,6 +2912,7 @@ static void check_notices_dot(void)
         int x, y, w, h, tx, ty, tw, th, mx, my, mw, mh;
 
         memory_zero(&compositor, sizeof(compositor));
+        taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = 2560, compositor.height = 1440;
@@ -2919,6 +2924,7 @@ static void check_notices_dot(void)
         if (!glass_table_map())
         {
                 check("notices: the table is made", false);
+                taskbar_standard();
                 return;
         }
         table = compositor.table;
@@ -3120,6 +3126,7 @@ static void check_notices_dot(void)
         view = compositor_taskbar_view();
         check("notices: Dismiss all takes the kernel notices off the board, and the look after it takes the dot away",
               compositor_notices_look() == 1 && !taskbar.notices_item && !taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h));
+        taskbar_standard();
 }
 #endif
 
@@ -3140,6 +3147,7 @@ static void check_compositor_volume(void)
         compositor_volume_unmap();
         memory_zero(&compositor_volume, sizeof(compositor_volume));
         memory_zero(&compositor, sizeof(compositor));
+        taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -3153,6 +3161,7 @@ static void check_compositor_volume(void)
         if (!glass_table_map())
         {
                 check("volume: the table is made", false);
+                taskbar_standard();
                 return;
         }
         compositor.width = 2560, compositor.height = 1440;
@@ -3233,7 +3242,7 @@ static void check_compositor_volume(void)
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
                         band_glass(null, rect[0], rect[1], rect[2], rect[3]);
-                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th, -2, 0);
+                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th);
                         for (int y = vy - dy; y < vy - dy + vh; y++)
                                 for (int x = vx - dx; x < vx - dx + vw; x++)
                                         count += look_luma(cell_lit[y * dw + x]) != look_luma(band_pixels[y * dw + x]);
@@ -3258,7 +3267,7 @@ static void check_compositor_volume(void)
                 compositor_volume_open(cx + cw / 2, cy + ch / 2);
                 check("volume: a press on the cell leaves its rectangle (along the cell, across the band), the edge and the screen for the popup",
                       table->button_x == ax && table->button_y == ay && (int)table->button_w == aw && (int)table->button_h == ah && table->button_edge == TASKBAR_BOTTOM &&
-                          table->button_screen == 0 && aw == cw && ah == 24);
+                          table->button_screen == 0 && aw == cw && ah == COMPOSITOR_PANEL);
                 table->button_w = 0;
                 compositor.showing[5] = 1;
                 string_copy_bounded((string_address)table->name[5], (string_address) "mixer-quick", WINDOWS_NAME);
@@ -3446,7 +3455,7 @@ static void check_compositor_volume(void)
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_MIC, &mx, &my, &mw, &mh);
                         band_glass(null, rect[0], rect[1], rect[2], rect[3]);
-                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th, -2, 0);
+                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th);
                         for (int y2 = my - dy; y2 < my - dy + mh; y2++)
                                 for (int x2 = mx - dx; x2 < mx - dx + mw; x2++)
                                         count += look_luma(mic_lit[y2 * dw + x2]) != look_luma(band_pixels[y2 * dw + x2]);
@@ -3464,7 +3473,7 @@ static void check_compositor_volume(void)
                 compositor_mic_open(mx + mw / 2, my + mh / 2);
                 check("mic: a press on the cell leaves its rectangle, the edge and the screen for the popup",
                       table->button_x == ax && table->button_y == ay && (int)table->button_w == aw && (int)table->button_h == ah && table->button_edge == TASKBAR_BOTTOM &&
-                          table->button_screen == 0 && aw == mw && ah == 24 && ax == mx);
+                          table->button_screen == 0 && aw == mw && ah == COMPOSITOR_PANEL && ax == mx);
                 table->button_w = 0;
                 compositor.showing[5] = 1;
                 string_copy_bounded((string_address)table->name[5], (string_address) "mixer-quick", WINDOWS_NAME);
@@ -3545,6 +3554,7 @@ static void check_compositor_volume(void)
         compositor_volume_path[3] = CTL_SOCKET;
         memory_zero(&compositor_ctl, sizeof(compositor_ctl));
         taskbar_volume_set(0, 0, 0, 0);
+        taskbar_standard();
 }
 
 /*
@@ -3552,7 +3562,7 @@ static void check_compositor_volume(void)
         window's close and minimise buttons, all in one scene, which is pinned by a hash of the whole output so that a
         changed default pixel is seen. The tabs' inks the band takes for a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x713c0c91u
+#define CHROME_SCENE_HASH 0x26d95c49u
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];

@@ -939,10 +939,10 @@ static fn check_launcher_anchor(void)
 
                                 switch (edges[at])
                                 {
-                                case TASKBAR_BOTTOM: button[0] = screen[0] + gap, button[1] = bottom - thick, button[2] = launcher_tab_length(scale), button[3] = thick; break;
-                                case TASKBAR_TOP: button[0] = screen[0] + gap, button[1] = screen[1], button[2] = launcher_tab_length(scale), button[3] = thick; break;
-                                case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = launcher_tab_length(scale); break;
-                                default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = launcher_tab_length(scale); break;
+                                case TASKBAR_BOTTOM: button[0] = screen[0] + gap, button[1] = bottom - thick, button[2] = thick, button[3] = thick; break;
+                                case TASKBAR_TOP: button[0] = screen[0] + gap, button[1] = screen[1], button[2] = thick, button[3] = thick; break;
+                                case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = thick; break;
+                                default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = thick; break;
                                 }
                                 ui_anchor_place(ui_panel_side(edges[at]), 0, button, screen, width, height, &x, &y);
                                 beside &= edges[at] == TASKBAR_BOTTOM ? y + height == button[1] && x == button[0]
@@ -1825,7 +1825,7 @@ static fn check_settings(string_address regular, string_address bold)
 "  taskbar display [primary|all]     the screens the taskbar is on: the primary, or all, each listing its windows [primary]\n"
 "  taskbar fullscreen [on|off]       the taskbar slides away while a window is fullscreen, and comes back when none is [on]\n"
 "  taskbar launcher [on|off]         a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again, as the logo key alone does [on]\n"
-"  taskbar padding [PX|default]      the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]\n"
+"  taskbar padding [PX|default]      the room inside each taskbar button before what it shows and after it (the icon and title of a task, the moon, a tray item), 0 to 24 pixels at the taskbar scale [12]\n"
 "  taskbar position [bottom|top|left|right]\n"
 "                                    the edge of the screen the taskbar sits on [bottom]\n"
 "  taskbar scale [PERCENT|default]   how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]\n"

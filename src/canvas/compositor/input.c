@@ -664,8 +664,8 @@ static int compositor_logo_tap(unsigned char *alone, unsigned int bit, int value
         return 0;
 }
 
-// A tap of the logo key: with the launcher up it is put away, as a press on its tab would put it; with none, and a band that has the
-// tab, the script is asked for one beside the tab of the first band that has it. With no tab (`taskbar launcher off`) it does nothing.
+// A tap of the logo key: with the launcher up it is put away, as a press on the moon would put it; with none, and the launcher on (`taskbar
+// launcher on`), the script is asked for one beside the moon of the first band. Off, the moon is the clock's alone and the key does nothing.
 static void compositor_logo_act(void)
 {
         int up = compositor_launcher_row();
@@ -681,7 +681,7 @@ static void compositor_logo_act(void)
                 struct taskbar_view view = compositor_band_view();
                 int x, y, w, h;
 
-                if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
+                if (!taskbar_launcher_on() || !taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
                         continue;
                 compositor.band_at = 0;
                 compositor_launcher_open(x + w / 2, y + h / 2);
@@ -1703,7 +1703,7 @@ static void compositor_button(unsigned int code, int down)
                                 compositor_close(up);
                                 compositor_tabs_changed();
                         }
-                        else
+                        else if (taskbar_launcher_on())
                                 compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
                         break;
                 case TASKBAR_ACT_VOLUME_OPEN: compositor_volume_open(compositor.pointer_x, compositor.pointer_y); break;

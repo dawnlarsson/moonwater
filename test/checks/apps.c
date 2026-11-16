@@ -8959,6 +8959,10 @@ b32 main()
                 return test_report(null);
         }
 
+#ifdef TASKBAR_PICTURES
+        band_pictures(program_argument_count() > 3 ? program_argument(3) : null);
+        return 0;
+#endif
         paths[0] = program_argument(1);
         // The kit's UI faces are the repository's Inter files (the arguments after the mono faces), as ui_app_run's are on a machine.
         if (program_argument_count() > 4)
@@ -9391,6 +9395,7 @@ b32 main()
         check_taskbar_tray();
         check_taskbar_launcher();
         check_taskbar_centre();
+        check_taskbar_highlight();
         check_taskbar_tree();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY

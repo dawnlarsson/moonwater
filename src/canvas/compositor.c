@@ -968,6 +968,8 @@ static struct
         positive blurred, recomposed; // pixels blurred again and composed again, all frames
         int damage_by; // what is being damaged: 0 the scene, a row and one its own picture, COMPOSITOR_OVER what lies over all
         font_face face;
+        font_face bold; // the face's bold, the taskbar clock's (compositor_font), when it loaded
+        int bold_ok;
         font_engine *engine;
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
@@ -1982,6 +1984,28 @@ static void compositor_font(string_address path)
                 return;
         }
 
+        // Its bold, the moon's clock's: the same file's name with Bold for Regular (Inter-Regular.ttf, Inter-Bold.ttf); without one the clock is in
+        // the face.
+        {
+                char bold_path[512];
+                positive at = 0, bold_size = 0, bold_bytes;
+
+                while (path[at] && at < sizeof(bold_path) - 8)
+                        at++;
+                if (path[at] == 0)
+                {
+                        string_copy((string_address)bold_path, path);
+                        for (positive k = 0; k + 7 <= at; k++)
+                                if (!memory_compare(bold_path + k, "Regular", 7))
+                                {
+                                        string_copy((string_address)bold_path + k + 4, (string_address)path + k + 7);
+                                        memory_copy(bold_path + k, "Bold", 4);
+                                        bold_bytes = compositor_map_file((string_address)bold_path, address_of bold_size);
+                                        compositor.bold_ok = bold_bytes && font_load(&compositor.bold, (const p8 address_to)bold_bytes, bold_size, 0) == 0;
+                                        break;
+                                }
+                }
+        }
         compositor.engine = (font_engine address_to)engine;
         font_start(compositor.engine, atlas, 128, 128);
         compositor_fallbacks(compositor.engine);

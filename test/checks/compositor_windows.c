@@ -146,6 +146,15 @@ static int life_drawn(void)
                 }
                 if (top < 0 || beside)
                         continue;
+                // A middle under the taskbar's band is the band's pills there (the moon and the tasks float in its middle), not the window's.
+                {
+                        struct taskbar_view view = compositor_taskbar_view();
+                        int bx, by, bw, bh;
+
+                        taskbar_band(&view, &bx, &by, &bw, &bh);
+                        if (x >= bx && x < bx + bw && y >= by && y < by + bh)
+                                continue;
+                }
                 if ((compositor.scanout[y * pitch + x] & 0xffffffu) != life_colour(top))
                         return 0;
         }
@@ -2738,6 +2747,9 @@ static void check_compositor_tile_line(void)
     const unsigned int picture = 0xc06020u, ground = compositor_ground;
     unsigned int line_at, corner_at, inside_at, beyond_at;
 
+    // The moon and the tasks at the band's start, so the tiles' corners at the bottom of the screen, and the middle, are no pill's.
+    taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_START;
+    taskbar_changed();
     assist_fresh();
     compositor.showing[2] = compositor.showing[3] = 0; /* the others would cover the tile's corner */
     compositor_arrange(1, COMPOSITOR_LEFT);
@@ -2759,6 +2771,7 @@ static void check_compositor_tile_line(void)
               (layout_pixels[255 * 256 + 128] & 0xffffffu) == (compositor_line_unlit() & 0xffffffu) &&
               (layout_pixels[255 * 256 + 127] & 0xffffffu) == picture && (layout_pixels[0 * 256 + 127] & 0xffffffu) == picture);
     compositor_float(1);
+    taskbar_standard();
 }
 
 /*
@@ -3464,9 +3477,13 @@ static void check_compositor_tile_square(void)
     unsigned int shapes = ~0u, previews = ~0u, drawn = ~0u;
     int room[4] = {0, 0, 256, 200};
 
+    // The moon and the tasks at the band's start, so the tiles' corners at the bottom of the screen, and the middle, are no pill's.
+    taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_START;
+    taskbar_changed();
     if (!layout_table_map(256))
     {
         check("tile square: the table is mapped", false);
+        taskbar_standard();
         return;
     }
 
@@ -3623,6 +3640,7 @@ static void check_compositor_tile_square(void)
         if (!layout_table_map(512))
         {
             check("tile square: the table is mapped for two screens", false);
+            taskbar_standard();
             return;
         }
         layout_setup(512, 1);
@@ -3674,6 +3692,7 @@ static void check_compositor_tile_square(void)
         lands = frame.source_w > 0 && frame.width < (int)compositor.w[1] && frame.radius == 0 && frame.line == 1;
         check("tile square: a tile gliding into its place and one landing there are square from the first frame", glides && lands);
     }
+    taskbar_standard();
 }
 
 /*
@@ -3816,10 +3835,15 @@ static void check_compositor_preview_over(void)
     unsigned int address_to first_map;
     struct taskbar_view view;
 
+    // The pills at the band's end, the tray (a battery) among them in the target at the right.
+    taskbar.moon_zone = TASKBAR_ZONE_END, taskbar.tasks_zone = TASKBAR_ZONE_END, taskbar.battery_item = 1, taskbar.battery_percent = 50;
+    taskbar_changed();
     over_setup(made, band);
     if (!compositor.table)
     {
         check("preview over: the table is mapped", false);
+        taskbar.battery_item = 0;
+    taskbar_standard();
         return;
     }
     first_map = (unsigned int address_to)compositor.table;
@@ -3847,6 +3871,8 @@ static void check_compositor_preview_over(void)
     if (found != 5)
     {
         corner_scene_end(first_map);
+        taskbar.battery_item = 0;
+    taskbar_standard();
         return;
     }
 
@@ -3911,6 +3937,8 @@ static void check_compositor_preview_over(void)
         if (!mapped)
         {
             check("preview over: the table is mapped for two screens", false);
+            taskbar.battery_item = 0;
+    taskbar_standard();
             return;
         }
         compositor.stack[0] = 2, compositor.stack[1] = 1, compositor.stacked = 2;
@@ -3925,6 +3953,8 @@ static void check_compositor_preview_over(void)
               "that screen's line (2 px) and a window's corners there (16 px)",
               seen && line == 2 && radius == 2 * UI_RADIUS);
     }
+    taskbar.battery_item = 0;
+    taskbar_standard();
 }
 
 /*
