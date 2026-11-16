@@ -1336,9 +1336,7 @@ static void compositor_wl_settle(int row)
         if (!compositor_lent(row))
                 return;
         // A dma-buf the processor read in place COMPOSITOR_WL_WC_PRESENTS presents running: copied once, and the row's copies made from here on.
-        // A picture with red and blue swapped is seeded after the first: the processor cannot read it as it is.
-        if (row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].fd >= 0 &&
-            compositor_wl.wc_reads[row] >= (compositor_lent_swap(row) ? 1 : COMPOSITOR_WL_WC_PRESENTS))
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].fd >= 0 && compositor_wl.wc_reads[row] >= COMPOSITOR_WL_WC_PRESENTS)
         {
                 compositor_wl.wc_reads[row] = 0;
                 compositor_wl.wc_copy[row] = 1;

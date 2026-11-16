@@ -14,7 +14,11 @@
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 #define GPU_IMPORTS 64
-static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[GPU_IMPORTS], imports; positive imported_va[GPU_IMPORTS], imported_bytes[GPU_IMPORTS]; unsigned char imported_dead[GPU_IMPORTS], imported_holds[GPU_IMPORTS]; unsigned int address_to at; positive size, pending; } gpu;
+// The ticks an import let go of stays mapped before it is unmapped (gpu_trim): a client's buffers come round again (Chromium's three or four are lent in turn,
+// each let go of as the next is lent), and a job built or still running in the tick an import was let go of may name it. Taken again within them it is
+// the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped.
+#define GPU_IMPORT_GRACE 8
+static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[GPU_IMPORTS], imports; positive imported_va[GPU_IMPORTS], imported_bytes[GPU_IMPORTS]; unsigned char imported_dead[GPU_IMPORTS], imported_holds[GPU_IMPORTS]; positive imported_dead_at[GPU_IMPORTS]; unsigned int address_to at; positive size, pending; } gpu;
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 // The memory the dma-buf route may reach: the window table's memfd (fd), mapped at at (its byte 0), the picture part of it (bytes), and pin(offset, on) when a
 // map of its pages is made or let go, so that the program that owns them does not give them back while the card may read them.
@@ -1236,7 +1240,7 @@ static void gpu_trim(void)
                         gpu_drop(i--, forgotten ? GPU_GONE_FORGET : GPU_GONE_TRIM);
         }
         for (unsigned int i = 0; idle && i < gpu.imports; i++)
-                if (gpu.imported_dead[i])
+                if (gpu.imported_dead[i] && gpu_tick - gpu.imported_dead_at[i] >= GPU_IMPORT_GRACE)
                         gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i = ~0u; // the list has moved: looked at again from the start
 }
 
@@ -1294,7 +1298,7 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
 
         if (gpu.imports == GPU_IMPORTS && gpu_idle())
                 for (unsigned int i = 0; i < gpu.imports; i++)
-                        if (gpu.imported_dead[i])
+                        if (gpu.imported_dead[i] && gpu_tick - gpu.imported_dead_at[i] >= GPU_IMPORT_GRACE)
                                 gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i = ~0u;
         at = gpu.imports == GPU_IMPORTS ? 0 : gpu_place(whole);
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
@@ -1376,7 +1380,7 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         }
                         if (gpu.pending && !gpu_idle())
                         {
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0;
+                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick;
                                 return;
                         }
                         gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1, 0);
@@ -1384,6 +1388,7 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         gpu_close(gpu.imported[i]);
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
                         gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1];
+                        gpu.imported_dead_at[i] = gpu.imported_dead_at[gpu.imports - 1];
                         gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imports--;
                         return;
                 }
@@ -1398,7 +1403,7 @@ static void gpu_release_import(positive at)
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                                 gpu.imported_holds[i]--;
                         else
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0;
+                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick;
                         return;
                 }
 }
