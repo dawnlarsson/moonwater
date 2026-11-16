@@ -1958,6 +1958,66 @@ static void check_compositor_hover(void)
         check("input: a key's release that a full ring dropped is posted before the row's next event, with its flags, and once",
               dropped && landed && after && table->event_head[1] == table->event_tail[1]);
     }
+
+    /* A device's queue the kernel dropped (SYN_DROPPED) may have held the releases: what the compositor holds down that no device has
+       down is let go (a pipe stands for the device, and its state, which no pipe has, is nothing down). The window was left with Shift
+       and a key held, and the press of the button holding every motion and turn of the wheel to it. */
+    {
+        int device[2] = {-1, -1};
+        b32 held, released, key_up = false, shift_up = false, button_up = false;
+
+        if (system_call_2(syscall(pipe2), (positive)device, O_NONBLOCK))
+        {
+            check("input: the device is made", false);
+            return;
+        }
+        compositor.inputs[0] = device[0];
+        compositor.input_count = 1;
+        compositor.pointer_x = 60, compositor.pointer_y = 90;
+        compositor_focus(1);
+        table->event_tail[1] = table->event_head[1];
+        {
+            struct compositor_input_event down[5] = {{0, 0, COMPOSITOR_EV_KEY, (unsigned short)COMPOSITOR_BTN_LEFT, 1},
+                                                     {0, 0, COMPOSITOR_EV_SYN, 0, 0},
+                                                     {0, 0, COMPOSITOR_EV_KEY, 42, 1},
+                                                     {0, 0, COMPOSITOR_EV_KEY, 30, 1},
+                                                     {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+
+            system_write_once(device[1], down, sizeof down);
+        }
+        compositor_input_read(0);
+        held = (compositor.button_down & 1) && compositor.grab == 1 && (compositor_modifiers() & WINDOW_KEY_SHIFT) &&
+               (compositor.keys_down[30 >> 3] >> (30 & 7) & 1);
+        table->event_tail[1] = table->event_head[1];
+        {
+            struct compositor_input_event dropped[2] = {{0, 0, COMPOSITOR_EV_SYN, (unsigned short)COMPOSITOR_SYN_DROPPED, 0},
+                                                        {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+
+            system_write_once(device[1], dropped, sizeof dropped);
+        }
+        compositor_input_read(0);
+        for (unsigned int at = table->event_tail[1]; at != table->event_head[1]; at++)
+        {
+            unsigned int cell = at % WINDOWS_EVENTS, flags = table->event_flags[1][cell];
+
+            if (table->event_type[1][cell] == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN))
+            {
+                key_up |= table->event_a[1][cell] == 30 && !(flags & WINDOW_KEY_SHIFT);
+                shift_up |= table->event_a[1][cell] == 42;
+            }
+            button_up |= table->event_type[1][cell] == WINDOW_EVENT_BUTTON && !(flags & WINDOW_KEY_DOWN) &&
+                         table->event_a[1][cell] == COMPOSITOR_BTN_LEFT;
+        }
+        released = !compositor.button_down && compositor.grab == COMPOSITOR_NONE && !(compositor_modifiers() & WINDOW_KEY_SHIFT) &&
+                   !(compositor.keys_down[30 >> 3] >> (30 & 7) & 1);
+        check("input: a device's dropped reports let go of what no device has down: the button where it was pressed, Shift and the key",
+              held && released && key_up && shift_up && button_up);
+        table->event_tail[1] = table->event_head[1];
+        compositor.inputs[0] = -1;
+        compositor.input_count = 0;
+        system_close(device[0]);
+        system_close(device[1]);
+    }
 }
 
 /*

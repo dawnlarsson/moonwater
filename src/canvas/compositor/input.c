@@ -3780,6 +3780,77 @@ static void compositor_touch_tick(positive now)
 static void compositor_input_read_device(unsigned int at);
 
 /*
+        What the kernel dropped from a device (SYN_DROPPED: its queue was full while the loop was away) may be a key's or a button's
+        release, and nothing would let go of it: a modifier held on every key after it, a key repeating in its window, a button held
+        on a window that takes every motion and turn of the wheel after it (compositor.grab). So the state of the keys is read from
+        every device (EVIOCGKEY), and what the compositor holds down that no device has down is let go as its release would have
+        been: each keyboard's modifiers by the keyboard, the keys to the window they went to, the buttons where they were pressed,
+        and a move or a resize the hand held with none. A device whose state cannot be read holds nothing, as one gone holds
+        nothing (compositor_input_read_device). A touchpad's left button is the button it was pressed as (its two fingers' right),
+        and a pen's touch is the left.
+*/
+#define COMPOSITOR_EVIOCGKEY(bytes) (0x80000000u | (bytes) << 16 | 0x4518u)
+#define COMPOSITOR_KEY_BYTES 96 // KEY_MAX (0x2ff) + 1 bits
+
+static b32 compositor_input_down(const unsigned char *bits, unsigned int code)
+{
+        return code < COMPOSITOR_KEY_BYTES * 8 && (bits[code >> 3] >> (code & 7) & 1);
+}
+
+static void compositor_input_state(unsigned int at, unsigned char *bits)
+{
+        memory_zero(bits, COMPOSITOR_KEY_BYTES);
+        if (at >= COMPOSITOR_INPUTS || compositor.inputs[at] < 0 || compositor.wakeonly[at] ||
+            system_control(compositor.inputs[at], COMPOSITOR_EVIOCGKEY(COMPOSITOR_KEY_BYTES), bits) != 0)
+        {
+                memory_zero(bits, COMPOSITOR_KEY_BYTES);
+                return;
+        }
+        if (compositor.touchpad[at] && compositor_input_down(bits, COMPOSITOR_BTN_LEFT) && compositor.pad[at].clicked)
+        {
+                unsigned int clicked = compositor.pad[at].clicked;
+
+                bits[COMPOSITOR_BTN_LEFT >> 3] &= (unsigned char)~(1u << (COMPOSITOR_BTN_LEFT & 7));
+                bits[clicked >> 3] |= (unsigned char)(1u << (clicked & 7));
+        }
+        if (!compositor.touchpad[at] && compositor_input_down(bits, COMPOSITOR_BTN_TOUCH))
+                bits[COMPOSITOR_BTN_LEFT >> 3] |= (unsigned char)(1u << (COMPOSITOR_BTN_LEFT & 7));
+}
+
+static void compositor_input_dropped(unsigned int at, positive now)
+{
+        unsigned char any[COMPOSITOR_KEY_BYTES], one[COMPOSITOR_KEY_BYTES];
+
+        memory_zero(any, sizeof any);
+        // Each keyboard's modifiers, by what it has down: a twin (the other Shift) still down keeps the modifier held.
+        for (unsigned int device = 0; device < compositor.input_count && device < COMPOSITOR_INPUTS; device++)
+        {
+                compositor_input_state(device, one);
+                for (unsigned int k = 0; k < COMPOSITOR_KEY_BYTES; k++)
+                        any[k] |= one[k];
+                for (unsigned int code = 0; code < 256 && compositor.held[device]; code++)
+                {
+                        unsigned int bit = compositor_held_bit(code);
+
+                        if (bit && (compositor.held[device] & bit) && !compositor_input_down(one, code))
+                                compositor_key(device, code, 0, now);
+                }
+                for (unsigned int code = 0; code < 256; code++)
+                        if (compositor_held_bit(code) && compositor_input_down(one, code))
+                                compositor.held[device] |= (unsigned char)compositor_held_bit(code);
+        }
+        for (unsigned int code = 0; code < 256; code++)
+                if ((compositor.keys_down[code >> 3] >> (code & 7) & 1) && !compositor_input_down(any, code))
+                        compositor_key(at, code, 0, now);
+        for (unsigned int index = 0; index < 8; index++)
+                if ((compositor.button_down >> index & 1) && !compositor_input_down(any, COMPOSITOR_BTN_LEFT + index))
+                        compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
+        if ((compositor.drag >= 0 || compositor.resize >= 0) && !compositor_input_down(any, COMPOSITOR_BTN_LEFT) &&
+            !compositor_input_down(any, COMPOSITOR_BTN_RIGHT))
+                compositor_release(COMPOSITOR_BTN_LEFT, 0);
+}
+
+/*
         A device's reports read, and what they say posted. The posts it makes are the device's (compositor_post_physical says whether
         it is the machine's own, compositor_input_add) for as long as the read lasts and no longer, so a post made after it, from
         anywhere, is marked as one whose source is not known; a slot whose device has gone is the machine's no more.
@@ -3946,6 +4017,8 @@ static void compositor_input_read_device(unsigned int at)
                                         compositor.pad[at].moving = 0;
                                         compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
                                 }
+                                // And a key's or a button's release: what no device has down is let go.
+                                compositor_input_dropped(at, now);
                         }
                         else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] && event->code >= COMPOSITOR_ABS_MT_SLOT &&
                                  event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
