@@ -638,6 +638,9 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->gpu_map_user || table->gpu_map_dma)
                 host_say(log, "  gpu maps        %p pictures mapped by userptr, %p by the dma-buf route (the table's pages, when userptr is refused or off)\n",
                          (positive)table->gpu_map_user, (positive)table->gpu_map_dma);
+        if (table->metric_maps_own_user)
+                host_say(log, "  gpu maps own    %p of them by userptr after the dma-buf route refused the compositor's own memory (the last refusal error %p: 22 is udmabuf past its size limit)\n",
+                         (positive)table->metric_maps_own_user, (positive)table->metric_maps_own_errno);
         if (table->gpu_map_why && table->gpu_map_probe)
                 host_say(log, "  gpu map probes  the node answers a plain question: %s; userptr over anonymous memory: error %p; over the refused page: error %p, without validating it: error %p (0 is taken)\n",
                          table->gpu_map_probe & 1 ? (string_address) "yes" : (string_address) "no", (positive)(table->gpu_map_probe >> 8 & 255),
@@ -679,6 +682,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
         host_say(log, "  metrics         maps held %p (lookups that found one %p, that did not %p); clock wakes %p; jobs %p, %p us mean wait\n",
                  (positive)table->metric_maps, (positive)table->metric_map_hits, (positive)table->metric_map_misses, (positive)table->metric_wakes,
                  (positive)table->metric_jobs, (positive)table->metric_job_mean);
+        host_say(log, "  metrics         jobs waited %p (%p us mean in the submit, %p us mean after it), %p not waited; scenes %p (%p us in all), copies %p (%p us in all), scaled %p (%p us in all)\n",
+                 (positive)table->metric_jobs_waited, (positive)(table->metric_jobs_waited ? table->metric_job_submit_ns / table->metric_jobs_waited / 1000 : 0),
+                 (positive)(table->metric_jobs_waited ? table->metric_job_wait_ns / table->metric_jobs_waited / 1000 : 0), (positive)table->metric_jobs_unwaited,
+                 (positive)table->metric_gpu_jobs_scene, (positive)(table->metric_gpu_job_ns_scene / 1000), (positive)table->metric_gpu_jobs_copy,
+                 (positive)(table->metric_gpu_job_ns_copy / 1000), (positive)table->metric_gpu_jobs_scale, (positive)(table->metric_gpu_job_ns_scale / 1000));
         host_say(log, "  metrics         %p presents a second, %p list frames a second\n", (positive)table->metric_presents, (positive)table->metric_lists);
         host_say(log, "  presents        %p late a second, %p missed their vblank; lead %p us; longest in the loop %p us; %p flips a second with jobs in flight (at most %p)\n",
                  (positive)table->metric_late, (positive)table->metric_missed, (positive)table->metric_lead, (positive)table->metric_present_most,
