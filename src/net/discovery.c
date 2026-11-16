@@ -15,27 +15,38 @@
           from the kernel's own table by netlink and sending nothing;
 
           whether UDP gets out, the public IPv4 address and the NAT's
-          mapping, by a STUN binding (RFC 8489) from one socket to two
-          servers: one mapping for both is a NAT that maps by endpoint
-          (RFC 4787's endpoint-independent mapping, which a hole can be
-          punched through), two mappings is one that maps per server;
+          mapping, by a STUN binding (RFC 8489) from one socket to the first
+          two servers of the person's list that resolve (stun.cloudflare.com
+          and stun.l.google.com unless another is kept): one mapping for
+          both is a NAT that maps by endpoint (RFC 4787's
+          endpoint-independent mapping, which a hole can be punched
+          through), two mappings is one that maps per server;
 
           where UDP does not get out, the public address over HTTPS, the
-          trace Cloudflare answers, fetched and read in a confined child
-          (net_apart) as the zone question is;
+          trace at the URL kept (Cloudflare's unless another is), fetched
+          and read in a confined child (net_apart) as the zone question is;
 
-          whether an HTTP proxy is named (HTTPS_PROXY), which a later piece
-          tunnels through by CONNECT.
+          whether an HTTP proxy is named (HTTPS_PROXY), unless the person
+          said to ignore it, which a later piece tunnels through by CONNECT.
 
         Every lookup that sends a packet off the machine has a switch, a
-        word in /root that is on when there is none, and discovery's own
-        switch is all of them at once (discovery_settings). A lookup that is
-        not allowed sends nothing: discovery_sent counts every datagram and
+        word in /root that is on when there is none, and so do the local
+        network's announcing and asking; discovery's own switch is all of
+        them at once (discovery_settings). Turning one on is a deliberate
+        act in Settings, turning one off never is. A lookup that is not
+        allowed sends nothing: discovery_sent counts every datagram and
         connection this file opens, and the check holds it where it was with
-        discovery off. Every wait is about a second. What a gather finds is
-        kept with its time in DISCOVERY_CACHE_PATH, which is root's and in
-        /run, so a reader (Settings, the status) never waits on the network,
-        and discovery_report says it a line a key, to any writer.
+        discovery off; the local network's socket refuses a packet whose
+        switch is off before it counts it (discovery_lan_allowed). Every wait
+        has a time limit the person may change, about a second by default.
+        What a gather finds is kept with its time in DISCOVERY_CACHE_PATH,
+        which is root's and in /run, so a reader (Settings, the status)
+        never waits on the network, and discovery_report says it a line a
+        key with the value alone, and how and when on lines of their own, to
+        any writer. A gather is made when asked, and by the network's
+        watcher at its start and when the network changes (src/sh/net.c's
+        net_discovery_soon), apart from the lease and only while a lookup is
+        on.
 
         IPv6's public address is the interface's own global address for now:
         the resolver asks A records alone and the confined child has no
@@ -61,13 +72,15 @@
 
 #include "../sh/host_words.h"
 
-//      The lookups a gather may make: the person's switches.
+//      What discovery may send off the machine, each by the person's switch:
+//      a gather's two lookups, and the local network's announcing and asking.
 #define DISCOVERY_ASK_STUN 1u
 #define DISCOVERY_ASK_HTTPS 2u
+#define DISCOVERY_ASK_ANNOUNCE 4u
+#define DISCOVERY_ASK_LISTEN 8u
 
 #define DISCOVERY_CACHE_PATH "/run/moonwater/discovery"
 #define DISCOVERY_STUN_PORT 3478
-#define DISCOVERY_TRACE_URL "https://cloudflare.com/cdn-cgi/trace"
 
 static positive discovery_sent;
 
@@ -220,6 +233,42 @@ static positive discovery_address_text(const p8 address_to address,
                 if (at < 7)
                         text[used++] = ':';
         }
+        text[used] = end;
+        return used;
+}
+
+/*      An interface's name as a line says it: in quotes, each byte that is
+        not printable ASCII, and a quote, a backslash or a semicolon, as
+        \xHH. The kernel takes any byte in a name but a slash, a colon, a
+        blank and the end, and Settings finds a row's value by its key at
+        the start of a line or after a blank or a semicolon (settings.c's
+        settings_find): a name said bare, "learned" or "x;nat", would carry
+        another row's key and a value of its own choosing. Quoted and
+        escaped it holds no blank and no semicolon, and its first byte
+        follows a quote. At most DISCOVERY_NAME_TEXT bytes with the end. */
+#define DISCOVERY_NAME_TEXT 68
+
+static positive discovery_name_text(const p8 address_to name, p8 address_to text)
+{
+        static const p8 hex[] = "0123456789abcdef";
+        positive used = 0;
+
+        text[used++] = '"';
+        for (positive at = 0; name[at] && at < 16; at++)
+        {
+                p8 c = name[at];
+
+                if (c > ' ' && c < 0x7f && c != '"' && c != '\\' && c != ';')
+                {
+                        text[used++] = c;
+                        continue;
+                }
+                text[used++] = '\\';
+                text[used++] = 'x';
+                text[used++] = hex[c >> 4];
+                text[used++] = hex[c & 15];
+        }
+        text[used++] = '"';
         text[used] = end;
         return used;
 }
@@ -473,13 +522,16 @@ static p8 discovery_trace_address(const p8 address_to body, positive length,
 #define DISCOVERY_NAT_NONE 2        // the address seen is this machine's own
 #define DISCOVERY_NAT_INDEPENDENT 3 // one mapping for both servers
 #define DISCOVERY_NAT_DEPENDENT 4   // a mapping for each
+//      What each is, as the value Settings shows, and how it was told.
 static const string_address discovery_nat_names[] = {
-    "not known: no STUN server answered",
-    "not known: one STUN server answered, and two are needed to tell",
-    "none: the public address is this machine's own",
-    "endpoint-independent: one mapping for every server, so a hole can be punched",
-    "endpoint-dependent: a mapping for each server, so a hole cannot be punched "
-    "without the router's help or a relay"};
+    "not known", "not known", "none", "endpoint-independent", "endpoint-dependent"};
+static const string_address discovery_nat_hows[] = {
+    "no STUN server answered",
+    "one STUN server answered, and two are needed to tell",
+    "the public address is this machine's own",
+    "one mapping for every server, so a hole can be punched",
+    "a mapping for each server, so a hole cannot be punched without the "
+    "router's help or a relay"};
 
 /*      What the NAT does, from what each server saw (answered says which
         did) and whether the first mapping, the first server's or the
@@ -644,14 +696,25 @@ static fn discovery_here_read(discovery_here address_to here)
         discovery_here_read_some(here, true, AF_UNSPEC);
 }
 
-/* ---- the settings: the person's switches ---- */
+/* ---- the settings: the person's switches and lists ---- */
 
 /*      Each lookup's switch is a word in /root (DISCOVERY_KEPT), on when
         there is none, and discovery's own is every lookup at once: off
-        there is every lookup off, whatever its own word says. `moonwater
-        network discovery` writes them (src/sh/host/network.c). A word
+        there is every lookup off, whatever its own word says. Turning one
+        on is a deliberate act (registry.c's deliberate: a key or a press of
+        a device plugged into the machine), turning one off never is. A word
         `moonwater link discovery` kept, before the switches were the
-        network's, is moved to its new name the first time it is read. */
+        network's, is moved to its new name the first time it is read.
+
+        Beside them, what the lookups ask and how long they wait, each a
+        file of its own and today's behaviour when there is none: the STUN
+        servers (`network discovery stun servers`, up to four, the first two
+        that resolve asked), the trace's URL (`network discovery https
+        url`), each lookup's time limit, whether the proxy the environment
+        names is taken (`network proxy`) and how often a quiet path is kept
+        open (`network keepalive`, read by waterlink's listener).
+        `moonwater network` writes them (src/sh/host/network.c, and the
+        plain rows of registry.c for the numbers and the proxy). */
 #define DISCOVERY_KEPT "/root"
 #define DISCOVERY_PATH_ROOM 96
 
@@ -659,23 +722,67 @@ static const struct
 {
         string_address word;
         string_address leaf;
-        string_address was;
+        string_address was; // where `link discovery` kept it, or none
         positive ask;
         string_address says;
 } discovery_switches[] = {
     {"discovery", "network.discovery", "link.discovery", 0, "every lookup below"},
     {"stun", "network.discovery.stun", "link.discovery.stun", DISCOVERY_ASK_STUN,
-     "Public address discovery (STUN): a binding to stun.cloudflare.com and "
-     "stun.l.google.com"},
+     "Public address discovery (STUN): a binding to the first two STUN servers "
+     "listed that resolve"},
     {"https", "network.discovery.https", "link.discovery.https", DISCOVERY_ASK_HTTPS,
-     "Public address discovery (HTTPS): cloudflare.com's trace, where UDP "
+     "Public address discovery (HTTPS): the trace at the URL kept, where UDP "
      "does not get out"},
+    {"announce", "network.discovery.announce", null, DISCOVERY_ASK_ANNOUNCE,
+     "LAN announce (mDNS): the services of this machine announced on the local "
+     "network, and questions about them answered"},
+    {"listen", "network.discovery.listen", null, DISCOVERY_ASK_LISTEN,
+     "LAN listen (mDNS): the local network asked for machines, what they "
+     "announce heard, and a pairing code's sweep of the subnet"},
 };
+
+#define DISCOVERY_STUN_SERVERS 4
+#define DISCOVERY_NAME_ROOM 64
+#define DISCOVERY_URL_ROOM 128
+#define DISCOVERY_LIST_ROOM 320
+#define DISCOVERY_STUN_LEAF "network.discovery.stun.servers"
+#define DISCOVERY_STUN_DEFAULT "stun.cloudflare.com:3478 stun.l.google.com:19302"
+#define DISCOVERY_URL_LEAF "network.discovery.https.url"
+#define DISCOVERY_URL_DEFAULT "https://cloudflare.com/cdn-cgi/trace"
+//      The numbers and the proxy are plain rows of registry.c, whose files
+//      and bounds these are: a word that is no number in them is the default.
+#define DISCOVERY_STUN_MS_LEAF "network.discovery.stun.timeout"
+#define DISCOVERY_STUN_MS_DEFAULT 1000
+#define DISCOVERY_STUN_MS_LOW 200
+#define DISCOVERY_STUN_MS_HIGH 10000
+#define DISCOVERY_HTTPS_SECONDS_LEAF "network.discovery.https.timeout"
+#define DISCOVERY_HTTPS_SECONDS_DEFAULT 3
+#define DISCOVERY_HTTPS_SECONDS_LOW 1
+#define DISCOVERY_HTTPS_SECONDS_HIGH 30
+#define DISCOVERY_PROXY_LEAF "network.proxy"
+#define DISCOVERY_KEEPALIVE_LEAF "network.keepalive"
+#define DISCOVERY_KEEPALIVE_DEFAULT 10
+#define DISCOVERY_KEEPALIVE_LOW 1
+#define DISCOVERY_KEEPALIVE_HIGH 40 // under the 45 seconds a session is given up after
+
+typedef struct
+{
+        p8 name[DISCOVERY_NAME_ROOM];
+        p16 port;
+} discovery_stun_server;
 
 typedef struct
 {
         p8 switched[array_count(discovery_switches)]; // each switch's own word
         positive ask; // DISCOVERY_ASK_*: what they allow together, nothing while discovery is off
+        discovery_stun_server server[DISCOVERY_STUN_SERVERS];
+        positive servers;
+        p8 servers_kept; // the list is one kept, not the default
+        p8 url[DISCOVERY_URL_ROOM];
+        p8 url_kept;
+        positive stun_ms;       // a STUN binding's wait, all its servers at once
+        positive https_seconds; // the trace's, the whole fetch
+        p8 proxy;               // the proxy the environment names is taken
 } discovery_settings;
 
 //      The file a setting is kept in: the directory, a slash and its leaf.
@@ -687,39 +794,222 @@ static fn discovery_kept_path(string_address directory, string_address leaf,
         string_append_bounded((string_address)path, leaf, DISCOVERY_PATH_ROOM);
 }
 
+/*      One STUN server as it is written, NAME or NAME:PORT, of exactly
+        length bytes: a name of letters, digits, dots and dashes that starts
+        with a letter or a digit (an IPv4 address is one), at most 63 bytes,
+        kept in small letters; a port from 1 to 65535, 3478 when none is
+        said. */
+static p8 discovery_server_parse(const p8 address_to text, positive length,
+                                 discovery_stun_server address_to server)
+{
+        positive name = 0, port = 0, digits = 0;
+
+        while (name < length && text[name] != ':')
+                name++;
+        if (!name || name >= DISCOVERY_NAME_ROOM || text[0] == '.' || text[0] == '-')
+                return false;
+        for (positive at = 0; at < name; at++)
+        {
+                p8 c = text[at];
+
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '.' || c == '-'))
+                        return false;
+                server->name[at] = c >= 'A' && c <= 'Z' ? (p8)(c + 32) : c;
+        }
+        server->name[name] = end;
+        for (positive at = name + 1; at < length; at++)
+        {
+                if (text[at] < '0' || text[at] > '9' || ++digits > 5)
+                        return false;
+                port = port * 10 + (positive)(text[at] - '0');
+        }
+        if (name < length && (!digits || !port || port > 65535))
+                return false;
+        server->port = (p16)(name < length ? port : DISCOVERY_STUN_PORT);
+        return true;
+}
+
+/*      A list of servers, words a blank apart: one to DISCOVERY_STUN_SERVERS
+        of them, each good and each named once, or false and no list. */
+static p8 discovery_servers_parse(const p8 address_to text, positive length,
+                                  discovery_stun_server address_to servers,
+                                  positive address_to count)
+{
+        positive at = 0, made = 0;
+
+        address_to count = 0;
+        while (at < length)
+        {
+                positive size = 0;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                        at++;
+                while (at + size < length && text[at + size] != ' ' &&
+                       text[at + size] != '\t')
+                        size++;
+                if (!size)
+                        break;
+                if (made == DISCOVERY_STUN_SERVERS ||
+                    !discovery_server_parse(text + at, size, servers + made))
+                        return false;
+                for (positive before = 0; before < made; before++)
+                        if (servers[before].port == servers[made].port &&
+                            string_equals((string_address)servers[before].name,
+                                          (string_address)servers[made].name))
+                                return false;
+                made++;
+                at += size;
+        }
+        address_to count = made;
+        return made != 0;
+}
+
+/*      A trace's URL: https://, a host, and what follows it, every byte a
+        printable one but a blank, a quote, a backslash or a semicolon (a
+        line of the report says it, and Settings reads a line by its words),
+        shorter than DISCOVERY_URL_ROOM. */
+static p8 discovery_url_good(const p8 address_to text, positive length)
+{
+        if (length >= DISCOVERY_URL_ROOM || length <= 8 ||
+            memory_compare(text, "https://", 8) || text[8] == '/' ||
+            text[8] == ':')
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (text[at] <= ' ' || text[at] >= 0x7f || text[at] == '"' ||
+                    text[at] == '\\' || text[at] == ';')
+                        return false;
+        return true;
+}
+
+//      The host a good URL names, into a room of DISCOVERY_NAME_ROOM bytes.
+static fn discovery_url_host(const p8 address_to url, p8 address_to host)
+{
+        positive length = 0;
+
+        while (url[8 + length] && url[8 + length] != '/' && url[8 + length] != ':' &&
+               url[8 + length] != '?' && url[8 + length] != '#' &&
+               length + 1 < DISCOVERY_NAME_ROOM)
+        {
+                host[length] = url[8 + length];
+                length++;
+        }
+        host[length] = end;
+}
+
+/*      A whole number a plain row kept, from low to high; the default for
+        none, for default, and for anything else. */
+static positive discovery_number_of(const p8 address_to word, positive low,
+                                    positive high, positive standard)
+{
+        positive value = 0, at = 0;
+
+        while (word[at] >= '0' && word[at] <= '9' && at < 9)
+                value = value * 10 + (positive)(word[at++] - '0');
+        return at && !word[at] && value >= low && value <= high ? value : standard;
+}
+
+static positive discovery_kept_number(string_address directory, string_address leaf,
+                                      positive low, positive high, positive standard)
+{
+        p8 path[DISCOVERY_PATH_ROOM];
+        p8 word[16];
+
+        discovery_kept_path(directory, leaf, path);
+        if (host_read_word((string_address)path, word, sizeof word) <= 0)
+                return standard;
+        return discovery_number_of(word, low, high, standard);
+}
+
+//      A switch of a word, on when there is none, as the lookups' are.
+static p8 discovery_kept_on(string_address directory, string_address leaf)
+{
+        p8 path[DISCOVERY_PATH_ROOM];
+        p8 word[8];
+
+        discovery_kept_path(directory, leaf, path);
+        return host_read_word((string_address)path, word, sizeof word) < 0 ||
+               !string_equals((string_address)word, "off");
+}
+
+//      What a file of one line holds, whole, or -1 when it is not there or
+//      does not fit: a cut line is no line.
+static bipolar discovery_kept_line(string_address directory, string_address leaf,
+                                   p8 address_to text, positive room)
+{
+        p8 path[DISCOVERY_PATH_ROOM];
+        bipolar got;
+
+        discovery_kept_path(directory, leaf, path);
+        got = host_read_word((string_address)path, text, room);
+        return got >= (bipolar)room - 1 ? -1 : got;
+}
+
 static fn discovery_settings_read_at(string_address directory,
                                      discovery_settings address_to settings)
 {
+        p8 text[DISCOVERY_LIST_ROOM];
+        bipolar got;
+
         memory_zero(settings, sizeof(address_to settings));
         for (positive at = 0; at < array_count(discovery_switches); at++)
         {
-                p8 path[DISCOVERY_PATH_ROOM];
-                p8 word[8];
-
-                discovery_kept_path(directory, discovery_switches[at].leaf, path);
 #if !defined(MACOS)
+                if (discovery_switches[at].was)
                 {
+                        p8 path[DISCOVERY_PATH_ROOM];
                         p8 was[DISCOVERY_PATH_ROOM];
 
                         //      Never over a word the network's verb has kept since.
+                        discovery_kept_path(directory, discovery_switches[at].leaf, path);
                         discovery_kept_path(directory, discovery_switches[at].was, was);
                         (void)system_rename_at(AT_FDCWD, (string_address)was, AT_FDCWD,
                                                (string_address)path,
                                                1 /* RENAME_NOREPLACE */);
                 }
 #endif
-                settings->switched[at] =
-                    host_read_word((string_address)path, word, sizeof word) < 0 ||
-                    !string_equals((string_address)word, "off");
+                settings->switched[at] = discovery_kept_on(directory, discovery_switches[at].leaf);
         }
         for (positive at = 1; settings->switched[0] && at < array_count(discovery_switches); at++)
                 if (settings->switched[at])
                         settings->ask |= discovery_switches[at].ask;
+
+        got = discovery_kept_line(directory, DISCOVERY_STUN_LEAF, text, sizeof text);
+        settings->servers_kept =
+            got > 0 && discovery_servers_parse(text, (positive)got, settings->server,
+                                               address_of settings->servers);
+        if (!settings->servers_kept)
+                (void)discovery_servers_parse((const p8 address_to)DISCOVERY_STUN_DEFAULT,
+                                              sizeof(DISCOVERY_STUN_DEFAULT) - 1,
+                                              settings->server, address_of settings->servers);
+        got = discovery_kept_line(directory, DISCOVERY_URL_LEAF, text, sizeof text);
+        settings->url_kept = got > 0 && discovery_url_good(text, (positive)got);
+        string_copy_bounded((string_address)settings->url,
+                            settings->url_kept ? (string_address)text
+                                               : (string_address)DISCOVERY_URL_DEFAULT,
+                            sizeof settings->url);
+        settings->stun_ms = discovery_kept_number(directory, DISCOVERY_STUN_MS_LEAF,
+                                                  DISCOVERY_STUN_MS_LOW,
+                                                  DISCOVERY_STUN_MS_HIGH,
+                                                  DISCOVERY_STUN_MS_DEFAULT);
+        settings->https_seconds = discovery_kept_number(
+            directory, DISCOVERY_HTTPS_SECONDS_LEAF, DISCOVERY_HTTPS_SECONDS_LOW,
+            DISCOVERY_HTTPS_SECONDS_HIGH, DISCOVERY_HTTPS_SECONDS_DEFAULT);
+        settings->proxy = discovery_kept_on(directory, DISCOVERY_PROXY_LEAF);
 }
 
 static fn discovery_settings_read(discovery_settings address_to settings)
 {
         discovery_settings_read_at(DISCOVERY_KEPT, settings);
+}
+
+/*      How long a quiet path waits before a keepalive holds its NAT's
+        mapping open, in seconds: waterlink's listener asks it as it starts. */
+static positive discovery_keepalive_seconds(void)
+{
+        return discovery_kept_number(DISCOVERY_KEPT, DISCOVERY_KEEPALIVE_LEAF,
+                                     DISCOVERY_KEEPALIVE_LOW, DISCOVERY_KEEPALIVE_HIGH,
+                                     DISCOVERY_KEEPALIVE_DEFAULT);
 }
 
 /* ---- what a gather found, kept with its time ---- */
@@ -750,14 +1040,9 @@ typedef struct
         p16 local_port;
         p16 reserved;
         p8 trace[16];
+        discovery_stun_server asked_of[2]; // the server each of the two was
+        p8 trace_host[DISCOVERY_NAME_ROOM]; // the host the trace was asked of
 } discovery_found;
-
-static const struct
-{
-        string_address name;
-        p16 port;
-} discovery_stun_servers[2] = {{"stun.cloudflare.com", DISCOVERY_STUN_PORT},
-                                {"stun.l.google.com", 19302}};
 
 //      The wall clock's second, asked of the kernel itself where there is
 //      no shell around this file to ask for it.
@@ -786,7 +1071,7 @@ static fn discovery_stun_send(bipolar handle, discovery_found address_to found,
         {
                 socket_address_internet to = {
                     .family = AF_INET,
-                    .port = network_order_16(discovery_stun_servers[at].port),
+                    .port = network_order_16(found->asked_of[at].port),
                     .host = network_order_32(server[at])};
 
                 if (!(named & (1u << at)) || (found->answered & (1u << at)))
@@ -811,8 +1096,8 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
 
                 if (now >= until || (found->answered & named) == named)
                         return;
-                limit.tv_sec = 0;
-                limit.tv_nsec = (b64)(until - now);
+                limit.tv_sec = (b64)((until - now) / 1000000000ull);
+                limit.tv_nsec = (b64)((until - now) % 1000000000ull);
                 if (descriptor_wait_readable(handle, address_of limit, null) <= 0)
                         continue;
                 got = socket_receive((b32)handle, answer, sizeof answer, MSG_DONTWAIT,
@@ -834,24 +1119,32 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
         }
 }
 
-/*      One socket, a request to each server and one more after half a
-        second to any that has not answered, and a second in all. The same
-        socket for both is what lets the two mappings be compared. */
+/*      One socket, a request to each of the first two servers listed whose
+        names resolve and one more halfway through the time limit to any
+        that has not answered, and the limit in all (a second unless the
+        person set another). The same socket for both is what lets the two
+        mappings be compared. */
 static fn discovery_stun(discovery_found address_to found,
-                          const discovery_here address_to here)
+                          const discovery_here address_to here,
+                          const discovery_settings address_to settings)
 {
         p32 server[2] = {0, 0};
         p8 transaction[2][12];
         p8 named = 0;
+        positive slot = 0;
+        positive seconds = (settings->stun_ms + 999) / 1000;
         bipolar handle;
         socket_address_internet self = {0};
         b32 self_size = sizeof self;
         p64 start;
 
-        for (positive at = 0; at < 2; at++)
-                if (net_resolve_v4_apart(discovery_stun_servers[at].name,
-                                         server + at, 1) == DNS_OK)
-                        named |= (p8)(1u << at);
+        for (positive at = 0; at < settings->servers && slot < 2; at++)
+                if (net_resolve_v4_apart((string_address)settings->server[at].name,
+                                         server + slot, seconds) == DNS_OK)
+                {
+                        found->asked_of[slot] = settings->server[at];
+                        named |= (p8)(1u << slot++);
+                }
         if (!named)
         {
                 found->udp = DISCOVERY_UDP_NO_NAME;
@@ -867,12 +1160,13 @@ static fn discovery_stun(discovery_found address_to found,
         }
         start = clock_monotonic_nanoseconds();
         discovery_stun_send(handle, found, server, named, transaction);
-        discovery_stun_wait(handle, found, named, transaction, start + 500000000ull);
+        discovery_stun_wait(handle, found, named, transaction,
+                             start + (p64)settings->stun_ms * 500000ull);
         if ((found->answered & named) != named)
         {
                 discovery_stun_send(handle, found, server, named, transaction);
                 discovery_stun_wait(handle, found, named, transaction,
-                                     start + 1000000000ull);
+                                     start + (p64)settings->stun_ms * 1000000ull);
         }
         if (socket_name((b32)handle, address_of self, address_of self_size) >= 0)
                 found->local_port = network_order_16(self.port);
@@ -896,7 +1190,9 @@ static fn discovery_stun(discovery_found address_to found,
 
 /*      The trace, apart: the TLS, the HTTP and the reading of the trace run
         in a confined child, and what comes back is a status and sixteen
-        bytes, believed only as an address. */
+        bytes, believed only as an address. Its time limit is the whole
+        fetch (three seconds unless the person set another), each wait of
+        its head and its body a second less. */
 static const http_manners discovery_trace_manners = {
     (string_address)"Moonwater", '1', false, true, false, 2, 2, 4096, 0, false, 3};
 
@@ -909,14 +1205,17 @@ typedef struct
 
 static bool discovery_trace_task(address_any context, bipolar answer)
 {
+        const discovery_settings address_to settings = context;
+        http_manners manners = discovery_trace_manners;
         discovery_trace_said said;
         http_buffer body = {0};
 
-        (void)context;
+        manners.chain_seconds = settings->https_seconds;
+        manners.head_seconds = manners.body_seconds =
+            settings->https_seconds > 1 ? settings->https_seconds - 1 : 1;
         memory_zero(address_of said, sizeof said);
-        said.status = http_run((string_address)DISCOVERY_TRACE_URL,
-                               address_of discovery_trace_manners, true, -1,
-                               address_of body, null, null, null);
+        said.status = http_run((string_address)settings->url, address_of manners,
+                               true, -1, address_of body, null, null, null);
         said.found = !said.status &&
                      discovery_trace_address(body.bytes, body.used, said.address);
         byte_store_release(address_of body);
@@ -924,14 +1223,15 @@ static bool discovery_trace_task(address_any context, bipolar answer)
                sizeof said;
 }
 
-static fn discovery_https(discovery_found address_to found)
+static fn discovery_https(discovery_found address_to found,
+                          const discovery_settings address_to settings)
 {
         byte_store got = {0};
         discovery_trace_said said;
         bipolar ran;
 
         discovery_sent++;
-        ran = net_apart(discovery_trace_task, null, -1, address_of got,
+        ran = net_apart(discovery_trace_task, (address_any)settings, -1, address_of got,
                         sizeof said, false);
         found->https = DISCOVERY_HTTPS_FAILED;
         found->https_status = ran != NET_APART_OK ? (b32)ran : -1;
@@ -944,6 +1244,7 @@ static fn discovery_https(discovery_found address_to found)
                         found->https = DISCOVERY_HTTPS_ANSWERED;
                         found->https_status = 0;
                         memory_copy(found->trace, said.address, 16);
+                        discovery_url_host(settings->url, found->trace_host);
                         found->https_when = discovery_now();
                 }
         }
@@ -951,7 +1252,8 @@ static fn discovery_https(discovery_found address_to found)
 }
 #endif
 
-//      What was kept, or zeros when nothing whole was.
+//      What was kept, or zeros when nothing whole was. The names in it are
+//      ended where their room ends, whatever the file says.
 static fn discovery_found_read(discovery_found address_to found)
 {
         if (file_read_once_at(AT_FDCWD, DISCOVERY_CACHE_PATH, found,
@@ -962,12 +1264,15 @@ static fn discovery_found_read(discovery_found address_to found)
             found->nat > DISCOVERY_NAT_DEPENDENT ||
             found->https > DISCOVERY_HTTPS_FAILED)
                 memory_zero(found, sizeof(address_to found));
+        found->asked_of[0].name[DISCOVERY_NAME_ROOM - 1] = end;
+        found->asked_of[1].name[DISCOVERY_NAME_ROOM - 1] = end;
+        found->trace_host[DISCOVERY_NAME_ROOM - 1] = end;
 }
 
 /*      What a gather that learned nothing new keeps of the ones before: the
-        last STUN answer whole (which servers answered, what each saw, the
-        NAT told from it and when) and the last trace's address and when,
-        however many gathers ago they came. */
+        last STUN answer whole (which servers answered, who they were, what
+        each saw, the NAT told from it and when) and the last trace's
+        address, its host and when, however many gathers ago they came. */
 static fn discovery_found_keep(discovery_found address_to found,
                                 const discovery_found address_to before)
 {
@@ -978,15 +1283,17 @@ static fn discovery_found_keep(discovery_found address_to found,
                 memory_copy(found->mapped, before->mapped, sizeof found->mapped);
                 memory_copy(found->mapped_port, before->mapped_port,
                             sizeof found->mapped_port);
+                memory_copy(found->asked_of, before->asked_of, sizeof found->asked_of);
                 found->stun_when = before->stun_when;
         }
         if (found->https != DISCOVERY_HTTPS_ANSWERED && before->https_when)
         {
                 memory_copy(found->trace, before->trace, 16);
+                memory_copy(found->trace_host, before->trace_host,
+                            sizeof found->trace_host);
                 found->https_when = before->https_when;
         }
 }
-
 /*      Root's, 0600, never through a link planted at the name, and whole:
         written under a name of this process's own beside it and renamed
         over it, so a reader (Settings, another gather) never takes it cut,
@@ -1030,7 +1337,7 @@ static fn discovery_found_write(const discovery_found address_to found)
 #endif
 }
 
-/*      The lookups the settings allow, each in about a second, into a
+/*      The lookups the settings allow, each within its time limit, into a
         record of this moment. Off is off: no lookup allowed is no packet. */
 static fn discovery_look(const discovery_settings address_to settings,
                          discovery_found address_to found,
@@ -1042,9 +1349,9 @@ static fn discovery_look(const discovery_settings address_to settings,
         found->asked = discovery_now();
 #if !defined(MACOS)
         if (settings->ask & DISCOVERY_ASK_STUN)
-                discovery_stun(found, here);
+                discovery_stun(found, here, settings);
         if ((settings->ask & DISCOVERY_ASK_HTTPS) && found->udp != DISCOVERY_UDP_OUT)
-                discovery_https(found);
+                discovery_https(found, settings);
 #else
         (void)settings;
         (void)here;
@@ -1068,9 +1375,22 @@ static fn discovery_gather(const discovery_settings address_to settings,
         discovery_found_write(found);
 }
 
+/*      Whether the network's change is owed a gather (src/sh/net.c's
+        net_discovery_soon: the watcher's start, a lease that is new or
+        moved, a link that came or went): only while a lookup may send, so
+        with discovery off, or both its lookups off, nothing is started and
+        nothing leaves. The gather is the one `network discovery refresh`
+        makes. */
+static p8 discovery_auto_wanted(const discovery_settings address_to settings)
+{
+        return (settings->ask & (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS)) != 0;
+}
+
 /*      The proxy a program here is told to use, as host:port with any
-        user and password left out, or none. */
-static p8 discovery_proxy(p8 address_to text, positive room)
+        user and password left out, or none; none as well when the person
+        said to ignore it (`network proxy off`). */
+static p8 discovery_proxy(const discovery_settings address_to settings,
+                          p8 address_to text, positive room)
 {
         static const string_address names[] = {"HTTPS_PROXY", "https_proxy",
                                                "ALL_PROXY", "all_proxy"};
@@ -1078,7 +1398,7 @@ static p8 discovery_proxy(p8 address_to text, positive room)
         positive at = 0, length;
 
         text[0] = end;
-        for (positive name = 0; !value && name < array_count(names); name++)
+        for (positive name = 0; settings->proxy && !value && name < array_count(names); name++)
         {
                 value = getenv(names[name]);
                 if (value && !value[0])
@@ -1146,7 +1466,7 @@ static string_address discovery_https_reason(b32 status)
         switch (status)
         {
         case HTTP_NO_HOST:
-                return (string_address) "cloudflare.com did not resolve";
+                return (string_address) "its host did not resolve";
         case HTTP_NO_ROUTE:
                 return (string_address) "no route to it";
         case HTTP_UNTRUSTED:
@@ -1170,14 +1490,37 @@ static string_address discovery_https_reason(b32 status)
         return (string_address) "no answer";
 }
 
-/*      The page, each line a key and its value, prefix before each line
-        (the doctor's indent, or nothing). Every value is a number, one of the
-        tables' words or an interface's name the kernel holds. */
+//      A server as a line says it, NAME:PORT, into DISCOVERY_NAME_ROOM + 8.
+static fn discovery_server_text(const discovery_stun_server address_to server,
+                                p8 address_to text)
+{
+        positive used = string_length((string_address)server->name);
+
+        memory_copy(text, server->name, used);
+        text[used++] = ':';
+        text[used + positive_into(text + used, (positive)server->port)] = end;
+}
+
+/*
+        The page, prefix before each line (the doctor's indent, or nothing).
+        Each line is a key and its value alone, the line a Settings row
+        reads: a switch's word, a list, an address, a word of the tables.
+        How a value was learned and when are lines of their own, the key
+        and how or when, after it. A line's key comes before any other line
+        holds those words after a blank or a semicolon, which a check holds
+        for every Settings row of the verb; nothing in a line is another's
+        text but an interface's name, said quoted and escaped
+        (discovery_name_text), the servers and the URL, whose bytes their
+        parsers allow. Every value is a number, one of the tables' words,
+        or one of those.
+*/
 static fn discovery_report(writer say, const discovery_settings address_to settings,
                              const discovery_found address_to found,
                              discovery_here address_to here, string_address prefix)
 {
         p8 text[48];
+        p8 name[DISCOVERY_NAME_TEXT];
+        p8 server[DISCOVERY_NAME_ROOM + 8];
         p8 ago[32];
         p8 when[32];
         p8 proxy[64];
@@ -1190,21 +1533,36 @@ static fn discovery_report(writer say, const discovery_settings address_to setti
                 string_format(say, "%s%s %s\n", prefix,
                               (string_address)discovery_switches[at].word,
                               settings->switched[at] ? "on" : "off");
+        string_format(say, "%sstun servers", prefix);
+        for (positive at = 0; at < settings->servers; at++)
+        {
+                discovery_server_text(settings->server + at, server);
+                string_format(say, " %s", (string_address)server);
+        }
+        string_format(say, "\n%shttps url %s\n", prefix, (string_address)settings->url);
 
         if (found->answered)
         {
                 discovery_address_text(found->mapped[first], text);
                 discovery_when(found->stun_when, when);
-                string_format(say, "%spublic ipv4 %s:%p by STUN, %s\n", prefix,
-                              (string_address)text, (positive)found->mapped_port[first],
-                              (string_address)when);
+                discovery_server_text(found->asked_of + first, server);
+                string_format(say, "%spublic ipv4 %s\n"
+                                   "%spublic ipv4 how STUN, port %p, as %s saw it\n"
+                                   "%spublic ipv4 when %s\n",
+                              prefix, (string_address)text, prefix,
+                              (positive)found->mapped_port[first], (string_address)server,
+                              prefix, (string_address)when);
         }
         else if (found->https_when && discovery_mapped(found->trace))
         {
                 discovery_address_text(found->trace, text);
                 discovery_when(found->https_when, when);
-                string_format(say, "%spublic ipv4 %s by HTTPS, %s\n", prefix,
-                              (string_address)text, (string_address)when);
+                string_format(say, "%spublic ipv4 %s\n"
+                                   "%spublic ipv4 how HTTPS, the trace of %s\n"
+                                   "%spublic ipv4 when %s\n",
+                              prefix, (string_address)text, prefix,
+                              (string_address)found->trace_host, prefix,
+                              (string_address)when);
         }
         else
                 string_format(say, "%spublic ipv4 not known\n", prefix);
@@ -1221,60 +1579,86 @@ static fn discovery_report(writer say, const discovery_settings address_to setti
         if (v6 && v6 != found->trace)
         {
                 discovery_address_text(v6, text);
-                string_format(say, "%spublic ipv6 %s, %s's own global address, now\n",
-                              prefix, (string_address)text,
-                              v6_where ? (string_address)v6_where->name : (string_address)"an interface");
+                if (v6_where)
+                        discovery_name_text(v6_where->name, name);
+                string_format(say, "%spublic ipv6 %s\n"
+                                   "%spublic ipv6 how the global address of %s, "
+                                   "which needs no NAT\n"
+                                   "%spublic ipv6 when now\n",
+                              prefix, (string_address)text, prefix,
+                              v6_where ? (string_address)name : (string_address) "an interface",
+                              prefix);
         }
         else if (v6)
         {
                 discovery_address_text(v6, text);
                 discovery_when(found->https_when, when);
-                string_format(say, "%spublic ipv6 %s by HTTPS, %s\n", prefix,
-                              (string_address)text, (string_address)when);
+                string_format(say, "%spublic ipv6 %s\n"
+                                   "%spublic ipv6 how HTTPS, the trace of %s\n"
+                                   "%spublic ipv6 when %s\n",
+                              prefix, (string_address)text, prefix,
+                              (string_address)found->trace_host, prefix,
+                              (string_address)when);
         }
         else
-                string_format(say, "%spublic ipv6 none: no interface has a global "
-                                   "IPv6 address\n", prefix);
+                string_format(say, "%spublic ipv6 none\n"
+                                   "%spublic ipv6 how no interface has a global IPv6 "
+                                   "address\n", prefix, prefix);
 
         discovery_when(found->asked, ago);
         if (!found->asked)
-                string_format(say, "%sudp out not known: nothing looked yet "
-                                   "(moonwater network discovery refresh)\n", prefix);
+                string_format(say, "%sudp out not known\n"
+                                   "%sudp out how nothing looked yet "
+                                   "(moonwater network discovery refresh)\n",
+                              prefix, prefix);
         else if (found->udp == DISCOVERY_UDP_OUT)
-                string_format(say, "%sudp out yes, %s\n", prefix, (string_address)ago);
+                string_format(say, "%sudp out yes\n%sudp out how a STUN server answered\n",
+                              prefix, prefix);
         else if (found->udp == DISCOVERY_UDP_BLOCKED)
-                string_format(say, "%sudp out blocked: no STUN server answered in "
-                                   "a second, %s\n", prefix, (string_address)ago);
+                string_format(say, "%sudp out blocked\n"
+                                   "%sudp out how no STUN server answered in %p ms\n",
+                              prefix, prefix, settings->stun_ms);
         else if (found->udp == DISCOVERY_UDP_NO_NAME)
-                string_format(say, "%sudp out not known: the STUN servers' names "
-                                   "were not found, %s\n", prefix, (string_address)ago);
+                string_format(say, "%sudp out not known\n"
+                                   "%sudp out how the names of the STUN servers were "
+                                   "not found\n", prefix, prefix);
         else
-                string_format(say, "%sudp out not asked: %s, %s\n", prefix,
+                string_format(say, "%sudp out not asked\n%sudp out how %s\n", prefix, prefix,
                               settings->switched[0] ? "Public address discovery (STUN) is off"
-                                                    : "discovery is off",
-                              (string_address)ago);
+                                                    : "discovery is off");
+        if (found->asked)
+                string_format(say, "%sudp out when %s\n", prefix, (string_address)ago);
 
         if (found->udp == DISCOVERY_UDP_NOT_ASKED && !found->answered)
-                string_format(say, "%snat not known: STUN was not asked\n", prefix);
+                string_format(say, "%snat not known\n%snat how STUN was not asked\n",
+                              prefix, prefix);
         else
-                string_format(say, "%snat %s\n", prefix,
-                              (string_address)discovery_nat_names[found->nat]);
+                string_format(say, "%snat %s\n%snat how %s\n", prefix,
+                              (string_address)discovery_nat_names[found->nat], prefix,
+                              (string_address)discovery_nat_hows[found->nat]);
 
         if (found->https == DISCOVERY_HTTPS_ANSWERED)
-                string_format(say, "%shttps answered, %s\n", prefix, (string_address)ago);
+                string_format(say, "%strace answered\n%strace how %s answered\n",
+                              prefix, prefix, (string_address)found->trace_host);
         else if (found->https == DISCOVERY_HTTPS_FAILED)
-                string_format(say, "%shttps failed: %s (status %b), %s\n", prefix,
-                              discovery_https_reason(found->https_status),
-                              (bipolar)found->https_status, (string_address)ago);
+                string_format(say, "%strace failed\n%strace how %s (status %b)\n",
+                              prefix, prefix, discovery_https_reason(found->https_status),
+                              (bipolar)found->https_status);
         else if (found->udp == DISCOVERY_UDP_OUT)
-                string_format(say, "%shttps not asked: UDP gets out\n", prefix);
+                string_format(say, "%strace not asked\n%strace how UDP gets out\n",
+                              prefix, prefix);
         else
-                string_format(say, "%shttps not asked\n", prefix);
+                string_format(say, "%strace not asked\n", prefix);
+        if (found->https != DISCOVERY_HTTPS_NOT_ASKED)
+                string_format(say, "%strace when %s\n", prefix, (string_address)ago);
 
-        if (discovery_proxy(proxy, sizeof proxy))
-                string_format(say, "%sproxy %s, named by the environment; "
+        if (discovery_proxy(settings, proxy, sizeof proxy))
+                string_format(say, "%sproxy %s\n%sproxy how named by the environment; "
                                    "nothing goes through it yet\n",
-                              prefix, (string_address)proxy);
+                              prefix, (string_address)proxy, prefix);
+        else if (!settings->proxy)
+                string_format(say, "%sproxy ignored\n%sproxy how network proxy is off\n",
+                              prefix, prefix);
         else
                 string_format(say, "%sproxy none\n", prefix);
 
@@ -1288,13 +1672,15 @@ static fn discovery_report(writer say, const discovery_settings address_to setti
                 if (mine->scope == NET_SCOPE_LOOPBACK)
                         continue;
                 discovery_address_text(mine->address, text);
+                if (where)
+                        discovery_name_text(where->name, name);
                 string_format(say, "%s %s %s %s/%p %s", shown++ ? ";" : "",
-                              where ? (string_address)where->name : (string_address)"?",
+                              where ? (string_address)name : (string_address) "?",
                               (string_address)discovery_kind_names[where ? where->kind : 0],
                               (string_address)text, (positive)mine->prefix,
                               (string_address)discovery_scope_names[mine->scope]);
         }
-        string_format(say, "%s, now\n", shown ? "" : " none but loopback");
+        string_format(say, "%s\n", shown ? "" : " none but loopback");
 
         string_format(say, "%slearned %s\n", prefix, (string_address)ago);
 }
@@ -1913,7 +2299,23 @@ typedef struct
         p32 address[DISCOVERY_LAN_INTERFACES]; // host order
         p32 mask[DISCOVERY_LAN_INTERFACES];    // host order; 0 when not known
         positive interfaces;
+        positive ask; // the switches' DISCOVERY_ASK_ANNOUNCE and _LISTEN, which its caller reads
 } discovery_lan;
+
+/*      Whether the switches let a packet leave: an mDNS response (the QR
+        bit of its header) is an announcement or an answer, which LAN
+        announce allows, and a question is asking, which LAN listen allows.
+        A packet too short to say is neither. The socket's two senders ask
+        it before anything is counted or sent, so with a switch off no
+        packet of its kind leaves, whatever its caller does. */
+static p8 discovery_lan_allowed(const discovery_lan address_to lan,
+                                const p8 address_to packet, positive length)
+{
+        if (length < 12)
+                return false;
+        return (packet[2] & 0x80) ? (lan->ask & DISCOVERY_ASK_ANNOUNCE) != 0
+                                  : (lan->ask & DISCOVERY_ASK_LISTEN) != 0;
+}
 
 #if !defined(MACOS)
 //      struct ip_mreqn: the group, the interface's address and its index.
@@ -2137,10 +2539,15 @@ static fn discovery_lan_open(discovery_lan address_to lan)
 
 /*      One packet to the group, out of one interface the socket has joined
         on: its length when it went, or the negative errno of what stopped
-        it. Counted in discovery_sent. */
+        it (DISCOVERY_LAN_OFF when a switch is off for it). Counted in
+        discovery_sent. */
+#define DISCOVERY_LAN_OFF (-1) // EPERM, on both kernels
+
 static bipolar discovery_lan_send(discovery_lan address_to lan, positive interface_at,
                                   p8 address_to packet, positive length)
 {
+        if (!discovery_lan_allowed(lan, packet, length))
+                return DISCOVERY_LAN_OFF;
 #if defined(MACOS)
         /* Darwin names the interface by its address, in network order, and
            its sockaddr_in carries a length first. Both are built here, for
@@ -2190,7 +2597,8 @@ static bipolar discovery_lan_send(discovery_lan address_to lan, positive interfa
 }
 
 //      One packet back to the one place that asked, as a one-shot asker is
-//      answered: its length when it went. Counted in discovery_sent.
+//      answered: its length when it went, DISCOVERY_LAN_OFF when LAN
+//      announce is off. Counted in discovery_sent.
 static bipolar discovery_lan_reply(discovery_lan address_to lan, p32 address, p16 port,
                                    p8 address_to packet, positive length)
 {
@@ -2198,6 +2606,8 @@ static bipolar discovery_lan_reply(discovery_lan address_to lan, p32 address, p1
                                       .port = network_order_16(port),
                                       .host = network_order_32(address)};
 
+        if (!discovery_lan_allowed(lan, packet, length))
+                return DISCOVERY_LAN_OFF;
 #if defined(MACOS)
         to.length = sizeof to;
 #endif

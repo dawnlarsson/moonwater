@@ -12,14 +12,26 @@
         One to three IPv4 addresses are kept in /root/dns and written to
         /etc/resolv.conf at once, and every lease after writes them in place
         of its own resolver. default forgets them for Moonwater's own order:
-        Cloudflare's 1.1.1.1 and 1.0.0.1, then the lease's server as the
-        fallback. auto forgets them for the network's server first and
-        nothing behind it (1.1.1.1 only where the network names none), kept
-        as the word network in /root/dns.order. In every order a name of the
-        network's own (one label, .local, .lan, .internal, .home.arpa) is
-        asked of the network's server first (dns_name_internal in net.c).
-        Bare says what the file names now, whose choice that is, where each
-        server came from, and how internal names go.
+        the default list, then the lease's server as the fallback. auto
+        forgets them for the network's server first and nothing behind it
+        (1.1.1.1 only where the network names none), kept as the word
+        network in /root/dns.order. Bare says what the file names now and
+        whose choice that is (another program's when it names anything
+        Moonwater's choice would not), then a line a key with its value
+        alone: the default list, the order, where each server came from,
+        and how internal names go.
+
+        moonwater dns default [ADDRESS...|reset]: the default list, one to
+        three addresses kept in /root/dns.default (1.1.1.1 and 1.0.0.1 when
+        none is, or after reset), and Moonwater's order taken with it.
+
+        moonwater dns internal [on|off] and moonwater dns internal suffixes
+        [SUFFIX...|default]: whether a name of the network's own (one label,
+        or under a suffix: .local .home.arpa .internal .lan .localdomain
+        .home unless others are kept) is asked of the network's server first
+        (dns_name_internal in net.c), kept in /root and published for every
+        lookup in DNS_INTERNAL_PATH with the default list's servers, which
+        count as public.
 */
 /*
         moonwater dns tls [on|off|only]: whether names are asked over TLS
@@ -62,82 +74,154 @@ static string_address dns_tls_word(positive mode)
 }
 
 /*
-        The servers in the order they are asked, each with where it came
-        from: the person's list, Moonwater's default (1.1.1.1 and 1.0.0.1),
-        or the network's lease; and where a name of the network's own goes.
+        What the lines of `moonwater dns` say, each a key and its value
+        alone, which Settings' Network rows read, with where each server came
+        from and how internal names go on lines of their own after them.
+
+        Whose choice resolv.conf is: the person's list kept, the network's
+        under auto, or Moonwater's default, when the file names what that
+        choice writes; and another program's when it names anything else,
+        since something other than Moonwater wrote it then.
 */
-static fn dns_say_order(bool label, const p32 address_to servers, positive count)
+static string_address dns_whose(const p32 address_to servers, positive count)
+{
+        p32 expected[DNS_SERVERS_MAX];
+        positive kept = net_dns_kept_at(NET_DNS_PATH, expected);
+        bool network = net_dns_network_first();
+        positive have = kept ? kept : net_resolver_choose(net_dns_lease(), expected);
+
+        if (have != count || memory_compare(expected, servers, count * sizeof *servers))
+                return (string_address) "written by another program";
+        return kept ? (string_address) "kept"
+               : network ? (string_address) "the network's"
+                         : (string_address) "Moonwater's default";
+}
+
+static fn dns_line(bool label)
+{
+        string_format(log, label ? host_label : "  ");
+}
+
+static fn dns_say_order(bool label, const p32 address_to servers, positive count,
+                        bool foreign)
 {
         p32 kept[DNS_SERVERS_MAX];
+        p32 defaults[DNS_SERVERS_MAX];
         p8 text[24];
         p8 held[96];
+        p8 routes[DNS_INTERNAL_ROOM];
         positive kept_count = locale_readable(NET_DNS_PATH, held, sizeof(held))
                                   ? net_dns_kept_at(NET_DNS_PATH, kept)
                                   : 0;
+        positive default_count = net_dns_defaults_at(NET_DNS_DEFAULT_PATH, defaults);
         p32 lease = net_dns_lease();
         p32 network = 0;
+        positive start = 0, length = 0;
 
-        string_format(log, label ? host_label "dns order" : "  dns order");
+        dns_internal_text(routes);
+        dns_line(label);
+        string_format(log, "dns order");
+        for (positive at = 0; at < count; at++)
+                string_format(log, " %s", net_host_text(text, servers[at]));
+        if (!count)
+                string_format(log, " %s", net_host_text(text, DNS_FALLBACK));
+        string_format(log, "\n");
+        dns_line(label);
+        string_format(log, "dns order from");
         for (positive at = 0; at < count; at++)
         {
-                bool listed = false;
+                bool listed = false, standard = false;
 
                 for (positive was = 0; was < kept_count; was++)
                         listed |= kept[was] == servers[at];
+                for (positive was = 0; was < default_count; was++)
+                        standard |= defaults[was] == servers[at];
                 string_format(log, "%s %s %s", at ? ";" : "",
                               net_host_text(text, servers[at]),
-                              listed ? (string_address) "the person's list"
-                              : servers[at] == lease && lease ? (string_address) "the network's lease"
-                              : servers[at] == NET_DNS_DEFAULT_FIRST ||
-                                      servers[at] == NET_DNS_DEFAULT_SECOND
-                                  ? (string_address) "Moonwater's default"
-                                  : (string_address) "resolv.conf");
-                if (!network && !dns_server_public(servers[at]))
+                              foreign                          ? (string_address) "resolv.conf"
+                              : listed                         ? (string_address) "the person's list"
+                              : servers[at] == lease && lease  ? (string_address) "the network's lease"
+                              : standard                       ? (string_address) "the default list"
+                                                               : (string_address) "resolv.conf");
+                if (!network && !dns_server_public_in(servers[at], routes))
                         network = servers[at];
         }
         if (!count)
                 string_format(log, " %s, where a lookup asks when none is named",
                               net_host_text(text, DNS_FALLBACK));
         string_format(log, "\n");
+
+        dns_line(label);
+        if (!dns_internal_line(routes, "suffixes", address_of start, address_of length))
+        {
+                string_format(log, "dns internal off\n");
+                dns_line(label);
+                string_format(log, "dns internal how every name goes where every name goes\n");
+                return;
+        }
+        string_format(log, "dns internal on\n");
+        dns_line(label);
+        {
+                p8 words[DNS_INTERNAL_ROOM];
+
+                memory_copy(words, routes + start, length);
+                words[length] = end;
+                string_format(log, "dns internal suffixes%s\n", (string_address)words);
+        }
+        dns_line(label);
+        string_format(log, "dns internal server %s\n",
+                      network ? net_host_text(text, network) : (string_address) "none");
+        dns_line(label);
         if (network)
-                string_format(log, label ? host_label "dns internal one-label names and .local .lan "
-                                           ".internal .home.arpa go to %s first\n"
-                                         : "  dns internal one-label names and .local .lan "
-                                           ".internal .home.arpa go to %s first\n",
-                              net_host_text(text, network));
+                string_format(log, "dns internal how one-label names and names under the "
+                                   "suffixes go to %s first\n", net_host_text(text, network));
         else
-                string_format(log, label ? host_label "dns internal no server of the network's is "
-                                           "named, so they go where every name goes\n"
-                                         : "  dns internal no server of the network's is "
-                                           "named, so they go where every name goes\n");
+                string_format(log, "dns internal how no server of the network is named, so "
+                                   "they go where every name goes\n");
 }
 
 static fn dns_say(bool label)
 {
         p32 servers[DNS_SERVERS_MAX];
-        p32 kept[DNS_SERVERS_MAX];
+        p32 defaults[DNS_SERVERS_MAX];
         p8 held[96];
         p8 text[24];
         positive count = dns_servers((string_address)"/etc/resolv.conf",
                                      servers, array_count(servers));
+        positive default_count;
+        bool readable = locale_readable(NET_DNS_PATH, held, sizeof(held)) &&
+                        locale_readable(NET_DNS_DEFAULT_PATH, held, sizeof(held));
+        bool foreign = false;
 
-        if (label)
-                string_format(log, host_label "dns");
-        else
-                string_format(log, "  dns");
+        dns_line(label);
+        string_format(log, "dns");
         for (positive at = 0; at < count; at++)
                 string_format(log, " %s", net_host_text(text, servers[at]));
         if (!count)
                 string_format(log, " none named, lookups ask %s",
                               net_host_text(text, DNS_FALLBACK));
-        else if (!locale_readable(NET_DNS_PATH, held, sizeof(held)))
+        else if (!readable)
                 string_format(log, " " LOCALE_NEEDS_ROOT);
         else
-                string_format(log, "%s", net_dns_kept_at(NET_DNS_PATH, kept) ? " (kept)"
-                                         : net_dns_network_first()      ? " (the network's)"
-                                                                        : " (Moonwater's default)");
+        {
+                string_address whose = dns_whose(servers, count);
+
+                foreign = string_equals(whose, "written by another program");
+                string_format(log, " (%s)", whose);
+        }
         string_format(log, "\n");
-        dns_say_order(label, servers, count);
+        dns_line(label);
+        if (!readable)
+                string_format(log, "dns default " LOCALE_NEEDS_ROOT "\n");
+        else
+        {
+                default_count = net_dns_defaults_at(NET_DNS_DEFAULT_PATH, defaults);
+                string_format(log, "dns default");
+                for (positive at = 0; at < default_count; at++)
+                        string_format(log, " %s", net_host_text(text, defaults[at]));
+                string_format(log, "\n");
+        }
+        dns_say_order(label, servers, count, foreign);
         //      The label's escapes are format text: as an argument %s would
         //      print them as the characters they are spelt with.
         host_say(log, label ? host_label "dns tls %s\n" : "  dns tls %s\n",
@@ -173,14 +257,51 @@ static b32 dns_tls_verb(string_address address_to arguments, positive count)
         return 0;
 }
 
-static b32 dns_set(string_address address_to words, positive count)
+/*
+        The lines a lookup reads of internal names, published from what is
+        kept (net_dns_internal_compose): /root/dns.internal (off is routing
+        off), /root/dns.internal.suffixes and the default list. With none of
+        them kept there is no published file, and a lookup takes the
+        default's, which is the same.
+*/
+static bipolar dns_internal_publish(void)
 {
-        p32 servers[DNS_SERVERS_MAX];
-        p8 line[96];
-        bipolar failed;
+        p8 word[8];
+        p8 kept[NET_DNS_SUFFIXES_ROOM];
+        p8 suffixes[NET_DNS_SUFFIXES_ROOM];
+        p8 text[DNS_INTERNAL_ROOM];
+        p32 defaults[DNS_SERVERS_MAX];
+        p32 listed[DNS_SERVERS_MAX];
+        bipolar on = host_read_word(NET_DNS_INTERNAL_PATH, word, sizeof(word));
+        bipolar got = host_read_word(NET_DNS_SUFFIXES_PATH, kept, sizeof(kept));
+        positive count = net_dns_defaults_at(NET_DNS_DEFAULT_PATH, defaults);
 
-        if (count > DNS_SERVERS_MAX)
-                return host_refuse("dns takes %p servers at most, which is all a lookup "
+        if (on < 0 && got < 0 && !net_dns_kept_at(NET_DNS_DEFAULT_PATH, listed))
+        {
+                bipolar failed = system_remove_at(AT_FDCWD, DNS_INTERNAL_PATH, 0);
+
+                return failed < 0 && failed != -ENOENT ? failed : 0;
+        }
+        if (got <= 0 || got >= (bipolar)sizeof(kept) - 1 ||
+            !net_dns_suffixes_normal(kept, (positive)got, suffixes))
+                string_copy_bounded((string_address)suffixes, DNS_INTERNAL_SUFFIXES,
+                                    sizeof(suffixes));
+        host_state_ready();
+        return file_publish_with(DNS_INTERNAL_PATH, text,
+                                 net_dns_internal_compose(on < 0 || !string_equals(word, "off"),
+                                                          (string_address)suffixes, defaults,
+                                                          count, text),
+                                 0644, true, FILE_STAGED_EXACT_MODE);
+}
+
+/*      One to DNS_SERVERS_MAX addresses from words, each named once and one
+        a machine can be at, into servers and as the line they are kept as;
+        a refusal said, and nonzero, for anything else. */
+static b32 dns_servers_of(string_address address_to words, positive count,
+                          p32 address_to servers, p8 address_to line, positive room)
+{
+        if (!count || count > DNS_SERVERS_MAX)
+                return host_refuse("dns takes 1 to %p servers, which is all a lookup "
                                    "reads; auto for the network's\n",
                                    (positive)DNS_SERVERS_MAX);
         line[0] = end;
@@ -197,10 +318,20 @@ static b32 dns_set(string_address address_to words, positive count)
                                 return host_refuse("%s is named twice\n", words[at]);
                 servers[at] = (p32)host;
                 if (at)
-                        string_append_bounded(line, " ", sizeof(line));
-                string_append_bounded(line, words[at], sizeof(line));
+                        string_append_bounded(line, " ", room);
+                string_append_bounded(line, words[at], room);
         }
+        return 0;
+}
 
+static b32 dns_set(string_address address_to words, positive count)
+{
+        p32 servers[DNS_SERVERS_MAX];
+        p8 line[96];
+        bipolar failed;
+
+        if (dns_servers_of(words, count, servers, line, sizeof(line)))
+                return 1;
         failed = radio_write_word(NET_DNS_PATH, line);
         return_if(failed < 0, host_fail("dns", failed));
         failed = net_write_resolv_servers((string_address) "/etc/resolv.conf",
@@ -231,6 +362,84 @@ static b32 dns_auto(bool network)
         return 0;
 }
 
+/*      dns default ADDRESS...|reset: the default list kept (or forgotten
+        for 1.1.1.1 and 1.0.0.1), published as public for internal names,
+        and Moonwater's order taken with it, as a bare dns default takes it. */
+static b32 dns_default_set(string_address address_to words, positive count)
+{
+        p32 servers[DNS_SERVERS_MAX];
+        p8 line[96];
+        bipolar failed;
+
+        if (count == 1 && string_equals(words[0], "reset"))
+        {
+                failed = system_remove_at(AT_FDCWD, NET_DNS_DEFAULT_PATH, 0);
+                return_if(failed < 0 && failed != -ENOENT, host_fail("dns default", failed));
+        }
+        else
+        {
+                if (dns_servers_of(words, count, servers, line, sizeof(line)))
+                        return 1;
+                failed = radio_write_word(NET_DNS_DEFAULT_PATH, line);
+                return_if(failed < 0, host_fail("dns default", failed));
+        }
+        failed = dns_internal_publish();
+        return_if(failed < 0, host_fail("dns default not published to " DNS_INTERNAL_PATH, failed));
+        return dns_auto(false);
+}
+
+/*      dns internal [on|off] and dns internal suffixes [SUFFIX...|default]:
+        kept, and the lines a lookup reads published again. */
+static b32 dns_internal_verb(string_address address_to arguments, positive count)
+{
+        bipolar failed;
+
+        if (count >= 4 && string_equals(arguments[3], "suffixes"))
+        {
+                if (count == 5 && string_equals(arguments[4], "default"))
+                {
+                        failed = system_remove_at(AT_FDCWD, NET_DNS_SUFFIXES_PATH, 0);
+                        return_if(failed < 0 && failed != -ENOENT,
+                                  host_fail("dns internal suffixes", failed));
+                }
+                else if (count > 4)
+                {
+                        p8 line[NET_DNS_SUFFIXES_ROOM];
+                        p8 normal[NET_DNS_SUFFIXES_ROOM];
+
+                        line[0] = end;
+                        for (positive at = 4; at < count; at++)
+                        {
+                                if (at > 4)
+                                        string_append_bounded((string_address)line, " ", sizeof(line));
+                                string_append_bounded((string_address)line, arguments[at], sizeof(line));
+                        }
+                        if (string_length((string_address)line) + 1 >= sizeof(line) ||
+                            !net_dns_suffixes_normal(line, string_length((string_address)line), normal))
+                                return host_refuse("suffixes are 1 to %p names each starting with a "
+                                                   "dot, like .lan, each named once, or default\n",
+                                                   (positive)NET_DNS_SUFFIXES);
+                        failed = radio_write_word(NET_DNS_SUFFIXES_PATH, (string_address)normal);
+                        return_if(failed < 0, host_fail("dns internal suffixes", failed));
+                }
+        }
+        else if (count == 4)
+        {
+                return_if(host_onoff(arguments[3]) < 0, host_usage());
+                failed = radio_write_word(NET_DNS_INTERNAL_PATH, arguments[3]);
+                return_if(failed < 0, host_fail("dns internal", failed));
+        }
+        else
+                return_if(count != 3, host_usage());
+        if (count > 3)
+        {
+                failed = dns_internal_publish();
+                return_if(failed < 0, host_fail("dns internal not published to " DNS_INTERNAL_PATH, failed));
+        }
+        dns_say(true);
+        return 0;
+}
+
 //      What was kept is the file before any lease writes it: a machine that
 //      boots with no network at all still asks the servers it was told to.
 static fn dns_restore(void)
@@ -239,6 +448,7 @@ static fn dns_restore(void)
         positive count = net_dns_kept_at(NET_DNS_PATH, servers);
 
         (void)dns_tls_publish();
+        (void)dns_internal_publish();
         if (count)
                 (void)net_write_resolv_servers((string_address) "/etc/resolv.conf",
                                                servers, count);
@@ -263,8 +473,10 @@ static b32 host_dns(string_address address_to arguments, positive count)
         //      different servers (A kept, B kept, B written, A written).
         if (!host_acquire())
                 return 1;
-        answer = count == 3 && string_equals(arguments[2], "auto")      ? dns_auto(true)
+        answer = string_equals(arguments[2], "internal")                ? dns_internal_verb(arguments, count)
+                 : count == 3 && string_equals(arguments[2], "auto")    ? dns_auto(true)
                  : count == 3 && string_equals(arguments[2], "default") ? dns_auto(false)
+                 : string_equals(arguments[2], "default")               ? dns_default_set(arguments + 3, count - 3)
                                                                         : dns_set(arguments + 2, count - 2);
         host_release();
         return answer;

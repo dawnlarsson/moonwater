@@ -93069,8 +93069,10 @@ static bipolar link_groups_read(link_groups address_to groups,
         sec(group, "#define WATERLINK_NAMESPACE_MAX 32", "#endif // WATERLINK_GROUP_INCLUDED"),
         #   The local network's socket: the kernel's numbers and its record
         #   for a message, the socket's own record, and an option set; and
-        #   the count of what discovery sends, which its sends keep.
-        "#include <errno.h>\nstatic positive discovery_sent;\n",
+        #   the count of what discovery sends, which its sends keep, and the
+        #   two LAN switches the socket's senders ask.
+        "#include <errno.h>\nstatic positive discovery_sent;\n"
+        "#define DISCOVERY_ASK_ANNOUNCE 4u\n#define DISCOVERY_ASK_LISTEN 8u\n",
         sec(disc, "/*      The kernel's numbers for the socket options and control messages the\n"
                   "        socket asks for",
             "/*      An IPv4 datagram socket that does not wait"),

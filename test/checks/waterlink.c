@@ -4665,7 +4665,8 @@ static fn discovery_kept_clear(string_address directory)
         for (positive at = 0; at < array_count(discovery_switches); at++)
         {
                 (void)discovery_kept_word(directory, discovery_switches[at].leaf, null);
-                (void)discovery_kept_word(directory, discovery_switches[at].was, null);
+                if (discovery_switches[at].was)
+                        (void)discovery_kept_word(directory, discovery_switches[at].was, null);
         }
 }
 
@@ -4692,8 +4693,9 @@ static fn discovery_setting_rows(void)
         made &= discovery_kept_word((string_address)directory, "network.discovery.stun", "off\n");
         discovery_settings_read_at((string_address)directory, address_of stun_off);
         check("discovery: every lookup is on when nothing is kept",
-              made && none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS) &&
-                  none.switched[0] && none.switched[1] && none.switched[2]);
+              made && none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN) &&
+                  none.switched[0] && none.switched[1] && none.switched[2] &&
+                  none.switched[3] && none.switched[4]);
         check("sec: discovery off is every lookup off, and the lookups then send "
               "nothing and say they asked nothing",
               made && off.ask == 0 && !off.switched[0] && off.switched[1] &&
@@ -4701,7 +4703,7 @@ static fn discovery_setting_rows(void)
                   found.udp == DISCOVERY_UDP_NOT_ASKED &&
                   found.https == DISCOVERY_HTTPS_NOT_ASKED && !found.answered);
         check("discovery: one lookup's switch is that lookup alone",
-              made && stun_off.ask == DISCOVERY_ASK_HTTPS && stun_off.switched[0] &&
+              made && stun_off.ask == (DISCOVERY_ASK_HTTPS | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN) && stun_off.switched[0] &&
                   !stun_off.switched[1]);
 
         //      What `link discovery https off` kept is the network's word
@@ -4718,10 +4720,354 @@ static fn discovery_setting_rows(void)
         discovery_settings_read_at((string_address)directory, address_of kept);
         check("discovery: a switch link discovery kept is read once and moved to "
               "the network's name, and never over a word kept since",
-              made && went && moved.ask == DISCOVERY_ASK_STUN &&
-                  kept.ask == DISCOVERY_ASK_STUN);
+              made && went && moved.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN) &&
+                  kept.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN));
         discovery_kept_clear((string_address)directory);
         (void)system_remove_at(AT_FDCWD, (string_address)directory, 0x200 /* AT_REMOVEDIR */);
+}
+
+/*
+        The network's lines as Settings reads them, each a key and its
+        value alone: what `network discovery` says, caught as a writer is
+        given it, and every Network row's key looked for as settings.c's
+        settings_find looks (at a line's start, or after a blank or a
+        semicolon, the first line that has it). Each key's first line is its
+        own, whatever the record holds, and an interface's name, which the
+        kernel lets hold any byte but a slash, a colon and a blank, cannot
+        be another row's key or end its line.
+*/
+static p8 discovery_link_fed(discovery_here address_to here, string_address name,
+                             p16 type, string_address driver, p8 marked);
+
+static p8 discovery_said[16384];
+static positive discovery_said_used;
+
+//      A writer: a length of zero is the bytes up to their end.
+static fn discovery_said_put(address_any data, positive length)
+{
+        if (!length)
+                length = string_length((string_address)data);
+        if (discovery_said_used + length >= sizeof discovery_said)
+                length = sizeof discovery_said - 1 - discovery_said_used;
+        memory_copy(discovery_said + discovery_said_used, data, length);
+        discovery_said_used += length;
+        discovery_said[discovery_said_used] = end;
+}
+
+//      Where key is in a line as settings_find finds it, or the line's length.
+static positive discovery_key_in(const p8 address_to line, positive length,
+                                 string_address key)
+{
+        positive size = string_length(key);
+
+        for (positive at = 0; at + size <= length; at++)
+                if ((!at || line[at - 1] == ' ' || line[at - 1] == ';') &&
+                    !memory_compare(line + at, key, size))
+                        return at;
+        return length;
+}
+
+/*      Whether the first line that holds key starts with it, and that
+        line's value (the rest of it) into value. */
+static p8 discovery_key_own(string_address key, p8 address_to value, positive room)
+{
+        for (positive at = 0; at < discovery_said_used;)
+        {
+                positive stop = at;
+
+                while (stop < discovery_said_used && discovery_said[stop] != '\n')
+                        stop++;
+                if (discovery_key_in(discovery_said + at, stop - at, key) < stop - at)
+                {
+                        positive size = string_length(key);
+                        positive left = stop - at - size;
+
+                        if (memory_compare(discovery_said + at, key, size))
+                                return false;
+                        left = left >= room ? room - 1 : left;
+                        memory_copy(value, discovery_said + at + size, left);
+                        value[left] = end;
+                        return true;
+                }
+                at = stop + 1;
+        }
+        return false;
+}
+
+static fn discovery_line_rows(void)
+{
+        static const string_address keys[] = {
+            "discovery ", "stun ", "https ", "announce ", "listen ", "stun servers ",
+            "https url ", "public ipv4 ", "public ipv6 ", "udp out ", "nat ", "proxy ",
+            "addresses ", "learned "};
+        //      Names a kernel takes: a row's key, a key after a semicolon, an
+        //      escape and a quote.
+        static const string_address names[] = {"learned", "x;nat", "a\x1b[2Jb", "q\"udp"};
+        discovery_settings settings;
+        discovery_found found;
+        discovery_here here;
+        positive wrong = 0, spoofed = 0, bare = 0;
+        p8 value[256];
+
+        memory_zero(address_of here, sizeof here);
+        for (positive at = 0; at < array_count(names); at++)
+        {
+                discovery_local address_to mine = here.own + here.owns++;
+
+                (void)discovery_link_fed(address_of here, names[at], 1, null, false);
+                mine->index = (b32)here.interfaces;
+                mine->prefix = 24;
+                (void)discovery_parse4((const p8 address_to) "10.0.0.5", 8, mine->address);
+                mine->address[15] = (p8)(5 + at);
+                mine->scope = (p8)discovery_address_scope(mine->address);
+        }
+        {
+                discovery_local address_to mine = here.own + here.owns++;
+
+                mine->index = 1;
+                mine->prefix = 64;
+                (void)discovery_parse6((const p8 address_to) "2001:db8::7", 11, mine->address);
+                mine->scope = NET_SCOPE_GLOBAL;
+        }
+        for (positive state = 0; state < 6; state++)
+        {
+                memory_zero(address_of settings, sizeof settings);
+                discovery_settings_read_at("/nonexistent-moonwater", address_of settings);
+                memory_zero(address_of found, sizeof found);
+                found.asked = state ? discovery_now() - 90 : 0;
+                if (state == 1 || state == 5)
+                {
+                        found.udp = DISCOVERY_UDP_OUT;
+                        found.answered = 3;
+                        found.nat = DISCOVERY_NAT_INDEPENDENT;
+                        found.stun_when = found.asked;
+                        (void)discovery_parse4((const p8 address_to) "203.0.113.7", 11, found.mapped[0]);
+                        memory_copy(found.mapped[1], found.mapped[0], 16);
+                        found.mapped_port[0] = found.mapped_port[1] = 40000;
+                        found.asked_of[0] = settings.server[0];
+                        found.asked_of[1] = settings.server[1];
+                }
+                if (state == 2 || state == 3)
+                {
+                        found.udp = DISCOVERY_UDP_BLOCKED;
+                        found.https = state == 2 ? DISCOVERY_HTTPS_ANSWERED : DISCOVERY_HTTPS_FAILED;
+                        found.https_status = state == 2 ? 0 : -3;
+                        found.https_when = found.asked;
+                        (void)discovery_parse4((const p8 address_to) "198.51.100.9", 12, found.trace);
+                        string_copy((string_address)found.trace_host, "cloudflare.com");
+                }
+                if (state == 4)
+                {
+                        settings.switched[0] = false;
+                        settings.ask = 0;
+                        settings.proxy = false;
+                }
+                discovery_said_used = 0;
+                discovery_report(discovery_said_put, address_of settings, address_of found,
+                                 address_of here, "");
+                for (positive at = 0; at < array_count(keys); at++)
+                        if (!discovery_key_own(keys[at], value, sizeof value))
+                        {
+                                wrong++;
+                                //      What was said, to see whose line took the key.
+                                string_format(log, "  discovery state %p, key \"%s\":\n%s",
+                                              state, keys[at], (string_address)discovery_said);
+                        }
+                //      The learned row reads when discovery looked, and no name.
+                spoofed += !discovery_key_own("learned ", value, sizeof value) ||
+                           !(string_equals((string_address)value, "never") ||
+                             memory_has_suffix(value, string_length((string_address)value), " ago"));
+                spoofed += !discovery_key_own("nat ", value, sizeof value) ||
+                           (!string_equals((string_address)value, "not known") &&
+                            !string_equals((string_address)value, "endpoint-independent"));
+                spoofed += discovery_said_used >= sizeof discovery_said - 1 ||
+                           memory_search(discovery_said, discovery_said_used, "\x1b", 1) != null ||
+                           memory_search(discovery_said, discovery_said_used, "x;nat", 5) != null ||
+                           memory_search(discovery_said, discovery_said_used, "\"x\\x3bnat\"", 10) == null;
+                if (state == 1)
+                        bare += !discovery_key_own("public ipv4 ", value, sizeof value) ||
+                                !string_equals((string_address)value, "203.0.113.7") ||
+                                !discovery_key_own("udp out ", value, sizeof value) ||
+                                !string_equals((string_address)value, "yes") ||
+                                !discovery_key_own("public ipv4 how ", value, sizeof value) ||
+                                !string_has_prefix((string_address)value, "STUN, port 40000");
+                if (state == 2)
+                        bare += !discovery_key_own("public ipv4 ", value, sizeof value) ||
+                                !string_equals((string_address)value, "198.51.100.9") ||
+                                !discovery_key_own("public ipv4 when ", value, sizeof value) ||
+                                !memory_has_suffix(value, string_length((string_address)value), "s ago");
+                if (state == 4)
+                        bare += !discovery_key_own("discovery ", value, sizeof value) ||
+                                !string_equals((string_address)value, "off") ||
+                                !discovery_key_own("proxy ", value, sizeof value) ||
+                                !string_equals((string_address)value, "ignored");
+        }
+        check("discovery: each Network row's key is first said on a line of its own, "
+              "in every state of what was learned", wrong == 0);
+        check("sec: discovery: an interface's name is said quoted and escaped, so a name "
+              "that is a row's key, holds a semicolon or an escape speaks for no other row",
+              spoofed == 0);
+        check("discovery: a row's line is its value alone, and how and when it was "
+              "learned are lines of their own", bare == 0);
+}
+
+/*
+        Discovery's lists and numbers: each is today's when nothing is kept
+        (the two STUN servers, the trace's URL, a second for STUN and three
+        for the trace, the proxy taken, ten seconds of keepalive), what is
+        kept is read whole or not at all, and the parsers take what the
+        verb takes.
+*/
+static fn discovery_list_rows(void)
+{
+        p8 directory[48] = "/tmp/moonwater-discovery-lists-";
+        discovery_settings none, kept;
+        discovery_stun_server servers[DISCOVERY_STUN_SERVERS];
+        discovery_stun_server one;
+        positive count = 0;
+        p8 made, parsed;
+
+        directory[31 + positive_into(directory + 31, (positive)system_call(syscall(getpid)))] = end;
+        made = system_make_directory_at(AT_FDCWD, (string_address)directory, 0700) >= 0;
+        discovery_settings_read_at((string_address)directory, address_of none);
+        check("discovery: with nothing kept the servers, the URL, the time limits and "
+              "the proxy are what they were before they could be changed",
+              made && none.servers == 2 && !none.servers_kept &&
+                  string_equals((string_address)none.server[0].name, "stun.cloudflare.com") &&
+                  none.server[0].port == 3478 &&
+                  string_equals((string_address)none.server[1].name, "stun.l.google.com") &&
+                  none.server[1].port == 19302 && !none.url_kept &&
+                  string_equals((string_address)none.url, "https://cloudflare.com/cdn-cgi/trace") &&
+                  none.stun_ms == 1000 && none.https_seconds == 3 && none.proxy &&
+                  none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS |
+                               DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN));
+        made &= discovery_kept_word((string_address)directory, DISCOVERY_STUN_LEAF,
+                                    "Stun.Example.net 192.0.2.1:3479\n");
+        made &= discovery_kept_word((string_address)directory, DISCOVERY_URL_LEAF,
+                                    "https://example.net/trace\n");
+        made &= discovery_kept_word((string_address)directory, DISCOVERY_STUN_MS_LEAF, "250\n");
+        made &= discovery_kept_word((string_address)directory, DISCOVERY_HTTPS_SECONDS_LEAF, "99\n");
+        made &= discovery_kept_word((string_address)directory, DISCOVERY_PROXY_LEAF, "off\n");
+        discovery_settings_read_at((string_address)directory, address_of kept);
+        check("discovery: what is kept is read: the servers in small letters and their "
+              "ports, the URL, a time limit in its bounds, the proxy off, and a number "
+              "out of its bounds is the default",
+              made && kept.servers_kept && kept.servers == 2 &&
+                  string_equals((string_address)kept.server[0].name, "stun.example.net") &&
+                  kept.server[0].port == 3478 && kept.server[1].port == 3479 &&
+                  kept.url_kept && string_equals((string_address)kept.url, "https://example.net/trace") &&
+                  kept.stun_ms == 250 && kept.https_seconds == 3 && !kept.proxy);
+        parsed = discovery_servers_parse((const p8 address_to) "a.b c.d:1 e:65535 f", 19, servers,
+                                         address_of count) && count == 4;
+        parsed &= !discovery_servers_parse((const p8 address_to) "a b c d e", 9, servers,
+                                           address_of count);
+        parsed &= !discovery_servers_parse((const p8 address_to) "a:3478 a", 8, servers,
+                                           address_of count);
+        parsed &= !discovery_server_parse((const p8 address_to) "a:0", 3, address_of one) &&
+                  !discovery_server_parse((const p8 address_to) "a:65536", 7, address_of one) &&
+                  !discovery_server_parse((const p8 address_to) "a:", 2, address_of one) &&
+                  !discovery_server_parse((const p8 address_to) "-a", 2, address_of one) &&
+                  !discovery_server_parse((const p8 address_to) "a;b", 3, address_of one) &&
+                  !discovery_server_parse((const p8 address_to) "a b", 3, address_of one);
+        parsed &= discovery_url_good((const p8 address_to) "https://x/y", 11) &&
+                  !discovery_url_good((const p8 address_to) "http://x/y", 10) &&
+                  !discovery_url_good((const p8 address_to) "https://", 8) &&
+                  !discovery_url_good((const p8 address_to) "https:///y", 10) &&
+                  !discovery_url_good((const p8 address_to) "https://x/;learned", 18) &&
+                  !discovery_url_good((const p8 address_to) "https://x/ y", 12);
+        check("discovery: a STUN server is a name or an address with a port of 1 to 65535, "
+              "a list one to four named once, and a URL https with no blank, quote or semicolon",
+              parsed);
+        (void)discovery_kept_word((string_address)directory, DISCOVERY_STUN_LEAF, null);
+        (void)discovery_kept_word((string_address)directory, DISCOVERY_URL_LEAF, null);
+        (void)discovery_kept_word((string_address)directory, DISCOVERY_STUN_MS_LEAF, null);
+        (void)discovery_kept_word((string_address)directory, DISCOVERY_HTTPS_SECONDS_LEAF, null);
+        (void)discovery_kept_word((string_address)directory, DISCOVERY_PROXY_LEAF, null);
+        (void)system_remove_at(AT_FDCWD, (string_address)directory, 0x200 /* AT_REMOVEDIR */);
+}
+
+/*
+        The local network's two switches, held where the packets leave
+        (discovery_lan_allowed, in discovery_lan_send and _reply): with LAN
+        announce off no announcement or answer is counted or sent, with LAN
+        listen off no question, and each alone lets its own kind through.
+        And the gather the network's changes start (net_discovery_soon):
+        none while discovery or both its lookups are off, and one that sends
+        while they are on.
+*/
+static fn discovery_lan_rows(void)
+{
+        p8 announcement[DISCOVERY_MDNS_MAX];
+        p8 question[64];
+        p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        p8 host[6] = {1, 2, 3, 4, 5, 6};
+        positive told = discovery_mdns_announce(address_of waterlink_mdns_service, announcement,
+                                                sizeof announcement, instance, host, 4242,
+                                                0x0a000001, 120, 0, null, 0);
+        positive asked = discovery_mdns_query(address_of waterlink_mdns_service, question,
+                                              sizeof question);
+        discovery_lan lan;
+        discovery_settings settings;
+        discovery_found found;
+        discovery_here here;
+        positive before;
+        p8 held, let;
+
+        memory_zero(address_of lan, sizeof lan);
+        lan.socket = -1;
+        lan.interfaces = 1;
+        before = discovery_sent;
+        held = told && asked &&
+               discovery_lan_send(address_of lan, 0, announcement, told) == DISCOVERY_LAN_OFF &&
+               discovery_lan_send(address_of lan, 0, question, asked) == DISCOVERY_LAN_OFF &&
+               discovery_lan_reply(address_of lan, 0x0a000002, 5353, announcement, told) ==
+                   DISCOVERY_LAN_OFF;
+        lan.ask = DISCOVERY_ASK_LISTEN;
+        held &= discovery_lan_send(address_of lan, 0, announcement, told) == DISCOVERY_LAN_OFF &&
+                discovery_lan_reply(address_of lan, 0x0a000002, 5353, announcement, told) ==
+                    DISCOVERY_LAN_OFF;
+        held &= discovery_sent == before;
+        let = discovery_lan_send(address_of lan, 0, question, asked) != DISCOVERY_LAN_OFF;
+        lan.ask = DISCOVERY_ASK_ANNOUNCE;
+        held &= discovery_lan_send(address_of lan, 0, question, asked) == DISCOVERY_LAN_OFF;
+        let &= discovery_lan_reply(address_of lan, 0x0a000002, 5353, announcement, told) !=
+               DISCOVERY_LAN_OFF;
+        check("sec: discovery: with LAN announce off no announcement or answer leaves, with "
+              "LAN listen off no question, and nothing is counted as sent",
+              held);
+        check("discovery: each LAN switch on lets its own kind of packet through", let);
+
+        //      The automatic gather: off starts none; on asks the servers.
+        memory_zero(address_of here, sizeof here);
+        memory_zero(address_of settings, sizeof settings);
+        discovery_settings_read_at("/nonexistent-moonwater", address_of settings);
+        held = discovery_auto_wanted(address_of settings);
+        settings.ask = DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN;
+        held &= !discovery_auto_wanted(address_of settings);
+        settings.ask = 0;
+        before = discovery_sent;
+        held &= !discovery_auto_wanted(address_of settings);
+        discovery_look(address_of settings, address_of found, address_of here);
+        held &= discovery_sent == before && found.udp == DISCOVERY_UDP_NOT_ASKED;
+        check("sec: discovery: a change of the network starts no gather while discovery "
+              "or both its lookups are off, and that gather would send nothing",
+              held);
+        //      On, against this machine's own discard port: no host off the
+        //      machine is asked, and the binding is made and counted.
+        settings.ask = DISCOVERY_ASK_STUN;
+        settings.servers = 2;
+        string_copy((string_address)settings.server[0].name, "127.0.0.1");
+        settings.server[0].port = 9;
+        string_copy((string_address)settings.server[1].name, "127.0.0.2");
+        settings.server[1].port = 9;
+        settings.stun_ms = 200;
+        before = discovery_sent;
+        discovery_look(address_of settings, address_of found, address_of here);
+        check("discovery: with a lookup on a change of the network is owed a gather, and "
+              "the gather asks the servers listed within the time limit",
+              discovery_auto_wanted(address_of settings) && discovery_sent > before &&
+                  found.asked && found.udp != DISCOVERY_UDP_NOT_ASKED &&
+                  found.udp != DISCOVERY_UDP_NO_NAME);
 }
 
 /*
@@ -5714,6 +6060,9 @@ b32 main(void)
         mdns_wire_exact();
         discovery_vectors();
         discovery_setting_rows();
+        discovery_list_rows();
+        discovery_line_rows();
+        discovery_lan_rows();
         discovery_fold_rows();
         return test_report(null);
 }
@@ -12520,14 +12869,14 @@ static fn discovery_switch_rows(void)
         discovery_settings_read(address_of after);
         log_flush();
         check("discovery: every lookup is on when the verb has kept nothing",
-              none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS));
+              none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN));
         check("sec: network discovery off is every lookup off, and a gather then "
               "sends nothing and says it asked nothing",
               all_off.ask == 0 && discovery_sent == before &&
                   found.udp == DISCOVERY_UDP_NOT_ASKED &&
                   found.https == DISCOVERY_HTTPS_NOT_ASKED && !found.answered);
         check("discovery: network discovery stun off is that lookup alone",
-              one_off.ask == DISCOVERY_ASK_HTTPS);
+              one_off.ask == (DISCOVERY_ASK_HTTPS | DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN));
         check("discovery: a word that is not on or off is refused and changes "
               "nothing", refused != 0 && after.ask == one_off.ask);
         for (positive at = 0; at < array_count(discovery_switches); at++)

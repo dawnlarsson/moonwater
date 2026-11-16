@@ -3183,6 +3183,12 @@ static fn storage_test_net_files(void)
                         };
                         p8 held = true;
                         p32 chosen[DNS_SERVERS_MAX];
+                        //      The default list's file, beside the person's, and none there.
+                        p8 standard[FILE_PATH_MAX];
+
+                        string_copy_bounded((string_address)standard, (string_address)target, sizeof standard);
+                        string_append_bounded((string_address)standard, ".default", sizeof standard);
+                        system_remove_at(AT_FDCWD, (string_address)standard, 0);
 
                         for (positive at = 0; at < array_count(kept_case); at++)
                         {
@@ -3198,27 +3204,41 @@ static fn storage_test_net_files(void)
                         check("/root/dns is up to three usable addresses, and a file with anything else is none", held);
 
                         file_publish_bytes(target, "9.9.9.9\n", 8, 0644, false);
-                        held = net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
+                        held = net_resolver_choose_at(target, standard, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
                         file_publish_bytes(target, "nope\n", 5, 0644, false);
-                        held &= net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
-                        held &= net_resolver_choose_at(target, true, 0, chosen) == 1 && chosen[0] == DNS_FALLBACK;
+                        held &= net_resolver_choose_at(target, standard, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, standard, true, 0, chosen) == 1 && chosen[0] == DNS_FALLBACK;
                         system_remove_at(AT_FDCWD, target, 0);
                         held &= net_dns_kept_at(target, chosen) == 0;
-                        held &= net_resolver_choose_at(target, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, standard, true, 0x0a000001, chosen) == 1 && chosen[0] == 0x0a000001;
                         check("dns auto: kept servers win over a lease's, a lease's over the public one, and a file that does not read is not a choice", held);
 
                         //      Moonwater's default: 1.1.1.1 and 1.0.0.1, then the lease's server; a kept list still wins.
                         file_publish_bytes(target, "9.9.9.9\n", 8, 0644, false);
-                        held = net_resolver_choose_at(target, false, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
+                        held = net_resolver_choose_at(target, standard, false, 0x0a000001, chosen) == 1 && chosen[0] == 0x09090909;
                         file_publish_bytes(target, "nope\n", 5, 0644, false);
-                        held &= net_resolver_choose_at(target, false, 0x0a000001, chosen) == 3 && chosen[0] == 0x01010101 &&
+                        held &= net_resolver_choose_at(target, standard, false, 0x0a000001, chosen) == 3 && chosen[0] == 0x01010101 &&
                                 chosen[1] == 0x01000001 && chosen[2] == 0x0a000001;
-                        held &= net_resolver_choose_at(target, false, 0, chosen) == 2 && chosen[0] == 0x01010101 &&
+                        held &= net_resolver_choose_at(target, standard, false, 0, chosen) == 2 && chosen[0] == 0x01010101 &&
                                 chosen[1] == 0x01000001;
-                        held &= net_resolver_choose_at(target, false, 0x01000001, chosen) == 2 && chosen[1] == 0x01000001;
+                        held &= net_resolver_choose_at(target, standard, false, 0x01000001, chosen) == 2 && chosen[1] == 0x01000001;
                         system_remove_at(AT_FDCWD, target, 0);
-                        held &= net_resolver_choose_at(target, false, 0x0a000001, chosen) == 3 && chosen[2] == 0x0a000001;
+                        held &= net_resolver_choose_at(target, standard, false, 0x0a000001, chosen) == 3 && chosen[2] == 0x0a000001;
                         check("the default: kept servers win, else 1.1.1.1 and 1.0.0.1 with the lease's behind them, named once", held);
+
+                        //      The default list is the person's to change: what dns default kept is asked first, the
+                        //      lease's server behind it while there is room, and a file that does not read is the pair.
+                        file_publish_bytes(standard, "9.9.9.9\n", 8, 0644, false);
+                        held = net_resolver_choose_at(target, standard, false, 0x0a000001, chosen) == 2 &&
+                               chosen[0] == 0x09090909 && chosen[1] == 0x0a000001;
+                        file_publish_bytes(standard, "9.9.9.9 8.8.8.8 8.8.4.4\n", 24, 0644, false);
+                        held &= net_resolver_choose_at(target, standard, false, 0x0a000001, chosen) == 3 &&
+                                chosen[2] == 0x08080404;
+                        file_publish_bytes(standard, "nope\n", 5, 0644, false);
+                        held &= net_resolver_choose_at(target, standard, false, 0, chosen) == 2 &&
+                                chosen[0] == 0x01010101 && chosen[1] == 0x01000001;
+                        system_remove_at(AT_FDCWD, (string_address)standard, 0);
+                        check("dns default: the kept list first and the lease's behind it while there is room, and a file that does not read is 1.1.1.1 and 1.0.0.1", held);
 
                         //      A name of the network's own goes to the network's server first.
                         held = dns_name_internal("printer") && dns_name_internal("nas.") &&
@@ -3230,6 +3250,38 @@ static fn storage_test_net_files(void)
                                !dns_name_internal(".") && dns_server_public(0x01010101) &&
                                !dns_server_public(0x0a000001);
                         check("a one-label name and one under .local, .lan, .internal or .home.arpa is the network's, and no other", held);
+
+                        //      Internal names are the person's too: off routes none, the suffixes kept are the only
+                        //      ones, and the default list's servers are public as the table's are.
+                        {
+                                p8 lines[DNS_INTERNAL_ROOM];
+                                p8 suffixes[NET_DNS_SUFFIXES_ROOM];
+                                const p32 defaults[2] = {0xd043dede, 0x09090909};
+
+                                held = net_dns_internal_compose(true, DNS_INTERNAL_SUFFIXES, defaults, 0, lines) &&
+                                       dns_name_internal_in("nas.local", lines) && dns_name_internal_in("printer", lines) &&
+                                       dns_name_internal_in("box.localdomain", lines) &&
+                                       !dns_name_internal_in("example.com", lines);
+                                held &= net_dns_internal_compose(false, DNS_INTERNAL_SUFFIXES, defaults, 2, lines) &&
+                                        !dns_name_internal_in("printer", lines) && !dns_name_internal_in("nas.local", lines) &&
+                                        dns_server_public_in(0xd043dede, lines) && !dns_server_public_in(0x0a000001, lines);
+                                held &= net_dns_suffixes_normal((const p8 address_to) ".Corp .home-net.example", 23,
+                                                                suffixes) == 2 &&
+                                        string_equals((string_address)suffixes, ".corp .home-net.example") &&
+                                        net_dns_internal_compose(true, (string_address)suffixes, defaults, 1, lines) &&
+                                        dns_name_internal_in("db.CORP", lines) && !dns_name_internal_in("nas.local", lines) &&
+                                        dns_name_internal_in("printer", lines);
+                                held &= !net_dns_suffixes_normal((const p8 address_to) "lan", 3, suffixes) &&
+                                        !net_dns_suffixes_normal((const p8 address_to) ".a..b", 5, suffixes) &&
+                                        !net_dns_suffixes_normal((const p8 address_to) ".a .a", 5, suffixes) &&
+                                        !net_dns_suffixes_normal((const p8 address_to) ".a;b", 4, suffixes) &&
+                                        !net_dns_suffixes_normal((const p8 address_to) ".", 1, suffixes) &&
+                                        !net_dns_suffixes_normal((const p8 address_to) ".a .b .c .d .e .f .g .h .i", 26,
+                                                                 suffixes);
+                                check("dns internal: off routes no name, the kept suffixes are the only ones, a one-label name "
+                                      "stays the network's, and a server of the default list is public",
+                                      held);
+                        }
                 }
                 //      The count is kept only while a failure is planned;
                 //      one that is never reached counts.

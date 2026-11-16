@@ -22,6 +22,9 @@
 #define NET_WIFI_LIST "/root/wifi"
 #define NET_DNS_PATH "/root/dns"
 #define NET_DNS_ORDER_PATH "/root/dns.order"
+#define NET_DNS_DEFAULT_PATH "/root/dns.default"
+#define NET_DNS_INTERNAL_PATH "/root/dns.internal"
+#define NET_DNS_SUFFIXES_PATH "/root/dns.internal.suffixes"
 #define NET_DNS_LEASE NET_STATE_DIR "/dns.lease"
 #define NET_WIFI_POWER "/root/wifi.power"
 #define NET_WIRED_POWER "/root/wired.power"
@@ -1146,14 +1149,17 @@ static b32 net_wget(void)
 /*
         /etc/resolv.conf: what the network handed out, or what was kept.
 
-        Since the owner's order of 2026-11-16 the file names Cloudflare's
-        1.1.1.1 and 1.0.0.1 and then the resolver the DHCP server gave, the
-        fallback (net_resolver_choose_at); `moonwater dns ADDRESS...` keeps
+        Since the owner's order of 2026-11-16 the file names the default
+        list, Cloudflare's 1.1.1.1 and 1.0.0.1 unless `moonwater dns default
+        ADDRESS...` kept another in /root/dns.default, and then the resolver
+        the DHCP server gave, the fallback (net_resolver_choose_at);
+        `moonwater dns ADDRESS...` keeps
         servers in /root/dns, which are written instead, in the order they
         were given, whatever a lease says; and `moonwater dns auto` asks for
         the order below, the network's resolver and nothing behind it. A
         name of the network's own goes to the network's resolver first in
-        every order (dns_name_internal in net.c). What follows is why auto
+        every order, unless `moonwater dns internal off` was said
+        (dns_name_internal in net.c). What follows is why auto
         is network first, and it holds for anyone who chooses it:
 
         This replaces two orders. Public resolver first cost every machine on
@@ -1257,25 +1263,41 @@ static COLD positive net_dns_kept_at(string_address path, p32 address_to into)
 
 /*
         The servers a lease is written as. The person's own list, kept, wins.
-        Without one, Moonwater's default: Cloudflare's 1.1.1.1 and 1.0.0.1,
-        and the lease's own server behind them, the fallback when both give
-        no answer. `moonwater dns auto` (network_first, /root/dns.order
-        holding network) is the order before it: the lease's server, else
-        the public one, alone.
+        Without one, Moonwater's default: the default list (Cloudflare's
+        1.1.1.1 and 1.0.0.1 unless /root/dns.default, which `moonwater dns
+        default ADDRESS...` keeps as /root/dns is kept, names others), and
+        the lease's own server behind them while there is room for it, the
+        fallback when they give no answer. `moonwater dns auto`
+        (network_first, /root/dns.order holding network) is the order before
+        it: the lease's server, else the public one, alone.
 
         A public resolver first is told every name, and says "no such name"
         of one only the network knows, which the walk believes; so a name of
-        the network's own (dns_name_internal in net.c: one label, .local,
-        .lan, .internal, .home.arpa) is asked of the lease's server first,
-        whatever this order is.
+        the network's own (dns_name_internal in net.c: one label, or under
+        one of the suffixes) is asked of the lease's server first, whatever
+        this order is, unless `moonwater dns internal off` was said.
 */
 #define NET_DNS_DEFAULT_FIRST 0x01010101u
 #define NET_DNS_DEFAULT_SECOND 0x01000001u
 
-static COLD positive net_resolver_choose_at(string_address path, bool network_first,
-                                            p32 nameserver, p32 address_to into)
+//      The default list: the one kept at path, or 1.1.1.1 and 1.0.0.1.
+static COLD positive net_dns_defaults_at(string_address path, p32 address_to into)
 {
         positive count = net_dns_kept_at(path, into);
+
+        if (count)
+                return count;
+        into[0] = NET_DNS_DEFAULT_FIRST;
+        into[1] = NET_DNS_DEFAULT_SECOND;
+        return 2;
+}
+
+static COLD positive net_resolver_choose_at(string_address path, string_address defaults,
+                                            bool network_first, p32 nameserver,
+                                            p32 address_to into)
+{
+        positive count = net_dns_kept_at(path, into);
+        bool named = false;
 
         if (count)
                 return count;
@@ -1284,12 +1306,115 @@ static COLD positive net_resolver_choose_at(string_address path, bool network_fi
                 into[count++] = nameserver ? nameserver : DNS_FALLBACK;
                 return count;
         }
-        into[count++] = NET_DNS_DEFAULT_FIRST;
-        into[count++] = NET_DNS_DEFAULT_SECOND;
-        if (nameserver && nameserver != NET_DNS_DEFAULT_FIRST &&
-            nameserver != NET_DNS_DEFAULT_SECOND)
+        count = net_dns_defaults_at(defaults, into);
+        for (positive at = 0; at < count; at++)
+                named |= into[at] == nameserver;
+        if (nameserver && !named && count < DNS_SERVERS_MAX)
                 into[count++] = nameserver;
         return count;
+}
+
+/*
+        The suffixes of the network's own names, as `moonwater dns internal
+        suffixes` takes them: one to NET_DNS_SUFFIXES of them, a blank
+        apart, each a dot and labels of letters, digits and dashes (1 to 63
+        bytes each, 63 in all), named once; into into as the line a lookup
+        reads (small letters, a blank apart). The count, or 0 for anything
+        else.
+*/
+#define NET_DNS_SUFFIXES 8
+#define NET_DNS_SUFFIXES_ROOM 520
+
+static COLD positive net_dns_suffixes_normal(const p8 address_to text, positive length,
+                                             p8 address_to into)
+{
+        positive at = 0, used = 0, count = 0;
+
+        into[0] = end;
+        while (at < length)
+        {
+                positive size = 0, label = 0;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                        at++;
+                while (at + size < length && text[at + size] != ' ' && text[at + size] != '\t')
+                        size++;
+                if (!size)
+                        break;
+                if (count == NET_DNS_SUFFIXES || size < 2 || size > 63 || text[at] != '.' ||
+                    used + size + 2 > NET_DNS_SUFFIXES_ROOM)
+                        return 0;
+                if (count)
+                        into[used++] = ' ';
+                for (positive c = 0; c < size; c++)
+                {
+                        p8 letter = text[at + c];
+
+                        letter = letter >= 'A' && letter <= 'Z' ? (p8)(letter + 32) : letter;
+                        if (letter == '.')
+                        {
+                                if (c && !label)
+                                        return 0;
+                                label = 0;
+                        }
+                        else if ((letter >= 'a' && letter <= 'z') ||
+                                 (letter >= '0' && letter <= '9') || letter == '-')
+                                label++;
+                        else
+                                return 0;
+                        if (label > 63)
+                                return 0;
+                        into[used + c] = letter;
+                }
+                if (!label)
+                        return 0;
+                into[used + size] = end;
+                //      Named once.
+                for (positive before = 0, word = 0; before < used; before += word + 1)
+                {
+                        word = 0;
+                        while (into[before + word] != ' ')
+                                word++;
+                        if (word == size && !memory_compare(into + before, into + used, size))
+                                return 0;
+                }
+                used += size;
+                count++;
+                at += size;
+        }
+        into[used] = end;
+        return count;
+}
+
+/*
+        The two lines a lookup reads (DNS_INTERNAL_PATH, net.c's
+        dns_name_internal): routing on with its suffixes, or off; and the
+        default list's servers, which are public as the table's are. Into
+        text, which has DNS_INTERNAL_ROOM bytes; its length.
+*/
+static COLD positive net_dns_internal_compose(bool on, string_address suffixes,
+                                              const p32 address_to defaults,
+                                              positive count, p8 address_to text)
+{
+        p8 host[24];
+
+        text[0] = end;
+        if (on)
+        {
+                string_append_bounded((string_address)text, "suffixes ", DNS_INTERNAL_ROOM);
+                string_append_bounded((string_address)text, suffixes, DNS_INTERNAL_ROOM);
+        }
+        else
+                string_append_bounded((string_address)text, "off", DNS_INTERNAL_ROOM);
+        string_append_bounded((string_address)text, "\npublic", DNS_INTERNAL_ROOM);
+        for (positive at = 0; at < count; at++)
+        {
+                string_append_bounded((string_address)text, " ", DNS_INTERNAL_ROOM);
+                string_append_bounded((string_address)text, net_host_text(host, defaults[at]),
+                                      DNS_INTERNAL_ROOM);
+        }
+        string_append_bounded((string_address)text, "\n", DNS_INTERNAL_ROOM);
+        return string_length((string_address)text);
 }
 
 //      Whether `moonwater dns auto` asked for the network's server first.
@@ -1303,8 +1428,8 @@ static COLD bool net_dns_network_first(void)
 
 static COLD positive net_resolver_choose(p32 nameserver, p32 address_to into)
 {
-        return net_resolver_choose_at(NET_DNS_PATH, net_dns_network_first(),
-                                      nameserver, into);
+        return net_resolver_choose_at(NET_DNS_PATH, NET_DNS_DEFAULT_PATH,
+                                      net_dns_network_first(), nameserver, into);
 }
 
 static COLD bipolar net_write_resolv(p32 nameserver)
@@ -1399,6 +1524,54 @@ static positive net_seconds(void)
         //      deadline. Zero is that answer, and the clock's first second
         //      is when a boot takes its lease, so it reads 1.
         return now ? now / NETWORK_NANOSECONDS + 1 : 0;
+}
+
+/*
+        Discovery, when the network has changed (src/net/discovery.c): as
+        the watcher starts, at a lease that is new or has moved, and when a
+        link comes or goes, which is asked at most once a
+        NET_DISCOVERY_LINK_EVERY. The gather is a child's child, so neither
+        the lease nor the watcher's loop waits on it and init reaps it; each
+        lookup has its time limit (about a second, and three for the
+        trace), so it ends of itself. With discovery off, or both its
+        lookups off, nothing is started and nothing leaves
+        (discovery_auto_wanted).
+*/
+#define NET_DISCOVERY_LINK_EVERY 30
+
+static COLD fn net_discovery_soon(bool link)
+{
+        static positive link_last;
+        discovery_settings settings;
+        positive now = net_seconds();
+        bipolar child;
+
+        if (link && link_last && now - link_last < NET_DISCOVERY_LINK_EVERY)
+                return;
+        discovery_settings_read(address_of settings);
+        if (!discovery_auto_wanted(address_of settings))
+                return;
+        if (link)
+                link_last = now;
+        child = system_fork();
+        if (!child)
+        {
+                if (!system_fork())
+                {
+                        discovery_found found;
+                        discovery_here here;
+
+                        discovery_gather(address_of settings, address_of found,
+                                         address_of here);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        if (child > 0)
+        {
+                positive status = 0;
+
+                (void)system_wait4_retry(child, address_of status, 0, null);
+        }
 }
 
 /* Deleting state which the kernel already discarded is the same outcome as
@@ -1852,6 +2025,10 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                 string_copy_max_end(next.name, name, IFNAME_SIZE - 1);
                 memory_copy(next.hardware, hardware, 6);
                 *held = next;
+                //      A lease that is new or moved is a way out that may
+                //      have changed: discovery looks again, apart.
+                if (address_changed || route_changed)
+                        net_discovery_soon(false);
         }
 
         net_flush();
@@ -3337,6 +3514,8 @@ static COLD b32 net_watch(void)
         //      would wait forever for an event that already happened.
         memory_fill(address_of held, 0, sizeof held);
         net_reconfigure_fresh(address_of held);
+        //      And how the machine is reached, as it is at the start.
+        net_discovery_soon(false);
 
         for (;;)
         {
@@ -3592,6 +3771,7 @@ static COLD b32 net_watch(void)
                         {
                                 retry_seconds = 4;
                                 woken = false;
+                                net_discovery_soon(true);
                         }
                 }
 

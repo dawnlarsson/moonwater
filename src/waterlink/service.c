@@ -152,7 +152,10 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define PUSH_BLOCK 131072u
 #define PUSH_FRAME_MAX (PUSH_BLOCK + PUSH_BLOCK / 64 + 4096)
 
-#define LINK_KEEPALIVE 10000000ull   // microseconds of silence, then a datagram
+//      Microseconds of silence, then a datagram: the network's keepalive
+//      (`moonwater network keepalive`, ten seconds unless the person set
+//      another), read as the listener or a client starts.
+static p64 link_keepalive = 10000000ull;
 #define LINK_DEAD 45000000ull        // of hearing nothing, then the session is gone
 #define LINK_GRACE 20000000ull       // old receive keys after a rekey
 #define LINK_ATTEMPT 1000000ull      // between initiations
@@ -3869,7 +3872,7 @@ static p64 link_sessions_turn(p64 now)
                 if (s->now.live)
                 {
                         link_session_flush(s, now);
-                        if (link_age(now, s->spoke) > LINK_KEEPALIVE)
+                        if (link_age(now, s->spoke) > link_keepalive)
                                 link_session_say(s, WATERLINK_KIND_CARRY);
                 }
 
@@ -4059,6 +4062,7 @@ static b32 link_serve(string_address ready_text)
                 system_close(ready);
         }
         link_nearby.lan.socket = -1;
+        link_keepalive = (p64)discovery_keepalive_seconds() * 1000000ull;
         link_self.server = true;
         link_self.gso = LINK_GSO;
         link_self.state_dirty = true;
@@ -4754,6 +4758,7 @@ static b32 link_client_run(string_address name, p8 kind,
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
         link_nearby.lan.socket = -1;
+        link_keepalive = (p64)discovery_keepalive_seconds() * 1000000ull;
         return_if(!link_session_open(s), host_fail("memory", -ENOMEM));
         scope_exit(link_session_close(s));
         memory_copy(s->peer, peer->key, 32);

@@ -1454,7 +1454,14 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(SETTING_AUDIO_SOURCE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
+    HOST_WIPE_KEEP(NET_DNS_ORDER_PATH),
+    HOST_WIPE_KEEP(NET_DNS_DEFAULT_PATH),
+    HOST_WIPE_KEEP(NET_DNS_INTERNAL_PATH),
+    HOST_WIPE_KEEP(NET_DNS_SUFFIXES_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),
+    //  The network's discovery lists (src/net/discovery.c, kept by leaf in /root); its switches are added with the plain rows.
+    DISCOVERY_STUN_LEAF,
+    DISCOVERY_URL_LEAF,
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
@@ -1493,6 +1500,9 @@ static fn host_wipe_table(void)
                 if (settings_rows[at].how == SETTING_PLAIN && settings_rows[at].path &&
                     string_has_prefix(settings_rows[at].path, "/root/"))
                         host_wipe_keep[used++] = (string_address)settings_rows[at].path + sizeof("/root/") - 1;
+        //      And discovery's switches, a word each in /root (discovery_switches).
+        for (positive at = 0; at < array_count(discovery_switches) && used + 1 < array_count(host_wipe_keep); at++)
+                host_wipe_keep[used++] = discovery_switches[at].leaf;
         host_wipe_keep[used] = null;
 }
 

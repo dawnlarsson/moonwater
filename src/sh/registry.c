@@ -173,6 +173,12 @@
 #define SETTING_BORDER_GRIP_PATH "/root/canvas.border.grip"
 // The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/ui.c reads it).
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
+// The network's numbers and its proxy switch (src/net/discovery.c reads each by its leaf, DISCOVERY_*_LEAF under DISCOVERY_KEPT,
+// and takes a word that is no number in the row's bounds for the row's standard; CHECK_waterlink_service holds the two the same).
+#define SETTING_NETWORK_STUN_MS_PATH "/root/network.discovery.stun.timeout"
+#define SETTING_NETWORK_TRACE_SECONDS_PATH "/root/network.discovery.https.timeout"
+#define SETTING_NETWORK_PROXY_PATH "/root/network.proxy"
+#define SETTING_NETWORK_KEEPALIVE_PATH "/root/network.keepalive"
 #define SETTING_LANGUAGE_PATH "/root/language"
 #define SETTING_LANGUAGE_DIRECTORY "/usr/share/moonwater/language/"
 #define SETTINGS_LANGUAGE_CODES "en es fr de pt it nl pl tr sv ru uk el ar he fa ur"
@@ -647,7 +653,7 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_DATE_FORMAT_PATH, .standard = "off",
                       .refusal = "date format is off, ymd, dmy or mdy, not %s\n", .usage = "time date [off|ymd|dmy|mdy]",
                       .help = "the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]"),
-    {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
+    {null, "Clock", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
      .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0,
      .usage = "ntp server [NAME|auto]", .help = "who is asked first: a name or address [auto]"},
@@ -669,27 +675,75 @@ static const struct settings_row settings_rows[] = {
      .usage = "dns tls [on|off|only]", .help = "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]"},
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(',
      .usage = "dns [ADDRESS...|default|auto]",
-     .help = "up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the server of the network; auto is that server first [default]"},
+     .help = "up to three servers names are asked of; default is the default list, then the server of the network; auto is that server first [default]"},
+    //  `moonwater dns` says each of these a line a key with its value alone, and where each server came from and how internal
+    //  names go on lines of their own after them (security.c's dns_say).
+    {null, "Default servers (or reset)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns default ", null,
+     {"dns", "default"}, null, 0,
+     .usage = "dns default [ADDRESS...|reset]",
+     .help = "the default list, one to three servers asked before the server of the network, and taken at once; reset is 1.1.1.1 and 1.0.0.1 [1.1.1.1 1.0.0.1]"},
     {null, "Servers in order", SETTINGS_INFO, 0, SETTINGS_LINE, {"dns"}, "dns order ", null, {null}, null, 0,
-     .help = "each server in the order it is asked, and where it came from: the person's list, Moonwater's default or the network's lease"},
-    {null, "Names of the network", SETTINGS_INFO, 0, SETTINGS_LINE, {"dns"}, "dns internal ", null, {null}, null, 0,
-     .help = "a one-label name, or one under .local, .lan, .internal or .home.arpa, is asked of the network's server first, which knows it"},
+     .help = "each server in the order it is asked; where each came from is the line after it: the person's list, the default list or the network's lease"},
+    {null, "Names of the network", SETTINGS_SWITCH, 0, 0, {"dns"}, "dns internal ", null, {"dns", "internal"}, null, 0,
+     .usage = "dns internal [on|off]",
+     .help = "a one-label name, or one under a suffix of dns internal suffixes, is asked of the server of the network first, which knows it; off asks it where every name goes [on]"},
+    {null, "Their suffixes (or default)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns internal suffixes ", null,
+     {"dns", "internal", "suffixes"}, null, 0,
+     .usage = "dns internal suffixes [SUFFIX...|default]",
+     .help = "the endings of the names of the network, one to eight [.local .home.arpa .internal .lan .localdomain .home]"},
+    {null, "Their server", SETTINGS_INFO, 0, SETTINGS_LINE, {"dns"}, "dns internal server ", null, {null}, null, 0,
+     .help = "the first server that is not a public one, which the names of the network are asked of first, or none"},
     //  Discovery (src/net/discovery.c, docs/discovery.md): every lookup that sends a packet off the machine to learn how it is
-    //  reached has its switch, and Discovery is all of them at once; the rows under them are what `network discovery` kept and
-    //  when, read from its page and never asked of the network by reading.
+    //  reached, and the local network's announcing and asking, has its switch, and Discovery is all of them at once. Each is on
+    //  when nothing is kept, and turning one on is deliberate (a key or a press from a device plugged into the machine); off is
+    //  never refused. Under them what the lookups ask and how long they wait, then what `network discovery` kept and when, a
+    //  line a key with its value alone, read from its page and never asked of the network by reading.
     {null, "Discovery", SETTINGS_SWITCH, 0, 0, {"network", "discovery"}, "discovery ", null, {"network", "discovery"}, null, 0,
      .usage = "network discovery [on|off|refresh]",
-     .help = "how this machine is reached: its public address, UDP out, the NAT, the proxy, each address of each interface; on and off are every lookup at once, refresh looks again [on]"},
+     .help = "how this machine is reached: its public address, UDP out, the NAT, the proxy, each address of each interface; on and off are every switch below at once, refresh looks again [on]",
+     .deliberate = 1},
     {null, "Public address discovery (STUN)", SETTINGS_SWITCH, 0, 0, {"network", "discovery"}, "stun ", null,
      {"network", "discovery", "stun"}, null, 0,
      .usage = "network discovery stun [on|off]",
-     .help = "a STUN binding to stun.cloudflare.com and stun.l.google.com, which learn the public address of this machine; off sends no packet for it [on]"},
+     .help = "a STUN binding to the first two servers of the list that resolve, which learn the public address of this machine; off sends no packet for it [on]",
+     .deliberate = 1},
     {null, "Public address discovery (HTTPS)", SETTINGS_SWITCH, 0, 0, {"network", "discovery"}, "https ", null,
      {"network", "discovery", "https"}, null, 0,
      .usage = "network discovery https [on|off]",
-     .help = "where UDP does not get out, the trace of cloudflare.com over HTTPS, which learns the public address of this machine; off sends no packet for it [on]"},
+     .help = "where UDP does not get out, the trace at the URL kept, fetched over HTTPS, which learns the public address of this machine; off sends no packet for it [on]",
+     .deliberate = 1},
+    {null, "LAN announce (mDNS)", SETTINGS_SWITCH, 0, 0, {"network", "discovery"}, "announce ", null,
+     {"network", "discovery", "announce"}, null, 0,
+     .usage = "network discovery announce [on|off]",
+     .help = "the services of this machine announced on the local network over mDNS, and questions about them answered; off sends no announcement and no answer [on]",
+     .deliberate = 1},
+    {null, "LAN listen (mDNS)", SETTINGS_SWITCH, 0, 0, {"network", "discovery"}, "listen ", null,
+     {"network", "discovery", "listen"}, null, 0,
+     .usage = "network discovery listen [on|off]",
+     .help = "the local network asked over mDNS for the machines on it, what they announce heard, and a pairing code swept over the subnet; off sends no question and greets nothing heard [on]",
+     .deliberate = 1},
+    {null, "STUN servers (or reset)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"network", "discovery"}, "stun servers ", null,
+     {"network", "discovery", "stun", "servers"}, null, 0,
+     .usage = "network discovery stun servers [NAME[:PORT]...|add NAME[:PORT]|remove NAME[:PORT]|reset]",
+     .help = "the STUN servers, one to four, tried in order, each a name or an IPv4 address and its port when it is not 3478 [stun.cloudflare.com:3478 stun.l.google.com:19302]"},
+    SETTING_PLAIN_ROW(null, "STUN time limit (ms, or default)", SETTINGS_FIELD, 0, ("network", "discovery", "stun", "timeout"),
+                      "timeout ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_NETWORK_STUN_MS_PATH,
+                      .standard = "1000", .unit = "ms", .low = 200, .high = 10000,
+                      .usage = "network discovery stun timeout [MS|default]",
+                      .help = "how long a STUN binding waits for its servers, asking again halfway, 200 to 10000 ms [1000]"),
+    {null, "Trace URL (or default)", SETTINGS_FIELD, 0, SETTINGS_LINE, {"network", "discovery"}, "https url ", null,
+     {"network", "discovery", "https", "url"}, null, 0,
+     .usage = "network discovery https url [URL|default]",
+     .help = "where the trace is fetched: an https URL whose answer has a line ip=ADDRESS [https://cloudflare.com/cdn-cgi/trace]"},
+    SETTING_PLAIN_ROW(null, "Trace time limit (seconds, or default)", SETTINGS_FIELD, 0, ("network", "discovery", "https", "timeout"),
+                      "timeout ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_NETWORK_TRACE_SECONDS_PATH,
+                      .standard = "3", .unit = "seconds", .low = 1, .high = 30,
+                      .usage = "network discovery https timeout [SECONDS|default]",
+                      .help = "how long the whole fetch of the trace may take, 1 to 30 seconds [3]"),
     {null, "Public IPv4", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "public ipv4 ", null, {null}, null, 0,
-     .help = "the address the internet sees this machine at, how it was learned and when"},
+     .help = "the address the internet sees this machine at; how it was learned and when are the lines after it"},
     {null, "Public IPv6", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "public ipv6 ", null, {null}, null, 0,
      .help = "this machine's global IPv6 address, which needs no NAT"},
     {null, "UDP out", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "udp out ", null, {null}, null, 0,
@@ -697,13 +751,22 @@ static const struct settings_row settings_rows[] = {
     {null, "NAT", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "nat ", null, {null}, null, 0,
      .help = "how the router maps this machine's port: the same for every server is one a hole can be punched through"},
     {null, "Proxy", SETTINGS_INFO, 0, SETTINGS_LINE, {"network", "discovery"}, "proxy ", null, {null}, null, 0,
-     .help = "the HTTP proxy the environment names (HTTPS_PROXY), if any"},
+     .help = "the HTTP proxy the environment names (HTTPS_PROXY), if any, and ignored when the row below is off"},
+    SETTING_PLAIN_ROW(null, "Proxy from the environment", SETTINGS_SWITCH, 0, ("network", "proxy"), "proxy ", null,
+                      .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_NETWORK_PROXY_PATH, .standard = "on",
+                      .usage = "network proxy [on|off]",
+                      .help = "take the proxy the environment names (HTTPS_PROXY, ALL_PROXY) as the way out; off ignores it [on]"),
+    SETTING_PLAIN_ROW(null, "Keepalive (seconds, or default)", SETTINGS_FIELD, 0, ("network", "keepalive"), "keepalive ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_NETWORK_KEEPALIVE_PATH,
+                      .standard = "10", .unit = "seconds", .low = 1, .high = 40,
+                      .usage = "network keepalive [SECONDS|default]",
+                      .help = "how long a quiet link to a machine waits before it sends a datagram that keeps the NAT mapping open, 1 to 40 seconds [10]"),
     {null, "Local addresses", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "addresses ", null, {null}, null, 0,
      .help = "each interface, its kind (ethernet, wifi, vpn, virtual) and its addresses with their scope"},
     {null, "Learned", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "learned ", null, {null}, null, 0,
-     .help = "when discovery last looked"},
+     .help = "when discovery last looked: at start, when the network changes, and when asked"},
     {null, "Discover now", SETTINGS_ACTION, 0, 0, {null}, null, null, {"network", "discovery", "refresh"}, null, 0,
-     .help = "look again now, as far as the switches above allow, about a second for each lookup"},
+     .help = "look again now, as far as the switches above allow, each lookup within its time limit"},
     //  Waterlink, the machines linked to this one (moonwater link, src/waterlink): this machine's name, the one switch of the
     //  listener, a code shown for another machine to type, the other machine's name and code typed here, and how the machines
     //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status).

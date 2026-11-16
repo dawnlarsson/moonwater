@@ -29,7 +29,10 @@
         and the confined reader of what arrives. What is here is what a
         group does with it: what it announces and asks (group.c's service),
         and whom it greets for what it hears. An address is taken from where
-        a packet came from, never from what it says.
+        a packet came from, never from what it says. Both follow the
+        network's switches (link_nearby_switches): LAN announce is what it
+        announces and answers, LAN listen what it asks, greets and sweeps,
+        and with both off it holds no socket at all.
 
         Included by service.c, which owns the sockets and the loop.
 
@@ -417,7 +420,8 @@ typedef struct
         p8 host[6];
         p64 groups_mark[6]; // what the file was when last read, or nothing
         p64 looked;
-        discovery_lan lan; // the network's socket for the local link, and the interfaces it joined on
+        discovery_lan lan; // the network's socket for the local link, the interfaces it joined on and the LAN switches
+        p64 switches_looked;
         p64 next_announce;
         p64 next_ask;
         positive announced;
@@ -445,6 +449,8 @@ typedef struct
 } link_nearby_state;
 
 static link_nearby_state link_nearby;
+
+static fn link_nearby_socket(void);
 
 static p8 link_nearby_labels(void)
 {
@@ -768,10 +774,13 @@ static p64 link_sweep_turn(p64 now)
         positive group = link_sweep_waiting();
 
         if (group == link_nearby.groups.count || link_self.socket < 0 ||
+            !(link_nearby.lan.ask & DISCOVERY_ASK_LISTEN) ||
             (link_nearby.sweeping && group != link_nearby.sweep_group))
         {
-                //      The code is used or gone, or the listener has no port:
-                //      what is left of the sweeps is not sent.
+                //      The code is used or gone, the listener has no port, or
+                //      LAN listen is off (the sweep is finding machines on
+                //      the local network): what is left of the sweeps is not
+                //      sent.
                 link_nearby.sweeping = false;
                 link_nearby.sweep_left = 0;
                 return 0;
@@ -873,10 +882,7 @@ static fn link_nearby_reload(p64 now)
                                           link_nearby.groups.record[at].namespace);
         link_machine_name(link_nearby.name);
 
-        if (link_nearby.groups.count && link_nearby.lan.socket < 0)
-                discovery_lan_open(address_of link_nearby.lan);
-        if (!link_nearby.groups.count && link_nearby.lan.socket >= 0)
-                discovery_lan_close(address_of link_nearby.lan);
+        link_nearby_socket();
 
         (void)link_nearby_labels();
         //      Deferred places index the groups as they were: none survives a change.
@@ -890,6 +896,47 @@ static fn link_nearby_reload(p64 now)
                                          ? LINK_SWEEPS
                                          : 0;
         link_nearby.sweep_next = now;
+}
+
+/*
+        The LAN switches (discovery_settings: LAN announce, LAN listen, and
+        discovery's own, which is both), read every two seconds into the
+        socket's own record, whose senders refuse what a switch keeps in
+        (discovery_lan_allowed). Turned on, the quick announcements and
+        questions start over; with both off there is no socket at all, and
+        nothing is heard either.
+*/
+static fn link_nearby_socket(void)
+{
+        p8 wanted = link_nearby.groups.count && link_nearby.lan.ask;
+
+        if (wanted && link_nearby.lan.socket < 0)
+                discovery_lan_open(address_of link_nearby.lan);
+        if (!wanted && link_nearby.lan.socket >= 0)
+                discovery_lan_close(address_of link_nearby.lan);
+}
+
+static fn link_nearby_switches(p64 now)
+{
+        discovery_settings settings;
+        positive was = link_nearby.lan.ask;
+
+        if (link_nearby.switches_looked && link_age(now, link_nearby.switches_looked) < 2000000)
+                return;
+        link_nearby.switches_looked = now;
+        discovery_settings_read(address_of settings);
+        link_nearby.lan.ask = settings.ask & (DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN);
+        if (link_nearby.lan.ask & ~was & DISCOVERY_ASK_ANNOUNCE)
+        {
+                link_nearby.announced = 0;
+                link_nearby.next_announce = now;
+        }
+        if (link_nearby.lan.ask & ~was & DISCOVERY_ASK_LISTEN)
+        {
+                link_nearby.asked = 0;
+                link_nearby.next_ask = now;
+        }
+        link_nearby_socket();
 }
 
 /*      The outcome of one send, from the sender's answer (its length, or a
@@ -1276,8 +1323,11 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
         }
 
         /* RFC 6762 6: a response from any port but 5353 is not mDNS, and
-           what it announces is not greeted (Avahi drops it the same way). */
-        if (source_port != DISCOVERY_MDNS_PORT)
+           what it announces is not greeted (Avahi drops it the same way).
+           With LAN listen off nothing heard is greeted either: the socket
+           is open for the questions LAN announce answers. */
+        if (source_port != DISCOVERY_MDNS_PORT ||
+            !(link_nearby.lan.ask & DISCOVERY_ASK_LISTEN))
                 found.count = 0;
         if (found.count)
                 link_peers_load(address_of peers);
@@ -1367,6 +1417,7 @@ static p64 link_nearby_tick(p64 now)
 {
         p64 wake = now + 1000000;
 
+        link_nearby_switches(now);
         link_nearby_reload(now);
         if (link_nearby.lan.socket < 0 || !link_nearby.groups.count)
                 return wake;

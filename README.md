@@ -136,12 +136,23 @@ moonwater timezone auto                from the network, one Cloudflare request 
 
 # Network
 moonwater airplane [on|off]            every radio at once
-moonwater dns [ADDRESS...|default|auto]  up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the server of the network; auto is that server first [default]
+moonwater dns [ADDRESS...|default|auto]  up to three servers names are asked of; default is the default list, then the server of the network; auto is that server first [default]
+moonwater dns default [ADDRESS...|reset]  the default list, one to three servers asked before the server of the network, and taken at once; reset is 1.1.1.1 and 1.0.0.1 [1.1.1.1 1.0.0.1]
+moonwater dns internal [on|off]        a one-label name, or one under a suffix of dns internal suffixes, is asked of the server of the network first, which knows it; off asks it where every name goes [on]
+moonwater dns internal suffixes [SUFFIX...|default]  the endings of the names of the network, one to eight [.local .home.arpa .internal .lan .localdomain .home]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 moonwater network                      the network as one page: each interface with its kind and its addresses, the name servers in their order, and what discovery may look up
-moonwater network discovery [on|off|refresh]  how this machine is reached: its public address, UDP out, the NAT, the proxy, each address of each interface; on and off are every lookup at once, refresh looks again [on]
-moonwater network discovery https [on|off]  where UDP does not get out, the trace of cloudflare.com over HTTPS, which learns the public address of this machine; off sends no packet for it [on]
-moonwater network discovery stun [on|off]  a STUN binding to stun.cloudflare.com and stun.l.google.com, which learn the public address of this machine; off sends no packet for it [on]
+moonwater network discovery [on|off|refresh]  how this machine is reached: its public address, UDP out, the NAT, the proxy, each address of each interface; on and off are every switch below at once, refresh looks again [on]
+moonwater network discovery announce [on|off]  the services of this machine announced on the local network over mDNS, and questions about them answered; off sends no announcement and no answer [on]
+moonwater network discovery https [on|off]  where UDP does not get out, the trace at the URL kept, fetched over HTTPS, which learns the public address of this machine; off sends no packet for it [on]
+moonwater network discovery https timeout [SECONDS|default]  how long the whole fetch of the trace may take, 1 to 30 seconds [3]
+moonwater network discovery https url [URL|default]  where the trace is fetched: an https URL whose answer has a line ip=ADDRESS [https://cloudflare.com/cdn-cgi/trace]
+moonwater network discovery listen [on|off]  the local network asked over mDNS for the machines on it, what they announce heard, and a pairing code swept over the subnet; off sends no question and greets nothing heard [on]
+moonwater network discovery stun [on|off]  a STUN binding to the first two servers of the list that resolve, which learn the public address of this machine; off sends no packet for it [on]
+moonwater network discovery stun servers [NAME[:PORT]...|add NAME[:PORT]|remove NAME[:PORT]|reset]  the STUN servers, one to four, tried in order, each a name or an IPv4 address and its port when it is not 3478 [stun.cloudflare.com:3478 stun.l.google.com:19302]
+moonwater network discovery stun timeout [MS|default]  how long a STUN binding waits for its servers, asking again halfway, 200 to 10000 ms [1000]
+moonwater network keepalive [SECONDS|default]  how long a quiet link to a machine waits before it sends a datagram that keeps the NAT mapping open, 1 to 40 seconds [10]
+moonwater network proxy [on|off]       take the proxy the environment names (HTTPS_PROXY, ALL_PROXY) as the way out; off ignores it [on]
 moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 moonwater wired [on|off]               the wired links; off keeps them down
 

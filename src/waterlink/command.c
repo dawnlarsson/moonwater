@@ -1889,7 +1889,8 @@ static fn link_paths_places(string_address prefix)
                                                 "been heard yet");
 }
 
-static fn link_paths_report(const discovery_found address_to found,
+static fn link_paths_report(const discovery_settings address_to settings,
+                            const discovery_found address_to found,
                             const discovery_here address_to here,
                             string_address prefix)
 {
@@ -1899,9 +1900,14 @@ static fn link_paths_report(const discovery_found address_to found,
 
         for (positive at = 0; at < here->owns; at++)
                 mine += here->own[at].scope != NET_SCOPE_LOOPBACK;
-        string_format(log, "%spaths udp %p on %p local address%s; multicast "
-                           "discovery on the network",
-                      prefix, (positive)link_port(), mine, mine == 1 ? "" : "es");
+        string_format(log, "%spaths udp %p on %p local address%s", prefix,
+                      (positive)link_port(), mine, mine == 1 ? "" : "es");
+        //      The local network's two switches (discovery_lan_allowed).
+        if ((settings->ask & DISCOVERY_ASK_ANNOUNCE) && (settings->ask & DISCOVERY_ASK_LISTEN))
+                string_format(log, "; multicast discovery on the network");
+        else if (settings->ask & (DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN))
+                string_format(log, "; multicast discovery on the network, %s only",
+                              settings->ask & DISCOVERY_ASK_LISTEN ? "listening" : "announcing");
         if (found->answered)
         {
                 discovery_address_text(found->mapped[first], text);
@@ -1918,12 +1924,14 @@ static fn link_paths_report(const discovery_found address_to found,
 
 static b32 link_paths_verb(void)
 {
+        discovery_settings settings;
         discovery_found found;
         discovery_here here;
 
+        discovery_settings_read(address_of settings);
         discovery_found_read(address_of found);
         discovery_here_read(address_of here);
-        link_paths_report(address_of found, address_of here, "");
+        link_paths_report(address_of settings, address_of found, address_of here, "");
         return 0;
 }
 
@@ -2049,7 +2057,8 @@ static b32 link_doctor(void)
                 discovery_gather(address_of settings, address_of found, address_of here);
                 discovery_report(log, address_of settings, address_of found,
                                  address_of here, "        ");
-                link_paths_report(address_of found, address_of here, "        ");
+                link_paths_report(address_of settings, address_of found, address_of here,
+                                  "        ");
         }
 
         if (failed)

@@ -1348,7 +1348,7 @@ static fn check_settings(string_address regular, string_address bold)
         settings.page.menu_row = -1;
         int name = settings_row_named("Name"), keyboard = settings_row_named("Keyboard"),
             zone = settings_row_named("Time zone"), ntp = settings_row_named("Set the clock from the network"),
-            clock = settings_row_named("Clock (Enter sets it now)"), wifi = settings_row_named("Wi-Fi"),
+            clock = settings_row_named("Clock"), wifi = settings_row_named("Wi-Fi"),
             prefer = settings_row_named("The internet prefers"), tls = settings_row_named("Names over TLS"),
             power = settings_row_named("Power profile"), bright = settings_row_named("Brightness"),
             boost = settings_row_named("Boost"), bluetooth = settings_row_named("Bluetooth");
@@ -2898,7 +2898,7 @@ static fn check_settings(string_address regular, string_address bold)
                             "[Moonwater] wifi on\n[Moonwater]   HomeNet\n[Moonwater] no networks heard (a new scan needs root)\n";
                         static const char tooth[] = "[Moonwater] bluetooth on\n[Moonwater]   Keyboard K1\n[Moonwater]   Mouse\n";
                         int wifi = settings_row_named("Wi-Fi"), bt = settings_row_named("Bluetooth"), battery = settings_row_named("Battery"),
-                            clock_row = settings_row_named("Clock (Enter sets it now)"), wifi_group = settings_group_of(wifi),
+                            clock_row = settings_row_named("Clock"), wifi_group = settings_group_of(wifi),
                             bt_group = settings_group_of(bt);
                         struct settings_item address_to items = settings_large->item[0], address_to devices = settings_large->item[1];
                         struct windows address_to table = (struct windows address_to)compositor_call(

@@ -2438,26 +2438,104 @@ static CONST COLD bool dns_answer_is_final(bipolar status)
 }
 
 /*
-        A name of the network's own: one label (a printer, a NAS), or under a
-        name the public tree does not delegate -- .local (RFC 6762), .home.arpa
-        (RFC 8375), .internal (ICANN's, 2024) -- or one routers hand out by
-        habit (.lan, .localdomain, .home). A public resolver says "no such
-        name" of these, and that answer is final, so they are asked of the
-        servers that are not the public ones first (dns_resolve_any). A
-        lease's search domain is not one of these yet: the DHCP client does
-        not read option 15.
+        A name of the network's own: one label (a printer, a NAS), or under
+        a suffix the public tree does not delegate -- .local (RFC 6762),
+        .home.arpa (RFC 8375), .internal (ICANN's, 2024) -- or one routers
+        hand out by habit (.lan, .localdomain, .home). A public resolver
+        says "no such name" of these, and that answer is final, so they are
+        asked of the servers that are not the public ones first
+        (dns_resolve_any). A lease's search domain is not one of these yet:
+        the DHCP client does not read option 15.
+
+        All of it is the person's (`moonwater dns internal [on|off]` and
+        `dns internal suffixes`, src/sh/host/security.c), and so is which
+        servers are public: the table below and the default list
+        (`moonwater dns default`). The verb publishes the two lines a lookup
+        reads in DNS_INTERNAL_PATH, which anybody may read, as dns.tls is
+        published, and no file is what it was before any of them could be
+        changed: these suffixes, routing on, and the table alone.
+
+            suffixes .local .home.arpa ...      (or off: routing is off)
+            public 1.1.1.1 1.0.0.1              (the default list's servers)
 */
 static const p32 dns_public_resolvers[] = {
     0x01010101u, 0x01000001u, 0x09090909u, 0x95707070u, 0x08080808u,
     0x08080404u};
 
-static COLD bool dns_name_internal(string_address name)
+#ifndef DNS_INTERNAL_PATH
+#define DNS_INTERNAL_PATH "/run/moonwater/dns.internal"
+#endif
+#define DNS_INTERNAL_SUFFIXES ".local .home.arpa .internal .lan .localdomain .home"
+#define DNS_INTERNAL_ROOM 640
+
+//      What a confined child read before its filter went on, as dns_held
+//      holds its servers; held is zero everywhere else.
+static struct
 {
-        static const string_address suffixes[] = {
-            ".local", ".home.arpa", ".internal", ".lan", ".localdomain", ".home"};
+        bool held;
+        p8 text[DNS_INTERNAL_ROOM];
+} dns_internal_held;
+
+//      The published lines, or the default's when there is no whole file.
+static COLD fn dns_internal_text(p8 address_to text)
+{
+        bipolar got;
+
+        if (dns_internal_held.held)
+        {
+                memory_copy(text, dns_internal_held.text, DNS_INTERNAL_ROOM);
+                return;
+        }
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_INTERNAL_PATH,
+                                    text, DNS_INTERNAL_ROOM, O_NOFOLLOW);
+        if (got <= 0 || got >= DNS_INTERNAL_ROOM - 1)
+        {
+                got = (bipolar)sizeof("suffixes " DNS_INTERNAL_SUFFIXES) - 1;
+                memory_copy(text, "suffixes " DNS_INTERNAL_SUFFIXES, (positive)got);
+        }
+        text[got] = end;
+}
+
+static COLD fn dns_internal_hold(void)
+{
+        dns_internal_text(dns_internal_held.text);
+        dns_internal_held.held = true;
+}
+
+/*      The words of the line of text that starts with key and a blank, as
+        where it starts and how long it is, or false when no line does. */
+static COLD bool dns_internal_line(const p8 address_to text, string_address key,
+                                   positive address_to start, positive address_to length)
+{
+        positive size = string_length(key);
+
+        for (positive at = 0; text[at];)
+        {
+                positive stop = at;
+
+                while (text[stop] && text[stop] != '\n')
+                        stop++;
+                if (stop - at >= size && !memory_compare(text + at, key, size) &&
+                    (stop - at == size || text[at + size] == ' '))
+                {
+                        address_to start = at + size;
+                        address_to length = stop - at - size;
+                        return true;
+                }
+                at = stop + (text[stop] == '\n');
+        }
+        return false;
+}
+
+//      Whether name is the network's, by the lines of text.
+static COLD bool dns_name_internal_in(string_address name, const p8 address_to text)
+{
         positive length = string_length(name);
+        positive start = 0, words = 0;
         bool dotted = false;
 
+        if (!dns_internal_line(text, "suffixes", address_of start, address_of words))
+                return false;
         if (length && name[length - 1] == '.')
                 length--;
         if (!length)
@@ -2466,30 +2544,75 @@ static COLD bool dns_name_internal(string_address name)
                 dotted |= name[at] == '.';
         if (!dotted)
                 return true;
-        for (positive which = 0; which < array_count(suffixes); which++)
+        for (positive at = start; at < start + words;)
         {
-                positive size = string_length(suffixes[which]);
-                bool same = length > size;
+                positive size = 0;
+                bool same;
 
-                for (positive at = 0; same && at < size; at++)
+                while (at < start + words && text[at] == ' ')
+                        at++;
+                while (at + size < start + words && text[at + size] != ' ')
+                        size++;
+                same = size && length > size;
+                for (positive c = 0; same && c < size; c++)
                 {
-                        p8 c = (p8)name[length - size + at];
+                        p8 letter = (p8)name[length - size + c];
 
-                        same = (c >= 'A' && c <= 'Z' ? (p8)(c + 32) : c) ==
-                               (p8)suffixes[which][at];
+                        same = (letter >= 'A' && letter <= 'Z' ? (p8)(letter + 32) : letter) ==
+                               text[at + c];
                 }
                 if (same)
                         return true;
+                at += size;
         }
         return false;
 }
 
-static COLD bool dns_server_public(p32 server)
+//      Whether server is a public resolver: the table's, or the default list's.
+static COLD bool dns_server_public_in(p32 server, const p8 address_to text)
 {
+        positive start = 0, length = 0;
+
         for (positive at = 0; at < array_count(dns_public_resolvers); at++)
                 if (dns_public_resolvers[at] == server)
                         return true;
+        if (!dns_internal_line(text, "public", address_of start, address_of length))
+                return false;
+        for (positive at = start; at < start + length;)
+        {
+                p8 word[24];
+                positive size = 0;
+
+                while (at < start + length && text[at] == ' ')
+                        at++;
+                while (at + size < start + length && text[at + size] != ' ' &&
+                       size + 1 < sizeof word)
+                {
+                        word[size] = text[at + size];
+                        size++;
+                }
+                word[size] = end;
+                if (size && string_to_host((string_address)word) == (bipolar)server)
+                        return true;
+                at += size ? size : 1;
+        }
         return false;
+}
+
+static COLD bool dns_name_internal(string_address name)
+{
+        p8 text[DNS_INTERNAL_ROOM];
+
+        dns_internal_text(text);
+        return dns_name_internal_in(name, text);
+}
+
+static COLD bool dns_server_public(p32 server)
+{
+        p8 text[DNS_INTERNAL_ROOM];
+
+        dns_internal_text(text);
+        return dns_server_public_in(server, text);
 }
 
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
@@ -2502,16 +2625,19 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         positive count = dns_held.held
                              ? dns_held.count
                              : dns_servers(path, read, array_count(read));
-        bool internal = dns_name_internal(name);
+        p8 routes[DNS_INTERNAL_ROOM];
+        bool internal;
         positive placed = 0;
 
+        dns_internal_text(routes);
+        internal = dns_name_internal_in(name, routes);
         //      The file's order, but a name of the network's own goes to the
         //      network's servers before the public ones.
         if (count > DNS_SERVERS_MAX)
                 count = DNS_SERVERS_MAX;
         for (positive pass = 0; pass < 2; pass++)
                 for (positive index = 0; index < count; index++)
-                        if (internal ? (pass == 0) != dns_server_public(servers[index])
+                        if (internal ? (pass == 0) != dns_server_public_in(servers[index], routes)
                                      : pass == 0)
                                 order[placed++] = servers[index];
 
@@ -16621,6 +16747,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
 
         dns_servers_hold((string_address) "/etc/resolv.conf");
         dns_tls_held = dns_tls_mode() + 1;
+        dns_internal_hold();
         clock_floor_held = clock_trust_floor();
         tls_overlay_hold();
         net_filter_build(address_of filter, clock);
