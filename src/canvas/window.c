@@ -1765,12 +1765,17 @@ static unsigned int windows_gpu_judge(const struct windows *table, unsigned int 
 
 /*
         The kernel's own notices (moonwater's feeder): /dev/kmsg, the kernel's log, read without waiting, each record classified and the classes put on
-        the board. A record is raised when its level is emergency to error (0 to 3), or when its words are one of the classes' that matter whatever the
-        level (a warning from amdgpu about a ring that timed out, a program that crashed, an out of memory). Level 4 is raised only by those words;
-        levels 5 to 7 are never raised. Lines the kernel prints on every boot and that are not faults are quiet (kernel_notice_quiet). A class is one
-        issue on the board with the records of it counted, its worst severity, the seconds since its last record and its last line, sanitized: the
-        text is copied in as plain bytes, a control byte or an escape becomes a blank, and the line is cut to the detail's room. A flood of one
-        class is still one issue, and a warning not seen again for KERNEL_NOTICE_AGE_NS is cleared; an error is kept until it is dismissed.
+        the board. What a record is raised for is what the kernel says of it, in its level (the low three bits of the record's priority field):
+        emergency to error (0 to 3) is the kernel calling it a fault, and it is raised as an error (in the class its words name, else the system's);
+        a warning (4) is raised as a warning when its words name a class and what went wrong in it (a ring that timed out, a device that failed, a
+        temperature that throttled); notice, info and debug (5 to 7) are the kernel saying it is not a fault, and are not raised (a thermal zone
+        registered, a feature left off by default, a device unplugged are lines of that kind). The few lines the kernel says at info when they are
+        faults all the same are the rules of kernel_notice_rules whose level is 7 (a program's crash; a panel i915 gave up). Lines that are not faults at
+        any level, and that the kernel prints on boots of machines that work, are quiet (kernel_notice_quiet), each there for a reason a machine's
+        log showed. A class is one issue on the board with the records of it counted, its worst severity, the seconds since its last record and its
+        last line, sanitized: the text is copied in as plain bytes, a control byte or an escape becomes a blank, and the line is cut to the detail's
+        room. A flood of one class is still one issue, and a warning not seen again for KERNEL_NOTICE_AGE_NS is cleared; an error is kept until it is
+        dismissed.
 */
 #define KMSG_FILE "/dev/kmsg"
 #define KERNEL_NOTICE_MOST 256
@@ -1786,6 +1791,8 @@ static const char *const kernel_notice_quiet[] = {
     "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
     "ACPI BIOS Error",        // firmware's own tables, on most boards
     "Direct firmware load",   // an optional blob that is not there
+    "[Firmware Bug]",         // the kernel's own label for a board's firmware being wrong, which it works around (a WMI block that is not there, a table's
+                              // entry): the board's maker's to fix and not the user's, on most boards
     "no codecs found",        // an HD-Audio controller with nothing on its link: a board whose analog sound is a USB card (the box's MSI PRO X670-P has
                               // 0db0:3130, and says this of 0000:16:00.6 at every boot while the iGPU's HDMI card plays); a machine with no card at all says so in the audio service
     "RDSEED32 is broken",     // a CPU bug the kernel works around
@@ -1803,7 +1810,8 @@ struct kernel_notices
 };
 static struct kernel_notices kernel_notice_state = {.fd = -1};
 
-// Whether text (length bytes, not ended) has any of words (ended): the alternatives, split at a bar.
+// Whether text (length bytes, not ended) has any of words (ended): the alternatives, split at a bar, each found where a word of the line starts
+// (after anything that is not a letter), so that "fault" is not in "default" nor "usb" in "xusb".
 static int kernel_notice_has(const char *text, unsigned int length, const char *words)
 {
         for (unsigned int from = 0, to = 0, k; words[from]; from = to + (words[to] == '|'))
@@ -1812,6 +1820,8 @@ static int kernel_notice_has(const char *text, unsigned int length, const char *
                         ;
                 for (unsigned int at = 0; at + to - from <= length; at++)
                 {
+                        if (at && (text[at - 1] | 32) >= 'a' && (text[at - 1] | 32) <= 'z')
+                                continue;
                         for (k = 0; k < to - from && text[at + k] == words[from + k]; k++)
                                 ;
                         if (k == to - from)
@@ -1822,21 +1832,27 @@ static int kernel_notice_has(const char *text, unsigned int length, const char *
 }
 
 // What makes a line a class's, asked in this order, the first that holds wins (the system's crashes and a program's segfault come before the drivers').
-// words: one of these alternatives is in the line; needs, when there are some: so is one of these (a line of level 3 or less needs none). severity is
-// the one it is raised at, or 0 for the level's: an error up to level 3, else a warning. A line none holds is the system's error at level 3 or less.
-static const struct { unsigned int code, severity; const char *words, *needs; } kernel_notice_rules[] = {
-    {WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR, "Out of memory|oom_kill_process|Killed process|BUG:|Oops|Kernel panic|WARNING: CPU", null},
-    {WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING, "segfault at", null},
-    {WINDOWS_ISSUE_KERNEL_GPU, 0, "amdgpu|drm|i915", "timeout|reset|fault|failed"},
-    {WINDOWS_ISSUE_KERNEL_USB, 0, "xhci|usb", "overrun|disconnect|failed"},
-    {WINDOWS_ISSUE_KERNEL_WIFI, 0, "iwlwifi|ath1|ath9|mt76|brcm|cfg80211", "firmware|timeout|error"},
-    {WINDOWS_ISSUE_KERNEL_BLUETOOTH, 0, "Bluetooth:", "failed|error"},
-    {WINDOWS_ISSUE_KERNEL_AUDIO, 0, "snd_|hda", "no codecs|error|failed"},
-    {WINDOWS_ISSUE_KERNEL_STORAGE, 0, "nvme|ext4|btrfs|xfs|mmc|FAT-fs|I/O error|Buffer I/O", "I/O error|Buffer I/O|not properly unmounted|error|timeout"},
-    {WINDOWS_ISSUE_KERNEL_SYSTEM, 0, "thermal|throttl|Hardware Error|mce:|EDAC", null}};
+// level is the quietest level the rule raises (the highest number): 4 is the kernel's warning, so a line the kernel says at notice, info or debug is
+// no fault of these classes; 7 is for the lines the kernel says at info and that are faults, which are asked at every level. words: one of these
+// alternatives is in the line; needs, when there are some: so is one of these (a line of level 3 or less needs none). severity is the one it is
+// raised at, or 0 for the level's: an error up to level 3, else a warning. A line none holds is the system's error at level 3 or less.
+static const struct { unsigned int code, severity, level; const char *words, *needs; } kernel_notice_rules[] = {
+    {WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR, 4, "Out of memory|oom_kill_process|Killed process|BUG:|Oops|Kernel panic|WARNING: CPU", null},
+    // A program's crash is the kernel's info line, not its fault (x86's show_signal prints it at KERN_INFO): "segfault at", "traps:" (a trap, an invalid opcode).
+    {WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING, 7, "segfault at|traps:", null},
+    {WINDOWS_ISSUE_KERNEL_GPU, 0, 4, "amdgpu|drm|i915", "timeout|reset|fault|failed"},
+    // i915 says at info (drm_info) that it has given up a panel whose link it could not read: the screen it was to drive is not driven.
+    {WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING, 7, "i915", "disabling eDP"},
+    {WINDOWS_ISSUE_KERNEL_USB, 0, 4, "xhci|usb", "overrun|failed"}, // a device unplugged ("USB disconnect") is a person's, not a fault
+    {WINDOWS_ISSUE_KERNEL_WIFI, 0, 4, "iwlwifi|ath1|ath9|mt76|mt79|brcm|cfg80211", "firmware|timeout|error"},
+    {WINDOWS_ISSUE_KERNEL_BLUETOOTH, 0, 4, "Bluetooth:", "failed|error"},
+    {WINDOWS_ISSUE_KERNEL_AUDIO, 0, 4, "snd_|hda", "no codecs|error|failed"},
+    {WINDOWS_ISSUE_KERNEL_STORAGE, 0, 4, "nvme|ext4|btrfs|xfs|mmc|FAT-fs|I/O error|Buffer I/O", "I/O error|Buffer I/O|not properly unmounted|error|timeout"},
+    {WINDOWS_ISSUE_KERNEL_SYSTEM, 0, 4, "thermal|throttl|Hardware Error|mce:|EDAC", null}};
 
 // The class of a line of the kernel's log at level, and the severity it is raised at (WINDOWS_ISSUE_*), or 0 when it is not raised: quiet lines,
-// and a level of 4 or more without the words that make a class of its own. Written as the table of the box's real lines it is checked against.
+// a level of 5 or more but for the rules of level 7, and a level of 4 without the words that make a class of its own. Written as the table of the
+// real lines of the machines' logs it is checked against.
 static unsigned int kernel_notice_class(const char *text, unsigned int length, unsigned int level, unsigned int *severity)
 {
         *severity = 0;
@@ -1844,7 +1860,7 @@ static unsigned int kernel_notice_class(const char *text, unsigned int length, u
                 if (kernel_notice_has(text, length, kernel_notice_quiet[q]))
                         return 0;
         for (unsigned int r = 0; r < sizeof(kernel_notice_rules) / sizeof(kernel_notice_rules[0]); r++)
-                if (kernel_notice_has(text, length, kernel_notice_rules[r].words) &&
+                if (level <= kernel_notice_rules[r].level && kernel_notice_has(text, length, kernel_notice_rules[r].words) &&
                     (!kernel_notice_rules[r].needs || level <= 3 || kernel_notice_has(text, length, kernel_notice_rules[r].needs)))
                 {
                         *severity = kernel_notice_rules[r].severity ? kernel_notice_rules[r].severity : level <= 3 ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING;

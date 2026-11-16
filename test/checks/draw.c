@@ -339,7 +339,14 @@ static const struct iss_kernel_line iss_kernel_lines[] = {
     {3, "amdgpu 0000:14:00.0: [gfxhub] page fault (src_id:0 ring:24 vmid:8 pasid:32768)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
     {3, "amdgpu 0000:14:00.0:   in page starting at address 0x0000000000000000 from client 18 (UTCL2)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
     {4, "amdgpu 0000:14:00.0: Failed to setup vendor infoframe on connector HDMI-A-1: -22", 0, 0},
-    {5, "amdgpu 0000:14:00.0: GPU reset begin! on a ring timeout", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
+    {6, "amdgpu 0000:14:00.0: GPU reset begin!", 0, 0}, // the kernel's info, after the error line of the ring that timed out, which is what is raised
+    {5, "amdgpu 0000:14:00.0: GPU reset begin! on a ring timeout", 0, 0}, // a notice is not a fault, whatever else the line says
+    {3, "amdgpu 0000:16:00.0: ring comp_1.3.0 timeout, signaled seq=10, emitted seq=13", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {3, "amdgpu 0000:16:00.0: Failed to load firmware \"amdgpu/psp_13_0_0_sos.bin\"", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {6, "amdgpu 0000:16:00.0: Trusted Memory Zone (TMZ) feature disabled as experimental (default)", 0, 0},
+    {4, "amdgpu 0000:16:00.0: Trusted Memory Zone (TMZ) feature disabled as experimental (default)", 0, 0}, // "fault" is not in "default"
+    {6, "i915 0000:00:02.0: [drm] [ENCODER:113:DDI A/PHY A] failed to retrieve link info, disabling eDP", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
+    {6, "i915 0000:00:02.0: [drm] Finished loading DMC firmware i915/kbl_dmc_ver1_04.bin (v1.4)", 0, 0},
     {6, "[drm:amdgpu_dm_init] DM_PPLIB: values for V-Blank", 0, 0},
     {3, "snd_hda_intel 0000:16:00.6: no codecs found!", 0, 0},
     {3, "snd_hda_intel 0000:14:00.6: no codecs found!", 0, 0},
@@ -347,29 +354,50 @@ static const struct iss_kernel_line iss_kernel_lines[] = {
     {4, "FAT-fs (nvme0n1p1): Volume was not properly unmounted. Some data may be corrupt. Please run fsck.", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_WARNING},
     {3, "EXT4-fs error (device sda1): ext4_find_entry:1455: inode #2: comm ls: reading directory lblock 0", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
     {3, "Buffer I/O error on dev sdb1, logical block 0, async page read", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
+    {3, "blk_update_request: I/O error, dev sda, sector 1234 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
+    {6, "EXT4-fs (nvme1n1p2): mounted filesystem 0a9d7823-8415-47dc-bb85-94d069364491 r/w with ordered data mode. Quota mode: disabled.", 0, 0},
+    {6, "nvme nvme0: 8/0/0 default/read/poll queues", 0, 0},
     {3, "nvme nvme0: I/O 123 QID 3 timeout, aborting", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
     {4, "workqueue: name exceeds WQ_NAME_LEN. Truncating to: hdmi_frl_status_polling_workque", 0, 0},
     {4, "xhci_hcd 0000:00:14.0: WARN: buffer overrun event for slot 3 ep 2 on endpoint", WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_WARNING},
     {3, "usb 1-3: device descriptor read/64, error -71", WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_ERROR},
+    {6, "usb 1-1: USB disconnect, device number 2", 0, 0},
+    {4, "usb 1-1: USB disconnect, device number 2", 0, 0}, // a device unplugged is a person's, not a fault, at the level it is printed at or any
     {6, "xhci_hcd 0000:00:14.0: xHCI Host Controller", 0, 0},
     {6, "usb 1-1: New USB device found, idVendor=046d, idProduct=c52b, bcdDevice=12.11", 0, 0},
     {4, "usb usb3: We don't know the algorithms for LPM for this host, disabling LPM.", 0, 0},
     {3, "iwlwifi 0000:00:14.3: Microcode SW error detected. Restarting 0x2000000.", WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_ERROR},
     {4, "iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-cc-a0-77.ucode failed with error -2", 0, 0},
+    {6, "iwlwifi 0000:00:14.3: loaded firmware version 77.a0fb5e42.0 cc-a0-77.ucode op_mode iwlmvm", 0, 0},
+    {3, "iwlwifi 0000:00:14.3: Failed to start RT ucode: -110", WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_ERROR},
+    {6, "mt7921e 0000:0c:00.0: Loading firmware patch: mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin", 0, 0},
+    {3, "mt7921e 0000:0c:00.0: Message 00020007 (seq 1) timeout", WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_ERROR},
+    {6, "cfg80211: failed to load regulatory.db", 0, 0},
     {3, "Bluetooth: hci0: command 0x0c03 tx timeout", WINDOWS_ISSUE_KERNEL_BLUETOOTH, WINDOWS_ISSUE_ERROR},
+    {3, "Bluetooth: hci0: Opcode 0x0c03 failed: -110", WINDOWS_ISSUE_KERNEL_BLUETOOTH, WINDOWS_ISSUE_ERROR},
     {6, "Bluetooth: Core ver 2.22", 0, 0},
     {3, "mce: [Hardware Error]: CPU 0: Machine Check: 0 Bank 1: be00000000800400", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
     {3, "thermal thermal_zone3: critical temperature reached (105 C), shutting down", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "CPU0: Package temperature above threshold, cpu clock throttled (total events = 1)", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_WARNING},
+    {6, "thermal_sys: Registered thermal governor 'step_wise'", 0, 0},
+    {6, "ACPI: thermal: Thermal Zone [TZ00] (28 C)", 0, 0},
+    {6, "acpi LNXTHERM:00: registered as thermal_zone0", 0, 0},
+    {4, "wmi_bus wmi_bus-PNP0C14:03: [Firmware Bug]: WQBC data block query control method not found", 0, 0},
+    {3, "wmi_bus wmi_bus-PNP0C14:03: [Firmware Bug]: WQBC data block query control method not found", 0, 0}, // the board's firmware, said even at error
+    {6, "PCI: Using host bridge windows from ACPI; if necessary, use \"pci=nocrs\" and report a bug", 0, 0},
     {4, "ACPI BIOS Error (bug): Could not resolve symbol [_SB.PCI0.GPP8.PEGP._DSM], AE_NOT_FOUND", 0, 0},
     {4, "RDSEED32 is broken. Disabling the corresponding CPUID bit.", 0, 0},
     {6, "virt/tdx: TDX not supported by the host platform", 0, 0},
     {4, "kauditd_printk_skb: 225 callbacks suppressed", 0, 0},
     {2, "Out of memory: Killed process 4321 (ld) total-vm:1048576kB, anon-rss:524288kB", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
-    {6, "oom_kill_process.cold+0x2c/0x7d", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "oom_kill_process.cold+0x2c/0x7d", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR}, // a Call Trace's frame, printed at the default level, 4
+    {6, "oom_kill_process.cold+0x2c/0x7d", 0, 0},
     {2, "BUG: unable to handle page fault for address: ffff8880a1b2c3d4", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
     {4, "WARNING: CPU: 3 PID: 1 at kernel/sched/core.c:1234 __schedule+0x1f", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
     {4, "check[1234]: segfault at 0 ip 0000000000401000 sp 00007ffd error 4 in check[400000+1000]", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING},
     {4, "bash[99]: segfault at 7f00 ip 00007f1 sp 00007f0 error 6 likely on CPU 2", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING},
+    {6, "bash[99]: segfault at 7f00 ip 00007f1 sp 00007f0 error 6 likely on CPU 2", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING}, // x86 prints a crash at info
+    {6, "traps: foo[321] trap invalid opcode ip:7f12a4 sp:7ffd8c error:0 in libc.so.6[7f12a0+1000]", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING},
     {4, "Call Trace:", 0, 0},
     {6, "Mem-Info:", 0, 0},
     {4, "lowmem_reserve[]: 0 0 0 0 0", 0, 0},
@@ -422,7 +450,24 @@ static void iss_rows_kernel(void)
 
                 raised += kernel_notices_record(&k, record, n, 1000);
         }
-        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 26);
+        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 35);
+        check("kernel notices: a word is found where a word of the line starts, not inside one (fault is not in default, usb is not in xusb)",
+              !kernel_notice_has("feature default", 15, "fault") && kernel_notice_has("page fault", 10, "fault") && kernel_notice_has("a_fault", 7, "fault") &&
+                  !kernel_notice_has("xusb 1", 6, "usb") && kernel_notice_has("usb1", 4, "usb") && kernel_notice_has("[drm:x]", 7, "drm"));
+        {
+                // The level is the kernel's own word on it: each line of the table, said at notice, info or debug in turn, is raised only by the words of a rule of level 7.
+                unsigned int loud = 0;
+
+                for (unsigned int level = 5; level <= 7; level++)
+                        for (unsigned int i = 0; i < lines; i++)
+                        {
+                                unsigned int sev = 0, length = (unsigned int)string_length((string_address)iss_kernel_lines[i].text);
+
+                                loud += kernel_notice_class(iss_kernel_lines[i].text, length, level, &sev) != 0 &&
+                                        !kernel_notice_has(iss_kernel_lines[i].text, length, "segfault at|traps:|disabling eDP");
+                        }
+                check("kernel notices: at notice, info or debug no line of the table is raised but a program's crash and the panel i915 gave up", loud == 0);
+        }
         memory_zero(&k, sizeof(k));
         k.fd = -2;
         check("kernel notices: a record with no semicolon is no record", kernel_notices_record(&k, "3,1,2,-", 7, 1) == 0);
