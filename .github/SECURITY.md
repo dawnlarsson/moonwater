@@ -1044,20 +1044,32 @@ reachable.
 | A program of a bowl at the hardened tier (a real uid 1000) | nothing: `/root` is not in its view, the state is root's 0600, the lock and the record are root's, and it cannot signal or trace the server |
 | A program of a bowl at the **default** tier | **everything a file can do**: it is root to the machine's files (BOWL-D1), so it can read the host key and rewrite the settings and the list, as it can rewrite the machine script; these settings hold only against the rest |
 | An unprivileged program of the machine, a Wayland or X client, a D-Bus call or portal | nothing of the settings; the session bus has no method that runs `moonwater`, and no client can write the window table. A uid 1000 program can bind the port while the server is off (above 1024, when the port is set there), and is ended at the next look |
-| A program with `/dev/uinput` (root, or a bowl with the input grant, which `bowl profile steam` gives) | **can type into any window**, the Settings window and a root terminal included: the compositor does not tell a virtual device from a real one |
+| A program with `/dev/uinput` (root, or a bowl with the input grant, which `bowl profile steam` gives) | **not** turn the server on, let root in or add a key through the Settings window, whose deliberate rows take only a key or a press the compositor read from a device it found physical (`WINDOW_EVENT_VIRTUAL`, MW-2026-202, ae5dcbec; the window's gate 349adc24); **can** still type into a root terminal, which takes virtual keys, and so type `moonwater ssh on` there as it can type anything |
+
+### What holds against synthetic input, and what does not
+
+- The rows that are a deliberate act (SSH server on, Root login on, Add a key)
+  carry `deliberate` in the registry, and the Settings window runs one only for
+  a KEY or BUTTON event without `WINDOW_EVENT_VIRTUAL`: the compositor leaves
+  the bit off only for an event it read itself from a device it classified as
+  physical (USB, a built-in keyboard, ACPI and platform buttons, an I2C
+  touchpad, classic Bluetooth through the kernel's driver, a virtual machine's
+  virtio input; a touch screen's taps inherit the touch screen). Virtual, and
+  refused: uinput, uhid (so a Bluetooth LE keyboard cannot confirm), a node it
+  cannot read, the headless pipe, the on-screen keyboard, and anything the
+  Wayland shim injects. The same verbs typed in the window's All commands are
+  refused without a hand too. Turning off, root off and End every session are
+  not gated. Held by four CHECK_terminal rows (the UI's; NOT RUN by this
+  worker).
+- Not held: the Canvas terminal takes virtual keys, so a program that can make a
+  uinput keyboard can type `moonwater ssh on` into a root terminal that is open;
+  `moonwater ssh on`, `ssh root on` and `ssh key add` at a root terminal are the
+  deliberate path, and are as safe as that terminal. Kernels of the hardened
+  and locked profiles have no uinput. Whether a Bluetooth LE keyboard and the
+  on-screen keyboard being unable to confirm is acceptable is the owner's
+  decision.
 
 ### What is not done
-
-- The Settings window does not tell a virtual input device from a real one: the
-  rows that are a deliberate act (Server, Root login, Add a key) carry
-  `deliberate` in the registry and nothing reads it yet. It needs the
-  compositor to mark each evdev device whose sysfs path is under
-  `/sys/devices/virtual/` (uinput, and uhid, so a Bluetooth keyboard through
-  uhid would count as virtual) and the window to refuse a deliberate row for a
-  virtual press. Until then the deliberate path is `moonwater ssh on`, `ssh root
-  on` and `ssh key add` typed in a root terminal at the machine, and a uinput
-  keyboard can type those as well as it can type anything else. Kernels of the
-  hardened and locked profiles have no uinput.
 - At the default bowl tier nothing here holds against a program of a bowl
   (BOWL-D1): the status line and the Settings row say which tier the machine
   is, and `sec_bowl_hardened` is the tier at which they hold.

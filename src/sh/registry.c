@@ -210,9 +210,9 @@ struct settings_row
         // The window's again, last so that the places of the fields before stay.
         const char address_to part;  // the header of the part of its group this row starts, or none: it is in the part before it
         const char address_to about; // what it does, in plain words: the line under its label in the window
-        // A change that is a deliberate act of the person's (a server turned on, root let in, a key added), which the window is to
-        // run only for a press or a key from a device plugged into the machine and never for a virtual one (uinput, uhid). Nothing
-        // reads it yet: the compositor does not tell the window which a device is (.github/SECURITY.md, the ssh server).
+        // A change that is a deliberate act of the person's (a server turned on, root let in, a key added): the window runs it only for
+        // a key or a press with no WINDOW_EVENT_VIRTUAL, which the compositor leaves off only for what it read from a device it found
+        // physical, so never for uinput, uhid or the on-screen keyboard (settings.c's settings_refused; .github/SECURITY.md, the ssh server).
         unsigned char deliberate;
 };
 
