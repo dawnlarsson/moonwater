@@ -2728,9 +2728,9 @@ static b32 compositor_main()
                         until = !until || frame < until ? frame : until;
                 }
 
-                // A wallpaper being made on its thread: looked at again soon, to be taken when it is done.
-                if (compositor_wall_making())
-                        until = !until || now + COMPOSITOR_WALL_LOOK < until ? now + COMPOSITOR_WALL_LOOK : until;
+                // The wallpaper: one held back for the first frame, or one made on its thread with no knock to say it is done.
+                if (compositor_wall_due(now))
+                        until = !until || compositor_wall_due(now) < until ? compositor_wall_due(now) : until;
                 // The moon's next step of its turn, while it turns.
                 if (compositor.band && taskbar_moon_due(now))
                         until = !until || taskbar_moon_due(now) < until ? taskbar_moon_due(now) : until;

@@ -1639,6 +1639,7 @@ static void compositor_doors_start(int clip)
         compositor_doors.done = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0); // EFD_CLOEXEC | EFD_NONBLOCK
         if (compositor_doors.done < 0)
                 return;
+        compositor_wall_knock = compositor_doors.done; // the wallpaper's thread knocks with it too
         for (unsigned int slot = 0; slot <= compositor_rows_in_use; slot++)
         {
                 // A kick is read where its thread waits (EFD_CLOEXEC alone: the read blocks), so a thread asked for a wake makes two

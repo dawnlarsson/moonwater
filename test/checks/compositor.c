@@ -4455,6 +4455,23 @@ static void wallpaper_bench(string_address into)
                  {"wall-4k-dark-dimmed.ppm", 3840, 2160, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM},
                  {"wall-4k-light.ppm", 3840, 2160, 0}};
 
+    // The button's moon: its map made (cold), then a 32 pixel disc at fifty steps of its turn.
+    {
+        static unsigned int field[64 * 64];
+        static const struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0, 0};
+        struct ui ui;
+        positive at[3];
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = field, ui.pitch = 64, ui.width = 64, ui.height = 64, ui.bottom = 64, ui.scale = 100;
+        at[0] = clock_monotonic_nanoseconds();
+        ui_moon_map_for(32);
+        at[1] = clock_monotonic_nanoseconds();
+        for (int k = 0; k < 50; k++)
+            ui_moon(&ui, 0, 0, 32, UI_ONE / 2, (b64)k * UI_ONE / 300, &look);
+        at[2] = clock_monotonic_nanoseconds();
+        string_format(log, "  moon bench: the button's map made in %p ms, the 32 pixel disc in %p us a step\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 50000);
+    }
     for (unsigned int k = 0; k < sizeof(looks) / sizeof(looks[0]); k++)
     {
         struct ui ui;

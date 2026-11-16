@@ -16216,6 +16216,7 @@ struct ui_moon_map
         int width, levels;
         unsigned short address_to albedo;
         short address_to height;
+        unsigned short address_to texel; // each texel's albedo, its slope east and its slope north (signed, in 65536ths of the radius a texel), and none
 };
 
 static struct ui_moon_map ui_moon_maps[3]; // 512, 1024 and 2048 wide, each made when first wanted
@@ -16415,29 +16416,46 @@ static b32 ui_moon_bake(struct ui_moon_map address_to map, int width)
         if (got < 0 && got > -4096)
                 return false;
         map->albedo = (unsigned short address_to)got, map->height = (short address_to)(got + texels * (long)sizeof(unsigned short));
-        // The ground: the highlands and the maria, and their noise.
+        // The ground: the highlands and the maria, and their noise, a run of a row at a time (ui_moon_fbm_run).
         for (int j = 0; j < height; j++)
         {
                 decimal latitude = UI_MOON_PI / 2 - (j + 0.5) * UI_MOON_PI / height;
 
-                for (int i = 0; i < width; i++)
+                for (int i0 = 0; i0 < width; i0 += UI_MOON_RUN)
                 {
-                        decimal p[3], mare, albedo, rough;
-
-                        ui_moon_vector((i + 0.5) * texel - UI_MOON_PI, latitude, p);
-                        mare = ui_moon_mare(p);
-                        rough = ui_moon_fbm(p[0], p[1], p[2], 3.0, 7, 11u);
-                        albedo = 0.76 + 0.10 * rough + 0.08 * ui_moon_fbm(p[0], p[1], p[2], 1.2, 3, 23u) + 0.12 * ui_moon_fbm(p[0], p[1], p[2], 14.0, 5, 41u);
-                        // A mare: its core darkest, lighter toward its feathered shore, its basalts darker and lighter in patches.
+                        int n = width - i0 < UI_MOON_RUN ? width - i0 : UI_MOON_RUN;
+                        float px[UI_MOON_RUN], py[UI_MOON_RUN], pz[UI_MOON_RUN], f[8][UI_MOON_RUN];
+                        static const struct
                         {
-                                decimal basalt = 0.24 + 0.16 * (1 - mare) + 0.10 * ui_moon_fbm(p[0], p[1], p[2], 3.0, 4, 31u) +
-                                                 0.06 * ui_moon_fbm(p[0], p[1], p[2], 12.0, 4, 37u);
+                                float frequency;
+                                unsigned char octaves, seed;
+                        } fields[8] = {{3.0f, 6, 77}, {11.0f, 4, 79}, {3.0f, 7, 11}, {1.2f, 3, 23}, {14.0f, 5, 41}, {3.0f, 4, 31}, {12.0f, 4, 37}, {6.0f, 3, 53}};
 
-                                albedo += (basalt - albedo) * (mare * mare * (3 - 2 * mare));
+                        for (int k = 0; k < n; k++)
+                        {
+                                decimal p[3];
+
+                                ui_moon_vector((i0 + k + 0.5) * texel - UI_MOON_PI, latitude, p);
+                                px[k] = (float)p[0], py[k] = (float)p[1], pz[k] = (float)p[2];
                         }
-                        albedo = albedo < 0.05 ? 0.05 : albedo > 1 ? 1 : albedo;
-                        map->albedo[(long)j * width + i] = (unsigned short)(albedo * 65535);
-                        map->height[(long)j * width + i] = (short)((rough * 0.004 * (1 - 0.7 * mare) + 0.002 * mare * ui_moon_fbm(p[0], p[1], p[2], 6.0, 3, 53u)) * 65536);
+                        for (int at = 0; at < 8; at++)
+                                ui_moon_fbm_run(f[at], px, py, pz, n, fields[at].frequency, fields[at].octaves, fields[at].seed, 0.5f);
+                        for (int k = 0; k < n; k++)
+                        {
+                                decimal p[3] = {px[k], py[k], pz[k]}, mare = ui_moon_mare_at(p, 1.5 * f[0][k] + 0.6 * f[1][k]), rough = f[2][k], albedo;
+                                long at = (long)j * width + i0 + k;
+
+                                albedo = 0.76 + 0.10 * rough + 0.08 * f[3][k] + 0.12 * f[4][k];
+                                // A mare: its core darkest, lighter toward its feathered shore, its basalts darker and lighter in patches.
+                                {
+                                        decimal basalt = 0.24 + 0.16 * (1 - mare) + 0.10 * f[5][k] + 0.06 * f[6][k];
+
+                                        albedo += (basalt - albedo) * (mare * mare * (3 - 2 * mare));
+                                }
+                                albedo = albedo < 0.05 ? 0.05 : albedo > 1 ? 1 : albedo;
+                                map->albedo[at] = (unsigned short)(albedo * 65535);
+                                map->height[at] = (short)((rough * 0.004 * (1 - 0.7 * mare) + 0.002 * mare * f[7][k]) * 65536);
+                        }
                 }
         }
         // The craters, largest first: the k'th's radius is 0.26 degrees times the square root of 6000 over k + 1, so there are four times as
@@ -16561,6 +16579,33 @@ static b32 ui_moon_bake(struct ui_moon_map address_to map, int width)
                                 map->height[into + (long)j * w + i] = (short)(((int)map->height[a] + map->height[a + 1] + map->height[b] + map->height[b + 1]) / 4);
                         }
         }
+        // Each texel's albedo and its slopes east and north (half the difference of the heights either side, the east's wrapping round
+        // the equator, the north's held at the poles), side by side, so a sample of the light is one read of four.
+        {
+                long got_texels = ui_map((positive)texels * 4 * sizeof(unsigned short));
+
+                if (got_texels < 0 && got_texels > -4096)
+                        return false;
+                map->texel = (unsigned short address_to)got_texels;
+        }
+        for (int l = 0; l < levels; l++)
+        {
+                int w = width >> l, h = w / 2;
+                long base = ui_moon_level_at(width, l);
+
+                for (int j = 0; j < h; j++)
+                        for (int i = 0; i < w; i++)
+                        {
+                                long at = base + (long)j * w + i, row = base + (long)j * w;
+                                const short address_to up = map->height + base + (long)(j > 0 ? j - 1 : 0) * w, address_to down = map->height + base + (long)(j + 1 < h ? j + 1 : h - 1) * w;
+                                unsigned short address_to into = map->texel + at * 4;
+
+                                into[0] = map->albedo[at];
+                                into[1] = (unsigned short)(short)(((int)map->height[row + (i + 1) % w] - map->height[row + (i + w - 1) % w]) / 2);
+                                into[2] = (unsigned short)(short)(((int)up[i] - down[i]) / 2);
+                                into[3] = 0;
+                        }
+        }
         map->width = width, map->levels = levels;
         return true;
 }
@@ -16576,8 +16621,9 @@ static const struct ui_moon_map address_to ui_moon_map_for(int size)
         return map;
 }
 
-// A map's albedo (0 to 1) and height (of the radius) at u, v texels of a level, bilinear, wrapping along the equator.
-static void ui_moon_sample(const struct ui_moon_map address_to map, int level, decimal u, decimal v, decimal address_to albedo, decimal address_to rise)
+// A map's albedo (0 to 1) and its slopes east and north (of the radius a texel) at u, v texels of a level, bilinear, wrapping along the
+// equator: one read of the four texels round the point, each its albedo and its two slopes side by side.
+static void ui_moon_sample_slopes(const struct ui_moon_map address_to map, int level, decimal u, decimal v, decimal out[3])
 {
         int w = map->width >> level, h = w / 2, i, j;
         long base = ui_moon_level_at(map->width, level);
@@ -16588,10 +16634,12 @@ static void ui_moon_sample(const struct ui_moon_map address_to map, int level, d
         i = (int)(u < 0 ? u - 1 : u), j = (int)v, fu = u - i, fv = v - j;
         {
                 int i0 = ((i % w) + w) % w, i1 = (i0 + 1) % w;
-                long a = base + (long)j * w, b = a + w;
+                const unsigned short address_to a = map->texel + (base + (long)j * w) * 4, address_to b = a + (long)w * 4;
+                decimal w00 = (1 - fu) * (1 - fv), w10 = fu * (1 - fv), w01 = (1 - fu) * fv, w11 = fu * fv;
 
-                *albedo = ((map->albedo[a + i0] * (1 - fu) + map->albedo[a + i1] * fu) * (1 - fv) + (map->albedo[b + i0] * (1 - fu) + map->albedo[b + i1] * fu) * fv) / 65535.0;
-                *rise = ((map->height[a + i0] * (1 - fu) + map->height[a + i1] * fu) * (1 - fv) + (map->height[b + i0] * (1 - fu) + map->height[b + i1] * fu) * fv) / 65536.0;
+                out[0] = (a[i0 * 4] * w00 + a[i1 * 4] * w10 + b[i0 * 4] * w01 + b[i1 * 4] * w11) / 65535.0;
+                for (int k = 1; k < 3; k++)
+                        out[k] = ((short)a[i0 * 4 + k] * w00 + (short)a[i1 * 4 + k] * w10 + (short)b[i0 * 4 + k] * w01 + (short)b[i1 * 4 + k] * w11) / 65536.0;
         }
 }
 
@@ -16618,17 +16666,14 @@ static decimal ui_moon_light(const struct ui_moon_map address_to map, int level,
         decimal longitude = arc_tangent_two(bx, bz), latitude = arc_sine(by > 1 ? 1 : by < -1 ? -1 : by);
         int w = map->width >> level, h = w / 2;
         decimal u = (longitude + UI_MOON_PI) / (2 * UI_MOON_PI) * w, v = (UI_MOON_PI / 2 - latitude) / UI_MOON_PI * h;
-        decimal albedo, rise, east_rise, west_rise, north_rise, south_rise, a2, cl = square_root(1 - by * by);
+        decimal albedo, sampled[3], cl = square_root(1 - by * by);
         decimal n[3], len, mu0, mu, light;
 
-        ui_moon_sample(map, level, u, v, &albedo, &rise);
-        ui_moon_sample(map, level, u + 1, v, &a2, &east_rise);
-        ui_moon_sample(map, level, u - 1, v, &a2, &west_rise);
-        ui_moon_sample(map, level, u, v - 1, &a2, &north_rise);
-        ui_moon_sample(map, level, u, v + 1, &a2, &south_rise);
+        ui_moon_sample_slopes(map, level, u, v, sampled);
+        albedo = sampled[0];
         {
                 // The slopes in height per radian east and north, and the normal leant from them (the eye's frame turned with the body).
-                decimal per = w / (2 * UI_MOON_PI), d_east = (east_rise - west_rise) / 2 * per / (cl > 0.05 ? cl : 0.05), d_north = (north_rise - south_rise) / 2 * per;
+                decimal per = w / (2 * UI_MOON_PI), d_east = sampled[1] * per / (cl > 0.05 ? cl : 0.05), d_north = sampled[2] * per;
                 decimal sl = sine(longitude), clg = cosine(longitude), sb = by;
                 decimal east[3] = {clg, 0, -sl}, north[3] = {-sb * sl, cl, -sb * clg};
 
@@ -16664,20 +16709,17 @@ static decimal ui_moon_light_at(const struct ui_moon_map address_to map, int lev
         decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
         decimal longitude = lon0 + t, latitude;
         int w = map->width >> level, h = w / 2;
-        decimal u, v, albedo, rise, east_rise, west_rise, north_rise, south_rise, a2;
+        decimal u, v, albedo, sampled[3];
         decimal n[3], len, mu0, mu, light, sl, clg;
 
         longitude = longitude > UI_MOON_PI ? longitude - 2 * UI_MOON_PI : longitude <= -UI_MOON_PI ? longitude + 2 * UI_MOON_PI : longitude;
         latitude = arc_tangent_two(by, cl);
         u = (longitude + UI_MOON_PI) / (2 * UI_MOON_PI) * w, v = (UI_MOON_PI / 2 - latitude) / UI_MOON_PI * h;
         sl = cl > 1e-9 ? bx / cl : 0, clg = cl > 1e-9 ? bz / cl : 1;
-        ui_moon_sample(map, level, u, v, &albedo, &rise);
-        ui_moon_sample(map, level, u + 1, v, &a2, &east_rise);
-        ui_moon_sample(map, level, u - 1, v, &a2, &west_rise);
-        ui_moon_sample(map, level, u, v - 1, &a2, &north_rise);
-        ui_moon_sample(map, level, u, v + 1, &a2, &south_rise);
+        ui_moon_sample_slopes(map, level, u, v, sampled);
+        albedo = sampled[0];
         {
-                decimal per = w / (2 * UI_MOON_PI), d_east = (east_rise - west_rise) / 2 * per / (cl > 0.05 ? cl : 0.05), d_north = (north_rise - south_rise) / 2 * per;
+                decimal per = w / (2 * UI_MOON_PI), d_east = sampled[1] * per / (cl > 0.05 ? cl : 0.05), d_north = sampled[2] * per;
                 decimal sb = by, east[3] = {clg, 0, -sl}, north[3] = {-sb * sl, cl, -sb * clg};
 
                 d_east *= 2.5, d_north *= 2.5;

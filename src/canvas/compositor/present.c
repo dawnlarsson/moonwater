@@ -712,13 +712,28 @@ static void compositor_wall_make(struct compositor_wall_job *job)
         }
 }
 
+/*
+        The eventfd the wallpaper's thread knocks the loop with when it is done (the doors' own, compositor_doors_start sets it): the loop
+        wakes for it and takes the wallpaper at that pass, and asks the time of nothing while one is made. -1 before the doors are open;
+        then the loop looks again a frame later (compositor.period) while one is made.
+*/
+static int compositor_wall_knock = -1;
+
+// The wallpaper is deferred till the first frame is out: set when compositor_wall_keep held one back, so the loop wakes for it after.
+static int compositor_wall_deferred;
+
 static fn compositor_wall_run(address_any context)
 {
         struct compositor_wall_job *job = (struct compositor_wall_job *)context;
+        unsigned long one = 1;
 
+        // Under every other thread of the compositor (nice 10, and the disc's threads it starts with it): it is never what a frame waits for.
+        compositor_call(syscall(setpriority), 0, (positive)compositor_call(syscall(gettid), 0, 0, 0, 0, 0, 0), 10, 0, 0, 0);
         compositor_wall_make(job);
         job->took = clock_monotonic_nanoseconds() - job->began;
         __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+        if (compositor_wall_knock >= 0)
+                compositor_call(syscall(write), (positive)compositor_wall_knock, (positive)&one, sizeof one, 0, 0, 0);
 }
 
 // The wallpaper made on its thread taken: it is the one shown from now, the one before let go, the space damaged.
@@ -738,12 +753,21 @@ static void compositor_wall_take(void)
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
-// Whether a wallpaper is being made: the loop looks again within COMPOSITOR_WALL_LOOK for it to be done.
-#define COMPOSITOR_WALL_LOOK (16ull * 1000000ull)
-
+// Whether a wallpaper is being made on its thread.
 static int compositor_wall_making(void)
 {
         return compositor_wall_job.pixels != null;
+}
+
+// When the loop is to look at the wallpaper again, 0 for no time: one held back for the first frame now that a frame is out; one being
+// made only a frame later, and only with no knock to wake the loop when it is done.
+static positive compositor_wall_due(positive now)
+{
+        if (compositor_wall_deferred && compositor.presented)
+                return now;
+        if (compositor_wall_job.pixels && compositor_wall_knock < 0)
+                return now + (compositor.period ? compositor.period : 16666667ull);
+        return 0;
 }
 
 static void compositor_wall_keep(void)
@@ -756,6 +780,13 @@ static void compositor_wall_keep(void)
         // Not before the rows are read: a compositor that has read no settings (a check's) keeps its colour.
         if (!compositor_wall_rows.ready)
                 return;
+        // The first frame first, on a screen: the wallpaper after it, never in its way at boot.
+        compositor_wall_deferred = 0;
+        if (compositor.scanout && !compositor.presented)
+        {
+                compositor_wall_deferred = 1;
+                return;
+        }
         // One being made: taken when it is done, and nothing else asked till then.
         if (job->pixels)
         {
