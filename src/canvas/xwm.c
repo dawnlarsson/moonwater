@@ -867,7 +867,7 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
 */
 static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
 {
-        return w->row >= 0 && w->row < WINDOWS && (compositor.state[w->row] & WINDOW_CLOSING) && w->closes != compositor.close_asks[w->row] &&
+        return w->row >= 0 && w->row < COMPOSITOR_ROWS && (compositor.state[w->row] & WINDOW_CLOSING) && w->closes != compositor.close_asks[w->row] &&
                ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
 }
 
@@ -1041,7 +1041,7 @@ static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned 
             COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_LEFT,  COMPOSITOR_EDGE_LEFT};
         int row;
 
-        if (!w || w->row < 0 || w->row >= WINDOWS || !compositor.showing[w->row])
+        if (!w || w->row < 0 || w->row >= COMPOSITOR_ROWS || !compositor.showing[w->row])
                 return;
         row = w->row;
         if (direction == COMPOSITOR_XWM_MOVERESIZE_CANCEL)
@@ -1261,7 +1261,7 @@ static void compositor_xwm_event(const struct xwm_event *e)
                                 }
                         }
                         if (hidden && (e->data[1] == hidden || e->data[2] == hidden) &&
-                            w->row >= 0 && w->row < WINDOWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
+                            w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
                         {
                                 int on = e->data[0] == COMPOSITOR_XWM_NET_ADD      ? 1
                                          : e->data[0] == COMPOSITOR_XWM_NET_REMOVE ? 0
@@ -1277,20 +1277,20 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 else if (e->atom && e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
                 {
                         w = compositor_xwm_find(e->window, 0);
-                        if (w && w->row >= 0 && w->row < WINDOWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
+                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
                                 compositor_reveal(w->row);
                 }
                 else if (e->atom && e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CLOSE])
                 {
                         w = compositor_xwm_find(e->window, 0);
-                        if (w && w->row >= 0 && w->row < WINDOWS && compositor.showing[w->row])
+                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row])
                                 compositor_close(w->row);
                 }
                 else if (e->atom && e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_CHANGE_STATE] &&
                          e->format == XWM_FORMAT_32 && e->data[0] == COMPOSITOR_XWM_STATE_ICONIC)
                 {
                         w = compositor_xwm_find(e->window, 0);
-                        if (w && w->row >= 0 && w->row < WINDOWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
+                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !(w->state & COMPOSITOR_XWM_POPUPISH))
                                 compositor_minimize_row(w->row);
                 }
                 break;
@@ -1718,7 +1718,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || wayland_serial_row(w->serial) != w->row))
                         compositor_xwm_unmapped(w);
                 compositor_xwm_resolve(w);
-                if (w->row < 0 || w->row >= WINDOWS)
+                if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
                         continue;
                 // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW (once for each
                 // ask, compositor_xwm_close_owed) when its WM_PROTOCOLS lists it, and is destroyed when it does not (ICCCM 4.2.8.1).
@@ -1739,7 +1739,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 {
                         struct compositor_xwm_window *parent = compositor_xwm_find(w->transient, 0);
 
-                        if (parent && parent->row >= 0 && parent->row < WINDOWS)
+                        if (parent && parent->row >= 0 && parent->row < COMPOSITOR_ROWS)
                         {
                                 w->state |= COMPOSITOR_XWM_RAISED;
                                 compositor_raise(w->row);

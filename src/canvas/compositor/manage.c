@@ -305,7 +305,7 @@ static void compositor_place(int row, int x, int y)
 */
 static int compositor_least(int row, int down)
 {
-        b32 named = row >= 0 && row < WINDOWS;
+        b32 named = row >= 0 && row < COMPOSITOR_ROWS;
         unsigned int own = named ? (down ? compositor.table->least_height[row] : compositor.table->least_width[row]) : 0;
         unsigned int scale = named ? compositor.table->window_scale[row] : 0;
         int least = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100, asked;
@@ -1407,7 +1407,7 @@ static void compositor_arrange(int row, unsigned int how)
 // rule of the screen edges applies to it and to no other maximised window (compositor_swipe_act).
 static void compositor_fullscreen_row(int row)
 {
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         compositor_arrange(row, COMPOSITOR_MAXIMIZED);
         if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
@@ -2949,7 +2949,7 @@ static int compositor_popup_root(int row);
 
 static int compositor_clip_root(int row)
 {
-        return row >= 0 && row < WINDOWS ? compositor_popup_root(row) : -1;
+        return row >= 0 && row < COMPOSITOR_ROWS ? compositor_popup_root(row) : -1;
 }
 
 // A key or a button the person pressed on a row: the row and the window it belongs to may paste for a while.
@@ -2966,7 +2966,7 @@ static void compositor_clip_gesture(int row)
 
 static void compositor_clip_tell(int row, unsigned int which, int what)
 {
-        if (row >= 0 && row < WINDOWS && compositor.table->pid[row])
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor.table->pid[row])
                 compositor_post(row, WINDOW_EVENT_CLIP, 0, (int)which, what);
 }
 
@@ -3167,7 +3167,7 @@ static void compositor_osk_read(int row)
         unsigned int head;
         positive now;
 
-        if (row < 0 || row >= WINDOWS || !(compositor.asks[row] & WINDOW_KEYBOARD))
+        if (row < 0 || row >= COMPOSITOR_ROWS || !(compositor.asks[row] & WINDOW_KEYBOARD))
                 return;
         head = __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE);
         now = clock_monotonic_nanoseconds();
@@ -3390,7 +3390,7 @@ static b32 compositor_popup_first(int row)
 {
         struct windows *table = compositor.table;
         unsigned int named = table->popup_parent[row];
-        int parent = named >= 1 && named <= WINDOWS ? (int)named - 1 : -1;
+        int parent = named >= 1 && named <= (unsigned int)COMPOSITOR_ROWS ? (int)named - 1 : -1;
         unsigned int count;
         const int (*screens)[4];
         int ax, ay, aw, ah, x, y, at;

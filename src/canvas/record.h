@@ -235,7 +235,7 @@ static void compositor_record_scene(const struct compositor_frame *frames, unsig
 {
         unsigned int sizes = 2166136261u;
 
-        compositor_record_pending_count = windows < WINDOWS ? windows : WINDOWS;
+        compositor_record_pending_count = windows < compositor_rows_in_use ? windows : compositor_rows_in_use;
         for (unsigned int at = 0; at < compositor_record_pending_count; at++)
         {
                 compositor_record_pending[at][0] = frames[at].x;

@@ -1380,7 +1380,7 @@ static unsigned char *compositor_owed_any;             // whether any key of the
 
 static void compositor_owed_flush(int row)
 {
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         for (unsigned int index = 0; index < 8 && compositor_owed[row]; index++)
         {
@@ -1414,7 +1414,7 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                 compositor_owed[row] |= (unsigned char)(1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT));
                 compositor_owed_flags[row][(unsigned int)a - COMPOSITOR_BTN_LEFT] = flags;
         }
-        if (!posted && type == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a < 256 && row < WINDOWS)
+        if (!posted && type == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a < 256 && row < COMPOSITOR_ROWS)
         {
                 compositor_owed_keys[row][(unsigned int)a >> 3] |= (unsigned char)(1u << ((unsigned int)a & 7));
                 compositor_owed_key_flags[row][(unsigned int)a] = flags;
@@ -1632,6 +1632,27 @@ static fn compositor_door_misc(address_any context)
         }
 }
 
+/*
+        A slot's thread: a row's, or the misc one's (COMPOSITOR_DOOR_MISC). A kick is read where its thread waits (EFD_CLOEXEC alone: the
+        read blocks), so a thread asked for a wake makes two calls, the read that ends and the wake's write, where a poll, a read and the
+        write were three. 1 when the thread runs; 0 when the kernel refused its kick or the thread, and the slot is the loop's, as every
+        slot was.
+*/
+static int compositor_door_thread(unsigned int slot)
+{
+        compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000, 0, 0, 0, 0);
+        if (compositor_doors.kick[slot] < 0)
+                return 0;
+        compositor_doors.worker[slot] = thread_start(slot < WINDOWS ? compositor_door_run : compositor_door_misc, (address_any)(positive)slot);
+        if (!compositor_doors.worker[slot])
+        {
+                system_close(compositor_doors.kick[slot]);
+                compositor_doors.kick[slot] = -1;
+                return 0;
+        }
+        return 1;
+}
+
 // The threads, once the doors are open (clip, the clipboard's); a slot that can have none is the loop's, as every slot was.
 static void compositor_doors_start(int clip)
 {
@@ -1640,15 +1661,9 @@ static void compositor_doors_start(int clip)
         if (compositor_doors.done < 0)
                 return;
         compositor_wall_knock = compositor_doors.done; // the wallpaper's thread knocks with it too
-        for (unsigned int slot = 0; slot <= compositor_rows_in_use; slot++)
-        {
-                // A kick is read where its thread waits (EFD_CLOEXEC alone: the read blocks), so a thread asked for a wake makes two
-                // calls, the read that ends and the wake's write, where a poll, a read and the write were three.
-                compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000, 0, 0, 0, 0);
-                if (compositor_doors.kick[slot] >= 0)
-                        compositor_doors.worker[slot] = thread_start(slot < WINDOWS ? compositor_door_run : compositor_door_misc,
-                                                                     (address_any)(positive)slot);
-        }
+        for (unsigned int slot = 0; slot < compositor_rows_in_use; slot++)
+                compositor_door_thread(slot);
+        compositor_door_thread(COMPOSITOR_DOOR_MISC);
 }
 
 // Every row that was given something in this pass is knocked on, once: its byte written by its thread, or here.

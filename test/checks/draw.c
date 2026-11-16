@@ -26,7 +26,7 @@
         given up) and to nothing the table says of itself: a count it does not match, a severity that is none, a key or a detail with no
         null, a lock held by a writer that is gone.
 */
-static struct windows iss_table;
+static struct windows *iss_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 static struct windows_issues iss_copy;
 
 // The slot of a key on a copy, or -1 (the reader keeps each issue in its slot, so a test finds it by its key).
@@ -52,42 +52,43 @@ static void iss_rows_basic(void)
 {
         unsigned int slots[WINDOWS_ISSUES];
 
-        memory_zero(&iss_table, sizeof(iss_table));
-        check("issues: a set on the board is one issue", windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 3, 22, "pictures refused") == 1);
+        windows_scratch_zero(windows_scratch_table(&iss_table_scratch));
+        check("issues: a set on the board is one issue", windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 3, 22, "pictures refused") == 1);
         check("issues: the set is read back, its key, severity, code, numbers and detail whole",
-              windows_issues_read(&iss_table, &iss_copy) == 1 && iss_copy.count == 1 && string_equals((string_address)iss_copy.issue[0].key, (string_address)"canvas gpu") &&
+              windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy) == 1 && iss_copy.count == 1 && string_equals((string_address)iss_copy.issue[0].key, (string_address)"canvas gpu") &&
                   iss_copy.issue[0].severity == WINDOWS_ISSUE_ERROR && iss_copy.issue[0].code == WINDOWS_ISSUE_GPU_MAP && iss_copy.issue[0].a == 3 &&
                   iss_copy.issue[0].b == 22 && string_equals((string_address)iss_copy.issue[0].detail, (string_address)"pictures refused"));
         check("issues: the same key and code is updated in place, not added to",
-              windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_MAP, 4, 12, "again") == 1 && iss_table.issue_count == 1);
-        windows_issues_read(&iss_table, &iss_copy);
+              windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_MAP, 4, 12, "again") == 1 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: the update changes the severity, numbers and detail it was set with",
               iss_copy.count == 1 && iss_copy.issue[0].severity == WINDOWS_ISSUE_WARNING && iss_copy.issue[0].a == 4 && iss_copy.issue[0].b == 12 &&
                   string_equals((string_address)iss_copy.issue[0].detail, (string_address)"again"));
-        check("issues: the same key with another code is a second issue", windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 1 && iss_table.issue_count == 2);
-        check("issues: another key is an issue of its own", windows_issue_set(&iss_table, "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 5, 0, "") == 1);
-        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: the same key with another code is a second issue", windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 1 && windows_scratch_table(&iss_table_scratch)->issue_count == 2);
+        check("issues: another key is an issue of its own", windows_issue_set(windows_scratch_table(&iss_table_scratch), "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 5, 0, "") == 1);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: worst severity is per key", windows_issues_worst(&iss_copy, "canvas gpu", null) == WINDOWS_ISSUE_WARNING &&
               windows_issues_worst(&iss_copy, "audio device", null) == WINDOWS_ISSUE_ERROR && windows_issues_worst(&iss_copy, "wifi", null) == 0);
         check("issues: the count of a key is its issues", windows_issues_worst(&iss_copy, "canvas gpu", slots) == WINDOWS_ISSUE_WARNING && slots[0] == 2);
-        check("issues: a clear of one code leaves the others of the key", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_GPU_LISTS) == 1 && iss_table.issue_count == 2);
-        check("issues: a clear of every code takes the key's issues and no other key's", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 1 && iss_table.issue_count == 1);
-        check("issues: a clear of a key that has none changes nothing", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && iss_table.issue_count == 1);
-        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a clear of one code leaves the others of the key", windows_issue_clear(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_GPU_LISTS) == 1 && windows_scratch_table(&iss_table_scratch)->issue_count == 2);
+        check("issues: a clear of every code takes the key's issues and no other key's", windows_issue_clear(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ANY) == 1 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
+        check("issues: a clear of a key that has none changes nothing", windows_issue_clear(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: after the clears the copy holds the other key's one issue", iss_copy.count == 1 && iss_at(&iss_copy, "audio device") >= 0);
         check("issues: a set with no key, a bad severity or no code is refused",
-              windows_issue_set(&iss_table, null, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
-                  windows_issue_set(&iss_table, "", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
-                  windows_issue_set(&iss_table, "canvas gpu", 0, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
-                  windows_issue_set(&iss_table, "canvas gpu", 3, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
-                  windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_NONE, 0, 0, null) == 0 &&
-                  windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_COUNT, 0, 0, null) == 0 && iss_table.issue_count == 1);
+              windows_issue_set(windows_scratch_table(&iss_table_scratch), null, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(windows_scratch_table(&iss_table_scratch), "", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", 0, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", 3, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_NONE, 0, 0, null) == 0 &&
+                  windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_COUNT, 0, 0, null) == 0 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
         {
-                static struct windows notified;
+                static struct windows *notified_scratch;
+                struct windows *const notified_at = windows_scratch_table(&notified_scratch);
 
                 check("issues: a program's notification is a code the board takes, no kernel notice's, with a name for moonwater debug",
-                      windows_issue_set(&notified, "files", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_NOTIFICATION, 7, 1, "copied") == 1 &&
-                          notified.issue_count == 1 && notified.issues[0].code == WINDOWS_ISSUE_NOTIFICATION && notified.issues[0].a == 7 &&
+                      windows_issue_set(notified_at, "files", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_NOTIFICATION, 7, 1, "copied") == 1 &&
+                          notified_at->issue_count == 1 && notified_at->issues[0].code == WINDOWS_ISSUE_NOTIFICATION && notified_at->issues[0].a == 7 &&
                           !windows_issue_kernel(WINDOWS_ISSUE_NOTIFICATION) && windows_issue_names[WINDOWS_ISSUE_NOTIFICATION] != null);
         }
         {
@@ -96,9 +97,9 @@ static void iss_rows_basic(void)
                 memory_fill(wide, 'w', sizeof(wide) - 1);
                 wide[sizeof(wide) - 1] = 0;
                 check("issues: a key past its room is cut to it, and the detail to its room",
-                      windows_issue_set(&iss_table, "a key that is far longer than the room it has", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 0, 0, wide) == 1);
+                      windows_issue_set(windows_scratch_table(&iss_table_scratch), "a key that is far longer than the room it has", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 0, 0, wide) == 1);
         }
-        windows_issues_read(&iss_table, &iss_copy);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: the long key is cut to the key's room, the long detail to the detail's, both ended",
               iss_copy.count == 2 && iss_long(&iss_copy) == 1);
 }
@@ -107,73 +108,73 @@ static void iss_rows_full(void)
 {
         char key[WINDOWS_ISSUE_KEY];
 
-        memory_zero(&iss_table, sizeof(iss_table));
+        windows_scratch_zero(windows_scratch_table(&iss_table_scratch));
         for (int i = 0; i < WINDOWS_ISSUES; i++)
         {
                 key[0] = 'k', key[1] = (char)('a' + i / 26), key[2] = (char)('a' + i % 26), key[3] = 0;
-                if (windows_issue_set(&iss_table, key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, (unsigned int)i, 0, null) != 1)
+                if (windows_issue_set(windows_scratch_table(&iss_table_scratch), key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, (unsigned int)i, 0, null) != 1)
                         break;
         }
-        check("issues: a board takes as many issues as it has slots", iss_table.issue_count == WINDOWS_ISSUES);
+        check("issues: a board takes as many issues as it has slots", windows_scratch_table(&iss_table_scratch)->issue_count == WINDOWS_ISSUES);
         check("issues: a full board refuses the next set, counted, and holds the others",
-              windows_issue_set(&iss_table, "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 0 && iss_table.issue_refused == 1 &&
-                  iss_table.issue_count == WINDOWS_ISSUES);
-        check("issues: an update of an issue the full board holds is still made", windows_issue_set(&iss_table, "kaa", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_LISTS, 9, 0, null) == 1);
-        windows_issues_read(&iss_table, &iss_copy);
+              windows_issue_set(windows_scratch_table(&iss_table_scratch), "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 0 && windows_scratch_table(&iss_table_scratch)->issue_refused == 1 &&
+                  windows_scratch_table(&iss_table_scratch)->issue_count == WINDOWS_ISSUES);
+        check("issues: an update of an issue the full board holds is still made", windows_issue_set(windows_scratch_table(&iss_table_scratch), "kaa", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_LISTS, 9, 0, null) == 1);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: the reader sees the refusals and the full count", iss_copy.count == WINDOWS_ISSUES && iss_copy.refused == 1);
         check("issues: a clear frees a slot, and the refusals are counted again from zero",
-              windows_issue_clear(&iss_table, "kab", WINDOWS_ISSUE_ANY) == 1 && iss_table.issue_refused == 0);
+              windows_issue_clear(windows_scratch_table(&iss_table_scratch), "kab", WINDOWS_ISSUE_ANY) == 1 && windows_scratch_table(&iss_table_scratch)->issue_refused == 0);
         check("issues: a refused key takes the freed slot the next time it is set",
-              windows_issue_set(&iss_table, "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 1 && iss_table.issue_count == WINDOWS_ISSUES);
+              windows_issue_set(windows_scratch_table(&iss_table_scratch), "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 1 && windows_scratch_table(&iss_table_scratch)->issue_count == WINDOWS_ISSUES);
 }
 
 static void iss_rows_torn(void)
 {
-        memory_zero(&iss_table, sizeof(iss_table));
-        windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "x");
+        windows_scratch_zero(windows_scratch_table(&iss_table_scratch));
+        windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "x");
         memory_zero(&iss_copy, sizeof(iss_copy));
-        iss_table.issue_seq |= 1u;
+        windows_scratch_table(&iss_table_scratch)->issue_seq |= 1u;
         check("issues: a writer inside the board is a torn read, given up after its tries, and the copy is empty",
-              windows_issues_read(&iss_table, &iss_copy) == 0 && iss_copy.count == 0);
-        iss_table.issue_seq += 1u;
-        check("issues: a board the writer left whole is read again", windows_issues_read(&iss_table, &iss_copy) == 1 && iss_copy.count == 1);
-        iss_table.issue_lock = 1;
+              windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy) == 0 && iss_copy.count == 0);
+        windows_scratch_table(&iss_table_scratch)->issue_seq += 1u;
+        check("issues: a board the writer left whole is read again", windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy) == 1 && iss_copy.count == 1);
+        windows_scratch_table(&iss_table_scratch)->issue_lock = 1;
         check("issues: a set while a dead writer holds the lock is refused, and nothing is written",
-              windows_issue_set(&iss_table, "canvas wifi", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 0 && iss_table.issue_count == 1);
-        check("issues: a clear while the lock is held does nothing", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && iss_table.issue_count == 1);
-        iss_table.issue_lock = 0;
+              windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas wifi", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 0 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
+        check("issues: a clear while the lock is held does nothing", windows_issue_clear(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && windows_scratch_table(&iss_table_scratch)->issue_count == 1);
+        windows_scratch_table(&iss_table_scratch)->issue_lock = 0;
 }
 
 static void iss_rows_hostile(void)
 {
-        memory_zero(&iss_table, sizeof(iss_table));
-        windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "fine");
-        iss_table.issue_count = 0xffffffffu;
-        windows_issues_read(&iss_table, &iss_copy);
+        windows_scratch_zero(windows_scratch_table(&iss_table_scratch));
+        windows_issue_set(windows_scratch_table(&iss_table_scratch), "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "fine");
+        windows_scratch_table(&iss_table_scratch)->issue_count = 0xffffffffu;
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: a count the table claims that the slots do not hold is not trusted", iss_copy.count == 1);
-        iss_table.issues[5].used = 1, iss_table.issues[5].severity = 7, iss_table.issues[5].code = WINDOWS_ISSUE_GPU_MAP;
-        memory_copy(iss_table.issues[5].key, "canvas wifi", 12);
-        windows_issues_read(&iss_table, &iss_copy);
+        windows_scratch_table(&iss_table_scratch)->issues[5].used = 1, windows_scratch_table(&iss_table_scratch)->issues[5].severity = 7, windows_scratch_table(&iss_table_scratch)->issues[5].code = WINDOWS_ISSUE_GPU_MAP;
+        memory_copy(windows_scratch_table(&iss_table_scratch)->issues[5].key, "canvas wifi", 12);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: a slot whose severity is none is no issue", iss_copy.count == 1);
-        iss_table.issues[6].used = 1, iss_table.issues[6].severity = WINDOWS_ISSUE_WARNING, iss_table.issues[6].code = WINDOWS_ISSUE_GPU_MAP;
-        memory_zero(iss_table.issues[6].key, sizeof(iss_table.issues[6].key));
-        windows_issues_read(&iss_table, &iss_copy);
+        windows_scratch_table(&iss_table_scratch)->issues[6].used = 1, windows_scratch_table(&iss_table_scratch)->issues[6].severity = WINDOWS_ISSUE_WARNING, windows_scratch_table(&iss_table_scratch)->issues[6].code = WINDOWS_ISSUE_GPU_MAP;
+        memory_zero(windows_scratch_table(&iss_table_scratch)->issues[6].key, sizeof(windows_scratch_table(&iss_table_scratch)->issues[6].key));
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: a slot with an empty key is no issue", iss_copy.count == 1);
         for (int i = 0; i < WINDOWS_ISSUE_KEY; i++)
-                iss_table.issues[7].key[i] = 'q';
-        iss_table.issues[7].used = 1, iss_table.issues[7].severity = WINDOWS_ISSUE_WARNING, iss_table.issues[7].code = WINDOWS_ISSUE_GPU_LISTS;
+                windows_scratch_table(&iss_table_scratch)->issues[7].key[i] = 'q';
+        windows_scratch_table(&iss_table_scratch)->issues[7].used = 1, windows_scratch_table(&iss_table_scratch)->issues[7].severity = WINDOWS_ISSUE_WARNING, windows_scratch_table(&iss_table_scratch)->issues[7].code = WINDOWS_ISSUE_GPU_LISTS;
         for (int i = 0; i < WINDOWS_ISSUE_DETAIL; i++)
-                iss_table.issues[7].detail[i] = 'd';
-        windows_issues_read(&iss_table, &iss_copy);
+                windows_scratch_table(&iss_table_scratch)->issues[7].detail[i] = 'd';
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: a key or a detail with no null is ended by the reader",
               iss_copy.count == 2 && iss_long(&iss_copy) == 1);
-        iss_table.issues[8].used = 1, iss_table.issues[8].severity = WINDOWS_ISSUE_ERROR, iss_table.issues[8].code = 9999u;
-        memory_copy(iss_table.issues[8].key, "canvas odd", 11);
-        windows_issues_read(&iss_table, &iss_copy);
+        windows_scratch_table(&iss_table_scratch)->issues[8].used = 1, windows_scratch_table(&iss_table_scratch)->issues[8].severity = WINDOWS_ISSUE_ERROR, windows_scratch_table(&iss_table_scratch)->issues[8].code = 9999u;
+        memory_copy(windows_scratch_table(&iss_table_scratch)->issues[8].key, "canvas odd", 11);
+        windows_issues_read(windows_scratch_table(&iss_table_scratch), &iss_copy);
         check("issues: a code past the list is kept as the code it is, and no crash", iss_copy.count == 3 && iss_copy.issue[8].code == 9999u);
         check("issues: a worst severity of a key with a bad slot is the good one's", windows_issues_worst(&iss_copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
         check("issues: a null table or copy is refused", windows_issue_set(null, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
-              windows_issues_read(null, &iss_copy) == 0 && windows_issues_read(&iss_table, null) == 0);
+              windows_issues_read(null, &iss_copy) == 0 && windows_issues_read(windows_scratch_table(&iss_table_scratch), null) == 0);
 }
 
 // The GPU's issues from the table (windows_gpu_wanted) and its status (windows_gpu_judge): each a row of its own.
@@ -190,73 +191,74 @@ static unsigned int iss_wanted_has(unsigned int count, unsigned int code)
 static void iss_rows_gpu(void)
 {
         unsigned int count;
-        struct windows gpu;
+        static struct windows *gpu_scratch;
+        struct windows *const gpu_at = windows_scratch_fresh(&gpu_scratch); // zero, as the table on the stack was
 
-        memory_zero(&gpu, sizeof(gpu));
-        gpu.gpu_on = 1, gpu.gpu_able = 1;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        windows_scratch_zero(gpu_at);
+        gpu_at->gpu_on = 1, gpu_at->gpu_able = 1;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: a working GPU with no refusals raises none", count == 0);
-        gpu.gpu_map_why = 3u | 19u << 8;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_map_why = 3u | 19u << 8;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: a map refused at step 3 with error 19 is the missing userptr, an error",
               iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) - 1].severity == WINDOWS_ISSUE_ERROR &&
                   !iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP));
-        gpu.gpu_map_why = 3u | 22u << 8;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_map_why = 3u | 22u << 8;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: another error at step 3 is the generic map error with its numbers",
               iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) &&
                   iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) - 1].a == 3 && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) - 1].b == 22);
-        memory_copy(gpu.gpu_said, "amdgpu: HMM_MIRROR kernel config option is not enabled", 52);
-        gpu.gpu_map_why = 2u | 12u << 8;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        memory_copy(gpu_at->gpu_said, "amdgpu: HMM_MIRROR kernel config option is not enabled", 52);
+        gpu_at->gpu_map_why = 2u | 12u << 8;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: the kernel's words naming HMM_MIRROR are the userptr case, whatever the step",
               iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP));
-        memory_zero(gpu.gpu_said, sizeof(gpu.gpu_said));
-        gpu.gpu_map_why = 0;
-        gpu.gpu_refused[9] = 12, gpu.gpu_drawn = 10, gpu.gpu_processor = 90;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        memory_zero(gpu_at->gpu_said, sizeof(gpu_at->gpu_said));
+        gpu_at->gpu_map_why = 0;
+        gpu_at->gpu_refused[9] = 12, gpu_at->gpu_drawn = 10, gpu_at->gpu_processor = 90;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: a refusal reason shows when it refused enough presents, with its count and its reason's index",
               iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) - 1].a == 12 &&
                   iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) - 1].b == 9);
-        gpu.gpu_refused[9] = 3;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_refused[9] = 3;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: fewer refusals than the minimum raise none", !iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED));
-        gpu.gpu_refused[9] = 0, gpu.gpu_able = 0;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_refused[9] = 0, gpu_at->gpu_able = 0;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: lists off with the GPU working says so, a warning", iss_wanted_has(count, WINDOWS_ISSUE_GPU_LISTS) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LISTS) - 1].severity == WINDOWS_ISSUE_WARNING);
-        gpu.gpu_able = 1, gpu.gpu_state = WINDOWS_GPU_UNTRUSTED, gpu.gpu_family = 144;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_able = 1, gpu_at->gpu_state = WINDOWS_GPU_UNTRUSTED, gpu_at->gpu_family = 144;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: an untrusted card is an error with its family", iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED) - 1].a == 144);
-        gpu.gpu_state = WINDOWS_GPU_NO_CARD;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_state = WINDOWS_GPU_NO_CARD;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: a card of no family we have kernels for is a warning with its family", iss_wanted_has(count, WINDOWS_ISSUE_GPU_FAMILY) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED));
-        gpu.gpu_family = 0, gpu.gpu_state = WINDOWS_GPU_COOLING, gpu.gpu_steps = 2;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_family = 0, gpu_at->gpu_state = WINDOWS_GPU_COOLING, gpu_at->gpu_steps = 2;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: cooling down after hangs is a warning with the count", iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) - 1].a == 2);
-        gpu.gpu_state = WINDOWS_GPU_UP, gpu.gpu_steps = 0, gpu.list_tried[0] = 100, gpu.list_lost[0][0] = 4, gpu.pid[0] = 7;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_state = WINDOWS_GPU_UP, gpu_at->gpu_steps = 0, gpu_at->list_tried[0] = 100, gpu_at->list_lost[0][0] = 4, gpu_at->pid[0] = 7;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: lost frames under a tenth of those tried raise none", !iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST));
-        gpu.list_lost[0][0] = 20;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->list_lost[0][0] = 20;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: lost frames over a tenth of those tried are a warning with both counts",
               iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) - 1].a == 20 &&
                   iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) - 1].b == 100);
-        gpu.refused = 1, gpu.refused_error = 22;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->refused = 1, gpu_at->refused_error = 22;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: a framebuffer the card refused for scan-out is a warning with the kernel's error", iss_wanted_has(count, WINDOWS_ISSUE_GPU_SCANOUT) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_SCANOUT) - 1].a == 22);
-        gpu.gpu_on = 0;
-        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        gpu_at->gpu_on = 0;
+        count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: with the setting off there are none, whatever the counters say", count == 0);
-        check("gpu status: the setting off is off", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 90, 10) == WINDOWS_GPU_STATUS_OFF);
-        gpu.gpu_on = 1;
-        check("gpu status: a card that is none is no supported GPU", (gpu.gpu_state = WINDOWS_GPU_NO_CARD, windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 0, 50)) == WINDOWS_GPU_STATUS_NONE);
-        gpu.gpu_state = WINDOWS_GPU_UP;
-        check("gpu status: almost all presents on the card are in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 95, 5) == WINDOWS_GPU_STATUS_IN_USE);
-        check("gpu status: half is partly in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 50, 50) == WINDOWS_GPU_STATUS_PARTLY);
-        check("gpu status: none on the card is not in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_PARTLY, 0, 100) == WINDOWS_GPU_STATUS_NOT);
-        check("gpu status: in use stays in use at 70 percent, where it would not be entered again", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 70, 30) == WINDOWS_GPU_STATUS_IN_USE);
-        check("gpu status: not in use is not left at 70 percent", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 70, 30) == WINDOWS_GPU_STATUS_PARTLY);
-        check("gpu status: fewer than sixteen presents keep the answer", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 3, 2) == WINDOWS_GPU_STATUS_IN_USE);
+        check("gpu status: the setting off is off", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_IN_USE, 90, 10) == WINDOWS_GPU_STATUS_OFF);
+        gpu_at->gpu_on = 1;
+        check("gpu status: a card that is none is no supported GPU", (gpu_at->gpu_state = WINDOWS_GPU_NO_CARD, windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_NOT, 0, 50)) == WINDOWS_GPU_STATUS_NONE);
+        gpu_at->gpu_state = WINDOWS_GPU_UP;
+        check("gpu status: almost all presents on the card are in use", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_NOT, 95, 5) == WINDOWS_GPU_STATUS_IN_USE);
+        check("gpu status: half is partly in use", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_NOT, 50, 50) == WINDOWS_GPU_STATUS_PARTLY);
+        check("gpu status: none on the card is not in use", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_PARTLY, 0, 100) == WINDOWS_GPU_STATUS_NOT);
+        check("gpu status: in use stays in use at 70 percent, where it would not be entered again", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_IN_USE, 70, 30) == WINDOWS_GPU_STATUS_IN_USE);
+        check("gpu status: not in use is not left at 70 percent", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_NOT, 70, 30) == WINDOWS_GPU_STATUS_PARTLY);
+        check("gpu status: fewer than sixteen presents keep the answer", windows_gpu_judge(gpu_at, WINDOWS_GPU_STATUS_IN_USE, 3, 2) == WINDOWS_GPU_STATUS_IN_USE);
 }
 
 // The metrics' helpers (windows_metric_stats and windows_metric_rate): the mean and the worst of a ring in microseconds, and a rate per second.
@@ -303,20 +305,21 @@ static void iss_rows_metrics(void)
         // The sound card's issues (audio/service.c's audio_board_set and audio_board_clear, under the audio device row's key): a card that would not
         // open is an error, a rate it did not take a warning, and a card that opens clears both.
         {
-                struct windows audio;
+                static struct windows *audio_scratch;
+                struct windows *const audio_at = windows_scratch_fresh(&audio_scratch); // zero, as the table on the stack was
                 struct windows_issues copy;
 
-                memory_zero(&audio, sizeof(audio));
+                windows_scratch_zero(audio_at);
                 check("audio board: a card that would not open is an error under the audio device key",
-                      windows_issue_set(&audio, "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, (unsigned int)-5, 0, "") == 1);
+                      windows_issue_set(audio_at, "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, (unsigned int)-5, 0, "") == 1);
                 check("audio board: a rate the card did not take is a warning with both rates",
-                      windows_issue_set(&audio, "audio device", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_AUDIO_RATE, 48000, 44100, "") == 1);
-                windows_issues_read(&audio, &copy);
+                      windows_issue_set(audio_at, "audio device", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_AUDIO_RATE, 48000, 44100, "") == 1);
+                windows_issues_read(audio_at, &copy);
                 check("audio board: both are read back, the worst is the error", windows_issues_worst(&copy, "audio device", null) == WINDOWS_ISSUE_ERROR &&
                       windows_issues_worst(&copy, "audio device", null) == WINDOWS_ISSUE_ERROR && copy.count == 2);
                 check("audio board: a card that opens clears its open error and leaves the rate's warning when the rate is fine",
-                      windows_issue_clear(&audio, "audio device", WINDOWS_ISSUE_AUDIO_OPEN) == 1 && windows_issue_clear(&audio, "audio device", WINDOWS_ISSUE_AUDIO_RATE) == 1);
-                windows_issues_read(&audio, &copy);
+                      windows_issue_clear(audio_at, "audio device", WINDOWS_ISSUE_AUDIO_OPEN) == 1 && windows_issue_clear(audio_at, "audio device", WINDOWS_ISSUE_AUDIO_RATE) == 1);
+                windows_issues_read(audio_at, &copy);
                 check("audio board: with both cleared the device has no issue", windows_issues_worst(&copy, "audio device", null) == 0 && copy.count == 0);
         }
 }
@@ -458,14 +461,15 @@ static void iss_rows_kernel(void)
 
 static void iss_rows_kernel_board(void)
 {
-        struct windows board;
+        static struct windows *board_scratch;
+        struct windows *const board_at = windows_scratch_fresh(&board_scratch); // zero, as the table on the stack was
         struct kernel_notices k;
         char record[KERNEL_NOTICE_LINE];
         struct windows_issues copy;
         unsigned long long t0 = 5000000000ull;
         unsigned int n;
 
-        memory_zero(&board, sizeof(board));
+        windows_scratch_zero(board_at);
         memory_zero(&k, sizeof(k));
         k.fd = -2;
         for (unsigned int i = 0; i < 3000; i++)
@@ -475,16 +479,16 @@ static void iss_rows_kernel_board(void)
         }
         n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1, emitted seq=2", record, sizeof(record));
         kernel_notices_record(&k, record, n, t0);
-        kernel_notices_publish(&board, &k, t0 + 1000000000ull);
-        windows_issues_read(&board, &copy);
+        kernel_notices_publish(board_at, &k, t0 + 1000000000ull);
+        windows_issues_read(board_at, &copy);
         check("kernel notices: a flood is one issue per class on the board, and the warning and the error are their severities",
               copy.count == 2 && windows_issues_worst(&copy, "usb", null) == WINDOWS_ISSUE_WARNING && windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
-        kernel_notices_publish(&board, &k, t0 + 601ull * 1000000000ull);
-        windows_issues_read(&board, &copy);
+        kernel_notices_publish(board_at, &k, t0 + 601ull * 1000000000ull);
+        windows_issues_read(board_at, &copy);
         check("kernel notices: a warning not seen for ten minutes is cleared, and its count starts again",
               windows_issues_worst(&copy, "usb", null) == 0 && k.count[1] == 0 && windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
-        kernel_notices_publish(&board, &k, t0 + 3600ull * 1000000000ull);
-        windows_issues_read(&board, &copy);
+        kernel_notices_publish(board_at, &k, t0 + 3600ull * 1000000000ull);
+        windows_issues_read(board_at, &copy);
         check("kernel notices: an error is kept until it is dismissed, however long ago it was", windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
 }
 
@@ -511,27 +515,28 @@ static unsigned int dz_worst(struct windows *b)
 // error that is not dismissed stays on the board.
 static void iss_rows_dismiss(void)
 {
-        struct windows board;
+        static struct windows *board_scratch;
+        struct windows *const board_at = windows_scratch_fresh(&board_scratch); // zero, as the table on the stack was
         struct kernel_notices k;
         char record[KERNEL_NOTICE_LINE];
         unsigned int n;
 
-        memory_zero(&board, sizeof(board));
+        windows_scratch_zero(board_at);
         memory_zero(&k, sizeof(k));
         k.fd = -2;
         n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1, emitted seq=2", record, sizeof(record));
         kernel_notices_record(&k, record, n, 1000);
-        kernel_notices_publish(&board, &k, 1000);
-        check("dismiss: an error is on the board before it is dismissed", dz_worst(&board) == WINDOWS_ISSUE_ERROR);
+        kernel_notices_publish(board_at, &k, 1000);
+        check("dismiss: an error is on the board before it is dismissed", dz_worst(board_at) == WINDOWS_ISSUE_ERROR);
         check("dismiss: dismissing its class clears its issue and leaves the bit for the feeder",
-              windows_kernel_dismiss(&board, 1u << 0) == 1 && (board.kernel_dismiss & 1u) != 0);
-        kernel_notices_publish(&board, &k, 2000);
-        check("dismiss: the feeder takes the bit at its publish and counts that class from nothing", (board.kernel_dismiss & 1u) == 0 && k.count[0] == 0);
-        check("dismiss: a class that was not dismissed keeps its issue", dz_worst(&board) == 0);
+              windows_kernel_dismiss(board_at, 1u << 0) == 1 && (board_at->kernel_dismiss & 1u) != 0);
+        kernel_notices_publish(board_at, &k, 2000);
+        check("dismiss: the feeder takes the bit at its publish and counts that class from nothing", (board_at->kernel_dismiss & 1u) == 0 && k.count[0] == 0);
+        check("dismiss: a class that was not dismissed keeps its issue", dz_worst(board_at) == 0);
         n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=3, emitted seq=4", record, sizeof(record));
         kernel_notices_record(&k, record, n, 3000);
-        kernel_notices_publish(&board, &k, 3000);
-        check("dismiss: a new record after the dismissal is raised again as one record", k.count[0] == 1 && dz_worst(&board) == WINDOWS_ISSUE_ERROR);
+        kernel_notices_publish(board_at, &k, 3000);
+        check("dismiss: a new record after the dismissal is raised again as one record", k.count[0] == 1 && dz_worst(board_at) == WINDOWS_ISSUE_ERROR);
 }
 
 /*
@@ -548,53 +553,53 @@ static void iss_rows_identity(void)
         unsigned int seq, wrong = 0, clear = 0, kept;
         long mapped;
 
-        memory_zero(&iss_table, sizeof(iss_table));
+        windows_scratch_zero(windows_scratch_table(&iss_table_scratch));
         check("identity: a row that has said nothing has no app_id and no icon",
-              windows_app_id_read(&iss_table, 3, word) == 0 && !word[0] && windows_icon_read(&iss_table, 3, idn_icon) == 0);
-        check("identity: an app_id set is read back whole", windows_app_id_set(&iss_table, 3, "org.mozilla.firefox") == 1 &&
-              windows_app_id_read(&iss_table, 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
-        check("identity: and it is that row's and no other's", windows_app_id_read(&iss_table, 2, word) == 0 && windows_app_id_read(&iss_table, 4, word) == 0);
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 3, word) == 0 && !word[0] && windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == 0);
+        check("identity: an app_id set is read back whole", windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "org.mozilla.firefox") == 1 &&
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
+        check("identity: and it is that row's and no other's", windows_app_id_read(windows_scratch_table(&iss_table_scratch), 2, word) == 0 && windows_app_id_read(windows_scratch_table(&iss_table_scratch), 4, word) == 0);
         for (unsigned int at = 0; at < sizeof(longest); at++)
                 longest[at] = 'a';
         longest[WINDOWS_APP_ID - 1] = 0;
-        check("identity: the longest app_id, 63 bytes, is taken", windows_app_id_set(&iss_table, 5, longest) == 1 && windows_app_id_read(&iss_table, 5, word) == WINDOWS_APP_ID - 1);
+        check("identity: the longest app_id, 63 bytes, is taken", windows_app_id_set(windows_scratch_table(&iss_table_scratch), 5, longest) == 1 && windows_app_id_read(windows_scratch_table(&iss_table_scratch), 5, word) == WINDOWS_APP_ID - 1);
         longest[WINDOWS_APP_ID - 1] = 'a', longest[WINDOWS_APP_ID] = 0;
         check("identity: one byte longer, no text, an empty one, a space, a control byte, a delete and a row past the table are refused, and the row is as it was",
-              windows_app_id_set(&iss_table, 3, longest) == 0 && windows_app_id_set(&iss_table, 3, null) == 0 && windows_app_id_set(&iss_table, 3, "") == 0 &&
-              windows_app_id_set(&iss_table, 3, "two words") == 0 && windows_app_id_set(&iss_table, 3, "bell\007") == 0 && windows_app_id_set(&iss_table, 3, "del\177") == 0 &&
-              windows_app_id_set(&iss_table, 3, "esc\033[31m") == 0 && windows_app_id_set(&iss_table, WINDOWS, "files") == 0 && windows_app_id_set(null, 0, "files") == 0 &&
-              windows_app_id_read(&iss_table, 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
-        check("identity: a shorter app_id set over a longer leaves none of the longer", windows_app_id_set(&iss_table, 3, "files") == 1 &&
-              windows_app_id_read(&iss_table, 3, word) == 5 && string_equals((string_address)word, (string_address) "files") && !iss_table.app_id[3][6] && !iss_table.app_id[3][18]);
+              windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, longest) == 0 && windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, null) == 0 && windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "") == 0 &&
+              windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "two words") == 0 && windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "bell\007") == 0 && windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "del\177") == 0 &&
+              windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "esc\033[31m") == 0 && windows_app_id_set(windows_scratch_table(&iss_table_scratch), WINDOWS, "files") == 0 && windows_app_id_set(null, 0, "files") == 0 &&
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 3, word) == 19 && string_equals((string_address)word, (string_address) "org.mozilla.firefox"));
+        check("identity: a shorter app_id set over a longer leaves none of the longer", windows_app_id_set(windows_scratch_table(&iss_table_scratch), 3, "files") == 1 &&
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 3, word) == 5 && string_equals((string_address)word, (string_address) "files") && !windows_scratch_table(&iss_table_scratch)->app_id[3][6] && !windows_scratch_table(&iss_table_scratch)->app_id[3][18]);
         // A row somebody else wrote: no null in its room, and bytes that would move a terminal's cursor.
         for (unsigned int at = 0; at < WINDOWS_APP_ID; at++)
-                iss_table.app_id[7][at] = at % 5 == 0 ? '\033' : at % 7 == 0 ? ' ' : 'z';
-        seq = windows_app_id_read(&iss_table, 7, word);
+                windows_scratch_table(&iss_table_scratch)->app_id[7][at] = at % 5 == 0 ? '\033' : at % 7 == 0 ? ' ' : 'z';
+        seq = windows_app_id_read(windows_scratch_table(&iss_table_scratch), 7, word);
         for (unsigned int at = 0; at < WINDOWS_APP_ID - 1; at++)
                 wrong += word[at] != (at % 5 == 0 || at % 7 == 0 ? '?' : 'z');
         check("identity: an app_id with no null in its room is read to its room and ended there, its control bytes and spaces made question marks",
-              seq == WINDOWS_APP_ID - 1 && !word[WINDOWS_APP_ID - 1] && !wrong && windows_app_id_read(&iss_table, WINDOWS, word) == 0 && !word[0]);
+              seq == WINDOWS_APP_ID - 1 && !word[WINDOWS_APP_ID - 1] && !wrong && windows_app_id_read(windows_scratch_table(&iss_table_scratch), WINDOWS, word) == 0 && !word[0]);
 
         // A picture the icon's size is the icon; a pixel whose colour is over its alpha is held to it.
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
                 idn_picture[at] = 0xff000000u | at * 0x010203u;
         idn_picture[5] = 0x40ff8020u;
-        check("identity: a picture is taken as an icon", windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1);
-        seq = windows_icon_read(&iss_table, 3, idn_icon);
+        check("identity: a picture is taken as an icon", windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1);
+        seq = windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon);
         wrong = 0;
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
                 wrong += at != 5 && idn_icon[at] != idn_picture[at];
         check("identity: a picture 32 by 32 is read back pixel for pixel, its sequence even and not 0", seq && !(seq & 1u) && !wrong);
         check("identity: a pixel whose colour is over its alpha is kept premultiplied, each colour no more than the alpha", idn_icon[5] == 0x40404020u);
-        check("identity: a second picture moves the sequence on", windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1 &&
-              windows_icon_read(&iss_table, 3, idn_icon) == seq + 2);
+        check("identity: a second picture moves the sequence on", windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON) == 1 &&
+              windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == seq + 2);
 
         // Larger: each pixel of the icon is the mean of the two by two under it.
         for (unsigned int y = 0; y < 64; y++)
                 for (unsigned int x = 0; x < 64; x++)
                         idn_picture[y * 64 + x] = 0xff000000u | ((x & 1) ? 0x00640000u : 0x00c80000u) | ((y & 1) ? 0x0000000au : 0x00000014u) | (x / 2) << 8;
-        windows_icon_set(&iss_table, 3, idn_picture, 64, 64, 64);
-        windows_icon_read(&iss_table, 3, idn_icon);
+        windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 64, 64, 64);
+        windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon);
         wrong = 0;
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
                 wrong += idn_icon[at] != (0xff96000fu | (at % WINDOWS_ICON) << 8);
@@ -603,8 +608,8 @@ static void iss_rows_identity(void)
         // Wider than high: the longer side is the icon's, the shorter in the middle with clear above and below.
         for (unsigned int at = 0; at < 64 * 16; at++)
                 idn_picture[at] = 0xff112233u;
-        windows_icon_set(&iss_table, 3, idn_picture, 64, 16, 64);
-        windows_icon_read(&iss_table, 3, idn_icon);
+        windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 64, 16, 64);
+        windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon);
         wrong = 0;
         for (unsigned int y = 0; y < WINDOWS_ICON; y++)
                 for (unsigned int x = 0; x < WINDOWS_ICON; x++)
@@ -613,22 +618,22 @@ static void iss_rows_identity(void)
 
         // Smaller: one pixel is the whole icon.
         idn_picture[0] = 0x80402010u;
-        windows_icon_set(&iss_table, 3, idn_picture, 1, 1, 1);
-        windows_icon_read(&iss_table, 3, idn_icon);
+        windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 1, 1, 1);
+        windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon);
         wrong = 0;
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
                 wrong += idn_icon[at] != 0x80402010u;
         check("identity: a picture of one pixel is an icon of that pixel", !wrong);
 
         // What is refused, and the row as it was after each.
-        kept = windows_icon_read(&iss_table, 3, idn_icon);
+        kept = windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon);
         check("identity: no pixels, a side of 0, a side over 1024, rows shorter than the width and a row past the table are refused, and the icon is the one it was",
-              windows_icon_set(&iss_table, 3, null, 32, 32, 32) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 0, 32, 32) == 0 &&
-              windows_icon_set(&iss_table, 3, idn_picture, 32, 0, 32) == 0 && windows_icon_set(&iss_table, 3, idn_picture, WINDOWS_ICON_MOST + 1, 1, WINDOWS_ICON_MOST + 1) == 0 &&
-              windows_icon_set(&iss_table, 3, idn_picture, 1, WINDOWS_ICON_MOST + 1, 1) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 0x80000000u, 0x80000000u, 0x80000000u) == 0 &&
-              windows_icon_set(&iss_table, 3, idn_picture, 32, 32, 31) == 0 && windows_icon_set(&iss_table, 3, idn_picture, 32, 32, 0) == 0 &&
-              windows_icon_set(&iss_table, WINDOWS, idn_picture, 32, 32, 32) == 0 && windows_icon_set(null, 3, idn_picture, 32, 32, 32) == 0 &&
-              windows_icon_read(&iss_table, 3, idn_icon) == kept && idn_icon[0] == 0x80402010u && idn_icon[1023] == 0x80402010u);
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, null, 32, 32, 32) == 0 && windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 0, 32, 32) == 0 &&
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 32, 0, 32) == 0 && windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, WINDOWS_ICON_MOST + 1, 1, WINDOWS_ICON_MOST + 1) == 0 &&
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 1, WINDOWS_ICON_MOST + 1, 1) == 0 && windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 0x80000000u, 0x80000000u, 0x80000000u) == 0 &&
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 32, 32, 31) == 0 && windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 32, 32, 0) == 0 &&
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), WINDOWS, idn_picture, 32, 32, 32) == 0 && windows_icon_set(null, 3, idn_picture, 32, 32, 32) == 0 &&
+              windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == kept && idn_icon[0] == 0x80402010u && idn_icon[1023] == 0x80402010u);
 
         // The largest picture, and a stride wider than the width, each ending at a page that is not mapped: nothing past a row's width is read.
         mapped = window_call(WINDOW_SYS_MMAP, 0, 5 * 4096, 3, 0x22, -1, 0);
@@ -638,36 +643,36 @@ static void iss_rows_identity(void)
 
                 for (unsigned int at = 0; at < 4 * 1024; at++)
                         ((unsigned int *)mapped)[at] = 0xff000000u | at;
-                check("identity: a picture 1024 idn_across and one high that ends at the end of its page is taken", windows_icon_set(&iss_table, 6, idn_across, WINDOWS_ICON_MOST, 1, WINDOWS_ICON_MOST) == 1);
-                check("identity: so is one 1 idn_across and 1024 high", windows_icon_set(&iss_table, 6, idn_across, 1, WINDOWS_ICON_MOST, 1) == 1);
+                check("identity: a picture 1024 idn_across and one high that ends at the end of its page is taken", windows_icon_set(windows_scratch_table(&iss_table_scratch), 6, idn_across, WINDOWS_ICON_MOST, 1, WINDOWS_ICON_MOST) == 1);
+                check("identity: so is one 1 idn_across and 1024 high", windows_icon_set(windows_scratch_table(&iss_table_scratch), 6, idn_across, 1, WINDOWS_ICON_MOST, 1) == 1);
                 check("identity: a picture 4 wide and 40 high with rows 100 apart, whose last row ends at the end of its page, is taken: nothing past a row's width is read",
-                      windows_icon_set(&iss_table, 6, idn_apart, 4, 40, 100) == 1 && windows_icon_read(&iss_table, 6, idn_icon) != 0);
+                      windows_icon_set(windows_scratch_table(&iss_table_scratch), 6, idn_apart, 4, 40, 100) == 1 && windows_icon_read(windows_scratch_table(&iss_table_scratch), 6, idn_icon) != 0);
         }
         else
                 check("identity: a page to end a picture at is mapped", 0);
 
         // The seqlock: a writer inside is no picture, a sequence at its end wraps past 0, and a row somebody else wrote is held premultiplied.
-        __atomic_store_n(&iss_table.icon_seq[3], kept | 1u, __ATOMIC_RELEASE);
-        check("identity: an icon a writer is in the middle of is no icon to a reader", windows_icon_read(&iss_table, 3, idn_icon) == 0);
-        __atomic_store_n(&iss_table.icon_seq[3], 0xfffffffeu, __ATOMIC_RELEASE);
+        __atomic_store_n(&windows_scratch_table(&iss_table_scratch)->icon_seq[3], kept | 1u, __ATOMIC_RELEASE);
+        check("identity: an icon a writer is in the middle of is no icon to a reader", windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == 0);
+        __atomic_store_n(&windows_scratch_table(&iss_table_scratch)->icon_seq[3], 0xfffffffeu, __ATOMIC_RELEASE);
         idn_picture[0] = 0xff010203u;
         check("identity: the sequence after the last even one is 2, never 0, which is no icon",
-              windows_icon_set(&iss_table, 3, idn_picture, 1, 1, 1) == 1 && iss_table.icon_seq[3] == 2 && windows_icon_read(&iss_table, 3, idn_icon) == 2);
+              windows_icon_set(windows_scratch_table(&iss_table_scratch), 3, idn_picture, 1, 1, 1) == 1 && windows_scratch_table(&iss_table_scratch)->icon_seq[3] == 2 && windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == 2);
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
-                iss_table.icon[9][at] = 0x10ffffffu;
-        iss_table.icon_seq[9] = 8;
-        windows_icon_read(&iss_table, 9, idn_icon);
+                windows_scratch_table(&iss_table_scratch)->icon[9][at] = 0x10ffffffu;
+        windows_scratch_table(&iss_table_scratch)->icon_seq[9] = 8;
+        windows_icon_read(windows_scratch_table(&iss_table_scratch), 9, idn_icon);
         wrong = 0;
         for (unsigned int at = 0; at < WINDOWS_ICON * WINDOWS_ICON; at++)
                 wrong += idn_icon[at] != 0x10101010u;
         check("identity: an icon written straight into the row with colours over their alpha is read premultiplied", !wrong);
-        check("identity: a row past the table has no icon", windows_icon_read(&iss_table, WINDOWS, idn_icon) == 0 && windows_icon_read(null, 0, idn_icon) == 0);
+        check("identity: a row past the table has no icon", windows_icon_read(windows_scratch_table(&iss_table_scratch), WINDOWS, idn_icon) == 0 && windows_icon_read(null, 0, idn_icon) == 0);
 
         // A row taken again is nobody yet.
-        windows_reset_row(&iss_table, 3);
+        windows_reset_row(windows_scratch_table(&iss_table_scratch), 3);
         check("identity: a row given to the next window has no app_id and no icon, and the rows beside it keep theirs",
-              windows_app_id_read(&iss_table, 3, word) == 0 && windows_icon_read(&iss_table, 3, idn_icon) == 0 && !iss_table.app_id[3][0] &&
-              windows_app_id_read(&iss_table, 5, word) == WINDOWS_APP_ID - 1 && windows_icon_read(&iss_table, 9, idn_icon) == 8);
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 3, word) == 0 && windows_icon_read(windows_scratch_table(&iss_table_scratch), 3, idn_icon) == 0 && !windows_scratch_table(&iss_table_scratch)->app_id[3][0] &&
+              windows_app_id_read(windows_scratch_table(&iss_table_scratch), 5, word) == WINDOWS_APP_ID - 1 && windows_icon_read(windows_scratch_table(&iss_table_scratch), 9, idn_icon) == 8);
 }
 
 b32 main(void)
@@ -1233,7 +1238,21 @@ static void dl_probes(void)
         window_list_of read them.
 */
 #define DL_BUFFER 155648ul // a picture of DL_W by DL_H, a page rounded
-static unsigned long dl_span[(WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER + WINDOW_LIST_BYTES) / sizeof(unsigned long)];
+// The table the list rows share: a header, the pictures of DL_ROWS rows and a list, mapped at its first use (dl_table).
+#define DL_ROWS 32
+#define DL_SPAN (WINDOWS_HEADER + 2 * DL_ROWS * DL_BUFFER + WINDOW_LIST_BYTES)
+static struct windows *dl_span_at;
+
+static struct windows *dl_table(void)
+{
+        if (!dl_span_at)
+        {
+                long got = compositor_call(syscall(mmap), 0, DL_SPAN, 3, 0x4022, (positive)-1, 0);
+
+                dl_span_at = got < 0 && got > -4096 ? 0 : (struct windows *)got;
+        }
+        return dl_span_at;
+}
 static struct ui dl_app_ui;
 
 static void dl_app_draw(unsigned int address_to pixels)
@@ -1257,14 +1276,14 @@ static int dl_zero_words(const unsigned int address_to pixels, unsigned long cou
 
 static void dl_app_rows(void)
 {
-        struct windows address_to table = (struct windows address_to)dl_span;
+        struct windows address_to table = dl_table();
         struct window_row own = {table, 0, -1, -1, 0};
         static struct ui_draw_view view;
         int shown = -1, dirty = 1;
         unsigned int gen_before;
 
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
-        table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
+        table->lists = WINDOWS_LISTS_AT(DL_BUFFER, DL_ROWS), table->list_bytes = WINDOW_LIST_BYTES, table->capacity = DL_ROWS;
         table->list_mode = 1;
         // The row starts as one the compositor has not refused: the list rows before these share the table and end on a refused row (list_state 2, the
         // partial list's), which ui_list_wanted rightly paints as pixels.
@@ -1347,14 +1366,14 @@ static void dl_publish(void)
 
 static void dl_list_rows(void)
 {
-        struct windows address_to table = (struct windows address_to)dl_span;
+        struct windows address_to table = dl_table();
         unsigned int address_to head;
         int damage[4] = {0, 0, 0, 0};
         int calls;
         unsigned int invalid;
 
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
-        table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
+        table->lists = WINDOWS_LISTS_AT(DL_BUFFER, DL_ROWS), table->list_bytes = WINDOW_LIST_BYTES, table->capacity = DL_ROWS;
         head = (unsigned int address_to)window_list_of(table, 0);
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, which nothing before these rows made
         compositor.table = table, compositor.pixels = WINDOWS_HEADER, compositor.buffer = DL_BUFFER;
@@ -1488,12 +1507,13 @@ static void dl_list_rows(void)
 // recorder that loses every "every"-th try (0 never). A switch is a list frame followed by a pixel frame; the rows bound the switches and the tries.
 static void dl_backoff_run(int every, int frames, int *switches, int *tries, int *lists)
 {
-        static struct windows table;
-        struct window_row own = {.table = &table, .row = 0};
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
+        struct window_row own = {.table = table_at, .row = 0};
         int last_list = 0;
 
-        memory_zero(&table, sizeof(table));
-        table.list_mode = 1;
+        windows_scratch_zero(table_at);
+        table_at->list_mode = 1;
         ui_app_list.ready = 1, ui_app_row = 0, ui_app_ui = &dl_live;
         ui_list_skip = ui_list_wait = ui_list_whole_run = 0;
         dl_live.width = DL_W, dl_live.height = DL_H, dl_live.scale = 100;

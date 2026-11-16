@@ -728,7 +728,7 @@ static void compositor_wl_unlend(int row);
 
 static void compositor_wl_source_drop(int row)
 {
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         if (compositor_wl.source[row].va && compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
                 gpu_release_import(compositor_wl.source[row].va);
@@ -871,7 +871,8 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         (void)context;
         if (!table || client < 0 || client >= WAYLAND_CLIENTS)
                 return -1;
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+        // With every row taken, rows are made (compositor_rows_grow) and the walk goes on into them.
+        for (int row = 0; row < (int)compositor_rows_in_use || (row == (int)compositor_rows_in_use && compositor_rows_grow(compositor_rows_in_use + COMPOSITOR_ROWS_SPARE) > (unsigned int)row); row++)
         {
                 unsigned int none = 0;
 
@@ -909,7 +910,7 @@ static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
         // The cursor the client asked for is its own: a program that takes the row next has none asked (the kit's shape shows).
-        if (row >= 0 && row < WINDOWS)
+        if (row >= 0 && row < COMPOSITOR_ROWS)
         {
                 compositor_wl.laying[row].open = 0;
                 compositor_wl.cursor_asked[row] = 0;
@@ -924,7 +925,7 @@ static void compositor_wl_row_close(void *context, int row)
 
 static __attribute__((unused)) int compositor_wl_row_blend(int row)
 {
-        return row >= 0 && row < WINDOWS ? (int)compositor_wl.row_blend[row] : 0;
+        return row >= 0 && row < COMPOSITOR_ROWS ? (int)compositor_wl.row_blend[row] : 0;
 }
 
 /*
@@ -979,7 +980,7 @@ static void compositor_wl_part(int row, long x1, long y1, long x2, long y2)
 */
 static int compositor_wl_parts(int row, const int (**rects)[4])
 {
-        if (row < 0 || row >= WINDOWS || compositor_wl.parts[row].count < 2)
+        if (row < 0 || row >= COMPOSITOR_ROWS || compositor_wl.parts[row].count < 2)
                 return 0;
         *rects = compositor_wl.parts[row].rect;
         return compositor_wl.parts[row].count;
@@ -1020,7 +1021,7 @@ static int compositor_wl_sync_start(long client, int fd);
 */
 static int compositor_lent(int row)
 {
-        return row >= 0 && row < WINDOWS && compositor_wl.lent[row].pixels != 0;
+        return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].pixels != 0;
 }
 
 // Whether a fourcc is ARGB's or XRGB's bytes with red and blue the other way round.
@@ -1171,7 +1172,7 @@ static unsigned int compositor_lent_fb(int row)
 
 static void compositor_lent_fb_fail(int row)
 {
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         compositor_wl.lent[row].scan_failed = 1;
         compositor_wl_lent_drop_fb(row);
@@ -1185,7 +1186,7 @@ static int compositor_wl_row_async(int row)
 // A row's layers let go of: the imports of their dma-bufs released (as the lent picture's are), and the row has none.
 static void compositor_wl_layers_drop(int row)
 {
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
                 if (compositor_wl_live(compositor_wl_layers.layer[row][at].import, compositor_wl_layers.layer[row][at].epoch))
@@ -1231,7 +1232,7 @@ static void compositor_wl_layers_put(int row, unsigned int *to, unsigned long pi
 // the layers over it go with it (the shim lays what it shows of them again).
 static void compositor_wl_unlend(int row)
 {
-        if (row >= 0 && row < WINDOWS && compositor_wl_layers.count[row])
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor_wl_layers.count[row])
                 compositor_wl_layers_drop(row);
         if (!compositor_lent(row))
                 return;
@@ -1287,7 +1288,7 @@ static void compositor_wl_seed(int row, unsigned int which)
 // that is the table's already with them laid over it, in the buffer it shows. What is shown is what was: nothing to compose again.
 static void compositor_wl_layers_lay(int row)
 {
-        if (row < 0 || row >= WINDOWS || !compositor_wl_layers.count[row])
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl_layers.count[row])
                 return;
         if (compositor_lent(row))
                 compositor_wl_seed(row, compositor.front[row]);
@@ -1323,7 +1324,7 @@ static int compositor_wl_meets_corner(int x1, int y1, int x2, int y2, int width,
 
 static void compositor_wl_settle(int row)
 {
-        if (row >= 0 && row < WINDOWS && compositor_wl_layers.count[row])
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor_wl_layers.count[row])
         {
                 for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
                         if (compositor_wl_cut(compositor_wl_layers.layer[row][at].pixels))
@@ -1336,7 +1337,7 @@ static void compositor_wl_settle(int row)
                 return;
         // A dma-buf the processor read in place COMPOSITOR_WL_WC_PRESENTS presents running: copied once, and the row's copies made from here on.
         // A picture with red and blue swapped is seeded after the first: the processor cannot read it as it is.
-        if (row >= 0 && row < WINDOWS && compositor_wl.lent[row].fd >= 0 &&
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].fd >= 0 &&
             compositor_wl.wc_reads[row] >= (compositor_lent_swap(row) ? 1 : COMPOSITOR_WL_WC_PRESENTS))
         {
                 compositor_wl.wc_reads[row] = 0;
@@ -1563,7 +1564,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (picture->fragile && !(picture->full || !picture->damages))
                 return compositor_wl_lend_refused(picture, 4);
         // A row the processor composes is not lent a dma-buf (compositor_wl.wc_copy): its damage is copied with the streaming loads instead.
-        if (picture->sync_fd >= 0 && row >= 0 && row < WINDOWS && compositor_wl.wc_copy[row])
+        if (picture->sync_fd >= 0 && row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.wc_copy[row])
                 return compositor_wl_lend_refused(picture, 5);
         if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
                 return compositor_wl_lend_refused(picture, 6);
@@ -1974,7 +1975,7 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
         int ok = 1, changes = 0, box[4] = {0, 0, 0, 0}, rects[WAYLAND_DAMAGE][4];
 
         (void)context;
-        if (row < 0 || row >= WINDOWS || !table)
+        if (row < 0 || row >= COMPOSITOR_ROWS || !table)
                 return 0;
         // A window landing (drawn scaled) or of glass (composed over its backdrop) is drawn from one picture: its layers would be laid into it
         // at the next present (compositor_wl_settle), every present it is so, so they are refused here.
@@ -2098,7 +2099,7 @@ static void compositor_wl_layers_pending(struct windows *table, int row)
 static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at)
 {
         struct compositor_frame *window = &frames[at - 1];
-        unsigned int count = row >= 0 && row < WINDOWS ? compositor_wl_layers.count[row] : 0;
+        unsigned int count = row >= 0 && row < COMPOSITOR_ROWS ? compositor_wl_layers.count[row] : 0;
         int fit = count && compositor_lent(row) && !compositor_scaled(window) && window->pixels == compositor_wl.lent[row].pixels &&
                   window->width == compositor_wl.lent[row].width && window->height == compositor_wl.lent[row].height;
 
@@ -2506,7 +2507,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         unsigned int aside = 0;
 
         (void)context;
-        if (row < 0 || row >= WINDOWS || !table)
+        if (row < 0 || row >= COMPOSITOR_ROWS || !table)
                 return -1;
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
@@ -2773,7 +2774,7 @@ static const unsigned char compositor_wl_cursor_of[11] = {CP_ARROW, CP_TEXT, CP_
 // asks inside the window).
 static int compositor_wl_asked_shape(int row)
 {
-        if (row < 0 || row >= WINDOWS || !compositor_wl.cursor_asked[row])
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl.cursor_asked[row])
                 return -1;
         return compositor_wl.cursor_asked[row] == COMPOSITOR_WL_HIDDEN ? -2 : compositor_wl.cursor_asked[row] - 1;
 }
@@ -2814,7 +2815,7 @@ static void compositor_wl_caret(int row, long bottom)
 static void compositor_wl_row_do(void *context, int row, long what, long a, long b)
 {
         (void)context;
-        if (row < 0 || row >= WINDOWS)
+        if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         // A text field's count is kept whether or not the window has shown a picture yet: the shim counts it from the enable, and
         // gives it back when the window goes, which is before the row closes.
@@ -2900,7 +2901,7 @@ static int compositor_wl_row_facts(void *context, int row, struct wayland_facts 
         long states = 0;
 
         (void)context;
-        if (row < 0 || row >= WINDOWS || !compositor.showing[row])
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
                 return -1;
         facts->width = facts->height = 0;
         if (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row])
@@ -4138,7 +4139,7 @@ static void compositor_wl_clip_push(void *context, long row, long which, long fd
         positive now = clock_monotonic_nanoseconds();
         unsigned char info[256];
         long src, slot, client = wayland_row_owner(row);
-        int root = row >= 0 && row < WINDOWS ? compositor_clip_root((int)row) : -1;
+        int root = row >= 0 && row < COMPOSITOR_ROWS ? compositor_clip_root((int)row) : -1;
         unsigned int mode;
 
         (void)context;

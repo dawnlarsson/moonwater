@@ -1146,7 +1146,7 @@ static int compositor_asked_shape(int row)
         if (asked == -2 || (asked >= 0 && CP_CLIENT_SHAPES))
                 return asked;
 #endif
-        if (!compositor.table || row < 0 || row >= WINDOWS)
+        if (!compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
                 return -1;
         // A program's shape is one of the CP_ codes it knows; any other value is the arrow, so a program cannot make the -2 of no pointer.
         unsigned int shape = __atomic_load_n(&compositor.table->pointer_shape[row], __ATOMIC_ACQUIRE);
@@ -1490,7 +1490,7 @@ static void compositor_shape_sync(void)
 {
         int of = compositor.cursor.asked_row;
 
-        if (of >= 0 && of < WINDOWS && compositor_asked_shape(of) != compositor.cursor.asked_seen)
+        if (of >= 0 && of < COMPOSITOR_ROWS && compositor_asked_shape(of) != compositor.cursor.asked_seen)
                 compositor_motion();
 #ifdef CONFIG_MOONWATER_WAYLAND
         // The client's picture is looked at each pass too (its serial moves with every change): a new one, or none, is shown now.
@@ -3010,10 +3010,10 @@ static void compositor_chip_hide(void)
 static int compositor_chip_controls(int row, positive now)
 {
         struct compositor_chip *c = &compositor.chip;
-        int cells = row >= 0 && row < WINDOWS && (compositor.asks[row] & WINDOW_NO_TAB) ? 2 : 3;
+        int cells = row >= 0 && row < COMPOSITOR_ROWS && (compositor.asks[row] & WINDOW_NO_TAB) ? 2 : 3;
         int scale = compositor.scale, cell = UI_EDGE_CONTROL_CELL * scale / 100, w = cells * cell, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100;
 
-        if (row < 0 || row >= WINDOWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST)
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST)
                 return 0;
         if ((int)compositor.w[row] < w + 2 * cell || !compositor_chip_map())
                 return 0;
@@ -3767,7 +3767,7 @@ static void compositor_chip_press(int cell)
         int row = compositor.chip.row;
 
         compositor_chip_hide();
-        if (row < 0 || row >= WINDOWS || !compositor_visible(row))
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_visible(row))
                 return;
         if (cell == 0)
                 compositor_close(row);

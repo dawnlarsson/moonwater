@@ -4034,11 +4034,12 @@ static fn check_kit_theme(void)
                       theme.role[UI_PRIMARY] == 0xff18181bu && theme.role[UI_ON_PRIMARY] == 0xffffffffu);
                 // The chrome follows the theme: the lit line, and the tabs' glass (on a table of its own when none is mapped).
                 {
-                        static struct windows table_of_its_own;
+                        static struct windows *table_of_its_own_scratch;
+                        struct windows *const table_of_its_own_at = windows_scratch_table(&table_of_its_own_scratch);
                         struct windows *was_table = compositor.table;
 
                         if (!compositor.table)
-                                compositor.table = &table_of_its_own;
+                                compositor.table = table_of_its_own_at;
                         unsigned int themed = compositor.table->themed, mode = compositor.table->theme, accent = compositor.table->accent;
                         b32 before, standard, light, white, tabs;
 
@@ -4182,7 +4183,8 @@ static fn check_motion_pace(void)
         const struct settings_row address_to row = setting_by_path((string_address)SETTING_MOTION_SPEED_PATH);
         struct ui_kit was = ui_kit;
         static __typeof__(compositor) compositor_was;
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         b64 at_full[2], at_half[2], at_double[2], at_once[2];
         b32 springs, stretches, landing, lands_none, sways;
 
@@ -4222,7 +4224,7 @@ static fn check_motion_pace(void)
                 positive now;
 
                 ui_pace = 200;
-                check_land_setup(&table, 0);
+                check_land_setup(table_at, 0);
                 compositor_take(2);
                 now = clock_monotonic_nanoseconds();
                 compositor.land_at[2] = now - 85 * UI_MS;
@@ -4230,7 +4232,7 @@ static fn check_motion_pace(void)
                 compositor_land_keep();
                 landing = landing && !compositor.landing[2];
                 ui_pace = 100;
-                check_land_setup(&table, 0);
+                check_land_setup(table_at, 0);
                 compositor_take(2);
                 compositor.land_at[2] = clock_monotonic_nanoseconds() - 85 * UI_MS;
                 landing = landing && compositor_land_short(2) > 0;
@@ -4240,7 +4242,7 @@ static fn check_motion_pace(void)
                 for (unsigned int pace = 50; pace <= 200; pace += 150)
                 {
                         ui_pace = pace;
-                        check_land_setup(&table, 1);
+                        check_land_setup(table_at, 1);
                         compositor_take(2);
                         lands_none = lands_none && !compositor.landing[2];
                 }
@@ -4250,7 +4252,7 @@ static fn check_motion_pace(void)
         {
                 struct compositor_sway sway;
 
-                check_land_setup(&table, 0);
+                check_land_setup(table_at, 0);
                 memory_zero(&sway, sizeof(sway));
                 ui_pace = 200;
                 compositor_sway_to(&sway, 100, 1000);
@@ -4264,23 +4266,23 @@ static fn check_motion_pace(void)
         {
                 b32 carried, standard, kept_none, untold;
 
-                check_land_setup(&table, 0);
+                check_land_setup(table_at, 0);
                 ui_pace = 100;
                 compositor_pace_set("150");
-                carried = ui_pace == 150 && table.motion_pace == 150 && table.themed == 1;
+                carried = ui_pace == 150 && table_at->motion_pace == 150 && table_at->themed == 1;
                 ui_pace = 100;
-                ui_kit_pace_take(&table);
+                ui_kit_pace_take(table_at);
                 carried = carried && ui_pace == 150;
                 compositor_pace_set("");
-                standard = ui_pace == UI_PACE_STANDARD && table.motion_pace == UI_PACE_STANDARD;
+                standard = ui_pace == UI_PACE_STANDARD && table_at->motion_pace == UI_PACE_STANDARD;
                 compositor_pace_set("default");
                 standard = standard && ui_pace == UI_PACE_STANDARD;
                 compositor_pace_set("250");
                 kept_none = ui_pace == UI_PACE_STANDARD;
                 compositor_pace_set("sideways");
                 kept_none = kept_none && ui_pace == UI_PACE_STANDARD;
-                table.motion_pace = 0, ui_pace = 100;
-                ui_kit_pace_take(&table);
+                table_at->motion_pace = 0, ui_pace = 100;
+                ui_kit_pace_take(table_at);
                 untold = ui_pace == 100;
                 check("motion pace: the word the file keeps is the compositor's pace and the table's, and a window takes it from the table",
                       carried);
@@ -4327,7 +4329,8 @@ static int hand_shakes(int feel, int step)
 
 static fn check_hand_settings(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         static __typeof__(compositor) compositor_was;
         struct ui_kit kit_was = ui_kit;
         b64 click_was = ui_click_ns, hold_was = ui_hold_ns;
@@ -4347,13 +4350,13 @@ static fn check_hand_settings(void)
         memory_zero(&k, sizeof(k));
         ui_click_again(&k, 1000000000ll, 10, 10, 100);
         clicks = ui_click_again(&k, 1000000000ll + 600 * UI_MS, 10, 10, 100) == 1;
-        check_land_setup(&table, 0);
+        check_land_setup(table_at, 0);
         compositor_hand_set("700", "", "", "", "");
         memory_zero(&k, sizeof(k));
         ui_click_again(&k, 1000000000ll, 10, 10, 100);
-        clicks = clicks && ui_click_again(&k, 1000000000ll + 600 * UI_MS, 10, 10, 100) == 2 && table.click_ms == 700 && table.themed == 1;
+        clicks = clicks && ui_click_again(&k, 1000000000ll + 600 * UI_MS, 10, 10, 100) == 2 && table_at->click_ms == 700 && table_at->themed == 1;
         ui_click_ns = (b64)UI_CLICK_NS;
-        ui_kit_input_take(&table);
+        ui_kit_input_take(table_at);
         clicks = clicks && ui_click_ns == 700 * UI_MS;
         check("hand settings: a double click kept at 700 ms makes two presses 600 ms apart a double click in the compositor and, through the table, in a window",
               clicks);
@@ -4364,7 +4367,7 @@ static fn check_hand_settings(void)
         touch.mode = UI_TOUCH_ONE, touch.start = 2000000000ll;
         holds = ui_touch_due(&touch, 1) == 2000000000ll + (b64)UI_HOLD_NS;
         compositor_hand_set("", "800", "", "", "");
-        holds = holds && ui_touch_due(&touch, 1) == 2000000000ll + 800 * UI_MS && table.hold_ms == 800 && ui_click_ns == (b64)UI_CLICK_NS;
+        holds = holds && ui_touch_due(&touch, 1) == 2000000000ll + 800 * UI_MS && table_at->hold_ms == 800 && ui_click_ns == (b64)UI_CLICK_NS;
         {
                 struct ui_touch_out out;
 
@@ -4374,7 +4377,7 @@ static fn check_hand_settings(void)
                 holds = holds && out.count == 1 && out.event[0].kind == UI_TOUCH_HOLD;
         }
         ui_hold_ns = (b64)UI_HOLD_NS;
-        ui_kit_input_take(&table);
+        ui_kit_input_take(table_at);
         holds = holds && ui_hold_ns == 800 * UI_MS;
         check("hand settings: a long press kept at 800 ms is no hold at 600 ms and a hold at 800, in the touch recogniser and, through the table, in a window",
               holds);
@@ -4393,11 +4396,11 @@ static fn check_hand_settings(void)
         ui_kit.wheel_lines = 0;
         wheels = terminal_wheel_lines() == 3;
         compositor_hand_set("", "", "5", "", "");
-        ui_kit_input_take(&table);
-        wheels = wheels && table.wheel_lines == 5 && terminal_wheel_lines() == 5;
+        ui_kit_input_take(table_at);
+        wheels = wheels && table_at->wheel_lines == 5 && terminal_wheel_lines() == 5;
         compositor_hand_set("", "", "", "", "");
-        ui_kit_input_take(&table);
-        wheels = wheels && table.wheel_lines == 3 && terminal_wheel_lines() == 3;
+        ui_kit_input_take(table_at);
+        wheels = wheels && table_at->wheel_lines == 3 && terminal_wheel_lines() == 3;
         check("hand settings: the terminal's notch is three lines as standard, and five when kept so, carried by the table", wheels);
 
         // The shake: eight pixels back and forth is found at the fifth reversal as standard, at none when low (a step of nine), and five
@@ -4413,7 +4416,7 @@ static fn check_hand_settings(void)
               shakes);
 
         // The grip: a press 10 pixels left of a window's left edge is no grip at 6 pixels and the left edge's at 12.
-        check_land_setup(&table, 0);
+        check_land_setup(table_at, 0);
         compositor_take(2);
         compositor_popup_parent[2] = -1;
         compositor_hand_set("", "", "", "", "");
@@ -4426,7 +4429,7 @@ static fn check_hand_settings(void)
 
         // Words that are none of a row's are its standard.
         compositor_hand_set("950", "100", "11", "wild", "1");
-        junk = ui_click_ns == (b64)UI_CLICK_NS && ui_hold_ns == (b64)UI_HOLD_NS && table.wheel_lines == 3 && compositor.shake.feel == 0 &&
+        junk = ui_click_ns == (b64)UI_CLICK_NS && ui_hold_ns == (b64)UI_HOLD_NS && table_at->wheel_lines == 3 && compositor.shake.feel == 0 &&
                compositor_grip() == COMPOSITOR_GRIP;
         check("hand settings: a time, a count or a word that is none of its row's is the row's standard", junk);
 
@@ -11358,7 +11361,7 @@ static fn check_wheel_modifiers(void)
         struct windows address_to table;
         unsigned int at, with_control, with_both, with_none;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < COMPOSITOR_ROWS; row++)
                 compositor_popup_parent[row] = -1;
         compositor_zero();
         compositor.focus = compositor.hover = compositor.drag = COMPOSITOR_NONE;
@@ -11609,33 +11612,34 @@ static fn check_stream_gain(void)
 // after now is none.
 static fn check_wheel_report(void)
 {
-        static struct windows report;
+        static struct windows *report_scratch;
+        struct windows *const report_at = windows_scratch_table(&report_scratch);
         static const unsigned long long now = 20000000000ull;
         struct window_wheel_report r;
         int ok;
 
-        memory_zero(&report, sizeof(report));
+        windows_scratch_zero(report_at);
         for (int k = 0; k < 50; k++)
-                window_wheel_note(&report, 3, 1000000000ull + (unsigned long long)k * 1000000ull, 0); // nineteen seconds before now
+                window_wheel_note(report_at, 3, 1000000000ull + (unsigned long long)k * 1000000ull, 0); // nineteen seconds before now
         for (int k = 0; k < 200; k++)
-                window_wheel_note(&report, 3, now - (unsigned long long)(199 - k) * 16000000ull, k >= 50); // the last 3.2 s, 16 ms apart
-        window_wheel_report(&report, 3, now, &r);
+                window_wheel_note(report_at, 3, now - (unsigned long long)(199 - k) * 16000000ull, k >= 50); // the last 3.2 s, 16 ms apart
+        window_wheel_report(report_at, 3, now, &r);
         ok = r.notches == 200 && r.streams == 150 && r.gaps == 199 && r.least == 16000000ull && r.median == 16000000ull &&
              r.peak >= 60 && r.peak <= 65;
         check("wheel readout: the last five seconds of 200 turns 16 ms apart: 200 counted, 150 a stream's, gaps 16 ms, about 62 in a second, and the ten-second-old turns none",
               ok);
 
-        memory_zero(&report, sizeof(report));
+        windows_scratch_zero(report_at);
         for (int k = 0; k < 1500; k++)
-                window_wheel_note(&report, 4, now - (unsigned long long)(1499 - k) * 4000000ull, 1);
-        window_wheel_report(&report, 4, now, &r);
+                window_wheel_note(report_at, 4, now - (unsigned long long)(1499 - k) * 4000000ull, 1);
+        window_wheel_report(report_at, 4, now, &r);
         check("wheel readout: a ring that wrapped counts its last 1024 turns, 4 ms apart (6 s of them, so the span holds more than the ring)",
               r.notches == WINDOW_WHEEL_RING && r.streams == WINDOW_WHEEL_RING && r.gaps == WINDOW_WHEEL_RING - 1 && r.least == 4000000ull);
 
-        memory_zero(&report, sizeof(report));
+        windows_scratch_zero(report_at);
         for (int k = 0; k < 10; k++)
-                window_wheel_note(&report, 5, now + 1000000000ull + (unsigned long long)k * 1000000ull, 0);
-        window_wheel_report(&report, 5, now, &r);
+                window_wheel_note(report_at, 5, now + 1000000000ull + (unsigned long long)k * 1000000ull, 0);
+        window_wheel_report(report_at, 5, now, &r);
         check("wheel readout: turns stamped after now are none, and an input with none reads none", r.notches == 0 && r.gaps == 0 && r.least == 0 && r.median == 0);
 }
 
@@ -12761,7 +12765,7 @@ static fn strips_list(struct ui_strips address_to s, int n, const int address_to
 */
 static struct audio_state mixer_fixture_page;
 static b64 mixer_t0;
-static struct windows mixer_fixture_table;
+static struct windows *mixer_fixture_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 
 // A start is a grandchild's, which the check does not wait on: the file waited for (two seconds at most) and read.
 static positive mixer_waits(const char address_to path, char address_to into, positive room)
@@ -12842,8 +12846,8 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         memory_zero(&mixer, sizeof(mixer));
         mixer.big = (struct mixer_big address_to)mapped;
         mixer.ui = *ui;
-        mixer.own.table = &mixer_fixture_table;
-        mixer_fixture_table.stride = 640;
+        mixer.own.table = windows_scratch_table(&mixer_fixture_table_scratch);
+        windows_scratch_table(&mixer_fixture_table_scratch)->stride = 640;
         mixer.width = 640, mixer.height = 400, mixer.shown = -1, mixer.focused = true;
         mixer.page = &mixer_fixture_page;
         mixer.socket_path = "/nonexistent/native";
@@ -13219,18 +13223,18 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
                 // Beside the cell: the kit's anchor takes the rectangle the compositor left (the kit's own checks place a window beside it).
                 mixer_app.beside = true;
-                mixer_fixture_table.outputs = 2;
-                mixer_fixture_table.button_x = 2400, mixer_fixture_table.button_y = 1416, mixer_fixture_table.button_w = 40, mixer_fixture_table.button_h = 24;
-                mixer_fixture_table.button_edge = TASKBAR_BOTTOM, mixer_fixture_table.button_screen = 1;
-                mixer_fixture_table.output_x[0] = 0, mixer_fixture_table.output_y[0] = 0, mixer_fixture_table.output_w[0] = 2560, mixer_fixture_table.output_h[0] = 1440;
-                mixer_fixture_table.output_x[1] = 2560, mixer_fixture_table.output_y[1] = 0, mixer_fixture_table.output_w[1] = 1920, mixer_fixture_table.output_h[1] = 1080;
+                windows_scratch_table(&mixer_fixture_table_scratch)->outputs = 2;
+                windows_scratch_table(&mixer_fixture_table_scratch)->button_x = 2400, windows_scratch_table(&mixer_fixture_table_scratch)->button_y = 1416, windows_scratch_table(&mixer_fixture_table_scratch)->button_w = 40, windows_scratch_table(&mixer_fixture_table_scratch)->button_h = 24;
+                windows_scratch_table(&mixer_fixture_table_scratch)->button_edge = TASKBAR_BOTTOM, windows_scratch_table(&mixer_fixture_table_scratch)->button_screen = 1;
+                windows_scratch_table(&mixer_fixture_table_scratch)->output_x[0] = 0, windows_scratch_table(&mixer_fixture_table_scratch)->output_y[0] = 0, windows_scratch_table(&mixer_fixture_table_scratch)->output_w[0] = 2560, windows_scratch_table(&mixer_fixture_table_scratch)->output_h[0] = 1440;
+                windows_scratch_table(&mixer_fixture_table_scratch)->output_x[1] = 2560, windows_scratch_table(&mixer_fixture_table_scratch)->output_y[1] = 0, windows_scratch_table(&mixer_fixture_table_scratch)->output_w[1] = 1920, windows_scratch_table(&mixer_fixture_table_scratch)->output_h[1] = 1080;
                 mixer_app.anchor.anchored = false;
-                ui_anchor_take(&mixer_app.anchor, &mixer_fixture_table, mixer_app.beside);
+                ui_anchor_take(&mixer_app.anchor, windows_scratch_table(&mixer_fixture_table_scratch), mixer_app.beside);
                 check("mixer popup: the rectangle the compositor left is taken once, with the screen it names",
                       mixer_app.anchor.anchored && mixer_app.anchor.edge == TASKBAR_BOTTOM && mixer_app.anchor.number == 1 && mixer_app.anchor.button[0] == 2400 && mixer_app.anchor.button[2] == 40);
                 mixer_app.anchor.anchored = false;
-                mixer_fixture_table.button_w = 0;
-                ui_anchor_take(&mixer_app.anchor, &mixer_fixture_table, mixer_app.beside);
+                windows_scratch_table(&mixer_fixture_table_scratch)->button_w = 0;
+                ui_anchor_take(&mixer_app.anchor, windows_scratch_table(&mixer_fixture_table_scratch), mixer_app.beside);
                 check("mixer popup: and a table with no press in it leaves it in the middle", !mixer_app.anchor.anchored);
                 mixer_app.beside = false;
                 mixer.quick = false;
@@ -13508,18 +13512,18 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         {
                 struct ui_app asked = {0};
 
-                mixer_fixture_table.page[mixer.own.row] = 2;
+                windows_scratch_table(&mixer_fixture_table_scratch)->page[mixer.own.row] = 2;
                 asked.own = &mixer.own, asked.dirty = &mixer.dirty, asked.page = mixer_asked_hook;
                 ui_app_asked(&asked);
-                check("kit: a page asked of a window is told to its app, as its number, and taken", mixer_asked_page == 1 && !mixer_fixture_table.page[mixer.own.row]);
+                check("kit: a page asked of a window is told to its app, as its number, and taken", mixer_asked_page == 1 && !windows_scratch_table(&mixer_fixture_table_scratch)->page[mixer.own.row]);
                 mixer_asked_page = 77;
                 ui_app_asked(&asked);
                 check("kit: and only once", mixer_asked_page == 77);
-                mixer_fixture_table.page[mixer.own.row] = 3;
+                windows_scratch_table(&mixer_fixture_table_scratch)->page[mixer.own.row] = 3;
                 asked.page = null;
                 ui_app_asked(&asked);
-                check("kit: an app with no hook for it leaves the request where it is", mixer_fixture_table.page[mixer.own.row] == 3);
-                mixer_fixture_table.page[mixer.own.row] = 0;
+                check("kit: an app with no hook for it leaves the request where it is", windows_scratch_table(&mixer_fixture_table_scratch)->page[mixer.own.row] == 3);
+                windows_scratch_table(&mixer_fixture_table_scratch)->page[mixer.own.row] = 0;
                 mixer.recording = false;
                 mixer_asked(1);
                 check("mixer: asked for page 1 it shows Recording, as a press on the tab does", mixer.recording && s->item[0].master == 2);

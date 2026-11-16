@@ -278,7 +278,7 @@ static fn check_compositor_place(void)
                 compositor_take(2);
                 check("place: and a placement of nothing leaves a window where it is", compositor.x[2] == 68 && compositor.y[2] == (256 - COMPOSITOR_PANEL - 80) / 2);
         }
-        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0,
                         0, 0);
         compositor_zero();
 }
@@ -440,7 +440,7 @@ static fn check_compositor_remember(void)
         system_remove_at(AT_FDCWD, (string_address)remember_path, 0);
         compositor_places_path = SETTING_WINDOWS_PLACES_PATH;
         compositor_remember_path = SETTING_WINDOWS_REMEMBER_PATH;
-        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0,
                         0, 0);
         compositor_zero();
 }
@@ -519,7 +519,7 @@ static void check_glass_lift(void)
                                         plain += centre == 0x404040u && desktop == wall;
                                 cornered += corner == desktop;
                                 bordered += edge == compositor_line_unlit();
-                                compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+                                compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0,
                                                 0, 0);
                                 compositor_ground = COMPOSITOR_INK_DESKTOP;
                         }
@@ -688,7 +688,7 @@ static fn check_glass(void)
         compositor_leave(1);
         check("glass: a glass window gone gives its pictures back", !compositor.backdrop[2] && !compositor.glassy[2]);
         compositor_call(syscall(munmap), (positive)compositor.table,
-                        compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+                        compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
         if (compositor.blur)
                 compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
         compositor_zero();

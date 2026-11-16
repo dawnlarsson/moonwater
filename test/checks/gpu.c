@@ -300,7 +300,7 @@ static font_engine app_engine;
 static p8 app_atlas[512 * 512];
 static font_face app_face;
 static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS];
-static struct windows app_table;
+static struct windows *app_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 static struct ui_scene app_scene;
 // The app regions, from the GPU's base at app_at: the picture (16 MiB), the ops (4 MiB), the binning (16 MiB), the text covers (28 MiB).
 #define APP_PIC (0u)
@@ -385,12 +385,12 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : which == 7 ? app_find_paint : which == 8 ? editor_draw : mixer_draw;
 
                         // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
-                        memory_zero(&app_table, sizeof(app_table));
-                        app_table.stride = (unsigned int)pitch, app_table.output_width = (unsigned int)W, app_table.output_height = (unsigned int)H, app_table.scale = (unsigned int)s;
+                        windows_scratch_zero(windows_scratch_table(&app_table_scratch));
+                        windows_scratch_table(&app_table_scratch)->stride = (unsigned int)pitch, windows_scratch_table(&app_table_scratch)->output_width = (unsigned int)W, windows_scratch_table(&app_table_scratch)->output_height = (unsigned int)H, windows_scratch_table(&app_table_scratch)->scale = (unsigned int)s;
                         if (which == 0)
                         {
                                 // The launcher: three programs of the desktop listed, the field and the power row.
-                                launcher.own.table = &app_table;
+                                launcher.own.table = windows_scratch_table(&app_table_scratch);
                                 launcher.width = W, launcher.height = H;
                                 launcher.ui.scale = s, launcher.ui.engine = &app_engine, launcher.ui.regular = launcher.ui.bold = &app_face;
                                 launcher.ui.scratch = app_scratch, launcher.ui.scratch_width = 2000, launcher.ui.opaque = 1, launcher.ui.glass = 0;
@@ -435,7 +435,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         else if (which == 7)
                         {
                                 // The find bar: its field (the query, the replacement, or the line's number), its mode (group 0 find, 1 replace, 2 line).
-                                settings.own.table = &app_table;
+                                settings.own.table = windows_scratch_table(&app_table_scratch);
                                 settings.width = W, settings.height = H;
                                 settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
                                 settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
@@ -453,7 +453,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         else if (which == 6)
                         {
                                 // A popup menu: its items (a checked one, a disabled one, a separator, a submenu) and its hot item (the group's variant).
-                                settings.own.table = &app_table;
+                                settings.own.table = windows_scratch_table(&app_table_scratch);
                                 settings.width = W, settings.height = H;
                                 settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
                                 settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
@@ -482,7 +482,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         else if (which == 5)
                         {
                                 // The gallery showcase: the window's table and size, the faces, and gallery.on (its page instead of the settings').
-                                settings.own.table = &app_table;
+                                settings.own.table = windows_scratch_table(&app_table_scratch);
                                 settings.width = W, settings.height = H;
                                 settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
                                 settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
@@ -492,7 +492,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         {
                                 // Settings: its window, the group chosen, its layout as the window lays it out (the list and the page).
                                 gallery.on = 0;
-                                settings.own.table = &app_table;
+                                settings.own.table = windows_scratch_table(&app_table_scratch);
                                 settings.width = W, settings.height = H;
                                 settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
                                 settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
@@ -504,7 +504,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         {
                                 // The mixer: its window (the strips, the tabs and the message the page gives), its tray popup (-q), or its recording page.
                                 memory_zero(&app_mixer, sizeof(app_mixer));
-                                mixer.own.table = &app_table;
+                                mixer.own.table = windows_scratch_table(&app_table_scratch);
                                 mixer.width = W, mixer.height = H;
                                 mixer.ui.scale = s, mixer.ui.engine = &app_engine, mixer.ui.regular = mixer.ui.bold = &app_face;
                                 mixer.ui.scratch = app_scratch, mixer.ui.scratch_width = 2000, mixer.ui.opaque = 1, mixer.ui.glass = 0;
@@ -895,7 +895,7 @@ static b32 gpu_route_rows(void)
         system_truncate_handle((int)fd, BYTES);
         system_call_3(syscall(fcntl), (positive)fd, 1033, 2); // F_ADD_SEALS, F_SEAL_SHRINK, as the table is sealed
         mapped = system_call_6(syscall(mmap), 0, BYTES, 3, 1, (positive)fd, 0);
-        other = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+        other = system_call_6(syscall(mmap), 0, 4096, 3, 0x4022, (positive)-1, 0);
         if ((mapped < 0 && mapped > -4096) || (other < 0 && other > -4096))
         {
                 check("gpu route: memory for the rows", false);
@@ -1185,10 +1185,11 @@ static void gpu_layers_off_rows(void)
         struct wayland_picture layer;
         unsigned char kept_off = compositor_wl_layers.off;
         struct windows *kept_table = compositor.table;
-        struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_fresh(&table_scratch); // zero, as the table on the stack was
 
-        memory_zero(&table, sizeof table);
-        compositor.table = &table;
+        windows_scratch_zero(table_at);
+        compositor.table = table_at;
         memory_zero(&layer, sizeof layer);
         // An 8 by 8 picture at (20, 20) of a 64 by 64 window: clear of its corners, a layer the host keeps when layers are on.
         layer.pixels = layer.map = (const unsigned char *)pixels, layer.map_bytes = sizeof pixels, layer.stride = 32, layer.width = 8, layer.height = 8;
@@ -1243,8 +1244,8 @@ static void gpu_wc_rows(void)
         unsigned long kept_pixels = compositor.pixels, kept_buffer = compositor.buffer;
         int kept_width = compositor.width, kept_stride = compositor.stride, kept_damage[4], kept_x = compositor.x[ROW], kept_y = compositor.y[ROW];
         unsigned int kept_damages = compositor.damages, kept_w = compositor.w[ROW], kept_h = compositor.h[ROW], kept_front = compositor.front[ROW];
-        unsigned long table_bytes = ((sizeof(struct windows) + 4095) & ~4095ul) + (unsigned long)WINDOWS * 2 * SIDE * SIDE * 4;
-        long table = system_call_6(syscall(mmap), 0, table_bytes, 3, 0x22, (positive)-1, 0);
+        unsigned long table_bytes = ((sizeof(struct windows) + 4095) & ~4095ul) + (unsigned long)COMPOSITOR_ROWS_FIRST * 2 * SIDE * SIDE * 4;
+        long table = system_call_6(syscall(mmap), 0, table_bytes, 3, 0x4022, (positive)-1, 0);
         int fd = (int)system_call_2(syscall(memfd_create), (positive) "wc", 0);
         static unsigned int pixels[SIDE * SIDE];
         unsigned int seeded = compositor_wl.wc_seeded, presents = compositor_wl.wc_presents, *front;
@@ -1335,7 +1336,7 @@ static void gpu_pool_rows(void)
         const positive extent = (positive)STRIDE * (PH - 1) + PW * 4, expected = ((positive)(OFFSET & 4095) + extent + 4095) & ~4095ull;
         static const int rect[2][4] = {{0, 0, 300, 200}, {PW - 250, PH - 100, 250, 100}}; // sx, sy, w, h: the first pixel's corner, then the last pixel's
         struct wayland_picture picture;
-        long pool = system_call_6(syscall(mmap), 0, POOL, 3, 0x21, (positive)-1, 0), out = system_call_6(syscall(mmap), 0, DBYTES, 3, 0x22, (positive)-1, 0);
+        long pool = system_call_6(syscall(mmap), 0, POOL, 3, 0x21, (positive)-1, 0), out = system_call_6(syscall(mmap), 0, DBYTES, 3, 0x4022, (positive)-1, 0);
         unsigned int address_to want = (unsigned int address_to)memory(DBYTES), address_to to = (unsigned int address_to)out;
         unsigned int address_to pixels;
         unsigned long saved_buffer = compositor.buffer;
@@ -1514,7 +1515,8 @@ static b32 gpu_text_has(const char *text, const char *word)
 
 static void gpu_fault_rows(void)
 {
-        static struct windows board;
+        static struct windows *board_scratch;
+        struct windows *const board_at = windows_scratch_table(&board_scratch);
         struct windows_issue want[WINDOWS_GPU_CODES];
         unsigned int count;
         positive value = 0;
@@ -1611,14 +1613,14 @@ static void gpu_fault_rows(void)
         check("hang: a second hang within a minute gives the card up for the session", compositor_gpu_state.dead && compositor_gpu_state.hung_off &&
               compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG && !compositor_gpu_state.restart_due);
         check("hang: a present after it is the processor's for good", compositor_gpu_draw(0, 0) == COMPOSITOR_GPU_WHY_HANG);
-        memory_zero(&board, sizeof(board));
-        board.gpu_on = 1, board.gpu_state = WINDOWS_GPU_HUNG;
-        count = windows_gpu_wanted(&board, want, WINDOWS_GPU_CODES);
+        windows_scratch_zero(board_at);
+        board_at->gpu_on = 1, board_at->gpu_state = WINDOWS_GPU_HUNG;
+        count = windows_gpu_wanted(board_at, want, WINDOWS_GPU_CODES);
         check("hang: the board says the card is off for the session", count && want[0].code == WINDOWS_ISSUE_GPU_HUNG);
-        memory_zero(&board, sizeof(board));
-        board.gpu_on = 1, board.gpu_state = WINDOWS_GPU_UP, board.gpu_faults = 1;
-        string_copy_bounded((string_address)board.gpu_fault, (string_address)"card faulted reading 0x203fd75000: a map let go of", sizeof(board.gpu_fault));
-        count = windows_gpu_wanted(&board, want, WINDOWS_GPU_CODES);
+        windows_scratch_zero(board_at);
+        board_at->gpu_on = 1, board_at->gpu_state = WINDOWS_GPU_UP, board_at->gpu_faults = 1;
+        string_copy_bounded((string_address)board_at->gpu_fault, (string_address)"card faulted reading 0x203fd75000: a map let go of", sizeof(board_at->gpu_fault));
+        count = windows_gpu_wanted(board_at, want, WINDOWS_GPU_CODES);
         check("fault: the board carries the card's fault text", count && want[0].code == WINDOWS_ISSUE_GPU_FAULT && gpu_text_has(want[0].detail, "card faulted reading 0x203fd75000"));
         compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
         compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
@@ -2470,7 +2472,7 @@ static void gpu_own_rows(void)
         //    succeeded, on a card whose start took an anonymous page by userptr: the refusal is the address's, userptr is not gone for the session, and the refused
         //    map is kept to be said (other memory, step 5, its address and bytes).
         {
-                long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+                long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x4022, (positive)-1, 0);
 
                 gpu_own_userptr = 0, gpu_userptr_ok = 1, gpu_maps_user = 0, gpu_fake_userptr = 14, gpu_userptr_gone = 0;
                 check("gpu own: an EFAULT before any userptr map, on a card whose start took a page by userptr, leaves userptr on and the refusal kept as other memory",
@@ -2681,7 +2683,7 @@ static void gpu_async_rows(void)
 */
 static unsigned int gpu_card_buffer[(GPU_DATA + (6 << 20)) / 4]; // the fake card's buffer: the ops, the tables, the scaled tables and both sides of the bins
 static unsigned int gpu_card_screen[2048 * 64];                  // and the scanout
-static struct windows gpu_card_table;
+static struct windows *gpu_card_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 
 static positive gpu_card_present(const int (*rect)[4], unsigned int rects)
 {
@@ -2710,13 +2712,13 @@ static void gpu_card_rows(void)
         memory_copy(kept_comp, &compositor, sizeof(compositor)), memory_copy(kept_gpu, &gpu, sizeof(gpu));
         memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene));
         memory_copy(kept_map, &gpu_maps[0], sizeof(gpu_maps[0])), memory_copy(kept_card, &compositor_card, sizeof(compositor_card));
-        memory_zero(&gpu_card_table, sizeof(gpu_card_table));
+        windows_scratch_zero(windows_scratch_table(&gpu_card_table_scratch));
         gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_card_buffer, gpu.size = sizeof(gpu_card_buffer), gpu.imports = 0;
         gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
         gpu_fake_card = 1, gpu_tick = 100, gpu_map_count = 1;
         gpu_maps[0].from = (positive)gpu_card_screen, gpu_maps[0].to = (positive)gpu_card_screen + sizeof(gpu_card_screen), gpu_maps[0].va = GPU_VA_MAPS;
         gpu_maps[0].bytes = sizeof(gpu_card_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
-        compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
+        compositor_gpu = 1, compositor.card = -1, compositor.table = windows_scratch_table(&gpu_card_table_scratch), compositor.width = 2048, compositor.height = 64;
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
         compositor_card_zero();
@@ -2769,7 +2771,7 @@ static void gpu_card_rows(void)
 
         // 3. A job that ends: the present's end when the fence says so, the native row held for it given back, its time the card's.
         gpu_late_reset();
-        gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_card_table.shown[3] = 0;
+        gpu_fake_idle = 0, gpu_fake_busy = 1, windows_scratch_table(&gpu_card_table_scratch)->shown[3] = 0;
         drew = gpu_card_present(one, 1);
         compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds() - 1000000ull);
         compositor.held_rows = rows_from(1u << 3), compositor.taken_held[3] = 77, compositor.woken = rows_from(0); // its door's taken held for the job (compositor_take)
@@ -2779,7 +2781,7 @@ static void gpu_card_rows(void)
         check("gpu card: once the fence says done the present ends: nothing on the card, its time noted as the card's, a millisecond or more",
               drew == 1 && !compositor_card.on && !compositor_card_reads(3) && compositor_metric_card_count == kept_metric + 1 &&
                   compositor_metric_card[(compositor_metric_card_at + WINDOWS_METRIC_RUN - 1) % WINDOWS_METRIC_RUN] >= 1000000ull && !compositor_card.fence);
-        check("gpu card: and the window held for the job is told its picture was taken", gpu_card_table.shown[3] == 77 && !(rows_low(&compositor.held_rows) & (1u << 3)) &&
+        check("gpu card: and the window held for the job is told its picture was taken", windows_scratch_table(&gpu_card_table_scratch)->shown[3] == 77 && !(rows_low(&compositor.held_rows) & (1u << 3)) &&
               (rows_low(&compositor.woken) & (1u << 3)));
 
         // 4. Three rectangles: two jobs on the card, the third submitted once the first is done, none waited for.
@@ -2912,7 +2914,7 @@ static void gpu_lists_nowait_rows(void)
         memory_copy(kept_comp, &compositor, sizeof(compositor)), memory_copy(kept_gpu, &gpu, sizeof(gpu));
         memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene));
         memory_copy(kept_maps, gpu_maps, sizeof(kept_maps)), memory_copy(kept_card, &compositor_card, sizeof(compositor_card));
-        memory_zero(&gpu_card_table, sizeof(gpu_card_table));
+        windows_scratch_zero(windows_scratch_table(&gpu_card_table_scratch));
         gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_card_buffer, gpu.size = sizeof(gpu_card_buffer), gpu.imports = 0;
         gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0, gpu_bins_forget();
         gpu_fake_card = 1, gpu_tick = 100, gpu_map_count = 2;
@@ -2920,7 +2922,7 @@ static void gpu_lists_nowait_rows(void)
         gpu_maps[0].bytes = sizeof(gpu_card_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
         gpu_maps[1].from = (positive)gpu_lists_picture, gpu_maps[1].to = (positive)gpu_lists_picture + sizeof(gpu_lists_picture), gpu_maps[1].va = GPU_VA_MAPS + (16 << 20);
         gpu_maps[1].bytes = sizeof(gpu_lists_picture), gpu_maps[1].handle = 8, gpu_maps[1].used = gpu_tick, gpu_maps[1].written = 1, gpu_maps[1].dma = 0, gpu_maps[1].handed = 0;
-        compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
+        compositor_gpu = 1, compositor.card = -1, compositor.table = windows_scratch_table(&gpu_card_table_scratch), compositor.width = 2048, compositor.height = 64;
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
         compositor.dropping = rows_from(0), compositor.showing[5] = 1, compositor.x[5] = 100, compositor.y[5] = 10, compositor.w[5] = 64, compositor.h[5] = 4;
@@ -2977,35 +2979,35 @@ static void gpu_lists_nowait_rows(void)
               gpu_fake_submits == submits && compositor_gpu_state.failures == failures && !compositor_gpu_state.cool_until && !compositor_card_reads(6));
 
         // d. The door's taken held for the job; a flip's end leaves it; a turn while the job runs leaves it; the fence's done gives it back.
-        gpu_card_table.shown[5] = 0, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 55, compositor.woken = rows_from(0), compositor.flip_pending = 1;
+        windows_scratch_table(&gpu_card_table_scratch)->shown[5] = 0, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 55, compositor.woken = rows_from(0), compositor.flip_pending = 1;
         compositor_flip_done();
-        check("lists nowait: a flip that ends while the job runs leaves the row's door held", gpu_card_table.shown[5] == 0 && (rows_has(&compositor.held_rows, 5)));
+        check("lists nowait: a flip that ends while the job runs leaves the row's door held", windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 0 && (rows_has(&compositor.held_rows, 5)));
         compositor_card_tick();
-        check("lists nowait: a turn while the job runs asks the card without a wait and leaves the row the job's", compositor_card_reads(5) && gpu_card_table.shown[5] == 0 &&
+        check("lists nowait: a turn while the job runs asks the card without a wait and leaves the row the job's", compositor_card_reads(5) && windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 0 &&
               (rows_has(&compositor.held_rows, 5)) && gpu_fake_blocking == 0);
         gpu_fake_busy = 0, gpu_fake_idle = 1;
         compositor_card_tick();
         check("lists nowait: once the fence says done the turn gives the row back: its door told the picture was taken, nothing the job's, the present free",
-              gpu_card_table.shown[5] == 55 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) && !rows_any(&compositor_card.list_rows) &&
-                  !compositor_card_reads(5) && !compositor_card_holds() && !compositor_card_awaits() && gpu_card_table.list_state[5] == 0 && gpu_fake_blocking == 0);
+              windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 55 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) && !rows_any(&compositor_card.list_rows) &&
+                  !compositor_card_reads(5) && !compositor_card_holds() && !compositor_card_awaits() && windows_scratch_table(&gpu_card_table_scratch)->list_state[5] == 0 && gpu_fake_blocking == 0);
 
         // A list job that never signals: its row the job's past GPU_LATE_NS (the clients read again), given back by the hang path at its deadline.
         gpu_late_reset();
         gpu_fake_idle = 0, gpu_fake_busy = 1;
         gpu_lists_publish(0xff445566u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 66, compositor.woken = rows_from(0);
+        windows_scratch_table(&gpu_card_table_scratch)->shown[5] = 0, windows_scratch_table(&gpu_card_table_scratch)->list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 66, compositor.woken = rows_from(0);
         compositor.damages = 0;
         now = clock_monotonic_nanoseconds();
         compositor_card.list_began = now - GPU_LATE_NS - 1, gpu_job_began = now - (GPU_HANG_NS - 500000000ull);
         compositor_card_tick();
         check("lists nowait: a list's job that never signals is the row's past GPU_LATE_NS, the clients read again", drawn == 1 && compositor_card_reads(5) &&
-              !compositor_card_clients_held(now) && gpu_card_table.shown[5] == 0);
+              !compositor_card_clients_held(now) && windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 0);
         gpu_job_began = now - GPU_HANG_NS;
         compositor_card_tick();
         check("lists nowait: at its deadline the hang path gives the row's door back, its list refused so the program paints the frame, its window drawn again",
-              gpu_end == GPU_END_HUNG && gpu_card_table.shown[5] == 66 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) &&
-                  gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows) && compositor.damages >= 1 && compositor_gpu_state.cool_until > now);
+              gpu_end == GPU_END_HUNG && windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 66 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) &&
+                  windows_scratch_table(&gpu_card_table_scratch)->list_state[5] == 2 && !rows_any(&compositor_card.list_rows) && compositor.damages >= 1 && compositor_gpu_state.cool_until > now);
         check("lists nowait: and nothing holds the present, the clients or the loop after it: the program is not stuck", !compositor_card_holds() &&
               !compositor_card_clients_held(now) && !compositor_card_awaits() && !compositor_card_reads(5));
 
@@ -3014,21 +3016,21 @@ static void gpu_lists_nowait_rows(void)
         gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0;
         gpu_lists_publish(0xff778899u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 77;
+        windows_scratch_table(&gpu_card_table_scratch)->shown[5] = 0, windows_scratch_table(&gpu_card_table_scratch)->list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 77;
         gpu_fake_busy = 0, gpu_fake_errno = 1;
         compositor_card_tick();
         gpu_fake_errno = 0;
-        check("lists nowait: a list's job whose fence answers an error gives its row back, its list refused", drawn == 1 && gpu_card_table.shown[5] == 77 &&
-              gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
+        check("lists nowait: a list's job whose fence answers an error gives its row back, its list refused", drawn == 1 && windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 77 &&
+              windows_scratch_table(&gpu_card_table_scratch)->list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
         gpu_late_reset();
         gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0, gpu.ctx = 1;
         gpu_lists_publish(0xff998877u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 88;
+        windows_scratch_table(&gpu_card_table_scratch)->shown[5] = 0, windows_scratch_table(&gpu_card_table_scratch)->list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 88;
         gpu_recovered++;
         compositor_card_tick();
-        check("lists nowait: and one a restart of the card took, while the card says nothing of it", drawn == 1 && gpu_card_table.shown[5] == 88 &&
-              gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
+        check("lists nowait: and one a restart of the card took, while the card says nothing of it", drawn == 1 && windows_scratch_table(&gpu_card_table_scratch)->shown[5] == 88 &&
+              windows_scratch_table(&gpu_card_table_scratch)->list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
         gpu_recovered = kept_recovered;
 
         // Without the file: drawn and waited for in place, as it was.
@@ -3100,15 +3102,16 @@ static void dirty_rows(void)
 */
 static void metric_present_rows(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct windows *kept_table = compositor.table;
         positive kept_made = compositor_late.made, kept_missed = compositor_late.missed, kept_since = compositor_metric_since, now;
         unsigned long long kept_most = compositor_metric_loop_most, kept_flips = compositor_metric_flips_jobs, kept_waited = compositor_metric_waited_then;
         unsigned int kept_jobs_most = compositor_metric_flip_jobs_most;
         int kept_card = compositor.card;
 
-        memory_zero(&table, sizeof(table));
-        compositor.table = &table, compositor.card = -1;
+        windows_scratch_zero(table_at);
+        compositor.table = table_at, compositor.card = -1;
         compositor_metric_since = 0;
         compositor_metric_publish(); // the mark
         compositor_late.made += 60, compositor_late.missed += 2, compositor_metric_loop_most = 4321000ull;
@@ -3118,11 +3121,11 @@ static void metric_present_rows(void)
         compositor_metric_since = now - 1000000000ull; // a second ago
         compositor_metric_publish();
         check("metrics: the loop's time inside the card's waits in the second is the table's, in microseconds",
-              table.metric_waited >= 2490 && table.metric_waited <= 2500);
+              table_at->metric_waited >= 2490 && table_at->metric_waited <= 2500);
         check("metrics: a second's presents made late and missed, the loop's longest present and the flips with jobs in flight are the table's",
-              table.metric_late >= 59 && table.metric_late <= 60 && table.metric_missed >= 1 && table.metric_missed <= 2 && table.metric_present_most == 4321 &&
-                  table.metric_flip_jobs >= 29 && table.metric_flip_jobs <= 30 && table.metric_flip_jobs_most == 2);
-        check("metrics: a headless compositor says no lead", table.metric_lead == 0);
+              table_at->metric_late >= 59 && table_at->metric_late <= 60 && table_at->metric_missed >= 1 && table_at->metric_missed <= 2 && table_at->metric_present_most == 4321 &&
+                  table_at->metric_flip_jobs >= 29 && table_at->metric_flip_jobs <= 30 && table_at->metric_flip_jobs_most == 2);
+        check("metrics: a headless compositor says no lead", table_at->metric_lead == 0);
         {
                 unsigned int kept_kinds[3], kept_waited = gpu_jobs_waited, kept_unwaited = gpu_jobs_unwaited;
                 unsigned long long kept_kind_ns[3], kept_submit = gpu_job_submit_ns, kept_wait = gpu_job_wait_ns;
@@ -3133,10 +3136,10 @@ static void metric_present_rows(void)
                 gpu_jobs_waited = 44, gpu_jobs_unwaited = 55, gpu_job_submit_ns = 4400000000ull, gpu_job_wait_ns = 8800ull;
                 compositor_metric_publish();
                 check("metrics: the card's jobs by kind, each with its time waited, and those waited for against those not with the submit's time, are the table's",
-                      table.metric_gpu_jobs_scene == 11 && table.metric_gpu_job_ns_scene == 5000000000ull && table.metric_gpu_jobs_copy == 22 &&
-                          table.metric_gpu_job_ns_copy == 6000000ull && table.metric_gpu_jobs_scale == 33 && table.metric_gpu_job_ns_scale == 7000ull &&
-                          table.metric_jobs_waited == 44 && table.metric_jobs_unwaited == 55 && table.metric_job_submit_ns == 4400000000ull &&
-                          table.metric_job_wait_ns == 8800ull);
+                      table_at->metric_gpu_jobs_scene == 11 && table_at->metric_gpu_job_ns_scene == 5000000000ull && table_at->metric_gpu_jobs_copy == 22 &&
+                          table_at->metric_gpu_job_ns_copy == 6000000ull && table_at->metric_gpu_jobs_scale == 33 && table_at->metric_gpu_job_ns_scale == 7000ull &&
+                          table_at->metric_jobs_waited == 44 && table_at->metric_jobs_unwaited == 55 && table_at->metric_job_submit_ns == 4400000000ull &&
+                          table_at->metric_job_wait_ns == 8800ull);
                 memory_copy(gpu_jobs_kind, kept_kinds, sizeof(kept_kinds)), memory_copy(gpu_job_ns_kind, kept_kind_ns, sizeof(kept_kind_ns));
                 gpu_jobs_waited = kept_waited, gpu_jobs_unwaited = kept_unwaited, gpu_job_submit_ns = kept_submit, gpu_job_wait_ns = kept_wait;
         }
@@ -3154,7 +3157,8 @@ static void metric_present_rows(void)
 */
 static void scanout_refused_rows(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct windows *kept_table = compositor.table;
         struct windows_issue want[WINDOWS_GPU_CODES];
         char kept_driver[sizeof(compositor.driver)];
@@ -3162,22 +3166,22 @@ static void scanout_refused_rows(void)
         unsigned int count;
 
         memory_copy(kept_driver, compositor.driver, sizeof(kept_driver));
-        memory_zero(&table, sizeof(table)), compositor.table = &table, table.gpu_on = 1; // the board's GPU issues are judged with canvas gpu on
+        windows_scratch_zero(table_at), compositor.table = table_at, table_at->gpu_on = 1; // the board's GPU issues are judged with canvas gpu on
         string_copy((string_address)compositor.driver, (string_address) "i915");
         compositor_window_fb_refused(4, -22);
-        count = windows_gpu_wanted(&table, want, WINDOWS_GPU_CODES), warned = 0;
+        count = windows_gpu_wanted(table_at, want, WINDOWS_GPU_CODES), warned = 0;
         for (unsigned int at = 0; at < count; at++)
                 warned |= want[at].code == WINDOWS_ISSUE_GPU_SCANOUT;
-        check("scanout: a refused framebuffer of a table picture is its step and its error, and a warning", compositor.direct_refused && table.refused == 4 &&
-              table.refused_error == 22 && warned);
-        memory_zero(&table, sizeof(table)), table.gpu_on = 1, compositor.direct_refused = 0;
+        check("scanout: a refused framebuffer of a table picture is its step and its error, and a warning", compositor.direct_refused && table_at->refused == 4 &&
+              table_at->refused_error == 22 && warned);
+        windows_scratch_zero(table_at), table_at->gpu_on = 1, compositor.direct_refused = 0;
         string_copy((string_address)compositor.driver, (string_address) "amdgpu");
         compositor_window_fb_refused(4, -22);
-        count = windows_gpu_wanted(&table, want, WINDOWS_GPU_CODES), warned = 0;
+        count = windows_gpu_wanted(table_at, want, WINDOWS_GPU_CODES), warned = 0;
         for (unsigned int at = 0; at < count; at++)
                 warned |= want[at].code == WINDOWS_ISSUE_GPU_SCANOUT;
-        check("scanout: on amdgpu the step is said and no warning is raised (amdgpu shows no imported buffer)", compositor.direct_refused && table.refused == 4 &&
-              table.refused_error == 0 && !warned);
+        check("scanout: on amdgpu the step is said and no warning is raised (amdgpu shows no imported buffer)", compositor.direct_refused && table_at->refused == 4 &&
+              table_at->refused_error == 0 && !warned);
         compositor.table = kept_table, compositor.direct_refused = kept_refused, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
 }
 
@@ -3252,24 +3256,25 @@ static void under_ready_rows(void)
 // moment they were saved.
 static void close_ask_rows(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct windows *kept = compositor.table;
         struct compositor_xwm_window w = {.id = 9, .row = 3, .state = COMPOSITOR_XWM_PROTO_KNOWN, .protocols = COMPOSITOR_XWM_PROTO_DELETE};
-        struct window_row own = {.table = &table, .row = 3};
+        struct window_row own = {.table = table_at, .row = 3};
         struct wayland_facts facts;
         int parent = compositor_popup_parent[3];
         struct compositor_rows woken = compositor.woken;
 
-        compositor.table = &table;
+        compositor.table = table_at;
         compositor.showing[3] = 1, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = -1;
-        table.close_asks[3] = 0;
+        table_at->close_asks[3] = 0;
         check("close: a window nobody asked to go is owed no ask", !compositor_xwm_close_owed(&w));
         check("close: and its program hears none", !windows_close_asked(&own));
         check("close: nor does its Wayland client", compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 0);
         compositor_close(3);
         check("close: a window asked to go is said to be closing, in the table too, and is owed the ask",
-              (compositor.state[3] & WINDOW_CLOSING) && (table.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
-        check("close: the table says how many times it was asked", table.close_asks[3] == 1);
+              (compositor.state[3] & WINDOW_CLOSING) && (table_at->state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
+        check("close: the table says how many times it was asked", table_at->close_asks[3] == 1);
         check("close: its program hears the ask once, however often it looks", windows_close_asked(&own) && !windows_close_asked(&own) && !windows_close_asked(&own));
         check("close: its Wayland client is given the count, and the bit stays the compositor's",
               compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 1 && (compositor.state[3] & WINDOW_CLOSING));
@@ -3277,13 +3282,13 @@ static void close_ask_rows(void)
         check("close: once told it is owed nothing while it stays", !compositor_xwm_close_owed(&w));
         compositor_close(3);
         check("close: asked again it is owed the ask again", compositor.close_asks[3] == 2 && compositor_xwm_close_owed(&w));
-        check("close: its program hears the second ask, once", table.close_asks[3] == 2 && windows_close_asked(&own) && !windows_close_asked(&own));
+        check("close: its program hears the second ask, once", table_at->close_asks[3] == 2 && windows_close_asked(&own) && !windows_close_asked(&own));
         check("close: and its Wayland client's count is one more", compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 2);
         // A program cannot ask itself to go, or another, by the table: the compositor's count is its own.
-        table.close_asks[3] = 77;
+        table_at->close_asks[3] = 77;
         check("close: a count written into the table is not the compositor's", compositor.close_asks[3] == 2 && !compositor_xwm_close_owed(&(struct compositor_xwm_window){.row = 3, .closes = 2, .state = COMPOSITOR_XWM_PROTO_KNOWN}) &&
                                                                                compositor_wl_row_facts(0, 3, &facts) == 0 && facts.closing == 2);
-        table.close_asks[3] = 2, own.closes = 2;
+        table_at->close_asks[3] = 2, own.closes = 2;
         w.closes = compositor.close_asks[3];
         w.state &= ~COMPOSITOR_XWM_PROTO_KNOWN;
         compositor_close(3);
@@ -3291,13 +3296,13 @@ static void close_ask_rows(void)
         w.state |= COMPOSITOR_XWM_PROTO_KNOWN;
         check("close: and is owed when they are", compositor_xwm_close_owed(&w));
         compositor.close_asks[3] = 255, w.closes = 255;
-        table.close_asks[3] = 255, own.closes = 255;
+        table_at->close_asks[3] = 255, own.closes = 255;
         compositor_close(3);
         check("close: the count of asks never comes back to none", compositor.close_asks[3] == 1 && compositor_xwm_close_owed(&w));
-        check("close: and the ask past the count's end is heard by the program", table.close_asks[3] == 1 && windows_close_asked(&own) && !windows_close_asked(&own));
+        check("close: and the ask past the count's end is heard by the program", table_at->close_asks[3] == 1 && windows_close_asked(&own) && !windows_close_asked(&own));
         // The row let go of and shown again is another window: it has been asked nothing, and its first ask is heard.
         compositor_close_count(3, 0);
-        check("close: a row whose count went back to none has been asked nothing", table.close_asks[3] == 0 && !windows_close_asked(&own) && own.closes == 0);
+        check("close: a row whose count went back to none has been asked nothing", table_at->close_asks[3] == 0 && !windows_close_asked(&own) && own.closes == 0);
         compositor.state[3] = 0;
         compositor_close(3);
         check("close: and the next window in it hears its first ask", windows_close_asked(&own) && !windows_close_asked(&own));
@@ -3318,9 +3323,9 @@ static void close_ask_rows(void)
         compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = 2;
         compositor_close(3);
         compositor_close(3);
-        check("close: a popup is asked to go once", (compositor.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && table.close_asks[3] == 1);
+        check("close: a popup is asked to go once", (compositor.state[3] & WINDOW_CLOSING) && compositor.close_asks[3] == 1 && table_at->close_asks[3] == 1);
         compositor.showing[3] = 0, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = parent;
-        table.close_asks[3] = 0;
+        table_at->close_asks[3] = 0;
         compositor.woken = woken, compositor.table = kept;
         // A title's request that cannot be queued is not waited for: counted as asked, no reply ever came to take it off, and the title was
         // never asked of again for as long as the window lived.
@@ -3376,7 +3381,8 @@ static int descriptor_is(long number, const char *what)
 
 static void descriptor_rows(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct windows *kept = compositor.table;
         long most = compositor_descriptors_most, memfd, lowest, after;
         int pair[2] = {-1, -1}, slot = WAYLAND_CLIENTS - 1, was = compositor_wl.fd[WAYLAND_CLIENTS - 1];
@@ -3386,7 +3392,7 @@ static void descriptor_rows(void)
         check("descriptors: one in the compositor's own share says the clients' is full",
               compositor_descriptor_crowded(most - COMPOSITOR_DESCRIPTORS_OWN) && compositor_descriptor_crowded(most - 1));
 
-        compositor.table = &table;
+        compositor.table = table_at;
         compositor_clip_reserve();
         check("clipboard numbers: both are held from the start, by /dev/null",
               compositor_clip.blank >= 0 && descriptor_is(WINDOWS_CLIP_FD, "/dev/null") && descriptor_is(WINDOWS_CLIP_FD + 1, "/dev/null"));
@@ -3457,7 +3463,8 @@ static void flip_wait_rows(void)
         // for it, every flip after was let go of a frame early. The events are struct drm_event_vblank: type 2, length 32, the user data, a
         // stamp and a sequence.
         {
-                static struct windows flip_table;
+                static struct windows *flip_table_scratch;
+                struct windows *const flip_table_at = windows_scratch_table(&flip_table_scratch);
                 struct windows *kept = compositor.table;
                 positive serial = compositor.flip_serial;
                 struct compositor_rows held = compositor.held_rows, dropping = compositor.dropping;
@@ -3465,7 +3472,7 @@ static void flip_wait_rows(void)
                 unsigned int type = COMPOSITOR_EVENT_FLIP_COMPLETE, length = 32;
                 positive stale = 7, mine = 8;
 
-                compositor.table = &flip_table, compositor.held_rows = compositor.dropping = rows_from(0);
+                compositor.table = flip_table_at, compositor.held_rows = compositor.dropping = rows_from(0);
                 memory_zero(events, sizeof(events));
                 memory_copy(events, &type, 4), memory_copy(events + 4, &length, 4), memory_copy(events + 8, &stale, 8);
                 memory_copy(events + 32, &type, 4), memory_copy(events + 36, &length, 4), memory_copy(events + 40, &mine, 8);
@@ -3735,7 +3742,8 @@ static void present_due_rows(void)
 // EWMH/XDG grab protocols: maximized vs fullscreen row_facts, immediate float past button slop on client move, and XWM _NET_SUPPORTED / _NET_WM_MOVERESIZE.
 static void grab_protocol_rows(void)
 {
-        static struct windows tbl;
+        static struct windows *tbl_scratch;
+        struct windows *const tbl_at = windows_scratch_table(&tbl_scratch);
         static unsigned char kept_comp[sizeof(compositor)], kept_xwm[sizeof(compositor_xwm)];
         struct wayland_facts facts;
         struct compositor_xwm_window *xw;
@@ -3748,10 +3756,10 @@ static void grab_protocol_rows(void)
         memory_copy(kept_xwm, &compositor_xwm, sizeof(compositor_xwm));
         compositor_zero();
         memory_zero(&compositor_xwm, sizeof(compositor_xwm));
-        memory_zero(&tbl, sizeof(tbl));
+        windows_scratch_zero(tbl_at);
 
         compositor.card = -1;
-        compositor.table = &tbl;
+        compositor.table = tbl_at;
         compositor.width = 1920, compositor.height = 1080, compositor.scale = 100;
         compositor.drag = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
         compositor.shared_row = COMPOSITOR_NONE, compositor.focus = COMPOSITOR_NONE, compositor.grab = COMPOSITOR_NONE;
@@ -3759,7 +3767,7 @@ static void grab_protocol_rows(void)
         compositor.stacked = 1, compositor.stack[0] = 0;
         compositor.x[0] = 0, compositor.y[0] = 0, compositor.w[0] = 1920, compositor.h[0] = 1080;
         compositor.arranged[0] = COMPOSITOR_MAXIMIZED, compositor.fullscreen[0] = 0;
-        tbl.state[0] = WINDOW_NO_GRAB;
+        tbl_at->state[0] = WINDOW_NO_GRAB;
 
         check("grab facts: COMPOSITOR_MAXIMIZED without fullscreen reports MAXIMIZED, not FULLSCREEN",
               compositor_wl_row_facts(0, 0, &facts) == 0 &&
@@ -4063,12 +4071,13 @@ static void gpu_engine_and_render_regressions(void)
 
         /* 6. compositor_direct_candidate blocks direct scanout when table->list_mode is non-zero */
         {
-                struct windows fake_table = {0};
+                static struct windows *fake_table_scratch;
+                struct windows *const fake_table_at = windows_scratch_fresh(&fake_table_scratch); // zero, as the table on the stack was
                 struct compositor_frame f = {0};
                 unsigned int row = 0;
 
-                fake_table.list_mode = 1;
-                compositor.table = &fake_table;
+                fake_table_at->list_mode = 1;
+                compositor.table = fake_table_at;
                 compositor.table_memfd = 1;
                 compositor.card = 1;
                 compositor.width = 100, compositor.height = 100;
@@ -5429,8 +5438,8 @@ b32 main(void)
         {
                 positive tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
                 struct compositor_target reference = {gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
-                long grown = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0), other = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
-                long far = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
+                long grown = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x4022, (positive)-1, 0), other = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x4022, (positive)-1, 0);
+                long far = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x4022, (positive)-1, 0);
                 struct compositor_frame f;
                 unsigned int ground = 0xff102030u;
                 positive hostile_bad, leaked;
@@ -5475,7 +5484,7 @@ b32 main(void)
                 // Pages the GPU was given in an earlier present that the compositor let go of since (a glass window's backdrop, a band made again at another
                 // size): every job names every map, and the kernel refuses one that names a map whose pages are gone; the scene still runs.
                 {
-                        long gone = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0), reused = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x22, (positive)-1, 0);
+                        long gone = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x4022, (positive)-1, 0), reused = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x4022, (positive)-1, 0);
 
                         if ((gone < 0 && gone > -4096) || (reused < 0 && reused > -4096))
                                 return 1;
@@ -5489,7 +5498,7 @@ b32 main(void)
                         // present between. The job that follows does not name it (the kernel refuses a job that names a buffer whose pages are gone, EFAULT, three times and
                         // gives the present to the processor), and it is not a hang.
                         {
-                                long scratch = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
+                                long scratch = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x4022, (positive)-1, 0);
                                 unsigned int held = gpu_map_count;
 
                                 if (scratch < 0 && scratch > -4096)
@@ -5621,7 +5630,7 @@ b32 main(void)
         // composes the window at its last size into a headless scanout, which must be compositor_draw's.
         {
                 enum { SW = 696, SH = 419 };
-                long tall = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x22, (positive)-1, 0), screen = system_call_6(syscall(mmap), 0, (positive)SW * SH * 4, 3, 0x22, (positive)-1, 0);
+                long tall = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x4022, (positive)-1, 0), screen = system_call_6(syscall(mmap), 0, (positive)SW * SH * 4, 3, 0x4022, (positive)-1, 0);
                 struct compositor_target reference = {gpu_kit_want, PP, SW, SH, 0, 0, SW, SH, 0, 0, 0};
                 struct compositor_frame f;
                 positive wrong = 0;
@@ -5748,12 +5757,13 @@ b32 main(void)
         // Why the card is refused a present is counted, and the processor's presents with it, in the table moonwater canvas reads: a width the card does not
         // draw (695) is refused as an alignment, a present it draws is counted as the card's, and the counts are the table's, not only the compositor's.
         {
-                static struct windows why_table;
+                static struct windows *why_table_scratch;
+                struct windows *const why_table_at = windows_scratch_table(&why_table_scratch);
                 struct compositor_frame f;
                 unsigned int drawn0, processor0, align0, align1;
                 int drew_now, refused_wide;
                 enum { WW = 695, WH = 40 };
-                long screen_mem = system_call_6(syscall(mmap), 0, (positive)WW * WH * 4, 3, 0x22, (positive)-1, 0);
+                long screen_mem = system_call_6(syscall(mmap), 0, (positive)WW * WH * 4, 3, 0x4022, (positive)-1, 0);
 
                 if (screen_mem < 0 && screen_mem > -4096)
                         return 1;
@@ -5763,20 +5773,20 @@ b32 main(void)
                 compositor.width = WW, compositor.height = WH, compositor.scanout = (unsigned int address_to)screen_mem, compositor.scanout_pitch = 2780;
                 compositor.scanout_bytes = (positive)WW * WH * 4, compositor.cursor.drawn = 0, compositor.damages = 1;
                 compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = WW, compositor.damage[0][3] = WH;
-                memory_zero(&why_table, sizeof(why_table));
-                compositor.table = &why_table;
+                windows_scratch_zero(why_table_at);
+                compositor.table = why_table_at;
                 compositor_gpu_counts.drawn = compositor_gpu_counts.processor = 0;
                 memory_zero(compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
                 memory_zero(&f, sizeof(f));
                 f.x = 4, f.y = 4, f.width = 20, f.height = 20, f.scale = 100, f.builtin = 1, f.slot = -2, f.line = 0, f.pitch = 0;
                 refused_wide = !compositor_gpu_present(&f, 1);
-                align0 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
-                processor0 = why_table.gpu_processor;
-                drawn0 = why_table.gpu_drawn;
+                align0 = why_table_at->gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
+                processor0 = why_table_at->gpu_processor;
+                drawn0 = why_table_at->gpu_drawn;
                 check("gpu why: a scanout pitch that is not 16 bytes is refused", refused_wide);
                 check("gpu why: the refusal is counted as an alignment reason", align0 == 1);
                 check("gpu why: and as the processor's present, not the card's", processor0 == 1 && drawn0 == 0);
-                check("gpu why: the table's counts are the compositor's", why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN] == compositor_gpu_counts.why[COMPOSITOR_GPU_WHY_ALIGN] && why_table.gpu_processor == compositor_gpu_counts.processor);
+                check("gpu why: the table's counts are the compositor's", why_table_at->gpu_refused[COMPOSITOR_GPU_WHY_ALIGN] == compositor_gpu_counts.why[COMPOSITOR_GPU_WHY_ALIGN] && why_table_at->gpu_processor == compositor_gpu_counts.processor);
                 // A snap preview on a window itself (not lifted into a frame of its own) is the processor's: its ring and its hide are not records.
                 if (gpu.at)
                 {
@@ -5798,8 +5808,8 @@ b32 main(void)
                 {
                         compositor.width = WW, compositor.scanout_pitch = 2784; // 695 wide: the card draws 692 of it, the processor the rest
                         drew_now = compositor_gpu_present(&f, 1);
-                        align1 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
-                        check("gpu why: a width of 695 is drawn by the card to 692, and counted as its present", drew_now == 1 && why_table.gpu_drawn == 1 && why_table.gpu_processor == 1 && align1 == 1);
+                        align1 = why_table_at->gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
+                        check("gpu why: a width of 695 is drawn by the card to 692, and counted as its present", drew_now == 1 && why_table_at->gpu_drawn == 1 && why_table_at->gpu_processor == 1 && align1 == 1);
                 }
                 else
                         string_format(log, "  gpu why: no amdgpu card, the present at the width it draws is not asked of it\n");
@@ -5849,8 +5859,8 @@ b32 main(void)
         // which together are the whole picture the processor draws. The picture is a window with a line and round corners over the ground.
         {
                 enum { SW = 695, SH = 60, STRIDE = 696, PAGE = 256 };
-                long screen_mem = system_call_6(syscall(mmap), 0, (positive)STRIDE * SH * 4, 3, 0x22, (positive)-1, 0);
-                long picture_mem = system_call_6(syscall(mmap), 0, (positive)PAGE * 64 * 4, 3, 0x22, (positive)-1, 0);
+                long screen_mem = system_call_6(syscall(mmap), 0, (positive)STRIDE * SH * 4, 3, 0x4022, (positive)-1, 0);
+                long picture_mem = system_call_6(syscall(mmap), 0, (positive)PAGE * 64 * 4, 3, 0x4022, (positive)-1, 0);
                 struct compositor_target reference = {gpu_kit_want, PP, SW, SH, 0, 0, SW, SH, 0, 0, 0};
                 struct compositor_frame f;
                 int rows[2], drew = 0;
@@ -5896,8 +5906,8 @@ b32 main(void)
         // refused), and the frames of the whole desktop are composed as records by the card's compose, with the band's tabs over them.
         {
                 enum { WINS = 80, SIDE = 48, DW = 696, DH = 419 }; // more than the 64 maps there were, and forty windows and more are what a desktop has
-                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * SIDE * SIDE * 4, 3, 0x22, (positive)-1, 0);
-                long band = system_call_6(syscall(mmap), 0, (positive)DW * 48 * 4, 3, 0x22, (positive)-1, 0);
+                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * SIDE * SIDE * 4, 3, 0x4022, (positive)-1, 0);
+                long band = system_call_6(syscall(mmap), 0, (positive)DW * 48 * 4, 3, 0x4022, (positive)-1, 0);
                 struct compositor_frame desk[WINS + 6];
                 int mapped = 1;
                 unsigned int composed = 0;
@@ -5944,7 +5954,7 @@ b32 main(void)
         {
                 enum { RUNS = 31, TABS = 34, BAND_ROWS = 48, WIDE = 3840 };
                 positive window_bytes = (positive)WIDE * 1080 * 4, band_bytes = (positive)WIDE * BAND_ROWS * 4, took[RUNS], best[5], middle[5];
-                long windows = system_call_6(syscall(mmap), 0, 10 * window_bytes, 3, 0x22, (positive)-1, 0), band = system_call_6(syscall(mmap), 0, band_bytes, 3, 0x22, (positive)-1, 0);
+                long windows = system_call_6(syscall(mmap), 0, 10 * window_bytes, 3, 0x4022, (positive)-1, 0), band = system_call_6(syscall(mmap), 0, band_bytes, 3, 0x4022, (positive)-1, 0);
 
                 if ((windows < 0 && windows > -4096) || (band < 0 && band > -4096))
                         return 1;
@@ -6056,7 +6066,7 @@ b32 main(void)
                 static const int sizes[3][2] = {{1920, 1080}, {3840, 2160}, {7680, 4320}};
                 static const string_address bench_names[3] = {(string_address) "1080p", (string_address) "4K", (string_address) "8K"};
                 positive base = bins_at + (8 << 20), took[RUNS], tiny[RUNS], idle[IDLE_RUNS];
-                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * WW * WH * 4, 3, 0x22, (positive)-1, 0);
+                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * WW * WH * 4, 3, 0x4022, (positive)-1, 0);
                 struct compositor_frame desk[WINS + 4];
 
                 if (pictures < 0 && pictures > -4096)
@@ -6166,7 +6176,7 @@ b32 main(void)
                         positive copy_cpu[COPY_RUNS], copy_warm[COPY_RUNS], copy_idle[COPY_IDLE], warm_cpu[COPY_RUNS], cpu_mark;
                         // The source is 128 MiB, and each copy reads a 4 MiB slot of it the last copy did not: cold on both sides (a client's buffer
                         // is not in the cache either), not the one warm rectangle, which the processor would copy from its own cache.
-                        long area = system_call_6(syscall(mmap), 0, (128 + 8) << 20, 3, 0x22, (positive)-1, 0);
+                        long area = system_call_6(syscall(mmap), 0, (128 + 8) << 20, 3, 0x4022, (positive)-1, 0);
                         unsigned int address_to from, address_to into;
                         b32 same = true, mapped;
                         unsigned int slot = 0;

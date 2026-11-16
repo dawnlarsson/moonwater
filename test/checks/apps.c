@@ -140,7 +140,7 @@ static fn frames_run(string_address name, const struct frames_step address_to st
         the theme, the scale and the language's direction, and the board is the issues fold_issues gives: 1 a warning, 2 an error, 3 the GPU
         row's three (a warning, an error and a warning, the error's line with a detail).
 */
-static struct windows fold_table;
+static struct windows *fold_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 static int fold_row = -1;
 static const b64 fold_frame_ns = 16666667;
 
@@ -162,9 +162,9 @@ static void fold_setup(int scale, b32 dark, unsigned int language_code)
         memory_zero(settings_expanded, sizeof(settings_expanded));
         memory_zero(settings_fold_at, sizeof(settings_fold_at));
         memory_zero(settings_fold_live, sizeof(settings_fold_live));
-        memory_zero(&fold_table, sizeof(fold_table));
-        fold_table.stride = GALLERY_W, fold_table.output_width = 1920, fold_table.output_height = 1080;
-        settings.own.table = &fold_table;
+        windows_scratch_zero(windows_scratch_table(&fold_table_scratch));
+        windows_scratch_table(&fold_table_scratch)->stride = GALLERY_W, windows_scratch_table(&fold_table_scratch)->output_width = 1920, windows_scratch_table(&fold_table_scratch)->output_height = 1080;
+        settings.own.table = windows_scratch_table(&fold_table_scratch);
         settings.ui.scale = scale;
         ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_STANDARD, 0);
         ui_kit_inks(&settings.ui);
@@ -190,14 +190,14 @@ static void fold_setup(int scale, b32 dark, unsigned int language_code)
 
 static void fold_issues(int which)
 {
-        windows_issue_clear(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_ANY);
+        windows_issue_clear(windows_scratch_table(&fold_table_scratch), WINDOWS_KEY_GPU, WINDOWS_ISSUE_ANY);
         if (which == 1 || which == 3)
-                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+                windows_issue_set(windows_scratch_table(&fold_table_scratch), WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
         if (which == 2 || which == 3)
-                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "the kernel's own words");
+                windows_issue_set(windows_scratch_table(&fold_table_scratch), WINDOWS_KEY_GPU, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "the kernel's own words");
         if (which == 3)
-                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 3, 0, "");
-        windows_issues_read(&fold_table, &settings_board);
+                windows_issue_set(windows_scratch_table(&fold_table_scratch), WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 3, 0, "");
+        windows_issues_read(windows_scratch_table(&fold_table_scratch), &settings_board);
         settings_rebuild();
 }
 
@@ -344,7 +344,7 @@ b32 main()
                 return test_report(null);
         }
         frames_dir = program_argument(4);
-        engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         settings.ui.engine = (font_engine address_to)engine;
         font_start(settings.ui.engine, frames_atlas, 1024, 1024);
         for (int k = 0; k < 3; k++)
@@ -416,7 +416,8 @@ b32 main()
                     string_equals(what, (string_address) "settings-hover") || string_equals(what, (string_address) "settings-toggle") ||
                     string_equals(what, (string_address) "settings-column") || string_equals(what, (string_address) "settings-wheel"))
                 {
-                        static struct windows table;
+                        static struct windows *table_scratch;
+                        struct windows *const table_at = windows_scratch_table(&table_scratch);
                         int top, bottom, wired = 0;
 
                         if (!settings_map())
@@ -436,8 +437,8 @@ b32 main()
                                                                      : row->standard ? row->standard : "1"),
                                                     SETTINGS_VALUE);
                         }
-                        table.stride = 700;
-                        settings.own.table = &table;
+                        table_at->stride = 700;
+                        settings.own.table = table_at;
                         settings.width = 700, settings.height = 520;
                         settings.ui.pitch = 700, settings.ui.width = 700, settings.ui.height = 520;
                         settings.ui.opaque = 1;
@@ -685,10 +686,11 @@ b32 main()
                                                                      : row->standard ? row->standard : "1"),
                                                     SETTINGS_VALUE);
                         }
-                        static struct windows table;
+                        static struct windows *table_scratch;
+                        struct windows *const table_at = windows_scratch_table(&table_scratch);
 
-                        table.stride = 700;
-                        settings.own.table = &table;
+                        table_at->stride = 700;
+                        settings.own.table = table_at;
                         settings.width = 700, settings.height = 520;
                         settings.ui.pitch = 700, settings.ui.width = 700, settings.ui.height = 520;
                         settings_refilter();
@@ -782,7 +784,8 @@ b32 main()
                 static char names[6][LAUNCHER_NAME];
                 static unsigned char from[6];
                 static unsigned short hashed[LAUNCHER_HASH];
-                static struct windows table;
+                static struct windows *table_scratch;
+                struct windows *const table_at = windows_scratch_table(&table_scratch);
                 static const char address_to const fixture[] = {"ls", "lsblk", "lsof", "less", "false", "also"};
 
                 for (positive at = 0; at < 6; at++)
@@ -790,8 +793,8 @@ b32 main()
                 memory_zero(&launcher, sizeof(launcher));
                 launcher.names = (char address_to)names, launcher.count = 6, launcher.from = from, launcher.hashed = hashed;
                 launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
-                table.output_width = 1920, table.output_height = 1080, table.stride = GALLERY_W;
-                launcher.own.table = &table;
+                table_at->output_width = 1920, table_at->output_height = 1080, table_at->stride = GALLERY_W;
+                launcher.own.table = table_at;
                 // The launcher is glass (WINDOW_GLASS): its pieces are drawn in the inks of the glass the dark theme gives it,
                 // and its picture is laid over that glass to be seen, as the settings window's is.
                 launcher.ui = settings.ui;
@@ -2001,7 +2004,7 @@ enum
 };
 
 static struct ui_text ts_view;
-static struct windows ts_table;
+static struct windows *ts_table_scratch; // the table, mapped at its first use (windows_scratch_table)
 static struct window_row ts_own;
 static unsigned int address_to ts_pixels;
 static int ts_top = 40;
@@ -2538,7 +2541,7 @@ static fn touch_select_check(struct ui address_to wui)
         p64 all = ~0ull;
         long pixels = ui_map(TS_WIDTH * TS_HEIGHT * 4);
 
-        ts_own.table = &ts_table, ts_own.row = 0, ts_own.door = -1;
+        ts_own.table = windows_scratch_table(&ts_table_scratch), ts_own.row = 0, ts_own.door = -1;
         ts_pixels = (unsigned int address_to)pixels;
         for (int k = 0; k < 6; k++)
                         all &= ts_code(wui, scales[k]) | ts_fields(wui, scales[k]) | ts_rows(wui, scales[k]);
@@ -2594,12 +2597,13 @@ static fn touch_select_check(struct ui address_to wui)
 static fn field_check(struct ui address_to wui)
 {
         static struct ui_text t;
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         static struct window_row own;
         long pixels = ui_map(400 * 100 * 4);
         const struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, FIELD_KEY_UP, 0};
 
-        own.table = &table, own.row = 0, own.door = -1;
+        own.table = table_at, own.row = 0, own.door = -1;
         ui_begin(wui, (unsigned int address_to)pixels, 400, 400, 100);
 
         // Blanks and characters, anywhere.
@@ -2837,7 +2841,7 @@ static fn field_check(struct ui address_to wui)
         // Masked: dots, nothing let out, no words.
         {
                 static struct ui_text_layout l;
-                unsigned int offered = table.clip_offer_serial[0];
+                unsigned int offered = table_at->clip_offer_serial[0];
                 static struct ui_popmenu m;
 
                 ui_text_close(&t);
@@ -2851,7 +2855,7 @@ static fn field_check(struct ui address_to wui)
                 field_key(wui, &t, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
                 field_key(wui, &t, 46, 3, WINDOW_KEY_CONTROL);
                 field_key(wui, &t, 45, 24, WINDOW_KEY_CONTROL);
-                check("field: a masked field is never copied or cut out", field_is(&t, "pa ss") && table.clip_offer_serial[0] == offered);
+                check("field: a masked field is never copied or cut out", field_is(&t, "pa ss") && table_at->clip_offer_serial[0] == offered);
                 m.count = 0;
                 ui_text_menu_items(&m, &t, false);
                 check("field: and its menu has Cut and Copy greyed", m.items[3].id == UI_TEXT_MENU_CUT && (m.items[3].flags & UI_MENU_DISABLED) &&
@@ -2885,7 +2889,7 @@ static fn field_check(struct ui address_to wui)
                 ui_text_menu_do(wui, &t, UI_TEXT_MENU_UNDO);
                 check("field: Undo brings it back", field_is(&t, "one two"));
                 ui_text_menu_do(wui, &t, UI_TEXT_MENU_PASTE);
-                check("field: Paste asks the clipboard, and the answer is this field's", t.pasting && table.clip_ask_serial[0]);
+                check("field: Paste asks the clipboard, and the answer is this field's", t.pasting && table_at->clip_ask_serial[0]);
                 {
                         struct window_event refused = {WINDOW_EVENT_CLIP, 0, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_REFUSED};
                         struct window_event ready = {WINDOW_EVENT_CLIP, 0, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_READY};
@@ -3082,13 +3086,14 @@ static fn check_glass_pieces(string_address regular)
         static font_face face;
         static p8 atlas[512 * 512];
         static unsigned int scratch[800 * UI_SCRATCH_ROWS], picture[800 * 240], menu_picture[800 * 240];
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         static char names[1][LAUNCHER_NAME];
         static unsigned char from[1];
         static unsigned short hashed[LAUNCHER_HASH];
         static struct ui_popmenu menu;
         positive size = 0, bytes = compositor_map_file(regular, &size);
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         struct ui ui, menu_ui, parent;
         struct ui_popup popup;
         int pad, row, kit_ok;
@@ -3129,8 +3134,8 @@ static fn check_glass_pieces(string_address regular)
         string_copy((string_address)names[0], (string_address) "lsof");
         launcher.names = (char address_to)names, launcher.count = 1, launcher.from = from, launcher.hashed = hashed;
         launcher.dirs[0] = "/bin", launcher.dir_count = 1;
-        table.stride = 800, table.output_width = 1920, table.output_height = 1080;
-        launcher.own.table = &table;
+        table_at->stride = 800, table_at->output_width = 1920, table_at->output_height = 1080;
+        launcher.own.table = table_at;
         launcher.ui = ui;
         launcher.width = LAUNCHER_WIDTH, launcher.height = 240;
         launcher.focused = true, launcher_app.had_keys = true;
@@ -3180,13 +3185,13 @@ static fn check_glass_pieces(string_address regular)
         parent.opaque = 1, parent.glass = 0;
         ui_inks(&parent, 0xe0e0e0u);
         memory_zero(&popup, sizeof(popup));
-        popup.own.table = &table, popup.own.row = 2;
-        table.ground[2] = 0x112233u;
-        ui_popmenu_look(&popup, &table, &parent);
+        popup.own.table = table_at, popup.own.row = 2;
+        table_at->ground[2] = 0x112233u;
+        ui_popmenu_look(&popup, table_at, &parent);
         check("glass: a menu is glass: its row is glass with no close button, and its inks are the row's ground",
-              popup.ui.glass && !popup.ui.opaque && table.glass[2] == UI_POPUP_GLASS && popup.ui.ground == 0x112233u);
-        table.ground[2] = 0;
-        ui_popmenu_look(&popup, &table, &parent);
+              popup.ui.glass && !popup.ui.opaque && table_at->glass[2] == UI_POPUP_GLASS && popup.ui.ground == 0x112233u);
+        table_at->ground[2] = 0;
+        ui_popmenu_look(&popup, table_at, &parent);
         check("glass: a menu opened before the compositor gave its ground is inked by the parent's", popup.ui.ground == 0xe0e0e0u);
 
         // A glass window has its line too, as a floating window that is not glass does.
@@ -4278,7 +4283,8 @@ static fn lcheck_listener(void)
 
 static fn language_runtime_check(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         const char address_to held;
         const char address_to data = "Settings";
         char text[64];
@@ -4297,18 +4303,18 @@ static fn language_runtime_check(void)
         }
         // Taking a language reads its file; every word changes at once, a text the file lacks stays English, and the listeners hear.
         language_listen(lcheck_listener);
-        table.language = 'd' | 'e' << 8;
-        ui_kit_language_take(&table);
+        table_at->language = 'd' | 'e' << 8;
+        ui_kit_language_take(table_at);
         check("language: a window takes the table's language, and its ids come out of the file",
               !string_compare_max((string_address)WORDS(menu_copy), (string_address) "&Kopieren", 10) && lcheck_heard == 1);
         check("language: a data text comes out of the file by its English, and one the file lacks stays English",
               !string_compare_max((string_address)language_of(data), (string_address) "Einstellungen", 14) &&
                   language_of("no such text") != null && !string_compare_max((string_address)language_of("no such text"), (string_address) "no such text", 13));
-        ui_kit_language_take(&table);
+        ui_kit_language_take(table_at);
         check("language: the same code again changes nothing and tells nobody", lcheck_heard == 1);
         held = WORDS(menu_cut);
-        table.language = 'f' | 'r' << 8;
-        ui_kit_language_take(&table);
+        table_at->language = 'f' | 'r' << 8;
+        ui_kit_language_take(table_at);
         check("language: a change is taken at once, and the words a window still holds from the language it left are whole",
               !string_compare_max((string_address)WORDS(menu_copy), (string_address) "&Copier", 10) && lcheck_heard == 2 &&
                   !string_compare_max((string_address)held, (string_address) "A&usschneiden", 14));
@@ -4322,36 +4328,36 @@ static fn language_runtime_check(void)
                 check("language: a text cut at its room ends at a whole character, never in the middle of one",
                       made == 2 && (p8)small[0] == 0xd8 && (p8)small[1] == 0xa7 && small[2] == 0);
         }
-        table.language = 'e' | 'n' << 8;
-        ui_kit_language_take(&table);
+        table_at->language = 'e' | 'n' << 8;
+        ui_kit_language_take(table_at);
         check("language: back to English the table answers again, with nothing left of the language before",
               WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data && lcheck_heard == 3);
-        table.language = 'x' | 'x' << 8;
-        ui_kit_language_take(&table);
+        table_at->language = 'x' | 'x' << 8;
+        ui_kit_language_take(table_at);
         check("language: a code with no file is English, and no word of it is blank",
               WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data);
         // The table's word is a peer's to write: bytes that are no two or three letters (here ".." and "/", which would make the path
         // ".../language/../.txt") are English, and no file is named by them.
-        table.language = '.' | '.' << 8 | '/' << 16;
-        ui_kit_language_take(&table);
+        table_at->language = '.' | '.' << 8 | '/' << 16;
+        ui_kit_language_take(table_at);
         check("language: a table word that is no code (bytes that would make a path) is English, and no file is named by it",
               language.code == 0 && WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english);
-        table.language = 0;
-        ui_kit_language_take(&table);
+        table_at->language = 0;
+        ui_kit_language_take(table_at);
         // The compositor's side: a change of the code counts the table's theme up once, the same code not at all.
         {
                 struct windows address_to saved = compositor.table;
                 unsigned int before;
 
-                compositor.table = &table;
-                before = table.themed;
+                compositor.table = table_at;
+                before = table_at->themed;
                 compositor_language_publish(windows_language_code("de", 2));
                 compositor_language_publish(windows_language_code("de", 2));
                 check("language: the compositor publishes the code into the table and knocks the windows once for a change",
-                      table.language == ('d' | 'e' << 8) && table.themed == before + 1);
+                      table_at->language == ('d' | 'e' << 8) && table_at->themed == before + 1);
                 compositor_language_publish(windows_language_code("default", 7));
                 check("language: a word that is not a code is English, and only two or three lower case letters are a code",
-                      table.language == 0 && table.themed == before + 2 && !windows_language_code("EN", 2) && !windows_language_code("e", 1) &&
+                      table_at->language == 0 && table_at->themed == before + 2 && !windows_language_code("EN", 2) && !windows_language_code("e", 1) &&
                           !windows_language_code("de1", 3) && windows_language_code("en", 2) == LANGUAGE_ENGLISH);
                 compositor.table = saved;
         }
@@ -4476,14 +4482,15 @@ static fn taskbar_words_check(void)
         static const char address_to const days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
         static const char address_to const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         struct windows address_to saved = compositor.table;
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         positive wrong = 0;
         char word[32];
         int at;
         tm broken;
 
-        compositor.table = &table;
-        table.language = 0;
+        compositor.table = table_at;
+        table_at->language = 0;
         memory_zero(&broken, sizeof(broken));
         taskbar.tray_custom = 1;
         taskbar.battery_item = 1;
@@ -4512,8 +4519,8 @@ static fn taskbar_words_check(void)
                 wrong += !!string_compare_max((string_address)word, (string_address)(charging ? "charging" : "discharging"), 12);
         }
         check("taskbar words: the weekdays, the months, AM and PM and the battery's state are the English they were", !wrong);
-        table.language = 'd' | 'e' << 8;
-        language_take(table.language);
+        table_at->language = 'd' | 'e' << 8;
+        language_take(table_at->language);
         broken.tm_wday = 0, at = 0;
         taskbar_tray_one(word, &at, sizeof(word), 10, &broken);
         wrong = !!string_compare_max((string_address)word, (string_address) "So", 8);
@@ -4527,19 +4534,19 @@ static fn taskbar_words_check(void)
         // A tray rendered takes the language the table says, as the compositor publishes it.
         taskbar.tray_custom = 1;
         string_copy_bounded((string_address)taskbar.tray_format, (string_address) "{date.weekday} {date.monthname}", sizeof(taskbar.tray_format));
-        table.language = 'f' | 'r' << 8;
+        table_at->language = 'f' | 'r' << 8;
         taskbar_tray_render();
         check("taskbar words: a tray drawn takes the language of the table, not the one it drew in before", language.code == ('f' | 'r' << 8) && taskbar.tray_chars > 0);
-        table.language = 0;
+        table_at->language = 0;
         taskbar_tray_render();
         check("taskbar words: and English again when the table says none", !language.code);
         // The tray is drawn at once when the language changes, and not for a tick that changes neither the minute nor the language.
         taskbar.minute = taskbar_minute_now();
         taskbar_tick();
         check("taskbar words: a tick of the same minute in the same language draws nothing", taskbar_tick() == 0);
-        table.language = 'd' | 'e' << 8;
+        table_at->language = 'd' | 'e' << 8;
         check("taskbar words: a language taken is drawn at that tick, and not at the minute's end", taskbar_tick() == 1 && language.code == ('d' | 'e' << 8));
-        table.language = 0;
+        table_at->language = 0;
         taskbar_tick();
         taskbar.tray_custom = 0, taskbar.battery_item = 0, taskbar.battery_charging = 0;
         taskbar.tray_format[0] = 0;
@@ -4783,20 +4790,21 @@ static fn settings_status_check(void)
 */
 static fn settings_metric_check(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         b64 t0 = 100000000000ll;
 
         settings.ui.scale = 100;
         settings_size(700, 520);
         settings_group_choose(0);
-        memory_zero(&table, sizeof(table));
-        table.gpu_on = 1, table.gpu_able = 1, table.gpu_state = WINDOWS_GPU_UP;
-        settings.own.table = &table;
+        windows_scratch_zero(table_at);
+        table_at->gpu_on = 1, table_at->gpu_able = 1, table_at->gpu_state = WINDOWS_GPU_UP;
+        settings.own.table = table_at;
         settings_board_due = 0, settings_metric_at = 0;
         ui_kit.now = ui_kit.test_clock = t0;
         settings_board_tick();
         check("settings metric: the first board read makes the page at its time", settings_metric_at == (positive)t0);
-        table.metric_card_mean = 7;
+        table_at->metric_card_mean = 7;
         ui_kit.now = ui_kit.test_clock = t0 + 1000000000ll;
         settings_board_tick();
         check("settings metric: a change inside the window does not make the page again yet", settings_metric_at == (positive)t0);
@@ -4854,25 +4862,26 @@ static fn mixer_quiet_check(void)
 static fn settings_board_check(void)
 {
         struct windows address_to saved = settings.own.table;
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         unsigned int key;
 
-        memory_zero(&table, sizeof(table));
-        table.gpu_on = 1, table.gpu_able = 1, table.gpu_state = WINDOWS_GPU_UP;
-        settings.own.table = &table;
-        table.gpu_drawn = 50, table.gpu_processor = 0;
+        windows_scratch_zero(table_at);
+        table_at->gpu_on = 1, table_at->gpu_able = 1, table_at->gpu_state = WINDOWS_GPU_UP;
+        settings.own.table = table_at;
+        table_at->gpu_drawn = 50, table_at->gpu_processor = 0;
         settings_gpu_sample();
         key = settings_gpu_key;
-        table.gpu_drawn = 60;
+        table_at->gpu_drawn = 60;
         settings_gpu_sample();
         check("settings board: a count that moves alone (all on the card) keeps the status key, so the page is not made again", settings_gpu_key == key && settings_gpu_shown_total == 60);
-        table.gpu_processor = 40;
+        table_at->gpu_processor = 40;
         settings_gpu_sample();
         check("settings board: a share that moves changes the status key", settings_gpu_key != key);
-        table.gpu_on = 0;
+        table_at->gpu_on = 0;
         settings_gpu_sample();
         key = settings_gpu_key;
-        table.gpu_drawn += 9, table.gpu_processor += 9;
+        table_at->gpu_drawn += 9, table_at->gpu_processor += 9;
         settings_gpu_sample();
         check("settings board: with canvas gpu off, counts moving alone keep the key too", settings_gpu_key == key);
         settings.own.table = saved;
@@ -5867,9 +5876,10 @@ static fn check_kit_defaults(struct ui address_to wui)
 #ifdef UI_CONFIRM_TEXT
         {
                 static struct ui_text t, plain, secret;
-                static struct windows table;
+                static struct windows *table_scratch;
+                struct windows *const table_at = windows_scratch_table(&table_scratch);
                 static struct window_row own;
-                own.table = &table, own.row = 0, own.door = -1;
+                own.table = table_at, own.row = 0, own.door = -1;
                 field_ok = UI_FIELD_H == UI_TARGET && UI_TARGET == 48;
                 ui_field_open(&plain, &own, "");
                 ui_field_open(&secret, &own, "");
@@ -6056,9 +6066,10 @@ static fn check_field_hands(string_address regular)
         static font_face face;
         static p8 atlas[512 * 512];
         static unsigned int scratch[800 * UI_SCRATCH_ROWS];
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         positive size = 0, bytes = compositor_map_file(regular, &size);
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         long pixels = ui_map(800 * 600 * 4);
         struct ui ui;
 
@@ -6076,7 +6087,7 @@ static fn check_field_hands(string_address regular)
         ui.opaque = 1;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ui_kit_inks(&ui);
-        table.stride = 800, table.output_width = 1920, table.output_height = 1080;
+        table_at->stride = 800, table_at->output_width = 1920, table_at->output_height = 1080;
 
         // The launcher: a click in its field puts the caret, a drag selects, and the keys type there.
         {
@@ -6092,7 +6103,7 @@ static fn check_field_hands(string_address regular)
                 memory_zero(&launcher, sizeof(launcher));
                 launcher.names = (char address_to)names, launcher.count = 1, launcher.from = from, launcher.hashed = hashed;
                 launcher.dirs[0] = "/bin", launcher.dir_count = 1;
-                launcher.own.table = &table;
+                launcher.own.table = table_at;
                 launcher.ui = ui;
                 launcher.width = LAUNCHER_WIDTH;
                 launcher.focused = true, launcher_app.had_keys = true;
@@ -6325,7 +6336,7 @@ static fn check_field_hands(string_address regular)
                 int wifi = settings_row_named("Wi-Fi"), name = settings_row_named("Name");
 
                 settings.ui = ui;
-                settings.own.table = &table;
+                settings.own.table = table_at;
                 settings.width = 800, settings.height = 520;
                 settings.ui.pitch = 800, settings.ui.width = 800, settings.ui.height = 520;
                 settings.focused = 1, settings.page.pane = 1, settings.page.menu_row = -1, settings.page.card = 0;
@@ -6486,7 +6497,7 @@ static fn check_field_hands(string_address regular)
                 settings.queued = 0, settings.child = 0;
                 settings_group_choose(0);
         }
-        check_input_matrix(&ui, (unsigned int address_to)pixels, &table);
+        check_input_matrix(&ui, (unsigned int address_to)pixels, table_at);
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
 }
 #endif
@@ -7407,14 +7418,15 @@ static fn menu_defaults_check(struct ui address_to wui)
         }
         // Every popup is glass: its row takes the glass flags (no close button), and so does its look, whatever the app.
         {
-                static struct windows glass_table;
+                static struct windows *glass_table_scratch;
+                struct windows *const glass_table_at = windows_scratch_table(&glass_table_scratch);
                 struct ui_popup popup;
 
                 memory_zero(&popup, sizeof(popup));
-                popup.own.table = &glass_table, popup.own.row = 1;
-                ui_popmenu_look(&popup, &glass_table, wui);
+                popup.own.table = glass_table_at, popup.own.row = 1;
+                ui_popmenu_look(&popup, glass_table_at, wui);
                 check("menu: a popup is glass, its row has the glass flags and no close button", popup.ui.glass && !popup.ui.opaque &&
-                      glass_table.glass[1] == UI_POPUP_GLASS);
+                      glass_table_at->glass[1] == UI_POPUP_GLASS);
         }
         /*
                 A click on an item: the item's rect is the one element it has, the whole width of the menu and square, lit in the
@@ -8166,35 +8178,36 @@ static fn editor_disk_check(struct ui address_to wui)
 */
 static fn check_screen_numbers(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         unsigned int number[WINDOWS_OUTPUTS], count;
 
-        memory_zero(&table, sizeof(table));
-        table.outputs = 3;
-        table.output_x[0] = 1920, table.output_y[0] = 0;
-        table.output_x[1] = 0, table.output_y[1] = 540;
-        table.output_x[2] = 0, table.output_y[2] = 0;
-        count = windows_screen_numbers(&table, number);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 3;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 0;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 540;
+        table_at->output_x[2] = 0, table_at->output_y[2] = 0;
+        count = windows_screen_numbers(table_at, number);
         check("identify: three screens are counted as three", count == 3);
         check("identify: the screens are numbered in reading order, top edge then left edge (the primary on the right is 2)",
               number[0] == 2 && number[1] == 3 && number[2] == 1);
 
         // A 2 by 2 arrangement, listed bottom right, bottom left, top right, top left.
-        memory_zero(&table, sizeof(table));
-        table.outputs = 4;
-        table.output_x[0] = 1920, table.output_y[0] = 1080;
-        table.output_x[1] = 0, table.output_y[1] = 1080;
-        table.output_x[2] = 1920, table.output_y[2] = 0;
-        table.output_x[3] = 0, table.output_y[3] = 0;
-        count = windows_screen_numbers(&table, number);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 4;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 1080;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 1080;
+        table_at->output_x[2] = 1920, table_at->output_y[2] = 0;
+        table_at->output_x[3] = 0, table_at->output_y[3] = 0;
+        count = windows_screen_numbers(table_at, number);
         check("identify: a 2 by 2 arrangement is counted as four", count == 4);
         check("identify: a 2 by 2 arrangement is numbered top left 1, top right 2, bottom left 3, bottom right 4",
               number[3] == 1 && number[2] == 2 && number[1] == 3 && number[0] == 4);
-        table.outputs = 0;
-        count = windows_screen_numbers(&table, number);
+        table_at->outputs = 0;
+        count = windows_screen_numbers(table_at, number);
         check("identify: a table that lists no screen is one screen, numbered 1", count == 1 && number[0] == 1);
-        table.outputs = WINDOWS_OUTPUTS + 1;
-        count = windows_screen_numbers(&table, number);
+        table_at->outputs = WINDOWS_OUTPUTS + 1;
+        count = windows_screen_numbers(table_at, number);
         check("identify: a list past what the table holds is one screen, numbered 1", count == 1 && number[0] == 1);
 }
 
@@ -8404,7 +8417,7 @@ static fn check_no_tab(void)
         compositor_leave(3);
         compositor_leave(2);
         compositor_leave(1);
-        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
         if (compositor.blur)
                 compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
         compositor_zero();
@@ -8417,30 +8430,31 @@ static fn check_no_tab(void)
 */
 static fn check_identify_numbers(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         unsigned int number[WINDOWS_OUTPUTS], count;
         int x, y, width, height;
         b32 matched = true, placed = true;
 
-        memory_zero(&table, sizeof(table));
-        table.outputs = 3;
-        table.output_x[0] = 1920, table.output_y[0] = 0, table.output_w[0] = 1920, table.output_h[0] = 1080;
-        table.output_x[1] = 0, table.output_y[1] = 540, table.output_w[1] = 1280, table.output_h[1] = 720;
-        table.output_x[2] = 0, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-        count = windows_screen_numbers(&table, number);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 3;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 0, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 540, table_at->output_w[1] = 1280, table_at->output_h[1] = 720;
+        table_at->output_x[2] = 0, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+        count = windows_screen_numbers(table_at, number);
         for (unsigned int at = 0; at < count; at++)
         {
-                unsigned int shown = windows_output(&table, at, &x, &y, &width, &height);
+                unsigned int shown = windows_output(table_at, at, &x, &y, &width, &height);
 
-                matched &= shown == at && identify_number(&table, at) == number[at];
-                placed &= x == table.output_x[at] && y == table.output_y[at] && width == (int)table.output_w[at] &&
-                          height == (int)table.output_h[at];
+                matched &= shown == at && identify_number(table_at, at) == number[at];
+                placed &= x == table_at->output_x[at] && y == table_at->output_y[at] && width == (int)table_at->output_w[at] &&
+                          height == (int)table_at->output_h[at];
         }
         check("identify: each screen's window shows the number windows_screen_numbers gives that screen",
               count == 3 && matched && number[0] == 2 && number[1] == 3 && number[2] == 1);
         check("identify: each screen's window is put on that screen's rectangle", placed);
-        table.outputs = 0;
-        check("identify: a table with no screens shows the one number, 1", identify_number(&table, 0) == 1);
+        table_at->outputs = 0;
+        check("identify: a table with no screens shows the one number, 1", identify_number(table_at, 0) == 1);
 }
 
 /*
@@ -8450,38 +8464,39 @@ static fn check_identify_numbers(void)
 */
 static fn check_screen_arrangements(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         unsigned int number[WINDOWS_OUTPUTS], count;
         int x, y, width, height;
         b32 matched = true, placed = true;
 
-        memory_zero(&table, sizeof(table));
-        table.outputs = 4;
-        table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
-        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
-        table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-        table.output_x[3] = 0, table.output_y[3] = 1080, table.output_w[3] = 1920, table.output_h[3] = 1080;
-        count = windows_screen_numbers(&table, number);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 4;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 1080, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 0, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+        table_at->output_x[2] = 1920, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+        table_at->output_x[3] = 0, table_at->output_y[3] = 1080, table_at->output_w[3] = 1920, table_at->output_h[3] = 1080;
+        count = windows_screen_numbers(table_at, number);
         check("identify: a 2 by 2 grid is numbered in reading order, top edge then left edge: top left 1, top right 2, bottom left 3, bottom right 4, whatever the list order",
               count == 4 && number[0] == 4 && number[1] == 1 && number[2] == 2 && number[3] == 3);
         for (unsigned int at = 0; at < count; at++)
         {
-                unsigned int shown = windows_output(&table, at, &x, &y, &width, &height);
+                unsigned int shown = windows_output(table_at, at, &x, &y, &width, &height);
 
-                matched &= shown == at && identify_number(&table, at) == number[at];
-                placed &= x == table.output_x[at] && y == table.output_y[at];
+                matched &= shown == at && identify_number(table_at, at) == number[at];
+                placed &= x == table_at->output_x[at] && y == table_at->output_y[at];
         }
         check("identify: each screen of the grid shows its own number and is put on its own rectangle", matched && placed);
 
-        memory_zero(&table, sizeof(table));
-        table.outputs = 3;
-        table.output_x[0] = 3000, table.output_y[0] = 1200, table.output_w[0] = 1280, table.output_h[0] = 1024;
-        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
-        table.output_x[2] = 2200, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-        count = windows_screen_numbers(&table, number);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 3;
+        table_at->output_x[0] = 3000, table_at->output_y[0] = 1200, table_at->output_w[0] = 1280, table_at->output_h[0] = 1024;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 0, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+        table_at->output_x[2] = 2200, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+        count = windows_screen_numbers(table_at, number);
         check("identify: screens across a gap are numbered left to right, then top to bottom",
               count == 3 && number[0] == 3 && number[1] == 1 && number[2] == 2);
-        table.outputs = 0;
+        table_at->outputs = 0;
 }
 
 // The bounding box of the pixels in a width by height picture: box is left, top, right and bottom, and the answer is
@@ -8533,15 +8548,16 @@ static void identify_check_ui(int scale)
 */
 static fn check_identify_picture(void)
 {
-        static struct windows screens;
+        static struct windows *screens_scratch;
+        struct windows *const screens_at = windows_scratch_table(&screens_scratch);
         static unsigned int pixels[800 * 600];
         struct identify_badge small, large, narrow;
         int digit[4], large_digit[4], narrow_digit[4];
         b32 opaque = true, inked;
 
-        memory_zero(&screens, sizeof(screens));
-        screens.output_width = 1000, screens.output_height = 800;
-        identify.own.table = &screens;
+        windows_scratch_zero(screens_at);
+        screens_at->output_width = 1000, screens_at->output_height = 800;
+        identify.own.table = screens_at;
         identify.text[0] = '8', identify.text[1] = 0;
 
         identify_check_ui(1);
@@ -8655,7 +8671,7 @@ static fn check_identify_frame(void)
 
         table->pid[1] = 1;
         compositor_leave(1);
-        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
         compositor_zero();
         identify.own.table = null;
 }

@@ -473,7 +473,8 @@ static fn check_launcher(void)
         static char names[10][LAUNCHER_NAME];
         static unsigned char from[10];
         static unsigned short hashed[LAUNCHER_HASH];
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         static const char address_to const fixture[] = {"ls", "lsblk", "less", "also", "cat", "false", "lsof", "xls", "term-x"};
         string_address words[LAUNCHER_WORDS];
         char full[LAUNCHER_FULL];
@@ -488,9 +489,9 @@ static fn check_launcher(void)
         launcher.hashed = hashed;
         launcher.dirs[0] = "/bin";
         launcher.dir_count = 1;
-        launcher.own.table = &table;
-        table.output_width = 1920;
-        table.output_height = 1080;
+        launcher.own.table = table_at;
+        table_at->output_width = 1920;
+        table_at->output_height = 1080;
         launcher.ui.scale = 100;
         launcher.regular = "/fonts/ui.ttf";
         launcher.mono = "/fonts/mono.ttf";
@@ -921,7 +922,8 @@ static fn check_launcher(void)
 */
 static fn check_launcher_anchor(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         static const unsigned int edges[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
         static const int scales[6] = {50, 75, 100, 125, 150, 200};
         static const int screens[2][4] = {{0, 0, 1920, 1080}, {1920, 0, 1280, 720}};
@@ -967,30 +969,30 @@ static fn check_launcher_anchor(void)
 
         // The table's press: taken once, and only a whole one.
         memory_zero(&launcher, sizeof(launcher));
-        launcher.own.table = &table;
+        launcher.own.table = table_at;
         launcher.own.row = 3;
         launcher.ui.scale = 100;
-        table.output_width = 1920;
-        table.output_height = 1080;
-        table.outputs = 2;
+        table_at->output_width = 1920;
+        table_at->output_height = 1080;
+        table_at->outputs = 2;
         for (int screen = 0; screen < 2; screen++)
-                table.output_x[screen] = screens[screen][0], table.output_y[screen] = screens[screen][1],
-                table.output_w[screen] = (unsigned int)screens[screen][2], table.output_h[screen] = (unsigned int)screens[screen][3];
-        table.button_x = 1944, table.button_y = 696, table.button_w = 21, table.button_h = 24;
-        table.button_edge = TASKBAR_BOTTOM, table.button_screen = 1;
+                table_at->output_x[screen] = screens[screen][0], table_at->output_y[screen] = screens[screen][1],
+                table_at->output_w[screen] = (unsigned int)screens[screen][2], table_at->output_h[screen] = (unsigned int)screens[screen][3];
+        table_at->button_x = 1944, table_at->button_y = 696, table_at->button_w = 21, table_at->button_h = 24;
+        table_at->button_edge = TASKBAR_BOTTOM, table_at->button_screen = 1;
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         kept &= !launcher.anchor.anchored;
         launcher.asked_beside = true;
-        table.button_w = 0;
+        table_at->button_w = 0;
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         kept &= !launcher.anchor.anchored;
-        table.button_w = 21, table.button_edge = TASKBAR_RIGHT + 1;
+        table_at->button_w = 21, table_at->button_edge = TASKBAR_RIGHT + 1;
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         kept &= !launcher.anchor.anchored;
-        table.button_edge = TASKBAR_BOTTOM, table.button_screen = 2;
+        table_at->button_edge = TASKBAR_BOTTOM, table_at->button_screen = 2;
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         kept &= !launcher.anchor.anchored;
-        table.button_screen = 1;
+        table_at->button_screen = 1;
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
         kept &= launcher.anchor.anchored && launcher.anchor.edge == TASKBAR_BOTTOM && launcher.anchor.number == 1 && launcher.anchor.button[0] == 1944 &&
                 launcher.anchor.button[1] == 696 && launcher.anchor.button[2] == 21 && launcher.anchor.button[3] == 24 && launcher.anchor.screen[0] == 1920 &&
@@ -1026,8 +1028,8 @@ static fn check_launcher_anchor(void)
         launcher.anchor.screen[0] = 1920, launcher.anchor.screen[1] = 0, launcher.anchor.screen[2] = 1280, launcher.anchor.screen[3] = 720;
         launcher.width = 560, launcher.height = 200;
         ui_anchor_set(&launcher.anchor, launcher.own.table, launcher.own.row, launcher.width, launcher.height);
-        kept = table.place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table.place_x[3] == 360 && table.place_y[3] == 496 &&
-               table.place_width[3] == 560 && table.place_height[3] == 200 && table.place_screen[3] == 1;
+        kept = table_at->place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table_at->place_x[3] == 360 && table_at->place_y[3] == 496 &&
+               table_at->place_width[3] == 560 && table_at->place_height[3] == 200 && table_at->place_screen[3] == 1;
         check("launcher beside the button: it asks for its place and size as a placement, counted from its screen's top left", kept);
 
         // Moved again with a new height only above a bottom panel, and only once shown.
@@ -2276,7 +2278,7 @@ static fn check_settings(string_address regular, string_address bold)
                 static p8 atlas[512 * 512];
                 positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0,
                          bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
-                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
                 struct ui ui = {pixels, 320, 320, 80, 0, 80, 100};
                 b32 drawn = true;
 
@@ -2912,7 +2914,7 @@ static fn check_settings(string_address regular, string_address bold)
                             bt_group = settings_group_of(bt);
                         struct settings_item address_to items = settings_large->item[0], address_to devices = settings_large->item[1];
                         struct windows address_to table = (struct windows address_to)compositor_call(
-                            syscall(mmap), 0, (sizeof(struct windows) + 4095) & ~(positive)4095, 3, 0x22, (positive)-1, 0);
+                            syscall(mmap), 0, (sizeof(struct windows) + 4095) & ~(positive)4095, 3, 0x4022, (positive)-1, 0);
                         int row_of;
 
                         check("settings: Wi-Fi and Bluetooth are groups of their own, each with the switch first",
@@ -4269,7 +4271,8 @@ static fn check_display_section(void)
         struct settings_map_view view;
         unsigned int number[WINDOWS_OUTPUTS] = {0};
         struct windows address_to saved = settings.own.table;
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         int x, y, width, height, bx, by, bw, bh, screen_row, turn_row, refresh_row, modes_row;
         char text[SETTINGS_VALUE];
         b32 snapped, typed = false, window = false;
@@ -4299,18 +4302,18 @@ static fn check_display_section(void)
         check("display section: a drop beside no neighbour does not move", !snapped && x == 5000 && y == 2000);
 
         // The dropdowns, from a fake table: three screens, the second at the left (number 1), with 144 Hz first (recommended).
-        memory_zero(&table, sizeof(table));
-        table.outputs = 3, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
-        table.output_x[0] = 1920, table.output_y[0] = 0, table.output_w[0] = 1920, table.output_h[0] = 1080;
-        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
-        table.output_x[2] = 3840, table.output_y[2] = 0, table.output_w[2] = 1280, table.output_h[2] = 720;
-        memory_copy(table.output_name[0], "DP-2", 5), memory_copy(table.output_name[1], "DP-1", 5), memory_copy(table.output_name[2], "HDMI-A-1", 9);
-        table.output_rates[1] = 3, table.output_hz[1][0] = 144, table.output_hz[1][1] = 75, table.output_hz[1][2] = 60, table.output_now[1] = 75;
-        table.output_turn[1] = 90, table.output_software[1] = 1;
-        settings.own.table = &table;
+        windows_scratch_zero(table_at);
+        table_at->outputs = 3, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 0, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 0, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+        table_at->output_x[2] = 3840, table_at->output_y[2] = 0, table_at->output_w[2] = 1280, table_at->output_h[2] = 720;
+        memory_copy(table_at->output_name[0], "DP-2", 5), memory_copy(table_at->output_name[1], "DP-1", 5), memory_copy(table_at->output_name[2], "HDMI-A-1", 9);
+        table_at->output_rates[1] = 3, table_at->output_hz[1][0] = 144, table_at->output_hz[1][1] = 75, table_at->output_hz[1][2] = 60, table_at->output_now[1] = 75;
+        table_at->output_turn[1] = 90, table_at->output_software[1] = 1;
+        settings.own.table = table_at;
         settings.map.display = -1;
         check("display section: the screens are numbered left to right, the one at the left is Screen 1",
-              windows_screen_numbers(&table, number) == 3 && number[1] == 1 && number[0] == 2 && number[2] == 3);
+              windows_screen_numbers(table_at, number) == 3 && number[1] == 1 && number[0] == 2 && number[2] == 3);
 
         screen_row = settings_output_row(SETTINGS_OUT_SCREEN);
         turn_row = settings_output_row(SETTINGS_OUT_TURN);
@@ -4331,7 +4334,7 @@ static fn check_display_section(void)
                   string_equals((string_address)text, (string_address) "Upside down") && settings_choice(&settings_rows[turn_row], 3, text, sizeof(text)) &&
                   string_equals((string_address)text, (string_address) "Turned left"));
         check("display section: a screen turned by Moonwater says so under its rotation",
-              settings_map_chosen() == 1 && table.output_software[1] == 1);
+              settings_map_chosen() == 1 && table_at->output_software[1] == 1);
 
         // The refresh dropdown lists only the rates the screen lists, the first marked recommended, and shows the one it is at.
         check("display section: the refresh dropdown lists only the screen's three rates, the first recommended",
@@ -4358,66 +4361,67 @@ static fn check_display_section(void)
                           string_equals((string_address)text, (string_address) "100% (recommended)") &&
                           settings_choice(&settings_rows[scale_row], 5, text, sizeof(text)) && string_equals((string_address)text, (string_address) "200%") &&
                           !settings_choice(&settings_rows[scale_row], 6, text, sizeof(text)));
-                table.output_asked_scale[1] = 150;
+                table_at->output_asked_scale[1] = 150;
                 check("display section: the Scale row shows the scale its screen's line asks, in percent",
                       string_equals((string_address)settings_shown_value(scale_row), (string_address) "150%"));
                 check("display section: the choice that is the screen's scale is found by its label", settings_choice_index(scale_row, "150%") == 4 &&
                       settings_choice_index(scale_row, "75%") == 1 && settings_choice_index(scale_row, "60%") == -1);
-                table.output_asked_scale[1] = 100;
-                width = table.output_w[1];
-                table.output_w[1] = 3840;
-                check("display section: a 4K screen suggests 150%, marked in the dropdown", settings_scale_suggested(&table, 1) == 150 &&
+                table_at->output_asked_scale[1] = 100;
+                width = table_at->output_w[1];
+                table_at->output_w[1] = 3840;
+                check("display section: a 4K screen suggests 150%, marked in the dropdown", settings_scale_suggested(table_at, 1) == 150 &&
                       settings_choice(&settings_rows[scale_row], 4, text, sizeof(text)) && string_equals((string_address)text, (string_address) "150% (recommended)"));
-                table.output_w[1] = 5120;
-                check("display section: a 5K screen suggests 200%", settings_scale_suggested(&table, 1) == 200);
-                table.output_w[1] = width;
+                table_at->output_w[1] = 5120;
+                check("display section: a 5K screen suggests 200%", settings_scale_suggested(table_at, 1) == 200);
+                table_at->output_w[1] = width;
         }
-        memory_copy(table.output_model[1], "Dell U2720Q", 12);
+        memory_copy(table_at->output_model[1], "Dell U2720Q", 12);
         check("display section: a screen whose EDID names it shows the name, its connector in brackets after it",
               string_equals((string_address)settings_shown_value(screen_row), (string_address) "Screen 1: Dell U2720Q [DP-1]"));
-        memory_zero(table.output_model[1], sizeof(table.output_model[1]));
+        memory_zero(table_at->output_model[1], sizeof(table_at->output_model[1]));
 
         // What the compositor did not do is said on the row it was asked of: a rate the screen does not offer, a turn it could
         // not do, and a place the file does not read (the Screen row). Nothing refused reads plain.
         check("display section: a row whose setting was not refused reads plain: the rate it is at", string_equals((string_address)settings_row_text(refresh_row, 1), (string_address) "75 Hz"));
-        table.output_refused[1] = WINDOWS_REFUSED_RATE, table.output_asked_hz[1] = 144;
+        table_at->output_refused[1] = WINDOWS_REFUSED_RATE, table_at->output_asked_hz[1] = 144;
         check("display section: a refresh rate the screen does not offer is said on its row, with the rate it is kept at",
               string_equals((string_address)settings_row_text(refresh_row, 1), (string_address) "75 Hz (144 Hz is not offered)"));
-        table.output_refused[1] = WINDOWS_REFUSED_TURN, table.output_asked_turn[1] = 90, table.output_turn[1] = 0;
+        table_at->output_refused[1] = WINDOWS_REFUSED_TURN, table_at->output_asked_turn[1] = 90, table_at->output_turn[1] = 0;
         check("display section: a turn the compositor could not do is said on the rotation row, with the turn it is at",
               string_equals((string_address)settings_row_text(turn_row, 1), (string_address) "Normal (Turned right could not be done)"));
-        table.output_refused[1] = WINDOWS_REFUSED_PLACE;
+        table_at->output_refused[1] = WINDOWS_REFUSED_PLACE;
         check("display section: a place the file does not read is said on the Screen row",
               string_equals((string_address)settings_row_text(screen_row, 1), (string_address) "Screen 1: DP-1 (its place in the file is not read)"));
-        table.output_refused[1] = 0, table.output_turn[1] = 90;
+        table_at->output_refused[1] = 0, table_at->output_turn[1] = 90;
 
         // The compositor's own answer for the table, from its state: a line asking 144 Hz and 90 degrees of a screen at 75 Hz, not
         // turned, is refused both; the same screen at 144 Hz and turned by software is refused neither; a bad y is a place refused.
         {
-                static struct windows made;
+                static struct windows *made_scratch;
+                struct windows *const made_at = windows_scratch_table(&made_scratch);
 
                 memory_zero(compositor_display, sizeof(compositor_display));
                 memory_copy(compositor_display[0].name, "DP-1", 5);
                 compositor_display[0].refresh = 144, compositor_display[0].rotation = 90, compositor_display[0].scale = 150;
                 compositor_displays = 1;
                 compositor.output[0].mode.vrefresh = 75, compositor.output[0].turned = 0, compositor.output[0].degrees = 90;
-                compositor_table_refusals(&made, 0, "DP-1");
+                compositor_table_refusals(made_at, 0, "DP-1");
                 check("display section: the compositor says a rate and a turn it did not do, with what each line asked",
-                      made.output_refused[0] == (WINDOWS_REFUSED_RATE | WINDOWS_REFUSED_TURN) && made.output_asked_hz[0] == 144 &&
-                          made.output_asked_turn[0] == 90);
+                      made_at->output_refused[0] == (WINDOWS_REFUSED_RATE | WINDOWS_REFUSED_TURN) && made_at->output_asked_hz[0] == 144 &&
+                          made_at->output_asked_turn[0] == 90);
                 compositor.output[0].mode.vrefresh = 144, compositor.output[0].turned = 2;
-                compositor_table_refusals(&made, 0, "DP-1");
+                compositor_table_refusals(made_at, 0, "DP-1");
                 check("display section: a rate it set and a turn it did in software are refused nothing",
-                      made.output_refused[0] == 0);
+                      made_at->output_refused[0] == 0);
                 compositor_display[0].bad = WINDOWS_DISPLAY_Y;
-                compositor_table_refusals(&made, 0, "DP-1");
-                check("display section: a place whose y the file does not read is refused as a place", made.output_refused[0] == WINDOWS_REFUSED_PLACE);
-                compositor_table_refusals(&made, 0, "HDMI-A-1");
-                check("display section: a screen with no line asks for nothing and is refused nothing", made.output_refused[0] == 0 && made.output_asked_hz[0] == 0);
-                check("display section: the table says the scale a screen's line asks, 100 when it has none", made.output_asked_scale[0] == 100);
+                compositor_table_refusals(made_at, 0, "DP-1");
+                check("display section: a place whose y the file does not read is refused as a place", made_at->output_refused[0] == WINDOWS_REFUSED_PLACE);
+                compositor_table_refusals(made_at, 0, "HDMI-A-1");
+                check("display section: a screen with no line asks for nothing and is refused nothing", made_at->output_refused[0] == 0 && made_at->output_asked_hz[0] == 0);
+                check("display section: the table says the scale a screen's line asks, 100 when it has none", made_at->output_asked_scale[0] == 100);
                 compositor_displays = 1;
-                compositor_table_refusals(&made, 0, "DP-1");
-                check("display section: the table says the scale a screen's line asks, in percent", made.output_asked_scale[0] == 150);
+                compositor_table_refusals(made_at, 0, "DP-1");
+                check("display section: the table says the scale a screen's line asks, in percent", made_at->output_asked_scale[0] == 150);
                 compositor_displays = 0;
                 memory_zero(compositor_display, sizeof(compositor_display));
         }
@@ -4448,14 +4452,14 @@ static fn check_display_section(void)
         check("display section: the map's panel is placed at the top of the page", settings.map.panel.y == 100 && settings.map.panel.h > 0 && settings.map.field.h > 0);
         // The Screen dropdown counts the screens in the same reading order as identify does: a 2 by 2 arrangement, listed bottom
         // right first, is Screen 1 top left, Screen 2 top right, Screen 3 bottom left and Screen 4 bottom right.
-        memory_zero(&table, sizeof(table));
-        table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
-        table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
-        table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
-        table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-        table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
-        memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
-        memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+        windows_scratch_zero(table_at);
+        table_at->outputs = 4, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+        table_at->output_x[0] = 1920, table_at->output_y[0] = 1080, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+        table_at->output_x[1] = 0, table_at->output_y[1] = 1080, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+        table_at->output_x[2] = 1920, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+        table_at->output_x[3] = 0, table_at->output_y[3] = 0, table_at->output_w[3] = 1920, table_at->output_h[3] = 1080;
+        memory_copy(table_at->output_name[0], "DP-4", 5), memory_copy(table_at->output_name[1], "DP-3", 5);
+        memory_copy(table_at->output_name[2], "DP-2", 5), memory_copy(table_at->output_name[3], "DP-1", 5);
         settings.map.display = -1;
         check("display section: the Screen dropdown of a 2 by 2 arrangement reads top left first, then top right, bottom left and bottom right",
               settings_options(&settings_rows[screen_row]) == 4 && settings_choice(&settings_rows[screen_row], 0, text, sizeof(text)) &&
@@ -4464,7 +4468,7 @@ static fn check_display_section(void)
                   settings_choice(&settings_rows[screen_row], 2, text, sizeof(text)) && string_equals((string_address)text, (string_address) "Screen 3: DP-3") &&
                   settings_choice(&settings_rows[screen_row], 3, text, sizeof(text)) && string_equals((string_address)text, (string_address) "Screen 4: DP-4"));
         check("display section: the map's numbers and the dropdown's are the same screens (Screen 2 is DP-2, top right)",
-              windows_screen_numbers(&table, number) == 4 && number[2] == 2 && number[1] == 3 && number[3] == 1 && number[0] == 4);
+              windows_screen_numbers(table_at, number) == 4 && number[2] == 2 && number[1] == 3 && number[3] == 1 && number[0] == 4);
 
         // A finger on the map, on the bottom left screen (table index 1): the press chooses it and starts its drag, a move
         // drags it, and no press of the page starts (no row is pressed, and the finger is not the page's), so a drag never
@@ -4513,15 +4517,15 @@ static fn check_display_section(void)
         {
                 struct ui_row row;
 
-                memory_zero(&table, sizeof(table));
+                windows_scratch_zero(table_at);
                 settings.map.display = -1;
                 check("display section: with no screen the map's caption says so", string_equals((string_address)settings_map_hint(0), (string_address) "No screen is connected."));
                 memory_zero(&row, sizeof(row));
                 settings_describe_output(screen_row, &row);
                 check("display section: with no screen the Screen row says so, in words", string_equals((string_address)row.value, (string_address) "No screen is connected"));
-                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
-                table.output_w[0] = 1920, table.output_h[0] = 1080, table.output_rates[0] = 1, table.output_hz[0][0] = 60, table.output_now[0] = 60;
-                memory_copy(table.output_name[0], "DP-1", 5);
+                table_at->outputs = 1, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+                table_at->output_w[0] = 1920, table_at->output_h[0] = 1080, table_at->output_rates[0] = 1, table_at->output_hz[0][0] = 60, table_at->output_now[0] = 60;
+                memory_copy(table_at->output_name[0], "DP-1", 5);
                 check("display section: with one screen the map's caption says so", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
                 memory_zero(&row, sizeof(row));
                 settings_describe_output(screen_row, &row);
@@ -4529,7 +4533,7 @@ static fn check_display_section(void)
                 memory_zero(&row, sizeof(row));
                 settings_describe_output(refresh_row, &row);
                 check("display section: a screen with one rate shows it in words, not a menu", row.kind == UI_ROW_PLAIN && string_equals((string_address)row.value, (string_address) "60 Hz (recommended)"));
-                table.output_rates[0] = 0;
+                table_at->output_rates[0] = 0;
                 memory_zero(&row, sizeof(row));
                 settings_describe_output(refresh_row, &row);
                 check("display section: a screen that lists no rate says so, in words", string_equals((string_address)row.value, (string_address) "The screen lists no rates"));
@@ -4544,14 +4548,14 @@ static fn check_display_section(void)
                 struct window_event event;
                 int tx, ty, tw, th, before_x, before_y;
 
-                memory_zero(&table, sizeof(table));
-                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 200;
-                table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
-                table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
-                table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-                table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
-                memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
-                memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+                windows_scratch_zero(table_at);
+                table_at->outputs = 4, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 200;
+                table_at->output_x[0] = 1920, table_at->output_y[0] = 1080, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+                table_at->output_x[1] = 0, table_at->output_y[1] = 1080, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+                table_at->output_x[2] = 1920, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+                table_at->output_x[3] = 0, table_at->output_y[3] = 0, table_at->output_w[3] = 1920, table_at->output_h[3] = 1080;
+                memory_copy(table_at->output_name[0], "DP-4", 5), memory_copy(table_at->output_name[1], "DP-3", 5);
+                memory_copy(table_at->output_name[2], "DP-2", 5), memory_copy(table_at->output_name[3], "DP-1", 5);
                 settings.ui.scale = 200;
                 display_map_place();
                 grid_count = settings_map_load(grid, grid_number);
@@ -4571,7 +4575,7 @@ static fn check_display_section(void)
                 check("display section: at scale 2 a motion over the map drags the screen it took, its target moves",
                       settings.map.drag == 2 && (settings.map.target_x != before_x || settings.map.target_y != before_y));
                 settings.map.display = settings.map.drag = -1;
-                settings.ui.scale = 100, table.scale = 100;
+                settings.ui.scale = 100, table_at->scale = 100;
                 display_map_place();
         }
 
@@ -4581,14 +4585,14 @@ static fn check_display_section(void)
         {
                 struct window_event key;
 
-                memory_zero(&table, sizeof(table));
-                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
-                table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
-                table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
-                table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
-                table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
-                memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
-                memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+                windows_scratch_zero(table_at);
+                table_at->outputs = 4, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+                table_at->output_x[0] = 1920, table_at->output_y[0] = 1080, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+                table_at->output_x[1] = 0, table_at->output_y[1] = 1080, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+                table_at->output_x[2] = 1920, table_at->output_y[2] = 0, table_at->output_w[2] = 1920, table_at->output_h[2] = 1080;
+                table_at->output_x[3] = 0, table_at->output_y[3] = 0, table_at->output_w[3] = 1920, table_at->output_h[3] = 1080;
+                memory_copy(table_at->output_name[0], "DP-4", 5), memory_copy(table_at->output_name[1], "DP-3", 5);
+                memory_copy(table_at->output_name[2], "DP-2", 5), memory_copy(table_at->output_name[3], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
                 settings.page.pane = 1, settings.list.focus = screen_row, ui_field_close(&settings.edit), (void)0, settings.page.card = false;
                 settings_filter_clear(), (void)0, settings.page.menu_row = -1;
@@ -4621,16 +4625,16 @@ static fn check_display_section(void)
         {
                 int x, y;
 
-                memory_zero(&table, sizeof(table));
-                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
-                table.output_x[0] = 5000, table.output_y[0] = 5000, table.output_w[0] = 1920, table.output_h[0] = 1080;
-                memory_copy(table.output_name[0], "DP-1", 5);
+                windows_scratch_zero(table_at);
+                table_at->outputs = 1, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+                table_at->output_x[0] = 5000, table_at->output_y[0] = 5000, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+                memory_copy(table_at->output_name[0], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = true, settings.map.nudged = false;
                 check("display section: a Shift and an arrow steps the chosen screen by a step", settings_map_stepped(1, 0, &x, &y) && x == 5010 && y == 5000);
                 check("display section: a held key steps from where the screen was sent, not from the table again", settings_map_stepped(1, 0, &x, &y) && x == 5020 && y == 5000);
-                table.output_x[0] = 5020;
+                table_at->output_x[0] = 5020;
                 check("display section: once the table has the place a key sent, the next step is from the table", settings_map_stepped(0, 1, &x, &y) && x == 5020 && y == 5010);
-                table.output_x[0] = 5000, table.output_y[0] = 5000, settings.map.nudged = false;
+                table_at->output_x[0] = 5000, table_at->output_y[0] = 5000, settings.map.nudged = false;
                 check("display section: a step that moves nothing is no move", !settings_map_stepped(0, 0, &x, &y));
                 settings.map.keys = false;
                 check("display section: with one screen the caption says so, though the keys are on the map", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
@@ -5620,9 +5624,9 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         static p8 atlas[1024 * 1024];
         static char sixteen[4096], nvme[1024], moved[1024];
         positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0, bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
-        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x4022, (positive)-1, 0);
         struct windows address_to window = (struct windows address_to)table;
         b32 least = true, fills = true, equal = true, drawn = false, free_track = false, apart = true, listed = false, last = false, tall = true, mirrored = true;
         b32 shut = false, pressed = false, keyed = false, sums = true, headed = false, columns = false, kept = false;
@@ -6309,7 +6313,8 @@ static fn check_settings_clicks(void)
         static p8 kept_kit[sizeof(ui_kit)], kept_board[sizeof(settings_board)];
         struct ui address_to ui = &settings.ui;
         struct ui_list address_to list = &settings.list;
-        static struct windows click_table;
+        static struct windows *click_table_scratch;
+        struct windows *const click_table_at = windows_scratch_table(&click_table_scratch);
         int before = settings.page.chosen, scroll_before = list->scroll.scroll, seen = 0, wrong = 0, strips = 0;
         int gpu = settings_row_named("GPU rendering (alpha)"), keyboard = settings_row_named("Keyboard");
         unsigned char gpu_fold = gpu >= 0 ? settings_expanded[gpu] : 0;
@@ -6402,8 +6407,8 @@ static fn check_settings_clicks(void)
                 struct window_event event;
                 unsigned char keyboard_fold = settings_expanded[keyboard];
 
-                windows_issue_set(&click_table, "keyboard", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
-                windows_issues_read(&click_table, &settings_board);
+                windows_issue_set(click_table_at, "keyboard", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+                windows_issues_read(click_table_at, &settings_board);
                 settings_group_choose(settings_group_of(keyboard));
                 settings_layout();
                 at = ui_list_at(list, keyboard);
@@ -6431,8 +6436,8 @@ static fn check_settings_clicks(void)
                         settings_event_at(&event);
                         hover_ok = settings.list.hover == keyboard;
                 }
-                windows_issue_clear(&click_table, "keyboard", WINDOWS_ISSUE_ANY);
-                windows_issues_read(&click_table, &settings_board);
+                windows_issue_clear(click_table_at, "keyboard", WINDOWS_ISSUE_ANY);
+                windows_issues_read(click_table_at, &settings_board);
                 settings_layout();
         }
         check("settings click: a dropdown's arrow is not in its row's expander strip, so a press on it is the dropdown's", arrow_ok);
@@ -6954,9 +6959,9 @@ static fn check_settings_frames(string_address regular, string_address bold)
         static font_face faces[2];
         static p8 atlas[1024 * 1024];
         positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0, bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
-        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x4022, (positive)-1, 0);
         struct settings_frames_saved
         {
                 struct ui ui;
@@ -7635,17 +7640,18 @@ static fn rtl_draw(int group, int scale, b32 rtl)
                 static char names[6][LAUNCHER_NAME];
                 static unsigned char from[6];
                 static unsigned short hashed[LAUNCHER_HASH];
-                static struct windows table;
+                static struct windows *table_scratch;
+                struct windows *const table_at = windows_scratch_table(&table_scratch);
                 static const char address_to const fixture[] = {"ls", "lsblk", "lsof", "less", "false", "also"};
 
                 for (positive at = 0; at < 6; at++)
                         string_copy((string_address)names[at], (string_address)fixture[at]);
                 memory_zero(&launcher, sizeof(launcher));
-                memory_zero(&table, sizeof(table));
+                windows_scratch_zero(table_at);
                 launcher.names = (char address_to)names, launcher.count = 6, launcher.from = from, launcher.hashed = hashed;
                 launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
-                table.output_width = 1920, table.output_height = 1080, table.stride = SETTINGS_FRAMES_W;
-                launcher.own.table = &table;
+                table_at->output_width = 1920, table_at->output_height = 1080, table_at->stride = SETTINGS_FRAMES_W;
+                launcher.own.table = table_at;
                 launcher.ui = settings.ui;
                 launcher.ui.opaque = 0, launcher.ui.glass = 1;
                 ui_inks(&launcher.ui, 0x2b2b2eu);
@@ -7774,7 +7780,8 @@ static fn check_text_scale(void)
 {
         static const unsigned int percents[] = {50, 100, 150, 200, 300};
         static const int scales[] = {100, 150, 200, 300};
-        static struct windows taken;
+        static struct windows *taken_scratch;
+        struct windows *const taken_at = windows_scratch_table(&taken_scratch);
         b32 same = true, wide = true, tall = true, rows = true, range = true, mirrored = true, pressed = true, published = false;
         b32 placed = false, lines = true, field = true, cut = false;
         unsigned int kept_percent = ui_text_percent;
@@ -7817,24 +7824,24 @@ static fn check_text_scale(void)
         rows &= ui_row_height() == 40;
         for (unsigned int value = 0; value < 400; value++)
         {
-                taken.text_scale = value;
-                ui_kit_text_take(&taken);
+                taken_at->text_scale = value;
+                ui_kit_text_take(taken_at);
                 range &= ui_text_percent == (value >= 50 && value <= 300 ? value : 0);
         }
         // A size taken that is another places every control again, once; the same size again does not.
         {
                 b64 epoch;
 
-                taken.text_scale = 0;
-                ui_kit_text_take(&taken);
+                taken_at->text_scale = 0;
+                ui_kit_text_take(taken_at);
                 epoch = ui_kit.epoch;
-                taken.text_scale = 150;
-                ui_kit_text_take(&taken);
+                taken_at->text_scale = 150;
+                ui_kit_text_take(taken_at);
                 placed = ui_kit.epoch == epoch + 1;
-                ui_kit_text_take(&taken);
+                ui_kit_text_take(taken_at);
                 placed = placed && ui_kit.epoch == epoch + 1;
-                taken.text_scale = 0;
-                ui_kit_text_take(&taken);
+                taken_at->text_scale = 0;
+                ui_kit_text_take(taken_at);
                 placed = placed && ui_kit.epoch == epoch + 2;
         }
         // A line box's baseline is the face's own at the size the text is drawn at, and a text field's em is the size and its zoom at it.
@@ -7886,14 +7893,14 @@ static fn check_text_scale(void)
                 struct windows address_to saved = compositor.table;
                 unsigned int before;
 
-                memory_zero(&taken, sizeof(taken));
-                compositor.table = &taken;
-                before = taken.themed;
+                windows_scratch_zero(taken_at);
+                compositor.table = taken_at;
+                before = taken_at->themed;
                 compositor_text_publish(150);
                 compositor_text_publish(150);
-                published = taken.text_scale == 150 && taken.themed == before + 1;
+                published = taken_at->text_scale == 150 && taken_at->themed == before + 1;
                 compositor_text_publish(0);
-                published = published && taken.text_scale == 0 && taken.themed == before + 2;
+                published = published && taken_at->text_scale == 0 && taken_at->themed == before + 2;
                 compositor.table = saved;
         }
         check("text size: the compositor publishes the size into the table and knocks the windows once for a change", published);
@@ -7926,9 +7933,9 @@ static fn check_rtl_mirror(void)
 {
         static font_face face;
         static p8 atlas[1024 * 1024];
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
-        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x4022, (positive)-1, 0);
         b32 gallery, groups = true;
 
         rtl_font_make();
@@ -8008,20 +8015,21 @@ static fn check_rtl_mirror(void)
         check_text_scale();
         // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.
         {
-                static struct windows language_table;
+                static struct windows *language_table_scratch;
+                struct windows *const language_table_at = windows_scratch_table(&language_table_scratch);
                 int seam;
 
                 language_directory = "languages/";
                 language_listen(settings_language);
                 rtl_draw(0, 1, false);
                 seam = settings.page.seam;
-                memory_zero(&language_table, sizeof(language_table));
-                language_table.language = 'a' | 'r' << 8;
-                ui_kit_language_take(&language_table);
+                windows_scratch_zero(language_table_at);
+                language_table_at->language = 'a' | 'r' << 8;
+                ui_kit_language_take(language_table_at);
                 check("rtl mirror: Arabic taken while the Settings window is open puts its column at the right, at once",
                       language_rtl() && ui_rtl() && seam < settings.width / 2 && settings.page.seam > settings.width / 2 && settings.page.left < settings.page.seam);
-                language_table.language = 0;
-                ui_kit_language_take(&language_table);
+                language_table_at->language = 0;
+                ui_kit_language_take(language_table_at);
                 check("rtl mirror: and English puts it back at the left", !language_rtl() && !ui_rtl() && settings.page.seam < settings.width / 2);
         }
         ui_kit.rtl = 0;

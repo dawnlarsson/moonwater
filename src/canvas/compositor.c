@@ -609,11 +609,22 @@ struct compositor_chip
 
 /*
         The rows of the window table in use: the high-water of the rows the compositor has made doors for, which the table publishes
-        (windows.rows) and every walk of the rows goes to, where it went to WINDOWS. It is WINDOWS from the start for now; rows made as
-        they are wanted come with the table's sparse layout.
+        (windows.rows) and every walk of the rows goes to, where it went to WINDOWS. COMPOSITOR_ROWS_FIRST are made with the table, and
+        more as they are wanted (compositor_rows_grow): whenever fewer than COMPOSITOR_ROWS_SPARE of them are free at a pass of the loop
+        (compositor_rows_spare), when a program knocks for one it did not find (the clipboard's door wakes the loop) and when a client's
+        window finds none. A step is half the rows in use, or the spares, whichever is more; the rows the table has room for
+        (compositor_rows_room, its capacity) are the end of it, and a row whose memory, door or thread the kernel refuses is where the
+        growth stops, until it is asked again.
 */
-static unsigned int compositor_rows_in_use = WINDOWS;
+#define COMPOSITOR_ROWS_FIRST 32
+#define COMPOSITOR_ROWS_SPARE 16
+static unsigned int compositor_rows_in_use = COMPOSITOR_ROWS_FIRST;
+static unsigned int compositor_rows_room = WINDOWS;
+static unsigned int compositor_rows_grow(unsigned int want);
 static unsigned int compositor_rows_made; // the rows whose memory is committed (compositor_rows_make)
+// A row of the compositor's is one below the rows in use: a number past them (a program's word in the table, a client's) names no row,
+// and its memory is not there to be read (compositor_rows_make).
+#define COMPOSITOR_ROWS ((int)compositor_rows_in_use)
 
 /*
         A set of rows, a bit each, with one past them (the doors' slot that is no row, COMPOSITOR_DOOR_MISC): what the masks of a
@@ -1579,15 +1590,35 @@ static void compositor_lists_set(int on)
         started, which is root, and a door the whole machine could write is a
         door the whole machine could hold open against the row it names.
 */
+static long compositor_door_make(unsigned int row);
+
+/*
+        The address space the table may take, of every process that maps it: a quarter of the 47 bits a mapping is given below the
+        kernel's (a machine with five levels of tables gives no more without being asked). The rows the table has room for are as many
+        as fit in it, every one with its two buffers and its list, WINDOWS at the most: 1,048,576 rows at 1920 by 1080, 491,520 at 3840
+        by 2160, as many as the descriptors and the processes a kernel has.
+*/
+#define COMPOSITOR_TABLE_MOST (1ul << 45)
+
+// The rows a table of buffers of `buffer` bytes has room for.
+static unsigned int compositor_table_room(unsigned long buffer)
+{
+        unsigned long per = 2 * buffer + WINDOW_LIST_BYTES, rows = (COMPOSITOR_TABLE_MOST - WINDOWS_HEADER) / per;
+
+        rows = rows < WINDOWS ? rows : WINDOWS;
+        return rows > COMPOSITOR_ROWS_FIRST ? (unsigned int)rows : COMPOSITOR_ROWS_FIRST;
+}
+
 static int compositor_table(void)
 {
         // Every window's buffer as large as the largest window may ever be, a row of it stride pixels: for the session,
         // as the table is sealed at its size and mapped by every window. They start at WINDOWS_HEADER (window.c).
         unsigned long buffer = compositor_buffer_room();
-        // And a window list for every row after the pictures (window.c's WINDOW_LIST_BYTES): sparse, so only what a program writes is there.
-        unsigned long bytes = WINDOWS_LISTS_AT(buffer) + WINDOW_LIST_BYTES * WINDOWS;
+        unsigned int room = compositor_table_room(buffer);
+        // And a window list for every row after the pictures (window.c's WINDOW_LIST_BYTES): sparse, so only what a program writes is
+        // there, and so are the rows' pictures (a memfd's pages are made where they are written).
+        unsigned long bytes = WINDOWS_LISTS_AT(buffer, room) + WINDOW_LIST_BYTES * (unsigned long)room;
         long handle, mapped;
-        p8 name[48];
 
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run", 0755, 0, 0, 0);
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run/moonwater", 0755, 0, 0, 0);
@@ -1640,7 +1671,9 @@ static int compositor_table(void)
         compositor.table->refused = compositor.memfd_failed;
         compositor.table->pixels = WINDOWS_HEADER;
         compositor.table->buffer = buffer;
-        compositor.table->lists = WINDOWS_LISTS_AT(buffer);
+        compositor.table->lists = WINDOWS_LISTS_AT(buffer, room);
+        compositor.table->capacity = room;
+        compositor_rows_room = room;
         compositor.table->list_bytes = WINDOW_LIST_BYTES;
         // The layout's version first for a program to read, and the rows a program may take (every one has its doors below).
         __atomic_store_n(&compositor.table->abi, WINDOWS_ABI, __ATOMIC_RELEASE);
@@ -1648,23 +1681,10 @@ static int compositor_table(void)
         compositor_lists_set(0);
         compositor_table_outputs();
 
-        // The door is read here and the wake written, each end kept for the session; S_IFIFO.
+        // The first rows' doors (compositor_door_make).
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
-                for (int wake = 0; wake < 2; wake++)
-                {
-                        windows_door_name((char *)name, row, wake);
-                        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)name, 0, 0, 0, 0);
-                        compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)name, 0010000 | WINDOWS_MODE, 0, 0, 0);
-                        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)name, WINDOWS_MODE, 0, 0, 0);
-                        handle = (long)system_open_at(AT_FDCWD, name,
-                                                      (wake ? FILE_READ_WRITE : FILE_READ) | O_NONBLOCK | O_CLOEXEC);
-                        if (handle < 0)
-                                return (int)handle;
-                        if (wake)
-                                compositor.wake[row] = (int)handle;
-                        else
-                                compositor.door[row] = (int)handle;
-                }
+                if ((handle = compositor_door_make(row)) < 0)
+                        return (int)handle;
         if (compositor_clip_start() < 0)
                 return -1;
 
@@ -2265,7 +2285,11 @@ static void compositor_band_room(void)
 */
 #define COMPOSITOR_DESCRIPTORS_WANTED (1L << 30) // as many as the kernel's hard limit lets it have: a client's dma-bufs are descriptors the compositor holds
 #define COMPOSITOR_DESCRIPTORS_WARM 4096          // the table grown to at the start (the kernel grows it past this as it is used)
-#define COMPOSITOR_DESCRIPTORS_OWN 256
+// The compositor's own that are no row's: the poll list's own, the inputs, the selections' history, the table, the card and the
+// render node with the buffers given to it, the sound server's socket and the transfers' pipes; and three a row (its door, its wake and
+// its thread's kick), the misc slot's kick among them. COMPOSITOR_DESCRIPTORS_OWN for the rows in use: the share grows as rows are made.
+#define COMPOSITOR_DESCRIPTORS_FIXED (7 + 32 + 32 + 3 + 64 + 32)
+#define COMPOSITOR_DESCRIPTORS_OWN (COMPOSITOR_DESCRIPTORS_FIXED + 3 * ((long)compositor_rows_in_use + 1))
 static long compositor_descriptors_most = 1024;
 
 static int compositor_descriptor_crowded(long descriptor)
@@ -2293,7 +2317,7 @@ static int compositor_picture_poll(int row)
         struct wayland_cursor picture;
         unsigned long was = compositor_picture.worn;
 
-        if (row < 0 || row >= WINDOWS || !compositor_wl.started || !wayland_cursor_picture(row, &picture))
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl.started || !wayland_cursor_picture(row, &picture))
         {
                 compositor_picture.worn = 0;
                 compositor_picture.asked = 0;
@@ -2328,15 +2352,16 @@ static int compositor_picture_poll(int row)
 #define COMPOSITOR_POLLS_FOR(rows) (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + (unsigned long)(rows) + COMPOSITOR_WL_POLLS)
 #define COMPOSITOR_POLLS COMPOSITOR_POLLS_FOR(WINDOWS)
 static struct compositor_poll *compositor_polls;
-// The compositor's own descriptors fit the share kept for them: the poll list's (but the clients'), a wake for every door, the table,
-// the card, the render node and the buffers given to it, the sound server's socket, the selections and their history, and each transfer's pipe.
-_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_OWN,
+// The compositor's own descriptors that are no row's fit the share kept for them (COMPOSITOR_DESCRIPTORS_FIXED): the poll list's (but the
+// clients'), the selections and their history, the table, the card, the render node and the buffers given to it, the sound server's
+// socket and each transfer's pipe; a row's three are counted with it.
+_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_FIXED,
                "the compositor's own descriptors fit the numbers kept for them");
 
 /*
         The compositor's memory of each row: what was 81 arrays of WINDOWS in its structs and beside them, each a pointer into one
         reservation of address space (PROT_NONE and MAP_NORESERVE, of no memory until it is committed), its arrays one after another
-        at page boundaries, every one with room for WINDOWS (WINDOWS + 1 for the doors' threads, whose last is the misc door's; the
+        at page boundaries, every one with room for WINDOWS (WINDOWS + 1 for the doors' threads, committed whole, whose last is the misc door's; the
         bands' marks are a screen's each). A row's memory is committed (mprotect) when the row is made, compositor_rows_make, and its
         defaults set then (a popup's parent none); the elements never move, so a pointer to a row's taken before more rows were made
         is good after. A commit the kernel refuses is the rows not made, and nothing else. compositor_zero is the compositor's
@@ -2345,7 +2370,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
         the parts that keep theirs for the session.
 */
 #define COMPOSITOR_ROWS_ROW(rows) (rows)
-#define COMPOSITOR_ROWS_ROW1(rows) ((rows) + 1)
+#define COMPOSITOR_ROWS_ROW1(rows) (WINDOWS + 1) // every slot's and the misc one's, at WINDOWS: pages touched only where a thread is
 #define COMPOSITOR_ROWS_SCREENS(rows) WINDOWS_OUTPUTS
 #define COMPOSITOR_ROWS_FRAMES(rows) COMPOSITOR_FRAMES_FOR(rows)
 #define COMPOSITOR_ROWS_PIECES(rows) COMPOSITOR_PIECES_FOR(rows)
@@ -2590,6 +2615,87 @@ static void compositor_card_zero(void)
         memory_zero(&compositor_card, sizeof(compositor_card));
         compositor_rows_point();
         COMPOSITOR_ROWS_CARD(COMPOSITOR_ROWS_ZERO)
+}
+
+/*
+        A row's door and wake, made and opened (S_IFIFO, the table's mode): the door is read here and the wake written, each end kept
+        for the session. 0, or the kernel's error. A number among the compositor's own last ones (the share no row has,
+        COMPOSITOR_DESCRIPTORS_FIXED, below compositor_descriptors_most) is refused as one a row may not take: a row is made only while
+        there is room for both its ends.
+*/
+static long compositor_door_make(unsigned int row)
+{
+        p8 name[48];
+
+        for (int wake = 0; wake < 2; wake++)
+        {
+                long handle;
+
+                windows_door_name((char *)name, row, wake);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)name, 0, 0, 0, 0);
+                compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)name, 0010000 | WINDOWS_MODE, 0, 0, 0);
+                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)name, WINDOWS_MODE, 0, 0, 0);
+                handle = (long)system_open_at(AT_FDCWD, name, (wake ? FILE_READ_WRITE : FILE_READ) | O_NONBLOCK | O_CLOEXEC);
+                if (handle >= 0 && handle >= compositor_descriptors_most - COMPOSITOR_DESCRIPTORS_FIXED)
+                {
+                        system_close(handle);
+                        handle = -24; // EMFILE
+                }
+                if (handle < 0)
+                {
+                        if (wake)
+                                system_close(compositor.door[row]);
+                        return handle;
+                }
+                if (wake)
+                        compositor.wake[row] = (int)handle;
+                else
+                        compositor.door[row] = (int)handle;
+        }
+        return 0;
+}
+
+/*
+        Rows made past the rows in use, to want (to the rows the table has room for at the most): their memory, their doors and their
+        threads (when the doors' threads have started), each row in turn, and the table told when they are all made. A row the kernel
+        refuses anything of is where it stops: the rows made before it are in use, and the next ask tries again. The rows in use.
+*/
+static unsigned int compositor_rows_grow(unsigned int want)
+{
+        unsigned int row = compositor_rows_in_use, to = want < compositor_rows_room ? want : compositor_rows_room;
+
+        if (!compositor.table || to <= row || !compositor_rows_make(to))
+                return compositor_rows_in_use;
+        for (; row < to; row++)
+        {
+                if (compositor_door_make(row) < 0)
+                        break;
+                if (compositor_doors.done >= 0 && !compositor_door_thread(row))
+                {
+                        system_close(compositor.door[row]), system_close(compositor.wake[row]);
+                        break;
+                }
+        }
+        if (row > compositor_rows_in_use)
+        {
+                compositor_rows_in_use = row;
+                __atomic_store_n(&compositor.table->rows, row, __ATOMIC_RELEASE);
+        }
+        return compositor_rows_in_use;
+}
+
+// At a pass of the loop: rows made when fewer than COMPOSITOR_ROWS_SPARE of those in use are free, looked for from the last (the rows a
+// program takes are the lowest free, so the free ones are mostly the last). A step of half the rows in use, or the spares.
+static void compositor_rows_spare(void)
+{
+        unsigned int free = 0, step = compositor_rows_in_use / 2 > COMPOSITOR_ROWS_SPARE ? compositor_rows_in_use / 2 : COMPOSITOR_ROWS_SPARE;
+
+        if (!compositor.table || compositor_rows_in_use >= compositor_rows_room)
+                return;
+        for (unsigned int row = compositor_rows_in_use; row-- > 0 && free < COMPOSITOR_ROWS_SPARE;)
+                free += __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) == 0;
+        if (free < COMPOSITOR_ROWS_SPARE)
+                compositor_rows_grow(compositor_rows_in_use + step);
 }
 
 /*
@@ -3310,6 +3416,8 @@ static b32 compositor_main()
 
                 // One knock a window a pass, however much it was given.
                 compositor_knock();
+                // Rows made while few are free (compositor_rows_spare), so the next window finds one.
+                compositor_rows_spare();
         }
 
 #ifdef CONFIG_MOONWATER_WAYLAND

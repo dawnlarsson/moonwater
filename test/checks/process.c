@@ -4880,8 +4880,9 @@ static fn sockets(void)
 #ifdef LINUX
 static fn windows_client(void)
 {
-        static struct windows table;
-        struct window_row own = {&table, 3, -1, -1, 0};
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
+        struct window_row own = {table_at, 3, -1, -1, 0};
         struct window_event event;
         b32 wake[2] = {-1, -1}, door[2] = {-1, -1};
         char name[48], byte;
@@ -4904,13 +4905,13 @@ static fn windows_client(void)
         check("an empty ring has no event", !windows_event(&own, &event));
         for (unsigned int at = 0; at < WINDOWS_EVENTS; at++)
         {
-                table.event_type[3][at] = WINDOW_EVENT_KEY;
-                table.event_flags[3][at] = WINDOW_KEY_DOWN;
-                table.event_a[3][at] = (int)at;
-                table.event_b[3][at] = -(int)at;
+                table_at->event_type[3][at] = WINDOW_EVENT_KEY;
+                table_at->event_flags[3][at] = WINDOW_KEY_DOWN;
+                table_at->event_a[3][at] = (int)at;
+                table_at->event_b[3][at] = -(int)at;
         }
-        table.event_tail[3] = 0xfffffff0u;
-        table.event_head[3] = 0xfffffff0u + WINDOWS_EVENTS;
+        table_at->event_tail[3] = 0xfffffff0u;
+        table_at->event_head[3] = 0xfffffff0u + WINDOWS_EVENTS;
         while (windows_event(&own, &event))
         {
                 unsigned int at = (0xfffffff0u + read_back) % WINDOWS_EVENTS;
@@ -4920,20 +4921,20 @@ static fn windows_client(void)
                 read_back++;
         }
         check("a full ring is read whole, in order, across the counter's wrap",
-              read_back == WINDOWS_EVENTS && in_order && table.event_tail[3] == table.event_head[3]);
+              read_back == WINDOWS_EVENTS && in_order && table_at->event_tail[3] == table_at->event_head[3]);
 
         check("a pipe for the wake", system_call_2(syscall(pipe2), (positive)wake, O_NONBLOCK) == 0);
         check("a pipe for the door", system_call_2(syscall(pipe2), (positive)door, O_NONBLOCK) == 0);
         own.wake = wake[0];
         own.door = door[1];
 
-        table.frame[3] = table.shown[3] = 7;
+        table_at->frame[3] = table_at->shown[3] = 7;
         check("a picture taken leaves the other buffer free", windows_ready(&own));
         windows_show(&own, 1);
-        check("a picture is counted and named", table.frame[3] == 8 && table.buffer_index[3] == 1);
+        check("a picture is counted and named", table_at->frame[3] == 8 && table_at->buffer_index[3] == 1);
         check("and knocked for", system_read_once(door[0], &byte, 1) == 1);
         check("not free until the compositor has taken it", !windows_ready(&own));
-        table.shown[3] = 8;
+        table_at->shown[3] = 8;
         check("free once it has", windows_ready(&own));
 
         check("no knock: the wait times out", windows_wait(&own, -1, 0) == 0);
@@ -4975,47 +4976,55 @@ static void wl_header(unsigned int width, unsigned int height)
 
 static fn windows_lists(void)
 {
-        static struct windows table;
-        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * WINDOWS * buffer + WINDOWS * WINDOW_LIST_BYTES, at;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
+        // A table with room for 40 rows, of the layout's WINDOWS: its lists follow the pictures of the rows it has room for.
+        const unsigned int room = 40;
+        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * room * buffer + room * WINDOW_LIST_BYTES, at;
         unsigned char address_to list = (unsigned char address_to)wl_list;
         unsigned int address_to head = wl_list;
         unsigned int lists_at;
         int every = 1;
 
-        table.lists = WINDOWS_HEADER + buffer * 2 * WINDOWS, table.list_bytes = WINDOW_LIST_BYTES;
-        check("the lists come after the pictures and end at the mapping", table.lists + WINDOWS * WINDOW_LIST_BYTES == size);
-        for (int row = 0; row < WINDOWS; row++)
+        table_at->capacity = room;
+        table_at->lists = WINDOWS_LISTS_AT(buffer, room), table_at->list_bytes = WINDOW_LIST_BYTES;
+        check("the lists come after the pictures and end at the mapping", table_at->lists + room * WINDOW_LIST_BYTES == size);
+        for (int row = 0; row < (int)room; row++)
         {
-                unsigned char address_to got = window_list_of(&table, row);
+                unsigned char address_to got = window_list_of(table_at, row);
 
-                at = (unsigned long)((char address_to)got - (char address_to)&table);
-                every = every && got && at == table.lists + (unsigned long)row * WINDOW_LIST_BYTES && at + WINDOW_LIST_BYTES <= size;
+                at = (unsigned long)((char address_to)got - (char address_to)table_at);
+                every = every && got && at == table_at->lists + (unsigned long)row * WINDOW_LIST_BYTES && at + WINDOW_LIST_BYTES <= size;
         }
         check("every row's list is its own, inside the mapping, with none shared", every);
-        table.lists = 0;
-        check("a table with no lists has none", !window_list_of(&table, 0));
-        table.lists = WINDOWS_HEADER + buffer * 2 * WINDOWS;
-        table.list_bytes = WINDOW_LIST_BYTES / 2;
-        check("a list of another size is none", !window_list_of(&table, 3));
-        table.list_bytes = WINDOW_LIST_BYTES;
-        check("a row out of range is none", !window_list_of(&table, -1) && !window_list_of(&table, WINDOWS));
+        table_at->lists = 0;
+        check("a table with no lists has none", !window_list_of(table_at, 0));
+        table_at->lists = WINDOWS_LISTS_AT(buffer, room);
+        table_at->list_bytes = WINDOW_LIST_BYTES / 2;
+        check("a list of another size is none", !window_list_of(table_at, 3));
+        table_at->list_bytes = WINDOW_LIST_BYTES;
+        check("a row out of range is none", !window_list_of(table_at, -1) && !window_list_of(table_at, WINDOWS));
+        check("a row past the table's room has no list, whatever the layout's rows", !window_list_of(table_at, (int)room));
+        table_at->capacity = room + 1;
+        check("lists laid for another room do not fit", !windows_lists_fit(table_at, size, buffer));
+        table_at->capacity = room;
 
-        check("the lists fit the mapping", windows_lists_fit(&table, size, buffer));
-        check("a mapping a page short of the lists does not", !windows_lists_fit(&table, size - 4096, buffer));
-        lists_at = table.lists;
-        table.lists += 4096;
-        check("lists that do not follow the pictures do not", !windows_lists_fit(&table, size, buffer));
-        table.lists = lists_at;
-        table.lists = 0;
-        check("a table with no lists is one windows_take takes", windows_lists_fit(&table, size, buffer));
-        table.lists = lists_at;
+        check("the lists fit the mapping", windows_lists_fit(table_at, size, buffer));
+        check("a mapping a page short of the lists does not", !windows_lists_fit(table_at, size - 4096, buffer));
+        lists_at = table_at->lists;
+        table_at->lists += 4096;
+        check("lists that do not follow the pictures do not", !windows_lists_fit(table_at, size, buffer));
+        table_at->lists = lists_at;
+        table_at->lists = 0;
+        check("a table with no lists is one windows_take takes", windows_lists_fit(table_at, size, buffer));
+        table_at->lists = lists_at;
 
         // The reset zeroes the row's list header, which this table (the struct alone, no pictures or lists behind it) does not have.
-        table.lists = 0;
-        table.list_state[5] = 2, table.list_seen[5] = 6;
-        windows_reset_row(&table, 5);
-        table.lists = lists_at;
-        check("a reset row has no list state and no generation seen", !table.list_state[5] && !table.list_seen[5]);
+        table_at->lists = 0;
+        table_at->list_state[5] = 2, table_at->list_seen[5] = 6;
+        windows_reset_row(table_at, 5);
+        table_at->lists = lists_at;
+        check("a reset row has no list state and no generation seen", !table_at->list_state[5] && !table_at->list_seen[5]);
 
         // A header the kit wrote: valid for the picture it is for, and refused for each word that makes it another list.
         wl_header(240, 160);
@@ -5101,40 +5110,51 @@ static fn windows_lists(void)
 */
 static fn windows_header(void)
 {
-        static struct windows table;
-        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * WINDOWS * buffer;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
+        const unsigned int room = 48;
+        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * room * buffer;
 
         check("a header the compositor writes fits the mapping",
-              windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32));
-        check("pixels off the layout do not", !windows_fits(size, WINDOWS_HEADER + 4096, buffer, 64, 64, 32));
-        check("a buffer past the mapping does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4096, 64, 64, 32));
-        check("a buffer that is not whole pages does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4, 64, 64, 32));
-        check("a stride narrower than the output does not", !windows_fits(size, WINDOWS_HEADER, buffer, 32, 64, 32));
-        check("a buffer shorter than the rows used does not", !windows_fits(size, WINDOWS_HEADER, 4096, 64, 64, 32));
-        check("a table of this layout's version is taken, and one of another is refused before any field is read",
-              windows_abi_ok(WINDOWS_ABI) && !windows_abi_ok(0) && !windows_abi_ok(WINDOWS_ABI + 1));
-        table.rows = WINDOWS + 5;
-        check("the rows a table says are in use are held to the struct's (a peer's count past it reads no row that is not there)",
-              windows_rows(&table) == WINDOWS);
-        table.rows = 3;
-        check("and are what the table says below it", windows_rows(&table) == 3);
-        table.rows = 0;
+              windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, room));
+        check("pixels off the layout do not", !windows_fits(size, WINDOWS_HEADER + 4096, buffer, 64, 64, 32, room));
+        check("a buffer past the mapping does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4096, 64, 64, 32, room));
+        check("a buffer that is not whole pages does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4, 64, 64, 32, room));
+        check("a stride narrower than the output does not", !windows_fits(size, WINDOWS_HEADER, buffer, 32, 64, 32, room));
+        check("a buffer shorter than the rows used does not", !windows_fits(size, WINDOWS_HEADER, 4096, 64, 64, 32, room));
+        check("a room of rows past the mapping does not, nor none, nor one past the layout's",
+              !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, room + 1) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, 0) &&
+                  !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, WINDOWS + 1));
+        check("a table of this layout's version is taken, and one of another is refused before any field is read (2 and 3, the 32 rows', among them)",
+              windows_abi_ok(WINDOWS_ABI) && WINDOWS_ABI == 4 && !windows_abi_ok(0) && !windows_abi_ok(2) && !windows_abi_ok(3) && !windows_abi_ok(WINDOWS_ABI + 1));
+        check("the layout has rows for more than a million windows, and the struct's per-row fields with them",
+              WINDOWS >= (1u << 20) && sizeof(table_at->pid) / sizeof(table_at->pid[0]) == WINDOWS);
+        table_at->capacity = room;
+        table_at->rows = room + 5;
+        check("the rows a table says are in use are held to its room (a peer's count past it reads no row that is not there)",
+              windows_rows(table_at) == room && windows_room(table_at) == room);
+        table_at->capacity = WINDOWS + 7;
+        check("and its room to the layout's", windows_room(table_at) == WINDOWS);
+        table_at->capacity = room;
+        table_at->rows = 3;
+        check("and are what the table says below it", windows_rows(table_at) == 3);
+        table_at->rows = 0;
                 check("a zero buffer, width or height does not",
-              !windows_fits(size, WINDOWS_HEADER, 0, 64, 64, 32) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 0, 32) &&
-              !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 0));
+              !windows_fits(size, WINDOWS_HEADER, 0, 64, 64, 32, room) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 0, 32, room) &&
+              !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 0, room));
 
-        table.hover_off[3] = 1;
-        table.glass[3] = WINDOW_GLASS;
-        table.lift[3] = 5;
-        table.spoiled_height[3][1] = 7;
-        table.damage_height[3] = 4;
-        table.want_width[3] = 9;
-        table.pinned[3] = 1;
-        windows_reset_row(&table, 3);
+        table_at->hover_off[3] = 1;
+        table_at->glass[3] = WINDOW_GLASS;
+        table_at->lift[3] = 5;
+        table_at->spoiled_height[3][1] = 7;
+        table_at->damage_height[3] = 4;
+        table_at->want_width[3] = 9;
+        table_at->pinned[3] = 1;
+        windows_reset_row(table_at, 3);
         check("a reset row has no hover, glass, lift, spoiled rows or wanted size",
-              !table.hover_off[3] && !table.glass[3] && !table.lift[3] && !table.spoiled_height[3][1] &&
-              !table.damage_height[3] && !table.want_width[3]);
-        check("and keeps pinned, which the card may still read", table.pinned[3] == 1);
+              !table_at->hover_off[3] && !table_at->glass[3] && !table_at->lift[3] && !table_at->spoiled_height[3][1] &&
+              !table_at->damage_height[3] && !table_at->want_width[3]);
+        check("and keeps pinned, which the card may still read", table_at->pinned[3] == 1);
 
         /*
                 The table, its memfd and the doors are made owner-only (0600):
@@ -5148,26 +5168,26 @@ static fn windows_header(void)
         check("the window table and its doors are private to the owner", WINDOWS_MODE == 0600);
         check("no group or other bits reach the table or its doors", (WINDOWS_MODE & 0077) == 0);
 
-        table.place[3] = WINDOW_PLACE_AT | WINDOW_PLACE_SIZE;
-        table.place_x[3] = 5;
-        table.place_screen[3] = 2;
-        table.name[3][0] = 't';
-        table.name[3][14] = 'x';
-        table.moved[3] = 4;
-        windows_reset_row(&table, 3);
+        table_at->place[3] = WINDOW_PLACE_AT | WINDOW_PLACE_SIZE;
+        table_at->place_x[3] = 5;
+        table_at->place_screen[3] = 2;
+        table_at->name[3][0] = 't';
+        table_at->name[3][14] = 'x';
+        table_at->moved[3] = 4;
+        windows_reset_row(table_at, 3);
         check("a reset row has no placement, no name to its last byte and no move left",
-              !table.place[3] && !table.place_x[3] && !table.place_screen[3] && !table.name[3][0] && !table.name[3][14] &&
-                  !table.moved[3]);
+              !table_at->place[3] && !table_at->place_x[3] && !table_at->place_screen[3] && !table_at->name[3][0] && !table_at->name[3][14] &&
+                  !table_at->moved[3]);
 
         // A menu had the row: the window that takes it next is no popup of the menu's window, at the menu's anchor.
-        table.popup_parent[3] = 2;
-        table.popup_x[3] = 273, table.popup_y[3] = 248, table.popup_w[3] = 9, table.popup_h[3] = 9;
-        table.popup_flags[3] = WINDOW_POPUP_POINT;
-        table.clip_watch[3] = 1;
-        windows_reset_row(&table, 3);
+        table_at->popup_parent[3] = 2;
+        table_at->popup_x[3] = 273, table_at->popup_y[3] = 248, table_at->popup_w[3] = 9, table_at->popup_h[3] = 9;
+        table_at->popup_flags[3] = WINDOW_POPUP_POINT;
+        table_at->clip_watch[3] = 1;
+        windows_reset_row(table_at, 3);
         check("a reset row is no popup: no parent, anchor or flags left from the menu that had it, and no clipboard watch",
-              !table.popup_parent[3] && !table.popup_x[3] && !table.popup_y[3] && !table.popup_w[3] && !table.popup_h[3] &&
-                  !table.popup_flags[3] && !table.clip_watch[3]);
+              !table_at->popup_parent[3] && !table_at->popup_x[3] && !table_at->popup_y[3] && !table_at->popup_w[3] && !table_at->popup_h[3] &&
+                  !table_at->popup_flags[3] && !table_at->clip_watch[3]);
 }
 
 /*
@@ -5252,7 +5272,8 @@ static fn windows_placement(void)
                 found past that null). A second window of the program, and whatever it starts, finds nothing.
         */
         {
-                static struct windows table;
+                static struct windows *table_scratch;
+                struct windows *const table_at = windows_scratch_table(&table_scratch);
                 string_address address_to environment = program_environment_list();
                 static char first[] = "MOONWATER_PLACE=at 40,50 size 300x200 name probe";
                 static char second[] = "MOONWATER_PLACE=center";
@@ -5268,33 +5289,33 @@ static fn windows_placement(void)
                         kept[1] = environment[1];
                         environment[0] = (string_address)first;
                         environment[1] = (string_address)second;
-                        windows_place_take(&table, 6);
+                        windows_place_take(table_at, 6);
                         check("MOONWATER_PLACE is the row's placement and name",
-                              table.place[6] == (WINDOW_PLACE_AT | WINDOW_PLACE_SIZE) && table.place_x[6] == 40 &&
-                                  table.place_y[6] == 50 && table.place_width[6] == 300 && table.place_height[6] == 200 &&
-                                  string_equals((string_address)table.name[6], "probe"));
+                              table_at->place[6] == (WINDOW_PLACE_AT | WINDOW_PLACE_SIZE) && table_at->place_x[6] == 40 &&
+                                  table_at->place_y[6] == 50 && table_at->place_width[6] == 300 && table_at->place_height[6] == 200 &&
+                                  string_equals((string_address)table_at->name[6], "probe"));
                         check("and every copy of it is emptied in place, the vector as long as it was",
                               string_equals(environment[0], "MOONWATER_PLACE=") &&
                                   string_equals(environment[1], "MOONWATER_PLACE=") && environment[count] == null &&
                                   environment[count - 1] != null);
-                        windows_reset_row(&table, 7);
-                        windows_place_take(&table, 7);
-                        check("so a second window of the program is where it asks, unplaced", !table.place[7] && !table.name[7][0]);
+                        windows_reset_row(table_at, 7);
+                        windows_place_take(table_at, 7);
+                        check("so a second window of the program is where it asks, unplaced", !table_at->place[7] && !table_at->name[7][0]);
                         environment[0] = kept[0];
                         environment[1] = kept[1];
                 }
 
                 {
-                        struct window_row own = {&table, 6, -1, -1, 0, 0, 0, 0, 0};
+                        struct window_row own = {table_at, 6, -1, -1, 0, 0, 0, 0, 0};
 
                         windows_name(&own, "terminal");
-                        check("a placement's name stands over the name the program gives", string_equals((string_address)table.name[6], "probe"));
-                        windows_reset_row(&table, 6);
+                        check("a placement's name stands over the name the program gives", string_equals((string_address)table_at->name[6], "probe"));
+                        windows_reset_row(table_at, 6);
                         windows_name(&own, "terminal");
-                        check("which is the name with none from the placement", string_equals((string_address)table.name[6], "terminal"));
-                        windows_reset_row(&table, 6);
+                        check("which is the name with none from the placement", string_equals((string_address)table_at->name[6], "terminal"));
+                        windows_reset_row(table_at, 6);
                         windows_name(&own, "Not A Name");
-                        check("and a name that is none is no name", !table.name[6][0]);
+                        check("and a name that is none is no name", !table_at->name[6][0]);
                 }
         }
 }

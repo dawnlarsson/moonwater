@@ -865,7 +865,7 @@ static long popup_fake_take(struct window_row address_to own)
 
         if (!popup_fake.screen)
                 return windows_take(own);
-        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x4022, (positive)-1, 0);
         if (mapped < 0 && mapped > -4096)
                 return mapped;
         table = (struct windows address_to)mapped;
@@ -1010,7 +1010,7 @@ static p32 render_next(p32 below)
 
 static p32 address_to render_map(positive bytes)
 {
-        long mapped = system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        long mapped = system_call_6(syscall(mmap), 0, bytes, 3, 0x4022, (positive)-1, 0);
 
         return mapped < 0 && mapped > -4096 ? 0 : (p32 address_to)mapped;
 }
@@ -1214,12 +1214,12 @@ static fn render_surface(void)
                 // A window of the largest grid the steps make: 50 by 14 cells at the largest text, 39 by 84 px a cell.
                 reserved = ((unsigned long)2048 * 1280 * 4 + 4095) & ~4095ul;
                 header = (sizeof(struct windows) + 4095) & ~4095ul;
-                table = (struct windows address_to)system_call_6(syscall(mmap), 0, header + reserved * 2, 3, 0x22,
+                table = (struct windows address_to)system_call_6(syscall(mmap), 0, header + reserved * 2, 3, 0x4022,
                                                                  (positive)-1, 0);
                 render_screen = render_map(reserved);
         }
 
-        memory_zero(table, header);
+        windows_scratch_zero(table); // the header as it was mapped: its pages given back, not written
         table->pixels = header;
         table->buffer = reserved;
         table->output_width = table->output_height = 1u << 14;

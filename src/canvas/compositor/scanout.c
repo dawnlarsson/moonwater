@@ -51,7 +51,7 @@ static void compositor_gpu_pin(positive offset, b32 on)
         if (!compositor.table || !compositor.buffer || offset < compositor.pixels)
                 return;
         buffers = (offset - compositor.pixels) / compositor.buffer, row = (unsigned int)(buffers / 2);
-        if (row >= WINDOWS)
+        if (row >= COMPOSITOR_ROWS)
                 return;
         if (on)
                 compositor_gpu_pins[row]++;
@@ -260,7 +260,7 @@ static struct
 */
 static int compositor_card_reads(int row)
 {
-        return row >= 0 && row < WINDOWS && ((compositor_card.on && rows_has(&compositor_card.rows, row)) || rows_has(&compositor_card.list_rows, row));
+        return row >= 0 && row < COMPOSITOR_ROWS && ((compositor_card.on && rows_has(&compositor_card.rows, row)) || rows_has(&compositor_card.list_rows, row));
 }
 
 // Whether the doors still to be read this turn wait for a later one: a list's job not waited for was submitted in this turn (listing: one was on the card

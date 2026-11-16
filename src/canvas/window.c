@@ -642,7 +642,13 @@ struct windows_issue
         root. A design that lets an unprivileged program be a window must hand
         it the door (and the table) as a descriptor, not leave the FIFO open
         to the whole machine. */
-#define WINDOWS 32
+/*
+        The rows the table's layout has: every per-row field of struct windows is an array of WINDOWS, in a memfd of no memory but the
+        pages written (its rows past those in use are never touched), and the rows a table has pictures and lists for are its capacity
+        (windows.capacity, at most WINDOWS, what the address space holds of them), of which the rows in use (windows.rows) are made as
+        they are wanted. No count of windows is a cap: the kernel's descriptors, processes and memory are, before these.
+*/
+#define WINDOWS (1u << 20)
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
 #define WINDOWS_APP_ID 64       // a window's app_id, its null with it
@@ -1251,9 +1257,12 @@ struct windows
         */
         unsigned int abi;
         unsigned int rows;
+        // The rows the pictures and the lists have room for (at most WINDOWS): the pictures are 2 * capacity buffers from WINDOWS_HEADER
+        // and the lists capacity of them from lists, so the table's size is the header's and capacity rows' worth.
+        unsigned int capacity;
 };
 
-#define WINDOWS_ABI 3u // 1 was the layout with no abi and no rows (thirty-two rows, every one with its doors); 2 had no lend refusals
+#define WINDOWS_ABI 4u // 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)
@@ -1261,12 +1270,20 @@ static inline int windows_abi_ok(unsigned int abi)
         return abi == WINDOWS_ABI;
 }
 
-// The rows in use, as the table says (at most WINDOWS): what every walk of the rows goes to.
+// The rows the table has pictures and lists for, as it says (at most WINDOWS).
+static inline unsigned int windows_room(const struct windows *table)
+{
+        unsigned int room = table ? __atomic_load_n(&table->capacity, __ATOMIC_ACQUIRE) : 0;
+
+        return room < WINDOWS ? room : WINDOWS;
+}
+
+// The rows in use, as the table says (at most its room): what every walk of the rows goes to.
 static inline unsigned int windows_rows(const struct windows *table)
 {
-        unsigned int rows = table ? __atomic_load_n(&table->rows, __ATOMIC_ACQUIRE) : 0;
+        unsigned int rows = table ? __atomic_load_n(&table->rows, __ATOMIC_ACQUIRE) : 0, room = windows_room(table);
 
-        return rows < WINDOWS ? rows : WINDOWS;
+        return rows < room ? rows : room;
 }
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -1354,7 +1371,7 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
 // Where the window lists start in a table whose buffers are buffer bytes each: after the header and every row's two buffers.
-#define WINDOWS_LISTS_AT(buffer) (WINDOWS_HEADER + (unsigned long)(buffer) * 2 * WINDOWS)
+#define WINDOWS_LISTS_AT(buffer, rows) (WINDOWS_HEADER + (unsigned long)(buffer) * 2 * (unsigned long)(rows))
 
 /*
         A window's list (ui/ui.c's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
@@ -1368,7 +1385,7 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 // of another size, or a row that is not one).
 static inline unsigned char *window_list_of(const struct windows *table, int row)
 {
-        if (!table || !table->lists || table->list_bytes != WINDOW_LIST_BYTES || row < 0 || row >= WINDOWS)
+        if (!table || !table->lists || table->list_bytes != WINDOW_LIST_BYTES || row < 0 || (unsigned int)row >= windows_room(table))
                 return 0;
         return (unsigned char *)table + table->lists + (unsigned long)row * table->list_bytes;
 }
@@ -3035,6 +3052,39 @@ static long window_call(long number, long a, long b, long c, long d, long e, lon
 #endif
 
 /*
+        A table of no file and no compositor's (a check's, a program's that draws alone), made at its first use where *at is 0: the
+        header alone, private and of no memory but the pages written (MAP_NORESERVE), where a struct windows of WINDOWS rows in a
+        program's own data would be gigabytes the kernel is asked for at its start. 0 when the address space is not there. The fresh one
+        is zero each time it is asked for, as a table declared on the stack and zeroed was: its pages given back (MADV_DONTNEED).
+*/
+static struct windows *windows_scratch_table(struct windows **at)
+{
+        if (!*at)
+        {
+                long got = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 3, 0x4022, -1, 0); // PRIVATE | ANONYMOUS | NORESERVE
+
+                *at = got < 0 && got > -4096 ? 0 : (struct windows *)got;
+        }
+        return *at;
+}
+
+// A table of a private mapping of no file zeroed as a whole: its pages given back (MADV_DONTNEED), not written, which would be the
+// gigabytes of every row's fields.
+static void windows_scratch_zero(struct windows *table)
+{
+        if (table)
+                window_call(WINDOW_SYS_MADVISE, (long)table, (long)((sizeof(struct windows) + 4095) & ~4095ul), 4, 0, 0, 0); // MADV_DONTNEED
+}
+
+static struct windows *windows_scratch_fresh(struct windows **at)
+{
+        struct windows *table = windows_scratch_table(at);
+
+        windows_scratch_zero(table);
+        return table;
+}
+
+/*
         The touch trace, a file switch: while /run/moonwater/touch-trace exists, the compositor and each program that takes touch append
         lines to /run/moonwater/touch-trace.log, up to WINDOW_TRACE_CAP bytes (a line past it is not written). The switch is looked for
         at a touch-down (window_trace_touch: one open that fails when the file is not there), and a log is made fresh when the switch
@@ -3341,17 +3391,17 @@ static void windows_drain(long handle)
 
 /*
         Whether the table's lists (if it has any) are where the layout puts them and whole inside the mapping: the lists follow the
-        pictures, each list is WINDOW_LIST_BYTES, and WINDOWS of them fit in size. A table with no lists is fine as it is.
+        pictures, each list is WINDOW_LIST_BYTES, and the table's room of them fit in size. A table with no lists is fine as it is.
 */
 static int windows_lists_fit(const struct windows *table, unsigned long size, unsigned long buffer)
 {
-        unsigned long lists = table->lists;
+        unsigned long lists = table->lists, room = windows_room(table);
 
         if (!lists)
                 return 1;
-        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_LISTS_AT(buffer) || lists > size)
+        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_LISTS_AT(buffer, room) || lists > size)
                 return 0;
-        return (size - lists) / WINDOW_LIST_BYTES >= WINDOWS;
+        return (size - lists) / WINDOW_LIST_BYTES >= room;
 }
 
 /*
@@ -3497,16 +3547,16 @@ static unsigned int windows_icon_read(const struct windows *table, unsigned int 
 
 /*
         Whether a header describes a table of size bytes that can be drawn through: the pixels where the layout puts
-        them, every buffer a whole number of pages and all 2 * WINDOWS of them inside the mapping, and each row of a
+        them, every buffer a whole number of pages and all 2 * room of them (the table's capacity) inside the mapping, and each row of a
         buffer stride pixels long with stride at least the output's width, the rows used fitting in the buffer. The
         compositor writes exactly that; a table that does not is refused, not drawn through.
 */
 static int windows_fits(unsigned long size, unsigned long pixels, unsigned long buffer, unsigned int stride,
-                        unsigned int width, unsigned int height)
+                        unsigned int width, unsigned int height, unsigned int room)
 {
-        if (pixels != WINDOWS_HEADER || size < WINDOWS_HEADER || !buffer || buffer % 4096)
+        if (pixels != WINDOWS_HEADER || size < WINDOWS_HEADER || !buffer || buffer % 4096 || !room || room > WINDOWS)
                 return 0;
-        if (buffer > (size - WINDOWS_HEADER) / (2 * WINDOWS))
+        if (buffer > (size - WINDOWS_HEADER) / (2 * (unsigned long)room))
                 return 0;
         if (!width || !height || stride < width)
                 return 0;
@@ -4306,6 +4356,35 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
 }
 
 /*
+        The compositor asked for rows past the `had` in use, which every program found taken: the clipboard's door knocked (it wakes the
+        compositor's loop, whose pass makes rows when fewer than its spares are free, compositor_rows_spare), and the table watched for
+        WINDOWS_ROWS_WAIT_MS for the rows to grow. 1 when they did; 0 when the table has no room for more (its capacity), no compositor
+        reads the door, or none came: the take is refused then, as a full table was.
+*/
+#define WINDOWS_ROWS_WAIT_MS 2000
+static int windows_rows_ask(const struct windows *table, unsigned int had)
+{
+        long door;
+
+        if (had >= windows_room(table))
+                return 0;
+        door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0);
+        if (door < 0)
+                return 0;
+        for (unsigned int waited = 0; waited < WINDOWS_ROWS_WAIT_MS && windows_rows(table) <= had; waited++)
+        {
+                long nap[2] = {0, 1000000}; // a millisecond, then the table looked at again
+                char byte = 0;
+
+                if (waited % 100 == 0)
+                        window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0);
+                window_call(WINDOW_SYS_PPOLL, 0, 0, (long)nap, 0, 8, 0);
+        }
+        window_call(WINDOW_SYS_CLOSE, door, 0, 0, 0, 0, 0);
+        return windows_rows(table) > had;
+}
+
+/*
         The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, once,
         and kept. The table is root's (WINDOWS_MODE), so only a root process raises an issue; a process that cannot map it gets none (null), and its
         issues are simply not shown.
@@ -4371,7 +4450,8 @@ static long windows_take(struct window_row *own)
         stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
         width = __atomic_load_n(&table->output_width, __ATOMIC_ACQUIRE);
         height = __atomic_load_n(&table->output_height, __ATOMIC_ACQUIRE);
-        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height) || !windows_lists_fit(table, (unsigned long)size, buffer))
+        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height, windows_room(table)) ||
+            !windows_lists_fit(table, (unsigned long)size, buffer))
         {
                 window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
                 return -22; // EINVAL
@@ -4404,6 +4484,14 @@ static long windows_take(struct window_row *own)
 
                 if (own->row >= windows_rows(table))
                 {
+                        unsigned int had = own->row;
+
+                        // Every row in use is taken: the compositor is asked for more, and the walk goes on into them.
+                        if (had && windows_rows_ask(table, had))
+                        {
+                                own->row = had - 1;
+                                continue;
+                        }
                         window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
                         return failed ? failed : -28; // ENOSPC
                 }

@@ -167,7 +167,7 @@ static void check_compositor_snap_frames(void)
     }
     for (int motion = 0; motion < 2; motion++)
     {
-        int prev_window[4], prev_preview[4], window[4], preview[4], prev_thumbs[WINDOWS][4], thumbs[WINDOWS][4], prev_count, count;
+        int prev_window[4], prev_preview[4], window[4], preview[4], prev_thumbs[COMPOSITOR_ROWS_FIRST][4], thumbs[COMPOSITOR_ROWS_FIRST][4], prev_count, count;
 
         snap_fresh();
         compositor.table->motion = (unsigned int)motion;
@@ -1071,17 +1071,18 @@ static void check_field_flick(struct ui address_to wui)
     thrown = ui_body_going(&field.sel.fling);
     // On a 144 Hz screen (the table's period) the throw's next step is a 144 Hz frame on, not 16 ms: it moves at every frame shown.
     {
-        static struct windows fast;
+        static struct windows *fast_scratch;
+        struct windows *const fast_at = windows_scratch_table(&fast_scratch);
         struct windows address_to kept = ui_kit_table;
         long asked;
 
-        fast.period = 1000000000u / 144;
-        ui_kit_table = &fast;
+        fast_at->period = 1000000000u / 144;
+        ui_kit_table = fast_at;
         ui_kit.now = now += 6944444ull;
         asked = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
         ui_kit_table = kept;
         check("field flick: on a 144 Hz screen the throw asks for its next step a 144 Hz frame on, not 16 ms",
-              thrown && ui_body_going(&field.sel.fling) && asked > 0 && asked <= (long)fast.period);
+              thrown && ui_body_going(&field.sel.fling) && asked > 0 && asked <= (long)fast_at->period);
     }
     for (int step = 1; step <= 150; step++)
         ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
@@ -1768,7 +1769,7 @@ static void edge_setup(int motion)
     table = compositor.table;
     table->motion = (unsigned int)motion;
     /* Nothing reads these rows' events but the rows, so each starts with the ring empty (WINDOWS_EVENTS, a full ring drops a post). */
-    for (unsigned int row = 0; row < WINDOWS; row++)
+    for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         table->event_tail[row] = table->event_head[row];
     /* The chip's memory is the compositor's, mapped once: layout_setup clears the compositor, so it is kept. */
     compositor.chip.cover = chip_cover, compositor.chip.scratch = chip_scratch;

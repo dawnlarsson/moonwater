@@ -661,7 +661,7 @@ static void check_compositor_popup(void)
 
     // compositor_popup_parent is no part of the compositor struct: it is cleared here and after, so no popup is left for
     // a later section to take a row of the compositor for one.
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -729,7 +729,7 @@ static void check_compositor_popup(void)
     compositor_present();
     check("popup keys: a window that takes the row of a popup's window has the keys, not the popup",
           compositor.focus == 1 && compositor_popup_top(1) == 1);
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -742,7 +742,7 @@ static void check_compositor_popup_press(b32 touch)
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
     struct windows address_to table;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -810,7 +810,7 @@ static void check_compositor_popup_press(b32 touch)
     }
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor.touching = 0;
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -836,7 +836,7 @@ static void check_popup_ground_steady(void)
     unsigned int first_ground = 0, first_ink = 0;
     int moves = 0, ground_moves = 0, ink_moves = 0;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -942,7 +942,7 @@ static void check_dropdown_labels(void)
     struct windows address_to table;
     int missing = 0, labels_missing = 0, opens = 0;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1156,7 +1156,7 @@ static void check_dropdown_scroll(void)
     b32 shown[4] = {false, false, false, false}, closed[4] = {false, false, false, false}, kept_open = false;
     b32 stop_own_open = false, stop_app_open = false;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1281,7 +1281,7 @@ static void check_popup_reopen(void)
     struct windows address_to table;
     int blank = 0, partial = 0, missing = 0, stale = 0, on_screen_lost = 0, opens = 200;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1411,7 +1411,7 @@ static void check_popup_reopen(void)
     check("popup reopen: every opaque pixel of a menu is on the screen as it is drawn", on_screen_lost == 0);
     check("popup reopen: a move of the hot item is shown when the compositor was not ready for the present it made",
           stale == 0);
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -1426,7 +1426,7 @@ static void check_compositor_popup_grip(b32 touch)
     struct windows address_to table;
     int tab = COMPOSITOR_NONE;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1485,7 +1485,7 @@ static void check_compositor_popup_grip(b32 touch)
           compositor.resize < 0 && compositor.grab == COMPOSITOR_NONE && compositor.focus == 1 && compositor.lit_edges == 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor.touching = 0;
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -1500,7 +1500,7 @@ static void check_compositor_popup_holds(void)
     struct windows address_to table;
     unsigned int at;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1554,7 +1554,7 @@ static void check_compositor_popup_holds(void)
     check("popup holds: its window hears the release as one that is no click",
           table->event_type[1][at] == WINDOW_EVENT_BUTTON && (table->event_flags[1][at] & WINDOW_KEY_CANCEL) != 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -1568,7 +1568,7 @@ static void check_compositor_glass_popup(void)
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
     struct windows address_to table;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -1616,7 +1616,7 @@ static void check_compositor_glass_popup(void)
         check("glass menu: it has its line at its edge, as a window does, and the window beneath is what is outside that",
               outside == compositor_line_unlit() && glass_at(58, 60) == 0x2060c0u);
     }
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -1778,7 +1778,7 @@ static void check_compositor_launcher(void)
     struct taskbar_view view;
     int ok_asked = 1, ok_table = 1, ok_other = 1, ok_toggle = 1, ok_lit = 1, ok_off = 1;
 
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
     for (int at = 0; at < 4; at++)
     {
@@ -1871,7 +1871,7 @@ static void check_compositor_launcher(void)
         compositor_button(COMPOSITOR_BTN_LEFT, 0);
         ok_off &= compositor.launcher_asked == 2;
         compositor_call(syscall(munmap), (positive)table,
-                        ((sizeof(struct windows) + 4095) & ~4095ul) + (((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul) * 2 * WINDOWS, 0, 0, 0, 0);
+                        ((sizeof(struct windows) + 4095) & ~4095ul) + (((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul) * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
     }
     check("launcher button press: a left press on it asks the script for the launcher once, at each position of the panel", ok_asked);
     check("launcher button press: and the table holds the rectangle it opens beside, the panel's edge and the screen", ok_table);
@@ -1881,7 +1881,7 @@ static void check_compositor_launcher(void)
     check("launcher button press: with the button off the place where it was asks nothing", ok_off);
     taskbar_launcher_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
 
@@ -2974,7 +2974,7 @@ static void check_notices_dot(void)
 
             drawn = band_view(TASKBAR_BOTTOM, null);
             taskbar_band(&drawn, &bx, &by, &bw, &bh);
-            taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+            taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
             notices_shot_write("/tmp/notices-band-1920x24.raw", band_pixels, BAND_W, COMPOSITOR_PANEL, BAND_W);
         }
         /*
@@ -2999,7 +2999,7 @@ static void check_notices_dot(void)
                     __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
                     taskbar_notices_set(1, severity ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING);
                     taskbar_band(&drawn, &bx, &by, &bw, &bh);
-                    taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                    taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
                     right &= taskbar_slot(&drawn, TASKBAR_NOTICES, &dx, &dy, &dw, &dh) != 0;
                     middle[dark][severity] = band_pixels[(unsigned long)(dy + dh / 2 - by) * BAND_W + (unsigned long)(dx + dw / 2 - bx)] & 0xffffffu;
                     want[dark][severity] = compositor_ink_role(severity ? UI_ERROR : UI_WARNING) & 0xffffffu;
@@ -3237,7 +3237,7 @@ static void check_compositor_volume(void)
                         taskbar_volume_set(says[variant][0], says[variant][1], says[variant][2], says[variant][3]);
                         drawn = band_view(TASKBAR_BOTTOM, titles);
                         taskbar_band(&drawn, &dx, &dy, &dw, &dh);
-                        taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
                         memory_copy(cell_lit, band_pixels, sizeof(band_pixels));
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
@@ -3450,7 +3450,7 @@ static void check_compositor_volume(void)
                         taskbar_mic_set(1, variant);
                         drawn = band_view(TASKBAR_BOTTOM, titles);
                         taskbar_band(&drawn, &dx, &dy, &dw, &dh);
-                        taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
                         memory_copy(mic_lit, band_pixels, sizeof(band_pixels));
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_MIC, &mx, &my, &mw, &mh);

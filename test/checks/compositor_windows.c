@@ -75,17 +75,17 @@ static int life_on(int row)
 
 static int life_holds(const char **why)
 {
-        unsigned int count, stacked_count[WINDOWS];
+        unsigned int count, stacked_count[COMPOSITOR_ROWS_FIRST];
         const int (*screens)[4] = compositor_screens(&count);
 
         memory_zero(stacked_count, sizeof(stacked_count));
         for (unsigned int at = 0; at < compositor.stacked; at++)
         {
-                if (compositor.stack[at] >= WINDOWS)
+                if (compositor.stack[at] >= compositor_rows_in_use)
                         return *why = "a stack entry is no row", 0;
                 stacked_count[compositor.stack[at]]++;
         }
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < COMPOSITOR_ROWS; row++)
         {
                 if (stacked_count[row] > 1)
                         return *why = "a window is stacked twice", 0;
@@ -118,7 +118,7 @@ static int life_drawn(void)
         struct compositor_frame frame;
         unsigned int pitch = compositor.scanout_pitch / 4;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < COMPOSITOR_ROWS; row++)
         {
                 int x, y, top = COMPOSITOR_NONE, beside = 0;
 
@@ -333,7 +333,7 @@ static void check_compositor_lifecycle(void)
     life_step("close it again", !compositor.showing[1]);
 
     // Many windows at once, every row, scattered over the edges, closed in an order that is not the opening one.
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
     {
         table->x[row] = (row * 37) % 230 - 20;
         table->y[row] = (row * 53) % 230 - 20;
@@ -341,9 +341,9 @@ static void check_compositor_lifecycle(void)
         life_step("open every row", compositor.showing[row] != 0);
     }
     check("lifecycle: thirty-two windows are shown, each on the screen", life_on(0) && life_on(31));
-    for (int at = 0; at < WINDOWS; at++)
+    for (int at = 0; at < COMPOSITOR_ROWS; at++)
     {
-        int row = (at * 11 + 5) % WINDOWS;
+        int row = (at * 11 + 5) % COMPOSITOR_ROWS;
 
         if (!compositor.showing[row])
             continue;
@@ -1093,7 +1093,7 @@ static int space_session(volatile unsigned int address_to step, const char addre
     // The table, its buffers the session's room (compositor_buffer_room), mapped as the compositor maps its own, and three windows in it.
     *step = 1;
     buffer = compositor_buffer_room();
-    mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     if (mapped < 0 && mapped > -4096)
         return 12;
     compositor.table = (struct windows address_to)mapped;
@@ -1386,7 +1386,8 @@ static void check_compositor_card_walk(void)
 */
 static void check_compositor_wake(void)
 {
-    static struct windows table;
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     positive seen = 0, now;
     unsigned int sets;
     b32 status;
@@ -1419,8 +1420,8 @@ static void check_compositor_wake(void)
         card_walk_end();
         return;
     }
-    memory_zero(&table, sizeof(table));
-    compositor.table = &table;
+    windows_scratch_zero(table_at);
+    compositor.table = table_at;
     compositor.watch = -1;
     compositor_table_outputs();
 
@@ -1431,7 +1432,7 @@ static void check_compositor_wake(void)
     compositor.damages = 0;
     compositor_woke(now, COMPOSITOR_WAKE_CLOCK);
     check("wake: the flip the sleep cut off is let go of as landed, and the picture it held is said taken",
-          !compositor.flip_pending && !rows_any(&compositor.held_rows) && table.shown[3] == 9);
+          !compositor.flip_pending && !rows_any(&compositor.held_rows) && table_at->shown[3] == 9);
     {
         int whole = 0;
 
@@ -1444,7 +1445,7 @@ static void check_compositor_wake(void)
     }
     compositor_woke(now + 1000, COMPOSITOR_WAKE_SIGNAL);
     check("wake: the sleep verb's word of the same wake is that wake, heard both ways",
-          compositor.wakes == 1 && table.wakes == 1 && table.wake_how == (COMPOSITOR_WAKE_CLOCK | COMPOSITOR_WAKE_SIGNAL) &&
+          compositor.wakes == 1 && table_at->wakes == 1 && table_at->wake_how == (COMPOSITOR_WAKE_CLOCK | COMPOSITOR_WAKE_SIGNAL) &&
               compositor.wake_at == now + COMPOSITOR_WAKE_FIRST_NS);
 
     // The monitor came back at another mode. The pass asks for the take; the loop makes it once nothing holds the card (space_wanted).
@@ -1459,7 +1460,7 @@ static void check_compositor_wake(void)
     compositor_space_retake();
     check("wake: the connector is asked again and the screen taken at the mode it came back with",
           compositor.outputs == 1 && compositor.width == 1280 && compositor.height == 720 && compositor.output[0].mode.hdisplay == 1280 &&
-              !compositor.retrain && !compositor.space_wanted && table.wake_sets == 1);
+              !compositor.retrain && !compositor.space_wanted && table_at->wake_sets == 1);
     check("wake: its crtc is turned off and then set, a mode set, showing the compositor's scanout",
           card_fake.set_count >= sets + 2 && sets + 1 < 32 && card_fake.set_was[sets] == 0 && card_fake.set_was[sets + 1] == 1 &&
               card_fake.crtc_fb == compositor.fb && compositor.on_screen == compositor.fb);
@@ -1475,7 +1476,7 @@ static void check_compositor_wake(void)
     compositor_space_retake();
     check("wake: once it has landed the take sets the crtc anew, though nothing of the screen changed",
           !compositor.retrain && card_fake.set_count >= sets + 2 && card_fake.set_was[sets] == 0 && card_fake.set_was[sets + 1] == 1 &&
-              table.wake_sets == 2);
+              table_at->wake_sets == 2);
 
     // A wake whose set the card refuses (a link not up yet): the screen is looked at again, as one that went, until a take sets it.
     compositor_woke(now + 60000000000ull, COMPOSITOR_WAKE_SIGNAL);
@@ -1484,7 +1485,7 @@ static void check_compositor_wake(void)
     compositor_space_retake();
     card_fake.refuse_sets = 0;
     check("wake: a set the card refuses leaves the screen to be looked at again, and says so",
-          compositor.screens_gone && !compositor.retrain && table.wake_refused == 1 && compositor.wakes == 2 && table.wake_how == COMPOSITOR_WAKE_SIGNAL);
+          compositor.screens_gone && !compositor.retrain && table_at->wake_refused == 1 && compositor.wakes == 2 && table_at->wake_how == COMPOSITOR_WAKE_SIGNAL);
     // Its present's flip was refused too, which swaps the plates: the take freed the scanout it began with, which was the spare by then.
     check("wake: and the take kept both plates it composes into mapped (a refused flip had swapped them)",
           compositor.scanout && system_call_3(syscall(msync), (positive)compositor.scanout, compositor.scanout_bytes, 1) == 0 &&
@@ -1522,7 +1523,8 @@ static void check_compositor_wake(void)
 */
 static void check_compositor_rate_fastest(void)
 {
-    static struct windows table;
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     static const unsigned int rates[3] = {60, 144, 120};
     struct windows address_to kept_kit = ui_kit_table;
     positive period = 1000000000ull / 144, presented;
@@ -1534,22 +1536,22 @@ static void check_compositor_rate_fastest(void)
     }
     memory_copy(card_fake.rates, rates, sizeof(rates));
     card_fake.rate_count = 3, card_fake.crtc_rate = 144;
-    memory_zero(&table, sizeof(table));
+    windows_scratch_zero(table_at);
     if (compositor_cards_walk() != 0)
     {
         check("rate: the fake card at 144 Hz is taken", false);
         card_walk_end();
         return;
     }
-    compositor.table = &table;
+    compositor.table = table_at;
     compositor.watch = -1;
     compositor_table_outputs();
     check("rate: a 144 Hz monitor whose preferred mode is 60 Hz is driven at 144, the fastest mode at its size",
-          compositor.outputs == 1 && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144 && table.output_now[0] == 144);
+          compositor.outputs == 1 && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144 && table_at->output_now[0] == 144);
     check("rate: and it lists its rates the fastest first, the one the settings recommend",
-          table.output_rates[0] == 3 && table.output_hz[0][0] == 144 && table.output_hz[0][1] == 120 && table.output_hz[0][2] == 60);
+          table_at->output_rates[0] == 3 && table_at->output_hz[0][0] == 144 && table_at->output_hz[0][1] == 120 && table_at->output_hz[0][2] == 60);
     check("rate: a frame is 6.94 ms, and the table every kit window paces by says so",
-          compositor.period == period && period > 6900000ull && period < 6990000ull && table.period == (unsigned int)period);
+          compositor.period == period && period > 6900000ull && period < 6990000ull && table_at->period == (unsigned int)period);
     presented = 5000000000ull;
     check("rate: the next present is due a 144 Hz frame after the last, not 16.7 ms",
           compositor_present_due(presented, compositor.period, 0, 0, presented + 1000) == presented + period &&
@@ -1576,7 +1578,7 @@ static void check_compositor_rate_fastest(void)
             sequence += flip == 1 ? 2 : 1, usec += flip == 1 ? 13889 : 6944;
         }
         check("rate: the vblanks measure the period, a flip that missed one included",
-              table.period_seen >= 6940000u && table.period_seen <= 6950000u);
+              table_at->period_seen >= 6940000u && table_at->period_seen <= 6950000u);
     }
 
     // A wake's take asks every connector again and sets the crtc anew: still at 144 Hz, the table with it.
@@ -1584,20 +1586,20 @@ static void check_compositor_rate_fastest(void)
     compositor_space_retake();
     check("rate: a wake's take sets the screen at 144 Hz again, not at the 60 Hz the monitor prefers",
           !compositor.retrain && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144 && compositor.period == period &&
-              table.period == (unsigned int)period);
+              table_at->period == (unsigned int)period);
     // The monitor back at 60 Hz alone (another monitor, or a fallback list): the take is at 60, and the table follows it.
     card_fake.rate_count = 1, card_fake.rates[0] = 60, card_fake.crtc_rate = 60;
     compositor.retrain = 1;
     compositor_space_retake();
     check("rate: a take at another rate is the table's period too (it was the first take's for the session)",
-          compositor.output[0].mode.vrefresh == 60 && compositor.period == 1000000000ull / 60 && table.period == 1000000000u / 60);
+          compositor.output[0].mode.vrefresh == 60 && compositor.period == 1000000000ull / 60 && table_at->period == 1000000000u / 60);
     card_fake.rate_count = 3, memory_copy(card_fake.rates, rates, sizeof(rates)), card_fake.crtc_rate = 60;
     compositor.retrain = 1;
     compositor_space_retake();
-    check("rate: and with the 144 back, the screen goes back to it", compositor.output[0].mode.vrefresh == 144 && table.period == (unsigned int)period);
+    check("rate: and with the 144 back, the screen goes back to it", compositor.output[0].mode.vrefresh == 144 && table_at->period == (unsigned int)period);
 
     // A kit window's frame is the table's: a throw, a drag's scroll past an edge and a menu's ripple step at 144 Hz.
-    ui_kit_table = &table;
+    ui_kit_table = table_at;
     check("rate: a kit window steps what moves a 144 Hz frame on", ui_kit_frame_ns() == (long)period);
     ui_kit_table = 0;
     check("rate: and a 60 Hz frame with no table", ui_kit_frame_ns() == 16666667l);
@@ -1797,7 +1799,7 @@ static void check_compositor_lifecycle_seam(void)
     static unsigned int scanout[SCREENS_W * SCREENS_H];
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     struct windows address_to table;
     struct compositor_frame was;
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
@@ -2046,7 +2048,7 @@ static void check_compositor_lifecycle_more(void)
             life_step("churn: move a row", !compositor_visible(row) || life_on(row));
         }
     }
-    for (int row = 0; row < WINDOWS; row++)
+    for (int row = 0; row < COMPOSITOR_ROWS; row++)
         if (compositor.showing[row])
         {
             compositor_frame_of(row, &was);
@@ -2254,7 +2256,7 @@ static unsigned int address_to layout_table_map(int side)
 {
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)side * side * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
 
     if (mapped < 0 && mapped > -4096)
         return null;
@@ -2306,7 +2308,7 @@ static void layout_show(int row, int x, int y, int width, int height)
     compositor.table->want_height[row] = (unsigned int)height;
     compositor.saved_x[row] = (unsigned int)x, compositor.saved_y[row] = (unsigned int)y;
     compositor.saved_w[row] = (unsigned int)width, compositor.saved_h[row] = (unsigned int)height;
-    if (compositor.stacked < WINDOWS)
+    if (compositor.stacked < compositor_rows_in_use)
         compositor.stack[compositor.stacked++] = row;
 }
 
@@ -2515,7 +2517,7 @@ static void check_compositor_seam(void)
     struct windows address_to table;
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
     int part[4];
 
@@ -3744,7 +3746,7 @@ static void check_compositor_tile_square(void)
         compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
         compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
         compositor.output[0].scale = 100, compositor.output[1].scale = 200;
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < COMPOSITOR_ROWS; row++)
             compositor.wake[row] = -1;
         layout_show(1, 10, 20, 100, 40);
         compositor.stack[0] = 1, compositor.stacked = 1;
@@ -4352,7 +4354,7 @@ static void check_compositor_divider_scales(void)
     compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
     compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
     compositor.output[0].scale = 100, compositor.output[1].scale = 200;
-    for (unsigned int row = 0; row < WINDOWS; row++)
+    for (unsigned int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor.wake[row] = -1;
     layout_show(1, 10, 10, 100, 80);
     layout_show(2, 20, 20, 100, 80);
@@ -4956,7 +4958,7 @@ static void check_compositor_wheel(void)
                                         {200, 120, 40, 120}, {110, 100, 30, 30}};
         unsigned int was_stacked = compositor.stacked, differ = 0, points = 0, gripped = 0, none = 0;
         int was_scale = compositor.scale, was_grip = compositor.grip, was_touching = compositor.touching;
-        unsigned char was_stack[WINDOWS];
+        unsigned int was_stack[COMPOSITOR_ROWS_FIRST];
 
         memory_copy(was_stack, compositor.stack, sizeof(was_stack));
         compositor.stacked = 0;

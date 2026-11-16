@@ -26,44 +26,45 @@
 */
 static fn check_take(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
 
         compositor_zero();
-        compositor.table = &table;
+        compositor.table = table_at;
         compositor.width = compositor.height = 256;
         compositor.scale = 100;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
-        table.width[2] = table.height[2] = 16;
-        table.x[2] = table.y[2] = 40;
-        table.frame[2] = 2;
-        table.buffer_index[2] = 1;
-        string_copy((string_address)table.title[2], (string_address) "two");
-        table.asked[2] = 1;
+        table_at->width[2] = table_at->height[2] = 16;
+        table_at->x[2] = table_at->y[2] = 40;
+        table_at->frame[2] = 2;
+        table_at->buffer_index[2] = 1;
+        string_copy((string_address)table_at->title[2], (string_address) "two");
+        table_at->asked[2] = 1;
 
         compositor_take(2);
         check("compositor: a window that showed twice before it was looked at has the other buffer back",
-              table.shown[2] == 2 && compositor.front[2] == 1 && compositor.showing[2]);
+              table_at->shown[2] == 2 && compositor.front[2] == 1 && compositor.showing[2]);
         check("compositor: a window that shows is put where it asked, on top, with the keys and a tab",
               compositor.x[2] == 40 && compositor.y[2] == 40 && compositor.stacked == 1 && compositor.stack[0] == 2 &&
-                  table.focus == 2 && compositor_windows() == 1 && compositor.listed[0] == 2);
+                  table_at->focus == 2 && compositor_windows() == 1 && compositor.listed[0] == 2);
 
         // And the ordinary case, a buffer at a time; a title changed with no picture is taken on the knock.
-        table.frame[2] = 3;
-        table.buffer_index[2] = 0;
+        table_at->frame[2] = 3;
+        table_at->buffer_index[2] = 0;
         compositor_take(2);
-        check("compositor: the next picture is taken from the buffer it names", table.shown[2] == 3 && compositor.front[2] == 0);
-        string_copy((string_address)table.title[2], (string_address) "renamed");
+        check("compositor: the next picture is taken from the buffer it names", table_at->shown[2] == 3 && compositor.front[2] == 0);
+        string_copy((string_address)table_at->title[2], (string_address) "renamed");
         compositor_take(2);
         check("compositor: a title with no picture is taken", !memory_compare(compositor.title[2], "renamed", 8) &&
-                                                                   table.shown[2] == 3);
+                                                                   table_at->shown[2] == 3);
 
         // Its door closed: gone from the screen and the tabs, and the row free.
-        table.pid[2] = 77;
+        table_at->pid[2] = 77;
         compositor_leave(2);
         check("compositor: a window whose program has gone is off the screen and its row is free",
-              !compositor.showing[2] && !compositor.stacked && compositor.focus == COMPOSITOR_NONE && !table.pid[2] &&
-                  table.focus == WINDOWS);
+              !compositor.showing[2] && !compositor.stacked && compositor.focus == COMPOSITOR_NONE && !table_at->pid[2] &&
+                  table_at->focus == WINDOWS);
 }
 
 /*
@@ -74,7 +75,7 @@ static fn check_take(void)
 static fn check_land_setup(struct windows address_to table, unsigned int motion)
 {
         compositor_zero();
-        memory_zero(table, sizeof(*table));
+        windows_scratch_zero(table);
         compositor.table = table;
         compositor.width = compositor.height = 512;
         compositor.scale = 100;
@@ -92,11 +93,12 @@ static fn check_land_setup(struct windows address_to table, unsigned int motion)
 
 static fn check_land(void)
 {
-        static struct windows table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
         struct compositor_frame frame;
         positive now;
 
-        check_land_setup(&table, 0);
+        check_land_setup(table_at, 0);
         compositor_take(2);
         compositor_frame_of(2, &frame);
         check("compositor: a window's first frame is at 96 percent of its size, about its centre",
@@ -123,12 +125,12 @@ static fn check_land(void)
         compositor_land_keep();
         check("compositor: a landed window damages nothing, so the compositor is idle", compositor.damages == 0);
 
-        table.frame[2] = 3;
-        table.buffer_index[2] = 0;
+        table_at->frame[2] = 3;
+        table_at->buffer_index[2] = 0;
         compositor_take(2);
         check("compositor: a window shown again does not land", !compositor.landing[2]);
 
-        check_land_setup(&table, 1);
+        check_land_setup(table_at, 1);
         compositor_take(2);
         compositor_frame_of(2, &frame);
         check("compositor: with reduced motion a window's first picture is at its size at once",
@@ -151,7 +153,7 @@ static unsigned int address_to glass_table_map(void)
 {
         unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
         unsigned long buffer = ((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul;
-        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
 
         if (mapped < 0 && mapped > -4096)
                 return null;
@@ -401,7 +403,7 @@ static positive runs_steps(unsigned int address_to out, b32 forgetting, p64 addr
 {
         unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
         unsigned long buffer = ((unsigned long)RUNS_W * RUNS_H * 4 + 4095) & ~4095ul;
-        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
         unsigned int seed = 11;
         positive used = 0;
 
@@ -495,9 +497,9 @@ static void check_compositor_runs(void)
 {
         static unsigned int screen[RUNS_H * RUNS_W], flat[4][RUNS_H * RUNS_W], slices[RUNS_W * COMPOSITOR_SLICE * COMPOSITOR_BANDS];
         static p64 made[240], copied[240];
-        struct compositor_frame frames[COMPOSITOR_FRAMES];
+        struct compositor_frame frames[COMPOSITOR_FRAMES_FOR(COMPOSITOR_ROWS_FIRST)];
         struct compositor_apart apart = {runs_flush, slices, RUNS_W};
-        unsigned int rows[WINDOWS];
+        unsigned int rows[COMPOSITOR_ROWS_FIRST];
         unsigned int count = 0, with = 0;
         positive used = runs_steps(screen, false, made);
         int spare[2];
@@ -585,7 +587,7 @@ static void check_compositor_screens(void)
     struct windows address_to table;
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     struct compositor_frame band;
     int was[2][4], x, y, w, h;
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
@@ -809,7 +811,7 @@ static void check_compositor_screens(void)
         check("screens: a picture held for a direct window's flip is said taken once the screens are taken again",
               held && table->shown[1] == table->frame[1] && !rows_any(&compositor.held_rows) && compositor.direct_row < 0);
     }
-    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
     compositor_zero();
 
     // A hotplug is any uevent of the drm subsystem: its lines are each ended by a null, and only a whole line counts.
@@ -836,7 +838,7 @@ static void check_compositor_scales(void)
     static unsigned int scanout[SCREENS_W * SCREENS_H];
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     struct windows address_to table;
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
     int first_whole = 0;
@@ -858,7 +860,7 @@ static void check_compositor_scales(void)
     memory_copy(compositor.output[0].name, names[0], sizeof(names[0]));
     memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
     compositor.output[0].scale = compositor.output[1].scale = 100;
-    for (unsigned int row = 0; row < WINDOWS; row++)
+    for (unsigned int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor.wake[row] = -1; // a knock goes nowhere: no program reads it here
     compositor.stride = compositor.most_w = SCREENS_A_W;
     compositor.room_h = compositor.most_h = SCREENS_H;
@@ -937,7 +939,7 @@ static void check_compositor_scales(void)
 #endif
     compositor_displays = 0;
     memory_zero(compositor_display, sizeof(compositor_display));
-    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
     compositor_zero();
 }
 
@@ -1024,7 +1026,7 @@ static void corner_scene_end(unsigned int address_to mapped)
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul;
 
-    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
     compositor_zero();
 }
 
@@ -1110,7 +1112,7 @@ static void check_compositor_corner_scales(void)
     // The assist's thumbnail and the grid's tile: the radius and the line of their screen's scale, a pixel at the least.
     for (unsigned int at = 0; at < array_count(corner_scales); at++)
     {
-        static struct compositor_frame frames[COMPOSITOR_FRAMES];
+        static struct compositor_frame frames[COMPOSITOR_FRAMES_FOR(COMPOSITOR_ROWS_FIRST)];
         int line = corner_scales[at] / 100 > 1 ? corner_scales[at] / 100 : 1, radius = UI_RADIUS * corner_scales[at] / 100;
         unsigned int added, ok;
 
@@ -1628,7 +1630,7 @@ static void check_compositor_preview_held(void)
         static unsigned int scanout[HELD_OUT_W * HELD_OUT_H];
         unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
         unsigned long buffer = ((unsigned long)HELD_OUT_W * HELD_OUT_H * 4 + 4095) & ~4095ul;
-        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
         struct windows address_to table;
         int target[4];
 
@@ -1712,7 +1714,7 @@ static void check_compositor_preview_held(void)
         compositor_land_keep();
         check("preview held: once presented, with the pointer still on the target, the compositor has nothing to do",
               compositor.damages == 0 && compositor.preview[2] == target[2] && compositor.preview_row == 2);
-        compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 0, 0, 0, 0);
         compositor_zero();
     }
 }
@@ -1816,7 +1818,7 @@ static void check_compositor_aside(void)
 #define GROUND_H 160
 static void ground_painted(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
 {
-    int radii[COMPOSITOR_FRAMES];
+    int radii[COMPOSITOR_FRAMES_FOR(COMPOSITOR_ROWS_FIRST)];
 
     compositor_radii(frames, count, radii);
     compositor_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1, compositor_ground);
@@ -1927,7 +1929,7 @@ static void check_compositor_chip_clip(void)
 {
     static unsigned char cover[40 * 10];
     struct compositor_chip was = compositor.chip;
-    long mapped = compositor_call(syscall(mmap), 0, 3 * 4096, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, 3 * 4096, 3, 0x4022, (positive)-1, 0);
     // Where the target's 64 by 16 pixels lie on the desktop, against the chip's box at 100, 100, 40 by 10.
     static const int places[][2] = {{100, 200}, {100, 74}, {20, 100}, {200, 100}, {100, 109}, {139, 96}, {60, 84}};
     static const int meets[][4] = {{0}, {0}, {0}, {0}, {100, 109, 140, 110}, {139, 100, 140, 110}, {0}};
@@ -2017,7 +2019,7 @@ static void check_compositor_shared(void)
     static unsigned int scanout[SHARED_W * SHARED_H], plain[SHARED_W * SHARED_H], marked[SHARED_W * SHARED_H];
     unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
     unsigned long buffer = ((unsigned long)SHARED_W * SHARED_H * 4 + 4095) & ~4095ul;
-    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * COMPOSITOR_ROWS_FIRST, 3, 0x4022, (positive)-1, 0);
     struct windows address_to table;
     struct compositor_frame frames[2];
     struct compositor_target t;
@@ -2652,7 +2654,8 @@ static int fullscreen_covers(const int *rect)
 static void check_taskbar_fullscreen(void)
 {
     static const char *const words[4] = {"bottom", "top", "left", "right"};
-    static struct windows table;
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     const positive half = UI_WINDOW_NS / 2, whole = UI_WINDOW_NS + 1000000ull;
     int off_stays = 1, between = 1, at_end = 1, takes_no_press = 1, damage_old_new = 1, keeps = 1, ends_idle = 1, back = 1,
         minimised_stays = 1;
@@ -2665,8 +2668,8 @@ static void check_taskbar_fullscreen(void)
         positive t0 = 1000000000ull + (positive)at * 4000000000ull, t1 = t0 + whole, t2, t3;
 
         compositor_zero();
-        memory_zero(&table, sizeof(table));
-        compositor.table = &table;
+        windows_scratch_zero(table_at);
+        compositor.table = table_at;
         compositor.width = BAND_W;
         compositor.height = BAND_H;
         compositor.scale = 100;
@@ -2776,9 +2779,9 @@ static void check_taskbar_launcher(void)
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
     {
-        int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(WINDOWS - 1);
+        int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(TASKBAR_TAB_ROOM - 1);
 
-        for (int tab = 0; tab < WINDOWS; tab++)
+        for (int tab = 0; tab < TASKBAR_TAB_ROOM; tab++)
             own &= taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(tab);
         check("moon: its redo bit is its own, not the tray's and not a tab's", own);
     }
@@ -2882,7 +2885,7 @@ static void check_taskbar_centre(void)
         for (int ci = 0; ci < 3; ci++)
         {
             struct taskbar_view view;
-            int moon[4], band[4], slot[WINDOWS][4], before[4], after[4], count = counts[ci], gap = TASKBAR_GAP * 2, pills[64][4], listed = 0, which;
+            int moon[4], band[4], slot[TASKBAR_TAB_ROOM][4], before[4], after[4], count = counts[ci], gap = TASKBAR_GAP * 2, pills[64][4], listed = 0, which;
 
             memory_zero(&view, sizeof(view));
             view.width = widths[wi], view.height = 1080, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = (unsigned int)count, view.lengths = lengths;
@@ -3041,15 +3044,16 @@ static void check_bar_options(void)
 static void check_wallpaper_ground(void)
 {
     static unsigned int target_pixels[320 * 200];
-    static struct windows table;
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     struct compositor_target t;
     unsigned int damages;
     b32 made, copied, kept, plain, glow;
 
     compositor_zero();
-    memory_zero(&table, sizeof(table));
-    table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
-    compositor.table = &table, compositor.width = 320, compositor.height = 200;
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u;
+    compositor.table = table_at, compositor.width = 320, compositor.height = 200;
     // With no file of any row (a live boot), the rows read are the standards: the moon, dimmed, 45 percent seas, the glow.
     compositor_wall_rows.moon = 0, compositor_wall_rows.ready = 0;
     {
@@ -3195,15 +3199,16 @@ static void check_moon_motion(void)
 */
 static void check_wallpaper_turn(void)
 {
-    static struct windows table;
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     b32 stepped, square, rest, quiet;
     unsigned int before_corner;
     positive now = clock_monotonic_nanoseconds();
 
     compositor_zero();
-    memory_zero(&table, sizeof(table));
-    table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
-    compositor.table = &table, compositor.width = 320, compositor.height = 200;
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u;
+    compositor.table = table_at, compositor.width = 320, compositor.height = 200;
     compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
     taskbar.glides = 1, taskbar.moon_at = 0;
     taskbar_moon_seen(now);
@@ -3949,7 +3954,7 @@ static void check_scene_damage_cut(void)
     static unsigned int picture[200 * 100];
     static struct ui_draw_list scene_list;
     struct ui ui;
-    long mapped = (long)system_call_6(syscall(mmap), 0, WINDOW_LIST_BYTES, 3, 0x22, (positive)-1, 0);
+    long mapped = (long)system_call_6(syscall(mmap), 0, WINDOW_LIST_BYTES, 3, 0x4022, (positive)-1, 0);
     unsigned char address_to bytes = (unsigned char address_to)mapped;
     const unsigned int address_to head;
     b32 cut;
@@ -3983,13 +3988,14 @@ static void check_taskbar_guard(void)
                                                "short"};
     static const char *const edges[4] = {"bottom", "top", "left", "right"};
     static const int scales[4] = {100, 125, 150, 200}, lengths[8] = {40, 97, 160, 333, 640, 1080, 1366, 2000};
-    static struct windows guard_table;
+    static struct windows *guard_table_scratch;
+    struct windows *const guard_table_at = windows_scratch_table(&guard_table_scratch);
     struct windows address_to kept_table = compositor.table;
     int drawn = 0, tried = 0, rect[4], outside = 0, named_outside = 0, laid = 0;
 
-    memory_zero(&guard_table, sizeof(guard_table));
-    guard_table.themed = 1, guard_table.theme = 1, guard_table.accent = 0xffffffu;
-    compositor.table = &guard_table;
+    windows_scratch_zero(guard_table_at);
+    guard_table_at->themed = 1, guard_table_at->theme = 1, guard_table_at->accent = 0xffffffu;
+    compositor.table = guard_table_at;
     taskbar_volume_set(1, 50, 0, 0);
     taskbar_mic_set(1, 0);
     taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
@@ -4017,7 +4023,7 @@ static void check_taskbar_guard(void)
                     if (bw <= 0 || bh <= 0)
                         continue;
                     bytes = (positive)bw * (positive)bh * 4, room = (bytes + 4095) & ~4095ul;
-                    mapped = (long)system_call_6(syscall(mmap), 0, room + 4096, 3, 0x22, (positive)-1, 0);
+                    mapped = (long)system_call_6(syscall(mmap), 0, room + 4096, 3, 0x4022, (positive)-1, 0);
                     if (mapped < 0 && mapped > -4096)
                         continue;
                     if (system_call_3(syscall(mprotect), (positive)mapped + room, 4096, 0) != 0)
@@ -4101,14 +4107,15 @@ static void check_taskbar_identity(void)
     static const char *const words[4] = {"bottom", "top", "left", "right"};
     static const int scales[3] = {100, 150, 200};
     static const unsigned int rows[3] = {4, 9, 17};
-    static struct windows standard_table;
+    static struct windows *standard_table_scratch;
+    struct windows *const standard_table_at = windows_scratch_table(&standard_table_scratch);
     struct windows address_to kept_table = compositor.table;
     struct taskbar_view view;
     int placed = 1, mirrored = 1, rect[4], x, y, w, h, bx, by, bw, bh, had_launcher = taskbar.launcher;
 
-    memory_zero(&standard_table, sizeof(standard_table));
-    standard_table.themed = 1, standard_table.theme = 1, standard_table.accent = 0xffffffu;
-    compositor.table = &standard_table;
+    windows_scratch_zero(standard_table_at);
+    standard_table_at->themed = 1, standard_table_at->theme = 1, standard_table_at->accent = 0xffffffu;
+    compositor.table = standard_table_at;
     taskbar_launcher_set(0);
     for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position++)
         for (int each = 0; each < 3; each++)
@@ -4293,12 +4300,13 @@ static void check_taskbar_text(string_address face_path)
               n < sizeof(title) - 1 && same);
     }
     // The band is drawn in the standard theme, as the compositor draws it: dark, with white, the table themed.
-    static struct windows standard_table;
+    static struct windows *standard_table_scratch;
+    struct windows *const standard_table_at = windows_scratch_table(&standard_table_scratch);
     struct windows address_to kept_table = compositor.table;
 
-    memory_zero(&standard_table, sizeof(standard_table));
-    standard_table.themed = 1, standard_table.theme = 1, standard_table.accent = 0xffffffu;
-    compositor.table = &standard_table;
+    windows_scratch_zero(standard_table_at);
+    standard_table_at->themed = 1, standard_table_at->theme = 1, standard_table_at->accent = 0xffffffu;
+    compositor.table = standard_table_at;
     taskbar.moon_at = 1794865620ll; // the moon and the clock in it at one time, so the bytes are the same at any hour
     for (int edge = 0; edge < 2; edge++)
     {
@@ -4433,7 +4441,7 @@ static void check_taskbar_text(string_address face_path)
             taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1;
             view = band_view(position, sides);
             taskbar_band(&view, &bx, &by, &bw, &bh);
-            laid &= taskbar_draw(&view, 1ul << WINDOWS, band_glass, null, rect) == 1;
+            laid &= taskbar_draw(&view, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect) == 1;
             memory_copy(lit, band_pixels, sizeof(band_pixels));
             laid &= taskbar_slot(&view, -2, &tray[0], &tray[1], &tray[2], &tray[3]);
             band_glass(null, rect[0], rect[1], rect[2], rect[3]);
@@ -5016,16 +5024,18 @@ static void pictures_one(string_address directory, const char *name, const struc
                                            "Notices", "Gallery", "Terminal 2", "build.log", "Chromium", "Mail"};
     static const char *const apps[12] = {"terminal", "settings", "files", "editor", "mixer", "org.mozilla.firefox", "notices", "gallery",
                                          "terminal", "editor", "chromium", "org.gnome.Geary"};
-    static unsigned char marks[WINDOWS], lengths[WINDOWS], rows[WINDOWS];
-    static struct windows table;
+    static unsigned char marks[TASKBAR_TAB_ROOM], lengths[TASKBAR_TAB_ROOM];
+    static unsigned int rows[TASKBAR_TAB_ROOM];
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
     struct taskbar_view view;
     char path[512];
     int rect[4], high = 0;
     positive at = 0;
 
-    memory_zero(&table, sizeof(table));
-    table.themed = 1, table.theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT, table.accent = dark ? UI_ACCENT_STANDARD : 0x2563ebu;
-    compositor.table = &table;
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT, table_at->accent = dark ? UI_ACCENT_STANDARD : 0x2563ebu;
+    compositor.table = table_at;
     compositor.band_at = 0;
     pictures_dark = dark;
     taskbar.moon_zone = arrange->moon, taskbar.tasks_zone = arrange->tasks, taskbar.tasks_right = arrange->right;

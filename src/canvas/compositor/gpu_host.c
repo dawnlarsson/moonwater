@@ -160,7 +160,7 @@ static int compositor_gpu_up(void)
         // The dma-buf route's memory: the table's memfd, its pictures (the window buffers, not the lists or the table's header) and the pin of their rows.
         gpu_shared.fd = compositor.table_memfd ? compositor.table_memfd - 1 : -1;
         gpu_shared.at = (unsigned char *)compositor.table;
-        gpu_shared.bytes = compositor.pixels + compositor.buffer * 2 * WINDOWS;
+        gpu_shared.bytes = compositor.pixels + compositor.buffer * 2 * compositor_rows_room;
         gpu_shared.pin = compositor_gpu_pin;
         if (!gpu_start((2 << 20) + (16 << 20)))
         {
@@ -1185,7 +1185,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
 
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
-        if (row < 0 || row >= WINDOWS || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
+        if (row < 0 || row >= COMPOSITOR_ROWS || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done. Nor while any job runs, a
         // list's drawn without a wait among them: its records, its row's base and its picture are that job's.

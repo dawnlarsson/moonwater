@@ -126,7 +126,7 @@ static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, 
                 return 1;
         if (at < doors)
                 return 2;
-        if (at < doors + WINDOWS)
+        if (at < doors + compositor_rows_in_use)
                 return 3;
         if (done_at && at == done_at)
                 return 4;
@@ -489,7 +489,7 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
 {
         rows_none(&compositor_card.rows);
         for (unsigned int at = 0; at < windows; at++)
-                if (rows[at] < WINDOWS)
+                if (rows[at] < COMPOSITOR_ROWS)
                         rows_add(&compositor_card.rows, rows[at]);
         memory_copy(compositor_card.clip, clip, (positive)clips * sizeof(clip[0]));
         compositor_card.clips = clips, compositor_card.turning = turning, compositor_card.composed = gpu_composed;
