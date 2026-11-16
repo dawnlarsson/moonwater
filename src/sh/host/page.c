@@ -1460,6 +1460,12 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(LINK_TRANSPORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    //  The sound modem's key, which `moonwater link modem key` makes and the far side holds the same of, and the two
+    //  counts that go with it (src/waterlink/modem.c): the last frame sent and the last one taken, by the key's
+    //  fingerprint. A key kept with its counts forgotten would count from 0 again under the same key.
+    HOST_WIPE_KEEP(LINK_MODEM_PATH),
+    HOST_WIPE_KEEP(LINK_MODEM_SEQ_PATH),
+    HOST_WIPE_KEEP(LINK_MODEM_RX_PATH),
     //  The ssh server's settings, its keys and its host key, kept as the link's are; a timed on still ends at the next boot.
     HOST_WIPE_KEEP(SSH_STATE),
     //  Where the windows were last put, which the compositor writes and no plain row names.
