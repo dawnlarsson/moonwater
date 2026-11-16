@@ -313,8 +313,8 @@ static const struct settings_ink address_to settings_ink_table(const struct sett
         return settings_inks;
 }
 
-// The rows to ask are a bit each, SETTINGS_UNREAD_WORDS words of 64 bits.
-#define SETTINGS_UNREAD_WORDS 2
+// The rows to ask are a bit each, in as many words of 64 bits as the table's rows take, so a row added never outgrows them.
+#define SETTINGS_UNREAD_WORDS ((sizeof(settings_rows) / sizeof(settings_rows[0]) + 63) / 64)
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) <= 64 * SETTINGS_UNREAD_WORDS, "the rows to ask fit their words");
 
 /*
