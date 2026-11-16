@@ -683,6 +683,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         host_say(log, "  presents        %p late a second, %p missed their vblank; lead %p us; longest in the loop %p us; %p flips a second with jobs in flight (at most %p)\n",
                  (positive)table->metric_late, (positive)table->metric_missed, (positive)table->metric_lead, (positive)table->metric_present_most,
                  (positive)table->metric_flip_jobs, (positive)table->metric_flip_jobs_most);
+        host_say(log, "  waits           the loop waited %p us a second on the card's jobs\n", (positive)table->metric_waited);
         host_say(log, "  wakes           compositor loop %p turns a second, %p of them with nothing to wait for\n", (positive)table->metric_loops, (positive)table->metric_loop_idle);
         host_say(log, "  wakes by        signals %p, watch %p, inputs %p, windows %p, done %p, card %p, uevents %p, clip %p, wayland %p, other %p\n",
                  (positive)table->metric_loop_by[0], (positive)table->metric_loop_by[1], (positive)table->metric_loop_by[2], (positive)table->metric_loop_by[3],
