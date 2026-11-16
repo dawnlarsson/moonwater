@@ -18134,7 +18134,10 @@ static HOT b32 exec_node(b32 index)
         /* -n still parses the entire physical program before it gets here.
            Once a command in that program enables it, later sibling nodes are
            skipped as Bash and dash skip the rest of the already parsed list. */
-        if (!shell_is_interactive && (shell_options & SHELL_NOEXEC))
+        //      Bash ignores -n in an interactive shell; dash keeps it,
+        //      so `dash -n -i` reads its input and runs none of it.
+        if ((!shell_is_interactive || !shell_bash_compat) &&
+            (shell_options & SHELL_NOEXEC))
                 return shell_status;
 
         b32 status = exec_node_kind(index);

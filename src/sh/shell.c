@@ -2489,7 +2489,8 @@ static HOT fn run_line_inner(string_address line)
                 return;
         }
 
-        if (!(shell_options & SHELL_FLAG('n')) || shell_is_interactive)
+        if (!(shell_options & SHELL_FLAG('n')) ||
+            (shell_is_interactive && shell_bash_compat))
         {
                 bool held_tail = shell_tail_command;
 

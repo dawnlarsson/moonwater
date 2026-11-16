@@ -219,6 +219,9 @@ static positive shell_run_complete_lines(p8 address_to text, positive length,
                 positive left = length - at;
                 p8 address_to newline = memory_first_of(text + at, '\n', left);
 
+                //      dash leaves the rest of a -c string it fell out of.
+                if (command_string && shell_command_string_abandoned)
+                        return length;
                 if (!newline)
                         break;
 
@@ -1253,6 +1256,7 @@ b32 main()
                    A single command can therefore stay in the process argument
                    block; only multi-line input needs a writable copy whose
                    newlines are ended in place. */
+                shell_command_string_running = true;
                 if (!*first_newline)
                 {
                         shell_verbose_from_string = true;
@@ -1277,7 +1281,8 @@ b32 main()
                                 positive at = shell_run_complete_lines(
                                     held_command, length, true);
 
-                                if (at < length)
+                                if (at < length &&
+                                    !shell_command_string_abandoned)
                                 {
                                         shell_verbose_line(held_command + at);
                                         lex_physical_newline(false);
@@ -1288,11 +1293,26 @@ b32 main()
 
                         memory_free(held_command, length + 1);
                 }
+                shell_command_string_running = false;
 
                 /* Join the ordinary input teardown without closing stdin:
                    -c has no source descriptor of its own. */
                 script_file = false;
-                goto input_finished;
+                if (!shell_command_string_abandoned)
+                        goto input_finished;
+
+                //      dash fell out of the string into its interactive
+                //      loop (expand_fatal_status): standard input is read
+                //      as an interactive shell reads it, with prompts.
+                interactive = true;
+                input = 0;
+                command = null;
+                //      A new input of its own: its first line is line 1.
+                shell_line_number = 0;
+                if (!shell_parser_source_begin(input))
+                        return string_report(log_error, 126,
+                                             "sh: cannot isolate input\n");
+                parser_source_started = true;
         }
 
         positive held = 0;
@@ -1523,6 +1543,11 @@ b32 main()
         //      ended is the file and not the session.
         if (!script_file)
                 shell_interactive_exit_said();
+        //      An interactive dash ends the prompt line its input ran out
+        //      on, a script given with -i included; its exit builtin does
+        //      not.
+        if (interactive && !shell_bash_compat && !exec_child_process())
+                log_error((string_address) "\n", 1);
 
         shell_parser_source_end();
 

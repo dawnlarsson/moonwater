@@ -2834,8 +2834,15 @@ HOT fn shell_env_init(string_address address_to process_environment)
                 static const string_address prompts[] = {"PS1=$ ", "PS2=> ",
                                                          "PS4=+ "};
 
+                //      dash's own prompt for root is #, as its interactive
+                //      loop writes it: `dash -i` as root prompted $. One
+                //      the environment gave is kept, as dash keeps it.
+                bool root = !system_call_1(syscall(geteuid), 0);
+
                 for (positive at = 0; at < array_count(prompts); at++)
-                        env_borrow_plain(prompts[at]);
+                        env_borrow_plain(at == 0 && root
+                                             ? (string_address) "PS1=# "
+                                             : prompts[at]);
         }
         else
         {

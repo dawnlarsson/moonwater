@@ -6059,6 +6059,20 @@ static COLD fn expand_discard_whole(b32 status)
         expand_discard(status);
 }
 
+/*
+        dash's fall to its interactive loop. An error that ends a shell that
+        is not interactive, met while the -c string runs in a dash that -i or
+        a later set -i made interactive, abandons what is left of the string,
+        and the shell reads commands from standard input with prompts until
+        its end (dash's main goes to state 4, cmdloop on the top input); a
+        subshell still ends. programs/shell.c holds the first while the
+        string runs and reads the second after it. Before this the shell
+        ended there, and dash -i -c went on with the string's next line.
+*/
+bool shell_command_string_running;
+bool shell_command_string_abandoned;
+static bool exec_child_process();
+
 static COLD fn expand_fatal_status(b32 status)
 {
         if (expand_errors_soft)
@@ -6073,6 +6087,14 @@ static COLD fn expand_fatal_status(b32 status)
         {
                 expand_failed = true;
                 return;
+        }
+
+        if (!shell_bash_compat && shell_command_string_running &&
+            (shell_options & ((positive)1 << ('i' - 'a'))) &&
+            !exec_child_process())
+        {
+                shell_command_string_abandoned = true;
+                shell_is_interactive = true;
         }
 
         if (shell_is_interactive)
