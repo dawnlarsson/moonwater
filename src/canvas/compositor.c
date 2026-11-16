@@ -2751,6 +2751,9 @@ static b32 compositor_main()
                 if (compositor_predict_due())
                         compositor_predict_expire(now);
 
+                // A release a full ring dropped is owed to its window until it lands.
+                compositor_owed_pass();
+
                 // A finger held long enough, and the marks that fade.
                 if (compositor_touch_due())
                         compositor_touch_tick(now);

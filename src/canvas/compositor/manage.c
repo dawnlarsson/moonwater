@@ -2466,6 +2466,7 @@ static void compositor_leave(int row)
                 compositor_chip_hide();
         // A key the keyboard had down is over with it: the next keyboard in the row starts with none held (compositor_osk_read).
         compositor_osk_held[row] = 0;
+        compositor_owed_drop(row);
 
         compositor_stack_remove(row);
         // An armed assist ends with its own window, and loses the thumbnail of one that goes (it is no window to place).

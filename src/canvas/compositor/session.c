@@ -1240,7 +1240,59 @@ static unsigned long long compositor_stamp_now;
 // Whether the left button is down on a keyboard window (WINDOW_KEYBOARD): its key requests are read while it is (compositor_osk_read).
 static unsigned char compositor_osk_held[WINDOWS];
 
+static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b);
+
+/*
+        A button let go that a full ring dropped is owed to its window: the window would hold the press for good (a thumb held, a pull
+        never let go, a drag of its own) with no release to come. It is posted again before the next thing the row is sent and at each
+        pass of the loop (compositor_owed_pass), in the order it was owed.
+*/
+static unsigned char compositor_owed[WINDOWS];                 // the buttons (bit of code - COMPOSITOR_BTN_LEFT) whose release the row is owed
+static unsigned int compositor_owed_flags[WINDOWS][8];
+
+static void compositor_owed_flush(int row)
+{
+        for (unsigned int index = 0; row >= 0 && row < WINDOWS && index < 8 && compositor_owed[row]; index++)
+        {
+                if (!(compositor_owed[row] >> index & 1))
+                        continue;
+                if (!compositor_post_now(row, WINDOW_EVENT_BUTTON, compositor_owed_flags[row][index], (int)(COMPOSITOR_BTN_LEFT + index), 0))
+                        return;
+                compositor_owed[row] &= (unsigned char)~(1u << index);
+        }
+}
+
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
+{
+        int posted;
+
+        if (row < 0)
+                return 0;
+        compositor_owed_flush(row);
+        posted = compositor_post_now(row, type, flags, a, b);
+        if (!posted && type == WINDOW_EVENT_BUTTON && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a - COMPOSITOR_BTN_LEFT < 8)
+        {
+                compositor_owed[row] |= (unsigned char)(1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT));
+                compositor_owed_flags[row][(unsigned int)a - COMPOSITOR_BTN_LEFT] = flags;
+        }
+        return posted;
+}
+
+// A row gone owes nothing: what it was owed was the program's that is gone, not the next one's.
+static void compositor_owed_drop(int row)
+{
+        compositor_owed[row] = 0;
+}
+
+// What every row is owed, tried again: a program that has caught up takes the release that did not fit.
+static void compositor_owed_pass(void)
+{
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor_owed[row])
+                        compositor_owed_flush(row);
+}
+
+static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
         unsigned int head, used, last;

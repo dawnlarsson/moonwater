@@ -1880,6 +1880,29 @@ static void check_compositor_hover(void)
     compositor.pointer_x = 58;
     compositor_motion();
     check("hover: and nothing once the button is let go", table->event_head[1] == before + 2);
+
+    /* A release that a full ring dropped is owed to the window and goes when the program has caught up: it was left holding the press
+       (a thumb, a pull never let go) for good. */
+    {
+        unsigned int last;
+        int dropped, landed, once;
+
+        table->event_tail[1] = table->event_head[1];
+        while (table->event_head[1] - table->event_tail[1] < WINDOWS_EVENTS)
+            compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a');
+        dropped = !compositor_post(1, WINDOW_EVENT_BUTTON, 0, COMPOSITOR_BTN_LEFT, 0);
+        compositor_owed_pass();
+        dropped = dropped && table->event_head[1] - table->event_tail[1] == WINDOWS_EVENTS;
+        table->event_tail[1] = table->event_head[1];
+        compositor_owed_pass();
+        last = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        landed = table->event_head[1] - table->event_tail[1] == 1 && table->event_type[1][last] == WINDOW_EVENT_BUTTON &&
+                 !(table->event_flags[1][last] & WINDOW_KEY_DOWN) && table->event_a[1][last] == COMPOSITOR_BTN_LEFT;
+        compositor_owed_pass();
+        once = table->event_head[1] - table->event_tail[1] == 1;
+        table->event_tail[1] = table->event_head[1];
+        check("input: a button's release that a full ring dropped is posted once the program has caught up, and once", dropped && landed && once);
+    }
 }
 
 /*
