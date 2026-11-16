@@ -1093,7 +1093,7 @@ static void case_surface(const char *name, int which)
                 break;
         case 9: // fullscreen and maximized set and unset 300 times (minimized between), then a frame at the size the last configure said
         {
-                for (int i = 0; i < 300; i++)
+                for (int i = 0; i < 299; i++) // the last asked is unset_maximized, not minimized
                 {
                         switch (i % 5)
                         {

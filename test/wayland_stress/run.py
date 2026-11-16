@@ -618,7 +618,7 @@ METRICS = {
 SHOWN = ["fps", "frame_p50", "frame_p99", "dropped", "late", "c2p_p50", "c2p_p99", "cb_p50", "cb_after_present_p50", "stalls",
          "cpu_ms_per_s", "xwayland_cpu_ms_per_s", "input_p50", "input_p99", "event_p50", "op_p50", "op_p99", "shown_p50", "shown_p99",
          "churn_per_s", "copy_p50", "copy_p99", "copies", "dnd", "dnd_p50", "start_ms", "first_frame_ms", "connect_to_present_ms",
-         "launch_to_present_ms", "launch_to_first_ms", "open_ms", "first_complete_ms", "msc_skips", "overlay_black"]
+         "launch_to_present_ms", "launch_to_first_ms", "open_ms", "first_complete_ms", "msc_skips", "overlay_black", "oom_score_adj"]
 
 
 def bench(args, comp):
@@ -636,6 +636,12 @@ def bench(args, comp):
         # Startup: the compositor's start to its socket, and to the first frame of a client started the moment the socket is there.
         first = run_client(comp, [os.path.join(args.bin, "wl-stress"), "-m", "first"], timeout=20)
         results["startup"] = {"start_ms": comp.start_ms}
+        # How protected the compositor is from the kernel's OOM killer (Moonwater asks for -900; a box without CAP_SYS_RESOURCE, as
+        # this one is, leaves it 0, and the owner's machine shows it).
+        try:
+            results["startup"]["oom_score_adj"] = float(open(f"/proc/{comp.pid}/oom_score_adj").read())
+        except (OSError, ValueError, TypeError):
+            pass
         if "connect_to_present_ms" in first and comp.t_spawn:
             results["startup"]["first_frame_ms"] = comp.start_ms + first.get("exec_to_present_ms", 0)
             results["startup"]["connect_to_present_ms"] = first["connect_to_present_ms"]
@@ -730,6 +736,8 @@ def edge_cases(args, comp):
             if not comp.start():
                 note(f"{comp.name}: did not start again after {name}: the rest of its edge cases are not run")
                 break
+    if not args.edge or "output-scale-change" in args.edge:
+        out["output-scale-change"] = output_scale_change(args, comp)
     return out
 
 
@@ -865,6 +873,30 @@ def x_edge(args, comp, xs):
     return out
 
 
+def output_scale_change(args, comp):
+    """The screen's scale changed on the fly under an animating client (Moonwater headless reads /root/canvas.displays, as
+    test/wayland_scale.py does): the client's frames keep coming. The references here have no way to change a headless
+    output's scale from outside (said as skip)."""
+    if comp.name != "moonwater" or args.real:
+        return {"outcome": "skip", "ms": -1, "detail": "no_outside_scale_change_here", "alive": comp.alive(), "recover_ms": 0}
+    p = subprocess.Popen([os.path.join(args.bin, "wl-stress"), "-m", "anim", "-t", "4", "-w", "800", "-h", "600"], env=comp.env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    time.sleep(1.0)
+    for percent in (150, 200, 125, 100):
+        with open("/root/canvas.displays", "w") as f:
+            f.write("Canvas scale=%d\n" % percent)
+        time.sleep(0.6)
+    out, _ = p.communicate(timeout=20)
+    res = parse_result(out)
+    r = {"outcome": "ok" if res.get("frames", 0) > 100 and res.get("frame_p99", 1e9) < 100 else "stall", "ms": res.get("frame_p99", -1),
+         "detail": "frames=%s dropped=%s" % (res.get("frames"), res.get("dropped")), "alive": comp.alive()}
+    rec = run_client(comp, [os.path.join(args.bin, "wl-stress"), "-m", "first"], timeout=8) if r["alive"] else {}
+    r["recover_ms"] = rec.get("connect_to_present_ms", -1)
+    print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % ("output-scale-change", r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
+          flush=True)
+    return r
+
+
 def edge_matrix(all_results, names):
     """The edge cases as a matrix: each compositor's outcome, whether it lived, and Moonwater's verdict against the references'
     (what they did is the expected behaviour where the protocol leaves it open)."""
@@ -904,7 +936,9 @@ def edge_matrix(all_results, names):
             verdict = "FAIL (" + m["outcome"] + ")"
         elif refs and m["outcome"] not in refs:
             verdict = "DIFFERS (references: " + ",".join(sorted(refs)) + ")"
-        elif best is not None and m["ms"] > 2 * best and m["ms"] - best > 5:
+        # Slower by more than a frame: a case that waits for a frame callback is a refresh on a paced compositor and next to nothing on
+        # Mutter headless, which does not pace.
+        elif best is not None and m["ms"] > 2 * best and m["ms"] - best > 17:
             verdict = "SLOW (x%.1f of the best reference)" % (m["ms"] / best if best else 0)
         else:
             verdict = "pass" + ("" if refs else " (no reference ran it)")
@@ -1015,7 +1049,12 @@ def gaps(all_results, names):
             continue
         for s, r in mw.items():
             o = all_results[other].get(s) or {}
+            # A compositor that does not pace its frames to the refresh (Mutter headless with no X: 460 frames a second) is not
+            # faster at frame times, commit to present or callbacks: those are not compared against it.
+            unpaced = isinstance(o.get("fps"), (int, float)) and o.get("fps", 0) > 75
             for k, (lower, eps) in METRICS.items():
+                if unpaced and (k in ("fps", "late", "dropped") or k.startswith(("frame_", "c2p_", "cb_"))):
+                    continue
                 a, b = r.get(k), o.get(k)
                 if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or a == -1 or b == -1:
                     continue

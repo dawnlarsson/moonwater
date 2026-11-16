@@ -2454,6 +2454,23 @@ static b32 compositor_main()
         if (!headless && !compositor.layout_given)
                 compositor_layout_read();
 
+        /*
+                Out of memory, the kernel kills the process its score names, and the compositor holds every client's windows, so with it went
+                the whole desktop: a client that made surfaces until memory ran out was as likely to take the compositor down as itself (what a
+                client sends costs the compositor its records of it). -900 keeps the compositor for nearly last, as system daemons are kept,
+                and not exempt (-1000), so a compositor that is itself the leak still goes. What a client's pools and dma-bufs hold is the
+                client's: its memfds and buffers are charged to it. The compositor starts no program, so nothing inherits this. Not allowed (a
+                compositor run without the privilege, a test's user namespace), it changes nothing.
+        */
+        {
+                bipolar oom = system_open_at(AT_FDCWD, (string_address) "/proc/self/oom_score_adj", FILE_WRITE | O_CLOEXEC);
+
+                if (oom >= 0)
+                {
+                        (void)system_write_all((positive)oom, (string_address) "-900\n", 5);
+                        system_close(oom);
+                }
+        }
         status = headless ? compositor_headless(headless, file) : compositor_card_open();
         if (status < 0)
         {
