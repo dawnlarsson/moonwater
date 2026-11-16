@@ -16,7 +16,7 @@
 #include "../../src/waterlink/seal.c"
 #include "../../src/waterlink/handshake.c"
 #include "../../src/waterlink/discover.c"
-#include "../../src/waterlink/connective.c"
+#include "../../src/net/discovery.c"
 #define SHARED_counted
 #include "../checks.c"
 #undef SHARED_counted
@@ -4634,11 +4634,103 @@ static positive mdns_expected(p8 address_to out, const p8 address_to instance,
 }
 
 /*
-        connective.c's pure parts: STUN against RFC 5769's vectors (the test
+        Discovery's settings, read from a directory of the check's own as
+        they are read from /root: each lookup on when nothing is kept, one
+        switch that lookup alone, discovery off all of them, the lookups
+        under off sending nothing (discovery_sent counts every datagram and
+        connection discovery.c opens), and a word `link discovery` kept,
+        before the switches were the network's, read once and moved.
+*/
+static p8 discovery_kept_word(string_address directory, string_address leaf,
+                              string_address word)
+{
+        p8 path[DISCOVERY_PATH_ROOM];
+        bipolar handle;
+        p8 whole;
+
+        discovery_kept_path(directory, leaf, path);
+        (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
+        if (!word)
+                return true;
+        handle = system_open_output_at(AT_FDCWD, (string_address)path, true, 0600);
+        if (handle < 0)
+                return false;
+        whole = system_write_all((positive)handle, word, string_length(word)) ==
+                string_length(word);
+        system_close((b32)handle);
+        return whole;
+}
+
+static fn discovery_kept_clear(string_address directory)
+{
+        for (positive at = 0; at < array_count(discovery_switches); at++)
+        {
+                (void)discovery_kept_word(directory, discovery_switches[at].leaf, null);
+                (void)discovery_kept_word(directory, discovery_switches[at].was, null);
+        }
+}
+
+static fn discovery_setting_rows(void)
+{
+        p8 directory[48] = "/tmp/moonwater-discovery-";
+        discovery_settings none, off, stun_off, moved, kept;
+        discovery_found found;
+        discovery_here here;
+        positive before = discovery_sent;
+        p8 path[DISCOVERY_PATH_ROOM];
+        p8 word[8];
+        p8 made, went;
+
+        directory[25 + positive_into(directory + 25, (positive)system_call(syscall(getpid)))] = end;
+        made = system_make_directory_at(AT_FDCWD, (string_address)directory, 0700) >= 0;
+        discovery_kept_clear((string_address)directory);
+        discovery_settings_read_at((string_address)directory, address_of none);
+        made &= discovery_kept_word((string_address)directory, "network.discovery", "off\n");
+        discovery_settings_read_at((string_address)directory, address_of off);
+        memory_zero(address_of here, sizeof here);
+        discovery_look(address_of off, address_of found, address_of here);
+        made &= discovery_kept_word((string_address)directory, "network.discovery", "on\n");
+        made &= discovery_kept_word((string_address)directory, "network.discovery.stun", "off\n");
+        discovery_settings_read_at((string_address)directory, address_of stun_off);
+        check("discovery: every lookup is on when nothing is kept",
+              made && none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS) &&
+                  none.switched[0] && none.switched[1] && none.switched[2]);
+        check("sec: discovery off is every lookup off, and the lookups then send "
+              "nothing and say they asked nothing",
+              made && off.ask == 0 && !off.switched[0] && off.switched[1] &&
+                  discovery_sent == before && found.asked &&
+                  found.udp == DISCOVERY_UDP_NOT_ASKED &&
+                  found.https == DISCOVERY_HTTPS_NOT_ASKED && !found.answered);
+        check("discovery: one lookup's switch is that lookup alone",
+              made && stun_off.ask == DISCOVERY_ASK_HTTPS && stun_off.switched[0] &&
+                  !stun_off.switched[1]);
+
+        //      What `link discovery https off` kept is the network's word
+        //      now: read once, moved, and never put over a word kept since.
+        discovery_kept_clear((string_address)directory);
+        made &= discovery_kept_word((string_address)directory, "link.discovery.https", "off\n");
+        discovery_settings_read_at((string_address)directory, address_of moved);
+        discovery_kept_path((string_address)directory, "network.discovery.https", path);
+        went = host_read_word((string_address)path, word, sizeof word) == 3 &&
+               string_equals((string_address)word, "off");
+        discovery_kept_path((string_address)directory, "link.discovery.https", path);
+        went &= host_read_word((string_address)path, word, sizeof word) < 0;
+        made &= discovery_kept_word((string_address)directory, "link.discovery.https", "on\n");
+        discovery_settings_read_at((string_address)directory, address_of kept);
+        check("discovery: a switch link discovery kept is read once and moved to "
+              "the network's name, and never over a word kept since",
+              made && went && moved.ask == DISCOVERY_ASK_STUN &&
+                  kept.ask == DISCOVERY_ASK_STUN);
+        discovery_kept_clear((string_address)directory);
+        (void)system_remove_at(AT_FDCWD, (string_address)directory, 0x200 /* AT_REMOVEDIR */);
+}
+
+/*
+        discovery.c's pure parts: STUN against RFC 5769's vectors (the test
         vectors RFC 8489 names), the request it sends, the trace's line, the
         NAT's reading, an address's scope and text and an interface's kind.
 */
-static fn connective_vectors(void)
+static fn discovery_vectors(void)
 {
         //      RFC 5769 2.2 and 2.3: the IPv4 and IPv6 responses, whole.
         static const p8 response4[80] = {
@@ -4670,38 +4762,38 @@ static fn connective_vectors(void)
                 string_address driver;
                 positive kind;
         } kinds[] = {
-            {"wg0", 65534, false, "wireguard", CONNECTIVE_KIND_VPN},
-            {"tailscale0", 65534, false, "tun", CONNECTIVE_KIND_VPN},
-            {"ztks57abcd", 1, false, "tun", CONNECTIVE_KIND_VPN},
-            {"ztks57abcd", 1, false, null, CONNECTIVE_KIND_VPN},
-            {"wlan0", 1, true, null, CONNECTIVE_KIND_WIFI},
-            {"wlp2s0", 1, false, null, CONNECTIVE_KIND_WIFI},
-            {"radio0", 1, true, null, CONNECTIVE_KIND_WIFI},
-            {"enp3s0", 1, false, null, CONNECTIVE_KIND_ETHERNET},
-            {"eth0", 1, false, "veth", CONNECTIVE_KIND_VIRTUAL},
-            {"docker0", 1, false, "bridge", CONNECTIVE_KIND_VIRTUAL},
-            {"lo", 772, false, null, CONNECTIVE_KIND_LOOPBACK},
-            {"can0", 280, false, null, CONNECTIVE_KIND_OTHER},
+            {"wg0", 65534, false, "wireguard", DISCOVERY_KIND_VPN},
+            {"tailscale0", 65534, false, "tun", DISCOVERY_KIND_VPN},
+            {"ztks57abcd", 1, false, "tun", DISCOVERY_KIND_VPN},
+            {"ztks57abcd", 1, false, null, DISCOVERY_KIND_VPN},
+            {"wlan0", 1, true, null, DISCOVERY_KIND_WIFI},
+            {"wlp2s0", 1, false, null, DISCOVERY_KIND_WIFI},
+            {"radio0", 1, true, null, DISCOVERY_KIND_WIFI},
+            {"enp3s0", 1, false, null, DISCOVERY_KIND_ETHERNET},
+            {"eth0", 1, false, "veth", DISCOVERY_KIND_VIRTUAL},
+            {"docker0", 1, false, "bridge", DISCOVERY_KIND_VIRTUAL},
+            {"lo", 772, false, null, DISCOVERY_KIND_LOOPBACK},
+            {"can0", 280, false, null, DISCOVERY_KIND_OTHER},
         };
         static const struct
         {
                 string_address text;
                 positive scope;
         } scopes[] = {
-            {"10.1.2.3", CONNECTIVE_SCOPE_PRIVATE},
-            {"172.31.0.1", CONNECTIVE_SCOPE_PRIVATE},
-            {"172.32.0.1", CONNECTIVE_SCOPE_GLOBAL},
-            {"192.168.7.1", CONNECTIVE_SCOPE_PRIVATE},
-            {"100.64.0.1", CONNECTIVE_SCOPE_SHARED},
-            {"100.128.0.1", CONNECTIVE_SCOPE_GLOBAL},
-            {"169.254.9.9", CONNECTIVE_SCOPE_LINK},
-            {"127.0.0.1", CONNECTIVE_SCOPE_LOOPBACK},
-            {"203.0.113.9", CONNECTIVE_SCOPE_GLOBAL},
-            {"fe80::1", CONNECTIVE_SCOPE_LINK},
-            {"fd12:3456::1", CONNECTIVE_SCOPE_UNIQUE},
-            {"2001:db8::1", CONNECTIVE_SCOPE_GLOBAL},
-            {"::1", CONNECTIVE_SCOPE_LOOPBACK},
-            {"ff02::1", CONNECTIVE_SCOPE_OTHER},
+            {"10.1.2.3", DISCOVERY_SCOPE_PRIVATE},
+            {"172.31.0.1", DISCOVERY_SCOPE_PRIVATE},
+            {"172.32.0.1", DISCOVERY_SCOPE_GLOBAL},
+            {"192.168.7.1", DISCOVERY_SCOPE_PRIVATE},
+            {"100.64.0.1", DISCOVERY_SCOPE_SHARED},
+            {"100.128.0.1", DISCOVERY_SCOPE_GLOBAL},
+            {"169.254.9.9", DISCOVERY_SCOPE_LINK},
+            {"127.0.0.1", DISCOVERY_SCOPE_LOOPBACK},
+            {"203.0.113.9", DISCOVERY_SCOPE_GLOBAL},
+            {"fe80::1", DISCOVERY_SCOPE_LINK},
+            {"fd12:3456::1", DISCOVERY_SCOPE_UNIQUE},
+            {"2001:db8::1", DISCOVERY_SCOPE_GLOBAL},
+            {"::1", DISCOVERY_SCOPE_LOOPBACK},
+            {"ff02::1", DISCOVERY_SCOPE_OTHER},
         };
         static const string_address texts[] = {
             "::1", "2001:db8::1", "fe80::1:0:0:1", "1:0:0:2::3", "1::",
@@ -4713,27 +4805,27 @@ static fn connective_vectors(void)
         p8 copy[92];
         p8 address[16];
         p8 text[48];
-        p8 request[CONNECTIVE_STUN_REQUEST];
+        p8 request[DISCOVERY_STUN_REQUEST];
         p16 port = 0;
         positive wrong = 0;
         p8 read;
 
-        read = connective_stun_read(response4, sizeof response4, transaction,
+        read = discovery_stun_read(response4, sizeof response4, transaction,
                                     address, address_of port);
-        connective_address_text(address, text);
-        check("connective: RFC 5769's IPv4 response is 192.0.2.1 port 32853, "
+        discovery_address_text(address, text);
+        check("discovery: RFC 5769's IPv4 response is 192.0.2.1 port 32853, "
               "its FINGERPRINT checked",
               read && port == 32853 && string_equals((string_address)text, "192.0.2.1") &&
-                  connective_stun_fingerprint(response4, 72) == 0xc07d4c96u);
-        read = connective_stun_read(response6, sizeof response6, transaction,
+                  discovery_stun_fingerprint(response4, 72) == 0xc07d4c96u);
+        read = discovery_stun_read(response6, sizeof response6, transaction,
                                     address, address_of port);
-        connective_address_text(address, text);
-        check("connective: RFC 5769's IPv6 response is "
+        discovery_address_text(address, text);
+        check("discovery: RFC 5769's IPv6 response is "
               "2001:db8:1234:5678:11:2233:4455:6677 port 32853",
               read && port == 32853 &&
                   string_equals((string_address)text,
                                 "2001:db8:1234:5678:11:2233:4455:6677") &&
-                  connective_stun_fingerprint(response6, 84) == 0xc8fb0b4cu);
+                  discovery_stun_fingerprint(response6, 84) == 0xc8fb0b4cu);
 
         //      Every byte the FINGERPRINT covers, and the fingerprint itself,
         //      changed is refused. Its attribute's type changed is an unknown
@@ -4747,45 +4839,45 @@ static fn connective_vectors(void)
                         continue;
                 memory_copy(copy, response4, sizeof response4);
                 copy[at] ^= 0x01;
-                wrong += connective_stun_read(copy, sizeof response4, transaction,
+                wrong += discovery_stun_read(copy, sizeof response4, transaction,
                                               address, address_of port);
         }
-        check("sec: connective: a STUN answer with any byte its FINGERPRINT "
+        check("sec: discovery: a STUN answer with any byte its FINGERPRINT "
               "covers changed is refused",
               wrong == 0);
         wrong = 0;
         for (positive length = 0; length < sizeof response4; length++)
-                wrong += connective_stun_read(response4, length, transaction,
+                wrong += discovery_stun_read(response4, length, transaction,
                                               address, address_of port);
-        wrong += connective_stun_read(response4, sizeof response4, other, address,
+        wrong += discovery_stun_read(response4, sizeof response4, other, address,
                                       address_of port);
-        check("sec: connective: a cut answer, or another transaction's, is refused",
+        check("sec: discovery: a cut answer, or another transaction's, is refused",
               wrong == 0);
 
-        (void)connective_stun_request(request, transaction);
-        check("connective: a Binding request is its header and a FINGERPRINT, "
+        (void)discovery_stun_request(request, transaction);
+        check("discovery: a Binding request is its header and a FINGERPRINT, "
               "28 bytes",
               request[0] == 0 && request[1] == 1 && request[2] == 0 && request[3] == 8 &&
-                  connective_get32(request + 4) == CONNECTIVE_STUN_MAGIC &&
+                  discovery_get32(request + 4) == DISCOVERY_STUN_MAGIC &&
                   !memory_compare(request + 8, transaction, 12) &&
-                  connective_get32(request + 20) == 0x80280004u &&
-                  connective_get32(request + 24) ==
-                      connective_stun_fingerprint(request, 20));
+                  discovery_get32(request + 20) == 0x80280004u &&
+                  discovery_get32(request + 24) ==
+                      discovery_stun_fingerprint(request, 20));
 
-        wrong = !connective_trace_address(
+        wrong = !discovery_trace_address(
                     (p8 address_to) "fl=1f1\nh=cloudflare.com\nip=203.0.113.9\nts=1\n",
                     44, address) ||
-                (connective_address_text(address, text),
+                (discovery_address_text(address, text),
                  !string_equals((string_address)text, "203.0.113.9"));
-        wrong += !connective_trace_address((p8 address_to) "ip=2001:db8::5\r\nts=2\n",
+        wrong += !discovery_trace_address((p8 address_to) "ip=2001:db8::5\r\nts=2\n",
                                            21, address) ||
-                 (connective_address_text(address, text),
+                 (discovery_address_text(address, text),
                   !string_equals((string_address)text, "2001:db8::5"));
-        wrong += connective_trace_address((p8 address_to) "h=x\nts=1\n", 9, address);
-        wrong += connective_trace_address((p8 address_to) "ip=999.0.0.1\n", 13, address);
-        wrong += connective_trace_address((p8 address_to) "xip=1.2.3.4\n", 12, address);
-        wrong += connective_trace_address((p8 address_to) "ip=\n", 4, address);
-        check("connective: the trace's ip= line is the address, and nothing "
+        wrong += discovery_trace_address((p8 address_to) "h=x\nts=1\n", 9, address);
+        wrong += discovery_trace_address((p8 address_to) "ip=999.0.0.1\n", 13, address);
+        wrong += discovery_trace_address((p8 address_to) "xip=1.2.3.4\n", 12, address);
+        wrong += discovery_trace_address((p8 address_to) "ip=\n", 4, address);
+        check("discovery: the trace's ip= line is the address, and nothing "
               "else is", wrong == 0);
 
         {
@@ -4794,74 +4886,74 @@ static fn connective_vectors(void)
 
                 memory_copy(b, a, 16);
                 b[15] = 8;
-                check("connective: the NAT is told by what two servers saw",
-                      connective_nat_classify(0, a, 1, a, 1, false) == CONNECTIVE_NAT_UNKNOWN &&
-                          connective_nat_classify(1, a, 1, a, 1, false) == CONNECTIVE_NAT_ONE &&
-                          connective_nat_classify(2, a, 1, a, 1, false) == CONNECTIVE_NAT_ONE &&
-                          connective_nat_classify(3, a, 1, a, 1, true) == CONNECTIVE_NAT_NONE &&
-                          connective_nat_classify(3, a, 4000, a, 4000, false) ==
-                              CONNECTIVE_NAT_INDEPENDENT &&
-                          connective_nat_classify(3, a, 4000, a, 4001, false) ==
-                              CONNECTIVE_NAT_DEPENDENT &&
-                          connective_nat_classify(3, a, 4000, b, 4000, false) ==
-                              CONNECTIVE_NAT_DEPENDENT);
+                check("discovery: the NAT is told by what two servers saw",
+                      discovery_nat_classify(0, a, 1, a, 1, false) == DISCOVERY_NAT_UNKNOWN &&
+                          discovery_nat_classify(1, a, 1, a, 1, false) == DISCOVERY_NAT_ONE &&
+                          discovery_nat_classify(2, a, 1, a, 1, false) == DISCOVERY_NAT_ONE &&
+                          discovery_nat_classify(3, a, 1, a, 1, true) == DISCOVERY_NAT_NONE &&
+                          discovery_nat_classify(3, a, 4000, a, 4000, false) ==
+                              DISCOVERY_NAT_INDEPENDENT &&
+                          discovery_nat_classify(3, a, 4000, a, 4001, false) ==
+                              DISCOVERY_NAT_DEPENDENT &&
+                          discovery_nat_classify(3, a, 4000, b, 4000, false) ==
+                              DISCOVERY_NAT_DEPENDENT);
                 //      The caller's first mapping is the second server's when
                 //      only it answered, and its own is no NAT all the same.
-                check("connective: an address of this machine's own seen by "
+                check("discovery: an address of this machine's own seen by "
                       "the second server alone is no NAT",
-                      connective_nat_classify(2, a, 1, a, 1, true) == CONNECTIVE_NAT_NONE);
+                      discovery_nat_classify(2, a, 1, a, 1, true) == DISCOVERY_NAT_NONE);
         }
 
         {
-                connective_found before, found;
+                discovery_found before, found;
 
                 memory_zero(address_of before, sizeof before);
                 before.answered = 1;
-                before.nat = CONNECTIVE_NAT_ONE;
+                before.nat = DISCOVERY_NAT_ONE;
                 before.mapped[0][15] = 7;
                 before.mapped_port[0] = 4000;
                 before.stun_when = 100;
-                before.https = CONNECTIVE_HTTPS_FAILED;
+                before.https = DISCOVERY_HTTPS_FAILED;
                 before.trace[15] = 9;
                 before.https_when = 50;
                 memory_zero(address_of found, sizeof found);
-                found.udp = CONNECTIVE_UDP_BLOCKED;
-                found.https = CONNECTIVE_HTTPS_FAILED;
-                connective_found_keep(address_of found, address_of before);
-                check("connective: a gather that learned nothing keeps the last "
+                found.udp = DISCOVERY_UDP_BLOCKED;
+                found.https = DISCOVERY_HTTPS_FAILED;
+                discovery_found_keep(address_of found, address_of before);
+                check("discovery: a gather that learned nothing keeps the last "
                       "STUN answer whole and a trace from gathers before",
-                      found.answered == 1 && found.nat == CONNECTIVE_NAT_ONE &&
+                      found.answered == 1 && found.nat == DISCOVERY_NAT_ONE &&
                           found.mapped[0][15] == 7 && found.mapped_port[0] == 4000 &&
-                          found.stun_when == 100 && found.udp == CONNECTIVE_UDP_BLOCKED &&
+                          found.stun_when == 100 && found.udp == DISCOVERY_UDP_BLOCKED &&
                           found.trace[15] == 9 && found.https_when == 50);
         }
 
         wrong = 0;
         for (positive at = 0; at < array_count(kinds); at++)
-                wrong += connective_interface_kind(kinds[at].name, kinds[at].type,
+                wrong += discovery_interface_kind(kinds[at].name, kinds[at].type,
                                                    kinds[at].wireless,
                                                    kinds[at].driver) != kinds[at].kind;
-        check("connective: an interface's kind, by its driver, its name and its "
+        check("discovery: an interface's kind, by its driver, its name and its "
               "hardware", wrong == 0);
 
         wrong = 0;
         for (positive at = 0; at < array_count(scopes); at++)
-                wrong += !connective_parse_address((p8 address_to)scopes[at].text,
+                wrong += !discovery_parse_address((p8 address_to)scopes[at].text,
                                                    string_length(scopes[at].text),
                                                    address) ||
-                         connective_address_scope(address) != scopes[at].scope;
-        check("connective: an address's scope", wrong == 0);
+                         discovery_address_scope(address) != scopes[at].scope;
+        check("discovery: an address's scope", wrong == 0);
 
         wrong = 0;
         for (positive at = 0; at < array_count(texts); at++)
-                wrong += !connective_parse_address((p8 address_to)texts[at],
+                wrong += !discovery_parse_address((p8 address_to)texts[at],
                                                    string_length(texts[at]), address) ||
-                         (connective_address_text(address, text),
+                         (discovery_address_text(address, text),
                           !string_equals((string_address)text, texts[at]));
         for (positive at = 0; at < array_count(refused); at++)
-                wrong += connective_parse_address((p8 address_to)refused[at],
+                wrong += discovery_parse_address((p8 address_to)refused[at],
                                                   string_length(refused[at]), address);
-        check("connective: an address read and written back is itself (RFC 5952), "
+        check("discovery: an address read and written back is itself (RFC 5952), "
               "and a malformed one is refused", wrong == 0);
 }
 
@@ -5496,7 +5588,8 @@ b32 main(void)
         group_pairing();
         mdns_parse();
         mdns_wire_exact();
-        connective_vectors();
+        discovery_vectors();
+        discovery_setting_rows();
         return test_report(null);
 }
 #endif /* CHECK_waterlink */
@@ -6822,6 +6915,10 @@ static fn names_and_words(void)
                         refused &= !link_name_good(link_shapes[at].word);
                 check("and none of the verbs link has, port among them",
                       refused);
+                check("nor discovery or network, which were the link's verbs and "
+                      "are the network's",
+                      !link_name_good("discovery") && !link_name_good("network") &&
+                              link_name_good("networks"));
         }
         check("a name of 31 is one and of 32 is not",
               link_name_good("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
@@ -12244,55 +12341,63 @@ static fn ipv4_only(void)
 }
 
 /*
-        link discovery's switches, through its verb (command.c): each lookup
-        on when nothing is kept, one switch that lookup alone, discovery off
-        all of them, and a gather under off sends nothing (connective_sent
-        counts every datagram and connection connective.c opens).
+        Discovery's switches through the network's verb (host/network.c), on
+        this namespace's own /root: off is every lookup off and a gather
+        then sends nothing, one lookup's switch is that lookup alone, and a
+        word that is neither on nor off is refused. CHECK_waterlink holds
+        the settings' reading itself, with no verb and no socket.
 */
-static fn discovery_switches(void)
+static fn discovery_switch_rows(void)
 {
-        string_address off[] = {(string_address) "moonwater", (string_address) "link",
+        string_address off[] = {(string_address) "moonwater", (string_address) "network",
                                 (string_address) "discovery", (string_address) "off"};
-        string_address on[] = {(string_address) "moonwater", (string_address) "link",
+        string_address on[] = {(string_address) "moonwater", (string_address) "network",
                                (string_address) "discovery", (string_address) "on"};
-        string_address stun_off[] = {(string_address) "moonwater", (string_address) "link",
+        string_address stun_off[] = {(string_address) "moonwater", (string_address) "network",
                                      (string_address) "discovery", (string_address) "stun",
                                      (string_address) "off"};
-        string_address bad[] = {(string_address) "moonwater", (string_address) "link",
+        string_address bad[] = {(string_address) "moonwater", (string_address) "network",
                                 (string_address) "discovery", (string_address) "https",
                                 (string_address) "maybe"};
-        connective_found found;
-        connective_here here;
-        positive before = connective_sent;
-        positive asks_default, asks_off, asks_stun, asks_bad;
+        discovery_settings none, all_off, one_off, after;
+        discovery_found found;
+        discovery_here here;
+        positive before = discovery_sent;
+        p8 path[DISCOVERY_PATH_ROOM];
         b32 refused;
 
-        for (positive at = 0; at < array_count(link_discoveries); at++)
-                (void)system_remove_at(AT_FDCWD, link_discoveries[at].path, 0);
-        asks_default = link_discovery_asks();
-        (void)link_discovery_verb(off, 4);
-        asks_off = link_discovery_asks();
-        connective_here_read(address_of here);
-        connective_gather(asks_off, address_of found, address_of here);
-        (void)link_discovery_verb(on, 4);
-        (void)link_discovery_verb(stun_off, 5);
-        asks_stun = link_discovery_asks();
-        refused = link_discovery_verb(bad, 5);
-        asks_bad = link_discovery_asks();
+        host_verb = (string_address) "network";
+        for (positive at = 0; at < array_count(discovery_switches); at++)
+        {
+                discovery_kept_path(DISCOVERY_KEPT, discovery_switches[at].leaf, path);
+                (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
+        }
+        discovery_settings_read(address_of none);
+        (void)host_network(off, 4);
+        discovery_settings_read(address_of all_off);
+        discovery_gather(address_of all_off, address_of found, address_of here);
+        (void)host_network(on, 4);
+        (void)host_network(stun_off, 5);
+        discovery_settings_read(address_of one_off);
+        refused = host_network(bad, 5);
+        discovery_settings_read(address_of after);
         log_flush();
-        check("discovery: every lookup is on when nothing is kept",
-              asks_default == (CONNECTIVE_ASK_STUN | CONNECTIVE_ASK_HTTPS));
-        check("sec: discovery off is every lookup off, and a gather then sends "
-              "nothing and says it asked nothing",
-              asks_off == 0 && connective_sent == before &&
-                  found.udp == CONNECTIVE_UDP_NOT_ASKED &&
-                  found.https == CONNECTIVE_HTTPS_NOT_ASKED && !found.answered);
-        check("discovery: one lookup's switch is that lookup alone",
-              asks_stun == CONNECTIVE_ASK_HTTPS);
+        check("discovery: every lookup is on when the verb has kept nothing",
+              none.ask == (DISCOVERY_ASK_STUN | DISCOVERY_ASK_HTTPS));
+        check("sec: network discovery off is every lookup off, and a gather then "
+              "sends nothing and says it asked nothing",
+              all_off.ask == 0 && discovery_sent == before &&
+                  found.udp == DISCOVERY_UDP_NOT_ASKED &&
+                  found.https == DISCOVERY_HTTPS_NOT_ASKED && !found.answered);
+        check("discovery: network discovery stun off is that lookup alone",
+              one_off.ask == DISCOVERY_ASK_HTTPS);
         check("discovery: a word that is not on or off is refused and changes "
-              "nothing", refused != 0 && asks_bad == asks_stun);
-        for (positive at = 0; at < array_count(link_discoveries); at++)
-                (void)system_remove_at(AT_FDCWD, link_discoveries[at].path, 0);
+              "nothing", refused != 0 && after.ask == one_off.ask);
+        for (positive at = 0; at < array_count(discovery_switches); at++)
+        {
+                discovery_kept_path(DISCOVERY_KEPT, discovery_switches[at].leaf, path);
+                (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
+        }
 }
 
 static fn indexes_and_commands(void)
@@ -13055,7 +13160,7 @@ b32 main(void)
         ipv4_only();
         client_never_waits();
         indexes_and_commands();
-        discovery_switches();
+        discovery_switch_rows();
         return test_report(null);
 }
 #endif /* CHECK_waterlink_service */

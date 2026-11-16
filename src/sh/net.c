@@ -13,6 +13,7 @@
 #define STANDARD_MODERN_C_SHELL_NET
 
 #include "../net/net.c"
+#include "../net/discovery.c" // how this machine is reached; it brings host_words.h, the state words read below
 
 #define NET_STATE_DIR "/run/moonwater"
 #define NET_WAKE_PATH NET_STATE_DIR "/net.wake"
@@ -1141,13 +1142,6 @@ static b32 net_wget(void)
         return 0;
 }
 
-
-//      host.c's, which is included after this file: a state word is read as a
-//      plain file and never waited for, so a FIFO planted at its name on the
-//      data partition cannot stop the watcher.
-static bipolar host_read_word(string_address path, p8 address_to into, positive room);
-static bipolar host_read_state(string_address path, p8 address_to into, positive room);
-static bipolar host_word_end(p8 address_to into, bipolar got);
 
 /*
         /etc/resolv.conf: what the network handed out, or what was kept.

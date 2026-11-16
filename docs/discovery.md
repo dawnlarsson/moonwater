@@ -1,9 +1,12 @@
-# Connective: machines that find each other with no port forwarded
+# Discovery: machines that find each other with no port forwarded
 
-`src/waterlink/connective.c` is the part of Moonwater that learns how this
-machine can be reached and how it can reach out. It knows nothing of
-waterlink: it takes switches and hands back what it found, so `moonwater ssh`,
-the update fetcher and the time sync can ask it the same way the link does.
+`src/net/discovery.c` is the module of Moonwater's network stack that learns
+how this machine can be reached and how it can reach out. It knows nothing
+of waterlink: it reads the person's switches and hands back what it found,
+so `moonwater ssh`, the update fetcher and the time sync can ask it the same
+way the link does. `moonwater network` is its verb, and bare it says the
+network as one page: each interface, the name servers in their order, and
+what discovery may look up.
 
 It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
 
@@ -38,18 +41,20 @@ It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
 5. **Relay** last: the Worker's Durable Object relays small traffic over a
    WebSocket; another Moonwater machine of the group that can be reached (a
    public IPv4 or IPv6 address, or a mapped port) relays for the rest.
-6. **Report** what it found in `moonwater link doctor` and in Settings.
+6. **Report** what it found in `moonwater network discovery`, after
+   `moonwater link doctor`'s checks, and in Settings.
 
 ## Discovery switches
 
 Every lookup that sends a packet off the machine has a switch of its own,
-named for what it discovers, and `moonwater link discovery off` turns them
-all off at once. Off means no packet leaves for it. Each is on by default.
+named for what it discovers, and `moonwater network discovery off` turns
+them all off at once. Off means no packet leaves for it. Each is on by
+default.
 
-    moonwater link discovery [on|off]          every lookup below
-    moonwater link discovery stun [on|off]     Public address discovery (STUN)
-    moonwater link discovery https [on|off]    Public address discovery (HTTPS)
-    moonwater link discovery refresh           look again now
+    moonwater network discovery [on|off]          every lookup below
+    moonwater network discovery stun [on|off]     Public address discovery (STUN)
+    moonwater network discovery https [on|off]    Public address discovery (HTTPS)
+    moonwater network discovery refresh           look again now
 
 The servers a lookup asks learn this machine's public address; that is
 written in `.github/SECURITY.md`.
@@ -62,8 +67,8 @@ A path is Moonwater's own code. It asks nothing the person must install, sign up
 
 Every item is Moonwater's own code under the rule above, has its
 discovery switch where it sends a packet off the machine, and shows what
-it found in `moonwater link doctor` and in Settings' Network and
-Waterlink rows. Sizes: S is a day of one agent or less, M two or three, L
+it found in `moonwater network discovery`, `moonwater link doctor` and
+Settings' Network and Waterlink rows. Sizes: S is a day of one agent or less, M two or three, L
 more. An item is proven by rows in CHECK_waterlink (pure: the wire, the
 parse, the decision) and, for what needs a real network, on a real
 machine; this sandbox has no UDP out and no inbound connection.

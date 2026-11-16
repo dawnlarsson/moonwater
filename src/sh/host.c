@@ -319,6 +319,7 @@ static fn host_pause(p64 nanoseconds)
 #include "host/debug.c" // the verbs debug, notices, sensors, name, time, timezone, ntp and keyboard
 #include "host/desktop.c" // the verb desktop: the desktop a machine starts, and which one
 #include "host/security.c" // the verbs dns, security and bind
+#include "host/network.c" // the verb network: the interfaces, the name servers and discovery as one page, and discovery's switches
 #include "host/page.c" // the verbs setup (install, update, update usb, rollback, use, live, removable), status, help, wipe, machine, boot and ask: the page of verbs and its rows, the sticks and an update from one, a rollback, a wipe
 
 /*
@@ -989,6 +990,7 @@ static b32 host_main()
             {"time", host_time, false, true},
             {"name", host_name, true},
             {"dns", host_dns, false, true},
+            {"network", host_network, false, true},
             {"security", host_security, false, true},
             {"link", link_main, false},
             {"ssh", ssh_main, false},

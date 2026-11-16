@@ -136,8 +136,12 @@ moonwater timezone auto                from the network, one Cloudflare request 
 
 # Network
 moonwater airplane [on|off]            every radio at once
-moonwater dns [ADDRESS...|default|auto]  up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the network's; auto is the network's first [default]
+moonwater dns [ADDRESS...|default|auto]  up to three servers names are asked of; default is 1.1.1.1 and 1.0.0.1, then the server of the network; auto is that server first [default]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
+moonwater network                      the network as one page: each interface with its kind and its addresses, the name servers in their order, and what discovery may look up
+moonwater network discovery [on|off|refresh]  how this machine is reached: its public address, UDP out, the NAT, the proxy, each address of each interface; on and off are every lookup at once, refresh looks again [on]
+moonwater network discovery https [on|off]  where UDP does not get out, the trace of cloudflare.com over HTTPS, which learns the public address of this machine; off sends no packet for it [on]
+moonwater network discovery stun [on|off]  a STUN binding to stun.cloudflare.com and stun.l.google.com, which learn the public address of this machine; off sends no packet for it [on]
 moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 moonwater wired [on|off]               the wired links; off keeps them down
 
@@ -146,8 +150,6 @@ moonwater wired [on|off]               the wired links; off keeps them down
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link state)
-moonwater link discovery [on|off|refresh]  how this machine is reached: its public address, UDP out, the NAT, the proxy, each interface's addresses; on and off are every lookup at once, refresh looks again [on]
-moonwater link discovery stun|https on|off  one lookup: STUN to Cloudflare and Google, or Cloudflare's trace over HTTPS; off sends no packet for it [on]
 moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network that link themselves
 moonwater link group leave NAME [forget]  stop, and forget the key of the group
 moonwater link key                     the public key of this machine, which link add takes
@@ -158,6 +160,7 @@ moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with i
 moonwater link NAME CODE               link to the machine called NAME, which waits
 moonwater link on|off                  the listener, kept across boots [off]
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
+moonwater link paths                   the ways in this machine has (its udp port, discovery on the network, its public address) and where each machine linked was last heard
 moonwater link port [N|auto]           the udp port it takes, and `link add` assumes [22348]
 moonwater link pull NAME PATH FILE     PATH there to a file here
 moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all

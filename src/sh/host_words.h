@@ -1,9 +1,12 @@
 /*
         The words a host file holds, read the one way on every host. host.c
         (the box) and host_darwin.c (the Mac's link) both include this, after
-        lib.util.c, which has the file reads these are made on: the one copy
-        here is the one both use.
+        lib.util.c, which has the file reads these are made on, and so does
+        src/net/discovery.c, whose switches are such words: the one copy here
+        is the one they all use.
 */
+#ifndef HOST_WORDS_INCLUDED
+#define HOST_WORDS_INCLUDED
 
 /* The bytes of a word a file held, its newline and the blanks after it taken off
    and the end made: how many are left. */
@@ -42,3 +45,5 @@ static bipolar host_read_word(string_address path, p8 address_to into, positive 
         }
         return host_word_end(into, got);
 }
+
+#endif // HOST_WORDS_INCLUDED

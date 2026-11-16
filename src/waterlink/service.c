@@ -338,7 +338,10 @@ static p8 link_key_parse(string_address text, p8 address_to key)
 static const string_address link_words[] = {
     "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
     "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
-    "run",  "help",  "transport", "modem", "cancel", "doctor",
+    "run",  "help",  "transport", "modem", "cancel", "doctor", "paths",
+    //  The network's, which were the link's once: `link discovery` is
+    //  `network discovery` now, and neither word is a machine's to take.
+    "discovery", "network",
 };
 
 #define LINK_NAME_CHARACTERS                                                  \
