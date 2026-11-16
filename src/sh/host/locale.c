@@ -1670,17 +1670,43 @@ static fn locale_zone_list_add(p8 address_to into, positive room,
         string_append_bounded(into, what, room);
 }
 
+//      Under the zone's lock, as its write is: each reads /root/timezone
+//      again, so the last to take the lock writes the zone the last write
+//      left. Without it two timezone commands could each write the word and
+//      then the files apart, the first's /etc/localtime landing after the
+//      second's, and /root/timezone named one zone while the machine kept
+//      the other (the cli lane's zone/zone race, one round in forty). A lock
+//      that cannot be had applies all the same, as before it.
+static fn locale_zone_put(bipolar address_to kernel, b32 address_to host,
+                          positive address_to bowls, positive address_to refused)
+{
+        bipolar lock = host_lock(LOCALE_LOCK_PATH, true);
+        bipolar east = kernel ? locale_zone_kernel() : 0;
+        b32 wrote = bowl_write_localtime_host();
+        positive took = bowl_write_localtime_all(refused);
+
+        radio_unlock(lock);
+        if (kernel)
+                address_to kernel = east;
+        if (host)
+                address_to host = wrote;
+        if (bowls)
+                address_to bowls = took;
+}
+
 static fn locale_zone_apply(void)
 {
         positive refused = 0;
-        bipolar kernel = locale_zone_kernel();
-        b32 host = bowl_write_localtime_host();
-        positive bowls = bowl_write_localtime_all(address_of refused);
+        bipolar kernel = 0;
+        b32 host = 0;
+        positive bowls = 0;
         p8 took[96] = {0};
         p8 kept[128] = {0};
         p8 count[32];
         positive at;
 
+        locale_zone_put(address_of kernel, address_of host, address_of bowls,
+                        address_of refused);
         if (kernel >= 0)
                 locale_zone_list_add(took, sizeof(took), "the kernel");
         else
@@ -2231,8 +2257,7 @@ static bipolar locale_auto_take(locale_auto_answer address_to answer,
         if (locale_zone_write(answer->zone, answer->mode, false) < 0)
                 return -1;
         tzset();
-        (void)bowl_write_localtime_host();
-        (void)bowl_write_localtime_all(null);
+        locale_zone_put(null, null, null, null);
         {
                 string_address line[] = {"timezone ", answer->zone, " (",
                                          answer->mode, ")", null};
