@@ -2473,7 +2473,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
         X(compositor_polls, COMPOSITOR_ROWS_POLLS) \
         X(compositor_present_frame_room, COMPOSITOR_ROWS_FRAMES) \
         X(compositor_present_row_room, COMPOSITOR_ROWS_LAYERED) \
-        X(compositor_gpu_scaled_copy, COMPOSITOR_ROWS_FRAMES) \
         X(compositor_scene_radii, COMPOSITOR_ROWS_FRAMES) \
         X(compositor_plan_box, COMPOSITOR_ROWS_PIECES) \
         X(compositor_plan_owner, COMPOSITOR_ROWS_PIECES) \
@@ -2497,7 +2496,14 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
         X(compositor_lane_edge[8], COMPOSITOR_ROWS_EDGES) \
         X(compositor_lane_span[8], COMPOSITOR_ROWS_SPANS)
 
-#define COMPOSITOR_ROWS_ALL(X) COMPOSITOR_ROWS_OWN(X) COMPOSITOR_ROWS_WL(X) COMPOSITOR_ROWS_CARD(X) COMPOSITOR_ROWS_KEPT(X)
+// The card's own: there only in a build with the card's code (MOONWATER_GPU_C), which the build tool and a build without it are not.
+#ifdef MOONWATER_GPU_C
+#define COMPOSITOR_ROWS_GPU(X) X(compositor_gpu_scaled_copy, COMPOSITOR_ROWS_FRAMES)
+#else
+#define COMPOSITOR_ROWS_GPU(X)
+#endif
+
+#define COMPOSITOR_ROWS_ALL(X) COMPOSITOR_ROWS_OWN(X) COMPOSITOR_ROWS_WL(X) COMPOSITOR_ROWS_CARD(X) COMPOSITOR_ROWS_GPU(X) COMPOSITOR_ROWS_KEPT(X)
 
 static unsigned char *compositor_row_at; // the reservation, 0 before the first row is made
 static unsigned long compositor_row_bytes;
