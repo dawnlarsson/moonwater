@@ -998,33 +998,6 @@ static void wayland_sub_clear(struct wayland_client *c, long slot)
                 wayland_sub_words(c)[slot / 64] &= ~(1ULL << (slot % 64));
 }
 
-struct wayland_subs
-{
-        const struct wayland_client *c;
-        long word, at;
-        unsigned long long mask;
-};
-
-static struct wayland_subs wayland_subs_of(const struct wayland_client *c)
-{
-        struct wayland_subs it = {c, -1, -1, 0};
-
-        return it;
-}
-
-// The next subsurface slot, in it.at: 1 when there is one. A word's bits are read when its first is reached.
-static int wayland_subs_next(struct wayland_subs *it)
-{
-        while (!it->mask)
-        {
-                if (++it->word >= it->c->sub_bits.count)
-                        return 0;
-                it->mask = ((const unsigned long long *)it->c->sub_bits.at)[it->word];
-        }
-        it->at = it->word * 64 + __builtin_ctzll(it->mask);
-        it->mask &= it->mask - 1;
-        return 1;
-}
 
 /* ---- the wire ---- */
 
@@ -1066,6 +1039,35 @@ int bits_trailing_zeros(unsigned long long value);
 #else
 #define wayland_first_bit(mask) ((long)bits_trailing_zeros(mask))
 #endif
+
+struct wayland_subs
+{
+        const struct wayland_client *c;
+        long word, at;
+        unsigned long long mask;
+};
+
+static struct wayland_subs wayland_subs_of(const struct wayland_client *c)
+{
+        struct wayland_subs it = {c, -1, -1, 0};
+
+        return it;
+}
+
+// The next subsurface slot, in it.at: 1 when there is one. A word's bits are read when its first is reached.
+static int wayland_subs_next(struct wayland_subs *it)
+{
+        while (!it->mask)
+        {
+                if (++it->word >= it->c->sub_bits.count)
+                        return 0;
+                it->mask = ((const unsigned long long *)it->c->sub_bits.at)[it->word];
+        }
+        it->at = it->word * 64 + wayland_first_bit(it->mask);
+        it->mask &= it->mask - 1;
+        return 1;
+}
+
 
 static inline unsigned long wayland_get(const unsigned char *at)
 {
