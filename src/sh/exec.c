@@ -10956,6 +10956,25 @@ static fn exec_trace_ps4()
 }
 
 /*
+        One assignment of a simple command, on a line of its own, as bash
+        writes it while it makes them: an assignment that is the whole
+        command is written before it is made, so `PS4='TRACE '` is written
+        after the PS4 it replaces and `a=1 PS4=x b=2` writes b=2 after x,
+        and one in front of a command after it is made, in the command's
+        environment, so a PS4 there writes itself with its own value. All
+        of them were written after every one was made, with the last PS4.
+*/
+static COLD fn exec_trace_assigned(string_address word)
+{
+        if (!shell_bash_compat || !exec_trace_on())
+                return;
+
+        exec_trace_ps4();
+        exec_trace_assignment(word);
+        log_error((string_address) "\n", 1);
+}
+
+/*
         The words a simple command expanded to.
 
         Bash writes each prefix assignment on a line of its own -- the name,
@@ -10970,14 +10989,10 @@ static COLD fn exec_trace(b32 count, b32 assignments)
         if (!exec_trace_on())
                 return;
 
+        //      Bash's assignment lines were written as each was made
+        //      (exec_trace_assigned); what is left is the command.
         if (shell_bash_compat)
         {
-                for (at = 0; at < assignments; at++)
-                {
-                        exec_trace_ps4();
-                        exec_trace_assignment(shell_argv[at]);
-                        log_error((string_address) "\n", 1);
-                }
                 from = assignments;
                 if (from == count)
                         return;
@@ -13250,6 +13265,7 @@ static HOT b32 exec_simple(b32 index)
                         }
                         if (!exec_assignment_error(exec_assignment_error_status(false, shell_argv[first])))
                                 break;
+                        exec_trace_assigned(word);
                         continue;
                 }
                 positive substitution_generation =
@@ -13282,6 +13298,7 @@ static HOT b32 exec_simple(b32 index)
                 {
                         arith_assign_stored = false;
                         shell_argv[at] = trial;
+                        exec_trace_assigned(trial);
                         continue;
                 }
                 /* A command that is one plain assignment and nothing else has
@@ -13302,6 +13319,7 @@ static HOT b32 exec_simple(b32 index)
                               SHELL_ARRAY_NAMEREF))
                         {
                                 shell_argv[at] = trial;
+                                exec_trace_assigned(trial);
                                 if (!exec_assign_value(
                                         trial, parse_word_rows[word_index].name_length,
                                         parse_word_rows[word_index].name_hash,
@@ -13327,6 +13345,8 @@ static HOT b32 exec_simple(b32 index)
                 exec_kept_value address_to saved = expanded_kept + expanded_count - 1;
                 b32 error = exec_assignment_error_status(assignments_only,
                     assignments_only ? null : shell_argv[first]);
+                if (assignments_only)
+                        exec_trace_assigned(trial);
                 bool accepted = !assignments_only && !saved->key
                     ? exec_prefix_assign(saved, &trial, parse_word_rows[word_index].name_length,
                         trial + value_at, (flags & PARSE_WORD_APPEND) != 0, false, error)
@@ -13339,7 +13359,10 @@ static HOT b32 exec_simple(b32 index)
                         goto fail;
                 }
                 if (!assignments_only)
+                {
                         shell_argv[at] = trial;
+                        exec_trace_assigned(trial);
+                }
         }
 
         if (exec_line_aborted())
