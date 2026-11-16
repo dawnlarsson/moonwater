@@ -33,6 +33,21 @@
 #       the kernel as CONFIG_EXTRA_FIRMWARE would, which MediaTek's licence
 #       does not allow ("not as part of the Linux kernel").
 #
+#       The regulatory database is the one file that is not linux-firmware's.
+#       cfg80211 asks for regulatory.db when it starts and, with the signature
+#       required (CFG80211_REQUIRE_SIGNED_REGDB, which is on whatever a
+#       profile says), for regulatory.db.p7s beside it; wireless-regdb makes
+#       and signs both, and the kernel carries its maintainers' keys. A profile
+#       names them the same way, from the one wireless-regdb tag below:
+#
+#           #> regdb regulatory.db SHA256
+#           #> regdb regulatory.db.p7s SHA256
+#           #> regdb_licence LICENSE SHA256
+#
+#       They go in as /lib/firmware/regulatory.db.zst and its signature, and
+#       the licence as LICENSES/LICENSE.wireless-regdb, each checked against
+#       its digest like the rest.
+#
 #       Every build runs this, with or without a firmware line: a build that
 #       drops a profile must not ship what the last build put there.
 #
@@ -47,8 +62,18 @@ source="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.
 mirror="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$commit"
 whence_digest=eeccfed23dd1f2717fe03de205972d62748ae7f0c29be404d4481eb0aea827d4
 
+#       wireless-regdb, at the tag of one release (2026.09.03). The tag's own
+#       files come from git.kernel.org; the release tarball on kernel.org's
+#       download servers has the same ones, and each file is held to the
+#       profile's digest whichever of the two it came from.
+regdb_release=2026.09.03
+regdb_tag=master-2026-09-03
+regdb_source="https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/plain"
+regdb_mirror="https://cdn.kernel.org/pub/software/network/wireless-regdb/wireless-regdb-$regdb_release.tar.xz"
+
 config=artifacts/.config
 cache=artifacts/firmware/$commit
+regdb_cache=artifacts/firmware/wireless-regdb-$regdb_tag
 image=fs/lib/firmware
 
 die() {
@@ -73,7 +98,9 @@ rm -rf -- fs/lib/firmware
 
 wanted=$(sed -n 's/^#> firmware //p; s/^#> firmware_licence /LICENSES\//p' "$config" |
         sort -u)
-[ -n "$wanted" ] || exit 0
+regdb=$(sed -n 's/^#> regdb //p' "$config" | sort -u)
+regdb_licence=$(sed -n 's/^#> regdb_licence //p' "$config" | sort -u)
+[ -n "$wanted$regdb$regdb_licence" ] || exit 0
 
 for tool in curl zstd; do
         command -v "$tool" > /dev/null 2>&1 ||
@@ -96,13 +123,43 @@ checked_digest() {
         [ "${#1}" = 64 ] || die "digest for $2 is not 64 characters"
 }
 
-#       artifacts/firmware/COMMIT/NAME, fetched once, checked every time it
-#       is used. A download goes to a private stage and is renamed in only
-#       after it matches.
-fetch() {
-        fetch_name=$1
-        fetch_want=$2
-        cached=$cache/$fetch_name
+#       One download, asked of curl the same way everywhere: https only and
+#       retried. The arguments are how often to retry, the URL and the file.
+get() {
+        curl --fail --location --silent --show-error \
+                --retry "$1" --retry-delay 1 \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --output "$3" "$2"
+}
+
+#       A linux-firmware file: git.kernel.org at the pinned commit, then the
+#       mirror.
+get_firmware() {
+        get 2 "$source/$1?id=$commit" "$2" ||
+                get 3 "$mirror/$1" "$2"
+}
+
+#       A wireless-regdb file: git.kernel.org at the tag, then the same file
+#       out of the release's tarball.
+get_regdb() {
+        get 2 "$regdb_source/$1?id=$regdb_tag" "$2" && return 0
+        get 3 "$regdb_mirror" "$2.tar" || { rm -f -- "$2.tar"; return 1; }
+        tar -xOf "$2.tar" "wireless-regdb-$regdb_release/$1" > "$2" ||
+                { rm -f -- "$2.tar"; return 1; }
+        rm -f -- "$2.tar"
+}
+
+#       DIR/NAME, fetched once, checked every time it is used. A download
+#       goes to a private stage and is renamed in only after it matches.
+#       The arguments are the directory, the function that downloads, what
+#       the digest is of (the commit or the tag), the name and the digest.
+fetch_one() {
+        fetch_dir=$1
+        fetch_get=$2
+        fetch_at=$3
+        fetch_name=$4
+        fetch_want=$5
+        cached=$fetch_dir/$fetch_name
 
         if [ -f "$cached" ] && [ ! -L "$cached" ] &&
                 [ "$(digest_of "$cached")" = "$fetch_want" ]; then
@@ -111,24 +168,20 @@ fetch() {
 
         mkdir -p -- "$(dirname -- "$cached")"
         stage=$(mktemp "$cached.XXXXXX") || die "cannot stage $fetch_name"
-        if ! curl --fail --location --silent --show-error \
-                --retry 2 --retry-delay 1 \
-                --proto '=https' --proto-redir '=https' --tlsv1.2 \
-                --output "$stage" "$source/$fetch_name?id=$commit" &&
-           ! curl --fail --location --silent --show-error \
-                --retry 3 --retry-delay 1 \
-                --proto '=https' --proto-redir '=https' --tlsv1.2 \
-                --output "$stage" "$mirror/$fetch_name"; then
+        if ! $fetch_get "$fetch_name" "$stage"; then
                 rm -f -- "$stage"
                 die "could not download $fetch_name"
         fi
         got=$(digest_of "$stage")
         if [ "$got" != "$fetch_want" ]; then
                 rm -f -- "$stage"
-                die "$fetch_name is $got at $commit, the profile pins $fetch_want"
+                die "$fetch_name is $got at $fetch_at, the profile pins $fetch_want"
         fi
         mv -f -- "$stage" "$cached"
 }
+
+fetch() { fetch_one "$cache" get_firmware "$commit" "$1" "$2"; }
+fetch_regdb() { fetch_one "$regdb_cache" get_regdb "$regdb_tag" "$1" "$2"; }
 
 label "Firmware, linux-firmware $(printf %.12s "$commit")"
 
@@ -136,7 +189,7 @@ mkdir -p -- "$cache" "$image/LICENSES"
 fetch WHENCE "$whence_digest"
 
 names=
-printf '%s\n' "$wanted" > "$cache/.wanted"
+{ [ -z "$wanted" ] || printf '%s\n' "$wanted"; } > "$cache/.wanted"
 while read -r name want from; do
         checked_path "$name"
         checked_digest "$want" "$name"
@@ -187,5 +240,50 @@ for name in $names; do
                 END { exit !found }' "$image/WHENCE" ||
                 die "WHENCE at $commit does not name $name"
 done
+
+#       The regulatory database: its files packed as the others are, the
+#       licence beside theirs, and a section of WHENCE of its own, since
+#       linux-firmware's names none of them.
+if [ -n "$regdb$regdb_licence" ]; then
+        label "Regulatory database, wireless-regdb $regdb_release"
+        mkdir -p -- "$regdb_cache"
+
+        { [ -z "$regdb" ] || printf '%s\n' "$regdb"; } > "$regdb_cache/.wanted"
+        regdb_names=
+        while read -r name want; do
+                checked_path "$name"
+                checked_digest "$want" "$name"
+                fetch_regdb "$name" "$want"
+                zstd -q -19 -f -o "$image/$name.zst" "$regdb_cache/$name" ||
+                        die "could not pack $name"
+                chmod 0644 "$image/$name.zst"
+                regdb_names="$regdb_names $name"
+        done < "$regdb_cache/.wanted"
+
+        { [ -z "$regdb_licence" ] || printf '%s\n' "$regdb_licence"; } > "$regdb_cache/.wanted"
+        while read -r name want; do
+                checked_path "$name"
+                checked_digest "$want" "$name"
+                fetch_regdb "$name" "$want"
+                cp -- "$regdb_cache/$name" "$image/LICENSES/$name.wireless-regdb"
+                chmod 0644 "$image/LICENSES/$name.wireless-regdb"
+        done < "$regdb_cache/.wanted"
+        rm -f -- "$regdb_cache/.wanted"
+
+        {
+                printf '%s\n' "----------" "" \
+                        "Driver: cfg80211 -- the wireless regulatory database"
+                for name in $regdb_names; do
+                        printf '%s\n' "File: $name"
+                done
+                printf '%s\n' "" \
+                        "Taken from wireless-regdb $regdb_release (tag $regdb_tag of kernel.org's" \
+                        "wens/wireless-regdb), each stored as NAME.zst. regulatory.db.p7s is the" \
+                        "signature the kernel checks regulatory.db against, with the maintainers'" \
+                        "keys it carries. Licence: ISC, in LICENSES/LICENSE.wireless-regdb." \
+                        "----------"
+        } >> "$image/WHENCE"
+        names="$names$regdb_names"
+fi
 
 echo "$(echo $names | wc -w | tr -d ' ') firmware files, $(du -sk "$image" | cut -f1) KiB in the image"

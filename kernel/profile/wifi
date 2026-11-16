@@ -21,6 +21,13 @@
 #   mt7921e     the MT7961 (MT7921) and MT7922 patch and RAM code
 #   btmtk       the MT7961 and MT7922 bluetooth RAM code
 #
+# The regulatory database. cfg80211 asks for regulatory.db as it starts, and
+# with the signature required (below) for regulatory.db.p7s as well; without
+# them every boot logs "failed to load regulatory.db" and every radio keeps
+# the world domain. They are wireless-regdb's, not linux-firmware's, so the
+# lines say regdb: kernel/firmware/apply fetches them from the one release it
+# pins and checks each digest, as it does the files above.
+#
 #> firmware rtw88/rtw8822c_fw.bin 3deecb31210986d98cdbfb000391e08d602a6eee4ffc883969faa2b907ab03ba
 #> firmware rtw88/rtw8822c_wow_fw.bin 6717fc6ff426a74571ac4f04cd9698fb2f356012c05c58aa64cf21ceb6b958a2
 #> firmware rtl_bt/rtl8822cu_fw.bin bb8b1221b62749baebfa3e60271d6d90b1db5e3a480e3255be82c9fb58fe9577
@@ -33,6 +40,9 @@
 #> firmware mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin 299942dbec7d34af030670ea59f9f7b4fd5c64e738b9e0157d76f4dd3beb190f
 #> firmware_licence LICENCE.rtlwifi_firmware.txt a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e
 #> firmware_licence LICENCE.mediatek a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805
+#> regdb regulatory.db 7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641
+#> regdb regulatory.db.p7s 50332f0db09b8bcc719235ec4985c27377f2cc2f42abb7b5dcf951866c5a888a
+#> regdb_licence LICENSE 678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1
 #
 # Compose it with desktop (the default image already does):
 #
@@ -45,7 +55,10 @@ CONFIG_WIRELESS=y
 CONFIG_CFG80211=y
 CONFIG_CFG80211_DEFAULT_PS=y
 CONFIG_CFG80211_CRDA_SUPPORT=n
-CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=n
+# Not a choice this profile has: the option has no prompt without
+# CFG80211_CERTIFICATION_ONUS and is y by default, so the n that stood here was
+# dropped and the kernel has always required the signature. It says what is.
+CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y
 CONFIG_MAC80211=y
 #> overrides CONFIG_MAC80211_MESH
 CONFIG_MAC80211_MESH=n

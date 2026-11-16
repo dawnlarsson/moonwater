@@ -15723,6 +15723,37 @@ fw_none=$?
 same 'a build with no firmware line clears the last one' '0:gone' \
         "$fw_none:$fw_left"
 
+#       The regulatory database, which is wireless-regdb's and not
+#       linux-firmware's: the same stand-in serves "blob:NAME", and the two
+#       files land as NAME.zst unpacking to what was served, the licence under
+#       LICENSES, and WHENCE gains the section that names the files; a digest
+#       the bytes do not have stops it with nothing cached.
+{
+        printf '#> regdb regulatory.db %s\n' "$(fw_digest blob:regulatory.db)"
+        printf '#> regdb regulatory.db.p7s %s\n' "$(fw_digest blob:regulatory.db.p7s)"
+        printf '#> regdb_licence LICENSE %s\n' "$(fw_digest blob:LICENSE)"
+} > "$fw/tree/artifacts/.config"
+(cd "$fw/tree" && PATH="$fw/bin:$PATH" sh ../apply > ../log-regdb 2>&1)
+fw_regdb_status=$?
+fw_regdb_db=$(zstd -dc "$fw/tree/fs/lib/firmware/regulatory.db.zst" 2>/dev/null)
+fw_regdb_sig=$(zstd -dc "$fw/tree/fs/lib/firmware/regulatory.db.p7s.zst" 2>/dev/null)
+fw_regdb_licence=$(cat "$fw/tree/fs/lib/firmware/LICENSES/LICENSE.wireless-regdb" 2>/dev/null)
+fw_regdb_whence=$(grep -c '^File: regulatory.db' "$fw/tree/fs/lib/firmware/WHENCE" 2>/dev/null)
+same 'the regulatory database lands as zstd with its signature, licence and WHENCE' \
+        '0:blob:regulatory.db:blob:regulatory.db.p7s:blob:LICENSE:2' \
+        "$fw_regdb_status:$fw_regdb_db:$fw_regdb_sig:$fw_regdb_licence:$fw_regdb_whence"
+
+rm -rf "$fw/tree/artifacts/firmware"
+sed 's/^\(#> regdb regulatory.db.p7s \).*/\1'"$(fw_digest other)"'/' \
+        "$fw/tree/artifacts/.config" > "$fw/config" &&
+        mv "$fw/config" "$fw/tree/artifacts/.config"
+(cd "$fw/tree" && PATH="$fw/bin:$PATH" sh ../apply > ../log-regdb-bad 2>&1)
+fw_regdb_bad=$?
+fw_regdb_bad_cached=$(find "$fw/tree/artifacts/firmware" -name 'regulatory.db.p7s*' | wc -l | tr -d ' ')
+fw_regdb_bad_said=$(grep -c 'the profile pins' "$fw/log-regdb-bad")
+same 'a regulatory database digest that differs stops the build' '1:0:1' \
+        "$fw_regdb_bad:$fw_regdb_bad_cached:$fw_regdb_bad_said"
+
 #       The profiles' own lines: a pinned commit, and each line a plain path
 #       with a 64-digit digest, in a profile that also turns on the zstd
 #       reader its .zst files need. The Deck LCD's two rtw88 files, without
@@ -15741,6 +15772,20 @@ done
 fw_deck=$(grep -c '^#> firmware rtw88/rtw8822c_\(wow_\)\{0,1\}fw.bin ' kernel/profile/wifi)
 same 'firmware lines are pinned and whole' "1:$fw_lines:0:2" \
         "$fw_commit:$fw_good:$fw_zstd:$fw_deck"
+
+#       The regulatory database is pinned the same way: one release tag, each
+#       line a plain path and a 64-digit digest, the database and its
+#       signature both named, and the signature required, which is what makes
+#       cfg80211 ask for the second file.
+fw_regdb_tag=$(sed -n 's/^regdb_tag=//p' kernel/firmware/apply |
+        grep -E -c '^master-[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+fw_regdb_lines=$(grep -r -h '^#> regdb' kernel/profile | wc -l | tr -d ' ')
+fw_regdb_good=$(grep -r -h '^#> regdb' kernel/profile |
+        grep -E -c '^#> regdb(_licence)? [A-Za-z0-9._/+-]+ [0-9a-f]{64}$')
+fw_regdb_pair=$(grep -c '^#> regdb regulatory\.db\(\.p7s\)\{0,1\} ' kernel/profile/wifi)
+fw_regdb_signed=$(grep -c '^CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y' kernel/profile/wifi)
+same 'the regulatory database is pinned, whole and signed' "1:3:3:2:1" \
+        "$fw_regdb_tag:$fw_regdb_lines:$fw_regdb_good:$fw_regdb_pair:$fw_regdb_signed"
 
 #       The machine process owns its attach from the moment it has it, not
 #       from the moment it is told to stop. Its own moonwater_poweroff runs
