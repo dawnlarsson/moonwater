@@ -8545,8 +8545,14 @@ static fn font_reset(font_engine address_to e)
         memory_zero(e->index, sizeof(e->index));
         e->slot_count = e->shelf_count = e->shelf_bottom = 0;
         e->scratched = false;
+        //      The counter wrapping back to a generation a way or a recent cell was written at would
+        //      make them hit again, so after a wrap they are emptied too.
         if (!++e->generation)
+        {
                 e->generation = 1;
+                memory_zero(e->cached, sizeof(e->cached));
+                memory_zero(e->recent, sizeof(e->recent));
+        }
 }
 
 //      A slot made, at the place in the index the lookup ended at.
@@ -11781,7 +11787,11 @@ static p8 font_identify(font_engine address_to e, p64 chain, p64 grid, p32 spans
         e->idents[i] = (font_ident){chain, grid, spans, true};
         e->ident_last = i;
         if (!++e->generation)
+        {
                 e->generation = 1;
+                memory_zero(e->cached, sizeof(e->cached));
+                memory_zero(e->recent, sizeof(e->recent));
+        }
         return (p8)(i + 1);
 }
 

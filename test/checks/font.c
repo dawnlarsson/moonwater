@@ -4647,6 +4647,18 @@ static fn check_strip(void)
         check("strip: the body's bytes are the loop's, every row count, stride and tail", same);
 }
 
+//      Whether a way or a recent cell is still keyed to the engine's current generation: one a lookup would hit.
+static p8 generation_kept(const font_engine address_to e)
+{
+        for (positive i = 0; i < FONT_CACHED; i++)
+                if (e->cached[i].key && e->cached[i].generation == e->generation)
+                        return true;
+        for (positive i = 0; i < FONT_RECENT; i++)
+                if (e->recent[i].key && e->recent[i].generation == e->generation)
+                        return true;
+        return false;
+}
+
 static fn check_generation_wrap(void)
 {
         font_engine g = {0};
@@ -4659,6 +4671,23 @@ static fn check_generation_wrap(void)
         g.generation = 0xffffffffu;
         font_start(&g, small_atlas, 128, 32);
         check("font_start skips 0 on 32-bit wrap and lands on 1", g.generation == 1);
+
+        //      A drawn cell written at generation 1, then the counter run round to 1 again through a reset: the way
+        //      and a recent cell with the same key and cell must miss, not answer with the slot they named.
+        font_cached(&g, null, 0x2500, 8 << 16 | 16, 0, 0, 0);
+        g.recent[0] = (font_recent){.key = (p64)1 << 63 | 5, .generation = 1};
+        check("wrap: a drawn cell is kept at generation 1 before the counter wraps", generation_kept(&g));
+        g.generation = 0xffffffffu;
+        font_reset(&g);
+        check("wrap: font_reset clears the ways and recent cells a generation 1 left behind", !generation_kept(&g));
+
+        //      The same by a new cell identity: the identity's wrap runs the counter round to 1 too.
+        font_cached(&g, null, 0x2500, 8 << 16 | 16, 0, 0, 0);
+        g.recent[0] = (font_recent){.key = (p64)1 << 63 | 5, .generation = 1};
+        g.generation = 0xffffffffu;
+        font_identify(&g, 0x1234, 0x5678, 1);
+        check("wrap: font_identify clears the ways and recent cells a generation 1 left behind",
+              g.generation == 1 && !generation_kept(&g));
 }
 
 b32 main()
