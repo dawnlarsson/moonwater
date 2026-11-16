@@ -4993,7 +4993,7 @@ static void test_clipboard(void)
                 WLCHECK(fake.clears == pulls + 1, "its owner can");
         }
 
-        /* a drag is not done: its source is told it is not going */
+        /* a drag started with a key's serial, no button held, is none: its source is told it is not going */
         {
                 unsigned long drag = clip_source(&b, 0, "text/plain");
 
@@ -5001,7 +5001,83 @@ static void test_clipboard(void)
                 wlc_forget(cb);
                 wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)serial);
                 wlc_pump(cb);
-                WLCHECK(clip_cancelled(cb, 0) == 1 && cb->errors == 0, "a drag's source is cancelled");
+                WLCHECK(clip_cancelled(cb, 0) == 1 && cb->errors == 0 && !wayland_dragging(), "a drag with no button held is cancelled");
+        }
+
+        /* drag and drop in one window: entered with an offer of the source's types and actions, accepted, dropped where the button lets
+           go, the target's descriptor handed to the source's send as it is, and finished */
+        {
+                unsigned long drag = clip_source(&b, 0, "application/x-moonwater-test"), offer;
+                struct wl_event_seen *enter, *sent;
+                int reader;
+                long write_end;
+
+                wlc_send(cb, drag, WLQ_wl_data_source_offer, "text/plain");
+                wlc_send(cb, drag, WLQ_wl_data_source_set_actions, 3L);
+                wayland_pointer_to(b.row, 10, 10);
+                wayland_pointer_button(b.row, 272, 1);
+                wlc_pump(cb);
+                wlc_forget(cb);
+                wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)wayland.client[cb->slot]->press_serial);
+                wlc_pump(cb);
+                enter = wlc_take(cb, WLI_wl_data_device, WLE_wl_data_device_enter);
+                offer = enter ? enter->u[4] : 0;
+                WLCHECK(wayland_dragging() && enter && offer && wlc_count(cb, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 2 &&
+                            wlc_count(cb, WLI_wl_data_offer, WLE_wl_data_offer_source_actions) == 1 && cb->errors == 0,
+                        "a drag with the press's serial enters the window it began in, its offer the source's two types and its actions");
+                wayland_pointer_motion(b.row, 14, 12);
+                wlc_pump(cb);
+                WLCHECK(wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_motion) == 1 && wlc_count(cb, WLI_wl_pointer, WLE_wl_pointer_motion) == 0,
+                        "the pointer's motion is the drag's, no pointer's");
+                wlc_send(cb, offer, WLQ_wl_data_offer_accept, enter ? enter->u[0] : 0UL, "text/plain");
+                wlc_send(cb, offer, WLQ_wl_data_offer_set_actions, 3L, 1L);
+                wlc_pump(cb);
+                WLCHECK(wlc_count(cb, WLI_wl_data_source, WLE_wl_data_source_target) == 1 && wlc_count(cb, WLI_wl_data_source, WLE_wl_data_source_action) == 1 &&
+                            wlc_count(cb, WLI_wl_data_offer, WLE_wl_data_offer_action) == 1,
+                        "an accepted type is the source's target, and the action both take (copy, the preferred) is told to both");
+                wayland_pointer_button(b.row, 272, 0);
+                wlc_pump(cb);
+                WLCHECK(wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_drop) == 1 &&
+                            wlc_count(cb, WLI_wl_data_source, WLE_wl_data_source_dnd_drop_performed) == 1 && !wayland_dragging() && clip_cancelled(cb, 0) == 0,
+                        "let go over the window that accepted: drop, and the source told the drop was performed");
+                write_end = wl_pipe(&reader);
+                wlc_forget(cb);
+                wlc_send(cb, offer, WLQ_wl_data_offer_receive, "text/plain", write_end);
+                wlc_pump(cb);
+                sent = wlc_take(cb, WLI_wl_data_source, WLE_wl_data_source_send);
+                WLCHECK(sent && sent->fd_count == 1 && !strcmp(sent->text[0], "text/plain"), "the target's receive is the source's send, the descriptor handed on");
+                close(reader);
+                wlc_send(cb, offer, WLQ_wl_data_offer_finish);
+                wlc_pump(cb);
+                WLCHECK(wlc_count(cb, WLI_wl_data_source, WLE_wl_data_source_dnd_finished) == 1 && cb->errors == 0, "and its finish the source's dnd_finished");
+                wlc_send(cb, offer, WLQ_wl_data_offer_destroy);
+                wlc_send(cb, drag, WLQ_wl_data_source_destroy);
+        }
+
+        /* a drag let go where nothing took a type, and one ended by Escape: cancelled */
+        {
+                unsigned long drag = clip_source(&b, 0, "text/plain");
+
+                wayland_pointer_to(b.row, 10, 10);
+                wayland_pointer_button(b.row, 272, 1);
+                wlc_pump(cb);
+                wlc_forget(cb);
+                wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)wayland.client[cb->slot]->press_serial);
+                wayland_pointer_button(b.row, 272, 0);
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1 && wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_drop) == 0 && !wayland_dragging(),
+                        "a drag let go with no type accepted is cancelled, and nothing dropped");
+                drag = clip_source(&b, 0, "text/plain");
+                wayland_pointer_button(b.row, 272, 1);
+                wlc_pump(cb);
+                wlc_forget(cb);
+                wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)wayland.client[cb->slot]->press_serial);
+                wayland_key(b.row, 1, 1);
+                wayland_key(b.row, 1, 0);
+                wayland_pointer_button(b.row, 272, 0);
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1 && wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_leave) == 1 && !wayland_dragging(),
+                        "Escape cancels a drag, the window it was over left");
         }
 
         /* the primary selection is a selection of its own, by the same rules */

@@ -4836,6 +4836,16 @@ static void compositor_wl_drain(int row)
                 // pointer's version of the same finger (the kit's press and motion, which say so) is not sent to that client.
                 if ((flags & WINDOW_KEY_TOUCH) && wayland_row_takes_touch(row))
                         continue;
+                // A drag holds the pointer: its motion is over whatever window is under the pointer now, however the press holds
+                // this one (the target may be another client's window, or none).
+                if (type == WINDOW_EVENT_MOTION && wayland_dragging())
+                {
+                        int tab, under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+
+                        wayland_drag_motion(under, under >= 0 ? compositor.pointer_x - compositor.x[under] : 0,
+                                            under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
+                        continue;
+                }
                 // Whatever the event, the pointer is on this window for the client first.
                 if (wayland.pointer_row != row)
                         wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],

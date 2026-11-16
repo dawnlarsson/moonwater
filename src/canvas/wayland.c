@@ -623,6 +623,9 @@ struct wayland_source
 {
         unsigned int id;
         unsigned char live, which, mimes, state;
+        unsigned int actions;            // what a drag of it may be (wl_data_source.set_actions, version 3)
+        struct wayland_table mime_table; // every type it offered, each with its null, as a drag's offer carries them
+        long mime_bytes;
 };
 
 // An offer made to a client of the selection as it was when it was made.
@@ -631,6 +634,8 @@ struct wayland_offer
         unsigned int id;
         unsigned char live, which;
         unsigned long serial;
+        unsigned char drag, accepted, finished; // a drag's offer: the target accepted a type of it, and said it is done with it
+        unsigned int actions, preferred;        // what the target takes of a drag (wl_data_offer.set_actions)
 };
 
 // A pointer lock or confinement: its kind (1 lock, 2 confine), whether it holds the pointer now, whether it ends with its first
@@ -804,6 +809,20 @@ static struct
         // Which client's source is each selection (its slot and one, 0 for none: the text outlives its source), and a count of
         // how many times it changed, so an offer made of an older one is known.
         long selection_owner[2], selection_source[2];
+        long buttons; // the pointer's buttons held, as the clients were told them
+        /*
+                The drag (wl_data_device.start_drag), while there is one: its client, its source (an index, -1 for a drag in its own
+                client with none) and the serial it began with; the client and surface it is over (-1 none) with the offer made it
+                (an index of that client's offers) and the action it came to; dropped once the button let go of it over a target
+                that took a type, until the target is done with it.
+        */
+        struct
+        {
+                int live, dropped;
+                long client, source, origin;
+                long target, surface, offer;
+                unsigned int action;
+        } drag;
         unsigned long selection_serial[2];
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
@@ -1095,6 +1114,8 @@ static void wayland_tables_init(struct wayland_client *c)
 
 static void wayland_tables_drop(struct wayland_client *c)
 {
+        for (long at = 0; at < c->source_table.count; at++)
+                wayland_table_drop(&c->sources[at].mime_table);
         wayland_table_drop(&c->index_table);
         wayland_table_drop(&c->object_table);
         wayland_table_drop(&c->surface_table);
@@ -5795,6 +5816,12 @@ static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_s
         The pointer is over row (or none, -1), at (x, y) of its picture: the surface it leaves, a subsurface or a window's root,
         is sent its leave and the surface it enters its enter, each to every pointer its client has. The same surface is no event.
 */
+WAYLAND_API int wayland_dragging(void);
+WAYLAND_API void wayland_drag_motion(long row, long x, long y);
+WAYLAND_API void wayland_drag_cancel(void);
+static void wayland_drag_release(void);
+static void wayland_drag_end(int how);
+
 static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surface **picked, long *sx_out, long *sy_out)
 {
         struct wayland_client *old = 0, *now = 0;
@@ -5804,6 +5831,13 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         if (!wayland.host)
         {
                 if (picked) *picked = 0;
+                return;
+        }
+        // A drag holds the pointer: where it is goes to the drag, and no client is told of the pointer.
+        if (wayland_dragging())
+        {
+                if (picked) *picked = 0;
+                wayland_drag_motion(row, x, y);
                 return;
         }
         root = wayland_row_surface(row, &now);
@@ -5858,6 +5892,11 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
         struct wayland_surface *root, *s = 0;
         long time, *slots, count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
 
+        if (wayland.host && wayland_dragging())
+        {
+                wayland_drag_motion(row, x, y);
+                return;
+        }
         if (!wayland.host || row != wayland.pointer_row || (wayland.hold_mode == 1 && row == wayland.hold_row) ||
             !(root = wayland_row_surface(row, &c)))
                 return;
@@ -6055,7 +6094,17 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         unsigned long serial;
         long time, *slots, count;
 
-        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || code < 0 || code > 0x2ff)
+        if (!wayland.host || code < 0 || code > 0x2ff)
+                return;
+        wayland.buttons += pressed ? 1 : wayland.buttons > 0 ? -1 : 0;
+        // A drag holds the pointer: the button let go is its drop (or its cancel), and no client is told of it.
+        if (wayland_dragging())
+        {
+                if (!pressed && !wayland.buttons)
+                        wayland_drag_release();
+                return;
+        }
+        if (row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)))
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
@@ -6486,6 +6535,13 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
 
         if (!wayland.host || code < 1 || code > 0x2ff)
                 return;
+        // Escape during a drag: the drag cancelled, and the key the drag's.
+        if (code == 1 && wayland_dragging())
+        {
+                if (pressed)
+                        wayland_drag_cancel();
+                return;
+        }
         if (code < 128)
         {
                 if (pressed)
@@ -6839,6 +6895,8 @@ static void wayland_source_cancel(struct wayland_client *c, long index)
         wayland_end(&e);
 }
 
+static void wayland_drag_end(int how);
+
 // A source object destroyed: a copy of it still being read is ended, and the selection stays what it was but is nobody's.
 static void wayland_source_drop(struct wayland_client *c, long index)
 {
@@ -6852,6 +6910,11 @@ static void wayland_source_drop(struct wayland_client *c, long index)
         }
         if (wayland.selection_owner[which] == c->slot + 1 && wayland.selection_source[which] == index)
                 wayland.selection_owner[which] = 0;
+        // The source of the drag gone: the drag is cancelled, its target told it left.
+        if (wayland.drag.live && wayland.drag.client == c->slot && wayland.drag.source == index)
+                wayland_drag_end(0);
+        wayland_table_drop(&source->mime_table);
+        source->mime_bytes = 0;
         source->live = 0;
 }
 
@@ -7004,6 +7067,372 @@ static int wayland_receive(struct wayland_client *c, struct wayland_object *self
         return WAYLAND_OK;
 }
 
+
+/*
+        Drag and drop (wl_data_device.start_drag). A client starts a drag with the serial of the press its button holds; the pointer is
+        then the drag's until the button lets go: what is under it is entered (wl_data_device.enter with an offer of its own carrying
+        the source's types and actions), moved over (motion) and left (leave), and no pointer event goes to any client. The target
+        accepts a type (wl_data_offer.accept, told to the source as target) and says what it takes (set_actions); the action is
+        what both take, the target's preferred one first, told to both. Let go over a target that took a type (and an action, at
+        version 3): the target is told drop and the source dnd_drop_performed, and the target's receive hands its descriptor to the
+        source's send as it is (no byte passes through the compositor), and its finish is the source's dnd_finished. Let go
+        anywhere else, Escape, the source or either client gone: the source is told cancelled and the target left. A drag with no
+        source is the client's own: only its own surfaces are entered, and nothing is carried. Xwayland bridges XDND to this itself.
+*/
+#define WAYLAND_DRAG_ACTIONS 7u
+
+// A type a source offered, kept for a drag's offer (its null with it). A type the memory has no room for is not offered.
+static void wayland_source_type(struct wayland_client *c, long index, const unsigned char *text, long length)
+{
+        struct wayland_source *source = &c->sources[index];
+
+        if (!text || length <= 1)
+                return;
+        source->mime_table.unit = 1;
+        if (!wayland_table_reach(&source->mime_table, source->mime_bytes + length))
+                return;
+        for (long at = 0; at < length; at++)
+                source->mime_table.at[source->mime_bytes + at] = at + 1 < length ? text[at] : 0;
+        source->mime_bytes += length;
+}
+
+static struct wayland_client *wayland_drag_client(void)
+{
+        return wayland.drag.live && wayland.drag.client >= 0 && wayland.drag.client < wayland.client_slots ? wayland.client[wayland.drag.client] : 0;
+}
+
+static struct wayland_source *wayland_drag_source(void)
+{
+        struct wayland_client *c = wayland_drag_client();
+
+        return c && wayland.drag.source >= 0 && wayland.drag.source < c->source_table.count && c->sources[wayland.drag.source].live
+                   ? &c->sources[wayland.drag.source]
+                   : 0;
+}
+
+static struct wayland_client *wayland_drag_target(void)
+{
+        return wayland.drag.live && wayland.drag.target >= 0 && wayland.drag.target < wayland.client_slots ? wayland.client[wayland.drag.target] : 0;
+}
+
+// The target's first data device, or -1.
+static long wayland_drag_device(struct wayland_client *c)
+{
+        long *slots, count = wayland_devices(c, 0, &slots);
+
+        return count > 0 ? slots[0] : -1;
+}
+
+// An event of the drag's source with a word (or none), when the source is there and its version has it.
+static void wayland_drag_tell_source(long op, long version, long word, int has_word)
+{
+        struct wayland_client *c = wayland_drag_client();
+        struct wayland_source *source = wayland_drag_source();
+        long slot = source ? wayland_slot_of(c, source->id) : -1;
+        struct wayland_event e;
+
+        if (slot < 0 || c->objects[slot].version < version)
+                return;
+        e = wayland_begin(c, source->id, op);
+        if (has_word)
+                wayland_word(&e, (unsigned long)word);
+        wayland_end(&e);
+}
+
+// The action a drag comes to: what the source and the target both take, the target's preferred one if it is among them, else the
+// first of copy, move and ask; 0 for none. Told to both when it changes.
+static void wayland_drag_actions(void)
+{
+        struct wayland_client *t = wayland_drag_target();
+        struct wayland_source *source = wayland_drag_source();
+        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count ? &t->offers[wayland.drag.offer] : 0;
+        unsigned int both, action = 0;
+        long slot;
+
+        if (!o)
+                return;
+        both = (source ? source->actions : WAYLAND_DRAG_ACTIONS) & o->actions;
+        action = (both & o->preferred) ? o->preferred : (both & 1u) ? 1u : (both & 2u) ? 2u : (both & 4u) ? 4u : 0;
+        if (action == wayland.drag.action)
+                return;
+        wayland.drag.action = action;
+        wayland_drag_tell_source(WLE_wl_data_source_action, 3, action, 1);
+        slot = wayland_slot_of(t, o->id);
+        if (slot >= 0 && t->objects[slot].version >= 3)
+        {
+                struct wayland_event e = wayland_begin(t, o->id, WLE_wl_data_offer_action);
+
+                wayland_word(&e, action);
+                wayland_end(&e);
+        }
+}
+
+// The target told the drag left it (its offer stays the client's until it destroys it).
+static void wayland_drag_leave(void)
+{
+        struct wayland_client *t = wayland_drag_target();
+        long device = t ? wayland_drag_device(t) : -1;
+
+        if (device >= 0)
+        {
+                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_leave);
+
+                wayland_end(&e);
+        }
+        if (t && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count)
+                t->offers[wayland.drag.offer].drag = 0;
+        if (t && wayland.drag.target != wayland.drag.client)
+                wayland_drag_tell_source(WLE_wl_data_source_target, 1, 0, 1); // no type accepted any more (a null type)
+        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        wayland.drag.action = 0;
+}
+
+/*
+        The drag ended: 0 cancelled (the target left, the source told cancelled), 1 the source's own end (nothing told it),
+        2 finished (the source told dnd_finished). The drag is none after.
+*/
+static void wayland_drag_end(int how)
+{
+        if (!wayland.drag.live)
+                return;
+        if (!wayland.drag.dropped && wayland_drag_target())
+                wayland_drag_leave();
+        if (how == 0)
+                wayland_drag_tell_source(WLE_wl_data_source_cancelled, 1, 0, 0);
+        else if (how == 2)
+                wayland_drag_tell_source(WLE_wl_data_source_dnd_finished, 3, 0, 0);
+        wayland.drag.live = wayland.drag.dropped = 0;
+        wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+}
+
+// The drag over (x, y) of row (-1: no window of a client): the surface there entered with an offer of its own, or moved over.
+static void wayland_drag_over(long row, long x, long y)
+{
+        struct wayland_client *t = 0, *c = wayland_drag_client();
+        struct wayland_surface *root = row >= 0 ? wayland_row_surface(row, &t) : 0, *is = 0;
+        struct wayland_source *source = wayland_drag_source();
+        long sx = 0, sy = 0, device;
+        struct wayland_event e;
+
+        if (!c || wayland.drag.dropped)
+                return;
+        if (root)
+                is = wayland_pick(t, root, x, y, &sx, &sy);
+        // A drag with no source is its own client's alone.
+        if (is && wayland.drag.source < 0 && t != c)
+                is = 0;
+        if (is && (device = wayland_drag_device(t)) < 0)
+                is = 0;
+        if (is && wayland.drag.target == t->slot && wayland.drag.surface == wayland_surface_index(t, is))
+        {
+                e = wayland_begin(t, t->objects[wayland_drag_device(t)].id, WLE_wl_data_device_motion);
+                wayland_word(&e, (unsigned long)wayland.host->now(wayland.host->context));
+                wayland_word(&e, wayland_fixed(sx, is->scale120));
+                wayland_word(&e, wayland_fixed(sy, is->scale120));
+                wayland_end(&e);
+                return;
+        }
+        if (wayland_drag_target())
+                wayland_drag_leave();
+        if (!is)
+                return;
+        device = wayland_drag_device(t);
+        {
+                long index = -1, offer = -1;
+                unsigned long id = 0;
+
+                if (source)
+                {
+                        for (long at = 0; at < t->offer_table.count && index < 0; at++)
+                                if (!t->offers[at].live)
+                                        index = at;
+                        if (index < 0)
+                                index = wayland_client_take(t, &t->offer_table);
+                        id = index >= 0 ? wayland_server_id(t) : 0;
+                        if (id)
+                                offer = wayland_object_new(t, id, WLI_wl_data_offer, t->objects[device].version);
+                        // No room for the target's offer: it is not entered, as a target with no device is not.
+                        if (offer < 0)
+                                return;
+                        t->offers[index].id = (unsigned int)id;
+                        t->offers[index].live = t->offers[index].drag = 1;
+                        t->offers[index].which = 0;
+                        t->offers[index].accepted = t->offers[index].finished = 0;
+                        t->offers[index].actions = t->offers[index].preferred = 0;
+                        t->objects[offer].link = (int)index;
+                        e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_data_offer);
+                        wayland_word(&e, id);
+                        wayland_end(&e);
+                        for (long at = 0; at < source->mime_bytes;)
+                        {
+                                const char *type = (const char *)source->mime_table.at + at;
+                                long length = 1;
+
+                                while (type[length - 1])
+                                        length++;
+                                e = wayland_begin(t, id, WLE_wl_data_offer_offer);
+                                wayland_string(&e, type);
+                                wayland_end(&e);
+                                at += length;
+                        }
+                        if (t->objects[offer].version >= 3)
+                        {
+                                e = wayland_begin(t, id, WLE_wl_data_offer_source_actions);
+                                wayland_word(&e, source->actions);
+                                wayland_end(&e);
+                        }
+                }
+                wayland.drag.target = t->slot, wayland.drag.surface = wayland_surface_index(t, is), wayland.drag.offer = index;
+                e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_enter);
+                wayland_word(&e, wayland_input_serial(t));
+                wayland_word(&e, is->id);
+                wayland_word(&e, wayland_fixed(sx, is->scale120));
+                wayland_word(&e, wayland_fixed(sy, is->scale120));
+                wayland_word(&e, id);
+                wayland_end(&e);
+        }
+}
+
+// start_drag: the source (or none), the origin surface, an icon (not drawn) and the serial of the press that holds the button.
+static int wayland_drag_start(struct wayland_client *c, struct wayland_arg *a)
+{
+        long source = -1;
+
+        if (a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_data_source)
+        {
+                source = c->objects[a[0].slot].link;
+                if (source < 0 || source >= c->source_table.count || c->sources[source].state != 0)
+                        return wayland_fail(c, c->objects[a[0].slot].id, WLN_wl_data_device_error_used_source, "the source was used before");
+        }
+        // Only with the button its press holds: the serial is that press's, and a button is down. Otherwise the source is cancelled.
+        if (!wayland.buttons || (unsigned int)a[3].u != c->press_serial || !wayland_surface_of(c, a[1].slot) || wayland.drag.live)
+        {
+                if (source >= 0)
+                        wayland_source_cancel(c, source);
+                return WAYLAND_OK;
+        }
+        if (source >= 0)
+                c->sources[source].state = 4; // a drag's, never a selection's
+        wayland.drag.live = 1, wayland.drag.dropped = 0;
+        wayland.drag.client = c->slot, wayland.drag.source = source, wayland.drag.origin = a[1].slot;
+        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        wayland.drag.action = 0;
+        wayland_drag_over(wayland.pointer_row, wayland.pointer_x, wayland.pointer_y);
+        return WAYLAND_OK;
+}
+
+// The target accepted a type (none: it takes nothing here), told to the source.
+static void wayland_drag_accept(struct wayland_client *c, long offer, const char *type)
+{
+        struct wayland_client *source_client = wayland_drag_client();
+        struct wayland_source *source = wayland_drag_source();
+        struct wayland_event e;
+        long slot;
+
+        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != offer || wayland.drag.dropped)
+                return;
+        c->offers[offer].accepted = type != 0;
+        slot = source ? wayland_slot_of(source_client, source->id) : -1;
+        if (slot < 0)
+                return;
+        e = wayland_begin(source_client, source->id, WLE_wl_data_source_target);
+        if (type)
+                wayland_string(&e, type);
+        else
+                wayland_word(&e, 0);
+        wayland_end(&e);
+}
+
+// The button let go: a drop where the target took a type (and an action at version 3), else the drag is cancelled.
+static void wayland_drag_release(void)
+{
+        struct wayland_client *t = wayland_drag_target();
+        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count ? &t->offers[wayland.drag.offer] : 0;
+        long device = t ? wayland_drag_device(t) : -1, slot = o ? wayland_slot_of(t, o->id) : -1;
+        int v3 = slot >= 0 && t->objects[slot].version >= 3;
+
+        if (wayland.drag.source < 0 && t && device >= 0)
+        {
+                // A drag of the client's own, with nothing carried: dropped, and over.
+                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_drop);
+
+                wayland_end(&e);
+                wayland.drag.dropped = 1;
+                wayland_drag_end(1);
+                return;
+        }
+        if (!o || device < 0 || !o->accepted || (v3 && !wayland.drag.action))
+        {
+                wayland_drag_end(0);
+                return;
+        }
+        {
+                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_drop);
+
+                wayland_end(&e);
+        }
+        wayland.drag.dropped = 1;
+        wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 3, 0, 0);
+}
+
+// receive on a drag's offer: the target's descriptor handed to the source's send, as it is (none of its bytes pass the compositor).
+static int wayland_drag_receive(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
+{
+        struct wayland_client *source_client = wayland_drag_client();
+        struct wayland_source *source = wayland_drag_source();
+        long slot = source ? wayland_slot_of(source_client, source->id) : -1;
+        struct wayland_event e;
+
+        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != self->link || slot < 0 || !a[0].text ||
+            a[0].length <= 1 || source_client->out_fd_count >= WAYLAND_OUT_FDS)
+                return WAYLAND_OK; // the descriptor is closed with the request's: the target reads an end
+        e = wayland_begin(source_client, source->id, WLE_wl_data_source_send);
+        wayland_string(&e, (const char *)a[0].text);
+        source_client->out_fd_owned[source_client->out_fd_count] = 1;
+        source_client->out_fds[source_client->out_fd_count] = a[1].fd;
+        source_client->out_fd_at[source_client->out_fd_count++] = e.start;
+        a[1].fd = -1; // the source's now, counted as the shim's until it is sent
+        wayland_end(&e);
+        return WAYLAND_OK;
+}
+
+// A drag's offer destroyed by its target: a dropped drag ends (finished at version 2, where there is no finish; cancelled at 3).
+static void wayland_drag_offer_gone(struct wayland_client *c, long offer)
+{
+        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != offer)
+                return;
+        if (wayland.drag.dropped)
+        {
+                long slot = wayland_slot_of(c, c->offers[offer].id);
+
+                wayland_drag_end(c->offers[offer].finished || (slot >= 0 && c->objects[slot].version < 3) ? 2 : 0);
+                return;
+        }
+        wayland.drag.offer = -1;
+}
+
+// Whether a drag holds the pointer (the host sends its motion and its release here, and Escape cancels it).
+WAYLAND_API int wayland_dragging(void)
+{
+        return wayland.drag.live && !wayland.drag.dropped;
+}
+
+WAYLAND_API void wayland_drag_cancel(void)
+{
+        if (wayland_dragging())
+                wayland_drag_end(0);
+}
+
+// The drag over the row under the pointer (-1 for none), from the host that knows which window that is.
+WAYLAND_API void wayland_drag_motion(long row, long x, long y)
+{
+        if (wayland_dragging())
+        {
+                wayland.pointer_x = x, wayland.pointer_y = y;
+                wayland_drag_over(row, x, y);
+        }
+}
+
 static int wayland_data_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         switch (self->iface)
@@ -7019,7 +7448,12 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
         case WLI_wl_data_source:
         case WLI_zwp_primary_selection_source_v1:
                 if (op == WLQ_wl_data_source_offer && c->sources[self->link].state == 0)
+                {
                         c->sources[self->link].mimes |= (unsigned char)wayland_mime_bit(a[0].text, a[0].length);
+                        wayland_source_type(c, self->link, a[0].text, a[0].length);
+                }
+                else if (op == WLQ_wl_data_source_set_actions && !(a[0].u & ~7UL))
+                        c->sources[self->link].actions = (unsigned int)a[0].u;
                 else if (op == WLQ_wl_data_source_destroy)
                         wayland_source_drop(c, self->link);
                 else if (op == WLQ_wl_data_source_set_actions && (a[0].u & ~7UL))
@@ -7029,17 +7463,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                 if (op == WLQ_wl_data_device_set_selection)
                         return wayland_set_selection(c, self, 0, a);
                 if (op == WLQ_wl_data_device_start_drag)
-                {
-                        // Not done: the source of a drag is told it is not going.
-                        if (a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_data_source)
-                        {
-                                long src = c->objects[a[0].slot].link;
-
-                                if (src >= 0 && src < c->source_table.count && c->sources[src].state == 0)
-                                        wayland_source_cancel(c, src);
-                        }
-                        return WAYLAND_OK;
-                }
+                        return wayland_drag_start(c, a);
                 wayland_device_remove(c, 0, self->id);
                 return WAYLAND_OK;
         case WLI_zwp_primary_selection_device_v1:
@@ -7049,11 +7473,29 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                 return WAYLAND_OK;
         case WLI_wl_data_offer:
                 if (op == WLQ_wl_data_offer_receive)
-                        return wayland_receive(c, self, a);
+                        return c->offers[self->link].drag ? wayland_drag_receive(c, self, a) : wayland_receive(c, self, a);
                 if (op == WLQ_wl_data_offer_destroy)
+                {
                         c->offers[self->link].live = 0;
+                        wayland_drag_offer_gone(c, self->link);
+                }
                 else if (op == WLQ_wl_data_offer_finish)
-                        return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_finish, "finish is for a drag's offer");
+                {
+                        if (!c->offers[self->link].drag || !wayland.drag.live || !wayland.drag.dropped || wayland.drag.target != c->slot ||
+                            wayland.drag.offer != self->link)
+                                return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_finish, "finish is for a dropped drag's offer");
+                        c->offers[self->link].finished = 1;
+                        wayland_drag_end(2);
+                }
+                else if (op == WLQ_wl_data_offer_accept && c->offers[self->link].drag)
+                        wayland_drag_accept(c, self->link, a[1].length > 0 ? (const char *)a[1].text : 0);
+                else if (op == WLQ_wl_data_offer_set_actions && c->offers[self->link].drag)
+                {
+                        if ((a[0].u & ~7UL) || (a[1].u & (a[1].u - 1)) || (a[1].u & ~7UL))
+                                return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_action_mask, "the actions are not a mask of three");
+                        c->offers[self->link].actions = (unsigned int)a[0].u, c->offers[self->link].preferred = (unsigned int)a[1].u;
+                        wayland_drag_actions();
+                }
                 return WAYLAND_OK;
         case WLI_zwp_primary_selection_offer_v1:
                 if (op == WLQ_zwp_primary_selection_offer_v1_receive)
@@ -9087,6 +9529,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
+        wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         wayland.cursor_client = wayland.cursor_surface = -1;
         wayland.xwayland_uid = -1;
         wayland.host = host;
@@ -9194,6 +9637,22 @@ WAYLAND_API void wayland_drop(long slot)
                 return;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
+        // The drag's client gone: cancelled. The client a drag is over gone: left (a dropped drag is cancelled).
+        if (wayland.drag.live && wayland.drag.client == slot)
+        {
+                wayland.drag.source = -1; // its source goes with it, and is told nothing
+                wayland_drag_end(1);
+        }
+        else if (wayland.drag.live && wayland.drag.target == slot)
+        {
+                if (wayland.drag.dropped)
+                {
+                        wayland.drag.target = -1;
+                        wayland_drag_end(0);
+                }
+                else
+                        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        }
         // Its picture of the pointer is none: the pools it was in are let go of below.
         if (wayland.cursor_client == slot)
         {
