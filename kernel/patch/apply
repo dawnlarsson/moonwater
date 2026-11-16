@@ -1128,6 +1128,26 @@ if [ -f "$lttpr_cap" ]; then
         fi
 fi
 
+#       A kernel built without device coredump (ALLOW_DEV_COREDUMP is off in
+#       debug_none, as "for more sensitive systems ... not to have the code,
+#       nor keep any data") answers the MediaTek Bluetooth driver's registration
+#       with -EOPNOTSUPP, and the driver then logs "Failed to register coredump
+#       (-95)" at error level on every boot with such a controller, as though
+#       something had broken: the setup goes on without it and nothing has. That
+#       answer is the kernel saying what it was built to say, so it is no
+#       failure; any other error of the registration is still logged.
+btmtk=linux/drivers/bluetooth/btmtk.c
+if [ -f "$btmtk" ]; then
+        cat > "$settings_work/btmtk" <<EOF
+${tab}/* Moonwater: no device coredump in this kernel is how it was built, not a failure. */
+${tab}if (err == -EOPNOTSUPP)
+${tab}${tab}err = 0;
+EOF
+        settings_insert "$btmtk" "Moonwater: no device coredump in this kernel" \
+                "${tab}err = btmtk_register_coredump(hdev, btmtk_data->drv_name, fw_version);" \
+                after "$settings_work/btmtk" "btmtk coredump"
+fi
+
 rm -rf "$settings_work"
 
 #       So: where does it actually point, and is that here.
