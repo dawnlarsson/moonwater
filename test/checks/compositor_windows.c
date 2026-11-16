@@ -234,7 +234,7 @@ static void check_compositor_lifecycle(void)
     struct windows address_to table;
     struct compositor_frame was;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -368,7 +368,7 @@ static void check_compositor_least_scale(void)
     unsigned long words = (unsigned long)GLASS_SIDE * GLASS_SIDE, changed = 0;
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -417,7 +417,7 @@ static void check_compositor_card_lists(void)
     struct compositor_connected found;
     unsigned int unlisted = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     if (!card_fake_open(800, 1280))
     {
         check("card lists: the fake card is made", false);
@@ -596,7 +596,7 @@ static void check_compositor_doors_held(void)
         int door_socket[2], wake_socket[2];
         timespec nap = {0, 100000000};
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -691,7 +691,7 @@ static void check_compositor_table_taken(void)
         table_sealed_write("/proc/self/gid_map", map);
         if (compositor_call(syscall(mount), (positive) "none", (positive) "/run", (positive) "tmpfs", 0, 0, 0) != 0)
             system_call_1(syscall(exit_group), 77);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.card = -1;
         compositor.width = compositor.height = 64;
         compositor.scale = 100;
@@ -847,7 +847,7 @@ static void check_compositor_table_sealed(void)
         table_sealed_write("/proc/self/gid_map", map);
         if (compositor_call(syscall(mount), (positive) "none", (positive) "/run", (positive) "tmpfs", 0, 0, 0) != 0)
             system_call_1(syscall(exit_group), 77);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.card = -1;
         compositor.width = compositor.height = 64;
         compositor.scale = 100;
@@ -884,7 +884,7 @@ static void check_compositor_card_edid(void)
     static const unsigned char named[6] = {1, 1, 1, 1, 0, 0};
     unsigned int right = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     if (!card_fake_open(1920, 1080))
     {
         check("card edid: the fake card is made", false);
@@ -931,7 +931,7 @@ static int card_turn_take(int refuse, b32 fresh)
         card_fake.rotation = 1;
     }
     card_fake.refuse_atomic = refuse;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(compositor_turns, sizeof(compositor_turns));
     compositor.card = card_fake.fd;
     compositor.scale = 100;
@@ -951,7 +951,7 @@ static fn card_turn_drop(void)
             compositor_call(syscall(munmap), (positive)compositor_turns[at].pixels, compositor_turns[at].bytes, 0, 0, 0, 0);
     if (compositor.mirror)
         compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(compositor_turns, sizeof(compositor_turns));
     compositor.card = -1;
 }
@@ -972,7 +972,7 @@ static void check_compositor_card_turn(void)
     system_write_once(handle, line, sizeof(line) - 1);
     system_close(handle);
     compositor_displays_path = path;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     if (!card_fake_open(800, 1280))
     {
         check("card turn: the fake card is made", false);
@@ -1223,7 +1223,7 @@ static void check_compositor_space_sizes(void)
 */
 static b32 card_walk_begin(unsigned long nodes, unsigned long dark, unsigned long busy, unsigned long firmware)
 {
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     if (!card_fake_open(1024, 768))
         return false;
     card_fake.base = card_fake.fd;
@@ -1721,7 +1721,7 @@ static void check_compositor_touch_hold_gone(void)
     struct windows address_to table;
     unsigned int head;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -1802,7 +1802,7 @@ static void check_compositor_lifecycle_seam(void)
     struct compositor_frame was;
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -1898,7 +1898,7 @@ static void check_compositor_lifecycle_more(void)
     unsigned int seed = 0x2545f491u;
     int x, y, width, height, under;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -2112,7 +2112,7 @@ static void check_compositor_asked(void)
     string_address environment_no[] = {asked_no, null};
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2157,7 +2157,7 @@ static void check_compositor_tiling(void)
     struct windows address_to table;
     int half = GLASS_SIDE / 2;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2271,7 +2271,7 @@ static void layout_setup(int side, int scale)
 {
     struct windows address_to table = compositor.table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.table = table;
     compositor.pixels = table->pixels;
     compositor.buffer = table->buffer;
@@ -2528,7 +2528,7 @@ static void check_compositor_seam(void)
     {
         int start_x = layout ? 256 : 220, start_y = 20;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
         compositor.shared_row = compositor.mark_row = COMPOSITOR_NONE;
@@ -3805,7 +3805,7 @@ static void over_setup(unsigned int *made, unsigned int *band)
 {
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
@@ -4555,7 +4555,7 @@ static void check_compositor_wheel(void)
     unsigned int events;
     int last, sum;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -5169,7 +5169,7 @@ static void check_compositor_lit(void)
     struct windows address_to table;
     unsigned int inside = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -5262,7 +5262,7 @@ static void check_compositor_border(void)
     unsigned int outside, one, four;
     long value = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;

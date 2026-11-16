@@ -1248,7 +1248,7 @@ static void gpu_wc_rows(void)
         int fd = (int)system_call_2(syscall(memfd_create), (positive) "wc", 0);
         static unsigned int pixels[SIDE * SIDE];
         unsigned int seeded = compositor_wl.wc_seeded, presents = compositor_wl.wc_presents, *front;
-        unsigned char rows[1] = {ROW};
+        unsigned int rows[1] = {ROW};
 
         if ((table < 0 && table > -4096) || fd < 0)
         {
@@ -1264,8 +1264,8 @@ static void gpu_wc_rows(void)
         compositor.width = SIDE, compositor.stride = SIDE;
         compositor.x[ROW] = compositor.y[ROW] = 0, compositor.w[ROW] = compositor.h[ROW] = SIDE, compositor.front[ROW] = 0;
         compositor.damages = 1, compositor.damage[0][0] = compositor.damage[0][1] = 0, compositor.damage[0][2] = compositor.damage[0][3] = SIDE;
-        memory_zero(compositor_wl.wc_reads, sizeof compositor_wl.wc_reads);
-        memory_zero(compositor_wl.wc_copy, sizeof compositor_wl.wc_copy);
+        memory_zero(compositor_wl.wc_reads, compositor_rows_made * sizeof(*compositor_wl.wc_reads));
+        memory_zero(compositor_wl.wc_copy, compositor_rows_made * sizeof(*compositor_wl.wc_copy));
 #define GPU_WC_LEND()                                                                                                                                   \
         (memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]), compositor_wl.lent[ROW].pixels = pixels, compositor_wl.lent[ROW].pitch = SIDE, \
          compositor_wl.lent[ROW].width = SIDE, compositor_wl.lent[ROW].height = SIDE, compositor_wl.lent[ROW].fd = fd,                                 \
@@ -2701,7 +2701,7 @@ static void gpu_card_rows(void)
         unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, kept_metric = compositor_metric_card_count, submits, flips, atomics;
         int kept_gpu_on = compositor_gpu;
         const int one[1][4] = {{0, 0, 64, 64}}, three[3][4] = {{0, 0, 64, 64}, {1024, 0, 1088, 64}, {1984, 0, 2048, 64}};
-        const unsigned char rows[1] = {3};
+        const unsigned int rows[1] = {3};
         const unsigned short clip[1][4] = {{0, 0, 64, 64}};
         struct compositor_poll wanted[COMPOSITOR_POLLS];
         struct compositor_slots held, open;
@@ -2719,7 +2719,7 @@ static void gpu_card_rows(void)
         compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
-        memory_zero(&compositor_card, sizeof(compositor_card));
+        compositor_card_zero();
         compositor_card.nowait = 1, compositor_card.looped = 1; // the loop's present, without a wait
         gpu_late_reset();
         compositor_gpu_layout();
@@ -2924,7 +2924,7 @@ static void gpu_lists_nowait_rows(void)
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
         compositor.dropping = rows_from(0), compositor.showing[5] = 1, compositor.x[5] = 100, compositor.y[5] = 10, compositor.w[5] = 64, compositor.h[5] = 4;
-        memory_zero(&compositor_card, sizeof(compositor_card));
+        compositor_card_zero();
         compositor_card.nowait = 1, compositor_card.lists_nowait = 1;
         gpu_late_reset();
         compositor_gpu_layout();
@@ -3746,7 +3746,7 @@ static void grab_protocol_rows(void)
 
         memory_copy(kept_comp, &compositor, sizeof(compositor));
         memory_copy(kept_xwm, &compositor_xwm, sizeof(compositor_xwm));
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         memory_zero(&compositor_xwm, sizeof(compositor_xwm));
         memory_zero(&tbl, sizeof(tbl));
 
@@ -4065,7 +4065,7 @@ static void gpu_engine_and_render_regressions(void)
         {
                 struct windows fake_table = {0};
                 struct compositor_frame f = {0};
-                unsigned char row = 0;
+                unsigned int row = 0;
 
                 fake_table.list_mode = 1;
                 compositor.table = &fake_table;
@@ -4087,6 +4087,7 @@ static void gpu_engine_and_render_regressions(void)
 
 b32 main(void)
 {
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;

@@ -29,7 +29,7 @@ static void check_compositor_click(void)
     struct compositor_sway sway = {0, 0, 0};
     int hot = 1, sizes[8] = {128, 192, 205, 256, 320, 384, 512, 576}, half;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.scale = 200;
@@ -104,7 +104,7 @@ static void check_compositor_cursor_style(void)
     unsigned int sentinel = 0x5a5a5a5au;
     int row_at, column_at, sentinel_ok = 1, squeeze_row, style_row, touched, mouse, same = 1, hot_x, hot_y;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.scale = 100;
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 16, 16, &p, fill, edge);
@@ -529,7 +529,7 @@ static void check_compositor_dismiss(void)
     struct compositor_frame frame;
     int bx, by, side;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -613,7 +613,7 @@ static void check_compositor_close_over_control(void)
     struct compositor_frame frame;
     int bx, by, side;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -663,7 +663,7 @@ static void check_compositor_popup(void)
     // a later section to take a row of the compositor for one.
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -744,7 +744,7 @@ static void check_compositor_popup_press(b32 touch)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -838,7 +838,7 @@ static void check_popup_ground_steady(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -944,7 +944,7 @@ static void check_dropdown_labels(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1158,7 +1158,7 @@ static void check_dropdown_scroll(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1283,7 +1283,7 @@ static void check_popup_reopen(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1428,7 +1428,7 @@ static void check_compositor_popup_grip(b32 touch)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1502,7 +1502,7 @@ static void check_compositor_popup_holds(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1570,7 +1570,7 @@ static void check_compositor_glass_popup(void)
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1637,7 +1637,7 @@ static void check_compositor_tab_reach(void)
     struct taskbar_view view;
     int sx, sy, sw, sh, dir, hit, at20, at30, at50;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -1687,7 +1687,7 @@ static void check_compositor_tray(void)
     struct taskbar_view view;
     int tx, ty, tw, th;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -1784,7 +1784,7 @@ static void check_compositor_launcher(void)
     {
         int x, y, w, h, rect[4];
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -1896,7 +1896,7 @@ static void check_compositor_hover(void)
     struct windows address_to table;
     unsigned int before;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2060,7 +2060,7 @@ static struct windows address_to predict_setup(void)
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2911,7 +2911,7 @@ static void check_notices_dot(void)
         struct taskbar_view view;
         int x, y, w, h, tx, ty, tw, th, mx, my, mw, mh;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -3146,7 +3146,7 @@ static void check_compositor_volume(void)
                 system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[k], 0);
         compositor_volume_unmap();
         memory_zero(&compositor_volume, sizeof(compositor_volume));
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         taskbar_classic(); // the tray these rows were written for: every item after the tasks, the clock its cell
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -3569,7 +3569,7 @@ static void check_compositor_chrome(void)
     unsigned int hash = 2166136261u;
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -3619,7 +3619,7 @@ static void check_compositor_focus_line(void)
     {
         struct windows address_to table;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -3675,7 +3675,7 @@ static void check_compositor_minimise(void)
     int bx, by, side;
     unsigned int head;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -3756,7 +3756,7 @@ static void check_compositor_glyphs(void)
         {
             unsigned int paper = dark ? 0x111113u : 0xf7f7f8u, ink = dark ? 0xededefu : 0x18181bu;
 
-            memory_zero(&compositor, sizeof(compositor));
+            compositor_zero();
             compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
             compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
             compositor.width = compositor.height = GLASS_SIDE;

@@ -683,6 +683,7 @@ static positive model_wrong; // the pixels that differ from the processor's, eve
 
 b32 main()
 {
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         int PW = 696;
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20), wrong_before;

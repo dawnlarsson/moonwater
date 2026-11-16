@@ -10832,7 +10832,7 @@ static void check_pinch_delivery(void)
         unsigned int head, at;
         int row = 1;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
         compositor.touch.pinch_row = COMPOSITOR_NONE;
@@ -11097,7 +11097,7 @@ static fn check_pad_pinch(void)
         unsigned int head, at, after;
         int row = 1, held = 0, parallel_held = 0, lifted = 0;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
         compositor.touch.pinch_row = COMPOSITOR_NONE;
@@ -11204,7 +11204,7 @@ static fn check_pad_scroll(void)
         long total = 0, sum_v = 0;
         int x, y, kind, reports = 0, kinds_wrong = 0;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         memory_zero(pad, sizeof(*pad));
         pad->per_mm_x = pad->per_mm_y = 100;
         pad->touching = 1, pad->fingers = 2, pad->moving = 1;
@@ -11273,7 +11273,7 @@ static fn check_wheel_stream(void)
         int ok = 1, two = 0;
         positive t = 1000000000ull, g = UI_HAND_GAP_NS;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         ok &= !compositor_wheel_stream(0, t);                              // the first of a device is stepped
         ok &= compositor_wheel_stream(0, t + 16000000);                    // 16 ms after: a stream
         ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000);       // 100 ms after: a lone notch, stepped (one stream notch is no gesture)
@@ -11360,7 +11360,7 @@ static fn check_wheel_modifiers(void)
 
         for (int row = 0; row < WINDOWS; row++)
                 compositor_popup_parent[row] = -1;
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -11407,7 +11407,7 @@ static fn check_wheel_mouse(void)
         int mouse_steps = 1, tablet_streams;
         positive t = 5000000000ull;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.input_kinds[0] = WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
         compositor.input_kinds[1] = WINDOWS_INPUT_TABLET | WINDOWS_INPUT_WHEEL;
         for (int k = 0; k < 40; k++)
@@ -11427,7 +11427,7 @@ static fn check_wheel_memory(void)
         positive t = 2000000000ull, g = UI_HAND_GAP_NS, m = COMPOSITOR_WHEEL_MEMORY_NS;
         int ok = 1, never = 1, mouse = 1, late = 1, memo = 1;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         // Two stream notches and no third: the device has not streamed, so its next gesture's first notch is a row step.
         compositor_wheel_stream(2, t);
         ok &= compositor_wheel_stream(2, t + 16000000) && compositor_wheel_stream(2, t + 32000000);
@@ -11435,7 +11435,7 @@ static fn check_wheel_memory(void)
         check("wheel memory: a device whose gesture had two stream notches has not streamed: its next first notch is stepped", ok && never);
 
         // Three in a gesture: streamed. Its next first notch, a second later, is a stream notch, and the gesture goes on as one.
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor_wheel_stream(3, t);
         ok = compositor_wheel_stream(3, t + 16000000) && compositor_wheel_stream(3, t + 32000000) && compositor_wheel_stream(3, t + 48000000);
         ok &= compositor_wheel_stream(3, t + 48000000 + 1000000000ull);
@@ -11443,13 +11443,13 @@ static fn check_wheel_memory(void)
         check("wheel memory: a device that streamed: its next gesture's first notch, a second later, is a stream notch and so is the rest", ok);
 
         // Three seconds after its last stream notch the memory has run out: a row step, as a new device's first is.
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor_wheel_stream(3, t);
         compositor_wheel_stream(3, t + 16000000);
         compositor_wheel_stream(3, t + 32000000);
         compositor_wheel_stream(3, t + 48000000);
         late &= !compositor_wheel_stream(3, t + 48000000 + m + 1);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor_wheel_stream(3, t);
         compositor_wheel_stream(3, t + 16000000);
         compositor_wheel_stream(3, t + 32000000);
@@ -11459,14 +11459,14 @@ static fn check_wheel_memory(void)
               late && memo);
 
         // A mouse's long gaps: never a stream and never a stream's memory, however often it turns.
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         for (int k = 0; k < 40; k++)
                 mouse &= !compositor_wheel_stream(4, t + (positive)k * 300000000ull);
         mouse &= !compositor_wheel_stream(4, t + 40ull * 300000000ull + 1000000000ull);
         check("wheel memory: a mouse's notches 300 ms apart are stepped, forty of them and then one a second later", mouse);
 
         // Another device has its own memory: device 0 streamed, device 1 did not.
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor_wheel_stream(5, t);
         compositor_wheel_stream(5, t + 16000000);
         compositor_wheel_stream(5, t + 32000000);
@@ -11558,7 +11558,7 @@ static fn check_stream_gain(void)
         check("stream gain: 8 px at 10 a second and below, 32 px at 45 and above and held there, and between them between the two",
               held && bounded);
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         for (int k = 0; k < 4; k++)
         {
                 long long sum_v = 0;
@@ -11664,7 +11664,7 @@ static fn check_trackpad_speed(void)
         long pads[3], stream[3];
         int ok;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         for (unsigned int speed = 0; speed < 3; speed++)
         {
                 compositor.trackpad_speed = speed == 0 ? 100 : speed == 1 ? 60 : 160;
@@ -11689,7 +11689,7 @@ static fn check_stream_notch(void)
         long long sum = 0, hires = 0, huge;
         int ok;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         for (int k = 0; k < 100; k++)
                 sum += compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0);
         check("stream notch: a hundred stream notches are 2400 of the wheel's 120ths: 8 px each at 100 percent, exactly",

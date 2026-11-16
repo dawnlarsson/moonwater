@@ -331,6 +331,7 @@ static void fold_frames(void)
 
 b32 main()
 {
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         positive size = 0, bytes;
         long engine;
 
@@ -8350,7 +8351,7 @@ static fn check_no_tab(void)
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
         struct windows address_to table;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -8406,7 +8407,7 @@ static fn check_no_tab(void)
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
         if (compositor.blur)
                 compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
 }
 
 /*
@@ -8601,7 +8602,7 @@ static fn check_identify_frame(void)
         b32 outside = true;
         unsigned int paper = 0, ink = 0;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -8655,7 +8656,7 @@ static fn check_identify_frame(void)
         table->pid[1] = 1;
         compositor_leave(1);
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         identify.own.table = null;
 }
 
@@ -9022,6 +9023,7 @@ static void record_rows(void)
 
 b32 main()
 {
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         string_address paths[1];
         positive compared = 0, wrong = 0, refused = 0;
 

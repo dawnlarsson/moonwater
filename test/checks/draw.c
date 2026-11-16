@@ -1356,6 +1356,7 @@ static void dl_list_rows(void)
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
         table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
         head = (unsigned int address_to)window_list_of(table, 0);
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, which nothing before these rows made
         compositor.table = table, compositor.pixels = WINDOWS_HEADER, compositor.buffer = DL_BUFFER;
         compositor.front[0] = 0;
         table->stride = DL_W, table->list_mode = 1, table->list_refused = 0;
@@ -1537,6 +1538,7 @@ static void dl_backoff_rows(void)
 
 b32 main(void)
 {
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;
         dl_list_rows();

@@ -40,7 +40,7 @@ struct compositor_fb2
 
 // The card's pins of the table's picture pages (gpu.c's dma-buf route): a count a row, and the row's pinned flag stays set while one is held, so the program that
 // owns the row gives back no page the card may read. offset is the pages' place in the table's memfd; the pins of other rows are not counted.
-static unsigned int compositor_gpu_pins[WINDOWS];
+static unsigned int *compositor_gpu_pins;
 static int compositor_shows_row(int row);
 static void compositor_row_reclaim(int row);
 static void compositor_gpu_pin(positive offset, b32 on)
@@ -247,7 +247,7 @@ static struct
         struct compositor_rows rows; // the rows whose pictures the present's jobs read (bit row)
         b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-nowait was there at the start)
         struct compositor_rows list_rows; // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
-        positive list_seq[WINDOWS], list_began;
+        positive *list_seq, list_began;
         unsigned int list_recovered; // the card's restarts (gpu_recovered) when they were submitted: one since ends them, as a hang does
         unsigned int door_from;     // the door read first at the next turn: the first of those a list's job left for later
 } compositor_card;
@@ -904,7 +904,7 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
 
 // The window the card can show straight: the top one, opaque, square and filling the output at the size it drew, with
 // nothing over it but the tabs, a pointer on its own plane, and a framebuffer of its buffer; -1 when there is none.
-static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
         int row;
 
@@ -1666,7 +1666,7 @@ static void compositor_unscanned(unsigned int why)
         compositor still draws round it. A card with no overlay, or one that
         refuses, has the window composed as any other.
 */
-static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned char *rows,
+static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned int *rows,
                                       unsigned int windows, int rect[4])
 {
         struct compositor_frame band;

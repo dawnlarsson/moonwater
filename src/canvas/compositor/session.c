@@ -1362,7 +1362,7 @@ static void compositor_clip_gesture(int row);
 static unsigned long long compositor_stamp_now;
 
 // Whether the left button is down on a keyboard window (WINDOW_KEYBOARD): its key requests are read while it is (compositor_osk_read).
-static unsigned char compositor_osk_held[WINDOWS];
+static unsigned char *compositor_osk_held;
 
 static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b);
 
@@ -1372,11 +1372,11 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
         again before the next thing the row is sent and at each pass of the loop (compositor_owed_pass), the buttons first and then the keys,
         with the flags it was dropped with (a key's character none, as compositor_keys_release posts it).
 */
-static unsigned char compositor_owed[WINDOWS];                 // the buttons (bit of code - COMPOSITOR_BTN_LEFT) whose release the row is owed
-static unsigned int compositor_owed_flags[WINDOWS][8];
-static unsigned char compositor_owed_keys[WINDOWS][32];        // the keys (bit of code, codes under 256) whose release the row is owed
-static unsigned int compositor_owed_key_flags[WINDOWS][256];
-static unsigned char compositor_owed_any[WINDOWS];             // whether any key of the row is owed
+static unsigned char *compositor_owed;                 // the buttons (bit of code - COMPOSITOR_BTN_LEFT) whose release the row is owed
+static unsigned int (*compositor_owed_flags)[8];
+static unsigned char (*compositor_owed_keys)[32];        // the keys (bit of code, codes under 256) whose release the row is owed
+static unsigned int (*compositor_owed_key_flags)[256];
+static unsigned char *compositor_owed_any;             // whether any key of the row is owed
 
 static void compositor_owed_flush(int row)
 {
@@ -1522,9 +1522,9 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
 
 static struct
 {
-        thread *worker[WINDOWS + 1];
-        int kick[WINDOWS + 1];          // eventfds, the loop to a thread
-        unsigned int asked[WINDOWS + 1]; // COMPOSITOR_DOOR_* asked of a thread
+        thread **worker;
+        int *kick;          // eventfds, the loop to a thread
+        unsigned int *asked; // COMPOSITOR_DOOR_* asked of a thread
         struct compositor_rows busy;     // the slots whose door a thread has: not polled
         struct compositor_rows drained, reopened; // what the threads have done, for the loop to take
         int done;                       // the eventfd a thread knocks the loop with, or -1

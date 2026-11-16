@@ -738,7 +738,7 @@ static int compositor_glass_room(int row)
         return 1;
 }
 
-static void compositor_glass_pass(struct compositor_frame *frames, const unsigned char *rows, unsigned int count)
+static void compositor_glass_pass(struct compositor_frame *frames, const unsigned int *rows, unsigned int count)
 {
         int shift = COMPOSITOR_GLASS_LEVELS, spread = COMPOSITOR_GLASS_SPREAD, block = COMPOSITOR_GLASS_BLOCK;
 

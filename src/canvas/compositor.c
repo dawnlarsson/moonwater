@@ -613,6 +613,7 @@ struct compositor_chip
         they are wanted come with the table's sparse layout.
 */
 static unsigned int compositor_rows_in_use = WINDOWS;
+static unsigned int compositor_rows_made; // the rows whose memory is committed (compositor_rows_make)
 
 /*
         A set of rows, a bit each, with one past them (the doors' slot that is no row, COMPOSITOR_DOOR_MISC): what the masks of a
@@ -964,67 +965,68 @@ static struct
         unsigned int overlay_fb[2], overlay_handle[2], overlay_back, overlay_rows;
         unsigned int *overlay_pixels[2];
         unsigned long overlay_pitch, overlay_bytes; // pitch in words
-        unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, flip_buffer;
-        unsigned int taken_held[WINDOWS], patched[WINDOWS][2];
+        unsigned int (*scan_fb)[2], (*scan_handle)[2], on_screen, flip_buffer;
+        unsigned int *taken_held, (*patched)[2];
         struct compositor_rows held_rows, dropping, reclaim;
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
         unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
         unsigned int *under[2];
         int under_rect[2][4];
-        int door[WINDOWS], wake[WINDOWS];
+        int *door, *wake;
         struct compositor_rows woken;  // the rows to knock on at the end of the pass, a bit each
         struct compositor_rows fit;    // the rows whose next picture of another size is asked to fit its screen (a scale was taken), a bit each
         positive fit_until;  // and until when (compositor_scale_fit)
-        unsigned int seen[WINDOWS];     // the frame last taken
+        unsigned int *seen;     // the frame last taken
         // A window's solid runs (compositor_runs_note): its picture's, mapped when first read, the picture they are of (the tag of
         // its frame and buffer), how many presents composed that picture, and what became of the read: 0 not read, 1 read and used
         // by the compose, 2 read and not worth using.
-        struct compositor_run_row *runs[WINDOWS];
-        unsigned long runs_bytes[WINDOWS];
-        unsigned int runs_tag[WINDOWS], runs_composed[WINDOWS];
-        unsigned char runs_state[WINDOWS];
-        unsigned int showing[WINDOWS];  // it has shown a picture: it is on the screen and has a tab
-        unsigned char landing[WINDOWS]; // its first show is landing: drawn smaller, growing to its size (compositor_land)
-        positive land_at[WINDOWS];      // when its landing began, at the first present that drew it; 0 until then
+        struct compositor_run_row **runs;
+        unsigned long *runs_bytes;
+        unsigned int *runs_tag, *runs_composed;
+        unsigned char *runs_state;
+        unsigned int *showing;  // it has shown a picture: it is on the screen and has a tab
+        unsigned char *landing; // its first show is landing: drawn smaller, growing to its size (compositor_land)
+        positive *land_at;      // when its landing began, at the first present that drew it; 0 until then
         // A window arranged or floated glides from the rectangle it had (compositor_glide_start): drawn between that and where
         // it is, from glide_at (0 until its first present), while glide[] is 1.
-        unsigned char glide[WINDOWS];
-        int glide_from[WINDOWS][4];
-        positive glide_at[WINDOWS];
+        unsigned char *glide;
+        int (*glide_from)[4];
+        positive *glide_at;
         // Where the window was put when its glide began: a window moved since (a hand, a placement) takes where it glides
         // from along with it. And the window the hand holds that glides all the same, plus one (0 for none): a tile torn
         // off, shrinking to its own size about the hand (compositor_float_for_drag).
-        int glide_base[WINDOWS][2];
+        int (*glide_base)[2];
         int drag_glide;
-        unsigned int made[WINDOWS];     // the order the windows first showed in, which their tabs are in
-        int x[WINDOWS], y[WINDOWS];
-        unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
+        unsigned int *made;     // the order the windows first showed in, which their tabs are in
+        int *x, *y;
+        unsigned int *w, *h, *front, *state; // w and h as it is shown
         // How many times the row's window has been asked to go since it showed (compositor_close), never 0 once it has been: what
         // carries the ask to a program is the count it has answered, not WINDOW_CLOSING, which stays. The table's close_asks is this
         // count said to the row's program (compositor_close_count is the one writer of both); the X window manager and the Wayland
         // shim read this one, which no program can write.
-        unsigned char close_asks[WINDOWS];
-        unsigned int picture_w[WINDOWS], picture_h[WINDOWS]; // as its program drew it
-        unsigned int asking[WINDOWS];   // shown at a size asked of it, until a picture of that size comes
-        unsigned int arranged[WINDOWS]; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
-        unsigned char fullscreen[WINDOWS]; // a window that asked to fill its screen under the taskbar too (fullscreen): a client's request, or a placement's
-        unsigned int edges[WINDOWS];    // the edges the hand holds, until the window is the size asked for
-        int far_x[WINDOWS], far_y[WINDOWS]; // where the edges it does not hold are
-        int saved_x[WINDOWS], saved_y[WINDOWS]; // where it was floating, and how large
-        unsigned int saved_w[WINDOWS], saved_h[WINDOWS];
-        char title[WINDOWS][WINDOWS_TITLE];
+        unsigned char *close_asks;
+        unsigned int *picture_w, *picture_h; // as its program drew it
+        unsigned int *asking;   // shown at a size asked of it, until a picture of that size comes
+        unsigned int *arranged; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
+        unsigned char *fullscreen; // a window that asked to fill its screen under the taskbar too (fullscreen): a client's request, or a placement's
+        unsigned int *edges;    // the edges the hand holds, until the window is the size asked for
+        int *far_x, *far_y; // where the edges it does not hold are
+        int *saved_x, *saved_y; // where it was floating, and how large
+        unsigned int *saved_w, *saved_h;
+        char (*title)[WINDOWS_TITLE];
         // Who the window is, the compositor's own copy of the row's identity (compositor_identity_take), which its tab is drawn from:
         // its app_id, and its icon with the sequence that picture is (0: none).
-        char app_id[WINDOWS][WINDOWS_APP_ID];
-        unsigned int icon_seq[WINDOWS];
-        unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
-        char name[WINDOWS][WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
-        unsigned int moved[WINDOWS];      // the row's moved, as it was last taken
-        unsigned char stack[WINDOWS];   // bottom first
+        char (*app_id)[WINDOWS_APP_ID];
+        unsigned int *icon_seq;
+        unsigned int (*icon)[WINDOWS_ICON * WINDOWS_ICON];
+        char (*name)[WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
+        unsigned int *moved;      // the row's moved, as it was last taken
+        unsigned int *stack;    // bottom first
         unsigned int stacked, next_made;
 
         // The tabs: the rows that have one in their order, what each shows, and the band drawn with the font.
-        unsigned char listed[WINDOWS], marks[WINDOWS], lengths[WINDOWS];
+        unsigned int *listed;
+        unsigned char *marks, *lengths;
         unsigned int listing;
         unsigned int *band;  // the band's pixels, or none: no font, and the tabs are shapes
         /*
@@ -1035,8 +1037,8 @@ static struct
         int band_at;
         unsigned int *band_more[WINDOWS_OUTPUTS];
         unsigned long band_more_bytes[WINDOWS_OUTPUTS];
-        unsigned char band_marks[WINDOWS_OUTPUTS][WINDOWS];
-        unsigned char banded[WINDOWS]; // with a band on every screen, the screen each window's tab was last drawn on, + 1
+        unsigned char (*band_marks)[WINDOWS]; // WINDOWS_OUTPUTS of them
+        unsigned char *banded; // with a band on every screen, the screen each window's tab was last drawn on, + 1
         unsigned long band_bytes; // how much memory the band has
         unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
         unsigned long glass_bytes;
@@ -1048,15 +1050,15 @@ static struct
                 x1, y1, x2, y2 on the output and empty when x2 is not past x1; which side of lightness its tint
                 goes to, and the ground it told its program. The scratch the blur is made in is shared.
         */
-        unsigned int glassy[WINDOWS];
-        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS, WINDOW_NO_TAB, WINDOW_NO_GRAB)
-        unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
-        unsigned int *boosted[WINDOWS]; // compositor_vivid of each backdrop cell, as the cell last was
-        unsigned long glass_sum[WINDOWS][3]; // per channel, the sums of boosted over the blocks: the side's mean
-        int glass_blocks[WINDOWS][4]; // the first block kept of the small picture under it, across and down, and how many each way
-        unsigned long glass_cut[WINDOWS];
-        int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
-        unsigned int glass_side[WINDOWS], glass_told[WINDOWS], lifted[WINDOWS];
+        unsigned int *glassy;
+        unsigned int *asks; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS, WINDOW_NO_TAB, WINDOW_NO_GRAB)
+        unsigned int **backdrop, **tinted, **composed;
+        unsigned int **boosted; // compositor_vivid of each backdrop cell, as the cell last was
+        unsigned long (*glass_sum)[3]; // per channel, the sums of boosted over the blocks: the side's mean
+        int (*glass_blocks)[4]; // the first block kept of the small picture under it, across and down, and how many each way
+        unsigned long *glass_cut;
+        int (*glass_made)[4], (*stale)[4], (*dirty)[4];
+        unsigned int *glass_side, *glass_told, *lifted;
         // The theme (`moonwater canvas theme`, its accent and motion): the word kept (0 light, 1 dark, 2 auto), and the
         // side every glass window is tinted to, 1 light and 0 dark, which the theme chooses and what is under it does not.
         unsigned int theme_word, theme_side;
@@ -1084,8 +1086,8 @@ static struct
         // What a drag or a resize took hold of, for Escape or a right press to put back (compositor_hold_cancel): the rows, a
         // bit each (a divider holds all of its windows), and each one's rectangle and what it filled at the press.
         struct compositor_rows hold_rows;
-        int hold_rect[WINDOWS][4];
-        unsigned int hold_how[WINDOWS];
+        int (*hold_rect)[4];
+        unsigned int *hold_how;
         // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
         // the row snapped, the region it took and its screen; the thumbnails, each its row, its tile and its rectangle.
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
@@ -1109,7 +1111,7 @@ static struct
         // All the windows of a divider's resize (compositor_divider), a bit each, the low side's and the high side's, and the
         // size each had across the line at the press.
         struct compositor_rows shared_lo_set, shared_hi_set;
-        int shared_sizes[WINDOWS];
+        int *shared_sizes;
         // The shared edge's indicator (compositor_mark_set): the rectangle, the window it is drawn over and the other, and all
         // the windows of its divider, a bit each.
         int mark_row, mark_with, mark[4];
@@ -1201,12 +1203,12 @@ static struct
         // one is focused again after it lost its focus (osk_turn_blur: the focused window's field count was none).
         unsigned char osk_turned, osk_turn_blur;
         int osk_turn_focus;
-        int osk_pan[WINDOWS], osk_height[WINDOWS];
-        unsigned int osk_edges[WINDOWS];
+        int *osk_pan, *osk_height;
+        unsigned int *osk_edges;
         // A Wayland client's text field (wayland_host.c): the content purpose of its field, and the bottom of its text cursor in the
         // window's pixels (0 for none). The pan keeps the cursor above the keyboard, not the window's bottom edge.
-        unsigned char text_purpose[WINDOWS];
-        int caret[WINDOWS];
+        unsigned char *text_purpose;
+        int *caret;
         // Where the hand is, before its lead (real_x, real_y), and the class that moved the pointer last (owner). The pointer
         // itself (pointer_x, pointer_y) is where that is led to, and every consumer of motion reads it; at_real is set while a
         // press is handled, so a press is at the real place.
@@ -2290,6 +2292,227 @@ static int compositor_picture_poll(int row)
 #endif
 
 /*
+        The compositor's memory of each row: what was 81 arrays of WINDOWS in its structs and beside them, each a pointer into one
+        reservation of address space (PROT_NONE and MAP_NORESERVE, of no memory until it is committed), its arrays one after another
+        at page boundaries, every one with room for WINDOWS (WINDOWS + 1 for the doors' threads, whose last is the misc door's; the
+        bands' marks are a screen's each). A row's memory is committed (mprotect) when the row is made, compositor_rows_make, and its
+        defaults set then (a popup's parent none); the elements never move, so a pointer to a row's taken before more rows were made
+        is good after. A commit the kernel refuses is the rows not made, and nothing else. compositor_zero is the compositor's
+        memory_zero: its struct zeroed, its arrays pointed at again and their rows zeroed, so a check that starts from nothing finds
+        the rows made as they were. The groups: the compositor's own (zeroed with it), the Wayland host's, the card's, and those of
+        the parts that keep theirs for the session.
+*/
+#define COMPOSITOR_ROWS_ROW(rows) (rows)
+#define COMPOSITOR_ROWS_ROW1(rows) ((rows) + 1)
+#define COMPOSITOR_ROWS_SCREENS(rows) WINDOWS_OUTPUTS
+
+#define COMPOSITOR_ROWS_OWN(X) \
+        X(compositor.scan_fb, COMPOSITOR_ROWS_ROW) \
+        X(compositor.scan_handle, COMPOSITOR_ROWS_ROW) \
+        X(compositor.taken_held, COMPOSITOR_ROWS_ROW) \
+        X(compositor.patched, COMPOSITOR_ROWS_ROW) \
+        X(compositor.door, COMPOSITOR_ROWS_ROW) \
+        X(compositor.wake, COMPOSITOR_ROWS_ROW) \
+        X(compositor.seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor.runs, COMPOSITOR_ROWS_ROW) \
+        X(compositor.runs_bytes, COMPOSITOR_ROWS_ROW) \
+        X(compositor.runs_tag, COMPOSITOR_ROWS_ROW) \
+        X(compositor.runs_composed, COMPOSITOR_ROWS_ROW) \
+        X(compositor.runs_state, COMPOSITOR_ROWS_ROW) \
+        X(compositor.showing, COMPOSITOR_ROWS_ROW) \
+        X(compositor.landing, COMPOSITOR_ROWS_ROW) \
+        X(compositor.land_at, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glide, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glide_from, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glide_at, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glide_base, COMPOSITOR_ROWS_ROW) \
+        X(compositor.made, COMPOSITOR_ROWS_ROW) \
+        X(compositor.x, COMPOSITOR_ROWS_ROW) \
+        X(compositor.y, COMPOSITOR_ROWS_ROW) \
+        X(compositor.w, COMPOSITOR_ROWS_ROW) \
+        X(compositor.h, COMPOSITOR_ROWS_ROW) \
+        X(compositor.front, COMPOSITOR_ROWS_ROW) \
+        X(compositor.state, COMPOSITOR_ROWS_ROW) \
+        X(compositor.close_asks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.picture_w, COMPOSITOR_ROWS_ROW) \
+        X(compositor.picture_h, COMPOSITOR_ROWS_ROW) \
+        X(compositor.asking, COMPOSITOR_ROWS_ROW) \
+        X(compositor.arranged, COMPOSITOR_ROWS_ROW) \
+        X(compositor.fullscreen, COMPOSITOR_ROWS_ROW) \
+        X(compositor.edges, COMPOSITOR_ROWS_ROW) \
+        X(compositor.far_x, COMPOSITOR_ROWS_ROW) \
+        X(compositor.far_y, COMPOSITOR_ROWS_ROW) \
+        X(compositor.saved_x, COMPOSITOR_ROWS_ROW) \
+        X(compositor.saved_y, COMPOSITOR_ROWS_ROW) \
+        X(compositor.saved_w, COMPOSITOR_ROWS_ROW) \
+        X(compositor.saved_h, COMPOSITOR_ROWS_ROW) \
+        X(compositor.title, COMPOSITOR_ROWS_ROW) \
+        X(compositor.app_id, COMPOSITOR_ROWS_ROW) \
+        X(compositor.icon_seq, COMPOSITOR_ROWS_ROW) \
+        X(compositor.icon, COMPOSITOR_ROWS_ROW) \
+        X(compositor.name, COMPOSITOR_ROWS_ROW) \
+        X(compositor.moved, COMPOSITOR_ROWS_ROW) \
+        X(compositor.stack, COMPOSITOR_ROWS_ROW) \
+        X(compositor.listed, COMPOSITOR_ROWS_ROW) \
+        X(compositor.marks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.lengths, COMPOSITOR_ROWS_ROW) \
+        X(compositor.banded, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glassy, COMPOSITOR_ROWS_ROW) \
+        X(compositor.asks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.backdrop, COMPOSITOR_ROWS_ROW) \
+        X(compositor.tinted, COMPOSITOR_ROWS_ROW) \
+        X(compositor.composed, COMPOSITOR_ROWS_ROW) \
+        X(compositor.boosted, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_sum, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_blocks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_cut, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_made, COMPOSITOR_ROWS_ROW) \
+        X(compositor.stale, COMPOSITOR_ROWS_ROW) \
+        X(compositor.dirty, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_side, COMPOSITOR_ROWS_ROW) \
+        X(compositor.glass_told, COMPOSITOR_ROWS_ROW) \
+        X(compositor.lifted, COMPOSITOR_ROWS_ROW) \
+        X(compositor.hold_rect, COMPOSITOR_ROWS_ROW) \
+        X(compositor.hold_how, COMPOSITOR_ROWS_ROW) \
+        X(compositor.shared_sizes, COMPOSITOR_ROWS_ROW) \
+        X(compositor.osk_pan, COMPOSITOR_ROWS_ROW) \
+        X(compositor.osk_height, COMPOSITOR_ROWS_ROW) \
+        X(compositor.osk_edges, COMPOSITOR_ROWS_ROW) \
+        X(compositor.text_purpose, COMPOSITOR_ROWS_ROW) \
+        X(compositor.caret, COMPOSITOR_ROWS_ROW) \
+        X(compositor.band_marks, COMPOSITOR_ROWS_SCREENS)
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+#define COMPOSITOR_ROWS_WL(X) \
+        X(compositor_wl.laying, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.parts, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.cursor_asked, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.source, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.wc_reads, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.wc_copy, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl_layers.layer, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl_layers.count, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl_layers.root_refused, COMPOSITOR_ROWS_ROW)
+#else
+#define COMPOSITOR_ROWS_WL(X)
+#endif
+
+#define COMPOSITOR_ROWS_CARD(X) \
+        X(compositor_card.list_seq, COMPOSITOR_ROWS_ROW)
+
+#define COMPOSITOR_ROWS_KEPT(X) \
+        X(compositor_popup_parent, COMPOSITOR_ROWS_ROW) \
+        X(compositor_listed, COMPOSITOR_ROWS_ROW) \
+        X(compositor_clip.offer_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_clip.ask_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_clip.gesture, COMPOSITOR_ROWS_ROW) \
+        X(compositor_gpu_pins, COMPOSITOR_ROWS_ROW) \
+        X(compositor_osk_held, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_flags, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_keys, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_key_flags, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_any, COMPOSITOR_ROWS_ROW) \
+        X(compositor_doors.worker, COMPOSITOR_ROWS_ROW1) \
+        X(compositor_doors.kick, COMPOSITOR_ROWS_ROW1) \
+        X(compositor_doors.asked, COMPOSITOR_ROWS_ROW1) \
+        X(compositor_record_shots[0].rects, COMPOSITOR_ROWS_ROW) \
+        X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
+        X(compositor_record_shots[2].rects, COMPOSITOR_ROWS_ROW) \
+        X(compositor_record_pending, COMPOSITOR_ROWS_ROW)
+
+#define COMPOSITOR_ROWS_ALL(X) COMPOSITOR_ROWS_OWN(X) COMPOSITOR_ROWS_WL(X) COMPOSITOR_ROWS_CARD(X) COMPOSITOR_ROWS_KEPT(X)
+
+static unsigned char *compositor_row_at; // the reservation, 0 before the first row is made
+static unsigned long compositor_row_bytes;
+
+static unsigned long compositor_row_round(unsigned long bytes)
+{
+        return (bytes + 4095ul) & ~4095ul;
+}
+
+// An array's first bytes made usable (zero where they were never touched): 1 when they are, 0 when the kernel refused.
+static int compositor_row_commit(void *at, unsigned long bytes)
+{
+        return !bytes || compositor_call(syscall(mprotect), (positive)at, (positive)compositor_row_round(bytes), 3, 0, 0, 0) == 0;
+}
+
+#define COMPOSITOR_ROWS_SIZE(array, kind) bytes += compositor_row_round((unsigned long)kind(WINDOWS) * sizeof(*(array)));
+#define COMPOSITOR_ROWS_POINT(array, kind) \
+        (array) = (__typeof__(array))(void *)(compositor_row_at + at), at += compositor_row_round((unsigned long)kind(WINDOWS) * sizeof(*(array)));
+#define COMPOSITOR_ROWS_COMMIT(array, kind) made = made && compositor_row_commit((array), (unsigned long)kind(rows) * sizeof(*(array)));
+#define COMPOSITOR_ROWS_ZERO(array, kind) memory_zero((array), (unsigned long)kind(compositor_rows_made) * sizeof(*(array)));
+
+// Every array pointed at its place in the reservation (after a struct that holds them was zeroed).
+static void compositor_rows_point(void)
+{
+        unsigned long at = 0;
+
+        if (!compositor_row_at)
+                return;
+        COMPOSITOR_ROWS_ALL(COMPOSITOR_ROWS_POINT)
+}
+
+// A row made: what it is before any window has it.
+static void compositor_row_defaults(unsigned int row)
+{
+        compositor_popup_parent[row] = -1;
+}
+
+/*
+        The rows below rows made, the reservation first: their memory committed and their defaults set. 1 when they are; 0 when the
+        address space or the memory is not there, and the rows made are as they were.
+*/
+static int compositor_rows_make(unsigned int rows)
+{
+        int made = 1;
+
+        if (rows > WINDOWS)
+                return 0;
+        if (!compositor_row_at)
+        {
+                unsigned long bytes = 0;
+                long got;
+
+                COMPOSITOR_ROWS_ALL(COMPOSITOR_ROWS_SIZE)
+                got = compositor_call(syscall(mmap), 0, (positive)bytes, 0, 0x4022, (positive)-1, 0); // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
+                if (got < 0 && got > -4096)
+                        return 0;
+                compositor_row_at = (unsigned char *)got;
+                compositor_row_bytes = bytes;
+                compositor_rows_point();
+        }
+        if (rows <= compositor_rows_made)
+                return 1;
+        COMPOSITOR_ROWS_ALL(COMPOSITOR_ROWS_COMMIT)
+        if (!made)
+                return 0;
+        for (unsigned int row = compositor_rows_made; row < rows; row++)
+                compositor_row_defaults(row);
+        compositor_rows_made = rows;
+        return 1;
+}
+
+// The compositor's struct as memory_zero left it, but for its rows: pointed at again, made (the rows in use) and zeroed.
+static void compositor_zero(void)
+{
+        memory_zero(&compositor, sizeof(compositor));
+        compositor_rows_point();
+        compositor_rows_make(compositor_rows_in_use);
+        COMPOSITOR_ROWS_OWN(COMPOSITOR_ROWS_ZERO)
+}
+
+// The card's struct likewise.
+static void compositor_card_zero(void)
+{
+        memory_zero(&compositor_card, sizeof(compositor_card));
+        compositor_rows_point();
+        COMPOSITOR_ROWS_CARD(COMPOSITOR_ROWS_ZERO)
+}
+
+/*
         The loop's poll list, sized by what can be in it: the loop's own (COMPOSITOR_POLLS_OWN: the signals, the watch of the input
         directory, the doors' threads' knock, the card while a flip is in flight, the sync_file of a job of the card's the loop waits
         on, the uevents and the clipboard's door), every
@@ -2477,7 +2700,13 @@ static b32 compositor_main()
         // (it joins timers by it), which a frame's timer and every other time of the loop had added to it. PR_SET_TIMERSLACK, 1 ns.
         compositor_call(syscall(prctl), 29, 1, 0, 0, 0, 0);
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
+        if (compositor_rows_made < compositor_rows_in_use)
+        {
+                string_format(log, "compositor: no memory for the rows of the window table\n");
+                log_flush();
+                return 1;
+        }
         compositor.watch = compositor.uevents = -1;
         compositor.hold = -1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;

@@ -213,7 +213,7 @@ struct compositor_record_shot
         unsigned int *pixels;           // width times height, the scanout's pixels
         unsigned long long when;
         unsigned int seq, sizes, rect_count;
-        int rects[WINDOWS][4];          // the window pictures: x1 y1 x2 y2
+        int (*rects)[4];                // the window pictures: x1 y1 x2 y2, a row each
 };
 static struct compositor_record_shot compositor_record_shots[3];
 static unsigned int *compositor_record_block;     // the mapping of the three frames and the ring
@@ -227,7 +227,7 @@ static unsigned int compositor_record_class_written[COMPOSITOR_RECORD_CLASSES]; 
 static unsigned int compositor_record_refused_size; // the screen is too large for the budget: nothing is classified
 static unsigned int compositor_record_events[COMPOSITOR_RECORD_EVENTS][3]; // seq, bits (1 << class), kept
 static unsigned int compositor_record_event_count;
-static int compositor_record_pending[WINDOWS][4];   // the window pictures of the present in hand (compositor_record_scene)
+static int (*compositor_record_pending)[4]; // the window pictures of the present in hand (compositor_record_scene)
 static unsigned int compositor_record_pending_count, compositor_record_pending_sizes;
 
 // The window pictures of the present in hand, from compositor_present_frames: their rectangles and their sizes (a hash).
@@ -500,7 +500,7 @@ static void compositor_record_capture(unsigned long long when)
         cur->seq = (unsigned int)compositor_records_all;
         cur->sizes = compositor_record_pending_sizes;
         cur->rect_count = compositor_record_pending_count;
-        memory_copy(cur->rects, compositor_record_pending, sizeof(cur->rects));
+        memory_copy(cur->rects, compositor_record_pending, compositor_record_pending_count * sizeof(*cur->rects));
         compositor_record_taken++;
         if (compositor_record_ring_cap && compositor_record_ring_pixels)
         {

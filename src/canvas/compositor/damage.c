@@ -610,9 +610,9 @@ static int compositor_wl_row_async(int row);
 static int compositor_wl_held(void);
 static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
-static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
+static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows);
 static void compositor_wl_lent_sync(int start);
-static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at);
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at);
 #else
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
 {
@@ -656,7 +656,7 @@ static void compositor_wl_settle(int row)
 {
         (void)row;
 }
-static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows)
+static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows)
 {
         (void)rows, (void)windows;
 }
@@ -664,7 +664,7 @@ static void compositor_wl_lent_sync(int start)
 {
         (void)start;
 }
-static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at)
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at)
 {
         (void)row, (void)frames, (void)rows, (void)at;
         return 0;
@@ -769,7 +769,7 @@ static int compositor_runs_damaged(const struct compositor_frame *frame)
 }
 
 // Before the compose: each window's frame takes its runs when it has them, and the presents that compose its picture are counted.
-static void compositor_runs_note(struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+static void compositor_runs_note(struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
         for (unsigned int at = 0; at < windows; at++)
         {
@@ -793,7 +793,7 @@ static void compositor_runs_note(struct compositor_frame *frames, const unsigned
 }
 
 // After the compose: the picture composed enough times is read for its runs, once, over its whole height.
-static void compositor_runs_learn(const struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+static void compositor_runs_learn(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
         for (unsigned int at = 0; at < windows; at++)
         {
@@ -1002,7 +1002,7 @@ static int compositor_bands(void)
 
 // The windows that have a tab, in the order they first showed, and what each tab shows: every window on the one band,
 // and on each of several, the windows whose screen it is on (compositor_screen_of).
-static int compositor_popup_parent[WINDOWS];
+static int *compositor_popup_parent;
 static int compositor_popup_top(int root);
 static b32 compositor_popups_close(int root, int keep);
 static b32 compositor_popup_first(int row);
@@ -1039,8 +1039,8 @@ static unsigned int compositor_windows(void)
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
                         place--;
-                memory_copy(compositor.listed + place + 1, compositor.listed + place, count - place);
-                compositor.listed[place] = (unsigned char)row;
+                memory_copy(compositor.listed + place + 1, compositor.listed + place, (count - place) * sizeof(*compositor.listed));
+                compositor.listed[place] = (unsigned int)row;
                 count++;
         }
 

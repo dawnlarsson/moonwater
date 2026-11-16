@@ -1322,7 +1322,7 @@ struct taskbar_view
         // app_id ("" or none for a window that has said none), and its icon, WINDOWS_ICON each way and premultiplied, with the
         // sequence that picture is (none and 0 for a window with no icon: its tab draws the kit's symbol for a kit program, the
         // lettered tile for any other program that says an app_id, and the window symbol for one that says nothing).
-        const unsigned char *rows;
+        const unsigned int *rows;
         const char *apps[WINDOWS];
         const unsigned int *icons[WINDOWS];
         unsigned int icon_seqs[WINDOWS];

@@ -60,7 +60,7 @@ static struct
         {
                 unsigned char open, touched, full, which;
                 int x1, y1, x2, y2;
-        } laying[WINDOWS];
+        } *laying;
         // The rectangles a commit changed of each window, in the window's pixels, beside the one box the table has room for: what
         // compositor_take damages in the box's place, one by one (compositor_wl_parts). count is how many, -1 for more than there is
         // room for (the box is what is damaged then), and they are good for the one take that follows the commit.
@@ -68,7 +68,7 @@ static struct
         {
                 int count;
                 int rect[WAYLAND_DAMAGE][4];
-        } parts[WINDOWS];
+        } *parts;
         // The keymap of each layout, made when a keyboard first needs it: a sealed file of xkb's text, kept for as long as the
         // compositor runs, and the layout the clients were last told.
         int keymap[16];
@@ -102,8 +102,8 @@ static struct
                 unsigned int format;
                 unsigned long modifier;
         } dmabuf_entries[WAYLAND_DMABUF_ENTRIES];
-        unsigned char cursor_asked[WINDOWS]; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
-        unsigned char row_blend[WINDOWS];    // 1 when the row's current surface has non-opaque alpha
+        unsigned char *cursor_asked; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
+        unsigned char *row_blend;    // 1 when the row's current surface has non-opaque alpha
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
         positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
@@ -141,7 +141,7 @@ static struct
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
                 unsigned int fourcc, offset, scan_fb, scan_handle;
                 int synced, scan_failed;
-        } lent[WINDOWS];
+        } *lent;
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
         // when the buffer changes or the row closes.
         struct
@@ -151,7 +151,7 @@ static struct
                 unsigned long dev, ino;
                 positive va;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
-        } source[WINDOWS];
+        } *source;
         int lent_synced;
         /*
                 A lent dma-buf the processor composes is read where the client's card wrote it, through a mapping that is write-combined on a
@@ -162,7 +162,7 @@ static struct
                 card draws a present: each commit's damage is copied so (the copy path's memory_copy_rect_stream_u32), and the processor
                 composes from the machine's own memory. Counted: the presents read so and the rows copied (wc_presents, wc_seeded).
         */
-        unsigned char wc_reads[WINDOWS], wc_copy[WINDOWS];
+        unsigned char *wc_reads, *wc_copy;
         unsigned int wc_presents, wc_seeded;
         // The last refusal of a client's buffer as a framebuffer to scan out (compositor_lent_fb): what was asked, and the kernel's errno or why it was
         // not asked (COMPOSITOR_WL_SCAN_*), and how many there were.
@@ -172,7 +172,7 @@ static struct
                 unsigned long long modifier;
                 int error;
         } scan_refused;
-} compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1, .lent = {{0}}};
+} compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1};
 
 /*
         A window's subsurfaces as layers of their own (row_layers, wayland.c): each the rectangle of a client's buffer at its place in the
@@ -199,12 +199,12 @@ struct compositor_wl_layer
 
 static struct
 {
-        struct compositor_wl_layer layer[WINDOWS][WAYLAND_LAYERS];
-        unsigned char count[WINDOWS];
+        struct compositor_wl_layer (*layer)[WAYLAND_LAYERS];
+        unsigned char *count;
         unsigned int total;
         // The row's own picture was copied when last handed with layers (root 1): it is not asked for again to have them
         // (WAYLAND_LAYERS_ROOT), and its subsurfaces are laid into it, as before, until its next picture is read in place.
-        unsigned char root_refused[WINDOWS];
+        unsigned char *root_refused;
         // What the layers handed with the row's own picture changed of the window (root 1), for the picture's take: rectangles x1, y1, x2,
         // y2 in the window's pixels, count -1 for more than there is room for (their box is damaged).
         int pending_row, pending_count, pending_box[4];
@@ -1446,11 +1446,11 @@ static void compositor_wl_lent_sync(int start)
 }
 
 // A present the card drew: counted once when it read a client's picture in place.
-static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows)
+static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows)
 {
         // The card drew this present: the processor read no lent dma-buf for it, and a row copied for want of the card is lent again.
-        memory_zero(compositor_wl.wc_reads, sizeof compositor_wl.wc_reads);
-        memory_zero(compositor_wl.wc_copy, sizeof compositor_wl.wc_copy);
+        memory_zero(compositor_wl.wc_reads, compositor_rows_made * sizeof(*compositor_wl.wc_reads));
+        memory_zero(compositor_wl.wc_copy, compositor_rows_made * sizeof(*compositor_wl.wc_copy));
         for (unsigned int at = 0; at < windows && compositor.table; at++)
                 if (compositor_lent(rows[at]))
                 {
@@ -2007,7 +2007,7 @@ static void compositor_wl_layers_pending(struct windows *table, int row)
         size (scaled, or composed as glass), or whose corners its layers now meet, has them laid into its picture instead (compositor_wl_layers_lay),
         and its frame is that picture's.
 */
-static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned char *rows, unsigned int at)
+static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at)
 {
         struct compositor_frame *window = &frames[at - 1];
         unsigned int count = row >= 0 && row < WINDOWS ? compositor_wl_layers.count[row] : 0;
@@ -2048,7 +2048,7 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
                 f->gpu_base = compositor_wl_live(l->va, l->epoch);
                 f->blend = l->blend;
                 f->layer = 1;
-                rows[at + k] = (unsigned char)row;
+                rows[at + k] = (unsigned int)row;
         }
         return count;
 }

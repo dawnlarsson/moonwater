@@ -2116,7 +2116,7 @@ static void compositor_radii(const struct compositor_frame *frames, unsigned int
 struct compositor_plan
 {
         int box[COMPOSITOR_PIECES][4];
-        unsigned char owner[COMPOSITOR_PIECES];
+        unsigned int owner[COMPOSITOR_PIECES];
         unsigned int pieces;
         int edge[2 * COMPOSITOR_PIECES + 2]; // the damage's top and bottom, and every piece's top or bottom inside them, sorted
         unsigned int edges;
@@ -2126,7 +2126,7 @@ static void compositor_plan_make(struct compositor_plan *plan, const struct comp
                                  const struct compositor_frame *frames, unsigned int count, const int *radii)
 {
         int (*box)[4] = plan->box, *edge = plan->edge;
-        unsigned char *owner = plan->owner;
+        unsigned int *owner = plan->owner;
         unsigned int edges = 2, pieces = 0;
 
         edge[0] = t->y1;
@@ -2143,16 +2143,16 @@ static void compositor_plan_make(struct compositor_plan *plan, const struct comp
                 if (!r)
                 {
                         box[pieces][0] = fx, box[pieces][1] = fy, box[pieces][2] = x2, box[pieces][3] = y2;
-                        owner[pieces++] = (unsigned char)at;
+                        owner[pieces++] = at;
                 }
                 else
                 {
                         box[pieces][0] = fx + r, box[pieces][1] = fy, box[pieces][2] = x2 - r, box[pieces][3] = y2;
-                        owner[pieces++] = (unsigned char)at;
+                        owner[pieces++] = at;
                         box[pieces][0] = fx, box[pieces][1] = fy + r, box[pieces][2] = fx + r, box[pieces][3] = y2 - r;
-                        owner[pieces++] = (unsigned char)at;
+                        owner[pieces++] = at;
                         box[pieces][0] = x2 - r, box[pieces][1] = fy + r, box[pieces][2] = x2, box[pieces][3] = y2 - r;
-                        owner[pieces++] = (unsigned char)at;
+                        owner[pieces++] = at;
                 }
 
                 for (unsigned int piece = first; piece < pieces; piece++)
@@ -2179,7 +2179,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         unsigned int *scratch = t->scratch ? t->scratch : compositor_corner_scratch;
         int edge[2 * COMPOSITOR_PIECES + 2];
         const int (*box)[4] = plan->box;
-        const unsigned char *owner = plan->owner;
+        const unsigned int *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
 
         // A blended frame with a frame under it here: every frame drawn over the last, from the ground up. One with the ground

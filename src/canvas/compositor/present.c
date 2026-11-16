@@ -485,7 +485,7 @@ static void compositor_card_said(void)
 // A present the card draws, at its end in compositor_present_frames: the rows whose pictures it reads, how it ends kept for when its jobs are done, and
 // its flip committed now where it can be.
 static void compositor_card_after(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off,
-                                  const unsigned char *rows, unsigned int windows)
+                                  const unsigned int *rows, unsigned int windows)
 {
         rows_none(&compositor_card.rows);
         for (unsigned int at = 0; at < windows; at++)
@@ -947,7 +947,7 @@ static void compositor_present_frames(void)
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_frame band;
         struct compositor_frame preview;
-        unsigned char rows[WINDOWS + COMPOSITOR_LAYERS];
+        unsigned int rows[WINDOWS + COMPOSITOR_LAYERS];
         unsigned int count = 0, windows;
         int tinted;
 

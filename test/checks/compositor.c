@@ -28,7 +28,7 @@ static fn check_take(void)
 {
         static struct windows table;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.table = &table;
         compositor.width = compositor.height = 256;
         compositor.scale = 100;
@@ -73,7 +73,7 @@ static fn check_take(void)
 */
 static fn check_land_setup(struct windows address_to table, unsigned int motion)
 {
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         memory_zero(table, sizeof(*table));
         compositor.table = table;
         compositor.width = compositor.height = 512;
@@ -223,7 +223,7 @@ static void check_compositor_partial(void)
     struct windows address_to table;
     unsigned int seed = 7, mismatched = 0, steps = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -305,7 +305,7 @@ static void check_compositor_held(void)
 {
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.direct_row = compositor.plane_row = compositor.flip_row = -1;
@@ -405,7 +405,7 @@ static positive runs_steps(unsigned int address_to out, b32 forgetting, p64 addr
         unsigned int seed = 11;
         positive used = 0;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = RUNS_W;
@@ -497,7 +497,7 @@ static void check_compositor_runs(void)
         static p64 made[240], copied[240];
         struct compositor_frame frames[COMPOSITOR_FRAMES];
         struct compositor_apart apart = {runs_flush, slices, RUNS_W};
-        unsigned char rows[WINDOWS];
+        unsigned int rows[WINDOWS];
         unsigned int count = 0, with = 0;
         positive used = runs_steps(screen, false, made);
         int spare[2];
@@ -590,7 +590,7 @@ static void check_compositor_screens(void)
     int was[2][4], x, y, w, h;
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -810,7 +810,7 @@ static void check_compositor_screens(void)
               held && table->shown[1] == table->frame[1] && !rows_any(&compositor.held_rows) && compositor.direct_row < 0);
     }
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
 
     // A hotplug is any uevent of the drm subsystem: its lines are each ended by a null, and only a whole line counts.
     {
@@ -841,7 +841,7 @@ static void check_compositor_scales(void)
     char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
     int first_whole = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(compositor_display, sizeof(compositor_display));
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -938,7 +938,7 @@ static void check_compositor_scales(void)
     compositor_displays = 0;
     memory_zero(compositor_display, sizeof(compositor_display));
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
 }
 
 /*
@@ -981,7 +981,7 @@ static unsigned int address_to corner_scene(unsigned int *scanout, int outputs, 
 {
     unsigned int address_to mapped;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
@@ -1025,7 +1025,7 @@ static void corner_scene_end(unsigned int address_to mapped)
     unsigned long buffer = ((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul;
 
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
 }
 
 static void check_compositor_corner_scales(void)
@@ -1188,7 +1188,7 @@ static void check_compositor_turn(void)
         unsigned int degrees = degrees_listed[turn], between = 0, near_a = 0, near_b = 0, from_card = 0;
         unsigned short clips[2][4] = {{2, 2, 14, 10}, {TURN_W - 12, TURN_H - 9, TURN_W - 2, TURN_H - 2}};
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         memory_zero(compositor_turns, sizeof(compositor_turns));
         compositor.card = -1;
         compositor.outputs = 1;
@@ -1234,7 +1234,7 @@ static void check_compositor_turn(void)
         unsigned short clip[1][4] = {{0, 0, TURN_W, TURN_H}};
         unsigned int wrong_scanout = 0;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.card = -1;
         compositor.outputs = 1;
         compositor.screen[0][2] = TURN_W, compositor.screen[0][3] = TURN_H;
@@ -1256,7 +1256,7 @@ static void check_compositor_turn(void)
     {
         unsigned int *kept;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.card = 3; // never used: the decision asks the driver's name
         memory_copy(compositor.driver, "i915", 5);
         compositor.width = 128, compositor.height = 64;
@@ -1283,7 +1283,7 @@ static void check_compositor_turn(void)
 
     // The space taken again at another shape: what waited to be drawn in the space before is gone, the whole new one is to be drawn.
     {
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.width = 256, compositor.height = 64;
         compositor_damage(0, 40, 256, 24);
         compositor_damage(10, 10, 20, 20);
@@ -1303,7 +1303,7 @@ static void check_compositor_turn(void)
 
         for (unsigned int at = 0; at < 256 * 256; at++)
             arena[at] = at < 256 * 64 ? 0u : 0xfeedfeedu;
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -1323,7 +1323,7 @@ static void check_compositor_turn(void)
         check("turn: the space taken at another shape composes the new space and stores nothing past its end",
               smashed == 0 && ground * 10 >= 256 * 64 * 9);
     }
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(compositor_turns, sizeof(compositor_turns));
 }
 
@@ -1637,7 +1637,7 @@ static void check_compositor_preview_held(void)
             check("preview held: the table is mapped", false);
             return;
         }
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
         compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
@@ -1713,7 +1713,7 @@ static void check_compositor_preview_held(void)
         check("preview held: once presented, with the pointer still on the target, the compositor has nothing to do",
               compositor.damages == 0 && compositor.preview[2] == target[2] && compositor.preview_row == 2);
         compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
     }
 }
 
@@ -2032,7 +2032,7 @@ static void check_compositor_shared(void)
         taskbar_standard();
         return;
     }
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
@@ -2226,7 +2226,7 @@ static void check_compositor_cycle(void)
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2307,7 +2307,7 @@ static void check_taskbar_tray(void)
     long_format[SETTING_TRAY_MOST + 1] = 0;
     check("tray format: and one more is not", !setting_tray_valid(long_format, null));
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = 2560;
     compositor.height = 1440;
     compositor.scale = 100;
@@ -2397,7 +2397,7 @@ static void check_taskbar_geometry(void)
         struct taskbar_view view;
         int x, y, w, h, tx, ty, tw, th, bx, by, bw, bh;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.width = 2560;
         compositor.height = 1440;
         compositor.scale = 100;
@@ -2421,7 +2421,7 @@ static void check_taskbar_geometry(void)
     /* The battery follows the "battery" line of the kept settings (/root/tune, as the battery verb writes it): none
        shows nothing, a name that is not a battery shows nothing, and auto (no line) shows the first battery there is.
        A battery is drawn just before the clock, so its cell ends where the clock's begins. */
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = 2560;
     compositor.height = 1440;
     compositor.scale = 100;
@@ -2493,7 +2493,7 @@ static void check_rtl_chrome(void)
     }
     language_take(0);
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = 2560, compositor.height = 1440, compositor.scale = 100;
     taskbar_settings_set("bottom", "primary", "battery none\n");
     taskbar_launcher_set(1);
@@ -2664,7 +2664,7 @@ static void check_taskbar_fullscreen(void)
         // The clock only goes on: each position's steps are later than the last one's (the band's slide is kept between them).
         positive t0 = 1000000000ull + (positive)at * 4000000000ull, t1 = t0 + whole, t2, t3;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         memory_zero(&table, sizeof(table));
         compositor.table = &table;
         compositor.width = BAND_W;
@@ -2772,7 +2772,7 @@ static void check_taskbar_launcher(void)
     static const unsigned char lengths[3] = {5, 15, 30};
     int shaped = 1, middle = 1, hits = 1, anchored = 1, damaged = 1, outside = 1, lit_differs = 1;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
     {
@@ -2872,7 +2872,7 @@ static void check_taskbar_centre(void)
     b32 alternate = true, trays = true, apart = true, inside = true, bare = true, hits = true, gaps_none = true;
 
     language_directory = "languages/";
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
     taskbar_volume_set(1, 50, 0, 0);
@@ -2985,7 +2985,7 @@ static void check_bar_options(void)
     int bx, by, bw, bh, x[4][4], which, px, py, pw, ph, plates = 0, gap = TASKBAR_GAP;
     b32 apart = 1, split, pressed = 1, edges = 1, held, followed = 1;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     memory_zero(&view, sizeof(view));
     view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 4, view.lengths = lengths;
@@ -3046,7 +3046,7 @@ static void check_wallpaper_ground(void)
     unsigned int damages;
     b32 made, copied, kept, plain, glow;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&table, sizeof(table));
     table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
     compositor.table = &table, compositor.width = 320, compositor.height = 200;
@@ -3092,7 +3092,7 @@ static void check_wallpaper_ground(void)
     compositor_ground_fill(&t, 40, 30, 200, 150);
     plain = !compositor_wall && target_pixels[100 * 320 + 160] == compositor_ground && compositor_ground_at(10, 10) == compositor_ground;
     compositor_wall_rows.moon = 1, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 0;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     check("wallpaper: once the rows are read the moon is made for the space and the space damaged", made);
     check("wallpaper: the ground is copied from it, a rectangle and a pixel alike", copied);
     check("wallpaper: kept: a present after makes nothing and damages nothing", kept);
@@ -3114,7 +3114,7 @@ static void check_moon_motion(void)
     positive now = 5000000000000ull;
     b32 rest, half, full, hit, back, reduced, turns, due, idle, own;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     memory_zero(&view, sizeof(view));
     view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
@@ -3200,7 +3200,7 @@ static void check_wallpaper_turn(void)
     unsigned int before_corner;
     positive now = clock_monotonic_nanoseconds();
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&table, sizeof(table));
     table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
     compositor.table = &table, compositor.width = 320, compositor.height = 200;
@@ -3229,7 +3229,7 @@ static void check_wallpaper_turn(void)
     compositor_wall_rows.moon = 0;
     compositor_wall_keep();
     compositor_wall_rows.moon = 1, compositor_wall_rows.ready = 0;
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     check("wallpaper turn: with the motion on and a hand about, the clock's next step turns the moon", stepped);
     check("wallpaper turn: a step damages the moon's square alone, the rest of the picture as it was", square);
     check("wallpaper turn: with the motion off nothing is made", rest);
@@ -3250,7 +3250,7 @@ static void check_taskbar_edit(void)
     int sx, sy, sw, sh, zx, zy, zw, zh, refused_before;
     b32 menu = 1, virtual_refused, moved, kept, read_back, left;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     memory_zero(&view, sizeof(view));
     view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
@@ -3457,7 +3457,7 @@ static void check_taskbar_highlight(void)
     b64 between;
     b32 moved, settled, still;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     memory_zero(&view, sizeof(view));
     memory_zero(band_pixels, sizeof(band_pixels));
@@ -3508,7 +3508,7 @@ static void check_taskbar_tree(void)
     int x, y, w, h, first, bx, by, bw, bh;
     b32 kept, grew, bare, moved;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     memory_zero(&view, sizeof(view));
     view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.count = 3, view.lengths = lengths;
     taskbar_settings_set("bottom", "primary", "battery none\n");
@@ -3556,7 +3556,7 @@ static void check_taskbar_scale(void)
     b32 thick_ok = true, bytes_ok = true, gap_ok = true, ends_ok = true, pad_ok = true, standard_ok = true, drawn = true, rows_ok = true;
     long number = -1;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
     taskbar_launcher_set(1);
@@ -4100,7 +4100,7 @@ static void check_taskbar_identity(void)
     static unsigned int first[BAND_W * COMPOSITOR_PANEL], second[BAND_W * COMPOSITOR_PANEL], picture[WINDOWS_ICON * WINDOWS_ICON], again[WINDOWS_ICON * WINDOWS_ICON];
     static const char *const words[4] = {"bottom", "top", "left", "right"};
     static const int scales[3] = {100, 150, 200};
-    static const unsigned char rows[3] = {4, 9, 17};
+    static const unsigned int rows[3] = {4, 9, 17};
     static struct windows standard_table;
     struct windows address_to kept_table = compositor.table;
     struct taskbar_view view;
@@ -4672,7 +4672,7 @@ static void check_compositor_look(void)
         parsed &= window_colour_parse((string_address)bad[at]) < 0;
     check("look: a colour is #rrggbb or rrggbb or the three digits of either, and nothing else", parsed);
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -5152,7 +5152,7 @@ static void band_pictures(string_address face_path)
         return;
     pictures_bold = bold > 0 && font_load(&band_bold, bold_bytes, (positive)bold, 0) == 0 ? &band_bold : null;
     font_start(&band_engine, band_atlas, 128, 128);
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     // The tasks grouped and separate, and the bar at -12, 0 and +16 from the screen's edge: dark at 200 percent.
     {
         static const char *const names[5] = {"options-grouped.ppm", "options-separate.ppm", "options-edge-minus-12.ppm", "options-edge-0.ppm",

@@ -328,7 +328,7 @@ static void check_touch_path(struct ui address_to wui)
     unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
     p32 asks = 0;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -471,7 +471,7 @@ static void scroll_setup(int touch)
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
     struct windows address_to table;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -2171,7 +2171,7 @@ static void check_compositor_touch(void)
     unsigned int head1, head2, flags = 0;
     int unchanged;
 
-    memory_zero(&compositor, sizeof(compositor));
+    compositor_zero();
     /* These are gestures, timed by the wall clock between reports: the lead a finger is given is check_compositor_predict's. */
     compositor.predict_off[COMPOSITOR_PREDICT_TOUCH] = 1;
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;

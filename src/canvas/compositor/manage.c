@@ -22,7 +22,7 @@ static void compositor_stack_remove(int row)
         if (at >= compositor.stacked)
                 return;
 
-        memory_copy(compositor.stack + at, compositor.stack + at + 1, compositor.stacked - at - 1);
+        memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
         compositor.stacked--;
 }
 
@@ -33,7 +33,7 @@ static void compositor_raise(int row)
                 return;
 
         compositor_stack_remove(row);
-        compositor.stack[compositor.stacked++] = (unsigned char)row;
+        compositor.stack[compositor.stacked++] = (unsigned int)row;
         compositor_damage_row(row);
 }
 
@@ -245,9 +245,26 @@ static int compositor_reach_most(void)
                    compositor.scale / 100 + line + 1;
 }
 
+/*
+        The last entry of the stack below count whose rectangle, grown by reach on every side, holds the point, or -1: two compares a
+        window, the point's offset from a rectangle's start taken as a number with no sign against its extent and twice the reach. It
+        is rects_point's rule (src/lib.c), whose order is a byte a row; the stack is a word a row, which names every row.
+*/
+static bipolar compositor_stack_point(positive count, int x, int y, positive reach)
+{
+        while (count--)
+        {
+                unsigned int row = compositor.stack[count];
+
+                if ((positive)((bipolar)x + (bipolar)reach - compositor.x[row]) < (positive)compositor.w[row] + 2 * reach &&
+                    (positive)((bipolar)y + (bipolar)reach - compositor.y[row]) < (positive)compositor.h[row] + 2 * reach)
+                        return (bipolar)count;
+        }
+        return -1;
+}
+
 static int compositor_under(int x, int y, int *tab)
 {
-        const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
 
         *tab = compositor_band_hit(x, y);
@@ -255,12 +272,12 @@ static int compositor_under(int x, int y, int *tab)
                 return COMPOSITOR_NONE;
 
         // The stack is asked from the top for a window whose rectangle, grown by the furthest a grip reaches, holds the point
-        // (rects_point, src/lib.c: two compares a window), and only such a window is asked what it has there, where every
+        // (compositor_stack_point: two compares a window), and only such a window is asked what it has there, where every
         // window above the one found, and every window when none was, had its grip worked out at each motion.
         reach = (positive)compositor_reach_most();
         while (count)
         {
-                bipolar at = rects_point(columns, compositor.stack, count, x, y, reach);
+                bipolar at = compositor_stack_point(count, x, y, reach);
                 int row;
 
                 if (at < 0)
@@ -2017,7 +2034,7 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
         and the row's state 1, or refused (state 2, the whole picture, and counted in list_refused). A picture that is not a list, or a
         list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
 */
-static unsigned char compositor_listed[WINDOWS]; // the row's picture in buffer 0 is the card's drawing of its last list (so a partial list is a change over it)
+static unsigned char *compositor_listed; // the row's picture in buffer 0 is the card's drawing of its last list (so a partial list is a change over it)
 static unsigned int compositor_list_invalids[WINDOW_LIST_REASONS];
 
 // A list window_list_check refused, counted by its reason in the table's list_invalid, and for one of another size the list's picture and the
@@ -2912,8 +2929,8 @@ static struct
 {
         int door;
         int fd[2];
-        unsigned int offer_seen[WINDOWS], ask_seen[WINDOWS], cli_seen;
-        positive gesture[WINDOWS];
+        unsigned int *offer_seen, *ask_seen, cli_seen;
+        positive *gesture;
         unsigned int history_most, history_count;
         int history[COMPOSITOR_CLIP_HISTORY];
         int blank; // /dev/null, which holds a selection's number while there is no selection (compositor_clip_reserve)
@@ -3305,8 +3322,7 @@ static void compositor_clip_leave(int row)
         open. It is asked to go (WINDOW_CLOSING) by a press outside every popup, its window losing the keys, its
         window being taken hold of to move, or its window going.
 */
-static int compositor_popup_parent[WINDOWS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-                                               -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+// compositor_popup_parent (damage.c): each row's parent, -1 for none, as a row is made (compositor_rows_make).
 
 /*
         Where a popup width by height goes against an anchor (ax, ay, aw, ah in the desktop's space) on a screen (sx,

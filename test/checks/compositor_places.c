@@ -62,7 +62,7 @@ static fn check_compositor_place(void)
                 struct taskbar_view view;
                 int band[4];
 
-                memory_zero(&compositor, sizeof(compositor));
+                compositor_zero();
                 compositor.width = 2560;
                 compositor.height = 1440;
                 compositor.scale = 100;
@@ -154,7 +154,7 @@ static fn check_compositor_place(void)
                   place_screen_at(10, 10, screens, 0) == 0);
 
         // In the compositor: a 256 by 256 output, its band COMPOSITOR_PANEL high along the bottom, so its room is 256 by 256 less that.
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -280,7 +280,7 @@ static fn check_compositor_place(void)
         }
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
                         0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
 }
 
 /*
@@ -348,7 +348,7 @@ static fn check_compositor_remember(void)
         check("remember: from far right of them all, the nearest is the one on the right", place_kept_screen(&kept, names, screens, 3) == 1);
         check("remember: and with no screens it is the first", place_kept_screen(&kept, names, screens, 0) == 0);
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -442,7 +442,7 @@ static fn check_compositor_remember(void)
         compositor_remember_path = SETTING_WINDOWS_REMEMBER_PATH;
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
                         0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
 }
 
 // The mean of a pixel's channels, for the lift: how light a colour is, 0 to 255.
@@ -473,7 +473,7 @@ static void check_glass_lift(void)
                                 struct windows address_to table;
                                 struct ui probe;
 
-                                memory_zero(&compositor, sizeof(compositor));
+                                compositor_zero();
                                 compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
                                 compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
                                 compositor.width = compositor.height = GLASS_SIDE;
@@ -558,7 +558,7 @@ static fn check_glass(void)
         unsigned int side, mismatched = 0, bounded = 1, kept = 1, distinct = 0, previous = 0, falling = 1;
         positive blurred, recomposed;
 
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
@@ -691,6 +691,6 @@ static fn check_glass(void)
                         compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
         if (compositor.blur)
                 compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
-        memory_zero(&compositor, sizeof(compositor));
+        compositor_zero();
 }
 
