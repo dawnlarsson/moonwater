@@ -5803,6 +5803,24 @@ net_target()
 
 lane_net()
 {
+        #       As root on the host's own network the interface rows do not stop at a refusal: they change the machine's
+        #       real interfaces, and in a container that cut its only link out (every agent's API connection refused and
+        #       the container restarted, five times in a day). So as root the lane runs itself again in a network namespace
+        #       of its own, its loopback brought up (by ioctl: iproute2 may not be there), and nothing of the host's is
+        #       touched; with no namespace to be had it says so and does not run.
+        if [ "$(id -u)" = 0 ] && [ -z "${MW_NET_PRIVATE:-}" ]; then
+                if unshare -n true 2> /dev/null; then
+                        MW_NET_PRIVATE=1 unshare -n sh -c 'python3 -c "
+import socket, fcntl, struct
+s = socket.socket()
+f = struct.unpack(\"16sh\", fcntl.ioctl(s, 0x8913, struct.pack(\"16sh\", b\"lo\", 0)))[1]
+fcntl.ioctl(s, 0x8914, struct.pack(\"16sh\", b\"lo\", f | 1))
+" && exec sh test/run net'
+                        return $?
+                fi
+                echo "  net          NOT RUN: as root it would reconfigure this machine's own interfaces, and unshare -n is refused here"
+                return 2
+        fi
         net_outcome=0
         net_fast || return 1
         for net_arch_name in x86_64 arm64 riscv64; do
