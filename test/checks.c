@@ -129559,10 +129559,9 @@ static long card_fake_node(unsigned int minor);
 #ifdef CHECK_draw_list
 #define COMPOSITOR_LIST_RENDER_EXTERNAL // the list rows below draw their own renderer (compositor_gpu_list_render, after this file)
 #endif
-#ifdef CHECK_terminal
 /*
         A page no one may touch after every mapping the compositor makes, while a row asks for it (space_guarded, the size
-        rows of check_compositor_space_sizes): a buffer's own pages, rounded up, and then one with no access, so a store one
+        rows of check_compositor_space_sizes, which every section that includes the compositor here builds): a buffer's own pages, rounded up, and then one with no access, so a store one
         row past a buffer's end is a fault there and not a write into whatever the kernel mapped next to it. The guard page
         is kept when the buffer is given back (the row runs in a child, which ends). Off, every call is the one it always is.
 */
@@ -129584,11 +129583,8 @@ static bipolar space_guard_call_6(positive number, positive a, positive b, posit
         return mapped;
 }
 #define system_call_6(number, a, b, c, d, e, f) space_guard_call_6(number, a, b, c, d, e, f)
-#endif
 #include "../src/canvas/compositor.c"
-#ifdef CHECK_terminal
 #undef system_call_6
-#endif
 #undef system_control
 #define system_control(handle, request, argument)                            \
         system_call_3(syscall(ioctl), (positive)(handle),                    \
