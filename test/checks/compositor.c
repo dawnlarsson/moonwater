@@ -2944,6 +2944,63 @@ static void check_taskbar_centre(void)
 }
 
 /*
+        The launcher opens over the moon: centred on the moon along the band wherever the arrangement puts it (the band's start, its
+        middle or its end), off the band on the screen's side, and held inside the screen, so at the start it is at the screen's left
+        edge, not past it. A side band's is centred on the moon down the band.
+*/
+static void check_launcher_centred(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    static const int zones[3] = {TASKBAR_ZONE_START, TASKBAR_ZONE_CENTRE, TASKBAR_ZONE_END};
+    b32 centred = 1, held = 1, beside = 1, side = 1;
+
+    for (int each = 0; each < 3; each++)
+        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position++)
+        {
+            static const char *const words[4] = {"bottom", "top", "left", "right"};
+            struct taskbar_view view;
+            struct ui_anchor anchor;
+            int x, y, width = 480, height = 360, vertical = position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
+
+            memory_zero(&view, sizeof(view));
+            memory_zero(&anchor, sizeof(anchor));
+            view.width = BAND_W, view.height = BAND_W * 9 / 16, view.scale = 100, view.position = position, view.count = 3, view.lengths = lengths;
+            taskbar_settings_set(words[position], "primary", "battery none\n");
+            taskbar.moon_zone = zones[each], taskbar.tasks_zone = zones[each];
+            taskbar_changed();
+            if (!taskbar_anchor(&view, TASKBAR_LAUNCHER, &anchor.button[0], &anchor.button[1], &anchor.button[2], &anchor.button[3]))
+            {
+                centred = held = beside = side = 0;
+                continue;
+            }
+            anchor.screen[2] = view.width, anchor.screen[3] = view.height, anchor.edge = position;
+            ui_anchor_beside(&anchor, width, height, &x, &y);
+            held &= x >= 0 && y >= 0 && x + width <= view.width && y + height <= view.height;
+            if (!vertical)
+            {
+                int middle = anchor.button[0] + anchor.button[2] / 2, want = middle - width / 2;
+
+                want = want < 0 ? 0 : want + width > view.width ? view.width - width : want;
+                centred &= x == want;
+                beside &= position == TASKBAR_BOTTOM ? y + height == anchor.button[1] : y == anchor.button[1] + anchor.button[3];
+            }
+            else
+            {
+                int middle = anchor.button[1] + anchor.button[3] / 2, want = middle - height / 2;
+
+                want = want < 0 ? 0 : want + height > view.height ? view.height - height : want;
+                side &= y == want && (position == TASKBAR_LEFT ? x == anchor.button[0] + anchor.button[2] : x + width == anchor.button[0]);
+            }
+        }
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_standard();
+    check("launcher: it opens centred on the moon along a bottom or top band, the moon at the start, the middle or the end", centred);
+    check("launcher: off the band on the screen's side, its edge on the band's", beside);
+    check("launcher: and inside the screen, at its edge where the moon is too near it to centre on", held);
+    check("launcher: on a side band it is centred on the moon down the band, beside it", side);
+}
+
+/*
         The highlight of the task with the keys moves to the next one's when the keys do, as the kit's tabs move their pip: half way through
         its 350 ms it is between the two, it is still moving (taskbar_moving, which keeps the band drawn), and after them it is over the new
         task exactly and has stopped. A task that keeps the keys while the band is laid out again has it put where the task is now, at once.
@@ -3763,7 +3820,7 @@ static void check_taskbar_text(string_address face_path)
     static const char *const cuts[4] = {"AVATAR To Wa: a title too long", "Settings \xe2\x80\x94 T\xc3\xa4st",
                                         "\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6 W", "W"};
     bipolar got = face_path ? file_slurp_regular_at(AT_FDCWD, face_path, bytes, sizeof(bytes), 0) : -1;
-    int rect[4], turns = 1, inked = 1, inside = 1, tall = 1, tops = 1, fits = 1, sized = 1, flat[6] = {0};
+    int rect[4], turns = 1, inked = 1, inside = 1, tall = 1, tops = 1, fits = 1, sized = 1, flat[6] = {0}, along[3] = {0};
 
     if (got <= 0 || font_load(&band_face, bytes, (positive)got, 0) != 0)
     {
@@ -3882,10 +3939,14 @@ static void check_taskbar_text(string_address face_path)
                 inked &= right >= 0;
                 if (position == TASKBAR_BOTTOM)
                 {
-                    flat[2 * at] = right - left, flat[2 * at + 1] = bottom - top;
+                    flat[2 * at] = right - left, flat[2 * at + 1] = bottom - top, along[at] = slot[at][2];
                     continue;
                 }
                 tall &= bottom - top > right - left;
+                // A side band shorter than the bottom one gives a tab less room, and its title is cut to it (the fits row below holds
+                // that): the size is held for a tab as long as the bottom band's.
+                if (slot[at][3] < along[at])
+                    continue;
                 if (bottom - top - flat[2 * at] > 1 || flat[2 * at] - (bottom - top) > 1 || right - left - flat[2 * at + 1] > 1 || flat[2 * at + 1] - (right - left) > 1)
                     string_format(log, "  taskbar text: tab %p on side %p (edge %p) is %p by %p, the bottom band's %p by %p\n", (positive)at, (positive)position,
                                   (positive)edge, (positive)(bottom - top), (positive)(right - left), (positive)flat[2 * at], (positive)flat[2 * at + 1]);

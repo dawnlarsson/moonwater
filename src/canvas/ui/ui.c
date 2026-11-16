@@ -25175,14 +25175,38 @@ static void ui_anchor_take(struct ui_anchor address_to anchor, const struct wind
         anchor->anchored = true;
 }
 
-// The place asked of the compositor for the window in row, as a width by height window beside the button (ui_anchor_place).
+/*
+        Where a width by height window beside the band's button goes: off the band on the screen's side of it (ui_anchor_place), and
+        centred on the button along the band, so the launcher opens over the moon wherever the moon is (the band's start, its middle or
+        its end) and a popup over its tray item, held inside the screen.
+*/
+static void ui_anchor_beside(const struct ui_anchor address_to anchor, int width, int height, int address_to x, int address_to y)
+{
+        const int address_to button = anchor->button, address_to screen = anchor->screen;
+
+        ui_anchor_place(ui_panel_side(anchor->edge), 0, button, screen, width, height, x, y);
+        if (anchor->edge == TASKBAR_BOTTOM || anchor->edge == TASKBAR_TOP)
+        {
+                address_to x = button[0] + button[2] / 2 - width / 2;
+                address_to x = address_to x + width > screen[0] + screen[2] ? screen[0] + screen[2] - width : address_to x;
+                address_to x = address_to x < screen[0] ? screen[0] : address_to x;
+        }
+        else
+        {
+                address_to y = button[1] + button[3] / 2 - height / 2;
+                address_to y = address_to y + height > screen[1] + screen[3] ? screen[1] + screen[3] - height : address_to y;
+                address_to y = address_to y < screen[1] ? screen[1] : address_to y;
+        }
+}
+
+// The place asked of the compositor for the window in row, as a width by height window beside the button (ui_anchor_beside).
 static void ui_anchor_set(const struct ui_anchor address_to anchor, struct windows address_to table, unsigned int row, int width, int height)
 {
         struct window_place place;
         int x, y;
 
         memory_zero(&place, sizeof(place));
-        ui_anchor_place(ui_panel_side(anchor->edge), 0, anchor->button, anchor->screen, width, height, &x, &y);
+        ui_anchor_beside(anchor, width, height, &x, &y);
         place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
         place.x = x - anchor->screen[0], place.y = y - anchor->screen[1];
         place.width = (unsigned int)width, place.height = (unsigned int)height;
