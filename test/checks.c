@@ -134779,7 +134779,7 @@ static void check_taskbar_guard(void)
     static const int scales[4] = {100, 125, 150, 200}, lengths[8] = {40, 97, 160, 333, 640, 1080, 1366, 2000};
     static struct windows guard_table;
     struct windows address_to kept_table = compositor.table;
-    int drawn = 0, tried = 0, rect[4];
+    int drawn = 0, tried = 0, rect[4], outside = 0, named_outside = 0, laid = 0;
 
     memory_zero(&guard_table, sizeof(guard_table));
     guard_table.themed = 1, guard_table.theme = 1, guard_table.accent = 0xffffffu;
@@ -134825,7 +134825,56 @@ static void check_taskbar_guard(void)
                     tried++;
                     drawn += taskbar_draw(&view, ~0ul, band_guard_glass, null, rect) != 0;
                     system_call_2(syscall(munmap), (positive)mapped, room + 4096);
+                    // What the band lays out is inside it: a tab or cell it has not the room for is given no room (no rectangle), not one
+                    // past its end, and none past it is named, so no press, point or draw finds a rectangle that is not wholly inside it.
+                    {
+                        const struct ui_tree address_to t = taskbar_tree(&view);
+                        const struct ui_node address_to band = &t->node[1];
+
+                        for (int k = 2; k < t->count; k++)
+                        {
+                            const struct ui_node address_to n = &t->node[k];
+                            b32 past = n->w > 0 && n->h > 0 && !(n->x >= band->x && n->y >= band->y && n->x + n->w <= band->x + band->w &&
+                                                                   n->y + n->h <= band->y + band->h);
+
+                            laid += n->w > 0 && n->h > 0;
+                            outside += past;
+                            named_outside += past && n->id != 0;
+                        }
+                    }
                 }
+    }
+    /*
+        A cell's text is inside its rectangle (ui_cell_line's target): a letter under twelve stacked marks, in a cell 20 pixels high, is
+        inked in the cell and nowhere below it or right of it. Its em is 11/20 of the cell's height, and the marks reach no lower than
+        its last row (the count is in the log), so a target a row taller than the cell is not seen here: no text reaches that row.
+    */
+    {
+        static unsigned int cell[(20 + 8) * (240 + 8)];
+        static const char stacked[] = "g\xcc\xa3\xcc\xb1\xcc\xa3\xcc\xb1\xcc\xa3\xcc\xb1\xcc\xa3\xcc\xb1\xcc\xa3\xcc\xb1\xcc\xa3\xcc\xb1";
+        struct taskbar_view face_view = band_view(TASKBAR_BOTTOM, null);
+        struct ui cell_ui;
+        const unsigned int sentinel = 0x5a5a5a5au;
+        int last_row = 0, spilled = 0, inside = 0;
+
+        memory_zero(&cell_ui, sizeof(cell_ui));
+        memory_fill_u32(cell, sizeof(cell) / sizeof(cell[0]), sentinel);
+        cell_ui.pixels = cell, cell_ui.pitch = 248, cell_ui.width = 248, cell_ui.height = 28, cell_ui.scale = 100;
+        cell_ui.engine = face_view.engine, cell_ui.regular = face_view.face;
+        ui_cell_line(&cell_ui, 0, 0, 240, 20, stacked, 0xffffffffu, 0xff000000u);
+        for (int y = 0; y < 28; y++)
+            for (int x = 0; x < 248; x++)
+            {
+                b32 inked = cell[y * 248 + x] != sentinel;
+
+                last_row += inked && y == 19 && x < 240;
+                inside += inked && y < 20 && x < 240;
+                spilled += inked && (y >= 20 || x >= 240);
+            }
+        string_format(log, "  taskbar guard: a cell's stacked marks ink %p pixels inside it, %p of its last row, and %p outside it\n", (positive)inside,
+                      (positive)last_row, (positive)spilled);
+        check("taskbar guard: a cell's text, a letter under twelve stacked marks, is inked inside its rectangle and nowhere below or beside it",
+              inside > 0 && spilled == 0);
     }
     taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
     taskbar_volume_set(0, 0, 0, 0);
@@ -134835,6 +134884,9 @@ static void check_taskbar_guard(void)
     compositor.table = kept_table;
     check("taskbar guard: a band on every edge at 100 to 200 percent, long titles, the tray's cells and a format of the person's, 40 to 2000 pixels long, drawn into exactly its bytes before a protected page, writes nothing past them",
           tried == 2 * 4 * 4 * 8 && drawn > tried / 2);
+    string_format(log, "  taskbar guard: %p rectangles laid out, %p past their band, %p of those named\n", (positive)laid, (positive)outside, (positive)named_outside);
+    check("taskbar guard: on every edge, scale and length from 40 to 2000 pixels each rectangle the band lays out is wholly inside it, and none past it is named",
+          laid > 0 && outside == 0 && named_outside == 0);
 }
 
 static void check_taskbar_identity(void)
@@ -178925,6 +178977,12 @@ b32 main()
                         b32 focused_was = terminal.focused, caret_on;
                         long timeout = -1;
 
+                        // The caret on (a step of the stream may have hidden it) and the view at its live end, where the caret is.
+                        cursor_hide();
+                        term_bytes((const p8 address_to) "\x1b[?25h", 6);
+                        to_shell_length = 0;
+                        cursor_show();
+                        terminal_view_live();
                         ui_kit.caret_speed = UI_CARET_NORMAL;
                         cycle = (positive)ui_caret_cycle();
                         terminal.focused = true;
@@ -178938,6 +178996,9 @@ b32 main()
                                 terminal_frame();
                         }
                         caret_on = terminal_caret_index != ~0u && terminal.caret_cover[0] == UI_CARET_FULL && terminal.caret_cover[1] == UI_CARET_FULL;
+                        // The list is wanted at once: no back-off a lost list of the stream left (ui_list_wanted), and no key held as lost.
+                        ui_list_skip = ui_list_wait = ui_list_whole_run = 0;
+                        terminal.list_lost = 0;
                         table->list_mode = 1;
                         for (unsigned int knock = 0; knock < 20; knock++)
                         {
@@ -178956,8 +179017,9 @@ b32 main()
                                 else
                                         later_lists += table->frame[own] - framed;
                         }
-                        string_format(log, "  idle terminal: the off caret's list at the first knock %p, frames at the next 19 knocks %p\n",
-                                      (positive)first_lists, (positive)later_lists);
+                        string_format(log, "  idle terminal: the caret solid in both pictures %p, the off caret's list at the first knock %p, frames at the next 19 knocks %p (shown %p, list skip %p, lost %p)\n",
+                                      (positive)caret_on, (positive)first_lists, (positive)later_lists, (positive)shown, (positive)ui_list_skip,
+                                      (positive)terminal.list_lost);
                         check("terminal lists: an idle terminal with the keys records its caret's off phase once, and presents no frame after it settles",
                               caret_on && first_lists && later_lists == 0);
                         terminal.dirty = false;
