@@ -3021,9 +3021,24 @@ static void check_wallpaper_ground(void)
     memory_zero(&table, sizeof(table));
     table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
     compositor.table = &table, compositor.width = 320, compositor.height = 200;
+    // With no file of any row (a live boot), the rows read are the standards: the moon, dimmed, 45 percent seas, the glow.
+    compositor_wall_rows.moon = 0, compositor_wall_rows.ready = 0;
+    {
+        bipolar any = system_open_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_PATH, O_RDONLY | O_CLOEXEC);
+
+        if (any >= 0)
+            system_close(any);
+        compositor_wall_read();
+        check("wallpaper: with no file of its rows the ground is the moon, dimmed, its seas 45 percent, with the glow",
+              any >= 0 || (compositor_wall_rows.ready && compositor_wall_rows.moon && compositor_wall_rows.dimmed && compositor_wall_rows.maria == 45 &&
+                           compositor_wall_rows.glow == 1));
+    }
     compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
     compositor_wall_keep();
-    made = compositor_wall && compositor_wall_w == 320 && compositor_wall_h == 200 && compositor.damages > 0;
+    // Made on its thread: nothing shown till it is done, then taken.
+    made = !compositor_wall && compositor_wall_making();
+    compositor_wall_finish();
+    made &= !compositor_wall_making() && compositor_wall && compositor_wall_w == 320 && compositor_wall_h == 200 && compositor.damages > 0;
     made &= compositor_wall[100 * 320 + 160] != compositor_wall[5 * 320 + 5];
     memory_zero(&t, sizeof(t));
     t.pixels = target_pixels, t.pitch = 320, t.width = 320, t.height = 200, t.x1 = 0, t.y1 = 0, t.x2 = 320, t.y2 = 200;
@@ -3040,6 +3055,7 @@ static void check_wallpaper_ground(void)
 
         compositor_wall_rows.glow = 2;
         compositor_wall_keep();
+        compositor_wall_finish();
         glow = compositor_wall && compositor.damages > 0 && compositor_wall[2 * 320 + 160] != before;
     }
     compositor_wall_rows.moon = 0;

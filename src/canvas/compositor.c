@@ -2625,6 +2625,9 @@ static b32 compositor_main()
                         until = !until || frame < until ? frame : until;
                 }
 
+                // A wallpaper being made on its thread: looked at again soon, to be taken when it is done.
+                if (compositor_wall_making())
+                        until = !until || now + COMPOSITOR_WALL_LOOK < until ? now + COMPOSITOR_WALL_LOOK : until;
                 // The moon's next step of its turn, while it turns.
                 if (compositor.band && taskbar_moon_due(now))
                         until = !until || taskbar_moon_due(now) < until ? taskbar_moon_due(now) : until;
@@ -2853,6 +2856,8 @@ static b32 compositor_main()
                 // The taskbar's place for this frame, before the frame is drawn: a slide is one step a pass.
                 compositor_taskbar_slide(now);
                 compositor_moon_keep(now);
+                // The wallpaper: one asked for, or one made on its thread taken.
+                compositor_wall_keep();
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.

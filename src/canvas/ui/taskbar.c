@@ -1614,14 +1614,14 @@ static unsigned int taskbar_wall_accent(void)
         (ui_moon_night), in the dark theme dimmed (its seas maria percent of its highlands) or inverted, in the light one ink on paper,
         the accent's glow round it (glow 1) and along the screen's edges too (glow 2).
 */
-static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow)
+static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent)
 {
         struct ui ui;
 
         memory_zero(&ui, sizeof(ui));
         ui.pixels = pixels, ui.pitch = (unsigned long)pitch, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
         ui_moon_dim_seas = maria / 100.0;
-        ui_moon_night(&ui, 0, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | (dimmed ? UI_MOON_PAPER_DIM : 0) : 0, taskbar_accent(), glow ? 1 : 0,
+        ui_moon_night(&ui, 0, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | (dimmed ? UI_MOON_PAPER_DIM : 0) : 0, accent, glow ? 1 : 0,
                       glow > 1 ? 1 : 0);
 }
 

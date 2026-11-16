@@ -635,9 +635,12 @@ static void compositor_present(void)
 
 /*
         The wallpaper kept for the space (compositor_wall): made again only when the space's size, the screens, the theme, the accent or
-        a row of `canvas wallpaper` changed, the whole space damaged then; nothing at any other present. Each screen has its own moon over
-        its sky, in the dark theme dimmed (the moon as it is, its seas `canvas wallpaper maria` of its highlands) or inverted (chalk on
-        charcoal), in the light one ink on paper, with the accent's glow round it and along the edges as `canvas wallpaper glow` says.
+        a row of `canvas wallpaper` changed. It is made on a thread of its own (compositor_wall_run), never on the loop: until it is
+        done the screen keeps what it showed (the last wallpaper, or the colour), and when it is the loop takes it at its next pass
+        (compositor_wall_keep), lets the old one go and damages the space once. A change while one is being made waits for it and is
+        made after. With no thread to be had it is made on the loop, as it was. Each screen has its own moon over its sky, in the dark
+        theme dimmed (the moon as it is, its seas `canvas wallpaper maria` of its highlands) or inverted (chalk on charcoal), in the light
+        one ink on paper, with the accent's glow round it and along the edges as `canvas wallpaper glow` says.
 */
 static struct
 {
@@ -645,10 +648,106 @@ static struct
         int ready;                     // the rows were read
 } compositor_wall_rows = {1, 1, 45, 1, 0};
 
+#define COMPOSITOR_WALL_SCREENS 8
+
+static struct compositor_wall_job
+{
+        thread *worker;          // the thread making it, or null
+        int done;                // the thread has made it (written last, with release)
+        unsigned int *pixels;    // what it makes into, as large as the space
+        positive bytes;
+        int width, height, count, dark, dimmed, maria, glow;
+        unsigned int accent;
+        int screens[COMPOSITOR_WALL_SCREENS][4];
+        unsigned int key[8];     // what it is made from
+        positive began, took;    // when it was begun, and how long it took (ns)
+} compositor_wall_job;
+
+static void compositor_kmsg(string_address text, positive value, string_address tail);
+
+/*
+        What became of the wallpaper, in the kernel's log (dmesg): "compositor: wallpaper moon 1920x1080 made in 850 ms" or
+        "compositor: wallpaper plain because ...", once for each change, so a screen with no wallpaper says why.
+*/
+static void compositor_wall_say(const char *why, int width, int height, positive ms)
+{
+        char line[120];
+        positive at = 0;
+
+        if (!why)
+        {
+                string_copy((string_address)line, (string_address) "compositor: wallpaper moon ");
+                at = string_length((string_address)line);
+                at += positive_into_string((p8 *)line + at, (positive)width);
+                line[at++] = 'x';
+                at += positive_into_string((p8 *)line + at, (positive)height);
+                string_copy((string_address)line + at, (string_address) " made in ");
+                at = string_length((string_address)line);
+                at += positive_into_string((p8 *)line + at, ms);
+                string_copy((string_address)line + at, (string_address) " ms");
+        }
+        else
+        {
+                string_copy((string_address)line, (string_address) "compositor: wallpaper plain because ");
+                string_copy((string_address)line + string_length((string_address)line), (string_address)why);
+        }
+        compositor_kmsg((string_address)line, 0, (string_address) "");
+}
+
+static unsigned int compositor_wall_key[8]; // what the wallpaper shown was made from
+static positive compositor_wall_bytes;
+
+// Make the job's wallpaper: each screen's in its rectangle of the space.
+static void compositor_wall_make(struct compositor_wall_job *job)
+{
+        for (int at = 0; at < (job->count ? job->count : 1); at++)
+        {
+                int x = job->count ? job->screens[at][0] : 0, y = job->count ? job->screens[at][1] : 0;
+                int w = job->count ? job->screens[at][2] : job->width, h = job->count ? job->screens[at][3] : job->height;
+
+                if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > job->width || y + h > job->height)
+                        continue;
+                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark, job->dimmed, job->maria, job->glow, job->accent);
+        }
+}
+
+static fn compositor_wall_run(address_any context)
+{
+        struct compositor_wall_job *job = (struct compositor_wall_job *)context;
+
+        compositor_wall_make(job);
+        job->took = clock_monotonic_nanoseconds() - job->began;
+        __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+// The wallpaper made on its thread taken: it is the one shown from now, the one before let go, the space damaged.
+static void compositor_wall_take(void)
+{
+        struct compositor_wall_job *job = &compositor_wall_job;
+
+        if (job->worker)
+                thread_join(job->worker);
+        job->worker = null;
+        if (compositor_wall)
+                compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+        compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height;
+        memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
+        job->pixels = null, job->done = 0;
+        compositor_wall_say(null, compositor_wall_w, compositor_wall_h, job->took / 1000000);
+        compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
+// Whether a wallpaper is being made: the loop looks again within COMPOSITOR_WALL_LOOK for it to be done.
+#define COMPOSITOR_WALL_LOOK (16ull * 1000000ull)
+
+static int compositor_wall_making(void)
+{
+        return compositor_wall_job.pixels != null;
+}
+
 static void compositor_wall_keep(void)
 {
-        static unsigned int key[8];
-        static positive bytes;
+        struct compositor_wall_job *job = &compositor_wall_job;
         unsigned int count = 0, now[8];
         const int (*screens)[4] = compositor_screens(&count);
         int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
@@ -656,36 +755,73 @@ static void compositor_wall_keep(void)
         // Not before the rows are read: a compositor that has read no settings (a check's) keeps its colour.
         if (!compositor_wall_rows.ready)
                 return;
+        // One being made: taken when it is done, and nothing else asked till then.
+        if (job->pixels)
+        {
+                if (__atomic_load_n(&job->done, __ATOMIC_ACQUIRE))
+                        compositor_wall_take();
+                return;
+        }
         now[0] = (unsigned int)compositor.width, now[1] = (unsigned int)compositor.height, now[2] = count, now[3] = (unsigned int)dark;
         now[4] = taskbar_wall_accent(), now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2);
         now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
-        if (!memory_compare(key, now, sizeof(key)) && (compositor_wall || !compositor_wall_rows.moon))
+        if (!memory_compare(compositor_wall_key, now, sizeof(now)))
                 return;
-        memory_copy(key, now, sizeof(key));
-        if (compositor_wall)
-                compositor_call(syscall(munmap), (positive)compositor_wall, bytes, 0, 0, 0, 0);
-        compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
-        compositor_damage(0, 0, compositor.width, compositor.height);
+        // Plain, or a space with nothing in it: the colour, at once.
         if (!compositor_wall_rows.moon || compositor.width <= 0 || compositor.height <= 0)
-                return;
-        bytes = (positive)compositor.width * (positive)compositor.height * 4;
         {
-                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+                compositor_wall_say(!compositor_wall_rows.moon ? "canvas wallpaper is plain" : "the space has no screen yet", 0, 0, 0);
+                memory_copy(compositor_wall_key, now, sizeof(now));
+                if (compositor_wall)
+                        compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+                compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+                return;
+        }
+        // A space of another size: the old picture is no ground for it, so the colour until the new one is made.
+        if (compositor_wall && (compositor_wall_w != compositor.width || compositor_wall_h != compositor.height))
+        {
+                compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+                compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+        job->bytes = (positive)compositor.width * (positive)compositor.height * 4;
+        {
+                long got = (long)compositor_call(syscall(mmap), 0, job->bytes, 3, 0x22, (positive)-1, 0);
 
                 if (got < 0 && got > -4096)
+                {
+                        // Said once for this space and look; looked for again only when something changes.
+                        compositor_wall_say("there was no memory for it", 0, 0, 0);
+                        memory_copy(compositor_wall_key, now, sizeof(now));
                         return;
-                compositor_wall = (unsigned int *)got;
+                }
+                job->pixels = (unsigned int *)got;
         }
-        compositor_wall_w = compositor.width, compositor_wall_h = compositor.height;
-        for (unsigned int at = 0; at < (count ? count : 1); at++)
+        job->width = compositor.width, job->height = compositor.height, job->count = count < COMPOSITOR_WALL_SCREENS ? (int)count : COMPOSITOR_WALL_SCREENS;
+        for (int at = 0; at < job->count; at++)
+                memory_copy(job->screens[at], screens[at], sizeof(job->screens[at]));
+        job->dark = dark, job->dimmed = compositor_wall_rows.dimmed, job->maria = compositor_wall_rows.maria, job->glow = compositor_wall_rows.glow;
+        job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;
+        memory_copy(job->key, now, sizeof(now));
+        job->worker = thread_start(compositor_wall_run, (address_any)job);
+        // No thread: made here, as it was.
+        if (!job->worker)
         {
-                int x = count ? screens[at][0] : 0, y = count ? screens[at][1] : 0, w = count ? screens[at][2] : compositor.width, h = count ? screens[at][3] : compositor.height;
-
-                if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > compositor_wall_w || y + h > compositor_wall_h)
-                        continue;
-                taskbar_wall_draw(compositor_wall + (long)y * compositor_wall_w + x, compositor_wall_w, w, h, dark, compositor_wall_rows.dimmed,
-                                  compositor_wall_rows.maria, compositor_wall_rows.glow);
+                compositor_wall_make(job);
+                job->took = clock_monotonic_nanoseconds() - job->began;
+                compositor_wall_take();
         }
+}
+
+// For a check: the wallpaper being made, waited for and taken.
+static void compositor_wall_finish(void)
+{
+        if (!compositor_wall_job.pixels)
+                return;
+        while (!__atomic_load_n(&compositor_wall_job.done, __ATOMIC_ACQUIRE))
+                compositor_call(syscall(sched_yield), 0, 0, 0, 0, 0, 0);
+        compositor_wall_take();
 }
 
 static void compositor_present_frames(void)
@@ -701,7 +837,6 @@ static void compositor_present_frames(void)
         // Not while a flip is in flight, nor while the card still has jobs that write or read what this present would (compositor_card_holds).
         if (!compositor.damages || compositor.flip_pending || compositor_card_holds())
                 return;
-        compositor_wall_keep();
         compositor_bands_follow();
 
         // What moonwater debug says of the card, once there is a table to say it in.
