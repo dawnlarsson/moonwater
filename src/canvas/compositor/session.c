@@ -900,6 +900,63 @@ static void compositor_touch_screen_open(unsigned int at, bipolar handle, int sl
         }
 }
 
+/*
+        Where the events being posted come from (WINDOW_EVENT_VIRTUAL). An input device is the machine's own when the node opened is
+        a device the kernel hangs under a real bus: its device number (statx of the descriptor opened, so it is the node read and no
+        other one that took its name since) resolved through /sys/dev/char lies under the kernel's devices and not under
+        devices/virtual, where uinput and uhid make theirs. A program writes a uinput or uhid device's bus, vendor, name and phys, so
+        none of those is asked; and a Bluetooth keyboard bluez brings up through uhid (Bluetooth LE) is virtual by the same rule, as
+        nothing it cannot forge tells bluez's from any other program that can open /dev/uhid, where one through the kernel's hidp
+        (classic Bluetooth) hangs under its hci and is the machine's. A laptop's lid, power and hotkey devices, its keyboard and pad
+        hang under ACPI, the platform, i8042, USB or I2C, and a virtual machine's virtio-input and usb-tablet under the guest's PCI or
+        USB: the machine's own, as the guest sees it. A link that cannot be read is not the machine's.
+*/
+static unsigned char compositor_input_physical[COMPOSITOR_INPUTS]; // the slots whose device was found to be the machine's own
+static int compositor_post_physical; // set by compositor_input_read alone, for the span of its own posts (compositor_post)
+
+// Whether a device's sysfs path (the link /sys/dev/char/MAJOR:MINOR resolves to, "../../devices/...") is the machine's own.
+static int compositor_input_path_physical(const char *resolved)
+{
+        static const char devices[] = "devices/", virtual[] = "virtual/";
+
+        if (!resolved)
+                return 0;
+        while (resolved[0] == '.' && resolved[1] == '.' && resolved[2] == '/')
+                resolved += 3;
+        for (unsigned int at = 0; at < sizeof(devices) - 1; at++)
+                if (resolved[at] != devices[at])
+                        return 0;
+        resolved += sizeof(devices) - 1;
+        for (unsigned int at = 0; at < sizeof(virtual) - 1; at++)
+                if (resolved[at] != virtual[at])
+                        return resolved[0] != 0;
+        return 0;
+}
+
+// The device of an open input node, classified (compositor_input_path_physical): 1 the machine's own, 0 not or not known.
+static int compositor_input_handle_physical(bipolar handle)
+{
+        p8 statx[256] = {0}, link[48] = "/sys/dev/char/", resolved[512];
+        positive length = string_length(link);
+        unsigned int major, minor;
+        long got;
+
+        // STATX_TYPE, AT_EMPTY_PATH: stx_rdev_major and stx_rdev_minor at 128 and 132.
+        if (compositor_call(syscall(statx), (positive)handle, (positive) "", 0x1000, 1, (positive)statx, 0) != 0)
+                return 0;
+        memory_copy(address_of major, statx + 128, 4);
+        memory_copy(address_of minor, statx + 132, 4);
+        length += positive_into_string(link + length, major);
+        link[length++] = ':';
+        length += positive_into_string(link + length, minor);
+        link[length] = 0;
+        got = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)link, (positive)resolved, sizeof(resolved) - 1, 0, 0);
+        if (got <= 0)
+                return 0;
+        resolved[got] = 0;
+        return compositor_input_path_physical((const char *)resolved);
+}
+
 static void compositor_input_add(unsigned int number)
 {
         p8 path[32] = "/dev/input/event";
@@ -1025,6 +1082,7 @@ static void compositor_input_add(unsigned int number)
 
         compositor.inputs[at] = (int)handle;
         compositor.device_number[at] = (int)number;
+        compositor_input_physical[at] = (unsigned char)compositor_input_handle_physical(handle);
         // A keyboard whose repeat can be asked is told what the settings keep, now and when they change.
         compositor.repeats[at] = 0;
         if (keyboard && system_control(handle, COMPOSITOR_EVIOCGREP, compositor.repeat_own[at]) == 0)
@@ -1204,6 +1262,11 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         // The right button of a long press says so, which a program may take as its own (WINDOW_KEY_HOLD).
         if (compositor.touch.holding && type == WINDOW_EVENT_BUTTON)
                 flags |= WINDOW_KEY_HOLD;
+        // Not read from a device found to be the machine's own, by the device's read itself: marked (WINDOW_EVENT_VIRTUAL). A pinch has no
+        // such bit (it is its WINDOW_PINCH_END), and no event of another type is marked.
+        if (!compositor_post_physical &&
+            (type == WINDOW_EVENT_KEY || type == WINDOW_EVENT_BUTTON || type == WINDOW_EVENT_MOTION || type == WINDOW_EVENT_WHEEL))
+                flags |= WINDOW_EVENT_VIRTUAL;
         head = table->event_head[row];
         used = head - __atomic_load_n(&table->event_tail[row], __ATOMIC_ACQUIRE);
         last = (head - 1) % WINDOWS_EVENTS;

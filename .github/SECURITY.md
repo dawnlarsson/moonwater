@@ -340,6 +340,15 @@ attacker gets its invariants here once there is a lane that proves them.
   desktop session starts, root, and the compositor) opens as root. An
   unprivileged window client, if ever wanted, is handed the door and the table
   as descriptors, never a world-writable FIFO.
+- **Input a program makes is marked (`WINDOW_EVENT_VIRTUAL`, MW-2026-202).** The
+  compositor sets the bit in a KEY, BUTTON, MOTION or WHEEL event's flags unless
+  it read the event itself from an input device whose node resolves (by its
+  device number, `/sys/dev/char`) under a real bus and not `devices/virtual`
+  (uinput's, uhid's), so a key a program types, the on-screen keyboard's keys and
+  anything of unknown source are marked, and a window lets only an unmarked press
+  change what only the person at the machine may. A Bluetooth LE keyboard,
+  which bluez brings up through uhid, is marked too: nothing unforgeable tells it
+  apart.
 - **The image's own programs, built with the compiler's hardening, are a region
   (`sec_build_hardened`):** locals zeroed (`-ftrivial-auto-var-init=zero`),
   frames probed (`-fstack-clash-protection`), call-used registers cleared

@@ -3777,7 +3777,23 @@ static void compositor_touch_tick(positive now)
         for as long as the device went on.
 */
 #define COMPOSITOR_INPUT_READS 16
+static void compositor_input_read_device(unsigned int at);
+
+/*
+        A device's reports read, and what they say posted. The posts it makes are the device's (compositor_post_physical says whether
+        it is the machine's own, compositor_input_add) for as long as the read lasts and no longer, so a post made after it, from
+        anywhere, is marked as one whose source is not known; a slot whose device has gone is the machine's no more.
+*/
 static void compositor_input_read(unsigned int at)
+{
+        compositor_post_physical = at < COMPOSITOR_INPUTS && compositor_input_physical[at];
+        compositor_input_read_device(at);
+        compositor_post_physical = 0;
+        if (at < COMPOSITOR_INPUTS && compositor.inputs[at] < 0)
+                compositor_input_physical[at] = 0;
+}
+
+static void compositor_input_read_device(unsigned int at)
 {
         struct compositor_input_event raw[64];
         struct compositor_report_event events[64];

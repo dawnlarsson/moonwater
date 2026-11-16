@@ -143894,9 +143894,109 @@ static void check_compositor_wheel(void)
         if (file >= 0)
             system_close((int)file);
     }
+    /*
+            Where an event came from (WINDOW_EVENT_VIRTUAL): a device's read posts as its device is (compositor_input_physical, which
+            compositor_input_add sets from where the device hangs) and only for the read's span; a post from anywhere else is marked;
+            the kernel's repeat of a key is the device's; a pinch never has the bit, which is its end there. The device is the pipe
+            that stands for one, found the machine's own or not by hand: no input device is here.
+    */
+    {
+        int focus = compositor.focus;
+        unsigned int at, flags[8];
+
+        compositor.focus = 1;
+        table->event_tail[1] = table->event_head[1];
+        compositor_input_physical[0] = 1;
+        wheel_feed(COMPOSITOR_EV_KEY, 30, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        check("origin: a key read from a device found to be the machine's own is not marked",
+              table->event_head[1] != table->event_tail[1] && table->event_type[1][at] == WINDOW_EVENT_KEY &&
+                  (table->event_flags[1][at] & WINDOW_KEY_DOWN) && !(table->event_flags[1][at] & WINDOW_EVENT_VIRTUAL));
+        wheel_feed(COMPOSITOR_EV_KEY, 30, 2);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        check("origin: and the kernel's repeat of it, which is the same device's, is not either",
+              (table->event_flags[1][at] & WINDOW_KEY_REPEAT) && !(table->event_flags[1][at] & WINDOW_EVENT_VIRTUAL));
+        wheel_feed(COMPOSITOR_EV_KEY, 30, 0);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a');
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        check("origin: the read leaves no origin behind it: a key posted after it, from anywhere else, is marked",
+              !compositor_post_physical && (table->event_flags[1][at] & WINDOW_EVENT_VIRTUAL));
+        compositor_input_physical[0] = 0;
+        wheel_feed(COMPOSITOR_EV_KEY, 31, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        check("origin: a key read from a device not found to be the machine's own (uinput's, uhid's, one not known) is marked",
+              table->event_type[1][at] == WINDOW_EVENT_KEY && (table->event_flags[1][at] & WINDOW_EVENT_VIRTUAL));
+        wheel_feed(COMPOSITOR_EV_KEY, 31, 0);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        compositor_post(1, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, COMPOSITOR_BTN_LEFT, 0);
+        flags[0] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
+        compositor_post(1, WINDOW_EVENT_BUTTON, 0, COMPOSITOR_BTN_LEFT, 0);
+        compositor_post(1, WINDOW_EVENT_MOTION, 0, 5, 5);
+        flags[1] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
+        compositor_post(1, WINDOW_EVENT_WHEEL, 0, 120, 0);
+        flags[2] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
+        compositor_post(1, WINDOW_EVENT_PINCH, WINDOW_PINCH_BEGIN, 1024, 0);
+        flags[3] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
+        check("origin: a button, a motion and a wheel posted from outside a device's read are marked, and a pinch is not given the bit",
+              (flags[0] & WINDOW_EVENT_VIRTUAL) && (flags[1] & WINDOW_EVENT_VIRTUAL) && (flags[2] & WINDOW_EVENT_VIRTUAL) &&
+                  flags[3] == WINDOW_PINCH_BEGIN);
+        compositor_post_physical = 1;
+        compositor_post(1, WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 32, 'd');
+        flags[4] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
+        compositor_post_physical = 0;
+        check("origin: one posted while a device of the machine's own is read is not marked", flags[4] == WINDOW_KEY_DOWN);
+        compositor.focus = focus;
+        compositor.button_down = 0;
+        table->event_tail[1] = table->event_head[1];
+    }
     system_close(wheel_pipe[0]);
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;
+}
+
+/*
+        Where an input device hangs, as compositor_input_path_physical reads the link /sys/dev/char/MAJOR:MINOR resolves to: the
+        machine's own under a real bus, and not under devices/virtual (uinput's, and uhid's, Bluetooth LE through bluez among them),
+        nor a path that is not under devices at all or could not be read. A descriptor that is no input device's is not the machine's.
+*/
+static void check_compositor_input_origin(void)
+{
+    static const char *const own[] = {
+        "../../devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/0003:046D:C52B.0003/input/input5/event5",
+        "../../devices/platform/i8042/serio0/input/input3/event3",
+        "../../devices/LNXSYSTM:00/LNXPWRBN:00/input/input2/event2",
+        "../../devices/platform/INT33D5:00/input/input12/event12",
+        "../../devices/pci0000:00/0000:00:15.1/i2c_designware.1/i2c-1/i2c-ELAN0501:01/0018:04F3:3060.0002/input/input18/event18",
+        "../../devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3:1.0/bluetooth/hci0/hci0:256/0005:046D:B342.0004/input/input21/event21",
+        "../../devices/pci0000:00/0000:00:06.0/virtio5/input/input8/event8"};
+    static const char *const not_own[] = {
+        "../../devices/virtual/input/input7/event7",
+        "../../devices/virtual/misc/uhid/0005:046D:B01C.0001/input/input20/event20",
+        "", "../../class/input/event3", "../../devices/", "devices"};
+    b32 all = 1;
+    int pipe_ends[2] = {-1, -1};
+
+    for (unsigned int at = 0; at < sizeof(own) / sizeof(own[0]); at++)
+        all &= compositor_input_path_physical(own[at]) == 1;
+    check("origin: USB, i8042, an ACPI button, a platform's hotkeys, an I2C pad, classic Bluetooth (hidp) and a VM's virtio-input are the machine's own", all);
+    all = !compositor_input_path_physical(null);
+    for (unsigned int at = 0; at < sizeof(not_own) / sizeof(not_own[0]); at++)
+        all &= compositor_input_path_physical(not_own[at]) == 0;
+    check("origin: uinput, uhid (Bluetooth LE through bluez with it), and a path not under devices or none are not", all);
+    system_call_2(syscall(pipe2), (positive)pipe_ends, O_NONBLOCK);
+    check("origin: a descriptor that is no input device's (a pipe, none) is not the machine's",
+          !compositor_input_handle_physical(-1) && pipe_ends[0] >= 0 && !compositor_input_handle_physical(pipe_ends[0]));
+    if (pipe_ends[0] >= 0)
+        system_close(pipe_ends[0]), system_close(pipe_ends[1]);
 }
 
 /*
@@ -179121,6 +179221,7 @@ b32 main()
         check_compositor_table_sealed();
         check_compositor_table_taken();
         check_compositor_cursor_probe();
+        check_compositor_input_origin();
         check_compositor_doors_held();
         check_compositor_asked();
         check_compositor_tiling();

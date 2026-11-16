@@ -123,6 +123,16 @@
         would read as the hand turning.
 */
 #define WINDOW_KEY_SETTLE 4096u
+/*
+        An event the compositor did not read from an input device it found to be the machine's own: set in the flags of a KEY, a
+        BUTTON, a MOTION and a WHEEL event unless the compositor itself read the event from a device whose node hangs under a real bus
+        (compositor_input_add: not under /sys/devices/virtual, where uinput and uhid make theirs, a Bluetooth LE keyboard through
+        bluez's uhid among them), so a key a program typed through uinput, the on-screen keyboard's keys, what the Wayland shim
+        injects, the headless -i file and whatever the compositor makes on its own (a lead taken away by a timer) carry it, and an
+        event whose source is not known does too. A PINCH event has no such bit: 0x8000 is its WINDOW_PINCH_END, so a reader tests
+        the event's type first. A setting only the person at the machine may change takes a press without it.
+*/
+#define WINDOW_EVENT_VIRTUAL 0x8000u
 
 struct window_key
 {

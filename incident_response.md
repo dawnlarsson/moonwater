@@ -41,6 +41,68 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-202: a key a program made was the same to a window as a key the person pressed
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-15, this commit (the mark); the settings that need it read it in their own commits |
+| Class | Input a local program injects taken for the person's own; a confused deputy for anything a window lets the person at the machine change |
+| Attacker | 1 or 8 where /dev/uinput or /dev/uhid can be opened (root by default; any group a distribution gives them); any program that is a window of the table, whose keys the on-screen keyboard's ring carries; a Wayland client, through whatever the shim injects |
+| Reachable | src/canvas/compositor/session.c `compositor_input_add` (where a device is classified) and `compositor_post` (where every event to a window is written), src/canvas/compositor/input.c `compositor_input_read` |
+
+**What it was.** Every event the compositor posted to a window's ring looked the
+same whatever made it: a key read from the laptop's keyboard, one a program typed
+through uinput (or a uhid device it made, with any bus, vendor, name and phys it
+liked), the on-screen keyboard's keys (which its program writes into the table),
+and whatever the compositor posts on its own. A window that wants to let only the
+person at the machine change something (the ssh server on, root's login on, a
+key added: the owner's "settings are king") had nothing to tell them apart by.
+
+**The fix.** `WINDOW_EVENT_VIRTUAL` (0x8000, `src/canvas/window.c`) is set in the
+flags of every KEY, BUTTON, MOTION and WHEEL event unless the compositor itself
+read it from a device it found to be the machine's own; a PINCH has no such bit
+(0x8000 is its end there). A device is the machine's own when the node opened,
+by its device number (statx of the descriptor read, so a node that took the
+name since is not the one asked about), resolves through `/sys/dev/char` to a
+path under the kernel's `devices/` and not under `devices/virtual/`, where uinput
+and uhid make theirs; a link that cannot be read is not. Nothing a program
+writes into a device's identity is read. The origin is set by
+`compositor_input_read` alone, for the span of its own posts, and cleared on its
+return, so a post from anywhere else is marked: the default is virtual.
+
+**What is marked and what is not.** uinput devices (ydotool, input remappers,
+Steam's virtual pads): marked. uhid devices, and so a **Bluetooth LE keyboard
+that bluez brings up through uhid: marked**: uhid's creator writes its bus
+(HID_ID 0005 included), name and phys, and nothing on the kernel side that a
+program with `/dev/uhid` cannot forge tells bluez's device from any other. A
+classic Bluetooth keyboard through the kernel's hidp hangs under its hci and is
+not marked. The on-screen keyboard's keys are marked: its program asks for them
+through its row, and the compositor did not make them from a press it read; a
+machine with only a touch screen cannot confirm such a setting by the on-screen
+keyboard, but its taps on a window's own buttons are BUTTON events read from the
+touch device and are not marked. The headless compositor's `-i` file is no input
+node and is marked. A key's repeat by the kernel is the same device's read and
+is not marked; a lead the compositor takes away on a timer, and releases it makes
+for a window that lost the keys outside a read, are marked. A Wayland client's
+injected input, if the shim ever takes one, enters outside a device's read and
+is marked.
+
+**What it does not stop.** A process that can mount over `/sys` in the
+compositor's mount namespace, or replace the compositor, is root of the machine
+already. The mark says where an event came from, not who pressed: a person's
+keyboard is physical whoever is at it.
+
+**Rows.** CHECK_terminal: the classification over resolved paths (USB, i8042, an
+ACPI button, a platform's hotkeys, an I2C pad, hidp, a VM's virtio-input are the
+machine's own; uinput, uhid, a path not under devices, none are not; a pipe and
+no descriptor are not); through the reader and `compositor_post` with the
+device's origin given by hand (no input device is on the machine the rows were
+written on): a key from a device of the machine's own unmarked and its kernel
+repeat too, the origin gone after the read (a post after it marked), a key from
+a device not found to be the machine's own marked, a button, a motion and a
+wheel posted outside a read marked, a pinch never given the bit. NOT RUN: a real
+uinput, uhid or Bluetooth device (none here).
+
 ### MW-2026-201: a subsurface's buffer read at every compose, and one released while it was still read
 
 | | |
