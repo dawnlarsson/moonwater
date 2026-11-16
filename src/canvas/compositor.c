@@ -1520,6 +1520,9 @@ static int compositor_table(void)
         compositor.table->buffer = buffer;
         compositor.table->lists = WINDOWS_LISTS_AT(buffer);
         compositor.table->list_bytes = WINDOW_LIST_BYTES;
+        // The layout's version first for a program to read, and the rows a program may take (every one has its doors below).
+        __atomic_store_n(&compositor.table->abi, WINDOWS_ABI, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.table->rows, (unsigned int)WINDOWS, __ATOMIC_RELEASE);
         compositor_lists_set(0);
         compositor_table_outputs();
 

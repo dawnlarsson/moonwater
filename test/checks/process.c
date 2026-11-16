@@ -5108,7 +5108,15 @@ static fn windows_header(void)
         check("a buffer that is not whole pages does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4, 64, 64, 32));
         check("a stride narrower than the output does not", !windows_fits(size, WINDOWS_HEADER, buffer, 32, 64, 32));
         check("a buffer shorter than the rows used does not", !windows_fits(size, WINDOWS_HEADER, 4096, 64, 64, 32));
-        check("a zero buffer, width or height does not",
+        check("a table of this layout's version is taken, and one of another is refused before any field is read",
+              windows_abi_ok(WINDOWS_ABI) && !windows_abi_ok(0) && !windows_abi_ok(WINDOWS_ABI + 1));
+        table.rows = WINDOWS + 5;
+        check("the rows a table says are in use are held to the struct's (a peer's count past it reads no row that is not there)",
+              windows_rows(&table) == WINDOWS);
+        table.rows = 3;
+        check("and are what the table says below it", windows_rows(&table) == 3);
+        table.rows = 0;
+                check("a zero buffer, width or height does not",
               !windows_fits(size, WINDOWS_HEADER, 0, 64, 64, 32) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 0, 32) &&
               !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 0));
 

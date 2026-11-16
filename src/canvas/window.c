@@ -1229,7 +1229,33 @@ struct windows
         char app_id[WINDOWS][WINDOWS_APP_ID];
         unsigned int icon_seq[WINDOWS];
         unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
+        /*
+                The layout's version and the rows in use. abi is WINDOWS_ABI, written by the compositor before anything else of the
+                table is read: a program built against another layout of this struct refuses the table (windows_abi_ok), where it would
+                have read every field at the wrong place. rows is how many rows a program may take now, the high-water of the rows the
+                compositor has made doors for (at most WINDOWS): every walk of the rows goes to it, not to WINDOWS, and a program that
+                finds every row below it taken knocks the grow door for more. Both are last in the struct, so a program of an older
+                layout finds the pixels moved (WINDOWS_HEADER) and refuses the table too.
+        */
+        unsigned int abi;
+        unsigned int rows;
 };
+
+#define WINDOWS_ABI 2u // 1 was the layout with no abi and no rows (thirty-two rows, every one with its doors)
+
+// Whether a table's layout is the one this program was built against.
+static inline int windows_abi_ok(unsigned int abi)
+{
+        return abi == WINDOWS_ABI;
+}
+
+// The rows in use, as the table says (at most WINDOWS): what every walk of the rows goes to.
+static inline unsigned int windows_rows(const struct windows *table)
+{
+        unsigned int rows = table ? __atomic_load_n(&table->rows, __ATOMIC_ACQUIRE) : 0;
+
+        return rows < WINDOWS ? rows : WINDOWS;
+}
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
 #define WINDOWS_CLIP_PRIMARY 1u
@@ -4322,6 +4348,12 @@ static long windows_take(struct window_row *own)
 
         table = (struct windows *)mapped;
         // The header read once, each field into the program's copy, and checked there: a peer may write any of it.
+        // A table of another layout (an older or newer build of the compositor's): refused, EPROTO, before any other field is read.
+        if (!windows_abi_ok(__atomic_load_n(&table->abi, __ATOMIC_ACQUIRE)))
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
+                return -71; // EPROTO
+        }
         pixels = __atomic_load_n(&table->pixels, __ATOMIC_ACQUIRE);
         buffer = __atomic_load_n(&table->buffer, __ATOMIC_ACQUIRE);
         stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
@@ -4349,7 +4381,7 @@ static long windows_take(struct window_row *own)
         */
         for (unsigned int from = 0;; from = own->row + 1)
         {
-                for (own->row = from; own->row < WINDOWS; own->row++)
+                for (own->row = from; own->row < windows_rows(table); own->row++)
                 {
                         unsigned int none = 0;
 
@@ -4358,7 +4390,7 @@ static long windows_take(struct window_row *own)
                                 break;
                 }
 
-                if (own->row >= WINDOWS)
+                if (own->row >= windows_rows(table))
                 {
                         window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
                         return failed ? failed : -28; // ENOSPC
