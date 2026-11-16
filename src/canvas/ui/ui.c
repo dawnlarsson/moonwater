@@ -16601,6 +16601,112 @@ static decimal ui_moon_light(const struct ui_moon_map address_to map, int level,
         return light + albedo * earth * mu;
 }
 
+/*
+        The light at a point of the sphere whose place the table has made once (ui_moon_sphere): x, y, z in the eye's frame, its longitude
+        before the turn (lon0) and the cosine of its latitude. Turned by t about the axis, its longitude is lon0 + t and its latitude is
+        the same, so the arc tangent, the arc sine, and the sine and cosine of the longitude ui_moon_light takes at every sample are
+        the table's and two products; the rest is ui_moon_light's, step for step.
+*/
+static decimal ui_moon_light_at(const struct ui_moon_map address_to map, int level, decimal x, decimal y, decimal z, decimal lon0, decimal cl, decimal t,
+                                decimal ct, decimal st, const decimal sun[3], decimal earth)
+{
+        decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
+        decimal longitude = lon0 + t, latitude;
+        int w = map->width >> level, h = w / 2;
+        decimal u, v, albedo, rise, east_rise, west_rise, north_rise, south_rise, a2;
+        decimal n[3], len, mu0, mu, light, sl, clg;
+
+        longitude = longitude > UI_MOON_PI ? longitude - 2 * UI_MOON_PI : longitude <= -UI_MOON_PI ? longitude + 2 * UI_MOON_PI : longitude;
+        latitude = arc_tangent_two(by, cl);
+        u = (longitude + UI_MOON_PI) / (2 * UI_MOON_PI) * w, v = (UI_MOON_PI / 2 - latitude) / UI_MOON_PI * h;
+        sl = cl > 1e-9 ? bx / cl : 0, clg = cl > 1e-9 ? bz / cl : 1;
+        ui_moon_sample(map, level, u, v, &albedo, &rise);
+        ui_moon_sample(map, level, u + 1, v, &a2, &east_rise);
+        ui_moon_sample(map, level, u - 1, v, &a2, &west_rise);
+        ui_moon_sample(map, level, u, v - 1, &a2, &north_rise);
+        ui_moon_sample(map, level, u, v + 1, &a2, &south_rise);
+        {
+                decimal per = w / (2 * UI_MOON_PI), d_east = (east_rise - west_rise) / 2 * per / (cl > 0.05 ? cl : 0.05), d_north = (north_rise - south_rise) / 2 * per;
+                decimal sb = by, east[3] = {clg, 0, -sl}, north[3] = {-sb * sl, cl, -sb * clg};
+
+                d_east *= 2.5, d_north *= 2.5;
+                n[0] = bx - d_east * east[0] - d_north * north[0];
+                n[1] = by - d_east * east[1] - d_north * north[1];
+                n[2] = bz - d_east * east[2] - d_north * north[2];
+                len = square_root(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                n[0] /= len, n[1] /= len, n[2] /= len;
+        }
+        mu = z > 0.02 ? z : 0.02;
+        mu0 = n[0] * sun[0] + n[1] * sun[1] + n[2] * sun[2];
+        {
+                decimal smooth = bx * sun[0] + by * sun[1] + bz * sun[2];
+                decimal edge = smooth <= -0.03 ? 0 : smooth >= 0.06 ? 1 : (smooth + 0.03) / 0.09;
+
+                light = mu0 > 0 ? albedo * (0.85 * 2 * mu0 / (mu0 + mu) + 0.15 * mu0) * edge : 0;
+        }
+        return light + albedo * earth * mu;
+}
+
+/*
+        The sphere's samples for a moon of size pixels at rest (no growth), made once a size and kept: for each pixel of its square and each
+        of its samples, the point's x, y, z in the eye's frame (a sample just past the limb moved onto it, as ui_moon moves it), its
+        longitude before the turn and the cosine of its latitude; null for a pixel the disc does not reach. Up to UI_MOON_SPHERE_MOST pixels
+        a side (a button's moon; a wallpaper's is ui_moon_paper's).
+*/
+#define UI_MOON_SPHERE_MOST 128
+
+struct ui_moon_sphere
+{
+        int size, samples;
+        float address_to at; // size * size * samples * samples * 5: x, y, z, lon0, cl
+};
+
+static const struct ui_moon_sphere address_to ui_moon_sphere_for(int size, int samples)
+{
+        static struct ui_moon_sphere kept;
+        positive count = (positive)size * (positive)size * (positive)(samples * samples) * 5;
+
+        if (size <= 0 || size > UI_MOON_SPHERE_MOST)
+                return null;
+        if (kept.size == size && kept.samples == samples && kept.at)
+                return &kept;
+        if (kept.at)
+                compositor_call(syscall(munmap), (positive)kept.at, (positive)kept.size * (positive)kept.size * (positive)(kept.samples * kept.samples) * 5 * sizeof(float),
+                                0, 0, 0, 0);
+        kept.at = null;
+        {
+                long got = ui_map(count * sizeof(float));
+
+                if (got < 0 && got > -4096)
+                        return null;
+                kept.at = (float address_to)got;
+        }
+        kept.size = size, kept.samples = samples;
+        {
+                decimal radius = size / 2.0;
+
+                for (int py = 0; py < size; py++)
+                        for (int px = 0; px < size; px++)
+                                for (int sy = 0; sy < samples; sy++)
+                                        for (int sx = 0; sx < samples; sx++)
+                                        {
+                                                float address_to into = kept.at + ((((positive)py * (positive)size + (positive)px) * (positive)samples + (positive)sy) * (positive)samples + (positive)sx) * 5;
+                                                decimal x = (px + (sx + 0.5) / samples - radius) / radius, y = -(py + (sy + 0.5) / samples - radius) / radius, zz = 1 - x * x - y * y;
+
+                                                if (zz <= 0)
+                                                {
+                                                        decimal r = square_root(x * x + y * y);
+
+                                                        x /= r * 1.0001, y /= r * 1.0001, zz = 1 - x * x - y * y;
+                                                        zz = zz < 0 ? 0 : zz;
+                                                }
+                                                into[0] = (float)x, into[1] = (float)y, into[2] = (float)square_root(zz);
+                                                into[3] = (float)arc_tangent_two(x, square_root(zz)), into[4] = (float)square_root(1 - y * y > 0 ? 1 - y * y : 0);
+                                        }
+        }
+        return &kept;
+}
+
 static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phase, b64 turn, const struct ui_moon_look address_to look)
 {
         const struct ui_moon_map address_to map = ui_moon_map_for(size);
@@ -16608,9 +16714,10 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
         decimal angle = (decimal)phase / (decimal)UI_ONE * 2 * UI_MOON_PI;
         decimal t = (decimal)(turn & (UI_ONE - 1)) / (decimal)UI_ONE * 2 * UI_MOON_PI, ct = cosine(t), st = sine(t), sun[3], earth = 0;
         int halo = look->options & UI_MOON_GLOW ? look->halo : 0, x0 = left - halo, y0 = top - halo, x1 = left + size + halo, y1 = top + size + halo;
-        int samples = size < 48 ? 4 : size < 160 ? 2 : 1, level = 0;
+        int samples = size < 48 ? 3 : size < 160 ? 2 : 1, level = 0;
         struct ui_moon_ink dark = ui_moon_ink_of(look->dark), lit = ui_moon_ink_of(look->lit), glow = ui_moon_ink_of(look->glow);
         struct ui_moon_ink rim = ui_moon_ink_of(look->rim | 0xff000000u);
+        const struct ui_moon_sphere address_to sphere = null;
 
         if (size <= 0 || !map)
                 return;
@@ -16642,6 +16749,13 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                 level++;
         x0 = x0 < 0 ? 0 : x0, y0 = y0 < ui->top ? ui->top : y0;
         x1 = x1 > ui->width ? ui->width : x1, y1 = y1 > ui->bottom ? ui->bottom : y1;
+        // The table serves the disc at rest, the turn's longitude added to it: t wrapped to (-pi, pi] (ui_moon_light_at wraps once).
+        {
+                decimal wrapped = t > UI_MOON_PI ? t - 2 * UI_MOON_PI : t;
+
+                t = wrapped;
+        }
+        sphere = look->grow > 0 || halo > 0 ? null : ui_moon_sphere_for(size, samples);
         for (int py = y0; py < y1; py++)
         {
                 unsigned int address_to row = ui->pixels + (long)py * (long)ui->pitch;
@@ -16659,7 +16773,16 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                         }
                         if (!cover)
                                 continue;
-                        for (int sy = 0; sy < samples; sy++)
+                        // At rest, the sphere's samples from the table made once a size; grown, made here.
+                        if (sphere)
+                        {
+                                const float address_to from = sphere->at + (((positive)(py - top) * (positive)size + (positive)(px - left)) * (positive)(samples * samples)) * 5;
+
+                                for (int k = 0; k < samples * samples; k++, from += 5)
+                                        sum += ui_moon_light_at(map, level, from[0], from[1], from[2], from[3], from[4], t, ct, st, sun, earth);
+                                hits = samples * samples;
+                        }
+                        for (int sy = 0; !sphere && sy < samples; sy++)
                                 for (int sx = 0; sx < samples; sx++)
                                 {
                                         decimal x = (px + (sx + 0.5) / samples - cx) / radius, y = -(py + (sy + 0.5) / samples - cy) / radius, zz = 1 - x * x - y * y;
