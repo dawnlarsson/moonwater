@@ -13,12 +13,12 @@ proto=$(pkg-config --variable=pkgdatadir wayland-protocols)
 code=
 for xml in stable/xdg-shell/xdg-shell stable/presentation-time/presentation-time \
         unstable/relative-pointer/relative-pointer-unstable-v1 unstable/pointer-constraints/pointer-constraints-unstable-v1 \
-        stable/linux-dmabuf/linux-dmabuf-v1; do
+        stable/viewporter/viewporter stable/linux-dmabuf/linux-dmabuf-v1; do
         name=${xml##*/}
         [ -r "$proto/$xml.xml" ] || { echo "NOTE no $xml.xml: nothing is built"; exit 2; }
         wayland-scanner client-header "$proto/$xml.xml" "$out/proto/$name-client.h" || exit 2
         wayland-scanner private-code "$proto/$xml.xml" "$out/proto/$name-code.c" || exit 2
-        case $name in linux-dmabuf-v1) ;; *) code="$code $out/proto/$name-code.c" ;; esac
+        case $name in linux-dmabuf-v1 | viewporter) ;; *) code="$code $out/proto/$name-code.c" ;; esac
 done
 dmabuf=
 if pkg-config --exists gbm; then
@@ -28,6 +28,8 @@ else
 fi
 # shellcheck disable=SC2086
 $cc $warn -I"$out/proto" "$here/stress.c" $code $dmabuf $(pkg-config --cflags --libs wayland-client) -lm -lpthread -o "$out/wl-stress" || exit 1
+# shellcheck disable=SC2086
+$cc $warn -I"$out/proto" "$here/edge.c" $code "$out/proto/viewporter-code.c" $(pkg-config --cflags --libs wayland-client) -o "$out/wl-edge" || exit 1
 if pkg-config --exists x11 x11-xcb xcb-present; then
         glx=
         pkg-config --exists gl && glx="-DHAVE_GLX $(pkg-config --libs gl)"
