@@ -230,6 +230,7 @@ settings_type_device	63e0	πληκτρολογήστε το όνομα μιας 
 settings_type_passphrase	ca95	πληκτρολογήστε τον κωδικό: το Enter συνδέεται, το Escape το αφήνει
 settings_unknown	9fb9	άγνωστο
 settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
+settings_virtual_refused	4202	μια εικονική συσκευή δεν μπορεί να το ενεργοποιήσει: χρησιμοποιήστε πληκτρολόγιο ή ποντίκι συνδεδεμένο στον υπολογιστή, ή moonwater ssh σε τερματικό root
 terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάσταση %d, πατήστε ένα πλήκτρο για κλείσιμο
 terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
 tray_am	0d13	πμ

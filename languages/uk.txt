@@ -230,6 +230,7 @@ settings_type_device	63e0	введіть назву пристрою: Enter за
 settings_type_passphrase	ca95	введіть пароль: Enter підключить, Escape залишить
 settings_unknown	9fb9	невідомо
 settings_verb_hint	05aa	ДІЄСЛОВО [АРГУМЕНТИ]
+settings_virtual_refused	4202	віртуальний пристрій не може це ввімкнути: скористайтеся клавіатурою або мишею, підключеними до машини, або moonwater ssh у терміналі root
 terminal_exited_press_to_close	a8cf	завершено зі статусом %d, натисніть будь-яку клавішу, щоб закрити
 terminal_press_to_close	080d	натисніть будь-яку клавішу, щоб закрити
 tray_am	0d13	дп

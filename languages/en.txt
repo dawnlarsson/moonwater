@@ -230,6 +230,7 @@ settings_type_device	63e0	type the name of a device: Enter keeps it, Escape leav
 settings_type_passphrase	ca95	type its passphrase: Enter joins it, Escape leaves it
 settings_unknown	9fb9	unknown
 settings_verb_hint	05aa	VERB [ARGUMENTS]
+settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
 terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
 terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM

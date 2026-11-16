@@ -148894,6 +148894,71 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: and a change to a row waiting replaces its change", settings.queued == 2 &&
                   string_equals((string_address)settings.queue[0].value, (string_address) "off"));
         settings.queued = 0;
+        /*
+                A deliberate change (registry.c's deliberate: the SSH server on, root let in, a key added) is made by a key or a press a
+                device plugged into the machine sent, never by one a virtual device sent (WINDOW_EVENT_VIRTUAL: uinput, uhid, the on-screen
+                keyboard, the headless pipe), which the status refuses: Enter on SSH server as each sends it, the server turned off by
+                either, the same verbs typed in All commands, and a key added. A row that is not deliberate takes either.
+        */
+        {
+                int server = settings_row_named("SSH server"), add = settings_row_named("Add a key (label, then the public key)");
+                struct window_event virtual_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_EVENT_VIRTUAL, 0, UI_KEY_ENTER};
+                struct window_event plugged_enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, UI_KEY_ENTER};
+                string_address refusal = (string_address)WORDS(settings_virtual_refused);
+                b32 refused, taken, off, typed, typed_root, typed_port, added, added_plugged, other;
+
+                settings.popup.open = 0, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear(), (void)0;
+                settings.page.menu_row = -1, ui_confirm_drop(&settings.confirm);
+                settings.state[server] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[server], (string_address) "off", SETTINGS_VALUE);
+                settings.page.chosen = settings_group_of(server);
+                settings_refilter();
+                settings.page.pane = 1;
+                settings.list.focus = server;
+                settings_say((string_address) "");
+                settings_event_at(&virtual_enter);
+                refused = settings.queued == 0 && string_equals((string_address)settings.status, refusal);
+                settings_event_at(&plugged_enter);
+                taken = settings.queued == 1 && settings.queue[0].row == server &&
+                        string_equals((string_address)settings.queue[0].value, (string_address) "on");
+                settings.queued = 0;
+                string_copy_bounded((string_address)settings.value[server], (string_address) "on", SETTINGS_VALUE);
+                settings_event_at(&virtual_enter);
+                off = settings.queued == 1 && settings.queue[0].row == server &&
+                      string_equals((string_address)settings.queue[0].value, (string_address) "off");
+                settings.queued = 0;
+                // Between events no change is a hand's: the commands typed in All commands, as Enter would run them.
+                settings_say((string_address) "");
+                typed = !settings_run(SETTINGS_ANY, "ssh on") && settings.queued == 0 && string_equals((string_address)settings.status, refusal);
+                settings_say((string_address) "");
+                typed_root = !settings_run(SETTINGS_ANY, "ssh root on") && settings.queued == 0 &&
+                             string_equals((string_address)settings.status, refusal);
+                typed_port = settings_run(SETTINGS_ANY, "ssh port 2222") && settings.queued == 1;
+                settings.queued = 0;
+                settings_say((string_address) "");
+                settings_change(add, "laptop ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl");
+                added = settings.queued == 0 && string_equals((string_address)settings.status, refusal);
+                settings.hand = true;
+                settings_change(add, "laptop ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl");
+                added_plugged = settings.queued == 1 && settings.queue[0].row == add;
+                settings.hand = false;
+                settings.queued = 0;
+                settings.state[wifi] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[wifi], (string_address) "off", SETTINGS_VALUE);
+                settings_activate(wifi, 1);
+                other = settings.queued == 1 && settings.queue[0].row == wifi;
+                settings.queued = 0;
+                string_format(log, "  settings deliberate: virtual Enter %p, plugged Enter %p, off %p, typed %p %p %p, a key %p %p, another row %p\n",
+                              (positive)refused, (positive)taken, (positive)off, (positive)typed, (positive)typed_root, (positive)typed_port,
+                              (positive)added, (positive)added_plugged, (positive)other);
+                check("settings: the SSH server is turned on by an Enter a plugged keyboard sent and not by a virtual device's, which the status refuses",
+                      server >= 0 && refused && taken);
+                check("settings: and it is turned off by either, and a row that is not deliberate takes a change with no hand", off && other);
+                check("settings: ssh on and ssh root on typed in All commands are refused without a hand, and ssh port is not",
+                      typed && typed_root && typed_port);
+                check("settings: a key is added by a hand and not without one", add >= 0 && added && added_plugged);
+                settings_say((string_address) "");
+        }
         // A slider row (the taskbar scale): the kit's slider over the row's range at the number the verb said, moved a step by the keys inside
         // its range, and changed once to the value the hand left it at. Its unit is a percent, which the row says as the sign the kit writes
         // against the number (125%), and not as the registry's word for it.

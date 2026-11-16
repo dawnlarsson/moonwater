@@ -230,6 +230,7 @@ settings_type_device	63e0	saisissez le nom d'un appareil : Enter le garde, Escap
 settings_type_passphrase	ca95	saisissez son mot de passe : Enter rejoint, Escape laisse
 settings_unknown	9fb9	inconnu
 settings_verb_hint	05aa	VERBE [ARGUMENTS]
+settings_virtual_refused	4202	un périphérique virtuel ne peut pas activer ceci : utilisez un clavier ou une souris branchés sur la machine, ou moonwater ssh dans un terminal root
 terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une touche pour fermer
 terminal_press_to_close	080d	appuyez sur une touche pour fermer
 tray_am	0d13	AM

@@ -230,6 +230,7 @@ settings_type_device	63e0	escriba el nombre de un dispositivo: Enter lo guarda, 
 settings_type_passphrase	ca95	escriba su contraseña: Enter se conecta, Escape lo deja
 settings_unknown	9fb9	desconocido
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
+settings_virtual_refused	4202	un dispositivo virtual no puede activar esto: use un teclado o ratón conectado a la máquina, o moonwater ssh en un terminal de root
 terminal_exited_press_to_close	a8cf	terminó con estado %d, pulse una tecla para cerrar
 terminal_press_to_close	080d	pulse una tecla para cerrar
 tray_am	0d13	a. m.

@@ -230,6 +230,7 @@ settings_type_device	63e0	skriv namnet på en enhet: Enter sparar det, Escape l�
 settings_type_passphrase	ca95	skriv lösenordet: Enter ansluter, Escape lämnar
 settings_unknown	9fb9	okänt
 settings_verb_hint	05aa	VERB [ARGUMENT]
+settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
 terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tangent för att stänga
 terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm

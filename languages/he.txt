@@ -231,6 +231,7 @@ settings_type_device	63e0	הקלד שם התקן: Enter שומר, Escape עוז�
 settings_type_passphrase	ca95	הקלד את הסיסמה: Enter מתחבר, Escape עוזב
 settings_unknown	9fb9	לא ידוע
 settings_verb_hint	05aa	פעולה [ארגומנטים]
+settings_virtual_refused	4202	התקן וירטואלי אינו יכול להפעיל את זה: השתמשו במקלדת או בעכבר המחוברים למחשב, או ב-moonwater ssh במסוף root
 terminal_exited_press_to_close	a8cf	הסתיים בקוד יציאה %d, הקש על מקש כלשהו לסגירה
 terminal_press_to_close	080d	הקש על מקש כלשהו לסגירה
 tray_am	0d13	לפנה״צ

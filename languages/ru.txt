@@ -230,6 +230,7 @@ settings_type_device	63e0	введите имя устройства: Enter за
 settings_type_passphrase	ca95	введите пароль: Enter подключит, Escape оставит
 settings_unknown	9fb9	неизвестно
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
+settings_virtual_refused	4202	виртуальное устройство не может это включить: используйте клавиатуру или мышь, подключённые к машине, или moonwater ssh в терминале root
 terminal_exited_press_to_close	a8cf	завершено со статусом %d, нажмите любую клавишу, чтобы закрыть
 terminal_press_to_close	080d	нажмите любую клавишу, чтобы закрыть
 tray_am	0d13	ДП

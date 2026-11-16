@@ -231,6 +231,7 @@ settings_type_device	63e0	ڈیوائس کا نام لکھیں: Enter اسے رک
 settings_type_passphrase	ca95	پاس ورڈ لکھیں: Enter منسلک کرتا ہے، Escape چھوڑ دیتا ہے
 settings_unknown	9fb9	نامعلوم
 settings_verb_hint	05aa	فعل [آرگیومنٹس]
+settings_virtual_refused	4202	ایک ورچوئل ڈیوائس اسے آن نہیں کر سکتی: مشین سے جڑا کی بورڈ یا ماؤس استعمال کریں، یا root ٹرمینل میں moonwater ssh
 terminal_exited_press_to_close	a8cf	ایگزٹ کوڈ %d کے ساتھ ختم ہوا، بند کرنے کے لیے کوئی کلید دبائیں
 terminal_press_to_close	080d	بند کرنے کے لیے کوئی کلید دبائیں
 tray_am	0d13	ص

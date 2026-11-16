@@ -758,6 +758,9 @@ static struct
 
         // The press again to confirm (the kit's): a command that asks for a second Enter (its row, and what was typed), a forget.
         struct ui_confirm confirm;
+        // The event being taken is a key or a press from a device plugged into the machine (no WINDOW_EVENT_VIRTUAL): only such
+        // a one makes a deliberate change (settings_refused). False between events, so a timer's change is never one.
+        b32 hand;
 
         // The verb being run: its process, the read end of its output, what it said, when it began, for which row.
         bipolar child;
@@ -2978,11 +2981,53 @@ static positive settings_waiting(int row, const char address_to value)
         return at;
 }
 
+/*
+        A deliberate change (registry.c's deliberate: the SSH server on, root let in, a key added) made by a key or a press that a
+        virtual device sent (uinput, uhid, the on-screen keyboard, the Wayland shim, the headless pipe) is refused, and the status
+        says how it is made. It is the row's own, or a command of All commands that is the same verb: its words then the row's
+        "on", or for a field its words and anything after them. Turning off, and every other row, needs no hand.
+*/
+static b32 settings_refused(int row, const char address_to value)
+{
+        b32 deliberate = false;
+
+        if (settings.hand)
+                return false;
+        if (row >= 0 && row < SETTINGS_ANY)
+                deliberate = settings_rows[row].deliberate &&
+                             (settings_rows[row].kind != SETTINGS_SWITCH || string_equals((string_address)value, (string_address) "on"));
+        else if (row >= SETTINGS_ANY && row < (int)SETTINGS_LIST)
+        {
+                string_address words[SETTINGS_WORDS];
+                positive count = settings_generic_words(row, value, words, SETTINGS_WORDS);
+
+                for (positive at = 0; at < SETTINGS_ROWS && !deliberate; at++)
+                {
+                        const struct settings_row address_to which = &settings_rows[at];
+                        positive n = 0;
+                        b32 same = which->deliberate;
+
+                        while (same && n < SETTING_WORDS && which->set[n])
+                        {
+                                same = 1 + n < count && string_equals(words[1 + n], (string_address)which->set[n]);
+                                n++;
+                        }
+                        deliberate = same && n && (which->kind != SETTINGS_SWITCH ||
+                                                   (count == 2 + n && string_equals(words[1 + n], (string_address) "on")));
+                }
+        }
+        if (deliberate)
+                settings_say((string_address)WORDS(settings_virtual_refused));
+        return deliberate;
+}
+
 // A row changed to value, now or once the verb running has finished (see settings_waiting for where it waits).
 static fn settings_change(int row, const char address_to value)
 {
         positive at;
 
+        if (settings_refused(row, value))
+                return;
         // A feed's reading is one that can be had again: a change waits for no feed.
         settings_feed_drop();
         at = settings_waiting(row, value);
@@ -4358,6 +4403,9 @@ static b32 settings_run(int row, const char address_to args)
                 settings_say((string_address)line);
                 return false;
         }
+        // A deliberate command a virtual device typed is not run, and the field keeps it for a hand's Enter.
+        if (settings_refused(row, args))
+                return false;
         settings_change(row, args);
         return true;
 }
@@ -5848,7 +5896,7 @@ static void settings_slid(void)
         settings_change(row, word);
 }
 
-static b32 settings_event(const struct window_event address_to event)
+static b32 settings_event_take(const struct window_event address_to event)
 {
         if (gallery.on)
         {
@@ -5946,6 +5994,18 @@ static b32 settings_event(const struct window_event address_to event)
                 break;
         }
         return true;
+}
+
+// An event, taken with whether it is a key or a press a device plugged into the machine sent (settings.hand, for settings_refused). A
+// pinch's 0x8000 is its end, so the mark is read on a key or a button only.
+static b32 settings_event(const struct window_event address_to event)
+{
+        b32 taken;
+
+        settings.hand = (event->type == WINDOW_EVENT_KEY || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_EVENT_VIRTUAL);
+        taken = settings_event_take(event);
+        settings.hand = false;
+        return taken;
 }
 
 // A press at the pointer, a mouse's at once and a finger's as it comes up where it went down: what it is on is done.

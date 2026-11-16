@@ -230,6 +230,7 @@ settings_type_device	63e0	typ de naam van een apparaat: Enter bewaart hem, Escap
 settings_type_passphrase	ca95	typ het wachtwoord: Enter verbindt, Escape laat het
 settings_unknown	9fb9	onbekend
 settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
+settings_virtual_refused	4202	een virtueel apparaat kan dit niet aanzetten: gebruik een toetsenbord of muis die op de machine is aangesloten, of moonwater ssh in een root-terminal
 terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
 terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.

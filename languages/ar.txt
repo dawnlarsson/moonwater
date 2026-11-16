@@ -231,6 +231,7 @@ settings_type_device	63e0	اكتب اسم الجهاز: Enter يحفظه، Escap
 settings_type_passphrase	ca95	اكتب كلمة المرور: Enter يتصل، Escape يتركه
 settings_unknown	9fb9	غير معروف
 settings_verb_hint	05aa	الفعل [الوسائط]
+settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
 terminal_exited_press_to_close	a8cf	انتهى برمز الخروج %d، اضغط أي مفتاح للإغلاق
 terminal_press_to_close	080d	اضغط أي مفتاح للإغلاق
 tray_am	0d13	ص

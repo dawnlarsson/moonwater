@@ -7826,6 +7826,7 @@ LANGUAGE_ID(settings_type_passphrase, "type its passphrase: Enter joins it, Esca
 LANGUAGE_ID(settings_unknown, "unknown") \
 LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
+LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
 LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
 LANGUAGE_ID(tray_am, "AM") \

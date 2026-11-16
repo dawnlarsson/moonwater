@@ -231,6 +231,7 @@ settings_type_device	63e0	نام دستگاه را تایپ کنید: Enter آن
 settings_type_passphrase	ca95	گذرواژه را تایپ کنید: Enter متصل می‌شود، Escape رها می‌کند
 settings_unknown	9fb9	نامشخص
 settings_verb_hint	05aa	فعل [آرگومان‌ها]
+settings_virtual_refused	4202	یک دستگاه مجازی نمی‌تواند این را روشن کند: از صفحه‌کلید یا موشواره‌ای که به دستگاه وصل است استفاده کنید، یا moonwater ssh در یک پایانه root
 terminal_exited_press_to_close	a8cf	با کد خروج %d پایان یافت؛ برای بستن یک کلید را فشار دهید
 terminal_press_to_close	080d	برای بستن یک کلید را فشار دهید
 tray_am	0d13	ق.ظ

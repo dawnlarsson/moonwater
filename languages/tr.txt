@@ -230,6 +230,7 @@ settings_type_device	63e0	bir aygıtın adını yazın: Enter saklar, Escape bı
 settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırakır
 settings_unknown	9fb9	bilinmiyor
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
+settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
 terminal_exited_press_to_close	a8cf	%d durumuyla çıktı, kapatmak için bir tuşa basın
 terminal_press_to_close	080d	kapatmak için bir tuşa basın
 tray_am	0d13	ÖÖ
