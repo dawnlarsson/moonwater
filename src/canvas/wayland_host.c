@@ -120,12 +120,12 @@ static struct
                 unsigned long long armed_point;
         } syncobj[COMPOSITOR_WL_SYNCOBJS];
         positive slow_until[WAYLAND_CLIENTS];
-        // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
-        struct
-        {
-                volatile unsigned long at, size;
-                volatile int bad;
-        } map[WAYLAND_CLIENTS * WAYLAND_POOLS];
+        // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut: a table that grows and never moves (the
+        // handler reads it as it is), with an index by each mapping's start (open addressing, a power of two of buckets, each a slot and
+        // one), so a pool let go of or resized is found at once; map_hint is the mapping the last question about a pixel was answered by.
+        struct wayland_table map_table, map_index;
+        struct compositor_wl_mapping *map;
+        long map_live, map_hint;
         // The client's own pictures the row shows, read in place (compositor_wl_lend): the first pixel of the picture in the client's
         // buffer, its pitch in pixels and its size, the card's address of that pixel when it is a dma-buf (its import's address, let go
         // of when the picture is) and the mapping the buffer is in. pixels 0 for a row whose picture is the table's.
@@ -484,6 +484,46 @@ static void compositor_wl_release(void *context, void *block, long bytes)
 }
 
 /*
+        The shim's tables (struct wayland_table): address space reserved with no access and no memory behind it (PROT_NONE,
+        MAP_NORESERVE), as much as asked and never more than the machine's memory (sysinfo's totalram), so a table cannot fill before
+        the memory does; and committed a step at a time by mprotect, which the kernel charges then, and refuses (ENOMEM) when the
+        memory is not there: the one request that wanted it is refused, not the compositor. Pages are zero when first touched.
+*/
+static void *compositor_wl_reserve(void *context, long *bytes)
+{
+        static unsigned long memory;
+        long got;
+
+        (void)context;
+        if (!memory)
+        {
+                unsigned char info[128];
+
+                memory_zero(info, sizeof info);
+                if (compositor_call(syscall(sysinfo), (positive)info, 0, 0, 0, 0, 0) == 0)
+                        memory = *(unsigned long *)(info + 32) * (*(unsigned int *)(info + 104) ? *(unsigned int *)(info + 104) : 1);
+                if (!memory)
+                        memory = 1ul << 34;
+        }
+        if ((unsigned long)*bytes > memory)
+                *bytes = (long)memory;
+        got = compositor_call(syscall(mmap), 0, (positive)*bytes, 0, 0x4022, (positive)-1, 0); // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
+        return got < 0 && got > -4096 ? 0 : (void *)got;
+}
+
+static int compositor_wl_commit(void *context, void *at, long bytes)
+{
+        (void)context;
+        return compositor_call(syscall(mprotect), (positive)at, (positive)bytes, 3, 0, 0, 0) == 0;
+}
+
+static void compositor_wl_unreserve(void *context, void *at, long bytes)
+{
+        (void)context;
+        compositor_call(syscall(munmap), (positive)at, (positive)bytes, 0, 0, 0, 0);
+}
+
+/*
         Whether a file's pages are memory the kernel holds itself: a file of tmpfs (a memfd, /dev/shm and a file under /run are that), of
         ramfs or of hugetlbfs, by the filesystem the descriptor is on (fstatfs, f_type first). Every other file's pages are read from
         somewhere when they are touched, and the compositor touches a pool's pages in its own loop: a file of a filesystem the client
@@ -502,11 +542,117 @@ static int compositor_wl_memory_file(long fd)
 }
 
 /* A regular file of at least size bytes whose pages are memory (compositor_wl_memory_file), mapped read-only and shared; null for anything else. */
+struct compositor_wl_mapping
+{
+        volatile unsigned long at, size;
+        volatile int bad;
+};
+
+static unsigned long compositor_wl_map_hash(unsigned long at, long buckets)
+{
+        return ((at >> 12) * 0x9e3779b97f4a7c15ul >> 20) & (unsigned long)(buckets - 1);
+}
+
+// The mapping that starts at `at`: its slot, or -1.
+static long compositor_wl_map_find(unsigned long at)
+{
+        long buckets = compositor_wl.map_index.count;
+        const unsigned int *bucket = (const unsigned int *)compositor_wl.map_index.at;
+
+        for (unsigned long b = buckets ? compositor_wl_map_hash(at, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets; n++, b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                if (!bucket[b])
+                        return -1;
+                if (compositor_wl.map[bucket[b] - 1].at == at)
+                        return (long)bucket[b] - 1;
+        }
+        return -1;
+}
+
+static void compositor_wl_map_put(struct wayland_table *index, long slot)
+{
+        long buckets = index->count;
+        unsigned int *bucket = (unsigned int *)index->at;
+        unsigned long b = compositor_wl_map_hash(compositor_wl.map[slot].at, buckets);
+
+        while (bucket[b])
+                b = (b + 1) & (unsigned long)(buckets - 1);
+        bucket[b] = (unsigned int)(slot + 1);
+}
+
+// The index made room for one more mapping: at half full, one of twice the buckets is made and every live mapping put in it. 0 when the memory is not there.
+static int compositor_wl_map_room(void)
+{
+        long buckets = compositor_wl.map_index.count;
+        struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
+
+        if (buckets && 2 * (compositor_wl.map_live + 1) <= buckets)
+                return 1;
+        if (!wayland_table_reach(&grown, buckets ? 2 * buckets : 64))
+                return 0;
+        for (long slot = 0; slot < compositor_wl.map_table.count; slot++)
+                if (compositor_wl.map[slot].at)
+                        compositor_wl_map_put(&grown, slot);
+        wayland_table_drop(&compositor_wl.map_index);
+        compositor_wl.map_index = grown;
+        return 1;
+}
+
+// The mapping at `at` taken out of the index (backward shift: the buckets after it that hashed before it move up), and its slot let go of.
+static void compositor_wl_map_forget(unsigned long at)
+{
+        long buckets = compositor_wl.map_index.count, slot = compositor_wl_map_find(at);
+        unsigned int *bucket = (unsigned int *)compositor_wl.map_index.at;
+        unsigned long hole, b;
+
+        if (slot < 0)
+                return;
+        for (hole = compositor_wl_map_hash(at, buckets); bucket[hole] != (unsigned int)(slot + 1); hole = (hole + 1) & (unsigned long)(buckets - 1))
+                ;
+        bucket[hole] = 0;
+        for (b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                unsigned long home = compositor_wl_map_hash(compositor_wl.map[bucket[b] - 1].at, buckets);
+
+                // The entry at b may fill the hole if its home is not in (hole, b], cyclically.
+                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
+                {
+                        bucket[hole] = bucket[b];
+                        bucket[b] = 0;
+                        hole = b;
+                }
+        }
+        compositor_wl.map[slot].at = 0;
+        compositor_wl.map[slot].size = 0;
+        compositor_wl.map[slot].bad = 0;
+        wayland_table_give(&compositor_wl.map_table, slot);
+        compositor_wl.map_live--;
+}
+
+// A mapping noted: its slot, or 0 when there is no memory for it (the pool is refused, and the caller unmaps it).
+static int compositor_wl_map_note(unsigned long at, unsigned long size)
+{
+        long slot;
+
+        if (!compositor_wl_map_room())
+                return 0;
+        slot = wayland_table_take(&compositor_wl.map_table);
+        if (slot < 0)
+                return 0;
+        compositor_wl.map = (struct compositor_wl_mapping *)compositor_wl.map_table.at;
+        compositor_wl.map[slot].bad = 0;
+        compositor_wl.map[slot].size = size;
+        __atomic_store_n(&compositor_wl.map[slot].at, at, __ATOMIC_RELEASE);
+        compositor_wl.map_live++;
+        compositor_wl_map_put(&compositor_wl.map_index, slot);
+        return 1;
+}
+
 static void *compositor_wl_map(void *context, long fd, long size)
 {
         // struct statx: stx_mode at 28 (u16), stx_size at 40 (u64); asked for the type and the size, of the descriptor itself.
         unsigned char info[256];
-        long got, at;
+        long got;
         unsigned int mode;
         unsigned long length;
 
@@ -522,14 +668,8 @@ static void *compositor_wl_map(void *context, long fd, long size)
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
         if (got < 0 && got > -4096)
                 return 0;
-        for (at = 0; at < WAYLAND_CLIENTS * WAYLAND_POOLS; at++)
-                if (!compositor_wl.map[at].at)
-                {
-                        compositor_wl.map[at].bad = 0;
-                        compositor_wl.map[at].size = (unsigned long)size;
-                        compositor_wl.map[at].at = (unsigned long)got;
-                        return (void *)got;
-                }
+        if (compositor_wl_map_note((unsigned long)got, (unsigned long)size))
+                return (void *)got;
         compositor_call(syscall(munmap), (positive)got, (positive)size, 0, 0, 0, 0);
         return 0;
 }
@@ -544,12 +684,22 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         got = compositor_call(syscall(mremap), (positive)at, (positive)old_size, (positive)new_size, 1, 0, 0);
         if (got < 0 && got > -4096)
                 return 0;
-        for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
-                if (compositor_wl.map[slot].at == (unsigned long)at)
+        {
+                long slot = compositor_wl_map_find((unsigned long)at);
+
+                if (slot >= 0)
                 {
-                        compositor_wl.map[slot].size = (unsigned long)new_size;
-                        compositor_wl.map[slot].at = (unsigned long)got;
+                        // Out of the index at its old start and into it at its new one (the slot is the same: the handler sees it move).
+                        unsigned long size = (unsigned long)new_size;
+
+                        compositor_wl_map_forget((unsigned long)at);
+                        if (!compositor_wl_map_note((unsigned long)got, size))
+                        {
+                                compositor_call(syscall(munmap), (positive)got, (positive)new_size, 0, 0, 0, 0);
+                                return 0;
+                        }
                 }
+        }
         // A picture a row shows in place from this pool (compositor_wl_lend) is read where the pool now is: a pool that grew may have moved,
         // and the address it was lent at is then no mapping at all, which the next compose would read.
         for (int row = 0; row < WINDOWS; row++)
@@ -600,13 +750,7 @@ static void compositor_wl_unmap(void *context, void *at, long size)
                 if (compositor_lent(row) && compositor_wl.lent[row].map == (const unsigned char *)at)
                         compositor_wl_unlend(row);
         }
-        for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
-                if (compositor_wl.map[slot].at == (unsigned long)at)
-                {
-                        compositor_wl.map[slot].at = 0;
-                        compositor_wl.map[slot].size = 0;
-                        compositor_wl.map[slot].bad = 0;
-                }
+        compositor_wl_map_forget((unsigned long)at);
         compositor_call(syscall(munmap), (positive)at, (positive)size, 0, 0, 0, 0);
 }
 
@@ -637,7 +781,7 @@ static void compositor_wl_bus(int number, void *info, void *context)
         unsigned long where = *(unsigned long *)((unsigned char *)info + 16);
 
         (void)context;
-        for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
+        for (long slot = 0; compositor_wl.map && slot < compositor_wl.map_table.count; slot++)
                 if (compositor_wl.map[slot].at && where >= compositor_wl.map[slot].at &&
                     where - compositor_wl.map[slot].at < compositor_wl.map[slot].size)
                 {
@@ -654,11 +798,19 @@ static void compositor_wl_bus(int number, void *info, void *context)
 static int compositor_wl_cut(const void *pixels)
 {
         unsigned long at = (unsigned long)pixels;
+        long hint = compositor_wl.map_hint;
 
-        for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
+        // The mapping the last question was answered by first: a frame asks of the same few pools again and again.
+        if (compositor_wl.map && hint < compositor_wl.map_table.count && compositor_wl.map[hint].at && at >= compositor_wl.map[hint].at &&
+            at - compositor_wl.map[hint].at < compositor_wl.map[hint].size)
+                return compositor_wl.map[hint].bad;
+        for (long slot = 0; compositor_wl.map && slot < compositor_wl.map_table.count; slot++)
                 if (compositor_wl.map[slot].at && at >= compositor_wl.map[slot].at &&
                     at - compositor_wl.map[slot].at < compositor_wl.map[slot].size)
+                {
+                        compositor_wl.map_hint = slot;
                         return compositor_wl.map[slot].bad;
+                }
         return 0;
 }
 
@@ -3395,14 +3547,8 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
                         return WAYLAND_DMABUF_UNMAPPED;
                 return 0;
         }
-        for (long at = 0; at < WAYLAND_CLIENTS * WAYLAND_POOLS; at++)
-                if (!compositor_wl.map[at].at)
-                {
-                        compositor_wl.map[at].bad = 0;
-                        compositor_wl.map[at].size = (unsigned long)size;
-                        compositor_wl.map[at].at = (unsigned long)got;
-                        return (void *)got;
-                }
+        if (compositor_wl_map_note((unsigned long)got, (unsigned long)size))
+                return (void *)got;
         compositor_call(syscall(munmap), (positive)got, (positive)size, 0, 0, 0, 0);
         return 0;
 }
@@ -4073,6 +4219,9 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_random,
     compositor_wl_row_layers,
     compositor_wl_row_busy,
+    compositor_wl_reserve,
+    compositor_wl_commit,
+    compositor_wl_unreserve,
 };
 
 /* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */
@@ -4092,6 +4241,7 @@ static void compositor_wl_start(void)
 
         if (compositor_wl.started)
                 return;
+        compositor_wl.map_table.unit = sizeof(struct compositor_wl_mapping);
         // Layers off where the owner asks (/run/moonwater/layers-off), looked for once at the start: subsurfaces laid into their window as before.
         {
                 bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/layers-off", FILE_READ | O_CLOEXEC);
@@ -4164,12 +4314,6 @@ static void compositor_wl_drop(long slot)
         compositor_wl_transfers_drop(slot);
 }
 
-// Everything the shim's caps let every client hold at once (its connection, the descriptors it sent and has not used, the planes of its
-// buffer parameters, and the dma-bufs of all clients together) is below the line the compositor's own numbers start at, when the limit is
-// the one asked for: no client that keeps to the caps is refused for room.
-_Static_assert(WAYLAND_CLIENTS * (1 + WAYLAND_FDS + WAYLAND_PARAMS * 4) + WAYLAND_DMABUFS_ALL + 2 * COMPOSITOR_WL_TRANSFERS <=
-                   COMPOSITOR_DESCRIPTORS_WANTED - COMPOSITOR_DESCRIPTORS_OWN,
-               "the clients' descriptors fit their share of the table");
 
 /* One connection, if one waits: its peer is read from the socket, and it takes a slot unless the caps say no. */
 static void compositor_wl_accept(void)

@@ -2138,7 +2138,8 @@ static void compositor_band_room(void)
         limit asked for, everything the shim's own caps let every client hold at once fits below the line (the assert in
         wayland_host.c), so no client that keeps to them is refused.
 */
-#define COMPOSITOR_DESCRIPTORS_WANTED 4096
+#define COMPOSITOR_DESCRIPTORS_WANTED (1L << 30) // as many as the kernel's hard limit lets it have: a client's dma-bufs are descriptors the compositor holds
+#define COMPOSITOR_DESCRIPTORS_WARM 4096          // the table grown to at the start (the kernel grows it past this as it is used)
 #define COMPOSITOR_DESCRIPTORS_OWN 256
 static long compositor_descriptors_most = 1024;
 
@@ -2272,7 +2273,8 @@ static void compositor_descriptors_room(void)
                 }
                 compositor_descriptors_most = (long)(limits[0] < COMPOSITOR_DESCRIPTORS_WANTED ? limits[0] : COMPOSITOR_DESCRIPTORS_WANTED);
         }
-        for (long last = compositor_descriptors_most - 1; last >= 127; last = (last - 1) / 2)
+        for (long last = (compositor_descriptors_most < COMPOSITOR_DESCRIPTORS_WARM ? compositor_descriptors_most : COMPOSITOR_DESCRIPTORS_WARM) - 1; last >= 127;
+             last = (last - 1) / 2)
         {
                 long made = compositor_call(syscall(fcntl), 0, COMPOSITOR_F_DUPFD_CLOEXEC, (positive)last, 0, 0, 0);
 

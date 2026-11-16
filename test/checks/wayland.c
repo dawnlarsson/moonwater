@@ -93,6 +93,9 @@ static struct fake_host_state
         long lent_parts;  // of those, the ones with a part damaged, and the box of the last one's damage in the window
         struct wayland_rect lent_box;
         int dmabuf_table_fd;
+        // The tables' reservations (reserve, commit, unreserve) and the commit that is refused: commit_fail_at counts down the commits
+        // that go through, and the one it reaches 1 at, and every one after, fails (0: none fails).
+        long reserves, unreserves, commits, commit_fail_at, commits_refused;
 } fake;
 
 static void *fake_alloc(void *context, long bytes)
@@ -108,6 +111,40 @@ static void fake_release(void *context, void *block, long bytes)
         (void)bytes;
         fake.releases++;
         free(block);
+}
+
+static void *fake_reserve(void *context, long *bytes)
+{
+        void *at;
+
+        (void)context;
+        if (*bytes > (1L << 30))
+                *bytes = 1L << 30;
+        at = mmap(0, (size_t)*bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (at == MAP_FAILED)
+                return 0;
+        fake.reserves++;
+        return at;
+}
+
+static int fake_commit(void *context, void *at, long bytes)
+{
+        (void)context;
+        fake.commits++;
+        if (fake.commit_fail_at && --fake.commit_fail_at <= 0)
+        {
+                fake.commit_fail_at = 1; // and every one after
+                fake.commits_refused++;
+                return 0;
+        }
+        return mprotect(at, (size_t)bytes, PROT_READ | PROT_WRITE) == 0;
+}
+
+static void fake_unreserve(void *context, void *at, long bytes)
+{
+        (void)context;
+        fake.unreserves++;
+        munmap(at, (size_t)bytes);
 }
 
 static void *fake_map(void *context, long fd, long size)
@@ -528,7 +565,8 @@ static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
-    fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0}; // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
+    fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0, // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
+    fake_reserve, fake_commit, fake_unreserve};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -544,13 +582,15 @@ struct wl_event_seen
         long fd_count;
 };
 
+#define WLC_IDS 65536 // ids a check's client may make: more than ten thousand surfaces, with what they need
+
 struct wlc
 {
         long slot;
         unsigned long next;
-        unsigned char iface[8192];
-        unsigned char version[8192];
-        unsigned char siface[64], sversion[64]; /* the objects the server makes: ids from WAYLAND_SERVER_BASE */
+        unsigned char iface[WLC_IDS];
+        unsigned char version[WLC_IDS];
+        unsigned char siface[4096], sversion[4096]; /* the objects the server makes: ids from WAYLAND_SERVER_BASE */
         struct wl_event_seen ev[EVENTS];
         long events, taken;
         long fds_seen;
@@ -591,27 +631,27 @@ static int wlc_pump(struct wlc *c);
 
 static int wlc_known(unsigned long id)
 {
-        return id < 8192 || (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64);
+        return id < WLC_IDS || (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 4096);
 }
 
 static unsigned char wlc_iface(struct wlc *c, unsigned long id)
 {
-        return id < 8192 ? c->iface[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64 ? c->siface[id - WAYLAND_SERVER_BASE] : 0;
+        return id < WLC_IDS ? c->iface[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 4096 ? c->siface[id - WAYLAND_SERVER_BASE] : 0;
 }
 
 static unsigned char wlc_version(struct wlc *c, unsigned long id)
 {
-        return id < 8192 ? c->version[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64 ? c->sversion[id - WAYLAND_SERVER_BASE] : 0;
+        return id < WLC_IDS ? c->version[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 4096 ? c->sversion[id - WAYLAND_SERVER_BASE] : 0;
 }
 
 static void wlc_set(struct wlc *c, unsigned long id, long iface, long version)
 {
-        if (id < 8192)
+        if (id < WLC_IDS)
         {
                 c->iface[id] = (unsigned char)iface;
                 c->version[id] = (unsigned char)version;
         }
-        else if (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64)
+        else if (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 4096)
         {
                 c->siface[id - WAYLAND_SERVER_BASE] = (unsigned char)iface;
                 c->sversion[id - WAYLAND_SERVER_BASE] = (unsigned char)version;
@@ -807,7 +847,7 @@ static int wlc_pump(struct wlc *c)
                         c->error_code = e->u[1];
                         snprintf(c->error_text, sizeof c->error_text, "%s", e->text[2]);
                 }
-                if (wlc_iface(c, object) == WLI_wl_display && opcode == WLE_wl_display_delete_id && e->u[0] < 8192)
+                if (wlc_iface(c, object) == WLI_wl_display && opcode == WLE_wl_display_delete_id && e->u[0] < WLC_IDS)
                         c->iface[e->u[0]] = 0;
                 at += size;
         }
@@ -979,6 +1019,7 @@ static void leak_check(const char *what)
                 stats.clients, stats.objects, stats.rows, stats.fds, stats.pools, stats.buffers, stats.surfaces);
         WLCHECK(fake.maps == fake.unmaps, "%s: every mapping is unmapped (%ld %ld)", what, fake.maps, fake.unmaps);
         WLCHECK(fake.allocs == fake.releases, "%s: every client record is released (%ld %ld)", what, fake.allocs, fake.releases);
+        WLCHECK(fake.reserves == fake.unreserves, "%s: every table's reservation is given back (%ld %ld)", what, fake.reserves, fake.unreserves);
         for (int row = 0; row < WAYLAND_ROWS; row++)
                 if (fake.row[row].used)
                 {
@@ -1659,9 +1700,9 @@ static void test_shm(void)
         WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_fd), "a pool does not shrink");
         wlc_end(c);
 #endif
-        /* too many pools */
+        /* pools past the old cap of 96, then a commit refused: the next pool is refused with no_memory, and nothing else */
         FRESH();
-        for (int at = 0; at < WAYLAND_POOLS + 1 && !c->errors; at++)
+        for (int at = 0; at < 1000 && !c->errors; at++)
         {
                 unsigned long id = wlc_id(c, WLI_wl_shm_pool, 1);
 
@@ -1669,7 +1710,18 @@ static void test_shm(void)
                 wlc_send(c, s.shm, WLQ_wl_shm_create_pool, id, fd, 4096L);
                 close((int)fd);
         }
-        WLCHECK(refused_with(c, WLN_wl_display_error_no_memory), "more pools than the cap is refused, not crashed");
+        WLCHECK(c->errors == 0, "a client holds a thousand pools (%s)", c->error_text);
+        fake.commit_fail_at = 1;
+        for (int at = 0; at < 2000 && !c->errors; at++)
+        {
+                unsigned long id = wlc_id(c, WLI_wl_shm_pool, 1);
+
+                fd = wl_file(4096, 0);
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, id, fd, 4096L);
+                close((int)fd);
+        }
+        fake.commit_fail_at = 0;
+        WLCHECK(refused_with(c, WLN_wl_display_error_no_memory), "a pool the memory is not there for is refused with no_memory, not crashed");
         wlc_end(c);
         leak_check("shm");
         WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
@@ -3355,7 +3407,11 @@ static void test_wire(void)
         wayland_stop();
 }
 
-/* The tables are fixed: a client that makes everything it can makes no more than the caps. */
+/*
+        The tables grow: a client makes as many objects and surfaces as memory lets it, and the one the memory is not there for (a
+        commit of the table refused, as the kernel refuses one) is refused with no_memory, that client alone, and what it held comes
+        back. Each table's growth is refused in its turn: an injected failure at the first commit after the table's last, at every one.
+*/
 static void test_caps(void)
 {
         struct session s;
@@ -3366,21 +3422,75 @@ static void test_caps(void)
         wayland_start(&fake_host);
         session_open(&s);
         c = s.c;
-        while (!c->errors && made < WAYLAND_OBJECTS + 50)
+        while (!c->errors && made < 20000)
         {
-                wlc_send(c, 1, WLQ_wl_display_get_registry, wlc_id(c, WLI_wl_registry, 1));
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_region, wlc_id(c, WLI_wl_region, 1));
                 made++;
         }
-        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory && made <= WAYLAND_OBJECTS,
-                "objects stop at the cap with a protocol error (%ld, code %lu)", made, c->error_code);
+        WLCHECK(c->errors == 0, "twenty thousand objects in one client, past the old cap of 2048 (%s)", c->error_text);
         wlc_end(c);
 
         session_open(&s);
         c = s.c;
-        for (int at = 0; at < WAYLAND_SURFACES + 5 && !c->errors; at++)
+        for (int at = 0; at < 10000 && !c->errors; at++)
                 wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, wlc_id(c, WLI_wl_surface, 6));
-        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory, "surfaces stop at the cap");
+        WLCHECK(c->errors == 0, "ten thousand surfaces in one client, past the old cap of 64 (%s)", c->error_text);
+        // A second client beside it, made while the first's tables are large: its objects are its own, and both are answered.
+        {
+                struct session t;
+
+                session_open(&t);
+                wlc_send(t.c, t.compositor, WLQ_wl_compositor_create_surface, wlc_id(t.c, WLI_wl_surface, 6));
+                wlc_pump(t.c);
+                WLCHECK(t.c->errors == 0, "a second client beside one of ten thousand surfaces is answered");
+                wlc_end(t.c);
+        }
+        // The memory runs out: the next surface (its object's table, or its own) is refused with no_memory, and the client alone.
+        fake.commit_fail_at = 1;
+        for (int at = 0; at < 100000 && !c->errors; at++)
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, wlc_id(c, WLI_wl_surface, 6));
+        fake.commit_fail_at = 0;
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory, "a surface the memory is not there for is refused with no_memory (%lu)",
+                c->error_code);
         wlc_end(c);
+        leak_check("growth");
+
+        // A failure injected at every growth point: the commit that fails is the 1st, 2nd, ... of a client that makes pools, buffers,
+        // surfaces, subsurfaces, regions and positioners; each run ends with a refusal or with all of it made, and gives everything back.
+        for (long fail = 1; fail <= 40; fail++)
+        {
+                long refused = 0;
+
+                session_open(&s);
+                c = s.c;
+                fake.commit_fail_at = fail;
+                {
+                        unsigned long sub = wl_global(c, s.registry, WLI_wl_subcompositor, 1), wm = wl_global(c, s.registry, WLI_xdg_wm_base, 1);
+
+                        for (int round = 0; round < 300 && !c->errors; round++)
+                        {
+                                unsigned long surface = wlc_id(c, WLI_wl_surface, 6), child = wlc_id(c, WLI_wl_surface, 6), region = wlc_id(c, WLI_wl_region, 1);
+                                long fd = wl_file(4096, 0);
+                                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1);
+
+                                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface);
+                                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, child);
+                                wlc_send(c, sub, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), child, surface);
+                                wlc_send(c, s.compositor, WLQ_wl_compositor_create_region, region);
+                                wlc_send(c, wm, WLQ_xdg_wm_base_create_positioner, wlc_id(c, WLI_xdg_positioner, 1));
+                                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, fd, 4096L);
+                                close((int)fd);
+                                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, wlc_id(c, WLI_wl_buffer, 1), 0L, 16L, 16L, 64L, 0L);
+                        }
+                        wlc_pump(c);
+                        refused = c->errors && c->error_code == WLN_wl_display_error_no_memory;
+                        WLCHECK(!c->errors || refused, "growth point %ld: a refusal is no_memory (%lu: %s)", fail, c->error_code, c->error_text);
+                }
+                fake.commit_fail_at = 0;
+                wlc_end(c);
+                (void)refused;
+                leak_check("growth point");
+        }
 
         /* the client slots */
         {
@@ -3465,7 +3575,7 @@ static void test_fuzz(long rounds)
                         /* an object of the client's, and one of its requests, with arguments chosen to be wrong in some way */
                         unsigned char m[256];
                         unsigned long object = wl_random() % 4 ? 1 + wl_random() % (c->next + 4) : 1;
-                        long iface = object < 8192 ? c->iface[object] : 0, op, n = 8;
+                        long iface = object < WLC_IDS ? c->iface[object] : 0, op, n = 8;
                         const struct wl_interface_info *info;
 
                         if (!iface)
@@ -3494,7 +3604,7 @@ static void test_fuzz(long rounds)
                                                 v = c->next++;
                                                 made++;
                                         }
-                                        if (k[0] == 'n' && v < 8192 && !c->iface[v])
+                                        if (k[0] == 'n' && v < WLC_IDS && !c->iface[v])
                                         {
                                                 c->iface[v] = k[1];
                                                 c->version[v] = c->version[object];
@@ -4411,9 +4521,9 @@ static void test_tree_cost(void)
 {
         struct session s;
         struct wlc *c;
-        unsigned long subcompositor, surface[WAYLAND_SURFACES], buffer[WAYLAND_SURFACES];
+        unsigned long subcompositor, surface[64], buffer[64];
         double total = 0;
-        long count = WAYLAND_SURFACES - 1, rounds = 3;
+        long count = 64 - 1, rounds = 3;
 
         wl_reset();
         wayland_start(&fake_host);
@@ -6319,13 +6429,13 @@ static void test_dmabuf(void)
                 "Y_INVERT flag (1) on linux_buffer_params creates a buffer");
         wlc_end(c);
 
-        /* the caps: a client holds at most 48 buffers, each with a descriptor, and params with descriptors given are closed with it */
+        /* no cap: a client holds 200 buffers made of dma-bufs, past the old 48, each with a descriptor, and params with descriptors given are closed with it */
         session_open(&s);
         c = s.c;
         {
                 long failed = 0, created = 0;
 
-                for (int at = 0; at < WAYLAND_DMABUFS + 3; at++)
+                for (int at = 0; at < 200; at++)
                 {
                         params = dmabuf_params(&s, dmabuf_file(4, 32, 2, 0), 0, 0, 32, 0);
                         wlc_forget(c);
@@ -6334,7 +6444,7 @@ static void test_dmabuf(void)
                         created += (long)wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_created);
                         wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
                 }
-                WLCHECK(c->errors == 0 && created == WAYLAND_DMABUFS && failed == 3, "a client has 48 dma-buf buffers and no more (%ld made, %ld failed)", created, failed);
+                WLCHECK(c->errors == 0 && created == 200 && failed == 0, "a client has 200 dma-buf buffers (%ld made, %ld failed)", created, failed);
         }
         wlc_end(c);
         session_open(&s);

@@ -59,16 +59,14 @@
         (about) WAYLAND_BLOCK bytes whatever the client does.
 */
 #define WAYLAND_CLIENTS 32
-#define WAYLAND_IDS 8192        // a client's ids run from 1 to this less one
-#define WAYLAND_OBJECTS 2048    // live objects of one client
-// Xwayland is one client for every X window of the desktop, with a surface, and a pool and a buffer (a dma-buf's buffer is a pool of
-// its own), for each window it maps: 120 X windows took it past 96 pools, and the protocol error ended Xwayland and every X program
-// with it, where weston and mutter showed them all (test/wayland_stress, x-many-windows). The record is mapped zeroed, so what a
-// client does not use costs no memory.
-#define WAYLAND_SURFACES 256
-#define WAYLAND_POOLS 512
-#define WAYLAND_BUFFERS 1024
-#define WAYLAND_POSITIONERS 8
+// A client's ids run from 1 up to as many as it has made, as libwayland's do: a new id is the next or one it let go of.
+#define WAYLAND_IDS 0xff000000UL
+/*
+        A client's objects, surfaces, pools, buffers, positioners and regions, and the index of its ids, are tables that grow
+        (struct wayland_table): no count of them is a cap, and what bounds them is the machine's memory. Xwayland is one client for
+        every X window of the desktop, and the fixed tables that were here (2048 objects, 64 then 256 surfaces, 96 then 512 pools,
+        256 then 1024 buffers, 8 positioners, 64 regions) ended it, and every X program with it, at the count a desktop reached.
+*/
 #define WAYLAND_MESSAGE 4096    // the largest message, header included, as in libwayland
 #define WAYLAND_ARGS 12
 #define WAYLAND_FDS 28          // descriptors a client may have sent and not yet had used
@@ -84,7 +82,8 @@
 #define WAYLAND_POOL_TOTAL (1L << 31) // what one client may have mapped
 #define WAYLAND_DIMENSION 16384
 #define WAYLAND_ROWS 32         // the compositor's table
-#define WAYLAND_SERVER_IDS 64   // objects the server makes (ids from 0xff000000)
+#define WAYLAND_SERVER_IDS 0x01000000UL // the server's own ids, from 0xff000000 (the protocol's range): its index grows with what it makes
+#define WAYLAND_ID_GAP 4096     // how far past the next id a client's new one may be (libwayland's servers allow none; a gap costs index, not more)
 #define WAYLAND_SERVER_BASE 0xff000000UL
 #define WAYLAND_SCREENS 8
 #define WAYLAND_GLOBALS_MAX 40
@@ -104,14 +103,10 @@
 #define WAYLAND_DMABUF_ENTRIES 64    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
 #define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
-#define WAYLAND_FEEDBACKS (WAYLAND_SURFACES + 1) // zwp_linux_dmabuf_feedback_v1 one client holds: a surface's, one each, and a default
-#define WAYLAND_DMABUFS 48           // buffers made of dma-bufs one client has (each holds a descriptor)
-#define WAYLAND_DMABUFS_ALL 192      // and all clients together
 #define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
 #define WAYLAND_NOTIFIES 8           // ext-idle-notify notifications one client holds
 #define WAYLAND_TEXTS 4              // zwp_text_input_v3 objects one client holds
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
-#define WAYLAND_REGIONS 64           // tracked wl_region rectangles for opaque- and input-region paths
 #define WAYLAND_REGION_RECTS 8       // exact disjoint rectangles tracked per region before bounding fallback
 #define WAYLAND_TIMELINES 32         // wp_linux_drm_syncobj_timeline_v1 objects one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
@@ -377,6 +372,13 @@ struct wayland_host
         // for its jobs); a buffer such a picture was read from is then not released at a commit or a close but at the next frame drawn or presented
         // (wayland_drawn, wayland_presented), which the host calls once its jobs are done. The client is read all along. Optional: none is never busy.
         int (*row_busy)(void *context, int row);
+        // The tables' memory (struct wayland_table): reserve is address space of *bytes, which the host may make less (to the machine's
+        // memory), of no memory until committed, or 0; commit makes bytes of it from at usable, zeroed, 1 when it did and 0 when the
+        // memory is not there; unreserve gives a reservation back. Optional, together: a host with none has its tables made of alloc,
+        // a block of WAYLAND_TABLE_FALLBACK bytes each.
+        void *(*reserve)(void *context, long *bytes);
+        int (*commit)(void *context, void *at, long bytes);
+        void (*unreserve)(void *context, void *at, long bytes);
 };
 
 #define WAYLAND_LAYERS 8        // the most subsurfaces a window is handed to the host with as layers (row_layers)
@@ -394,8 +396,30 @@ struct wayland_object
         unsigned int id;
         unsigned char iface, version;
         unsigned short flags;
-        short link;
-        unsigned short aux;
+        int link;
+        // A surface's generation for the objects that name a surface (all of it: a slot made again 65536 times had every new object
+        // of it taken for a stale one when this was 16 bits), else the object's own small word (a wl_output's screen).
+        unsigned int aux;
+};
+
+/*
+        A table that grows, and whose elements never move: one reservation of address space (the host's reserve, untouched and of no
+        memory), of which as much is committed (the host's commit) as the elements made need, a step at a time. An element's address
+        is the reservation's start and its index, so a pointer to an element taken before the table grew is good after it, and no
+        lookup is a scan. The elements a client let go of are on a stack in the same reservation, taken again first. What a table may
+        hold is what the reservation has room for, which is as much as the machine's memory (the compositor's host makes it so): a
+        commit that fails is the one request refused, with the protocol's no_memory, and nothing else.
+*/
+struct wayland_table
+{
+        unsigned char *at;     // the reservation (0 before the first element)
+        long unit;             // an element's bytes
+        long count;            // the elements ever made: every index below this has been one
+        long usable;           // elements whose memory is committed
+        long reserved;         // elements the reservation has room for
+        long bytes;            // the reservation's bytes
+        long frees;            // indices on the free stack, which starts at stack
+        long committed, stack_committed, stack;
 };
 
 #define WAYLAND_ROLE_NONE 0
@@ -477,7 +501,7 @@ struct wayland_surface
         // replaced, held until the frame that shows the replacement is drawn (buffer index + 1, 0 for none). A subsurface's are the same
         // for its picture as a layer (row_layers). layered: a root whose subsurfaces the host keeps as layers; laying: a root whose picture
         // is being laid (a row_picture without last was handed, and the take that ends it is owed).
-        unsigned short lent, lent_gone;
+        unsigned int lent, lent_gone;
         unsigned char layered, laying;
         // A toplevel.
         char title[WAYLAND_TEXT];
@@ -486,7 +510,7 @@ struct wayland_surface
         unsigned int parent;             // the parent toplevel's surface slot + 1
         // A subsurface: the surface it hangs from (its slot + 1), its object, its place and the place asked for, its order among its
         // siblings, whether it is synchronized, has a commit waiting for its parent's, and the buffer it holds as its picture.
-        unsigned short sub_parent, held;
+        unsigned int sub_parent, held;
         unsigned int sub_id, cached;
         long sub_x, sub_y, pend_x, pend_y, sub_order;
         unsigned char tearing, shortcuts; // a tearing control and a shortcuts inhibitor it has
@@ -614,7 +638,7 @@ struct wayland_constraint
 {
         unsigned int id;
         unsigned char live, kind, active, oneshot;
-        unsigned short surface;
+        unsigned int surface;
 };
 
 // An ext_idle_notification_v1: its object, its timeout in ms, whether it counts input alone (get_input_idle_notification), whether it
@@ -650,6 +674,12 @@ struct wayland_text
         unsigned long serial;
 };
 
+struct wayland_feedback
+{
+        unsigned int id;
+        unsigned char need;
+};
+
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
@@ -664,7 +694,7 @@ struct wayland_client
         long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
         long presenting_surfaces;    // surfaces of the client holding presentation feedbacks for a frame (presentings above zero), exact: a client with none is passed over
         long subsurfaces;            // live surfaces whose role is a subsurface's, exact (counted where the role is given, and where the surface goes): none, and no child scan is made
-        unsigned long long sub_mask; // bitmask of live subsurface slots in 0..WAYLAND_SURFACES-1
+        struct wayland_table sub_bits; // live subsurface slots, a bit each, 64 to a word (unsigned long long)
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
@@ -672,7 +702,6 @@ struct wayland_client
         long in_fds[WAYLAND_FDS], in_fd_count;
         unsigned long serial;
         long pool_bytes;
-        long free_hint;
         unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS], touch_id[WAYLAND_SEATS];
         unsigned char pointers, keyboards, touches;
         unsigned char finger_scroll; // a precise (finger) scroll was sent to this client and no axis_stop since
@@ -681,16 +710,18 @@ struct wayland_client
         unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
         unsigned char devices[2];
         unsigned int input_serial[WAYLAND_INPUT_SERIALS]; // the serials of the last input this client was sent
-        unsigned char input_next, server_hint;
+        unsigned char input_next;
+        long server_hint, server_live; // where the next of the server's own ids is looked for, and how many are in use
         unsigned char pending[2];   // the source being read for each selection, as its index and one, or 0
         struct wayland_source sources[WAYLAND_SOURCES];
         struct wayland_offer offers[WAYLAND_OFFERS];
         struct wayland_params params[WAYLAND_PARAMS];
         struct wayland_text texts[WAYLAND_TEXTS];
-        unsigned int feedback_id[WAYLAND_FEEDBACKS];
-        unsigned char feedback_need[WAYLAND_FEEDBACKS];
-        unsigned short feedbacks;    // up to WAYLAND_FEEDBACKS, a surface's each and a default
-        unsigned char feedback_pending, dmabufs;
+        struct wayland_table feedback_table; // zwp_linux_dmabuf_feedback_v1 objects (struct wayland_feedback), feedbacks of them in use
+        struct wayland_feedback *feedback;
+        long feedbacks;
+        unsigned char feedback_pending;
+        long dmabufs;
         struct wayland_sync_timeline timelines[WAYLAND_TIMELINES];
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
         struct wayland_notify notifies[WAYLAND_NOTIFIES];
@@ -704,16 +735,19 @@ struct wayland_client
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         // The buffers subsurfaces that went (destroyed, or taken off their parent) were read in place from as layers, buffer index and one:
         // the host has been told they went, and a frame drawn since lets them go (wayland_gone_drawn).
-        unsigned short gone[WAYLAND_GONE];
+        unsigned int gone[WAYLAND_GONE];
         unsigned char gones;
-        unsigned short index[WAYLAND_IDS];
-        unsigned short server_index[WAYLAND_SERVER_IDS];
-        struct wayland_object objects[WAYLAND_OBJECTS];
-        struct wayland_surface surfaces[WAYLAND_SURFACES];
-        struct wayland_pool pools[WAYLAND_POOLS];
-        struct wayland_buffer buffers[WAYLAND_BUFFERS];
-        struct wayland_positioner positioners[WAYLAND_POSITIONERS];
-        struct wayland_region regions[WAYLAND_REGIONS];
+        struct wayland_table server_table; // the server's ids -> object slot and one (unsigned int), for ids below its count
+        unsigned int *server_index;
+        // The tables (struct wayland_table), and each one's elements as an array, at the table's reservation: they never move.
+        struct wayland_table index_table, object_table, surface_table, pool_table, buffer_table, positioner_table, region_table;
+        unsigned int *index;                  // id -> object slot and one, for ids below index_table.count
+        struct wayland_object *objects;
+        struct wayland_surface *surfaces;
+        struct wayland_pool *pools;
+        struct wayland_buffer *buffers;
+        struct wayland_positioner *positioners;
+        struct wayland_region *regions;
 };
 
 /*
@@ -787,6 +821,211 @@ static struct
         unsigned long cursor_serial;
 } wayland;
 
+#define WAYLAND_TABLE_WANT (1L << 36)       // the address space a table asks for (64 GiB), which the compositor's host makes the machine's memory
+#define WAYLAND_TABLE_FALLBACK (1L << 26)   // a table's block where the host reserves nothing
+#define WAYLAND_TABLE_PAGE 4096L
+#define WAYLAND_TABLE_FIRST 64L             // elements committed first
+
+static long wayland_round_page(long bytes)
+{
+        return (bytes + WAYLAND_TABLE_PAGE - 1) & ~(WAYLAND_TABLE_PAGE - 1);
+}
+
+// A table's memory committed for `want` elements, its reservation made first: 1 when it is, 0 when the memory is not there.
+static int wayland_table_room(struct wayland_table *t, long want)
+{
+        long usable, need, stack_need;
+
+        if (want <= t->usable)
+                return 1;
+        if (!t->at)
+        {
+                long bytes = WAYLAND_TABLE_WANT;
+                void *at;
+
+                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
+                        at = wayland.host->reserve(wayland.host->context, &bytes);
+                else
+                        bytes = WAYLAND_TABLE_FALLBACK, at = wayland.host->alloc(wayland.host->context, bytes);
+                if (!at || bytes < 2 * WAYLAND_TABLE_PAGE + t->unit + 4)
+                {
+                        if (at)
+                        {
+                                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
+                                        wayland.host->unreserve(wayland.host->context, at, bytes);
+                                else
+                                        wayland.host->release(wayland.host->context, at, bytes);
+                        }
+                        return 0;
+                }
+                t->at = (unsigned char *)at;
+                t->bytes = bytes;
+                t->reserved = (bytes - 2 * WAYLAND_TABLE_PAGE) / (t->unit + 4);
+                t->stack = wayland_round_page(t->reserved * t->unit);
+        }
+        if (want > t->reserved)
+                return 0;
+        usable = t->usable * 2 > want ? t->usable * 2 : want;
+        usable = usable < WAYLAND_TABLE_FIRST ? WAYLAND_TABLE_FIRST : usable;
+        usable = usable > t->reserved ? t->reserved : usable;
+        need = wayland_round_page(usable * t->unit);
+        stack_need = wayland_round_page(usable * 4);
+        if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
+        {
+                if (need > t->committed && !wayland.host->commit(wayland.host->context, t->at + t->committed, need - t->committed))
+                        return 0;
+                if (need > t->committed)
+                        t->committed = need;
+                if (stack_need > t->stack_committed &&
+                    !wayland.host->commit(wayland.host->context, t->at + t->stack + t->stack_committed, stack_need - t->stack_committed))
+                        return 0;
+        }
+        t->committed = need > t->committed ? need : t->committed;
+        t->stack_committed = stack_need > t->stack_committed ? stack_need : t->stack_committed;
+        t->usable = usable;
+        return 1;
+}
+
+// An element of the table to use: one let go of, or a new one. Its index, or -1 when the memory for it is not there.
+static long wayland_table_take(struct wayland_table *t)
+{
+        if (t->frees > 0)
+                return (long)((unsigned int *)(t->at + t->stack))[--t->frees];
+        if (!wayland_table_room(t, t->count + 1))
+                return -1;
+        return t->count++;
+}
+
+// An element let go of, to be taken again. The stack has room: it holds fewer than count, and usable of it is committed.
+static void wayland_table_give(struct wayland_table *t, long index)
+{
+        if (index >= 0 && index < t->count && t->frees < t->count)
+                ((unsigned int *)(t->at + t->stack))[t->frees++] = (unsigned int)index;
+}
+
+// The table's elements below `count` usable (an index of ids, a bitmap), the count raised to it. 1 when they are.
+static int wayland_table_reach(struct wayland_table *t, long count)
+{
+        if (!wayland_table_room(t, count))
+                return 0;
+        if (count > t->count)
+                t->count = count;
+        return 1;
+}
+
+static void wayland_table_drop(struct wayland_table *t)
+{
+        if (t->at)
+        {
+                if (wayland.host->reserve && wayland.host->commit && wayland.host->unreserve)
+                        wayland.host->unreserve(wayland.host->context, t->at, t->bytes);
+                else
+                        wayland.host->release(wayland.host->context, t->at, t->bytes);
+        }
+        t->at = 0;
+        t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
+}
+
+// A client's tables made ready (their units) and their arrays pointed at, once a table has its reservation.
+static void wayland_tables_point(struct wayland_client *c)
+{
+        c->index = (unsigned int *)c->index_table.at;
+        c->objects = (struct wayland_object *)c->object_table.at;
+        c->surfaces = (struct wayland_surface *)c->surface_table.at;
+        c->pools = (struct wayland_pool *)c->pool_table.at;
+        c->buffers = (struct wayland_buffer *)c->buffer_table.at;
+        c->positioners = (struct wayland_positioner *)c->positioner_table.at;
+        c->regions = (struct wayland_region *)c->region_table.at;
+        c->feedback = (struct wayland_feedback *)c->feedback_table.at;
+        c->server_index = (unsigned int *)c->server_table.at;
+}
+
+static void wayland_tables_init(struct wayland_client *c)
+{
+        c->index_table.unit = sizeof(unsigned int);
+        c->object_table.unit = sizeof(struct wayland_object);
+        c->surface_table.unit = sizeof(struct wayland_surface);
+        c->pool_table.unit = sizeof(struct wayland_pool);
+        c->buffer_table.unit = sizeof(struct wayland_buffer);
+        c->positioner_table.unit = sizeof(struct wayland_positioner);
+        c->region_table.unit = sizeof(struct wayland_region);
+        c->feedback_table.unit = sizeof(struct wayland_feedback);
+        c->sub_bits.unit = sizeof(unsigned long long);
+        c->server_table.unit = sizeof(unsigned int);
+}
+
+static void wayland_tables_drop(struct wayland_client *c)
+{
+        wayland_table_drop(&c->index_table);
+        wayland_table_drop(&c->object_table);
+        wayland_table_drop(&c->surface_table);
+        wayland_table_drop(&c->pool_table);
+        wayland_table_drop(&c->buffer_table);
+        wayland_table_drop(&c->positioner_table);
+        wayland_table_drop(&c->region_table);
+        wayland_table_drop(&c->feedback_table);
+        wayland_table_drop(&c->sub_bits);
+        wayland_table_drop(&c->server_table);
+        wayland_tables_point(c);
+}
+
+// An element of one of a client's tables: its index (the arrays pointed at again, since the first take makes the reservation), or -1.
+static long wayland_client_take(struct wayland_client *c, struct wayland_table *t)
+{
+        long at = wayland_table_take(t);
+
+        wayland_tables_point(c);
+        return at;
+}
+
+/* The subsurfaces of a client, a bit for each surface slot that is one, walked in the order of the slots. */
+static unsigned long long *wayland_sub_words(struct wayland_client *c)
+{
+        return (unsigned long long *)c->sub_bits.at;
+}
+
+static int wayland_sub_mark(struct wayland_client *c, long slot)
+{
+        if (!wayland_table_reach(&c->sub_bits, slot / 64 + 1))
+                return 0;
+        wayland_sub_words(c)[slot / 64] |= 1ULL << (slot % 64);
+        return 1;
+}
+
+static void wayland_sub_clear(struct wayland_client *c, long slot)
+{
+        if (slot / 64 < c->sub_bits.count)
+                wayland_sub_words(c)[slot / 64] &= ~(1ULL << (slot % 64));
+}
+
+struct wayland_subs
+{
+        const struct wayland_client *c;
+        long word, at;
+        unsigned long long mask;
+};
+
+static struct wayland_subs wayland_subs_of(const struct wayland_client *c)
+{
+        struct wayland_subs it = {c, -1, -1, 0};
+
+        return it;
+}
+
+// The next subsurface slot, in it.at: 1 when there is one. A word's bits are read when its first is reached.
+static int wayland_subs_next(struct wayland_subs *it)
+{
+        while (!it->mask)
+        {
+                if (++it->word >= it->c->sub_bits.count)
+                        return 0;
+                it->mask = ((const unsigned long long *)it->c->sub_bits.at)[it->word];
+        }
+        it->at = it->word * 64 + __builtin_ctzll(it->mask);
+        it->mask &= it->mask - 1;
+        return 1;
+}
+
 /* ---- the wire ---- */
 
 /*
@@ -799,7 +1038,6 @@ static struct
 */
 #ifndef STANDARD_MODERN_C
 unsigned long long wire_message(const unsigned char *bytes, unsigned long long size, unsigned long long most, unsigned int *head);
-long long wire_slot(const unsigned short *index, unsigned long long count, unsigned long long at);
 unsigned long long rects_clip(long long *rects, unsigned long long count, unsigned long long width, unsigned long long height);
 unsigned long long wire_arguments(const unsigned char *kinds, const unsigned char *classes, const unsigned char *bytes, unsigned long long left,
                                   unsigned int *out, unsigned long long room);
@@ -979,8 +1217,8 @@ static long wayland_slot_of(struct wayland_client *c, unsigned long id)
         // A client's ids from 1, in its index; the server's from WAYLAND_SERVER_BASE, in theirs; anything else is in neither (an id
         // below the server's base is, less the base, far past the index's end).
         if (id < WAYLAND_IDS)
-                return id ? (long)wire_slot(c->index, WAYLAND_IDS, id) : -1;
-        return (long)wire_slot(c->server_index, WAYLAND_SERVER_IDS, id - WAYLAND_SERVER_BASE);
+                return id && id < (unsigned long)c->index_table.count ? (long)c->index[id] - 1 : -1;
+        return id - WAYLAND_SERVER_BASE < (unsigned long)c->server_table.count ? (long)c->server_index[id - WAYLAND_SERVER_BASE] - 1 : -1;
 }
 
 static long wayland_object_new(struct wayland_client *c, unsigned long id, long iface, long version)
@@ -991,15 +1229,21 @@ static long wayland_object_new(struct wayland_client *c, unsigned long id, long 
                 return -1;
         if (!(id >= 1 && id < WAYLAND_IDS) && !(id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < WAYLAND_SERVER_IDS))
                 return -1;
-        for (long at = c->free_hint; at < WAYLAND_OBJECTS; at++)
-                if (!c->objects[at].iface)
-                {
-                        slot = at;
-                        break;
-                }
+        // A client's new id is one below the most it has made, let go of, or the next one (libwayland's rule, and its servers'): an id
+        // far past them would have the index committed up to it for nothing. The index's memory first, then the object's.
+        if (id < WAYLAND_IDS)
+        {
+                long next = c->index_table.count > 1 ? c->index_table.count : 1;
+
+                if ((long)id > next + WAYLAND_ID_GAP || !wayland_table_reach(&c->index_table, (long)id + 1))
+                        return -1;
+                wayland_tables_point(c);
+        }
+        else if (id - WAYLAND_SERVER_BASE >= (unsigned long)c->server_table.count)
+                return -1;
+        slot = wayland_client_take(c, &c->object_table);
         if (slot < 0)
                 return -1;
-        c->free_hint = slot + 1;
         c->objects[slot].id = (unsigned int)id;
         c->objects[slot].iface = (unsigned char)iface;
         c->objects[slot].version = (unsigned char)(version > wl_interfaces[iface].version ? wl_interfaces[iface].version : version);
@@ -1007,9 +1251,9 @@ static long wayland_object_new(struct wayland_client *c, unsigned long id, long 
         c->objects[slot].link = -1;
         c->objects[slot].aux = 0;
         if (id < WAYLAND_IDS)
-                c->index[id] = (unsigned short)(slot + 1);
+                c->index[id] = (unsigned int)(slot + 1);
         else
-                c->server_index[id - WAYLAND_SERVER_BASE] = (unsigned short)(slot + 1);
+                c->server_index[id - WAYLAND_SERVER_BASE] = (unsigned int)(slot + 1), c->server_live++;
         wayland.objects++;
         return slot;
 }
@@ -1031,20 +1275,20 @@ static void wayland_object_free(struct wayland_client *c, long slot)
                         wayland.idle_notifies--;
         }
         else if (c->objects[slot].iface == WLI_wl_region && c->objects[slot].link >= 0 &&
-                 c->objects[slot].link < WAYLAND_REGIONS)
+                 c->objects[slot].link < c->region_table.count)
         {
                 c->regions[c->objects[slot].link].live = 0;
+                wayland_table_give(&c->region_table, c->objects[slot].link);
                 c->objects[slot].link = -1;
         }
 
         if (id < WAYLAND_IDS)
                 c->index[id] = 0;
         else
-                c->server_index[id - WAYLAND_SERVER_BASE] = 0;
+                c->server_index[id - WAYLAND_SERVER_BASE] = 0, c->server_live--;
         c->objects[slot].iface = 0;
         c->objects[slot].id = 0;
-        if (slot < c->free_hint)
-                c->free_hint = slot;
+        wayland_table_give(&c->object_table, slot);
         wayland.objects--;
 }
 
@@ -1232,7 +1476,7 @@ static struct wayland_surface *wayland_surface_of(struct wayland_client *c, long
         struct wayland_object *o = &c->objects[slot];
         struct wayland_surface *s;
 
-        if (o->link < 0 || o->link >= WAYLAND_SURFACES)
+        if (o->link < 0 || o->link >= c->surface_table.count)
                 return 0;
         s = &c->surfaces[o->link];
         return s->live && s->gen == o->aux ? s : 0;
@@ -1240,10 +1484,7 @@ static struct wayland_surface *wayland_surface_of(struct wayland_client *c, long
 
 static long wayland_surface_slot(struct wayland_client *c)
 {
-        for (long at = 0; at < WAYLAND_SURFACES; at++)
-                if (!c->surfaces[at].live)
-                        return at;
-        return -1;
+        return wayland_client_take(c, &c->surface_table);
 }
 
 // The slot of a surface record, from the record.
@@ -1310,7 +1551,7 @@ static void wayland_release_buffer(struct wayland_client *c, long slot)
 {
         long link = c->objects[slot].link;
 
-        if (link >= 0 && link < WAYLAND_BUFFERS && c->buffers[link].live)
+        if (link >= 0 && link < c->buffer_table.count && c->buffers[link].live)
                 wayland_buffer_signal_release(c, &c->buffers[link]);
         wayland_send(c, c->objects[slot].id, WLE_wl_buffer_release, 0, 0);
 }
@@ -1730,7 +1971,7 @@ static void wayland_constraints_update(void);
 static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
 
 static void wayland_let_go(struct wayland_client *c, long index);
-static void wayland_lent_let(struct wayland_client *c, long row, unsigned short index1);
+static void wayland_lent_let(struct wayland_client *c, long row, unsigned int index1);
 static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s);
 
 static void wayland_texts_row_gone(struct wayland_client *c, long row);
@@ -1754,12 +1995,12 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         // are those of its subsurfaces' layers.
         s->lent = s->lent_gone = 0;
         s->layered = s->laying = 0;
-        wayland_lent_let(c, s->row, (unsigned short)lent);
-        wayland_lent_let(c, s->row, (unsigned short)gone);
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        wayland_lent_let(c, s->row, (unsigned int)lent);
+        wayland_lent_let(c, s->row, (unsigned int)gone);
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                struct wayland_surface *child = &c->surfaces[wayland_first_bit(mask)];
-                unsigned short held[2] = {child->lent, child->lent_gone};
+                struct wayland_surface *child = &c->surfaces[sub_it.at];
+                unsigned int held[2] = {child->lent, child->lent_gone};
 
                 if (child == s || wayland_root_of(c, child) != s)
                         continue;
@@ -1871,7 +2112,7 @@ static void wayland_release_buffer(struct wayland_client *c, long slot);
 */
 static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s)
 {
-        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < WAYLAND_SURFACES; hops++)
+        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < c->surface_table.count; hops++)
                 s = &c->surfaces[s->sub_parent - 1];
         return s;
 }
@@ -1881,7 +2122,7 @@ static void wayland_sub_offset(struct wayland_client *c, struct wayland_surface 
 {
         long dx = 0, dy = 0, scale = wayland_root_of(c, s)->scale120;
 
-        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < WAYLAND_SURFACES; hops++)
+        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < c->surface_table.count; hops++)
         {
                 dx += s->sub_x;
                 dy += s->sub_y;
@@ -1894,7 +2135,7 @@ static void wayland_sub_offset(struct wayland_client *c, struct wayland_surface 
 // Whether a subsurface is synchronized: itself, or any surface above it that is a subsurface.
 static int wayland_sub_synced(struct wayland_client *c, struct wayland_surface *s)
 {
-        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < WAYLAND_SURFACES; hops++)
+        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < c->surface_table.count; hops++)
         {
                 if (s->sub_sync)
                         return 1;
@@ -1919,6 +2160,7 @@ static void wayland_let_go(struct wayland_client *c, long index)
                 wayland_pool_unref(c, b->pool);
                 b->live = 0;
                 b->zombie = 0;
+                wayland_table_give(&c->buffer_table, b - c->buffers);
                 wayland.buffers--;
         }
         else if (!b->zombie && b->held <= 0)
@@ -1938,7 +2180,7 @@ static int wayland_row_busy(long row)
 
 // A buffer read in place let go of (index and one), or, while a job of the card may still read its row's pictures, kept until a frame is drawn
 // (the client's gone list, wayland_gone_drawn); let go of at once only past WAYLAND_GONE.
-static void wayland_lent_let(struct wayland_client *c, long row, unsigned short index1)
+static void wayland_lent_let(struct wayland_client *c, long row, unsigned int index1)
 {
         if (!index1)
                 return;
@@ -1958,7 +2200,7 @@ static void wayland_gone_let(struct wayland_client *c, struct wayland_surface *s
         if (&c->buffers[index] == now)
                 c->buffers[index].held--;
         else
-                wayland_lent_let(c, wayland_root_of(c, s)->row, (unsigned short)(index + 1));
+                wayland_lent_let(c, wayland_root_of(c, s)->row, (unsigned int)(index + 1));
 }
 
 // A held buffer let go: its record is freed if its object was destroyed while it was held, else its client is told.
@@ -1975,8 +2217,8 @@ static void wayland_unhold(struct wayland_client *c, struct wayland_surface *s)
 
 static int wayland_has_children(struct wayland_client *c, long parent)
 {
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
-                if (c->surfaces[wayland_first_bit(mask)].sub_parent == parent + 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
+                if (c->surfaces[sub_it.at].sub_parent == parent + 1)
                         return 1;
         return 0;
 }
@@ -1986,9 +2228,9 @@ static long wayland_next_child(struct wayland_client *c, long parent, long above
 {
         long best = -1;
 
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 struct wayland_surface *s = &c->surfaces[at];
 
                 if (s->sub_parent == parent + 1 && (!*found || s->sub_order > above) &&
@@ -2012,7 +2254,7 @@ static void wayland_window_rect(struct wayland_client *c, const struct wayland_s
 {
         long x1 = 0, y1 = 0, x2 = width, y2 = height;
 
-        if (!c->sub_mask && !root->geometry_set)
+        if (!c->subsurfaces && !root->geometry_set)
         {
                 *x = 0;
                 *y = 0;
@@ -2020,9 +2262,9 @@ static void wayland_window_rect(struct wayland_client *c, const struct wayland_s
                 *h = wayland_min(height, WAYLAND_DIMENSION);
                 return;
         }
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 struct wayland_surface *child = &c->surfaces[at];
                 long ox, oy;
 
@@ -2330,7 +2572,7 @@ static void wayland_flatten(struct wayland_client *c, long parent, const struct 
 
 // A buffer read in place as a surface's picture (index and one): held once more as the surface's lent buffer, and the one it replaced is the
 // one that goes when the frame that shows the new one is drawn, as a window's lent picture (wayland_show).
-static void wayland_lend_hold(struct wayland_client *c, struct wayland_surface *s, unsigned short now)
+static void wayland_lend_hold(struct wayland_client *c, struct wayland_surface *s, unsigned int now)
 {
         if (!now || s->lent == now)
                 return;
@@ -2362,7 +2604,7 @@ static void wayland_lend_end(struct wayland_client *c, struct wayland_surface *s
 // without them (wayland_gone_drawn), or let go of at once past WAYLAND_GONE.
 static void wayland_lend_leave(struct wayland_client *c, struct wayland_surface *s)
 {
-        unsigned short kept[2] = {s->lent, s->lent_gone};
+        unsigned int kept[2] = {s->lent, s->lent_gone};
 
         s->lent = s->lent_gone = 0;
         for (long at = 0; at < 2; at++)
@@ -2394,9 +2636,9 @@ static void wayland_gone_drawn(struct wayland_client *c, int dmabufs)
 // just taken out of its tree (wayland_sub_drop), which is in no mask.
 static void wayland_layers_sweep(struct wayland_client *c, struct wayland_surface *also)
 {
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                struct wayland_surface *s = &c->surfaces[wayland_first_bit(mask)];
+                struct wayland_surface *s = &c->surfaces[sub_it.at];
 
                 // An orphan is its own root, and has no window either.
                 if ((s->lent || s->lent_gone) && wayland_root_of(c, s)->row < 0)
@@ -2459,7 +2701,7 @@ static void wayland_layers_walk(struct wayland_client *c, long self, struct wayl
         int found = 0;
         long order = 0;
 
-        if (depth > WAYLAND_SURFACES)
+        if (depth > c->surface_table.count)
         {
                 l->refused = 1;
                 return;
@@ -2521,9 +2763,9 @@ static long wayland_layers_make(struct wayland_client *c, struct wayland_surface
 // After the layers are handed: the subsurfaces the host keeps (list, count; none when it keeps none) hold their buffers as lent, the others not.
 static void wayland_layers_lent(struct wayland_client *c, struct wayland_surface *root, const struct wayland_picture *list, long count)
 {
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 struct wayland_surface *s = &c->surfaces[at];
                 int kept = 0;
 
@@ -2546,7 +2788,7 @@ static void wayland_layers_lent(struct wayland_client *c, struct wayland_surface
 static long wayland_root_again(struct wayland_client *c, struct wayland_surface *root, const struct wayland_rect *window,
                                const struct wayland_picture *list, long count)
 {
-        unsigned short shown = root->held ? root->held : root->lent;
+        unsigned int shown = root->held ? root->held : root->lent;
         struct wayland_picture picture;
         struct wayland_buffer *b;
         long status;
@@ -2589,7 +2831,7 @@ static long wayland_root_again(struct wayland_client *c, struct wayland_surface 
 static int wayland_layers(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *changed, int full)
 {
         struct wayland_picture list[WAYLAND_LAYERS];
-        unsigned short shown = root->held ? root->held : root->lent;
+        unsigned int shown = root->held ? root->held : root->lent;
         struct wayland_rect window, box;
         long count, status = 0;
 
@@ -2736,7 +2978,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                        s->shown_dst_width != s->dest_width || s->shown_dst_height != s->dest_height;
                 wayland_unhold(c, s);
                 b->held++;
-                s->held = (unsigned short)(c->objects[buffer].link + 1);
+                s->held = (unsigned int)(c->objects[buffer].link + 1);
                 s->width = tw;
                 s->height = th;
                 s->scale = s->pending_scale;
@@ -2847,9 +3089,9 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
 // The subsurfaces under a surface that are waiting for its commit, applied now, and theirs under them.
 static void wayland_sub_apply_children(struct wayland_client *c, long parent)
 {
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 struct wayland_surface *s = &c->surfaces[at];
 
                 if (s->sub_parent != parent + 1)
@@ -2915,9 +3157,9 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
         struct wayland_surface *root = s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent ? wayland_root_of(c, s) : 0;
 
         wayland_unhold(c, s);
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
 
                 if (c->surfaces[at].sub_parent == self + 1)
                 {
@@ -2925,7 +3167,7 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
                         c->surfaces[at].sub_parent = 0;
                 }
         }
-        c->sub_mask &= ~(1ull << wayland_surface_index(c, s));
+        wayland_sub_clear(c, wayland_surface_index(c, s));
         s->sub_parent = 0;
         s->sub_order = 0;
         if (root && root != s && root->live)
@@ -2968,7 +3210,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         if (s->live && s->role == WAYLAND_ROLE_SUBSURFACE)
         {
                 c->subsurfaces--;
-                c->sub_mask &= ~(1ULL << wayland_surface_index(c, s));
+                wayland_sub_clear(c, wayland_surface_index(c, s));
         }
         // The surface the pointer was over, or a window it was over, is nowhere now, and the next motion enters it again.
         if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot &&
@@ -2986,6 +3228,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
                 s->syncobj_id = 0;
         s->live = 0;
         s->gen++;
+        wayland_table_give(&c->surface_table, wayland_surface_index(c, s));
         wayland.surfaces--;
 }
 
@@ -2994,11 +3237,11 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
 /* A new id that cannot be had: out of the client's range, in use, or no room left for another object. */
 static int wayland_new_fail(struct wayland_client *c, unsigned long self, unsigned long id)
 {
-        if (id < 1 || id >= WAYLAND_IDS)
+        if (id < 1 || id >= WAYLAND_IDS || (long)id > (c->index_table.count > 1 ? c->index_table.count : 1) + WAYLAND_ID_GAP)
                 return wayland_fail(c, self, WLN_wl_display_error_invalid_object, "the new id is out of range");
         if (wayland_slot_of(c, id) >= 0)
                 return wayland_fail(c, self, WLN_wl_display_error_invalid_object, "the new id is in use");
-        return wayland_fail(c, 1, WLN_wl_display_error_no_memory, "too many objects");
+        return wayland_fail(c, 1, WLN_wl_display_error_no_memory, "no memory for the object");
 }
 
 #define WAYLAND_INVALID_OBJECT WLN_wl_display_error_invalid_object
@@ -3172,16 +3415,12 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
 
         if (op == WLQ_wl_compositor_create_region)
         {
-                long rslot = -1;
+                long rslot = wayland_client_take(c, &c->region_table);
 
-                for (long at = 0; at < WAYLAND_REGIONS && rslot < 0; at++)
-                        if (!c->regions[at].live)
-                                rslot = at;
-                if (rslot >= 0)
-                {
-                        c->regions[rslot] = (struct wayland_region){.live = 1};
-                        c->objects[a[0].slot].link = (short)rslot;
-                }
+                if (rslot < 0)
+                        return wayland_fail(c, c->objects[a[0].slot].id, WAYLAND_NO_MEMORY, "no memory for the region");
+                c->regions[rslot] = (struct wayland_region){.live = 1};
+                c->objects[a[0].slot].link = (int)rslot;
                 return WAYLAND_OK;
         }
         slot = wayland_surface_slot(c);
@@ -3202,8 +3441,8 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
         s->scale = s->pending_scale = 1;
         s->alpha = s->pending_alpha = 0xffffffffu;
         s->scale120 = WAYLAND_UNIT;
-        c->objects[a[0].slot].link = (short)slot;
-        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+        c->objects[a[0].slot].link = (int)slot;
+        c->objects[a[0].slot].aux = s->gen;
         wayland.surfaces++;
         wayland_scale_tell(c, s, screen_scale);
         if (c->objects[a[0].slot].version >= 6)
@@ -3427,7 +3666,7 @@ static void wayland_region_sub_rect(struct wayland_region *r, struct wayland_rec
 
 static int wayland_region_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        struct wayland_region *r = self->link >= 0 && self->link < WAYLAND_REGIONS ? &c->regions[self->link] : 0;
+        struct wayland_region *r = self->link >= 0 && self->link < c->region_table.count ? &c->regions[self->link] : 0;
 
         if (op == WLQ_wl_region_destroy)
         {
@@ -3516,6 +3755,7 @@ static void wayland_pool_unref(struct wayland_client *c, long pool)
         }
         c->pool_bytes -= p->size;
         p->live = 0;
+        wayland_table_give(&c->pool_table, p - c->pools);
         wayland.pools--;
 }
 
@@ -3536,7 +3776,7 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
 
         if (now == s->entered)
                 return;
-        for (long at = 0; at < WAYLAND_OBJECTS; at++)
+        for (long at = 0; at < c->object_table.count; at++)
         {
                 struct wayland_object *o = &c->objects[at];
                 struct wayland_event e;
@@ -3567,7 +3807,7 @@ static long wayland_xparent(struct wayland_client *c, const struct wayland_surfa
 {
         long best_row = -1, best_x = 0, best_y = 0, best_score = 0;
 
-        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        for (long at = 0; at < c->surface_table.count; at++)
         {
                 const struct wayland_surface *o = &c->surfaces[at];
                 struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
@@ -3731,7 +3971,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.
         if (status == WAYLAND_PICTURE_LENT)
         {
-                unsigned short now = (unsigned short)((b - c->buffers) + 1);
+                unsigned int now = (unsigned int)((b - c->buffers) + 1);
 
                 lent = 1;
 
@@ -4058,11 +4298,11 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         struct wayland_rect window;
 
                         // The buffer it already holds is kept as it is: letting it go here would send its release while it is the picture.
-                        if (s->held != (unsigned short)(c->objects[buffer].link + 1))
+                        if (s->held != (unsigned int)(c->objects[buffer].link + 1))
                         {
                                 wayland_unhold(c, s);
                                 b->held++;
-                                s->held = (unsigned short)(c->objects[buffer].link + 1);
+                                s->held = (unsigned int)(c->objects[buffer].link + 1);
                         }
                         window = wayland_window_of(c, s);
                         if (!s->layered) // as layers they are the host's, over the picture as it is now (wayland_show)
@@ -4074,16 +4314,16 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 {
                         // A cursor's buffer is held while it is the surface's picture, which the compositor reads when it draws the
                         // pointer (wayland_cursor_picture), and is let go of when another replaces it.
-                        if (s->held != (unsigned short)(c->objects[buffer].link + 1))
+                        if (s->held != (unsigned int)(c->objects[buffer].link + 1))
                         {
                                 wayland_unhold(c, s);
                                 b->held++;
-                                s->held = (unsigned short)(c->objects[buffer].link + 1);
+                                s->held = (unsigned int)(c->objects[buffer].link + 1);
                         }
                 }
                 else
                 {
-                        unsigned short now = (unsigned short)(c->objects[buffer].link + 1);
+                        unsigned int now = (unsigned int)(c->objects[buffer].link + 1);
                         struct wayland_buffer *again = &c->buffers[c->objects[buffer].link];
 
                         // The buffer the surface held as its picture (committed again) ends that hold here, and is released once, by
@@ -4212,7 +4452,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                 if (a[0].slot >= 0)
                 {
                         struct wayland_object *ro = &c->objects[a[0].slot];
-                        struct wayland_region *r = ro->link >= 0 && ro->link < WAYLAND_REGIONS ? &c->regions[ro->link] : 0;
+                        struct wayland_region *r = ro->link >= 0 && ro->link < c->region_table.count ? &c->regions[ro->link] : 0;
 
                         if (!(ro->flags & 1))
                                 s->input_none = s->input_bounded = 1;
@@ -4233,7 +4473,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                 return WAYLAND_OK;
         case WLQ_wl_surface_set_opaque_region:
                 s->pending_opaque_set = 1;
-                if (a[0].slot >= 0 && c->objects[a[0].slot].link >= 0 && c->objects[a[0].slot].link < WAYLAND_REGIONS &&
+                if (a[0].slot >= 0 && c->objects[a[0].slot].link >= 0 && c->objects[a[0].slot].link < c->region_table.count &&
                     c->regions[c->objects[a[0].slot].link].exact)
                         s->pending_opaque = c->regions[c->objects[a[0].slot].link].rect;
                 else
@@ -4268,17 +4508,18 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
 
         if (size < 1 || size > WAYLAND_POOL_BYTES || c->pool_bytes + size > WAYLAND_POOL_TOTAL)
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_stride, "the pool's size is out of range");
-        for (long i = 0; i < WAYLAND_POOLS && pool < 0; i++)
-                if (!c->pools[i].live)
-                        pool = i;
+        pool = wayland_client_take(c, &c->pool_table);
         if (pool < 0)
-                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pools");
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the pool");
         at = wayland.host->map(wayland.host->context, a[1].fd, size);
         wayland.host->close(wayland.host->context, a[1].fd);
         wayland.fds--;
         a[1].fd = -1;
         if (!at)
+        {
+                wayland_table_give(&c->pool_table, pool);
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "not a shared memory file of that size");
+        }
         c->pools[pool].live = 1;
         c->pools[pool].fd = -1;
         c->pools[pool].extra_fd[0] = c->pools[pool].extra_fd[1] = c->pools[pool].extra_fd[2] = -1;
@@ -4289,7 +4530,7 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
         c->pools[pool].gone = 0;
         c->pools[pool].at = at;
         c->pool_bytes += size;
-        c->objects[a[0].slot].link = (short)pool;
+        c->objects[a[0].slot].link = (int)pool;
         wayland.pools++;
         return WAYLAND_OK;
 }
@@ -4330,11 +4571,9 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                     stride < width * 4 || stride > (1L << 20) || (stride & 3) || offset > p->size ||
                     stride * height > p->size - offset)
                         return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_stride, "the buffer does not fit the pool");
-                for (long i = 0; i < WAYLAND_BUFFERS && slot < 0; i++)
-                        if (!c->buffers[i].live)
-                                slot = i;
+                slot = wayland_client_take(c, &c->buffer_table);
                 if (slot < 0)
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many buffers");
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the buffer");
                 c->buffers[slot].live = 1;
                 c->buffers[slot].pool = pool;
                 c->buffers[slot].offset = offset;
@@ -4351,7 +4590,7 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                 c->buffers[slot].rel_pending = 0;
                 c->buffers[slot].id = c->objects[a[0].slot].id;
                 c->buffers[slot].held = c->buffers[slot].zombie = 0;
-                c->objects[a[0].slot].link = (short)slot;
+                c->objects[a[0].slot].link = (int)slot;
                 p->refs++;
                 wayland.buffers++;
                 return WAYLAND_OK;
@@ -4365,7 +4604,7 @@ static int wayland_buffer_request(struct wayland_client *c, struct wayland_objec
         // A surface whose pending state names the buffer (attached, or cached by a synchronized subsurface, and not committed yet) has
         // that attach unmade: its commit shows what it showed. The protocol lets a client destroy a buffer at any time; the commit was a
         // protocol error that ended the client, and the id, given to the client's next buffer, was that buffer attached unasked.
-        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        for (long at = 0; at < c->surface_table.count; at++)
         {
                 struct wayland_surface *s = &c->surfaces[at];
 
@@ -4387,6 +4626,7 @@ static int wayland_buffer_request(struct wayland_client *c, struct wayland_objec
         c->pools[b->pool].refs--;
         wayland_pool_unref(c, b->pool);
         b->live = 0;
+        wayland_table_give(&c->buffer_table, b - c->buffers);
         wayland.buffers--;
         return WAYLAND_OK;
 }
@@ -4411,28 +4651,29 @@ static int wayland_subcompositor_request(struct wayland_client *c, struct waylan
         // The parent may not hang, however far up, from the surface that is to hang from it.
         long hops = 0;
 
-        for (struct wayland_surface *up = parent; up && hops < WAYLAND_SURFACES; hops++, up = up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent ? &c->surfaces[up->sub_parent - 1] : 0)
+        for (struct wayland_surface *up = parent; up && hops < c->surface_table.count; hops++, up = up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent ? &c->surfaces[up->sub_parent - 1] : 0)
                 if (up == s)
                         return wayland_fail(c, self->id, WLN_wl_subcompositor_error_bad_parent, "the parent hangs from the surface");
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
 
                 if (c->surfaces[at].sub_parent == wayland_surface_index(c, parent) + 1)
                         order = wayland_max(order, c->surfaces[at].sub_order);
         }
+        if (!wayland_sub_mark(c, wayland_surface_index(c, s)))
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the subsurface");
         if (s->role != WAYLAND_ROLE_SUBSURFACE)
                 c->subsurfaces++;
-        c->sub_mask |= 1ULL << wayland_surface_index(c, s);
         s->role = WAYLAND_ROLE_SUBSURFACE;
-        s->sub_parent = (unsigned short)(wayland_surface_index(c, parent) + 1);
+        s->sub_parent = (unsigned int)(wayland_surface_index(c, parent) + 1);
         s->sub_id = c->objects[a[0].slot].id;
         s->sub_sync = 1;
         s->sub_dirty = s->pend_pos = 0;
         s->sub_x = s->sub_y = s->pend_x = s->pend_y = 0;
         s->sub_order = order + 1;
-        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+        c->objects[a[0].slot].aux = s->gen;
         return WAYLAND_OK;
 }
 
@@ -4463,9 +4704,9 @@ static int wayland_subsurface_request(struct wayland_client *c, struct wayland_o
                                !(other->role == WAYLAND_ROLE_SUBSURFACE && other->sub_parent == s->sub_parent && other != s)))
                         return wayland_fail(c, self->id, WLN_wl_subsurface_error_bad_surface, "the surface is not a sibling or the parent");
                 key = other == (s->sub_parent ? &c->surfaces[s->sub_parent - 1] : 0) ? 0 : other->sub_order;
-                for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
                 {
-                        struct wayland_surface *sibling = &c->surfaces[wayland_first_bit(mask)];
+                        struct wayland_surface *sibling = &c->surfaces[sub_it.at];
 
                         if (sibling == s || sibling->sub_parent != s->sub_parent)
                                 continue;
@@ -4697,6 +4938,7 @@ static int wayland_positioner_request(struct wayland_client *c, struct wayland_o
         {
         case WLQ_xdg_positioner_destroy:
                 p->live = 0;
+                wayland_table_give(&c->positioner_table, self->link);
                 return WAYLAND_OK;
         case WLQ_xdg_positioner_set_size:
                 if (a[0].i < 1 || a[1].i < 1)
@@ -4746,17 +4988,15 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
         switch (op)
         {
         case WLQ_xdg_wm_base_destroy:
-                for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                for (long at = 0; at < c->object_table.count; at++)
                         if (c->objects[at].iface == WLI_xdg_surface)
                                 return wayland_fail(c, self->id, WLN_xdg_wm_base_error_defunct_surfaces,
                                                     "xdg_surfaces still exist");
                 return WAYLAND_OK;
         case WLQ_xdg_wm_base_create_positioner:
-                for (long at = 0; at < WAYLAND_POSITIONERS && slot < 0; at++)
-                        if (!c->positioners[at].live)
-                                slot = at;
+                slot = wayland_client_take(c, &c->positioner_table);
                 if (slot < 0)
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many positioners");
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the positioner");
                 {
                         unsigned char *clear = (unsigned char *)&c->positioners[slot];
 
@@ -4765,7 +5005,7 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
                 }
                 c->positioners[slot].live = 1;
                 c->positioners[slot].id = c->objects[a[0].slot].id;
-                c->objects[a[0].slot].link = (short)slot;
+                c->objects[a[0].slot].link = (int)slot;
                 return WAYLAND_OK;
         case WLQ_xdg_wm_base_get_xdg_surface:
                 s = wayland_surface_of(c, a[1].slot);
@@ -4780,8 +5020,8 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
                                             "the surface has a buffer");
                 s->flags |= WAYLAND_SURFACE_XDG;
                 s->xdg_id = c->objects[a[0].slot].id;
-                c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-                c->objects[a[0].slot].aux = (unsigned short)s->gen;
+                c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+                c->objects[a[0].slot].aux = s->gen;
                 return WAYLAND_OK;
         default: // pong: the client is alive
                 return WAYLAND_OK;
@@ -4846,8 +5086,8 @@ static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_
                                                     "the positioner is not complete");
                         s->role = WAYLAND_ROLE_POPUP;
                         s->parent = (unsigned int)(wayland_surface_index(c, parent) + 1);
-                        c->objects[made].link = (short)wayland_surface_index(c, s);
-                        c->objects[made].aux = (unsigned short)s->gen;
+                        c->objects[made].link = (int)wayland_surface_index(c, s);
+                        c->objects[made].aux = s->gen;
                         s->role_id = c->objects[made].id;
                         wayland_popup_configure(c, s, p, parent);
                         return WAYLAND_OK;
@@ -4856,8 +5096,8 @@ static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_
                 s->role_id = c->objects[made].id;
                 s->title[0] = s->app_id[0] = 0;
                 s->min_width = s->min_height = s->max_width = s->max_height = 0;
-                c->objects[made].link = (short)wayland_surface_index(c, s);
-                c->objects[made].aux = (unsigned short)s->gen;
+                c->objects[made].link = (int)wayland_surface_index(c, s);
+                c->objects[made].aux = s->gen;
                 return WAYLAND_OK;
         case WLQ_xdg_surface_set_window_geometry:
                 if (!s->role_id)
@@ -4891,7 +5131,7 @@ static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_
 /* Whether a toplevel is an ancestor of another, by its parent chain, which a loop of requests may not make. */
 static int wayland_ancestor(struct wayland_client *c, long maybe, long of)
 {
-        for (long hops = 0; hops < WAYLAND_SURFACES && of; hops++)
+        for (long hops = 0; hops < c->surface_table.count && of; hops++)
         {
                 if (of - 1 == maybe)
                         return 1;
@@ -5016,7 +5256,7 @@ static int wayland_popup_request(struct wayland_client *c, struct wayland_object
         {
         case WLQ_xdg_popup_destroy:
                 // Popups close from the top: one that has a popup of its own open cannot go first.
-                for (long at = 0; at < WAYLAND_SURFACES; at++)
+                for (long at = 0; at < c->surface_table.count; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_POPUP && c->surfaces[at].role_id &&
                             c->surfaces[at].parent == (unsigned int)(wayland_surface_index(c, s) + 1))
                                 return wayland_fail(c, self->id, WLN_xdg_wm_base_error_not_the_topmost_popup,
@@ -5084,8 +5324,8 @@ static int wayland_decoration_manager_request(struct wayland_client *c, struct w
                 return wayland_fail(c, self->id, WLN_zxdg_toplevel_decoration_v1_error_unconfigured_buffer,
                                     "the toplevel has a buffer");
         s->decoration_id = c->objects[a[0].slot].id;
-        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+        c->objects[a[0].slot].aux = s->gen;
         if (s->flags & WAYLAND_SURFACE_SENT)
                 wayland_configure(c, s, 0);
         return WAYLAND_OK;
@@ -5248,9 +5488,9 @@ static long wayland_prev_child(const struct wayland_client *c, long parent, long
 {
         long best = -1;
 
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 const struct wayland_surface *s = &c->surfaces[at];
 
                 if (s->sub_parent != parent + 1)
@@ -5270,7 +5510,7 @@ static struct wayland_surface *wayland_pick_node(struct wayland_client *c, struc
 {
         long parent = wayland_surface_index(c, node);
 
-        if (depth >= WAYLAND_SURFACES)
+        if (depth >= c->surface_table.count)
                 return 0;
         for (int pass = 0; pass < 2; pass++)
         {
@@ -5318,7 +5558,7 @@ static struct wayland_surface *wayland_pick(struct wayland_client *c, struct way
         x += wx;
         y += wy;
 
-        if (!c->sub_mask && !root->input_bounded)
+        if (!c->subsurfaces && !root->input_bounded)
         {
                 *sx = x;
                 *sy = y;
@@ -5845,7 +6085,7 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
                 t->row = -1;
                 t->counted = -1;
                 t->serial = 0;
-                c->objects[a[0].slot].link = (short)index;
+                c->objects[a[0].slot].link = (int)index;
                 // A client that gets its text input once the keys are in its window is told so at once.
                 focus = wayland_row_surface(wayland.keyboard_row, &owner);
                 if (focus && owner == c)
@@ -6328,13 +6568,24 @@ static void wayland_device_remove(struct wayland_client *c, long which, unsigned
 // An id of the server's own that no object of the client has now, taken in turn so a number just let go is not the next.
 static unsigned long wayland_server_id(struct wayland_client *c)
 {
-        for (long step = 0; step < WAYLAND_SERVER_IDS; step++)
+        // Half full or more, the index doubles (64 first), so the walk from the hint meets a free id in a step or two.
+        if (2 * (c->server_live + 1) > c->server_table.count)
         {
-                long at = (c->server_hint + step) % WAYLAND_SERVER_IDS;
+                long want = c->server_table.count ? 2 * c->server_table.count : 64;
+
+                if ((unsigned long)want > WAYLAND_SERVER_IDS || !wayland_table_reach(&c->server_table, want))
+                        want = 0;
+                wayland_tables_point(c);
+                if (!want && c->server_live >= c->server_table.count)
+                        return 0;
+        }
+        for (long step = 0; step < c->server_table.count; step++)
+        {
+                long at = (c->server_hint + step) % c->server_table.count;
 
                 if (!c->server_index[at])
                 {
-                        c->server_hint = (unsigned char)((at + 1) % WAYLAND_SERVER_IDS);
+                        c->server_hint = (at + 1) % c->server_table.count;
                         return WAYLAND_SERVER_BASE + (unsigned long)at;
                 }
         }
@@ -6368,7 +6619,7 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
                 c->offers[index].live = 1;
                 c->offers[index].which = (unsigned char)which;
                 c->offers[index].serial = wayland.selection_serial[which];
-                c->objects[offer].link = (short)index;
+                c->objects[offer].link = (int)index;
                 e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
                 wayland_word(&e, id);
                 wayland_end(&e);
@@ -6491,7 +6742,7 @@ static int wayland_source_new(struct wayland_client *c, struct wayland_object *s
         c->sources[index].which = (unsigned char)which;
         c->sources[index].mimes = 0;
         c->sources[index].state = 0;
-        c->objects[slot].link = (short)index;
+        c->objects[slot].link = (int)index;
         return WAYLAND_OK;
 }
 
@@ -6665,8 +6916,8 @@ static int wayland_viewport_request(struct wayland_client *c, struct wayland_obj
                 if (s->viewport_id)
                         return wayland_fail(c, self->id, WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport");
                 s->viewport_id = c->objects[a[0].slot].id;
-                c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-                c->objects[a[0].slot].aux = (unsigned short)s->gen;
+                c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+                c->objects[a[0].slot].aux = s->gen;
                 return WAYLAND_OK;
         }
         s = wayland_surface_of(c, self - c->objects);
@@ -6732,8 +6983,8 @@ static int wayland_fractional_request(struct wayland_client *c, struct wayland_o
                 return wayland_fail(c, self->id, WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists,
                                     "the surface has a fractional scale");
         s->fractional_id = c->objects[a[0].slot].id;
-        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+        c->objects[a[0].slot].aux = s->gen;
         {
                 // Said at once, in what it was told before it asked: the preferred scale is the first event of the object.
                 struct wayland_event e = wayland_begin(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale);
@@ -6918,9 +7169,9 @@ static long wayland_shm_format_of(unsigned int fourcc)
 static void wayland_feedback_queue(struct wayland_client *c, unsigned long id)
 {
         for (long at = 0; at < c->feedbacks; at++)
-                if (c->feedback_id[at] == id)
+                if (c->feedback[at].id == id)
                 {
-                        c->feedback_need[at] = 1;
+                        c->feedback[at].need = 1;
                         c->feedback_pending = 1;
                         wayland.out_dirty |= 1u << c->slot;
                         return;
@@ -6986,20 +7237,20 @@ static void wayland_feedback_flush(struct wayland_client *c)
         {
                 long object;
 
-                if (!c->feedback_need[at])
+                if (!c->feedback[at].need)
                         continue;
                 if (c->out_fd_count >= WAYLAND_OUT_FDS)
                 {
                         more = 1;
                         break;
                 }
-                c->feedback_need[at] = 0;
-                object = wayland_slot_of(c, c->feedback_id[at]);
+                c->feedback[at].need = 0;
+                object = wayland_slot_of(c, c->feedback[at].id);
                 if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
                         wayland_feedback_send(c, object);
         }
         for (long at = 0; at < c->feedbacks && !more; at++)
-                if (c->feedback_need[at])
+                if (c->feedback[at].need)
                         more = 1;
         c->feedback_pending = (unsigned char)more;
         if (c->feedback_pending)
@@ -7074,7 +7325,7 @@ static void wayland_global_flip_notify(long iface, int was_on, int now_on)
 
                 if (!c)
                         continue;
-                for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                for (long at = 0; at < c->object_table.count; at++)
                         if (c->objects[at].iface == WLI_wl_registry)
                         {
                                 if (now_on)
@@ -7117,7 +7368,7 @@ WAYLAND_API void wayland_dmabuf_changed(void)
                         continue;
                 for (long at = 0; at < c->feedbacks; at++)
                 {
-                        long object = wayland_slot_of(c, c->feedback_id[at]);
+                        long object = wayland_slot_of(c, c->feedback[at].id);
 
                         if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
                                 wayland_feedback_send(c, object);
@@ -7154,20 +7405,19 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         for (long entry = 0; entry < wayland.dmabuf.count; entry++)
                 found |= wayland.dmabuf.entry[entry].format == format &&
                          (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[entry].modifier == modifier);
-        if (!found || (flags & ~1UL) || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL ||
-            c->dmabufs >= WAYLAND_DMABUFS || wayland.dmabufs >= WAYLAND_DMABUFS_ALL)
+        if (!found || (flags & ~1UL) || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL)
                 return -2;
-        for (long i = 0; i < WAYLAND_POOLS && pool < 0; i++)
-                if (!c->pools[i].live)
-                        pool = i;
-        for (long i = 0; i < WAYLAND_BUFFERS && buffer < 0; i++)
-                if (!c->buffers[i].live)
-                        buffer = i;
-        if (pool < 0 || buffer < 0)
-                return -2;
-        at = wayland.host->dmabuf_map(wayland.host->context, fds[0], need);
+        pool = wayland_client_take(c, &c->pool_table);
+        buffer = pool >= 0 ? wayland_client_take(c, &c->buffer_table) : -1;
+        at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], need) : 0;
         if (!at)
+        {
+                if (buffer >= 0)
+                        wayland_table_give(&c->buffer_table, buffer);
+                if (pool >= 0)
+                        wayland_table_give(&c->pool_table, pool);
                 return -2;
+        }
         c->pools[pool].live = 1;
         c->pools[pool].fd = fds[0];
         fds[0] = -1; // the pool holds it now, and wayland.fds still counts it
@@ -7204,7 +7454,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         c->buffers[buffer].rel_pending = 0;
         c->buffers[buffer].id = c->objects[id_slot].id;
         c->buffers[buffer].held = c->buffers[buffer].zombie = 0;
-        c->objects[id_slot].link = (short)buffer;
+        c->objects[id_slot].link = (int)buffer;
         c->dmabufs++;
         wayland.dmabufs++;
         wayland.pools++;
@@ -7290,25 +7540,26 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                                 c->params[index].fd[plane] = -1;
                                 c->params[index].offset[plane] = c->params[index].stride[plane] = c->params[index].modifier[plane] = 0;
                         }
-                        c->objects[a[0].slot].link = (short)index;
+                        c->objects[a[0].slot].link = (int)index;
                 }
                 else if (op == WLQ_zwp_linux_dmabuf_v1_get_default_feedback || op == WLQ_zwp_linux_dmabuf_v1_get_surface_feedback)
                 {
-                        if (c->feedbacks >= WAYLAND_FEEDBACKS)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many feedback objects");
-                        c->feedback_need[c->feedbacks] = 0;
-                        c->feedback_id[c->feedbacks++] = c->objects[a[0].slot].id;
+                        if (!wayland_table_reach(&c->feedback_table, c->feedbacks + 1))
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the feedback");
+                        wayland_tables_point(c);
+                        c->feedback[c->feedbacks].need = 0;
+                        c->feedback[c->feedbacks++].id = c->objects[a[0].slot].id;
                         wayland_feedback_send(c, a[0].slot);
                 }
                 return WAYLAND_OK;
         case WLI_zwp_linux_dmabuf_feedback_v1:
                 for (long at = 0; at < c->feedbacks; at++)
-                        if (c->feedback_id[at] == self->id)
+                        if (c->feedback[at].id == self->id)
                         {
                                 c->feedbacks--;
-                                c->feedback_id[at] = c->feedback_id[c->feedbacks];
-                                c->feedback_need[at] = c->feedback_need[c->feedbacks];
-                                c->feedback_need[c->feedbacks] = 0;
+                                c->feedback[at].id = c->feedback[c->feedbacks].id;
+                                c->feedback[at].need = c->feedback[c->feedbacks].need;
+                                c->feedback[c->feedbacks].need = 0;
                                 break;
                         }
                 return WAYLAND_OK;
@@ -7435,8 +7686,8 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                                 return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists,
                                                     "the surface already has a syncobj surface");
                         s->syncobj_id = c->objects[a[0].slot].id;
-                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
-                        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
+                        c->objects[a[0].slot].aux = s->gen;
                         return WAYLAND_OK;
                 }
                 if (op == WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline)
@@ -7459,7 +7710,7 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                         c->timelines[idx].gone = 0;
                         c->timelines[idx].refs = 0;
                         c->timelines[idx].handle = handle;
-                        c->objects[a[0].slot].link = (short)idx;
+                        c->objects[a[0].slot].link = (int)idx;
                         return WAYLAND_OK;
                 }
                 return WAYLAND_OK;
@@ -7699,7 +7950,7 @@ static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
 
         if (icon >= 0)
                 c->objects[icon].flags |= WAYLAND_ICON_SET;
-        for (long at = 0; at < WAYLAND_SURFACES && !s; at++)
+        for (long at = 0; at < c->surface_table.count && !s; at++)
                 if (c->surfaces[at].live && c->surfaces[at].role_id == id)
                         s = &c->surfaces[at];
         if (!s)
@@ -7725,7 +7976,7 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
         case WLI_xdg_wm_dialog_v1:
                 if (op != WLQ_xdg_wm_dialog_v1_get_xdg_dialog)
                         return WAYLAND_OK;
-                for (long at = 0; at < WAYLAND_SURFACES; at++)
+                for (long at = 0; at < c->surface_table.count; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role_id == c->objects[a[1].slot].id)
                         {
                                 wayland_hint_bind(c, a[0].slot, &c->surfaces[at]);
@@ -7912,7 +8163,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                         wayland.token[at].client = c->slot;
                         wayland.token[at].serial = 0;
                         wayland.token[at].text[0] = 0;
-                        c->objects[a[0].slot].link = (short)at;
+                        c->objects[a[0].slot].link = (int)at;
                         return WAYLAND_OK;
                 }
                 if (op != WLQ_xdg_activation_v1_activate)
@@ -7998,8 +8249,8 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                         if (surface->xsurface || (surface->flags & WAYLAND_SURFACE_XDG) || surface->role != WAYLAND_ROLE_NONE)
                                 return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
                         surface->xsurface = 1;
-                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = surface->gen;
                 }
                 return WAYLAND_OK;
         }
@@ -8035,8 +8286,8 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                                 surface->shortcut_active = 1;
                                 surface->escape_down = 0;
                         }
-                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = surface->gen;
                 }
                 return WAYLAND_OK;
         }
@@ -8104,8 +8355,8 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 c->constraints[index].active = 0;
                 c->constraints[index].kind = op == WLQ_zwp_pointer_constraints_v1_lock_pointer ? 1 : 2;
                 c->constraints[index].oneshot = a[4].u == WLN_zwp_pointer_constraints_v1_lifetime_oneshot;
-                c->constraints[index].surface = (unsigned short)(wayland_surface_index(c, surface) + 1);
-                c->objects[a[0].slot].link = (short)index;
+                c->constraints[index].surface = (unsigned int)(wayland_surface_index(c, surface) + 1);
+                c->objects[a[0].slot].link = (int)index;
                 wayland.constraints++;
                 wayland_constraints_update();
                 return WAYLAND_OK;
@@ -8136,8 +8387,8 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                                                     "the surface has an inhibitor");
                         surface->shortcuts = 1;
                         surface->shortcut_id = c->objects[a[0].slot].id;
-                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = surface->gen;
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row)
                         {
                                 surface->shortcut_active = 1;
@@ -8164,8 +8415,8 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                                 return wayland_fail(c, self->id, WLN_wp_tearing_control_manager_v1_error_tearing_control_exists,
                                                     "the surface has a tearing control");
                         surface->tearing = 1;
-                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = surface->gen;
                 }
                 return WAYLAND_OK;
         case WLI_wp_tearing_control_v1:
@@ -8190,8 +8441,8 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                 // The inhibitor is linked to its surface, as a shortcuts inhibitor is: it holds while that surface is shown
                 // (wayland_inhibitors_now), and ends with its surface or its own destroy, which is the object going.
-                c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
-                c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
+                c->objects[a[0].slot].aux = surface->gen;
                 c->inhibitors++;
                 return WAYLAND_OK;
         case WLI_zwp_idle_inhibitor_v1:
@@ -8233,7 +8484,7 @@ static long wayland_inhibitors_now(void)
                         continue;
                 // c->inhibitors counts the zwp_idle_inhibitor_v1 objects the client holds (wayland_object_free takes one back when it
                 // goes), so the scan ends at the last of them: a turn of the loop asks this on every pass while a video plays.
-                for (long at = 0; at < WAYLAND_OBJECTS && seen < c->inhibitors; at++)
+                for (long at = 0; at < c->object_table.count && seen < c->inhibitors; at++)
                         if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && c->objects[at].id)
                         {
                                 seen++;
@@ -8278,7 +8529,7 @@ static int wayland_idle_request(struct wayland_client *c, struct wayland_object 
                 n->timeout = (long)a[1].u;
                 n->since = wayland.host->now(wayland.host->context);
                 n->idled = 0;
-                c->objects[a[0].slot].link = (short)at;
+                c->objects[a[0].slot].link = (int)at;
                 wayland.idle_notifies++;
                 return WAYLAND_OK;
         }
@@ -8713,9 +8964,18 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         c->pid = pid;
         c->uid = uid;
         c->stalled_sync_handle = -1;
+        wayland_tables_init(c);
         wayland.client[slot] = c;
         wayland.clients++;
-        wayland_object_new(c, 1, WLI_wl_display, 1);
+        if (wayland_object_new(c, 1, WLI_wl_display, 1) < 0)
+        {
+                // No memory for the display's object: the connection is refused, and its tables given back.
+                wayland_tables_drop(c);
+                wayland.client[slot] = 0;
+                wayland.clients--;
+                wayland.host->release(wayland.host->context, c, (long)sizeof *c);
+                return -1;
+        }
         return slot;
 }
 
@@ -8752,14 +9012,14 @@ WAYLAND_API void wayland_drop(long slot)
                 wayland.cursor_client = wayland.cursor_surface = -1;
                 wayland.cursor_serial++;
         }
-        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        for (long at = 0; at < c->surface_table.count; at++)
                 if (c->surfaces[at].live)
                 {
                         wayland_row_release(c, &c->surfaces[at]);
                         wayland.surfaces--;
                 }
         wayland_texts_drop(c);
-        for (long at = 0; at < WAYLAND_POOLS; at++)
+        for (long at = 0; at < c->pool_table.count; at++)
                 if (c->pools[at].live)
                 {
                         if (!c->pools[at].unmapped && c->pools[at].at)
@@ -8795,10 +9055,10 @@ WAYLAND_API void wayland_drop(long slot)
                         c->constraints[at].live = 0;
                         wayland.constraints--;
                 }
-        for (long at = 0; at < WAYLAND_BUFFERS; at++)
+        for (long at = 0; at < c->buffer_table.count; at++)
                 if (c->buffers[at].live)
                         wayland.buffers--;
-        for (long at = 0; at < WAYLAND_OBJECTS; at++)
+        for (long at = 0; at < c->object_table.count; at++)
                 if (c->objects[at].iface)
                         wayland.objects--;
         for (long at = 0; at < c->in_fd_count; at++)
@@ -8825,6 +9085,7 @@ WAYLAND_API void wayland_drop(long slot)
         wayland.out_dirty &= ~(1u << slot);
         wayland.client[slot] = 0;
         wayland.clients--;
+        wayland_tables_drop(c);
         wayland.host->release(wayland.host->context, c, (long)sizeof *c);
 }
 
@@ -9120,13 +9381,13 @@ WAYLAND_API void wayland_screens_changed(void)
                 //      nobody's: a screen that comes with it later is another global, and these are not it).
                 for (long screen = wayland.screens; c && screen < was && screen < 8; screen++)
                 {
-                        for (long at = 0; at < WAYLAND_SURFACES; at++)
+                        for (long at = 0; at < c->surface_table.count; at++)
                         {
                                 struct wayland_surface *surface = &c->surfaces[at];
 
                                 if (!surface->live || !(surface->entered & (1u << screen)))
                                         continue;
-                                for (long object = 0; object < WAYLAND_OBJECTS; object++)
+                                for (long object = 0; object < c->object_table.count; object++)
                                         if (c->objects[object].iface == WLI_wl_output && c->objects[object].aux == screen)
                                         {
                                                 struct wayland_event e = wayland_begin(c, surface->id, WLE_wl_surface_leave);
@@ -9136,14 +9397,14 @@ WAYLAND_API void wayland_screens_changed(void)
                                         }
                                 surface->entered &= (unsigned char)~(1u << screen);
                         }
-                        for (long object = 0; object < WAYLAND_OBJECTS; object++)
+                        for (long object = 0; object < c->object_table.count; object++)
                                 if ((c->objects[object].iface == WLI_wl_output || c->objects[object].iface == WLI_zxdg_output_v1) &&
                                     c->objects[object].aux == screen)
                                         c->objects[object].aux = 0xffff;
                 }
                 //      Each registry a client holds says so, as the protocol has it: a screen that came is a global to bind, one that went
                 //      is removed.
-                for (long at = 0; c && at < WAYLAND_OBJECTS && wayland.screens != was; at++)
+                for (long at = 0; c && at < c->object_table.count && wayland.screens != was; at++)
                         if (c->objects[at].iface == WLI_wl_registry)
                         {
                                 for (long screen = was; screen < wayland.screens; screen++)
@@ -9151,10 +9412,10 @@ WAYLAND_API void wayland_screens_changed(void)
                                 for (long screen = wayland.screens; screen < was; screen++)
                                         wayland_global_remove_send(c, c->objects[at].id, wayland_output_name(screen));
                         }
-                for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
+                for (long at = 0; c && at < c->object_table.count; at++)
                         if (c->objects[at].iface == WLI_zxdg_output_v1)
                                 wayland_xdg_output_send(c, at, c->objects[at].aux);
-                for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
+                for (long at = 0; c && at < c->object_table.count; at++)
                         if (c->objects[at].iface == WLI_wl_output)
                                 wayland_output_send(c, at);
         }
@@ -9187,9 +9448,9 @@ WAYLAND_API void wayland_scales_sweep(void)
                         continue;
                 wayland.row_percent[row] = percent;
                 wayland_scale_tell(c, root, percent);
-                for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
                 {
-                        long at = wayland_first_bit(mask);
+                        long at = sub_it.at;
                         if (wayland_root_of(c, &c->surfaces[at]) == root)
                                 wayland_scale_tell(c, &c->surfaces[at], percent);
                 }
@@ -9286,10 +9547,10 @@ WAYLAND_API void wayland_frame(void)
 
                 int any = s && s->live && s->readies;
 
-                if (c && c->sub_mask)
-                for (unsigned long long mask = c->sub_mask; s && s->live && mask && !any; mask &= mask - 1)
+                if (c && c->subsurfaces)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); s && s->live && !any && wayland_subs_next(&sub_it);)
                 {
-                        long at = wayland_first_bit(mask);
+                        long at = sub_it.at;
                         any = c->surfaces[at].readies && wayland_root_of(c, &c->surfaces[at]) == s;
                 }
                 if (!any)
@@ -9297,10 +9558,10 @@ WAYLAND_API void wayland_frame(void)
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
                 wayland_callbacks_done(c, s, now);
-                if (c->sub_mask)
-                for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+                if (c->subsurfaces)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
                 {
-                        long at = wayland_first_bit(mask);
+                        long at = sub_it.at;
                         if (wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_callbacks_done(c, &c->surfaces[at], now);
                 }
@@ -9345,7 +9606,7 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
 static void wayland_window_gone(struct wayland_client *c, struct wayland_surface *root, int dmabufs)
 {
         struct wayland_surface *s = root;
-        unsigned long long mask = c->sub_mask;
+        struct wayland_subs sub_it = wayland_subs_of(c);
 
         while (s)
         {
@@ -9354,9 +9615,9 @@ static void wayland_window_gone(struct wayland_client *c, struct wayland_surface
                         wayland_let_go(c, s->lent_gone - 1);
                         s->lent_gone = 0;
                 }
-                for (s = 0; mask && !s; mask &= mask - 1)
-                        if (&c->surfaces[wayland_first_bit(mask)] != root && wayland_root_of(c, &c->surfaces[wayland_first_bit(mask)]) == root)
-                                s = &c->surfaces[wayland_first_bit(mask)];
+                for (s = 0; !s && wayland_subs_next(&sub_it);)
+                        if (&c->surfaces[sub_it.at] != root && wayland_root_of(c, &c->surfaces[sub_it.at]) == root)
+                                s = &c->surfaces[sub_it.at];
         }
 }
 
@@ -9388,10 +9649,10 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                 if (drawn)
                         wayland_window_gone(c, s, 1);
                 wayland_presentings_done(c, s, when, refresh, seq, flags);
-                if (c->sub_mask)
-                for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+                if (c->subsurfaces)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
                 {
-                        long at = wayland_first_bit(mask);
+                        long at = sub_it.at;
                         if (wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
                 }
@@ -9473,9 +9734,9 @@ static int wayland_presentings_wanted(struct wayland_client *c, long row)
                 return 0;
         if (root->presentings)
                 return 1;
-        for (unsigned long long mask = c->sub_mask; mask; mask &= mask - 1)
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
-                long at = wayland_first_bit(mask);
+                long at = sub_it.at;
                 if (c->surfaces[at].presentings && wayland_root_of(c, &c->surfaces[at]) == root)
                         return 1;
         }
@@ -9510,10 +9771,10 @@ WAYLAND_API long wayland_frame_wanted(void)
                 if (!c || (!c->waiting && !c->presenting_surfaces))
                         continue;
                 waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies != 0;
-                if (c->sub_mask)
-                for (unsigned long long mask = c->sub_mask; c->waiting && !waits && mask; mask &= mask - 1)
+                if (c->subsurfaces)
+                for (struct wayland_subs sub_it = wayland_subs_of(c); c->waiting && !waits && wayland_subs_next(&sub_it);)
                 {
-                        long at = wayland_first_bit(mask);
+                        long at = sub_it.at;
                         waits = c->surfaces[at].readies && wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
                 }
                 // A window put away is told of no frame (wayland_frame), so no frame is wanted for its callbacks: they are answered by the
@@ -9616,7 +9877,7 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
                 wayland.pinch_x = fx;
                 wayland.pinch_y = fy;
         }
-        for (long at = 0, left = c->pinches; at < WAYLAND_OBJECTS && left > 0; at++)
+        for (long at = 0, left = c->pinches; at < c->object_table.count && left > 0; at++)
         {
                 struct wayland_object *o = &c->objects[at];
 
@@ -9663,7 +9924,7 @@ WAYLAND_API long wayland_serial_row(unsigned long long serial)
         {
                 struct wayland_client *c = wayland.client[at];
 
-                for (long slot = 0; c && slot < WAYLAND_SURFACES; slot++)
+                for (long slot = 0; c && slot < c->surface_table.count; slot++)
                 {
                         struct wayland_surface *s = &c->surfaces[slot];
 
@@ -9680,7 +9941,7 @@ static struct wayland_surface *wayland_xserial_surface(unsigned long long serial
         {
                 struct wayland_client *c = wayland.client[at];
 
-                for (long slot = 0; c && slot < WAYLAND_SURFACES; slot++)
+                for (long slot = 0; c && slot < c->surface_table.count; slot++)
                 {
                         struct wayland_surface *s = &c->surfaces[slot];
 
@@ -9739,7 +10000,7 @@ WAYLAND_API void wayland_xwindow_gone(unsigned long long serial)
         {
                 struct wayland_client *o = wayland.client[at];
 
-                if (o && s >= o->surfaces && s < o->surfaces + WAYLAND_SURFACES)
+                if (o && s >= o->surfaces && s < o->surfaces + o->surface_table.count)
                         c = o;
         }
         s->xdead = 1;
@@ -9982,7 +10243,7 @@ struct wayland_cursor
 WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
 {
         struct wayland_client *c = wayland.cursor_client >= 0 && wayland.cursor_client < WAYLAND_CLIENTS ? wayland.client[wayland.cursor_client] : 0;
-        struct wayland_surface *s = c && wayland.cursor_surface >= 0 && wayland.cursor_surface < WAYLAND_SURFACES ? &c->surfaces[wayland.cursor_surface] : 0;
+        struct wayland_surface *s = c && wayland.cursor_surface >= 0 && wayland.cursor_surface < c->surface_table.count ? &c->surfaces[wayland.cursor_surface] : 0;
         const struct wayland_buffer *b;
         const struct wayland_pool *p;
         long scale;
