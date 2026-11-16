@@ -1728,6 +1728,86 @@ b32 main(void)
                                                  0, null) == child &&
                                   wait_status_code(raw) == 0);
         }
+        /* set +m: the three terminal signals job_monitor_start took are given
+           back to default, as a command's own stop keys must be. Each is asked
+           of the kernel after the stop, and each was cached by
+           shell_was_ignored first, as job_monitor_start caches it. */
+        {
+                positive disposition[4];
+                bool all_default = true;
+                b32 number;
+
+                for (number = JOB_SIGNAL_STOP_KEY; number <= JOB_SIGNAL_TTY_OUTPUT;
+                     number++)
+                        (void)shell_was_ignored(number);
+                for (number = JOB_SIGNAL_STOP_KEY; number <= JOB_SIGNAL_TTY_OUTPUT;
+                     number++)
+                        shell_ignore(number);
+                job_signals_taken = true;
+                job_monitor_stop();
+                for (number = JOB_SIGNAL_STOP_KEY; number <= JOB_SIGNAL_TTY_OUTPUT;
+                     number++)
+                {
+                        disposition[0] = 0x5a;
+                        system_call_4(syscall(rt_sigaction), (positive)number, 0,
+                                      (positive)disposition, 8);
+                        if (disposition[0] != 0)
+                                all_default = false;
+                }
+                check("set +m gives the monitor's terminal signals back to default",
+                      all_default);
+        }
+
+        /* A trap on CHLD takes the child-watch handler's place, and the news
+           it carries must still reach the mid-command notice. */
+        {
+                job_child_news = false;
+                trap_signal_caught(SIGNAL_CHILD);
+                check("a trapped CHLD raises the job-child news the notice reads",
+                      job_child_news);
+                trap_pending[SIGNAL_CHILD] = 0;
+                trap_caught = false;
+                job_child_news = false;
+        }
+
+        /* A row holds its child's pidfd from the moment it is recorded until it
+           is done: a sweep leaves a running child alone, and reaps it, with its
+           pidfd closed, once the child has exited. */
+        {
+                bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+                positive pause[2] = {0, 300000000};
+                bipolar children[1];
+                positive row;
+                positive waited = 0;
+
+                check("pidfd test child starts", child >= 0);
+                if (!child)
+                {
+                        system_call_2(syscall(nanosleep), (positive)pause, 0);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                if (child <= 0)
+                        return test_report(null);
+
+                children[0] = child;
+                row = shell_wait_count;
+                check("background row is recorded with a pidfd",
+                      shell_background_started(children, 1, false, false) &&
+                          shell_wait_table[row].pidfd >= 0);
+                job_reap();
+                check("a sweep leaves a running child's row unfinished",
+                      !(shell_wait_table[row].flags & SHELL_WAIT_DONE) &&
+                          shell_wait_table[row].pidfd >= 0);
+                while (waited++ < 40 &&
+                       !(shell_wait_table[row].flags & SHELL_WAIT_DONE))
+                {
+                        system_call_2(syscall(nanosleep), (positive)pause, 0);
+                        job_reap();
+                }
+                check("a sweep reaps an exited child and closes its pidfd",
+                      (shell_wait_table[row].flags & SHELL_WAIT_DONE) &&
+                          shell_wait_table[row].pidfd == -1);
+        }
         return test_report(null);
 }
 #endif /* CHECK_audit_builtin_regressions */

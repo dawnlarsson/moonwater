@@ -702,6 +702,11 @@ static p8 exec_nothing[1];
 
 #define JOB_NO_HANG 1
 #define JOB_UNTRACED 2
+/* waitid's options and P_ALL, for job_stop_pending. */
+#define JOB_WAIT_NO_HANG 0x1
+#define JOB_WAIT_STOPPED 0x2
+#define JOB_WAIT_CONTINUED 0x8
+#define JOB_WAIT_NO_WAIT 0x1000000
 #define JOB_CONTINUED 8
 
 // The two terminal ioctls are the whole of a shell's claim on a terminal.
@@ -922,6 +927,7 @@ static volatile bool job_child_news;
 static bool job_child_watching;
 
 static fn job_child_watch();
+fn job_child_signalled(b32 number);
 
 /*
         Whether this process is the shell that owns the jobs.
@@ -1003,6 +1009,10 @@ static fn job_terminal_give(bipolar group)
         the other two, which is the whole of what `set -m` means with nobody
         watching.
 */
+/* Set while job_monitor_start has the shell's three terminal signals
+   ignored, so that job_monitor_stop puts them back to default. */
+static bool job_signals_taken;
+
 static fn job_monitor_start()
 {
         bipolar own;
@@ -1024,6 +1034,7 @@ static fn job_monitor_start()
         shell_ignore(JOB_SIGNAL_TTY_OUTPUT);
         shell_ignore(JOB_SIGNAL_TTY_INPUT);
         shell_ignore(JOB_SIGNAL_STOP_KEY);
+        job_signals_taken = true;
 
         job_terminal = 0;
         own = system_call_1(syscall(getpid), 0);
@@ -1042,6 +1053,18 @@ static fn job_monitor_start()
 // answering for a terminal it no longer arbitrates.
 static fn job_monitor_stop()
 {
+        /* A shell that stops arbitrating must still take its own stop keys:
+           an ignore the shell put there is not an inherited one, and its
+           children would otherwise run deaf to Ctrl-Z. shell_was_ignored is
+           what keeps an inherited ignore, and it stays ignored. */
+        if (job_signals_taken)
+        {
+                job_signals_taken = false;
+                shell_child_default(JOB_SIGNAL_TTY_OUTPUT);
+                shell_child_default(JOB_SIGNAL_TTY_INPUT);
+                shell_child_default(JOB_SIGNAL_STOP_KEY);
+        }
+
         job_monitor_ready = false;
         job_terminal_owned = false;
         job_terminal = -1;
@@ -1814,15 +1837,20 @@ static fn job_child_changed(bipolar pid, positive status)
 {
         bool stopped = (status & 0xff) == 0x7f;
         bool continued = (status & 0xffff) == 0xffff;
+        /* One getpgid for the child, not one per job row: a change with N
+           monitored jobs read every row's group through the kernel. */
+        bipolar child_group;
         positive at;
 
         if (exec_foreground_child_changed(pid, status))
                 return;
 
+        child_group = pid > 0 ? job_group_of(pid) : -1;
+
         for (at = job_front; at < job_count; at++)
                 if (job_table[at].last == pid ||
                     (job_table[at].group > 0 &&
-                     job_group_of(pid) == job_table[at].group))
+                     child_group == job_table[at].group))
                         break;
 
         if (at >= job_count)
@@ -1830,7 +1858,7 @@ static fn job_child_changed(bipolar pid, positive status)
                 for (at = 0; at < job_front && at < job_count; at++)
                         if (job_table[at].last == pid ||
                             (job_table[at].group > 0 &&
-                             job_group_of(pid) == job_table[at].group))
+                             child_group == job_table[at].group))
                                 break;
 
                 if (at >= job_front || at >= job_count)
@@ -1919,33 +1947,108 @@ static fn job_child_changed(bipolar pid, positive status)
         shell that is not waiting for it: without them a control-Z in a
         pipeline stage looks like nothing at all until somebody asks.
 */
+/* A row's child is reaped until it has nothing more to say. */
+static fn job_reap_row(positive at)
+{
+        shell_wait_entry address_to entry = shell_wait_table + at;
+        bipolar pid;
+
+        do
+        {
+                positive status = 0;
+
+                pid = system_wait4_retry(
+                    entry->pid, address_of status,
+                    JOB_NO_HANG | JOB_UNTRACED | JOB_CONTINUED, null);
+                if (pid > 0)
+                        job_child_changed(pid, status);
+        }
+        while (pid > 0 &&
+               !(entry->flags & SHELL_WAIT_DONE));
+}
+
+/* Whether some child has stopped or continued and not been waited for. A
+   pidfd is readable only when its child exits, so this is the one question
+   the poll cannot answer; it is asked by one waitid for any child, which
+   reads no status and consumes nothing. */
+static bool job_stop_pending()
+{
+        positive info[16] = {0};
+        bipolar got = system_call_5(syscall(waitid), 0, 0, (positive)info,
+                                    JOB_WAIT_NO_HANG | JOB_WAIT_NO_WAIT |
+                                        JOB_WAIT_STOPPED | JOB_WAIT_CONTINUED,
+                                    0);
+
+        return got == 0 && (b32)info[2] != 0;
+}
+
+#define JOB_REAP_CHUNK 64
+
+/* The sweep: the wait table's unfinished rows are asked in chunks, one poll
+   of their pidfds per chunk, so a sweep with N running children and none
+   ended makes no wait4 at all; a row with no pidfd, or any sweep that sees a
+   stop or continue, is waited for as before. The poll is zero-timeout and an
+   error from it reaps the chunk, so a failure can only cost calls. */
 fn job_reap()
 {
+        bool stops = job_stop_pending();
+        positive at = shell_wait_front;
+
         job_child_news = false;
 
         /* The rows before shell_wait_front are done, so the sweep starts at
            the first one that is not: a wait for each of ten thousand pids
            walked every finished row to find the few still running. */
-        for (positive at = shell_wait_front; at < shell_wait_count; at++)
+        while (at < shell_wait_count)
         {
-                shell_wait_entry address_to entry = shell_wait_table + at;
-                bipolar pid;
+                system_poll_descriptor watch[JOB_REAP_CHUNK];
+                positive rows[JOB_REAP_CHUNK];
+                bool due[JOB_REAP_CHUNK];
+                positive count = 0;
+                positive polled = 0;
+                positive watched[JOB_REAP_CHUNK];
+                timespec none = {0, 0};
+                bipolar ready;
 
-                if (entry->flags & SHELL_WAIT_DONE)
-                        continue;
-
-                do
+                for (; at < shell_wait_count && count < JOB_REAP_CHUNK; at++)
                 {
-                        positive status = 0;
+                        shell_wait_entry address_to entry = shell_wait_table + at;
 
-                        pid = system_wait4_retry(
-                            entry->pid, address_of status,
-                            JOB_NO_HANG | JOB_UNTRACED | JOB_CONTINUED, null);
-                        if (pid > 0)
-                                job_child_changed(pid, status);
+                        if (entry->flags & SHELL_WAIT_DONE)
+                                continue;
+
+                        rows[count] = at;
+                        due[count] = stops || entry->pidfd < 0;
+                        if (!due[count])
+                        {
+                                watch[polled] = (system_poll_descriptor){
+                                    (b32)entry->pidfd, SYSTEM_POLL_READ, 0};
+                                watched[polled++] = count;
+                        }
+                        count++;
                 }
-                while (pid > 0 &&
-                       !(entry->flags & SHELL_WAIT_DONE));
+
+                if (polled)
+                {
+                        ready = system_poll_wait(watch, polled, address_of none, null);
+                        if (ready < 0)
+                        {
+                                for (positive k = 0; k < polled; k++)
+                                        due[watched[k]] = true;
+                        }
+                        else
+                        {
+                                for (positive k = 0; k < polled; k++)
+                                        if (watch[k].returned)
+                                                due[watched[k]] = true;
+                        }
+                }
+
+                for (positive k = 0; k < count; k++)
+                {
+                        if (due[k] && !(shell_wait_table[rows[k]].flags & SHELL_WAIT_DONE))
+                                job_reap_row(rows[k]);
+                }
         }
 }
 
@@ -1963,11 +2066,20 @@ fn job_reap()
         there is news, so the sweep itself stays where it can safely walk the
         tables, and a shell with nothing to hear makes no call at all.
 */
+/* The one place a SIGCHLD says there is news. job_child_watch's handler and
+   a `trap ... CHLD` handler (builtin.c's trap_signal_caught) both come here:
+   a trap replaces the watch's handler, and the watch latches once, so without
+   the trap's call a job that finished during a trapped loop was never noticed
+   mid-command. */
+fn job_child_signalled(b32 number)
+{
+        if (number == SIGNAL_CHILD)
+                job_child_news = true;
+}
+
 static fn job_child_arrived(b32 number)
 {
-        (void)number;
-
-        job_child_news = true;
+        job_child_signalled(number);
 }
 
 static fn job_child_watch()

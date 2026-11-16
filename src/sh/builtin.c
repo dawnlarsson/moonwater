@@ -431,6 +431,7 @@ static b32 exec_context_enter();
 static fn exec_context_leave(b32 held);
 static bool exec_asynchronous;
 static fn shell_child_default(b32 number);
+fn job_child_signalled(b32 number);
 static bool job_any_stopped();
 static bool exec_inplace_ready(bool restricted);
 static bool floodlight_parent_prepare(bool supervise);
@@ -16518,6 +16519,7 @@ fn trap_signal_caught(b32 number)
                 trap_pending[number] = 1;
 
         trap_caught = true;
+        job_child_signalled(number);
 }
 
 bool trap_waiting()
@@ -20936,16 +20938,21 @@ bipolar trap_taken()
         if (!trap_caught)
                 return -1;
 
+        /* Cleared before the scan, not after it: a signal caught between the
+           scan and a clear after it set pending and caught, and the clear
+           lost the caught flag, so trap_waiting missed it. A caught signal
+           now leaves the flag up for the next look. */
+        trap_caught = false;
+
         for (positive number = 1; number <= TRAP_SIGNAL_MAX; number++)
         {
                 if (!trap_pending[number])
                         continue;
 
                 trap_pending[number] = 0;
+                trap_caught = true;
                 return (bipolar)number;
         }
-
-        trap_caught = false;
 
         return -1;
 }
@@ -21514,6 +21521,12 @@ typedef struct
         bipolar pid;
         positive status;
         positive flags;
+        /* The child's pidfd, opened when the row is recorded, or -1 when the
+           kernel refused one: the reaper polls these so that a sweep with
+           no child ended costs no wait4. A pidfd is only readable on exit,
+           so a stop still needs the reaper's WUNTRACED pass. Closed where the
+           row is done or dropped (shell_wait_unwatch). */
+        bipolar pidfd;
 } shell_wait_entry;
 
 static shell_wait_entry address_to shell_wait_table;
@@ -21546,6 +21559,15 @@ bool shell_wait_rows_changed;
 #define SHELL_WAIT_PIPEFAIL 4
 #define SHELL_WAIT_INVERT 8
 #define SHELL_WAIT_TOLD 16
+
+// Releases a row's pidfd, if it holds one. Every row that is done or leaves
+// the table goes through here, so no descriptor outlives its row.
+static fn shell_wait_unwatch(shell_wait_entry address_to entry)
+{
+        if (entry->pidfd >= 0)
+                system_close(entry->pidfd);
+        entry->pidfd = -1;
+}
 
 /* Child ownership cannot be recovered after a fork if growing this table
    then fails.  Callers reserve every row before they create the first child;
@@ -21717,6 +21739,8 @@ static fn shell_wait_drop(bipolar job)
         for (into = at; at < shell_wait_count; at++)
                 if (shell_wait_table[at].job != job)
                         shell_wait_table[into++] = shell_wait_table[at];
+                else
+                        shell_wait_unwatch(shell_wait_table + at);
 
         if (into != shell_wait_count)
         {
@@ -21774,12 +21798,16 @@ bool shell_background_started(bipolar address_to children, positive count,
         {
                 shell_wait_entry address_to entry =
                     shell_wait_table + shell_wait_count++;
+                bipolar pidfd;
 
                 entry->job = job;
                 entry->pid = children[at];
                 entry->status = 0;
                 entry->flags = flags |
                                (at + 1 == count ? SHELL_WAIT_LAST : 0);
+                pidfd = system_call_2(syscall(pidfd_open),
+                                      (positive)children[at], 0);
+                entry->pidfd = pidfd >= 0 ? pidfd : -1;
                 if (at == 0)
                         shell_wait_slot_add(job, shell_wait_count - 1);
         }
@@ -21791,6 +21819,8 @@ fn shell_background_child()
 {
         /* $! is part of the inherited shell environment. What a subshell
            cannot inherit is the parent's right to wait for those children. */
+        for (positive at = 0; at < shell_wait_count; at++)
+                shell_wait_unwatch(shell_wait_table + at);
         shell_wait_count = 0;
         shell_wait_front = 0;
         shell_wait_slots_valid = false;
@@ -21819,6 +21849,7 @@ static bipolar shell_background_reaped(bipolar pid, positive status)
         {
                 shell_wait_table[at].status = status;
                 shell_wait_table[at].flags |= SHELL_WAIT_DONE;
+                shell_wait_unwatch(shell_wait_table + at);
                 shell_wait_settle();
                 return shell_wait_table[at].job;
         }
@@ -21953,6 +21984,7 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
 
                         entry->status = raw;
                         entry->flags |= SHELL_WAIT_DONE;
+                        shell_wait_unwatch(entry);
                         shell_wait_settle();
                 }
 
@@ -22010,6 +22042,8 @@ COLD fn shell_wait(writer write)
                         // What was waited for is gone, and what was not is kept.
                         if (done > shell_wait_count)
                                 done = shell_wait_count;
+                        for (positive at = 0; at < done; at++)
+                                shell_wait_unwatch(shell_wait_table + at);
                         memory_copy(shell_wait_table, shell_wait_table + done,
                                     (shell_wait_count - done) * sizeof(*shell_wait_table));
                         shell_wait_count -= done;
@@ -22020,6 +22054,8 @@ COLD fn shell_wait(writer write)
                 }
         }
 
+        for (positive at = 0; at < shell_wait_count; at++)
+                shell_wait_unwatch(shell_wait_table + at);
         shell_wait_count = 0;
         shell_wait_front = 0;
         shell_wait_slots_valid = false;
