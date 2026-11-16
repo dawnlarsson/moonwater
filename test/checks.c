@@ -241232,6 +241232,11 @@ static unsigned int hash_crc32(unsigned int crc, void *bytes, unsigned long leng
         (void)length;
         return crc;
 }
+/* spark.c and moonwater.c hold their structures to the ABI with offset_of, the
+   library's name for offsetof, and this program does not include the library */
+#ifndef offset_of
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/moonwater/spark.c"
 #include "../src/moonwater/moonwater.c"
 /* The window table's two requests, which the device takes from the program that
