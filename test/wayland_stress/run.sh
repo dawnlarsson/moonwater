@@ -40,7 +40,10 @@ if [ -z "$out" ]; then
 fi
 
 if [ -z "${inside:-}" ]; then
-        sh "$here/build.sh" "$work/bin" || exit 1
+        # STRESS_PREBUILT=1: the clients are in $STRESS_WORK/bin already (built through the box's build queue), and are not built again.
+        if [ -z "${STRESS_PREBUILT:-}" ] || [ ! -x "$work/bin/wl-stress" ]; then
+                sh "$here/build.sh" "$work/bin" || exit 1
+        fi
         compositor=${MW_COMPOSITOR:-}
         if [ -z "$compositor" ] && [ -n "$real" ]; then
                 compositor=$(command -v compositor || true)

@@ -28,6 +28,7 @@
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1172,11 +1173,13 @@ static int run_clip(void)
         long dnd = 0, dnd_bad = 0;
         if (fifo >= 0 && pointer)
         {
-                if (!pointer_focus)
+                for (int i = 0; i < 20 && !pointer_focus; i++)
                 {
-                        inject(2, 0, 1);
-                        wait_for(&pointer_in, 1.0);
+                        inject(2, 0, (i & 1) ? 6 : -6);
+                        wait_for(&pointer_in, 0.05);
                 }
+                if (!pointer_focus)
+                        printf("NOTE the pointer never entered the window: drag and drop not run\n");
                 for (int i = 0; i < count && pointer_focus; i++)
                 {
                         button_down = 0;
@@ -1273,6 +1276,7 @@ int main(int argc, char **argv)
                 }
         if (windows < 1 || windows > MAXWIN || nbuffers < 2 || nbuffers > 3)
                 usage();
+        signal(SIGPIPE, SIG_IGN); // a paste's reader that goes is a write that fails, not the end of the bench
         if (fifo_path)
                 fifo = open(fifo_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
         t_connect = now_ns();
@@ -1379,6 +1383,14 @@ int main(int argc, char **argv)
                 win_open(&win[0], want_w, want_h, 1);
                 for (int i = 0; i < 20 && !win[0].configured; i++)
                         wl_display_roundtrip(display);
+                // A seat's pointer may come a moment after the seat (a compositor whose devices are made as it runs says so then).
+                for (int i = 0; i < 20 && seat && !pointer; i++)
+                {
+                        if (fifo >= 0)
+                                inject(2, 0, 1);
+                        wl_display_roundtrip(display);
+                        usleep(20000);
+                }
                 if (!pointer || !relative_manager || !constraints)
                         printf("NOTE no pointer, relative pointer or pointer constraints: the lock is not taken\n");
                 else
@@ -1398,7 +1410,7 @@ int main(int argc, char **argv)
                         for (int i = 0; i < 50 && !is_locked; i++)
                         {
                                 if (fifo >= 0)
-                                        inject(2, 0, (i & 1) ? 1 : -1);
+                                        inject(2, 0, (i & 1) ? 4 : -4);
                                 uint64_t until_ms = now_ns() + 20000000ull;
                                 while (!is_locked && now_ns() < until_ms)
                                 {

@@ -1185,6 +1185,75 @@ static void pump(struct conn *c, int ms)
         wait_flag(c, &never, ms);
 }
 
+/* ---- drag and drop within one client: what the compositor does with a drag the person makes ---- */
+struct dnd
+{
+        struct wl_data_offer *offer;
+        int entered, dropped, cancelled, finished, sent;
+        uint32_t enter_serial;
+};
+static struct dnd dnd;
+static void dnd_offer_offer(void *d, struct wl_data_offer *o, const char *m)
+{
+        (void)d, (void)o, (void)m;
+}
+static void dnd_offer_actions(void *d, struct wl_data_offer *o, uint32_t a)
+{
+        (void)d, (void)o, (void)a;
+}
+static const struct wl_data_offer_listener dnd_offer_listener = {dnd_offer_offer, dnd_offer_actions, dnd_offer_actions};
+static void dd_data_offer(void *d, struct wl_data_device *dd, struct wl_data_offer *o)
+{
+        (void)d, (void)dd;
+        wl_data_offer_add_listener(o, &dnd_offer_listener, NULL);
+}
+static void dd_enter(void *d, struct wl_data_device *dd, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y, struct wl_data_offer *o)
+{
+        (void)d, (void)dd, (void)s, (void)x, (void)y;
+        dnd.entered++, dnd.offer = o, dnd.enter_serial = serial;
+        if (o)
+        {
+                wl_data_offer_accept(o, serial, "text/plain;charset=utf-8");
+                wl_data_offer_set_actions(o, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+        }
+}
+static void dd_leave(void *d, struct wl_data_device *dd)
+{
+        (void)d, (void)dd;
+}
+static void dd_motion(void *d, struct wl_data_device *dd, uint32_t t, wl_fixed_t x, wl_fixed_t y)
+{
+        (void)d, (void)dd, (void)t, (void)x, (void)y;
+}
+static void dd_drop(void *d, struct wl_data_device *dd)
+{
+        (void)d, (void)dd;
+        dnd.dropped = 1;
+}
+static void dd_selection(void *d, struct wl_data_device *dd, struct wl_data_offer *o)
+{
+        (void)d, (void)dd, (void)o;
+}
+static const struct wl_data_device_listener dd_listener = {dd_data_offer, dd_enter, dd_leave, dd_motion, dd_drop, dd_selection};
+static void dnd_send(void *d, struct wl_data_source *s, const char *m, int32_t fd)
+{
+        (void)d, (void)s, (void)m;
+        if (write(fd, "dragged text", 12) == 12)
+                dnd.sent = 1;
+        close(fd);
+}
+static void dnd_cancelled(void *d, struct wl_data_source *s)
+{
+        (void)d, (void)s;
+        dnd.cancelled = 1;
+}
+static void dnd_finished(void *d, struct wl_data_source *s)
+{
+        (void)d, (void)s;
+        dnd.finished = 1;
+}
+static const struct wl_data_source_listener dnd_source_listener = {source_target, dnd_send, dnd_cancelled, source_nop, dnd_finished, source_action};
+
 static void case_input(const char *name, int which)
 {
         if (fifo < 0)
@@ -1281,6 +1350,47 @@ static void case_input(const char *name, int which)
                         inject(2, 0, 60), inject(2, 1, 60);
                 break;
         }
+        case 4: // a drag from the window to itself: the button pressed, the drag started, moved, dropped and the text read
+        {
+                if (!c.ddm)
+                        return say(name, "skip", -1);
+                struct wl_data_device *dd = wl_data_device_manager_get_data_device(c.ddm, c.seat);
+                wl_data_device_add_listener(dd, &dd_listener, NULL);
+                roundtrip_within(&c, 200);
+                inject(1, 272, 1);
+                pump(&c, 60);
+                struct wl_data_source *src = wl_data_device_manager_create_data_source(c.ddm);
+                wl_data_source_add_listener(src, &dnd_source_listener, NULL);
+                wl_data_source_offer(src, "text/plain;charset=utf-8");
+                wl_data_source_set_actions(src, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+                uint64_t t0 = now_ns();
+                wl_data_device_start_drag(dd, src, w.s, NULL, st.button_serial);
+                for (int i = 0; i < 10 && !dnd.entered && !dnd.cancelled; i++)
+                        inject(2, 0, (i & 1) ? 6 : -6), pump(&c, 20);
+                double enter_ms = dnd.entered ? ms_since(t0) : -1;
+                inject(1, 272, 0);
+                pump(&c, 100);
+                char got[64] = {0};
+                if (dnd.dropped && dnd.offer)
+                {
+                        int pipefd[2];
+                        if (pipe(pipefd) == 0)
+                        {
+                                wl_data_offer_receive(dnd.offer, "text/plain;charset=utf-8", pipefd[1]);
+                                close(pipefd[1]);
+                                pump(&c, 100);
+                                if (read(pipefd[0], got, sizeof(got) - 1) < 0)
+                                        got[0] = 0;
+                                close(pipefd[0]);
+                                wl_data_offer_finish(dnd.offer);
+                                pump(&c, 50);
+                        }
+                }
+                snprintf(detail, sizeof(detail), "entered=%d enter_ms=%.1f dropped=%d text=%d finished=%d cancelled=%d", dnd.entered, enter_ms,
+                         dnd.dropped, !strcmp(got, "dragged text"), dnd.finished, dnd.cancelled);
+                ok = ok && !strcmp(got, "dragged text");
+                break;
+        }
         case 3: // a key held while a new window takes the keys: the old one is left and is told no release after
         {
                 wait_flag(&c, &key_focus, 1000);
@@ -1325,7 +1435,7 @@ BUF(0) BUF(1) BUF(2) BUF(3) BUF(4) BUF(5) BUF(6) BUF(7) BUF(8) BUF(9) BUF(10)
 #define SURF(k) static void c_surf##k(const char *n) { case_surface(n, k); }
 SURF(0) SURF(1) SURF(2) SURF(3) SURF(4) SURF(5) SURF(6) SURF(7) SURF(8) SURF(9)
 #define INP(k) static void c_in##k(const char *n) { case_input(n, k); }
-INP(0) INP(1) INP(2) INP(3)
+INP(0) INP(1) INP(2) INP(3) INP(4)
 
 static const struct
 {
@@ -1354,7 +1464,7 @@ static const struct
     {"toplevel-parent-churn", c_surf7},       {"min-max-fight", c_surf8},
     {"state-toggle-storm", c_surf9},          {"lock-released-by-crash", c_in0},
     {"cursor-surface-destroyed", c_in1},      {"button-held-pointer-leaves", c_in2},
-    {"key-held-focus-change", c_in3},
+    {"key-held-focus-change", c_in3},         {"dnd-to-itself", c_in4},
 };
 
 int main(int argc, char **argv)

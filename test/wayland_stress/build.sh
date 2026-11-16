@@ -50,4 +50,10 @@ if pkg-config --exists glfw3 glesv2; then
 else
         echo "NOTE no GLFW or GLESv2 development files: glfw-anim is not built"
 fi
+if pkg-config --exists gio-2.0; then
+        # shellcheck disable=SC2086
+        $cc $warn "$here/mutter_input.c" $(pkg-config --cflags --libs gio-2.0) -o "$out/mutter-input" || exit 1
+else
+        echo "NOTE no GIO development files: mutter-input is not built (Mutter's input rows are not run)"
+fi
 exit 0

@@ -182,6 +182,9 @@ class Compositor:
                 p.wait()
         self.proc = self.xproc = None
         self.extra = []
+        if getattr(self, "fifo_hold", None) is not None:
+            os.close(self.fifo_hold)
+            self.fifo_hold = None
 
 
 class Moonwater(Compositor):
@@ -266,11 +269,6 @@ class Moonwater(Compositor):
         # The scan image is XRGB8888 in memory: B, G, R, X.
         return W, H, raw, (2, 1, 0)
 
-    def stop(self):
-        super().stop()
-        if getattr(self, "fifo_hold", None) is not None:
-            os.close(self.fifo_hold)
-            self.fifo_hold = None
 
 
 class Weston(Compositor):
@@ -380,6 +378,21 @@ class Mutter(Compositor):
         argv = [exe] + backend + ["--wayland-display", "wl-stress"]
         ok = self.spawn(argv, env, os.path.join(rt, "wl-stress"), os.path.join(self.work, "mutter.log"))
         self.env = dict(env, WAYLAND_DISPLAY="wl-stress")
+        # Its input, headless: the same evdev records Moonwater's FIFO takes, given to its RemoteDesktop session (mutter-input).
+        tool = os.path.join(self.args.bin, "mutter-input")
+        if ok and not self.args.real and os.path.exists(tool):
+            fifo = os.path.join(self.work, "in.fifo")
+            if os.path.exists(fifo):
+                os.unlink(fifo)
+            os.mkfifo(fifo)
+            p = subprocess.Popen([tool, fifo], env=env, stdout=subprocess.PIPE, stderr=open(os.path.join(self.work, "mutter-input.log"), "w"), text=True)
+            self.fifo_hold = os.open(fifo, os.O_RDWR)
+            if p.stdout.readline().startswith("ready"):
+                self.fifo = fifo
+                self.extra.append(p)
+            else:
+                note("mutter: its RemoteDesktop session did not start: its input rows are not run")
+                p.kill()
         if ok:
             self.find_display(10)
         return ok
@@ -653,6 +666,9 @@ def bench(args, comp):
                            t0=True, timeout=30)
             if "launch_to_first_ms" in g:
                 results["startup"]["launch_to_first_ms"] = g["launch_to_first_ms"]
+        # The Wayland edge cases before any X client: Mutter ends when its Xwayland does, and a drag reaches its Xwayland too.
+        if not args.only or "edge" in args.only:
+            results.setdefault("edge", {}).update(edge_cases(args, comp))
         # The X rows: Xwayland's start (the first X client's open and first frame), its animation, and the overlay.
         xs = os.path.join(args.bin, "x-stress")
         if (not args.only or any(n.startswith("x") or n == "edge" for n in args.only)) and os.path.exists(xs):
@@ -669,8 +685,6 @@ def bench(args, comp):
                     results.setdefault("edge", {}).update(x_edge(args, comp, xs))
             else:
                 results["x-anim"] = {"_notes": ["no Xwayland on this compositor here"]}
-        if not args.only or "edge" in args.only:
-            results.setdefault("edge", {}).update(edge_cases(args, comp))
         if "soak" in args.only:
             results["soak"] = soak(args, comp)
     finally:
