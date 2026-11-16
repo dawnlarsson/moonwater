@@ -671,6 +671,8 @@ def bench(args, comp):
                 results["x-anim"] = {"_notes": ["no Xwayland on this compositor here"]}
         if not args.only or "edge" in args.only:
             results.setdefault("edge", {}).update(edge_cases(args, comp))
+        if "soak" in args.only:
+            results["soak"] = soak(args, comp)
     finally:
         comp.stop()
     return results
@@ -714,6 +716,67 @@ def edge_cases(args, comp):
             if not comp.start():
                 note(f"{comp.name}: did not start again after {name}: the rest of its edge cases are not run")
                 break
+    return out
+
+
+def proc_sample(pid):
+    """The compositor's resident memory (KiB), open descriptors and CPU ticks now."""
+    try:
+        rss = int(open(f"/proc/{pid}/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
+        fds = len(os.listdir(f"/proc/{pid}/fd"))
+    except (OSError, ValueError, IndexError):
+        return None
+    return rss, fds, cpu_ticks(pid) or 0
+
+
+def soak(args, comp):
+    """args.soak seconds of mixed clients (animations, popup and subsurface churn, a resize storm, clients killed mid-commit and
+    mid-resize, clipboard round trips where there is a seat, an X animation where there is Xwayland), the compositor's memory,
+    descriptors and CPU sampled every ten seconds. Flat is: memory past the first minute grows less than 5 percent and 2 MiB,
+    and the descriptors end where they were after the first minute, give or take two."""
+    wl, edge, xs = (os.path.join(args.bin, n) for n in ("wl-stress", "wl-edge", "x-stress"))
+    fifo = ["-F", comp.fifo] if comp.fifo else []
+    x_ok = os.path.exists(xs) and (bool(comp.display) or comp.start_x())
+    jobs = [[wl, "-m", "anim", "-t", "2", "-N", "4"], [wl, "-m", "popup", "-t", "1"], [wl, "-m", "sub", "-t", "1"],
+            [wl, "-m", "resize", "-t", "1"], [edge, "-c", "kill-mid-commit"], [edge, "-c", "kill-mid-resize"],
+            [wl, "-m", "clip", "-n", "10"] + fifo, [edge, "-c", "subsurface-middle-destroyed"], [edge, "-c", "popup-chain-top-down"]]
+    samples = []
+    t0 = time.time()
+    last = 0.0
+    at = 0
+    while time.time() - t0 < args.soak:
+        if time.time() - last >= 10:
+            smp = proc_sample(comp.pid)
+            if smp is None:
+                note(f"{comp.name}: died during the soak at {time.time() - t0:.0f} s")
+                break
+            samples.append((round(time.time() - t0, 1),) + smp)
+            last = time.time()
+        job = jobs[at % len(jobs)]
+        at += 1
+        try:
+            subprocess.run(job, env=comp.env, capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        if x_ok and at % len(jobs) == 0:
+            try:
+                subprocess.run([xs, "-m", "anim", "-t", "1", "-w", "400", "-h", "300"], env=dict(comp.env, DISPLAY=comp.display), capture_output=True,
+                               timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+    smp = proc_sample(comp.pid)
+    if smp:
+        samples.append((round(time.time() - t0, 1),) + smp)
+    out = {"samples": samples, "clients_run": at}
+    if len(samples) >= 3:
+        warm = next((x for x in samples if x[0] >= 60), samples[1])
+        end = samples[-1]
+        span = end[0] - samples[0][0]
+        out.update(rss_start_kib=float(warm[1]), rss_end_kib=float(end[1]), rss_max_kib=float(max(x[1] for x in samples)),
+                   fds_start=float(warm[2]), fds_end=float(end[2]), cpu_ms_per_s=(end[3] - samples[0][3]) * 1000.0 / TICK / max(span, 1))
+        grew = end[1] - warm[1]
+        out["flat"] = 1.0 if (grew < 2048 or grew < 0.05 * warm[1]) and abs(end[2] - warm[2]) <= 2 else 0.0
+    print("  soak: " + " ".join(f"{k}={v}" for k, v in out.items() if k != "samples"), flush=True)
     return out
 
 
@@ -965,6 +1028,7 @@ def main():
     ap.add_argument("--compositors", default="moonwater,weston,kwin,mutter")
     ap.add_argument("--baseline", default="")
     ap.add_argument("--edge", default="", help="only these edge cases (comma-separated)")
+    ap.add_argument("--soak", type=float, default=600, help="seconds of the soak (run with --only soak)")
     args = ap.parse_args()
     args.only = [s for s in args.only.split(",") if s]
     args.edge = [s for s in args.edge.split(",") if s]
@@ -978,8 +1042,12 @@ def main():
     shown = [n for n in names if all_results.get(n)]
     head = ["Wayland stress bench, %s, %s, %s, %d s a scenario, %s" % (platform.node(), time.strftime("%Y-%m-%d %H:%M"),
             "real machine" if args.real else f"headless {W}x{H}", args.seconds, " ".join(shown))]
-    edge_free = {n: {k: v for k, v in (r or {}).items() if k != "edge"} for n, r in all_results.items()}
+    edge_free = {n: {k: v for k, v in (r or {}).items() if k not in ("edge", "soak")} for n, r in all_results.items()}
     lines = head + [""] + table(edge_free, shown) + [""] + gaps(edge_free, shown) + edge_matrix(all_results, shown)
+    for n in shown:
+        sk = (all_results.get(n) or {}).get("soak")
+        if sk:
+            lines.append("soak %s: %s" % (n, " ".join(f"{k}={fmt(v)}" for k, v in sk.items() if k != "samples")))
     if args.baseline and os.path.exists(args.baseline):
         old = json.load(open(args.baseline)).get("results", {}).get("moonwater") or {}
         new = all_results.get("moonwater") or {}
