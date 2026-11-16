@@ -4331,9 +4331,16 @@ static void radio_path(char *path, unsigned int room, unsigned int n, const char
 }
 
 // The rfkill switches (/sys/class/rfkill, eight at most): a radio that is blocked, in hardware or in software after it was asked for, is on the board
-// under its key, and one that is not is cleared. Read once a second with the kernel's records (kernel_notices_tick).
+// under its key (the first switch of its key that is blocked says how), and one that is not, or whose switch has gone (a controller the usb policy
+// held, one unplugged), is cleared, which it was not when it went: the loop only ever saw the switches that were still there. Read once a second with
+// the kernel's records (kernel_notices_tick).
+static unsigned char radio_shown[2]; // wifi, bluetooth: whether the board holds its radio's block, so that nothing is cleared that was never set
+
 static void radio_state_tick(struct windows *table)
 {
+        static const char *const keys[2] = {"wifi", "bluetooth"};
+        const char *found[2] = {null, null};
+
         if (!table)
                 return;
         for (unsigned int n = 0; n < 8; n++)
@@ -4351,10 +4358,15 @@ static void radio_state_tick(struct windows *table)
                 if (radio_read_file(path, hard, sizeof(hard)) < 0)
                         hard[0] = 0;
                 detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1', soft[0] == '1' && radio_asked_on(key));
-                if (detail)
-                        windows_issue_set(table, key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, detail);
-                else
-                        windows_issue_clear(table, key, WINDOWS_ISSUE_RADIO);
+                if (detail && !found[key[0] == 'b'])
+                        found[key[0] == 'b'] = detail;
+        }
+        for (unsigned int i = 0; i < 2; i++)
+        {
+                if (found[i])
+                        windows_issue_set(table, keys[i], WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, found[i]), radio_shown[i] = 1;
+                else if (radio_shown[i])
+                        windows_issue_clear(table, keys[i], WINDOWS_ISSUE_RADIO), radio_shown[i] = 0;
         }
 }
 
