@@ -9409,6 +9409,7 @@ b32 main()
         check_kit_focus();
         check_kit_virtual();
         check_kit_pull_hit();
+        check_kit_view_pull();
         check_kit_trail();
         check_kit_inks();
         check_kit_place();
@@ -9516,6 +9517,7 @@ b32 main()
         check_caret_terminal();
         check_terminal_stretch();
         check_terminal_stretch_edges();
+        check_terminal_cell_hit();
         check_terminal_stretch_cost();
 #endif
         check_no_input_codes();

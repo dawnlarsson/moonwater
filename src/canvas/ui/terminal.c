@@ -635,6 +635,21 @@ static int terminal_grid_pull(void)
         return drawn - ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
 }
 
+// The pointer's place in the grid's rows, where the cells under it are drawn: through the stretch a pull past an end made of the picture
+// (ui_scroll_unpull) and back from the slide a glide between rows gave the grid (terminal_grid_shift), which terminal_at_y has neither of.
+static int terminal_cell_y(void)
+{
+        int y = ui_kit.pointer_y;
+
+        if (terminal_grid_pull())
+        {
+                struct ui kit = terminal_kit(null);
+
+                y = ui_scroll_unpull(&kit, &terminal.bar, ui_body_px(&terminal.bar.body), (int)terminal.pad_y, terminal_grid_height(), y);
+        }
+        return y - (int)terminal.pad_y - terminal_grid_shift();
+}
+
 // The view is where the body is, to the nearest row (a row is a cell's height): the grid's only rounding of the body's place.
 static b32 terminal_bar_out(void)
 {
@@ -3063,15 +3078,15 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         address_to dirty = true;
                         return true;
                 }
-                if (terminal_at_x() < 0 || terminal_at_y() < 0)
+                if (terminal_at_x() < 0 || terminal_cell_y() < 0)
                         return false;
-                row = (unsigned int)terminal_at_y() / terminal.cell_h;
+                row = (unsigned int)terminal_cell_y() / terminal.cell_h;
                 column = (unsigned int)terminal_at_x() / terminal.cell_w;
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
                 place = terminal_place(line, at);
-                clicks = ui_click_count(&kit, &s->click, terminal_at_x(), terminal_at_y());
+                clicks = ui_click_count(&kit, &s->click, terminal_at_x(), terminal_cell_y());
                 if (shift && terminal_selecting() && clicks == 1)
                         ui_select_shift(&kit, s, place);
                 else
@@ -3088,7 +3103,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         }
         if (event->type == WINDOW_EVENT_MOTION && s->dragging)
         {
-                p64 to = ui_select_track(&kit, s, terminal_at_x(), terminal_at_y(), terminal_at_x(), terminal_at_y(), 0, false);
+                p64 to = ui_select_track(&kit, s, terminal_at_x(), terminal_cell_y(), terminal_at_x(), terminal_cell_y(), 0, false);
 
                 ui_kit_shape = WINDOW_POINTER_TEXT; // a motion made it the arrow again (ui_kit_track)
 

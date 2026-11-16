@@ -7336,6 +7336,56 @@ static void check_terminal_stretch_edges(void)
 }
 
 /*
+    The cell under the pointer is the one drawn there: the grid slid by a glide between rows (terminal_grid_shift) has its cells that far
+    from where they rest, and the grid pulled past an end is its picture stretched (ui_scroll_unpull), so a press on a line is on the
+    row drawn on that line.
+*/
+static void check_terminal_cell_hit(void)
+{
+    unsigned int first, shown, total;
+    b64 clock = 90000000000ll;
+    int shift, row_shifted, row_pulled, want_shifted, want_pulled, y, top = (int)terminal.pad_y, cell = (int)terminal.cell_h;
+    struct ui kit;
+    b32 moved_shift, moved_pull;
+
+    for (int k = 0; k < 60; k++)
+        term_bytes("row\r\n", 5);
+    terminal_view_live();
+    terminal_extent(&first, &shown, &total);
+    terminal_bar_place(first, shown, total);
+    ui_kit.busy = 0, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+    // A glide half a row from where the view rests: the grid is drawn slid by it.
+    ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, ((b64)first * cell - cell / 2) << UI_Q, (b64)clock);
+    shift = terminal_grid_shift();
+    ui_kit.pointer_x = (int)terminal.pad + 2, ui_kit.pointer_y = top + 3 * cell + cell / 4;
+    want_shifted = (ui_kit.pointer_y - top - shift) / cell;
+    row_shifted = terminal_cell_y() / cell;
+    moved_shift = shift != 0 && want_shifted != (ui_kit.pointer_y - top) / cell;
+    terminal_stretch_rest();
+    // A pull past the oldest line: the row drawn on a line is the picture's.
+    for (int k = 0; k < 60; k++)
+        term_bytes("row\r\n", 5);
+    terminal_view_set(0);
+    terminal_extent(&first, &shown, &total);
+    terminal_bar_place(first, shown, total);
+    for (int k = 0; k < 8; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        ui_body_track(&terminal.bar.body, -12 * UI_ONE, (b64)clock);
+    }
+    kit = terminal_kit(null);
+    y = top + 3 * cell + cell / 4;
+    ui_kit.pointer_y = y;
+    want_pulled = (ui_scroll_unpull(&kit, &terminal.bar, ui_body_px(&terminal.bar.body), top, terminal_grid_height(), y) - top) / cell;
+    row_pulled = terminal_cell_y() / cell;
+    moved_pull = terminal_grid_pull() < -4 && want_pulled != 3;
+    check("terminal cell hit: the cell under the pointer is the one drawn there, in a grid slid by a glide and in one pulled past its end",
+          moved_shift && row_shifted == want_shifted && moved_pull && row_pulled == want_pulled);
+    ui_kit.test_clock = 0;
+    terminal_stretch_rest();
+}
+
+/*
     What a stretched frame costs: a normal frame (the view at rest, one cell changed: the incremental draw) against a stretched one (the grid
     drawn whole, shifted), each the minimum of N frames made with the compositor taking every picture. Logged as ns a frame; not a check.
 */
@@ -9654,6 +9704,62 @@ static fn check_kit_list_wrap(void)
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         ui_kit.test_clock = 0;
+}
+
+/*
+        A view's scroll container pulled past its top is its picture stretched, and a control in it is where its picture draws it: the pointer on
+        the line that draws the switch's last row is on the switch, and on the line that draws the gap under it is not (ui_scroll_unpull).
+*/
+static fn check_kit_view_pull(void)
+{
+        static unsigned int pixels[300 * 330], scratch[300 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui address_to ui = &view_control_ui;
+        struct ui_control address_to toggle = &view_control[1];
+        struct ui_scroll address_to s = &view_check.scroll[0];
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        int in = -1, out = -1;
+        b32 lit, unlit;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit view pull: the face loads", false);
+                return;
+        }
+        *ui = terminal.ui;
+        ui->pixels = pixels, ui->pitch = 300, ui->width = 300, ui->height = 330, ui->scale = 100;
+        ui->scratch = scratch, ui->scratch_width = 300, ui->band_top = ui->band_bottom = 0, ui->mono = null, ui->scene = null;
+        ui->regular = ui->bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = ui_kit.test_clock = 9000000000ll;
+        ui_kit.rtl = 0, ui_kit_held = null;
+        ui_kit_settle();
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(view_control, sizeof(view_control));
+        view_control[0].kind = UI_CARD;
+        view_control[1].kind = view_control[4].kind = UI_SWITCH, view_control[1].label = "Wired", view_control[4].label = "Far";
+        view_control[2].kind = UI_BADGE, view_control[2].label = "New", view_control[2].role = UI_PRIMARY;
+        view_control[3].kind = UI_SLIDER, view_control[3].label = "Level", view_control[3].high = ui_q(100), view_control[3].step = ui_q(1);
+        view_control[5].kind = UI_RADIOS, view_control[5].count = 3, view_control[5].items[0] = "One", view_control[5].items[1] = "Two", view_control[5].items[2] = "Three";
+        for (int k = 0; k < 6; k++)
+                ui_control_start(&view_control[k]);
+        view_control_build();
+        ui_body_track(&s->body, -(b64)90 * UI_ONE, ui_kit_time());
+        view_control_build();
+        for (int line = 30; line < 330; line++)
+        {
+                int at = ui_scroll_unpull(ui, s, s->scroll, 30, 300, line);
+
+                in = at == toggle->y + toggle->h - 1 ? line : in;
+                out = out < 0 && at == toggle->y + toggle->h + 2 ? line : out;
+        }
+        view_control_send(WINDOW_EVENT_MOTION, 0, 150, in);
+        lit = toggle->hover && in > toggle->y + toggle->h;
+        view_control_send(WINDOW_EVENT_MOTION, 0, 150, out);
+        unlit = !toggle->hover;
+        check("kit view pull: a control of a container pulled past its end is hit where its stretched picture draws it", s->scroll < 0 && in > 0 && out > in && lit && unlit);
+        ui_body_hold(&s->body, ui_kit_time());
+        ui_kit.test_clock = 0, ui_kit.busy = 0, ui_kit_held = null;
 }
 
 static fn check_kit_view_controls(void)

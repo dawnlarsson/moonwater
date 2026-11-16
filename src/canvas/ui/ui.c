@@ -18477,6 +18477,23 @@ static p32 ui_view_act(const struct ui_item address_to item)
         asks for no picture. A key the buttons leave moves the scroll container under the pointer, or the first when the pointer is on
         none (ui_lines_key).
 */
+// A row of the window as the controls of element at have it drawn: through the picture of every scroll container they are in that is pulled
+// past an end, the outermost first (ui_scroll_unpull).
+static int ui_view_unpull(const struct ui address_to ui, const struct ui_view address_to v, int at, int y)
+{
+        if (at < 0)
+                return y;
+        y = ui_view_unpull(ui, v, v->tree.node[at].parent, y);
+        if (v->item[at].scroll >= 0)
+        {
+                const struct ui_scroll address_to s = &v->scroll[v->item[at].scroll];
+                const struct ui_node address_to box = &v->tree.node[at];
+
+                y = ui_scroll_unpull(ui, s, s->scroll, box->y, box->h, y);
+        }
+        return y;
+}
+
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
         b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT;
@@ -18531,7 +18548,7 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         for (int at = 0; lone && at < v->tree.count; at++)
         {
                 struct ui_control address_to c = v->item[at].control;
-                int look, ghost;
+                int look, ghost, seen;
                 b32 on;
 
                 if (!c)
@@ -18540,15 +18557,17 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                 // field whose text is an engine's, which has the pointer from its app (ui_field_event).
                 ui_view_rows(v, v->tree.node[at].parent, &top, &bottom);
                 on = y >= top && y < bottom && !(c->kind == UI_INPUT && c->edit);
+                // The control is where its picture drew it: a pull past an end of its container stretched that picture.
+                seen = on ? ui_view_unpull(ui, v, v->tree.node[at].parent, y) : y;
                 look = c->hover << 9 | c->focused << 8 | (c->item & 255), ghost = c->hover_x;
                 if (motion)
-                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, on ? y : -UI_TREE_MOST, false, event->flags);
+                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, on ? seen : -UI_TREE_MOST, false, event->flags);
                 else
                         c->focused = 0;
-                if (button && !ui_kit_held && on && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
+                if (button && !ui_kit_held && on && ui_control_live(c) && ui_control_hit(ui, c, x, seen) >= 0)
                 {
                         asks |= UI_VIEW_DRAW | UI_VIEW_TAKEN;
-                        if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, y, true, event->flags))
+                        if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, seen, true, event->flags))
                                 asks |= ui_view_act(&v->item[at]);
                 }
                 if (look != (c->hover << 9 | c->focused << 8 | (c->item & 255)))
