@@ -91,8 +91,6 @@
 #define WAYLAND_TOKENS_PER_CLIENT 4 // of those, the most one client may hold: a client that never commits its tokens cannot take them all
 #define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
-#define WAYLAND_SOURCES 8       // data sources (and primary selection sources) one client holds
-#define WAYLAND_OFFERS 16       // offers made to one client and not yet destroyed by it
 #define WAYLAND_DEVICES 8       // data devices, of each kind, one client holds
 #define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
 #define WAYLAND_CLIP_CLIPBOARD 0
@@ -100,13 +98,8 @@
 #define WAYLAND_PICTURE_LENT 2                 // row_picture's answer: the host reads the buffer in place and keeps it (see struct wayland_host)
 #define WAYLAND_DMABUF_ENTRIES 64    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
-#define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
-#define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
-#define WAYLAND_NOTIFIES 8           // ext-idle-notify notifications one client holds
-#define WAYLAND_TEXTS 4              // zwp_text_input_v3 objects one client holds
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_REGION_RECTS 8       // exact disjoint rectangles tracked per region before bounding fallback
-#define WAYLAND_TIMELINES 32         // wp_linux_drm_syncobj_timeline_v1 objects one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
 #define WAYLAND_FOURCC_ABGR8888 0x34324241UL
@@ -711,18 +704,18 @@ struct wayland_client
         unsigned char input_next;
         long server_hint, server_live; // where the next of the server's own ids is looked for, and how many are in use
         unsigned char pending[2];   // the source being read for each selection, as its index and one, or 0
-        struct wayland_source sources[WAYLAND_SOURCES];
-        struct wayland_offer offers[WAYLAND_OFFERS];
-        struct wayland_params params[WAYLAND_PARAMS];
-        struct wayland_text texts[WAYLAND_TEXTS];
+        struct wayland_source *sources; // a table that grows (source_table), as many as the client makes
+        struct wayland_offer *offers; // a table that grows (offer_table), as many as the client makes
+        struct wayland_params *params; // a table that grows (params_table), as many as the client makes
+        struct wayland_text *texts; // a table that grows (text_table), as many as the client makes
         struct wayland_table feedback_table; // zwp_linux_dmabuf_feedback_v1 objects (struct wayland_feedback), feedbacks of them in use
         struct wayland_feedback *feedback;
         long feedbacks;
         unsigned char feedback_pending;
         long dmabufs;
-        struct wayland_sync_timeline timelines[WAYLAND_TIMELINES];
-        struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
-        struct wayland_notify notifies[WAYLAND_NOTIFIES];
+        struct wayland_sync_timeline *timelines; // a table that grows (timeline_table), as many as the client makes
+        struct wayland_constraint *constraints; // a table that grows (constraint_table), as many as the client makes
+        struct wayland_notify *notifies; // a table that grows (notify_table), as many as the client makes
         long inhibitors;                             // zwp_idle_inhibitor_v1 objects it holds (its objects are scanned only while one is)
         long pinches;                                // zwp_pointer_gesture_pinch_v1 objects held (pinch delivery skips clients with none)
         // A commit held for a fifo barrier (hold_at 0: woken by the frames) or for its time (hold_at, the host's ms), and the surface it is for.
@@ -739,6 +732,7 @@ struct wayland_client
         unsigned int *server_index;
         // The tables (struct wayland_table), and each one's elements as an array, at the table's reservation: they never move.
         struct wayland_table index_table, object_table, surface_table, pool_table, buffer_table, positioner_table, region_table;
+        struct wayland_table source_table, offer_table, params_table, text_table, timeline_table, constraint_table, notify_table;
         unsigned int *index;                  // id -> object slot and one, for ids below index_table.count
         struct wayland_object *objects;
         struct wayland_surface *surfaces;
@@ -1033,6 +1027,13 @@ static void wayland_tables_point(struct wayland_client *c)
         c->regions = (struct wayland_region *)c->region_table.at;
         c->feedback = (struct wayland_feedback *)c->feedback_table.at;
         c->server_index = (unsigned int *)c->server_table.at;
+        c->sources = (struct wayland_source *)c->source_table.at;
+        c->offers = (struct wayland_offer *)c->offer_table.at;
+        c->params = (struct wayland_params *)c->params_table.at;
+        c->texts = (struct wayland_text *)c->text_table.at;
+        c->timelines = (struct wayland_sync_timeline *)c->timeline_table.at;
+        c->constraints = (struct wayland_constraint *)c->constraint_table.at;
+        c->notifies = (struct wayland_notify *)c->notify_table.at;
 }
 
 static void wayland_tables_init(struct wayland_client *c)
@@ -1047,6 +1048,13 @@ static void wayland_tables_init(struct wayland_client *c)
         c->feedback_table.unit = sizeof(struct wayland_feedback);
         c->sub_bits.unit = sizeof(unsigned long long);
         c->server_table.unit = sizeof(unsigned int);
+        c->source_table.unit = sizeof(struct wayland_source);
+        c->offer_table.unit = sizeof(struct wayland_offer);
+        c->params_table.unit = sizeof(struct wayland_params);
+        c->text_table.unit = sizeof(struct wayland_text);
+        c->timeline_table.unit = sizeof(struct wayland_sync_timeline);
+        c->constraint_table.unit = sizeof(struct wayland_constraint);
+        c->notify_table.unit = sizeof(struct wayland_notify);
 }
 
 static void wayland_tables_drop(struct wayland_client *c)
@@ -1061,6 +1069,13 @@ static void wayland_tables_drop(struct wayland_client *c)
         wayland_table_drop(&c->feedback_table);
         wayland_table_drop(&c->sub_bits);
         wayland_table_drop(&c->server_table);
+        wayland_table_drop(&c->source_table);
+        wayland_table_drop(&c->offer_table);
+        wayland_table_drop(&c->params_table);
+        wayland_table_drop(&c->text_table);
+        wayland_table_drop(&c->timeline_table);
+        wayland_table_drop(&c->constraint_table);
+        wayland_table_drop(&c->notify_table);
         wayland_tables_point(c);
 }
 
@@ -1364,7 +1379,7 @@ static void wayland_object_free(struct wayland_client *c, long slot)
         else if (c->objects[slot].iface == WLI_zwp_pointer_gesture_pinch_v1 && c->pinches > 0)
                 c->pinches--;
         else if (c->objects[slot].iface == WLI_ext_idle_notification_v1 && c->objects[slot].link >= 0 &&
-                 c->objects[slot].link < WAYLAND_NOTIFIES && c->notifies[c->objects[slot].link].live)
+                 c->objects[slot].link < c->notify_table.count && c->notifies[c->objects[slot].link].live)
         {
                 c->notifies[c->objects[slot].link].live = 0;
                 c->objects[slot].link = -1;
@@ -1616,7 +1631,7 @@ static void wayland_timeline_unref(struct wayland_client *c, long idx)
 {
         struct wayland_sync_timeline *t;
 
-        if (idx < 0 || idx >= WAYLAND_TIMELINES)
+        if (idx < 0 || idx >= c->timeline_table.count)
                 return;
         t = &c->timelines[idx];
         if (!t->live || !t->gone || t->refs > 0)
@@ -1635,7 +1650,7 @@ static void wayland_buffer_signal_release(struct wayland_client *c, struct wayla
                 return;
         idx = b->rel_timeline;
         b->rel_pending = 0;
-        if (idx >= 0 && idx < WAYLAND_TIMELINES && c->timelines[idx].live)
+        if (idx >= 0 && idx < c->timeline_table.count && c->timelines[idx].live)
         {
                 if (wayland.syncobj.signal && c->timelines[idx].handle >= 0)
                         wayland.syncobj.signal(wayland.syncobj.context, c->timelines[idx].handle, b->rel_point);
@@ -4275,7 +4290,7 @@ static int wayland_syncobj_check(struct wayland_client *c, struct wayland_surfac
                 return wayland_fail(c, s->syncobj_id, WLN_wp_linux_drm_syncobj_surface_v1_error_conflicting_points,
                                     "acquire and release points conflict"), -1;
         tl = s->pending_sync_acq_slot;
-        if (tl >= 0 && tl < WAYLAND_TIMELINES && c->timelines[tl].live && c->timelines[tl].handle >= 0 && wayland.syncobj.ready &&
+        if (tl >= 0 && tl < c->timeline_table.count && c->timelines[tl].live && c->timelines[tl].handle >= 0 && wayland.syncobj.ready &&
             !wayland.syncobj.ready(wayland.syncobj.context, c->timelines[tl].handle, s->pending_sync_acq_point))
         {
                 c->stalled_fd = -1;
@@ -4294,7 +4309,7 @@ static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surfac
         if (!s->pending_sync_acq_set && !s->pending_sync_rel_set)
                 return;
         tl = s->pending_sync_rel_slot;
-        if (s->pending_sync_rel_set && b && tl >= 0 && tl < WAYLAND_TIMELINES && c->timelines[tl].live)
+        if (s->pending_sync_rel_set && b && tl >= 0 && tl < c->timeline_table.count && c->timelines[tl].live)
         {
                 wayland_buffer_signal_release(c, b);
                 b->rel_pending = 1;
@@ -6170,7 +6185,7 @@ static void wayland_text_sync(struct wayland_client *c, struct wayland_text *t)
 // The window of a row goes: its text inputs lose the keys with it, and give back their counts (called before the row is closed).
 static void wayland_texts_row_gone(struct wayland_client *c, long row)
 {
-        for (long at = 0; at < WAYLAND_TEXTS; at++)
+        for (long at = 0; at < c->text_table.count; at++)
                 if (c->texts[at].live && c->texts[at].row == row)
                 {
                         c->texts[at].row = -1;
@@ -6182,7 +6197,7 @@ static void wayland_texts_row_gone(struct wayland_client *c, long row)
 // count with it. A leave is only for the window the keys were in.
 static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int surface, int entered)
 {
-        for (long at = 0; at < WAYLAND_TEXTS; at++)
+        for (long at = 0; at < c->text_table.count; at++)
         {
                 struct wayland_text *t = &c->texts[at];
                 struct wayland_event e;
@@ -6200,7 +6215,7 @@ static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int
 // The client's text input objects are given up: each one's count goes back (the client died, or the window's keys went with it).
 static void wayland_texts_drop(struct wayland_client *c)
 {
-        for (long at = 0; at < WAYLAND_TEXTS; at++)
+        for (long at = 0; at < c->text_table.count; at++)
                 if (c->texts[at].live)
                 {
                         c->texts[at].enabled = 0;
@@ -6222,9 +6237,9 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
 
                 if (op != WLQ_zwp_text_input_manager_v3_get_text_input)
                         return WAYLAND_OK;
-                for (index = 0; index < WAYLAND_TEXTS && c->texts[index].live; index++)
+                for (index = 0; index < c->text_table.count && c->texts[index].live; index++)
                         ;
-                if (index == WAYLAND_TEXTS)
+                if (index == c->text_table.count && (index = wayland_client_take(c, &c->text_table)) < 0)
                         return wayland_new_fail(c, self->id, a[0].u);
                 t = &c->texts[index];
                 t->live = 1;
@@ -6241,7 +6256,7 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
                         wayland_texts_focus(c, wayland.keyboard_row, focus->id, 1);
                 return WAYLAND_OK;
         }
-        if (self->link < 0 || self->link >= WAYLAND_TEXTS || !c->texts[self->link].live)
+        if (self->link < 0 || self->link >= c->text_table.count || !c->texts[self->link].live)
                 return WAYLAND_OK;
         t = &c->texts[self->link];
         switch (op)
@@ -6754,9 +6769,11 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
 
         if (wayland.host->clip_size(wayland.host->context, which) > 0)
         {
-                for (long at = 0; at < WAYLAND_OFFERS && index < 0; at++)
+                for (long at = 0; at < c->offer_table.count && index < 0; at++)
                         if (!c->offers[at].live)
                                 index = at;
+                if (index < 0)
+                        index = wayland_client_take(c, &c->offer_table);
                 id = index >= 0 ? wayland_server_id(c) : 0;
                 if (id)
                         offer = wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
@@ -6881,11 +6898,11 @@ static int wayland_source_new(struct wayland_client *c, struct wayland_object *s
 {
         long index = -1;
 
-        for (long at = 0; at < WAYLAND_SOURCES && index < 0; at++)
+        for (long at = 0; at < c->source_table.count && index < 0; at++)
                 if (!c->sources[at].live)
                         index = at;
-        if (index < 0)
-                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many data sources");
+        if (index < 0 && (index = wayland_client_take(c, &c->source_table)) < 0)
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data source");
         c->sources[index].id = c->objects[slot].id;
         c->sources[index].live = 1;
         c->sources[index].which = (unsigned char)which;
@@ -7008,7 +7025,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                         {
                                 long src = c->objects[a[0].slot].link;
 
-                                if (src >= 0 && src < WAYLAND_SOURCES && c->sources[src].state == 0)
+                                if (src >= 0 && src < c->source_table.count && c->sources[src].state == 0)
                                         wayland_source_cancel(c, src);
                         }
                         return WAYLAND_OK;
@@ -7676,11 +7693,11 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                 {
                         long index = -1;
 
-                        for (long at = 0; at < WAYLAND_PARAMS && index < 0; at++)
+                        for (long at = 0; at < c->params_table.count && index < 0; at++)
                                 if (!c->params[at].live)
                                         index = at;
-                        if (index < 0)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many buffer params");
+                        if (index < 0 && (index = wayland_client_take(c, &c->params_table)) < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for buffer params");
                         c->params[index].id = c->objects[a[0].slot].id;
                         c->params[index].live = 1;
                         c->params[index].used = 0;
@@ -7843,11 +7860,11 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                 {
                         long idx = -1, handle;
 
-                        for (long i = 0; i < WAYLAND_TIMELINES && idx < 0; i++)
+                        for (long i = 0; i < c->timeline_table.count && idx < 0; i++)
                                 if (!c->timelines[i].live)
                                         idx = i;
-                        if (idx < 0)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many syncobj timelines");
+                        if (idx < 0 && (idx = wayland_client_take(c, &c->timeline_table)) < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a syncobj timeline");
                         handle = wayland.syncobj.import ? wayland.syncobj.import(wayland.syncobj.context, a[1].fd) : -1;
                         wayland.host->close(wayland.host->context, a[1].fd);
                         wayland.fds--;
@@ -7868,7 +7885,7 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
         {
                 long idx = self->link;
 
-                if (idx >= 0 && idx < WAYLAND_TIMELINES && c->timelines[idx].live)
+                if (idx >= 0 && idx < c->timeline_table.count && c->timelines[idx].live)
                 {
                         c->timelines[idx].gone = 1;
                         wayland_timeline_unref(c, idx);
@@ -7891,7 +7908,7 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
         {
                 long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
 
-                if (tl < 0 || tl >= WAYLAND_TIMELINES || !c->timelines[tl].live)
+                if (tl < 0 || tl >= c->timeline_table.count || !c->timelines[tl].live)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
                 s->pending_sync_acq_set = 1;
                 s->pending_sync_acq_slot = (unsigned short)tl;
@@ -7902,7 +7919,7 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
         {
                 long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
 
-                if (tl < 0 || tl >= WAYLAND_TIMELINES || !c->timelines[tl].live)
+                if (tl < 0 || tl >= c->timeline_table.count || !c->timelines[tl].live)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
                 s->pending_sync_rel_set = 1;
                 s->pending_sync_rel_slot = (unsigned short)tl;
@@ -8004,7 +8021,7 @@ static void wayland_constraints_update(void)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                for (long at = 0; c && at < WAYLAND_CONSTRAINTS && chosen < 0; at++)
+                for (long at = 0; c && at < c->constraint_table.count && chosen < 0; at++)
                 {
                         struct wayland_constraint *con = &c->constraints[at];
                         struct wayland_surface *surface = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
@@ -8023,7 +8040,7 @@ static void wayland_constraints_update(void)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                for (long at = 0; c && at < WAYLAND_CONSTRAINTS; at++)
+                for (long at = 0; c && at < c->constraint_table.count; at++)
                         if (c->constraints[at].live && c->constraints[at].active && !(slot == client && at == chosen))
                                 wayland_constraint_release(c, &c->constraints[at], 1);
         }
@@ -8043,7 +8060,7 @@ static void wayland_constraints_update(void)
 // A surface that is going: its constraints go, and what they held is let go.
 static void wayland_constraints_drop(struct wayland_client *c, long surface)
 {
-        for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+        for (long at = 0; at < c->constraint_table.count; at++)
                 if (c->constraints[at].live && c->constraints[at].surface == surface + 1)
                         wayland_constraint_release(c, &c->constraints[at], 0);
         wayland_constraints_update();
@@ -8489,7 +8506,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                 if (a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_oneshot && a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_persistent)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the lifetime is oneshot or persistent");
-                for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+                for (long at = 0; at < c->constraint_table.count; at++)
                 {
                         if (c->constraints[at].live && c->constraints[at].surface == wayland_surface_index(c, surface) + 1)
                                 return wayland_fail(c, self->id, WLN_zwp_pointer_constraints_v1_error_already_constrained,
@@ -8497,8 +8514,8 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         if (!c->constraints[at].live && index < 0)
                                 index = at;
                 }
-                if (index < 0)
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pointer constraints");
+                if (index < 0 && (index = wayland_client_take(c, &c->constraint_table)) < 0)
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a pointer constraint");
                 c->constraints[index].id = c->objects[a[0].slot].id;
                 c->constraints[index].live = 1;
                 c->constraints[index].active = 0;
@@ -8666,10 +8683,10 @@ static int wayland_idle_request(struct wayland_client *c, struct wayland_object 
 
                 if (op != WLQ_ext_idle_notifier_v1_get_idle_notification && op != WLQ_ext_idle_notifier_v1_get_input_idle_notification)
                         return WAYLAND_OK;
-                for (at = 0; at < WAYLAND_NOTIFIES && c->notifies[at].live; at++)
+                for (at = 0; at < c->notify_table.count && c->notifies[at].live; at++)
                         ;
-                if (at == WAYLAND_NOTIFIES)
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many idle notifications");
+                if (at == c->notify_table.count && (at = wayland_client_take(c, &c->notify_table)) < 0)
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an idle notification");
                 n = &c->notifies[at];
                 n->live = 1;
                 n->idle = 0;
@@ -8682,7 +8699,7 @@ static int wayland_idle_request(struct wayland_client *c, struct wayland_object 
                 wayland.idle_notifies++;
                 return WAYLAND_OK;
         }
-        if (op == WLQ_ext_idle_notification_v1_destroy && self->link >= 0 && self->link < WAYLAND_NOTIFIES &&
+        if (op == WLQ_ext_idle_notification_v1_destroy && self->link >= 0 && self->link < c->notify_table.count &&
             c->notifies[self->link].live)
         {
                 c->notifies[self->link].live = 0;
@@ -9200,7 +9217,7 @@ WAYLAND_API void wayland_drop(long slot)
                         }
                         wayland.pools--;
                 }
-        for (long at = 0; at < WAYLAND_TIMELINES; at++)
+        for (long at = 0; at < c->timeline_table.count; at++)
                 if (c->timelines[at].live)
                 {
                         if (wayland.syncobj.drop && c->timelines[at].handle >= 0)
@@ -9208,10 +9225,10 @@ WAYLAND_API void wayland_drop(long slot)
                         c->timelines[at].live = 0;
                         c->timelines[at].handle = -1;
                 }
-        for (long at = 0; at < WAYLAND_PARAMS; at++)
+        for (long at = 0; at < c->params_table.count; at++)
                 if (c->params[at].live)
                         wayland_params_free(c, &c->params[at]);
-        for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+        for (long at = 0; at < c->constraint_table.count; at++)
                 if (c->constraints[at].live)
                 {
                         c->constraints[at].live = 0;
@@ -9237,7 +9254,7 @@ WAYLAND_API void wayland_drop(long slot)
                 if (c->pending[which])
                         wayland.host->clip_abort(wayland.host->context, c->slot, which);
         }
-        for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+        for (long at = 0; at < c->notify_table.count; at++)
                 if (c->notifies[at].live)
                 {
                         c->notifies[at].live = 0;
@@ -10303,7 +10320,7 @@ WAYLAND_API void wayland_idle_tick(void)
 
                 if (!c || c->dead)
                         continue;
-                for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                for (long at = 0; at < c->notify_table.count; at++)
                 {
                         struct wayland_notify *n = &c->notifies[at];
                         long base;
@@ -10349,7 +10366,7 @@ WAYLAND_API long wayland_idle_due(void)
 
                 if (!c || c->dead)
                         continue;
-                for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                for (long at = 0; at < c->notify_table.count; at++)
                 {
                         struct wayland_notify *n = &c->notifies[at];
                         long base, when;
@@ -10377,7 +10394,7 @@ WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idle
         *idled = 0;
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && !wayland.client[slot]->dead)
-                        for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                        for (long at = 0; at < wayland.client[slot]->notify_table.count; at++)
                                 *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
 }
 

@@ -2632,7 +2632,7 @@ static void test_idle_notify(void)
         wlc_send(c, s.surface, WLQ_wl_surface_destroy);
         WLCHECK(c->errors == 0 && wayland_idle_inhibited() == 0, "destroying its surface ends its inhibitor");
 
-        /* one client holds eight; the ninth is refused, and a destroyed one gives its place back */
+        /* one client holds eight, a destroyed one gives its place back, and the ninth is given as well */
         session_open(&s2);
         s2_notifier = wl_global(s2.c, s2.registry, WLI_ext_idle_notifier_v1, 2);
         wlc_forget(s2.c);
@@ -2648,8 +2648,7 @@ static void test_idle_notify(void)
         WLCHECK(s2.c->errors == 0, "a destroyed notification gives its place back");
         wlc_send(s2.c, s2_notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, wlc_id(s2.c, WLI_ext_idle_notification_v1, 2), 100UL,
                  s2.seat);
-        WLCHECK(s2.c->errors == 1 && s2.c->error_code == WLN_wl_display_error_no_memory,
-                "a ninth notification is refused with no_memory");
+        WLCHECK(s2.c->errors == 0, "a ninth notification is given too: a client holds as many as it makes");
         wlc_end(s2.c);
 
         /* a client that goes takes its notifications with it: nothing is due, and nothing is idle */
@@ -5097,9 +5096,9 @@ static void test_clipboard(void)
         }
         wlc_end(k.s.c);
         clip_open(&k);
-        for (int at = 0; at < WAYLAND_SOURCES + 1; at++)
+        for (int at = 0; at < 100; at++)
                 clip_source(&k, at & 1, "text/plain");
-        WLCHECK(k.s.c->errors == 1 && k.s.c->error_code == WAYLAND_NO_MEMORY, "a client holds at most eight sources (%s)", k.s.c->error_text);
+        WLCHECK(k.s.c->errors == 0, "a client holds as many sources as it makes: a hundred (%s)", k.s.c->errors ? k.s.c->error_text : "none refused");
         wlc_end(k.s.c);
         clip_open(&k);
         wlc_send(k.s.c, clip_source(&k, 0, "text/plain"), WLQ_wl_data_source_set_actions, 8L);
@@ -5109,18 +5108,18 @@ static void test_clipboard(void)
         wayland_keyboard_to(k.row);
         clip_other(0, "offered");
         wlc_forget(k.s.c);
-        for (int at = 0; at < WAYLAND_OFFERS + 6; at++)
+        for (int at = 0; at < 22; at++)
                 clip_other(0, "offered");
         wlc_pump(k.s.c);
-        WLCHECK(wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer) <= WAYLAND_OFFERS && k.s.c->errors == 0,
-                "a client that keeps its offers is given at most sixteen (%ld)", wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer));
+        WLCHECK(wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer) >= 22 && k.s.c->errors == 0,
+                "a client that keeps its offers is given every one, each a selection (%ld)", wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer));
         {
                 long last = 0;
 
                 for (long at = 0; at < k.s.c->events; at++)
                         if (k.s.c->ev[at].iface == WLI_wl_data_device && k.s.c->ev[at].opcode == WLE_wl_data_device_selection)
                                 last = (long)k.s.c->ev[at].u[0];
-                WLCHECK(last == 0, "and then told there is no selection");
+                WLCHECK(last != 0, "and told of the last as the selection");
         }
         wlc_end(k.s.c);
         /* a client that goes while its copy is being read: the host is told, and everything comes back */
@@ -6731,14 +6730,14 @@ static void test_games(void)
         wlc_end(cd);
         game_open(&d);
         cd = d.k.s.c;
-        for (int at = 0; at < WAYLAND_CONSTRAINTS + 1 && !cd->errors; at++)
+        for (int at = 0; at < 40 && !cd->errors; at++)
         {
                 unsigned long surface = wlc_id(cd, WLI_wl_surface, 6), object = wlc_id(cd, WLI_zwp_locked_pointer_v1, 1);
 
                 wlc_send(cd, d.k.s.compositor, WLQ_wl_compositor_create_surface, surface);
                 wlc_send(cd, d.k.s.constraints, WLQ_zwp_pointer_constraints_v1_lock_pointer, object, surface, d.pointer, 0UL, 2L);
         }
-        WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_NO_MEMORY, "a client holds at most eight constraints (%s)", cd->error_text);
+        WLCHECK(cd->errors == 0, "a client holds as many constraints as it makes: forty (%s)", cd->errors ? cd->error_text : "none refused");
         wlc_end(cd);
         game_open(&d);
         cd = d.k.s.c;
