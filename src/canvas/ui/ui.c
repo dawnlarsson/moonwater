@@ -1370,6 +1370,10 @@ static void taskbar_moon_seen(positive now);
 static void taskbar_moon_damaged(int band, const int *rect);
 static int taskbar_moon_more(const struct taskbar_view *view);
 static int taskbar_moon_most(int size);
+static b64 taskbar_moon_share(void);
+static int taskbar_moon_glow_square(const struct taskbar_view *view, int square[4]);
+static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixels, const int square[4]);
+static int taskbar_moon_glow_was(int band, int shown);
 static void taskbar_spin_set(int seconds);
 static void taskbar_bar_set(int separate, int edge);
 #define TASKBAR_EDGE_LEAST -16 // `taskbar edge`: logical pixels out past the screen's edge at the most (held further by TASKBAR_EDGE_KEEP)

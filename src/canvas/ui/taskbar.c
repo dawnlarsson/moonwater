@@ -769,6 +769,8 @@ static struct taskbar_band
         struct ui_tween grow;   // how far the moon has grown, Q30 of TASKBAR_MOON_GROW
         int moon_damage[4];     // the damage the moon made of itself (left, top, right, bottom), which nothing under the band is
         int moon_own;           // and that it is there to be told apart
+        int glow_key[5];        // what its glow's pixels were drawn for (taskbar_moon_glow): its side, the growth, the accent, the theme, the buffer
+        int glow_shown;         // its glow was in the last frame, so the frame after it puts the ground back where it was
 } taskbar_bands[WINDOWS_OUTPUTS];
 
 static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
@@ -1169,6 +1171,98 @@ static void taskbar_moon_damaged(int band, const int *rect)
                 return;
         memory_copy(taskbar_bands[band].moon_damage, rect, sizeof(taskbar_bands[band].moon_damage));
         taskbar_bands[band].moon_own = 1;
+}
+
+/*
+        The moon's glow: while the pointer is over the moon or the launcher is up, a halo round it of the rim light's hues (the accent above,
+        the cool turn of it toward the left and the warm toward the right, ui_moon_glow_hue), so the fresnel rim's tint runs on past the limb
+        into the air round it. It is as strong as the moon is grown (the same tween, the kit's ease over TASKBAR_MOON_GROW_MS, at once with
+        reduced motion), strongest at the limb and falling off as the square of the way across TASKBAR_MOON_HALO percent of the moon, and
+        dithered, so its fall has no rings. It reaches past the band, so it is a frame of its own under the band's plates (the compositor's,
+        compositor_moon_glow_frame), premultiplied, in a square that holds the disc at its largest and the reach round it; that square is
+        the moon's own damage while the glow is shown or going, and nothing else is.
+*/
+#define TASKBAR_MOON_HALO 45 // the glow's reach past the disc, percent of the moon's size
+static unsigned int taskbar_accent(void);
+#define TASKBAR_MOON_HALO_ALPHA 0.5 // its strength at the limb, the moon grown whole
+
+// The square of the glow round the moon of the band being drawn (left, top, side, side), in the space's pixels; false with no moon.
+static int taskbar_moon_glow_square(const struct taskbar_view *view, int square[4])
+{
+        int x, y, w, h, size, reach;
+
+        if (!taskbar_slot(view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0 || taskbar.moon_ink)
+                return 0;
+        size = w < h ? w : h, reach = size * TASKBAR_MOON_HALO / 100 + taskbar_moon_most(size) + 1;
+        square[0] = x + (w - size) / 2 - reach, square[1] = y + (h - size) / 2 - reach, square[2] = square[3] = size + 2 * reach;
+        return 1;
+}
+
+// Whether a band's glow was shown in the last frame, and now whether it is.
+static int taskbar_moon_glow_was(int band, int shown)
+{
+        int was;
+
+        if (band < 0 || band >= WINDOWS_OUTPUTS)
+                return 0;
+        was = taskbar_bands[band].glow_shown, taskbar_bands[band].glow_shown = shown;
+        return was;
+}
+
+/*
+        The glow's pixels for the band being drawn into pixels (its square's, a row of square[2]), premultiplied ARGB: false when there is
+        none now (the moon at rest). Drawn again only when the growth, the size, the accent or the theme changed since the last.
+*/
+static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixels, const int square[4])
+{
+        struct taskbar_band address_to band = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+        b64 share = taskbar_moon_share();
+        int side = square[2], size, key[5];
+        unsigned int accent = taskbar_accent();
+        decimal strength, grown, r, reach, c = side / 2.0;
+
+        if (share <= 0)
+                return 0;
+        // The moon's size, as its slot has it.
+        {
+                int x, y, w, h;
+
+                if (!taskbar_slot(view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
+                        return 0;
+                size = w < h ? w : h;
+        }
+        key[0] = side, key[1] = (int)(share >> 10), key[2] = (int)accent, key[3] = window_light(compositor_tab_target(0)), key[4] = (int)(positive)pixels;
+        if (!memory_compare(band->glow_key, key, sizeof(key)))
+                return 1;
+        memory_copy(band->glow_key, key, sizeof(key));
+        strength = TASKBAR_MOON_HALO_ALPHA * (decimal)share / (decimal)UI_ONE;
+        grown = size * (1 + (decimal)share / (decimal)UI_ONE * TASKBAR_MOON_GROW / 100.0), r = grown / 2, reach = size * TASKBAR_MOON_HALO / 100.0;
+        for (int y = 0; y < side; y++)
+                for (int x = 0; x < side; x++)
+                {
+                        decimal dx = x + 0.5 - c, dy = y + 0.5 - c, d = square_root(dx * dx + dy * dy), t = (d - r) / reach, a, value[4];
+                        unsigned int h = ui_moon_hash((unsigned int)x * 73856093u ^ (unsigned int)y * 19349663u), hue, out = 0;
+                        decimal dither = ((h & 255) + (h >> 8 & 255)) / 512.0 - 0.5;
+
+                        // Under the disc nothing (the plate is over it), a pixel's ramp in at the limb, then the fall.
+                        a = d < r - 1 || t >= 1 ? 0 : strength * (t < 0 ? 1 : (1 - t) * (1 - t)) * (d < r ? d - (r - 1) : 1);
+                        if (a <= 0)
+                        {
+                                pixels[(long)y * side + x] = 0;
+                                continue;
+                        }
+                        hue = ui_moon_glow_hue(accent, dx / r < -1 ? -1 : dx / r > 1 ? 1 : dx / r);
+                        value[3] = a * 255 + dither;
+                        value[3] = value[3] < 0 ? 0 : value[3] > 255 ? 255 : value[3];
+                        for (int k = 0; k < 3; k++)
+                        {
+                                value[k] = (hue >> (16 - 8 * k) & 255) * a + dither;
+                                value[k] = value[k] < 0 ? 0 : value[k] > value[3] ? value[3] : value[k];
+                        }
+                        out = (unsigned int)(value[3] + 0.5) << 24 | (unsigned int)(value[0] + 0.5) << 16 | (unsigned int)(value[1] + 0.5) << 8 | (unsigned int)(value[2] + 0.5);
+                        pixels[(long)y * side + x] = out;
+                }
+        return 1;
 }
 
 // `taskbar tasks grouped|separate` (separate 1) and `taskbar edge` (logical pixels, TASKBAR_EDGE_LEAST to TASKBAR_EDGE_MOST, else 0).

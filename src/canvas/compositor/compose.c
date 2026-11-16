@@ -1615,7 +1615,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_OVERLAYS 40 // the snap assist's thumbnails and veils, and the grid's tiles, borders and regions (compositor_overlays)
 // A client's surfaces shown as layers of its window, each a frame with no chrome after its window's (wayland_host.c appends them): room for this many in all.
 #define COMPOSITOR_LAYERS 64
-#define COMPOSITOR_FRAMES (2 * WINDOWS + 2 + 2 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS) // the snap preview has a frame of its own
+#define COMPOSITOR_FRAMES (2 * WINDOWS + 2 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS) // the snap preview has a frame of its own, the moon's glow one a band
 
 /*
         The scene: inside the target's damage, each window where nothing

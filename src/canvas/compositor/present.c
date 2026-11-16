@@ -953,6 +953,7 @@ static void compositor_present_frames(void)
                 for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
                 {
                         compositor_band_frame(&band);
+                        count += compositor_moon_glow_frame(&frames[count]); // under the plates
                         count += compositor_panel_tabs(&band, &frames[count]);
                 }
                 compositor.band_at = 0;

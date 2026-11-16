@@ -409,13 +409,60 @@ static void compositor_moon_keep(positive now)
                 if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
                         continue;
                 most = taskbar_moon_most(w < h ? w : h);
-                compositor_band_damage(x - most, y - most, w + 2 * most, h + 2 * most);
-                rect[0] = x - most < 0 ? 0 : x - most, rect[1] = y - most < 0 ? 0 : y - most;
-                rect[2] = x + w + most > compositor.width ? compositor.width : x + w + most;
-                rect[3] = y + h + most > compositor.height ? compositor.height : y + h + most;
+                {
+                        int square[4] = {x - most, y - most, w + 2 * most, h + 2 * most}, glow[4], shown = taskbar_moon_share() > 0;
+
+                        // While the glow is shown, or was in the last frame, its square is the moon's damage: past the band, and nothing else.
+                        if (taskbar_moon_glow_was(compositor.band_at, shown) | shown && taskbar_moon_glow_square(&view, glow))
+                                memory_copy(square, glow, sizeof(square));
+                        compositor_band_damage(square[0], square[1], square[2], square[3]);
+                        rect[0] = square[0] < 0 ? 0 : square[0], rect[1] = square[1] < 0 ? 0 : square[1];
+                        rect[2] = square[0] + square[2] > compositor.width ? compositor.width : square[0] + square[2];
+                        rect[3] = square[1] + square[3] > compositor.height ? compositor.height : square[1] + square[3];
+                }
                 taskbar_moon_damaged(compositor.band_at, rect);
         }
         compositor.band_at = 0;
+}
+
+/*
+        The moon's glow of the band being drawn as a frame of its own (taskbar_moon_glow): its square, premultiplied and blended over what is
+        under it, put under the band's plates so the moon is over it. Its pixels are a buffer a band, made as large as the square when it
+        is first wanted larger (the card forgets the one before). Answers how many frames: 1, or 0 with the moon at rest.
+*/
+static struct
+{
+        unsigned int *pixels;
+        positive bytes;
+} compositor_glow[WINDOWS_OUTPUTS];
+
+static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
+{
+        struct taskbar_view view = compositor_taskbar_view();
+        unsigned int at = (unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? (unsigned int)compositor.band_at : 0;
+        int square[4];
+        positive bytes;
+
+        if (taskbar_moon_share() <= 0 || !taskbar_moon_glow_square(&view, square))
+                return 0;
+        bytes = (positive)square[2] * (positive)square[3] * 4;
+        if (compositor_glow[at].bytes < bytes)
+        {
+                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return 0;
+                if (compositor_glow[at].pixels)
+                        gpu_forget(compositor_glow[at].pixels, compositor_glow[at].bytes),
+                            compositor_call(syscall(munmap), (positive)compositor_glow[at].pixels, compositor_glow[at].bytes, 0, 0, 0, 0);
+                compositor_glow[at].pixels = (unsigned int *)got, compositor_glow[at].bytes = bytes;
+        }
+        if (!taskbar_moon_glow(&view, compositor_glow[at].pixels, square))
+                return 0;
+        memory_zero(frame, sizeof(*frame));
+        frame->x = square[0], frame->y = square[1], frame->width = square[2], frame->height = square[3], frame->scale = view.scale;
+        frame->pixels = compositor_glow[at].pixels, frame->pitch = (unsigned long)square[2], frame->blend = 1, frame->slot = -5, frame->square = 15;
+        return 1;
 }
 
 // After a present: a slide still going, or the highlight of the tab with the keys still moving from one tab to the next, is damaged
