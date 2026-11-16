@@ -76002,12 +76002,14 @@ def harness_net_exhaustive_proof(argv):
     template = TEMPLATE_NET_EXHAUSTIVE
     production = "\n".join([ul_c_typedefs(net, "dhcp_lease", "dhcp_gathered")] + [
         ul_c_function(net, name) for name in (
-            "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
+            "net_scope_v4", "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
             "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
             "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
             "dhcp_walk", "tls_date_value", "tls_der_integer", "tls_der_named_bits",
             "tls_date_seconds", "tls_revocation_fresh")])
-    production = re.search(r"#define TLS_REVOCATION_SKEW .*\n", net).group(0) + production
+    #   The scopes http_address_public judges by, which are net_scope_v4's.
+    production = (re.search(r"#define TLS_REVOCATION_SKEW .*\n", net).group(0) +
+                  re.search(r"(?:#define NET_SCOPE_\w+ \d+\n)+", net).group(0) + production)
     source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
         "/* PRODUCTION */", production)
     compiler = shutil.which("cc") or shutil.which("clang")
@@ -78174,8 +78176,8 @@ WIRE_FAMILIES = ("NLM_", "NLMSG_", "NLA_", "RTM_", "RTA_", "RT_", "RTN_", "RTPRO
                  "IPPROTO_", "IP_", "IPV6_", "SO_", "SOL_", "AF_", "MSG_", "TCP_", "UDP_",
                  "PR_")
 
-WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/sh/net.c", "src/sh/host.c",
-              "src/waterlink/waterlink.c", "src/waterlink/discover.c",
+WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/net/discovery.c", "src/sh/net.c",
+              "src/sh/host.c", "src/waterlink/waterlink.c", "src/waterlink/group.c",
               "src/waterlink/nearby.c", "src/waterlink/link.c",
               "src/waterlink/service.c")
 
@@ -78288,7 +78290,7 @@ def harness_wire_constants(argv):
     checks(len(known) >= 120, "only %d kernel numbers were compared" % len(known))
     #   The filter is proved on the file that needs it: Darwin's SO_REUSEPORT
     #   is 0x0200 there, and what is compared is the kernel's 15.
-    service = (HARNESS_ROOT / "src/waterlink/service.c").read_text()
+    service = (HARNESS_ROOT / "src/net/discovery.c").read_text()
     checks("#define SO_REUSEPORT 0x0200" in service and
            "#define SO_REUSEPORT 0x0200" not in wire_linux_side(service) and
            "#define SO_REUSEPORT 15" in wire_linux_side(service) and
@@ -78569,7 +78571,7 @@ def harness_security_hygiene(argv):
         ("dns_records_end", ("message",)),
         ("dns_reply_identity", ("reply",)),
         ("dns_reply_result", ("reply",)),
-        ("waterlink_mdns_read", ("packet",)),
+        ("discovery_mdns_read", ("packet",)),
         ("tls_asn1_length", ("bytes",)),
         ("tls_asn1_enter", ("bytes",)),
         ("tls_asn1_skip", ("bytes",)),
@@ -78628,7 +78630,7 @@ def harness_security_hygiene(argv):
                    "%s: radio_keeper_said is given a literal, not %s" % (file, said.strip()[:40]))
     wire_source = (net + source_text(HARNESS_ROOT / "src/sh/host.c") +
                    (HARNESS_ROOT / "src/sh/net.c").read_text() +
-                   (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
+                   (HARNESS_ROOT / "src/net/discovery.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
     try:
         byte_reader_source()
@@ -78638,7 +78640,7 @@ def harness_security_hygiene(argv):
         found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
                           wire_source, re.M | re.S)
         checks(found is not None,
-               "reader-only: cannot find %s in net.c, host.c, sh/net.c, discover.c or bowl.c" % name)
+               "reader-only: cannot find %s in net.c, host.c, sh/net.c, discovery.c or bowl.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -78667,7 +78669,7 @@ def harness_security_hygiene(argv):
     #   takes nothing from seccomp but success, ENOSYS included.
     confined_callers = {
         "http_run": {"http_get", "http_fetch_to", "http_spider", "http_apart_task",
-                     "locale_auto_ask"},
+                     "locale_auto_ask", "discovery_trace_task"},
         "http_get": set(),
         "http_fetch_to": set(),
         "http_spider": set(),
@@ -78690,8 +78692,8 @@ def harness_security_hygiene(argv):
         "wifi_keep": {"radio_station_run"},
         "radio_station_run": {"radio_broker"},
         "radio_broker": {"radio_join_apart"},
-        #   The listener reads mDNS only in its confined reader.
-        "waterlink_mdns_read": {"link_mdns_child"},
+        #   mDNS is read only in the network's confined reader.
+        "discovery_mdns_read": {"discovery_mdns_child"},
         "net_resolve_v4": {"http_lookup", "dns_apart_task"},
         "dns_resolve_any": {"dns_resolve_wanted", "net_resolve_v4"},
         "dns_resolve_at": {"dns_resolve_any", "dns_apart_task"},
@@ -78702,6 +78704,7 @@ def harness_security_hygiene(argv):
     apart_tasks = {"http_apart_task": "src/net/net.c",
                    "nts_ke_task": "src/net/net.c",
                    "dns_apart_task": "src/net/net.c",
+                   "discovery_trace_task": "src/net/discovery.c",
                    "locale_auto_ask_task": "src/sh/host.c",
                    "sntp_apart_task": "src/sh/host.c"}
     found_callers = {}
@@ -78729,18 +78732,24 @@ def harness_security_hygiene(argv):
                "confinement: %s is no longer handed to net_apart in %s" % (task, home))
         for caller in sorted(found_callers.get(task, set())):
             checks(False, "confinement: %s calls the task %s directly" % (caller, task))
-    #   The listener's mDNS reader is a fork of the listener, which keeps the
-    #   link's key and every session's and group's: it forgets the link
-    #   before it confines itself, and both before it reads a packet.
-    reader = re.search(r"static DEAD_END COLD fn link_mdns_child\(.*?^\}$",
-                       uncommented((HARNESS_ROOT / "src/waterlink/nearby.c").read_text()),
+    #   The mDNS reader is a fork of whoever listens, and waterlink's listener
+    #   keeps the link's key and every session's and group's: the reader
+    #   forgets what its caller names before it confines itself, and both
+    #   before it reads a packet, and the listener names the link's secrets.
+    reader = re.search(r"static DEAD_END COLD fn discovery_mdns_child\(.*?^\}$",
+                       uncommented((HARNESS_ROOT / "src/net/discovery.c").read_text()),
                        re.M | re.S)
     checks(reader is not None and
-           0 <= reader.group(0).find("link_secrets_forget()") <
-           reader.group(0).find("link_mdns_confine(") <
-           reader.group(0).find("waterlink_mdns_read("),
-           "confinement: the mDNS reader forgets the link's secrets, then confines "
+           0 <= reader.group(0).find("forget()") <
+           reader.group(0).find("discovery_mdns_confine(") <
+           reader.group(0).find("discovery_mdns_read("),
+           "confinement: the mDNS reader forgets what its caller names, then confines "
            "itself, then reads")
+    checks(re.search(r"discovery_mdns_read_apart\(address_of waterlink_mdns_service,\s*"
+                     r"link_secrets_forget,",
+                     uncommented((HARNESS_ROOT / "src/waterlink/nearby.c").read_text()))
+           is not None,
+           "confinement: the listener's mDNS reader is handed the link's secrets to forget")
     apart = uncommented(net)
     install = re.search(r"static COLD bool net_filter_install\(.*?^\}$", apart, re.M | re.S)
     child = re.search(r"static DEAD_END COLD fn net_apart_child\(.*?^\}$", apart, re.M | re.S)
@@ -78774,16 +78783,16 @@ HOSTILE_SOURCES = {
         "dns_answer_address": "compares names; only addresses are printed",
         "dns_skip_name": "skips a name",
         "dns_records_end": "checks record framing and aggregate decompression work; prints nothing",
-        "waterlink_dns_name": "names pass link_name_good before use",
+        "discovery_mdns_name": "names pass link_name_good before use",
     },
     "http_header": {
         "http_response_framing_from": "row http (Location, reason, headers through wget and fetch)",
         "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
     },
-    "waterlink_mdns_read": {
-        "link_mdns_child": "the listener's confined reader: the reading goes back as "
-                           "waterlink_found, and its names pass link_name_for "
-                           "(link_name_good) in link_nearby_heard",
+    "discovery_mdns_read": {
+        "discovery_mdns_child": "the confined reader: the reading goes back as "
+                                "discovery_mdns_found, and its names pass link_name_for "
+                                "(link_name_good) in link_nearby_heard",
     },
     "file_machine_read": {
         "build_arch_here": "build tool, the machine field only",
@@ -90160,7 +90169,7 @@ def mdns_model_name(packet, at, pointers=None):
 
 
 def mdns_model_read(packet, budget=True):
-    """waterlink_mdns_read as a model written from its comments and the
+    """discovery_mdns_read as a model written from its comments and the
     RFCs it cites: (read, asked, ports of the instances found, compression
     pointers followed). The reader in the binary must say the same of every
     packet.
@@ -90603,9 +90612,9 @@ def harness_waterlink_sanitized(argv, lift=False):
                the real code and the start callees recording stubs. The proof:
                the same driver built with 266535d8's link_request fires an
                ASan stack-buffer-overflow, and the fixed tree passes.
-      mdns     pre-auth: waterlink_mdns_read and net.c's dns_copy_name over
+      mdns     pre-auth: discovery_mdns_read and net.c's dns_copy_name over
                structured DNS-SD, mutations and random bytes, with a round trip
-               through waterlink_mdns_announce.
+               through discovery_mdns_announce.
       gate     pre-auth: waterlink_gate_passes and waterlink_mac1 over every
                length and kind, and waterlink_admit's token buckets.
       core     the link core: waterlink_judge against test/checks.c's
@@ -91063,7 +91072,8 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *a
     svc = read("src/waterlink/service.c")
     push = read("src/waterlink/push_dictionary.h")
     net = read("src/net/net.c")
-    disc = read("src/waterlink/discover.c")
+    disc = read("src/net/discovery.c")
+    group = read("src/waterlink/group.c")
     hs = read("src/waterlink/handshake.c")
     link = read("src/waterlink/link.c")
     checks = read("test/checks.c")
@@ -91415,7 +91425,7 @@ int main(int argc, char **argv)
 '''
     DRIVER_MDNS = r'''/*      The mDNS / DNS-SD reader, driven directly.
 
-        waterlink_mdns_read is the most exposed parser on the machine: any
+        discovery_mdns_read is the most exposed parser on the machine: any
         host on the local link sends it a datagram and it runs before any
         key is in hand. This target compiles it and the name walker it stands
         on (net.c's dns_copy_name) hosted under the sanitizers and feeds it
@@ -91428,7 +91438,7 @@ int main(int argc, char **argv)
         random bytes of every length. A well-formed packet must read out the
         instances and ports the model put in it; every input at all must be
         read without a sanitizer saying a word, and a round trip through
-        waterlink_mdns_announce must come back the same.
+        discovery_mdns_announce must come back the same.
 */
 
 
@@ -91498,7 +91508,7 @@ static positive put_srv_record(p8 *packet, positive at, const char *label,
 /*      A well-formed response carrying `k` advertised PTR+SRV pairs for
         labels drawn from a small pool. Their wire order varies, labels repeat
         (found_at dedups, last SRV port wins), and the set can overflow
-        WATERLINK_FOUND_MAX. Fills the model with the PTR/SRV intersection the
+        DISCOVERY_MDNS_FOUND_MAX. Fills the model with the PTR/SRV intersection the
         production reader must expose. */
 static positive build_response(p8 *packet, struct model_instance *model,
                                positive *model_count)
@@ -91603,14 +91613,14 @@ int main(int argc, char **argv)
         /*      Round trip: our own announcement and query, read back. */
         for (int r = 0; r < 2000; r++)
         {
-                p8 packet[WATERLINK_MDNS_MAX];
+                p8 packet[DISCOVERY_MDNS_MAX];
                 p8 instance[10], host[6];
-                struct waterlink_found found;
+                struct discovery_mdns_found found;
                 positive length;
 
                 for (int i = 0; i < 10; i++) instance[i] = (p8)draw(256);
                 for (int i = 0; i < 6; i++) host[i] = (p8)draw(256);
-                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                length = discovery_mdns_announce(&waterlink_mdns_service, packet, sizeof packet, instance,
                                                  host, (p16)(1 + draw(65534)),
                                                  draw(2) ? 0x0a4d0002u : 0, 4500,
                                                  (p16)draw(65536), null, 0);
@@ -91619,13 +91629,13 @@ int main(int argc, char **argv)
                         p8 *exact = malloc(length);
 
                         memcpy(exact, packet, length);
-                        if (!waterlink_mdns_read(exact, length, &found))
+                        if (!discovery_mdns_read(&waterlink_mdns_service, exact, length, &found))
                                 roundtrip_bad++;
                         else if (found.count != 1)
                                 roundtrip_bad++;
                         free(exact);
                 }
-                length = waterlink_mdns_query(packet, sizeof packet);
+                length = discovery_mdns_query(&waterlink_mdns_service, packet, sizeof packet);
                 if (length)
                 {
                         p8 *exact = malloc(length);
@@ -91634,21 +91644,21 @@ int main(int argc, char **argv)
                         /*      Our own query is a query, not a response; the
                                 reader answers asked only when it is not us
                                 on our own socket, but reads it well formed. */
-                        (void)waterlink_mdns_read(exact, length, &found);
+                        (void)discovery_mdns_read(&waterlink_mdns_service, exact, length, &found);
                         free(exact);
                 }
         }
 
         for (long n = 0; n < count; n++)
         {
-                p8 scratch[WATERLINK_MDNS_MAX + 64];
+                p8 scratch[DISCOVERY_MDNS_MAX + 64];
                 struct model_instance model[16];
                 positive model_count = 0;
                 positive length;
                 int kind = draw(10);
                 int expect_asked = 0, check_model = 0;
                 p8 *packet;
-                struct waterlink_found found;
+                struct discovery_mdns_found found;
 
                 if (kind < 4)
                 {
@@ -91681,7 +91691,7 @@ int main(int argc, char **argv)
                 {
                         /*      Pure noise, every length. A compression byte
                                 is common so pointer handling is exercised. */
-                        length = draw(WATERLINK_MDNS_MAX + 2);
+                        length = draw(DISCOVERY_MDNS_MAX + 2);
                         for (positive at = 0; at < length && at < sizeof scratch; at++)
                                 scratch[at] = draw(6) ? (p8)draw(256)
                                                       : (p8)(0xc0 | draw(64));
@@ -91690,7 +91700,7 @@ int main(int argc, char **argv)
 
                 packet = malloc(length ? length : 1);
                 memcpy(packet, scratch, length);
-                if (waterlink_mdns_read(packet, length, &found))
+                if (discovery_mdns_read(&waterlink_mdns_service, packet, length, &found))
                 {
                         read_ok++;
                         found_total += found.count;
@@ -91706,7 +91716,7 @@ int main(int argc, char **argv)
                                         for (positive m = 0; m < model_count &&
                                                              m < found.count; m++)
                                         {
-                                                struct waterlink_found_instance *fi =
+                                                struct discovery_mdns_instance *fi =
                                                         &found.instance[m];
                                                 if (fi->label_length != model[m].label_length ||
                                                     memcmp(fi->label, model[m].label,
@@ -92344,9 +92354,11 @@ int main(int argc, char **argv)
         sec(net, "#define DNS_PORT 53", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
-        sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
+        sec(disc, "#define DISCOVERY_MDNS_PORT 5353", "// Writing ----"),
+        sec(group, "// The service, the type every DNS-SD browser",
+            "/*\n        What a group's key gives a member"),
         sec(disc, "// Writing ----", "// Reading ----"),
-        sec(disc, "// Reading ----", "#endif // WATERLINK_DISCOVER_INCLUDED"),
+        sec(disc, "// Reading ----", "// The end of the records ----"),
         DRIVER_MDNS])
 
     gate_source = "\n".join([
@@ -92502,7 +92514,7 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
         checks_run(mdns is not None, "the mDNS reader builds")
         if mdns is not None:
             got, _ = run(mdns, [int(150000 * scale), hex(seed or 0x5353ab)])
-            checks_run(got is not None, "waterlink_mdns_read passes ASan and the model")
+            checks_run(got is not None, "discovery_mdns_read passes ASan and the model")
 
         gate, err = build("gate", gate_source)
         checks_run(gate is not None, "the handshake gate builds")
@@ -92549,7 +92561,7 @@ def waterlink_pre_source():
     """The pre-authentication half of the listener as one hosted C unit.
 
     Everything a stranger on the network reaches before a key is proved:
-    discover.c and handshake.c whole, nearby.c's greeting and answering,
+    the network's mDNS records, group.c and handshake.c whole, nearby.c's greeting and answering,
     and service.c's receive loop (recvmmsg and its UDP_GRO runs), dispatch,
     initiation, carried-datagram checks, the stamp table and the client's
     answer -- sliced from the tree by their source text, so what is fuzzed
@@ -92572,7 +92584,8 @@ def waterlink_pre_source():
     link = read("src/waterlink/link.c")
     net = read("src/net/net.c")
     hs = read("src/waterlink/handshake.c")
-    disc = read("src/waterlink/discover.c")
+    disc = read("src/net/discovery.c")
+    group = read("src/waterlink/group.c")
     near = read("src/waterlink/nearby.c")
     svc = read("src/waterlink/service.c")
 
@@ -93052,7 +93065,15 @@ static bipolar link_groups_read(link_groups address_to groups,
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
-        sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
+        sec(disc, "#define DISCOVERY_MDNS_PORT 5353", "// The end of the records ----"),
+        sec(group, "#define WATERLINK_NAMESPACE_MAX 32", "#endif // WATERLINK_GROUP_INCLUDED"),
+        #   The local network's socket: the kernel's numbers and its record
+        #   for a message, the socket's own record, and an option set; and
+        #   the count of what discovery sends, which its sends keep.
+        "#include <errno.h>\nstatic positive discovery_sent;\n",
+        sec(disc, "/*      The kernel's numbers for the socket options and control messages the\n"
+                  "        socket asks for",
+            "/*      An IPv4 datagram socket that does not wait"),
         sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
         sec(svc, "typedef struct\n{\n        string_address name;",
             "// The grant a word names, or 0."),
@@ -93069,28 +93090,37 @@ static bipolar link_groups_read(link_groups address_to groups,
         sec(svc, "static fn link_keys_install(", "// Sending ----"),
         sec(svc, "static positive link_destination(",
             "/*\n        A run of full datagrams to one place"),
-        sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "/*      A frame whose payload is made already"),
         SERVICE_STUBS,
         sec(near, "#define LINK_PEERS_LOCK", "p8 link_groups_load("),
         NEARBY_STUBS,
         sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static p8 link_name_for(", "// The listener's side of it"),
-        sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
+        sec(near, "// The listener's side of it",
+            "/*\n        A read of the groups file that says nothing"),
         NEARBY_GROUP_STUBS,
-        sec(near, "typedef struct\n{\n        p32 multiaddr;",
-            "/*\n        Every interface with an IPv4 address"),
-        sec(near, "static p8 link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(disc, "/*\n        Joins the group on one interface",
+            "//      The memberships asked for again"),
+        sec(disc, "/*      One packet to the group, out of one interface",
+            "/*\n        What this machine can use of the local network"),
+        sec(near, "/*      The outcome of one send", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
-            "/*\n        The mDNS reader, apart."),
-        #   The listener reads mDNS in a confined child; the fuzz reads it in
-        #   place, since the reading is what it fuzzes.
-        "static bool link_mdns_read_apart(const p8 *packet, positive length,\n"
-        "                                 struct waterlink_found *found)\n"
-        "{\n        return waterlink_mdns_read(packet, length, found);\n}\n",
+            "/*\n        One mDNS packet from the local link"),
+        #   The listener reads mDNS in the network's confined child; the fuzz
+        #   reads it in place, since the reading is what it fuzzes.
+        "static bool discovery_mdns_read_apart(const discovery_mdns_service *service,\n"
+        "                                      void (*forget)(void), p8 *packet,\n"
+        "                                      positive length,\n"
+        "                                      struct discovery_mdns_found *found)\n"
+        "{\n        (void)forget;\n"
+        "        return discovery_mdns_read(service, packet, length, found);\n}\n"
+        "static void link_secrets_forget(void) {}\n",
         sec(near, "/*\n        One mDNS packet from the local link",
             "/*\n        The listener's turn:"),
-        sec(near, "// Read what is waiting on the mDNS socket",
+        #   The socket's read of one datagram, and the listener's loop over it.
+        sec(disc, "#if !defined(MACOS)\n/* The local IPv4 address the kernel says received a packet.",
+            "// The end of the socket ----"),
+        sec(near, "// What is waiting on the network's socket for the local link",
             "#endif // WATERLINK_NEARBY_INCLUDED"),
         "static p8 link_hear(address_any context, struct waterlink_frame *head, "
         "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
@@ -93182,7 +93212,7 @@ static bipolar wl_system(positive n, positive a, positive b, positive c, positiv
                 for (; count < (bipolar)c && wl_run_next < wl_run_count; count++)
                 {
                         struct wl_run *run = wl_runs + wl_run_next++;
-                        link_message *m = &got[count].message;
+                        socket_message *m = &got[count].message;
                         positive take = run->length < m->parts[0].length
                                                 ? run->length : m->parts[0].length;
                         p8 *control = m->control;
@@ -93225,7 +93255,7 @@ static bipolar wl_system(positive n, positive a, positive b, positive c, positiv
         }
         if (n == WL_SYSCALL_recvmsg)
         {
-                link_message *m = (link_message *)(intptr_t)b;
+                socket_message *m = (socket_message *)(intptr_t)b;
                 struct wl_run *run;
                 socket_address_internet *from = m->name;
                 p8 *control = m->control;
@@ -93402,7 +93432,7 @@ static void wl_reset(bool server)
         waterlink_identity_from(&link_self.me, secret);
         link_self.server = server;
         link_self.socket = 3;
-        link_nearby.socket = 4;
+        link_nearby.lan.socket = 4;
         for (int p = 0; p < 2; p++)
         {
                 struct waterlink_peer *peer = wl_file.peer + wl_file.count++;
@@ -93491,7 +93521,7 @@ static void wl_step(bool server)
         p8 op = take8();
         p8 *datagram = malloc(WATERLINK_DATAGRAM);
         p8 *address = wl_addresses[take8() & 3];
-        p16 port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+        p16 port = take8() & 1 ? DISCOVERY_MDNS_PORT : take16();
         p64 now = wl_clock / 1000;
 
         switch (op % 10)
@@ -93716,7 +93746,7 @@ static void wl_step(bool server)
         case 5:
         {
                 //      An mDNS packet, from anywhere on the link.
-                positive length = take16() % (WATERLINK_MDNS_MAX + 2);
+                positive length = take16() % (DISCOVERY_MDNS_MAX + 2);
                 p8 *raw = malloc(length ? length : 1);
 
                 length = take_bytes(raw, length);
@@ -93779,14 +93809,14 @@ static void wl_step(bool server)
                 for (positive r = 0; r < packets; r++)
                 {
                         struct wl_run *run = wl_mdns + wl_mdns_count;
-                        positive length = take16() % (WATERLINK_MDNS_MAX + 8);
+                        positive length = take16() % (DISCOVERY_MDNS_MAX + 8);
 
                         wl_mdns_ttl[wl_mdns_count++] = take8() & 1 ? 255 : take8();
                         bytes[r] = malloc(length ? length : 1);
                         run->length = take_bytes(bytes[r], length);
                         run->bytes = bytes[r];
                         memcpy(run->address, wl_addresses[take8() % 3], 16);
-                        run->port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+                        run->port = take8() & 1 ? DISCOVERY_MDNS_PORT : take16();
                 }
                 {
                         positive greeted = wl_greeted_count;
@@ -94134,7 +94164,7 @@ def waterlink_lift_cursors():
 def harness_waterlink_pre_fuzz(argv):
     """Coverage-guided libFuzzer over waterlink's pre-authentication surface.
 
-    waterlink_pre_source() lifts it from the tree: discover.c's mDNS reader
+    waterlink_pre_source() lifts it from the tree: the network's mDNS reader (src/net/discovery.c)
     and writer, handshake.c whole (gate, admission, Noise IK, stamps),
     nearby.c's greeting and answering, and service.c's receive loop with
     its UDP_GRO runs, datagram dispatch, initiation, carried-datagram checks

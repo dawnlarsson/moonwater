@@ -11,7 +11,11 @@
         still says what it is and what it refuses to know about its
         neighbours. wait.c stays beside this because src/sh/tools.c expands
         it too, and expands it first; anchors.inc, ct_logs.inc and
-        suffixes.inc stay beside it because they are tables.
+        suffixes.inc stay beside it because they are tables. discovery.c,
+        how this machine is reached, is the module beside it that is
+        included after it: it asks this file's resolver, its HTTP client and
+        its confinement, and shares its reading of a link's driver and its
+        IPv4 scopes (netlink_link_driver, net_scope_v4).
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -978,22 +982,32 @@ static bool netlink_link_carrier_downs(netlink_header address_to header,
         return true;
 }
 
-static bool netlink_link_is_wireless(netlink_header address_to header,
-                                     string_address name)
+/* The kernel's word for a link's driver (IFLA_INFO_KIND, inside
+   IFLA_LINKINFO): its bytes and how many, or none for a link whose driver
+   registered no kind, which is most hardware. The one reading of it: the
+   lease's choice of a link asks it whether a link is wireless, and
+   discovery (discovery.c) what kind of interface an address is on. */
+static p8 address_to netlink_link_driver(netlink_header address_to header,
+                                         positive address_to length)
 {
         positive size = 0;
         p8 address_to info = (p8 address_to)netlink_find(
             header, sizeof(netlink_link), IFLA_LINKINFO, address_of size);
-        p8 address_to kind;
-        positive kind_length = 0;
 
-        if (info)
-        {
-                kind = (p8 address_to)netlink_find_span(info, size, IFLA_INFO_KIND,
-                                                        address_of kind_length);
-                if (kind && kind_length >= 4 && !memory_compare(kind, "wlan", 4))
-                        return true;
-        }
+        address_to length = 0;
+        return info ? (p8 address_to)netlink_find_span(info, size, IFLA_INFO_KIND,
+                                                       length)
+                    : null;
+}
+
+static bool netlink_link_is_wireless(netlink_header address_to header,
+                                     string_address name)
+{
+        positive kind_length = 0;
+        p8 address_to kind = netlink_link_driver(header, address_of kind_length);
+
+        if (kind && kind_length >= 4 && !memory_compare(kind, "wlan", 4))
+                return true;
 
         if (netlink_find(header, sizeof(netlink_link), IFLA_WIRELESS, null))
                 return true;
@@ -13877,6 +13891,44 @@ static bool http_transport_allowed(bool address_to secure, bool tls)
         return true;
 }
 
+/*
+        What kind of place an IPv4 address is, by the blocks set aside for
+        each: loopback (127/8), private (10/8, 172.16/12, 192.168/16, RFC
+        1918), shared (100.64/10, a carrier's NAT, RFC 6598), link-local
+        (169.254/16, RFC 3927), other (this network, 0/8, and multicast and
+        reserved space from 224 up), and what is left, global. The one copy
+        of those rules: a fetch's destination is public only where this says
+        global (http_address_public), a rebound name is one this says is
+        loopback or link-local (http_name_rebound), and discovery says each
+        address of an interface by it (discovery.c, which adds IPv6's own:
+        unique local is no IPv4 address's scope).
+*/
+#define NET_SCOPE_GLOBAL 0
+#define NET_SCOPE_PRIVATE 1
+#define NET_SCOPE_SHARED 2
+#define NET_SCOPE_LINK 3
+#define NET_SCOPE_UNIQUE 4
+#define NET_SCOPE_LOOPBACK 5
+#define NET_SCOPE_OTHER 6
+
+static positive net_scope_v4(p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+        p8 b = (p8)(ip >> 16);
+
+        if (a == 127)
+                return NET_SCOPE_LOOPBACK;
+        if (a == 10 || (a == 172 && (b & 0xf0) == 16) || (a == 192 && b == 168))
+                return NET_SCOPE_PRIVATE;
+        if (a == 100 && (b & 0xc0) == 64)
+                return NET_SCOPE_SHARED;
+        if (a == 169 && b == 254)
+                return NET_SCOPE_LINK;
+        if (!a || a >= 224)
+                return NET_SCOPE_OTHER;
+        return NET_SCOPE_GLOBAL;
+}
+
 /* localhost, and every name under it, is this machine (RFC 6761 6.3), in
    any case and with or without the absolute name's dot. curl answers those
    names itself and the C library GNU wget asks answers them from its own
@@ -13921,9 +13973,10 @@ static p32 http_lookup(string_address host)
 }
 
 /* Whether a fetch whose destination the peer chose may go to ip: not this
-   network, loopback, private, shared (100.64/10), link-local, IETF
-   protocol (192.0.0/24), benchmarking (198.18/15), multicast or reserved
-   space. Checked on the address the name resolved to, so a name that
+   network, loopback, private, shared (100.64/10), link-local, multicast or
+   reserved space, which is every scope but global (net_scope_v4), and of
+   the global ones not IETF protocol (192.0.0/24) or benchmarking
+   (198.18/15). Checked on the address the name resolved to, so a name that
    rebinds to an inside address is refused too. The harness builds that
    define TLS_BENCH_ANCHOR serve from loopback and may reach it. */
 static bool http_address_public(p32 ip)
@@ -13935,9 +13988,7 @@ static bool http_address_public(p32 ip)
         if (a == 127)
                 return true;
 #endif
-        return a && a != 10 && a != 127 && a < 224 &&
-               (a != 100 || (b & 0xc0) != 64) && (a != 169 || b != 254) &&
-               (a != 172 || (b & 0xf0) != 16) && (a != 192 || b != 168) &&
+        return net_scope_v4(ip) == NET_SCOPE_GLOBAL &&
                (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
 }
 
@@ -13955,10 +14006,11 @@ static bool http_address_public(p32 ip)
    space from going back to one. */
 static bool http_name_rebound(string_address host, p32 ip)
 {
-        p8 a = (p8)(ip >> 24);
+        positive scope = net_scope_v4(ip);
 
         return string_to_host(host) < 0 && !http_host_loopback(host) &&
-               (!a || a == 127 || (a == 169 && (p8)(ip >> 16) == 254));
+               (!(ip >> 24) || scope == NET_SCOPE_LOOPBACK ||
+                scope == NET_SCOPE_LINK);
 }
 
 #define TLS_AIA_SECONDS 5

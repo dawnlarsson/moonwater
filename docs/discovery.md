@@ -109,7 +109,11 @@ Every rendezvous carries only sealed records, named by a hash of the
 group's secret.
 
 - **R1 LAN discovery** (S). mDNS and DNS-SD as `_moonwater._udp`, under
-  Moonwater's own name, the way a printer advertises itself.
+  Moonwater's own name, the way a printer advertises itself. The records,
+  the socket and the confined reader are the module's already
+  (`discovery_mdns_service`), and waterlink's groups announce
+  `_waterlink._udp` through them; what is left is the service of
+  Moonwater's own.
 - **R2 The Worker** (M). The owner's Cloudflare Worker: signed,
   rate-limited requests that only Moonwater can make, records kept with a
   time to live, and a **mailbox** where a sealed message waits until an

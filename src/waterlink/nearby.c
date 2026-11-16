@@ -22,12 +22,14 @@
         file guess at full speed) and the grants members get here. Written
         by `moonwater link group`, read by the listener whenever it changes.
 
-        Discovery is IPv4 only for now, 224.0.0.251 on every interface that
-        takes the membership; ff02::fb is not asked or answered. A packet is
-        believed only if it arrived with the TTL it was sent with, 255, which
-        no router forwards: that is what keeps this on the local link. An
-        address is taken from where a packet came from, never from what it
-        says.
+        Finding the machines is the network's own discovery
+        (src/net/discovery.c): the mDNS and DNS-SD records, the socket they
+        travel on (IPv4, 224.0.0.251 on every interface that takes the
+        membership, a packet believed only with the TTL it was sent with)
+        and the confined reader of what arrives. What is here is what a
+        group does with it: what it announces and asks (group.c's service),
+        and whom it greets for what it hears. An address is taken from where
+        a packet came from, never from what it says.
 
         Included by service.c, which owns the sockets and the loop.
 
@@ -38,7 +40,7 @@
 #ifndef WATERLINK_NEARBY_INCLUDED
 #define WATERLINK_NEARBY_INCLUDED
 
-#include "discover.c"
+#include "group.c"
 
 #if defined(MACOS)
 #define LINK_PEERS_LOCK link_state_path(LINK_LEAF_PEERS_LOCK)
@@ -46,7 +48,6 @@
 #define LINK_PEERS_LOCK HOST_STATE "/link.peers.lock"
 #endif
 #define LINK_GROUPS_MAX 8
-#define LINK_INTERFACES 16
 #define LINK_GREETED 16
 #define LINK_GREET_SOURCE LINK_GROUPS_MAX
 
@@ -416,11 +417,7 @@ typedef struct
         p8 host[6];
         p64 groups_mark[6]; // what the file was when last read, or nothing
         p64 looked;
-        bipolar socket;
-        b32 interface[LINK_INTERFACES];
-        p32 interface_address[LINK_INTERFACES];
-        p32 interface_mask[LINK_INTERFACES]; // host order; 0 when not known
-        positive interfaces;
+        discovery_lan lan; // the network's socket for the local link, and the interfaces it joined on
         p64 next_announce;
         p64 next_ask;
         positive announced;
@@ -654,228 +651,6 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         return new;
 }
 
-#if !defined(MACOS)
-typedef struct
-{
-        p32 multiaddr;
-        p32 address;
-        b32 index;
-} link_mreqn;
-#endif
-
-/*      A socket option set as socket_option_set sets it: zero, or the negative
-        errno. On Darwin it is setsockopt from libc, with Darwin's errno, so
-        the "already joined" answer of a membership is Darwin's EADDRINUSE. */
-static bipolar link_option_set(b32 handle, b32 level, b32 name,
-                               address_any value, positive length)
-{
-#if defined(MACOS)
-        if (setsockopt(handle, level, name, value, (socklen_t)length) < 0)
-                return -errno;
-        return 0;
-#else
-        return socket_option_set(handle, level, name, value, length);
-#endif
-}
-
-/*
-        Joins the group on one interface, which is named by its index where
-        the platform takes ip_mreqn (Linux) and by its IPv4 address where it
-        takes only ip_mreq (Darwin). address is the interface's address in host
-        order, as network_load_32 gives it. A namespace in a test has no default
-        route, so joining on "any" would fail there; one by one works everywhere.
-        One without multicast is passed over; joined already (EADDRINUSE) is
-        joined.
-*/
-static fn link_nearby_join(b32 index, p32 address, p32 mask)
-{
-#if defined(MACOS)
-        link_ip_mreq join;
-#else
-        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
-#endif
-        bipolar joined;
-
-        for (positive at = 0; at < link_nearby.interfaces; at++)
-                if (link_nearby.interface[at] == index)
-                        return;
-        if (link_nearby.interfaces == LINK_INTERFACES)
-                return;
-#if defined(MACOS)
-        join.multiaddr = network_order_32(WATERLINK_MDNS_GROUP);
-        join.interface = network_order_32(address);
-#else
-        join.index = index;
-#endif
-        joined = link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                 IP_ADD_MEMBERSHIP, address_of join,
-                                 sizeof join);
-        if (joined < 0 && joined != -EADDRINUSE)
-                return;
-        link_nearby.interface[link_nearby.interfaces] = index;
-        link_nearby.interface_address[link_nearby.interfaces] = address;
-        link_nearby.interface_mask[link_nearby.interfaces] = mask;
-        link_nearby.interfaces++;
-}
-
-/*
-        Every interface with an IPv4 address, handed to visit with its index,
-        that address in host order and its netmask: net.c's walk of the
-        addresses, which is the one the network setup already trusts. Linux
-        walks them with netlink; Darwin has no netlink, and walks them with
-        getifaddrs, which is the BSD routine for the same list. The listener
-        asks each for the membership and keeps its address for the A record
-        (link_nearby_join); the doctor and the status ask the same walk what
-        this machine can reach, so they say what the listener finds.
-*/
-typedef fn (address_to link_interface_visitor)(b32 index, p32 address, p32 mask);
-
-#if !defined(MACOS)
-/* The netmask of a prefix length, in host order; 0 for none. */
-static p32 link_prefix_mask(p8 prefix)
-{
-        if (!prefix || prefix > 32)
-                return 0;
-        return 0xffffffffu << (32 - prefix);
-}
-
-/* The netlink walk's callback: one address of the dump, IPv4 and with a local address, to the visitor the context names. */
-static p8 link_interface_address(netlink_header address_to header,
-                                   address_any context)
-{
-        netlink_address address_to body =
-            netlink_message_body(header, sizeof(netlink_address));
-        positive size = 0;
-        p8 address_to host;
-
-        if (header->type != RTM_NEWADDR || !body)
-                return true;
-        host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
-                             address_of size);
-        if (body->family != AF_INET || !host || size < 4)
-                return true;
-        (address_to (link_interface_visitor address_to)context)(
-            (b32)body->index, network_load_32(host),
-            link_prefix_mask(body->prefix));
-        return true;
-}
-#endif
-
-static fn link_interfaces_each(link_interface_visitor visit)
-{
-#if defined(MACOS)
-        struct ifaddrs *list = null;
-
-        if (getifaddrs(&list) < 0)
-                return;
-        for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
-        {
-                p8 address_to raw;
-                p32 mask = 0;
-                b32 index;
-
-                if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
-                        continue;
-                index = (b32)if_nametoindex(entry->ifa_name);
-                if (!index)
-                        continue;
-                //      A sockaddr_in is sin_len, sin_family, sin_port, then the
-                //      address in network order at offset 4, and its netmask
-                //      the same way.
-                raw = (p8 address_to)(void address_to)entry->ifa_addr;
-                if (entry->ifa_netmask && entry->ifa_netmask->sa_family == AF_INET)
-                        mask = network_load_32((p8 address_to)(void address_to)
-                                                       entry->ifa_netmask + 4);
-                visit(index, network_load_32(raw + 4), mask);
-        }
-        freeifaddrs(list);
-#else
-        bipolar handle = netlink_open_groups(0);
-
-        if (handle < 0)
-                return;
-        (void)netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
-                           AF_INET, link_interface_address, address_of visit);
-        system_close((b32)handle);
-#endif
-}
-
-static fn link_nearby_interfaces(void)
-{
-        link_nearby.interfaces = 0;
-        link_interfaces_each(link_nearby_join);
-}
-
-static fn link_nearby_close(void)
-{
-        if (link_nearby.socket > 0)
-                socket_close((b32)link_nearby.socket);
-        link_nearby.socket = -1;
-        link_nearby.interfaces = 0;
-}
-
-static fn link_nearby_open(void)
-{
-        b32 one = 1;
-        b32 ttl = 255;
-#if !defined(MACOS)
-        socket_address_internet self = {
-            .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT)};
-#endif
-
-#if defined(MACOS)
-        //      A datagram socket from libc, made close-on-exec and nonblocking
-        //      by fcntl, since Darwin has no SOCK_* flags on socket().
-        link_nearby.socket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (link_nearby.socket >= 0)
-        {
-                (void)fcntl(link_nearby.socket, F_SETFD, FD_CLOEXEC);
-                (void)fcntl(link_nearby.socket, F_SETFL, O_NONBLOCK);
-        }
-#else
-        link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
-                                                        SOCK_NONBLOCK,
-                                        0);
-#endif
-        if (link_nearby.socket < 0)
-                return;
-        (void)link_option_set((b32)link_nearby.socket, SOL_SOCKET,
-                              SO_REUSEADDR, address_of one, sizeof one);
-        (void)link_option_set((b32)link_nearby.socket, SOL_SOCKET,
-                              SO_REUSEPORT, address_of one, sizeof one);
-        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                              IP_MULTICAST_TTL, address_of ttl, sizeof ttl);
-        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                              IP_RECVTTL, address_of one, sizeof one);
-        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                              IP_PKTINFO, address_of one, sizeof one);
-
-#if defined(MACOS)
-        {
-                struct sockaddr_in local;
-
-                memory_zero(address_of local, sizeof local);
-                local.sin_len = (unsigned char)sizeof local;
-                local.sin_family = AF_INET;
-                local.sin_port = network_order_16(WATERLINK_MDNS_PORT);
-                if (bind((b32)link_nearby.socket, (struct sockaddr *)address_of local,
-                         sizeof local) < 0)
-                {
-                        link_nearby_close();
-                        return;
-                }
-        }
-#else
-        if (socket_bind((b32)link_nearby.socket, address_of self,
-                        sizeof self) < 0)
-        {
-                link_nearby_close();
-                return;
-        }
-#endif
-        link_nearby_interfaces();
-}
-
 /*
         A read of the groups file that says nothing about what it holds: not
         the file's absence, nor a file that is not what a groups file is (not
@@ -924,10 +699,10 @@ static positive link_sweep_fill(void)
 {
         positive count = 0;
 
-        for (positive at = 0; at < link_nearby.interfaces; at++)
+        for (positive at = 0; at < link_nearby.lan.interfaces; at++)
         {
-                p32 address = link_nearby.interface_address[at];
-                p32 mask = link_nearby.interface_mask[at];
+                p32 address = link_nearby.lan.address[at];
+                p32 mask = link_nearby.lan.mask[at];
                 p32 network;
                 p32 last;
 
@@ -1098,10 +873,10 @@ static fn link_nearby_reload(p64 now)
                                           link_nearby.groups.record[at].namespace);
         link_machine_name(link_nearby.name);
 
-        if (link_nearby.groups.count && link_nearby.socket < 0)
-                link_nearby_open();
-        if (!link_nearby.groups.count && link_nearby.socket >= 0)
-                link_nearby_close();
+        if (link_nearby.groups.count && link_nearby.lan.socket < 0)
+                discovery_lan_open(address_of link_nearby.lan);
+        if (!link_nearby.groups.count && link_nearby.lan.socket >= 0)
+                discovery_lan_close(address_of link_nearby.lan);
 
         (void)link_nearby_labels();
         //      Deferred places index the groups as they were: none survives a change.
@@ -1130,51 +905,9 @@ static p8 link_nearby_outcome(bipolar sent, positive length)
 static p8 link_nearby_send(p8 address_to packet, positive length,
                              positive interface_at)
 {
-#if defined(MACOS)
-        /* Darwin names the interface by its address, in network order, and
-           its sockaddr_in carries a length first. Both are built here, for
-           libc, since the lib's socket address is the Linux layout. */
-        struct in_addr out;
-        struct sockaddr_in to;
-
-        memory_zero(address_of to, sizeof to);
-        to.sin_len = (unsigned char)sizeof to;
-        to.sin_family = AF_INET;
-        to.sin_port = network_order_16(WATERLINK_MDNS_PORT);
-        to.sin_addr.s_addr = network_order_32(WATERLINK_MDNS_GROUP);
-        out.s_addr = network_order_32(link_nearby.interface_address[interface_at]);
-
-        /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
-           If it fails, send would retain the preceding interface selection
-           and put this interface's announcement onto another link. */
-        bipolar set = link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                      IP_MULTICAST_IF, address_of out, sizeof out);
-        ssize_t sent;
-
-        if (set < 0)
-                return link_nearby_outcome(set, length);
-        sent = sendto((b32)link_nearby.socket, packet, length, 0,
-                      (struct sockaddr *)address_of to, sizeof to);
-        return link_nearby_outcome(sent < 0 ? -errno : (bipolar)sent, length);
-#else
-        link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
-        socket_address_internet to = {
-            .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
-            .host = network_order_32(WATERLINK_MDNS_GROUP)};
-
-        /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
-           If it fails, send would retain the preceding interface selection
-           and put this interface's announcement onto another link. */
-        bipolar set = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                        IP_MULTICAST_IF, address_of out, sizeof out);
-
-        if (set < 0)
-                return link_nearby_outcome(set, length);
         return link_nearby_outcome(
-            socket_send((b32)link_nearby.socket, packet, length, MSG_NOSIGNAL,
-                        address_of to, sizeof to),
+            discovery_lan_send(address_of link_nearby.lan, interface_at, packet, length),
             length);
-#endif
 }
 
 /*
@@ -1214,15 +947,15 @@ static __attribute__((unused)) string_address link_discovery_reason_text(positiv
 
 static p8 link_nearby_announce(p32 ttl)
 {
-        p8 packet[WATERLINK_MDNS_MAX];
+        p8 packet[DISCOVERY_MDNS_MAX];
         p8 sent = false;
 
-        for (positive at = 0; at < link_nearby.interfaces; at++)
+        for (positive at = 0; at < link_nearby.lan.interfaces; at++)
         {
-                positive length = waterlink_mdns_announce(
-                        packet, sizeof packet, link_nearby.instance,
-                        link_nearby.host, link_port(),
-                        link_nearby.interface_address[at], ttl, 0, null, 0);
+                positive length = discovery_mdns_announce(
+                        address_of waterlink_mdns_service, packet, sizeof packet,
+                        link_nearby.instance, link_nearby.host, link_port(),
+                        link_nearby.lan.address[at], ttl, 0, null, 0);
 
                 if (length)
                         sent |= link_nearby_send(packet, length, at);
@@ -1233,21 +966,20 @@ static p8 link_nearby_announce(p32 ttl)
 static fn link_nearby_ask(void)
 {
         p8 packet[64];
-        positive length = waterlink_mdns_query(packet, sizeof packet);
+        positive length = discovery_mdns_query(address_of waterlink_mdns_service,
+                                               packet, sizeof packet);
 
-        for (positive at = 0; at < link_nearby.interfaces; at++)
+        for (positive at = 0; at < link_nearby.lan.interfaces; at++)
                 link_nearby_send(packet, length, at);
 }
 
 // Goodbye, with TTL zero, when the listener stops.
-static COLD fn link_mdns_end(void);
-
 static fn link_nearby_stop(void)
 {
-        if (link_nearby.socket >= 0 && link_nearby.groups.count)
+        if (link_nearby.lan.socket >= 0 && link_nearby.groups.count)
                 link_nearby_announce(0);
-        link_nearby_close();
-        link_mdns_end();
+        discovery_lan_close(address_of link_nearby.lan);
+        discovery_mdns_reader_end();
 }
 
 // The same place is greeted once in a while, not at every announcement.
@@ -1469,254 +1201,6 @@ static p8 link_pair_greeted(positive group, p8 address_to key,
 }
 
 /*
-        The mDNS reader, apart.
-
-        Every host on the link may send this listener mDNS, and reading it is a
-        walk of names, compression pointers and records of the sender's own
-        lengths (waterlink_mdns_read). The listener is root, keeps the link's
-        key and runs commands for linked machines, so the walk runs in a
-        reader of its own: a child that is nobody, cannot be dumped, dies with
-        the listener, holds only its end of a socket of whole messages and
-        stdio, and kills itself at any call but reading a packet from it and
-        sending the reading back (link_mdns_filter_build). What it answers is
-        the fixed-size waterlink_found, believed only with every count and
-        length inside its array. A reader that cannot be confined (no seccomp,
-        qemu-user) reads nothing: the listener then hears no machine nearby,
-        which is the link without discovery, not discovery unconfined. One
-        that dies or answers what cannot be believed is ended and started
-        again for the next packet.
-
-        Linux confines the child with seccomp (net.c's filter, net_apart_nobody
-        and net_apart_tie). Darwin has no seccomp, so its child is confined by
-        Seatbelt (link_mdns_confine, below). The two differ in that one
-        function and in the socket kind the pair is made with; everything
-        else in the reader, the parent's side included, is the same code on
-        both systems. A child that cannot be confined on either reads
-        nothing, so a Mac that cannot confine it hears no machine nearby,
-        as a Linux box without seccomp does.
-*/
-#define LINK_MDNS_SOCK_SEQPACKET 5
-#define LINK_MDNS_ANSWER_SECONDS 1
-/* Darwin's unix socket pairs have no SOCK_SEQPACKET; a datagram is a whole
-   message there too, and it is the kind the pair is made with on that system. */
-#if defined(MACOS)
-#define LINK_MDNS_SOCK_KIND 2 /* SOCK_DGRAM */
-#define LINK_MDNS_DESCRIPTORS 1024 /* the child closes these bar its channel */
-#else
-#define LINK_MDNS_SOCK_KIND (LINK_MDNS_SOCK_SEQPACKET | SOCK_CLOEXEC)
-#endif
-
-struct link_mdns_said
-{
-        b64 read;
-        struct waterlink_found found;
-};
-
-static struct
-{
-        b32 channel;
-        bipolar pid;
-        p8 refused;
-} link_mdns = {-1, -1, false};
-
-#if !defined(MACOS)
-static COLD fn link_mdns_filter_build(net_filter address_to filter)
-{
-        static const p32 plain[] = {
-            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
-            (p32)syscall(clock_gettime), (p32)syscall(munmap), (p32)syscall(madvise),
-            (p32)syscall(exit_group), (p32)syscall(exit), (p32)syscall(rt_sigreturn),
-            (p32)syscall(restart_syscall),
-#ifdef NET_APART_RISCV_HWPROBE
-            NET_APART_RISCV_HWPROBE,
-#endif
-        };
-        positive count = array_count(plain);
-
-        filter->used = 0;
-        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
-        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
-        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
-        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
-        for (positive at = 0; at < count; at++)
-                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0, plain[at]);
-        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
-        net_filter_answer(filter, SECCOMP_RET_ALLOW);
-}
-
-/*      The child's confinement: seccomp, and the descriptors but the channel
-        closed, the child made nobody's. False when any of it did not take,
-        which is the child's exit to say. */
-static COLD bool link_mdns_confine(b32 channel, bipolar parent)
-{
-        p32 kept[1] = {(p32)channel};
-        net_filter filter;
-
-        link_mdns_filter_build(address_of filter);
-        return descriptors_close_outside(3, kept, 1) && net_apart_nobody() &&
-               net_apart_tie(parent) && net_filter_install(address_of filter);
-}
-#else
-/*      Darwin's child: Seatbelt, which is what Darwin has in place of
-        seccomp. sandbox_init is libsystem's; it is declared here and not taken
-        from <sandbox.h>, whose deprecation would reach the build. The profile
-        denies everything, and allows only what a read of a packet is made of
-        (the sysctls libc consults and the metadata of files it already has
-        open). The descriptors are closed first, since a profile does not close
-        what is open: the channel alone is kept. A profile that does not take,
-        or a descriptor that will not close, leaves the child unconfined and it
-        exits so, as on Linux. */
-extern int sandbox_init(const char *profile, unsigned long long flags, char **error);
-
-#define LINK_MDNS_PROFILE                                                    \
-        "(version 1)(deny default)(allow sysctl-read)(allow file-read-metadata)"
-
-static COLD bool link_mdns_confine(b32 channel, bipolar parent)
-{
-        char *error = null;
-
-        (void)parent;
-        for (positive fd = 3; fd < LINK_MDNS_DESCRIPTORS; fd++)
-                if (fd != (positive)channel)
-                        (void)system_call_1(syscall(close), fd);
-        return sandbox_init(LINK_MDNS_PROFILE, 0, &error) == 0;
-}
-#endif
-
-static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
-{
-        //      Before a byte is read: this process is a copy of the listener,
-        //      and what it is kept apart from, it was holding.
-        link_secrets_forget();
-        if (!link_mdns_confine(channel, parent))
-                system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
-        for (;;)
-        {
-                p8 packet[WATERLINK_MDNS_MAX + 1];
-                struct link_mdns_said said;
-                network_deadline deadline;
-                bipolar ready;
-                bipolar got;
-
-                if (!network_deadline_begin(address_of deadline, 3600, 0))
-                        break;
-                ready = network_wait_readable_until(channel, address_of deadline);
-                if (!ready)
-                        continue;
-                got = ready < 0 ? -1
-                                : socket_receive(channel, packet, sizeof packet, MSG_DONTWAIT,
-                                                 null, null);
-                if (got <= 0)
-                        break;
-                memory_zero(address_of said, sizeof said);
-                said.read = waterlink_mdns_read(packet, (positive)got, address_of said.found);
-                if (socket_send(channel, address_of said, sizeof said, MSG_NOSIGNAL, null, 0) !=
-                    (bipolar)sizeof said)
-                        break;
-        }
-        system_call_1(syscall(exit_group), 0);
-        unreachable_here();
-}
-
-static COLD fn link_mdns_end(void)
-{
-        positive raw = 0;
-
-        if (link_mdns.channel >= 0)
-                system_close(link_mdns.channel);
-        if (link_mdns.pid > 0)
-        {
-                system_call_2(syscall(kill), (positive)link_mdns.pid, SIGKILL);
-                (void)system_wait4_retry(link_mdns.pid, address_of raw, 0, null);
-        }
-        link_mdns.channel = -1;
-        link_mdns.pid = -1;
-}
-
-static COLD p8 link_mdns_start(void)
-{
-        b32 ends[2];
-        bipolar parent = system_call(syscall(getpid));
-        bipolar child;
-
-        if (system_call_4(syscall(socketpair), AF_UNIX, LINK_MDNS_SOCK_KIND, 0,
-                          (positive)ends) < 0)
-                return false;
-        child = system_fork();
-        if (!child)
-        {
-                system_close(ends[0]);
-                link_mdns_child(ends[1], parent);
-        }
-        system_close(ends[1]);
-        if (child < 0)
-        {
-                system_close(ends[0]);
-                return false;
-        }
-        link_mdns.channel = ends[0];
-        link_mdns.pid = child;
-        return true;
-}
-
-static PURE COLD p8 link_mdns_believed(const struct waterlink_found address_to found)
-{
-        if (found->count > WATERLINK_FOUND_MAX ||
-            found->question_length > sizeof(found->question))
-                return false;
-        for (positive at = 0; at < found->count; at++)
-                if (found->instance[at].label_length > sizeof(found->instance[at].label))
-                        return false;
-        return true;
-}
-
-/* waterlink_mdns_read, apart: the reading the reader made, or false. */
-static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
-                                      struct waterlink_found address_to found)
-{
-        struct link_mdns_said said;
-        network_deadline deadline;
-
-        memory_zero(found, sizeof(*found));
-        //      Shorter than a header is no message, and is not sent: an
-        //      empty one reads at the reader as its channel's end, so each
-        //      cost the listener a reader, the fork and the confinement of
-        //      the next, for a datagram of no bytes from anyone on the link.
-        if (link_mdns.refused || length < DNS_HEADER || length > WATERLINK_MDNS_MAX)
-                return false;
-        if (link_mdns.channel < 0 && !link_mdns_start())
-                return false;
-        if (socket_send(link_mdns.channel, packet, length, MSG_NOSIGNAL | MSG_DONTWAIT, null,
-                        0) != (bipolar)length ||
-            !network_deadline_begin(address_of deadline, LINK_MDNS_ANSWER_SECONDS, 0) ||
-            network_wait_readable_until(link_mdns.channel, address_of deadline) <= 0 ||
-            socket_receive(link_mdns.channel, address_of said, sizeof said, MSG_DONTWAIT, null,
-                           null) != (bipolar)sizeof said ||
-            !link_mdns_believed(address_of said.found))
-        {
-                positive raw = 0;
-
-                //      A reader that could not be confined says so by its exit,
-                //      once: there is no reading here from then on. Waited for
-                //      here, however it ended, it is not this listener's to
-                //      signal: its number may be another process's by the
-                //      time link_mdns_end sends the kill.
-                if (link_mdns.pid > 0 &&
-                    system_wait4_retry(link_mdns.pid, address_of raw, 1 /* WNOHANG */, null) ==
-                        link_mdns.pid)
-                {
-                        link_mdns.pid = -1;
-                        link_mdns.refused = (raw & 0x7f) == 0 &&
-                                            ((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED;
-                }
-                link_mdns_end();
-                return false;
-        }
-        address_to found = said.found;
-        return said.read != 0;
-}
-
-/*
         One mDNS packet from the local link: a question about the service is
         answered, and every machine an announcement names is greeted for
         each group, unless a member of that group is already known there.
@@ -1725,10 +1209,14 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                             p8 address_to address, p16 source_port,
                             p32 local_address, p64 now)
 {
-        struct waterlink_found found;
+        struct discovery_mdns_found found;
         link_peers peers;
 
-        if (!link_mdns_read_apart(packet, length, address_of found))
+        //      Read in the network's confined reader, a copy of this
+        //      listener that forgets the link's secrets before it reads.
+        if (!discovery_mdns_read_apart(address_of waterlink_mdns_service,
+                                       link_secrets_forget, packet, length,
+                                       address_of found))
                 return;
 
         if (found.asked && link_nearby.groups.count)
@@ -1737,30 +1225,23 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 //      nobody checked: a few a second, or a stream of spoofed
                 //      questions is a stream of answers four times their size
                 //      at somebody else.
-                if (source_port && source_port != WATERLINK_MDNS_PORT &&
+                if (source_port && source_port != DISCOVERY_MDNS_PORT &&
                     found.question_length)
                 {
                         //      A one-shot asker gets the answer back to
                         //      itself, its ID and question with it.
-                        p8 reply[WATERLINK_MDNS_MAX];
-                        positive reply_length = waterlink_mdns_announce(
-                                reply, sizeof reply, link_nearby.instance,
-                                link_nearby.host, link_port(),
+                        p8 reply[DISCOVERY_MDNS_MAX];
+                        positive reply_length = discovery_mdns_announce(
+                                address_of waterlink_mdns_service, reply, sizeof reply,
+                                link_nearby.instance, link_nearby.host, link_port(),
                                 local_address
                                     ? local_address
-                                    : (link_nearby.interfaces
-                                           ? link_nearby.interface_address[0]
+                                    : (link_nearby.lan.interfaces
+                                           ? link_nearby.lan.address[0]
                                            : 0),
                                 10, found.id, found.question,
                                 found.question_length);
-                        socket_address_internet to = {
-                            .family = AF_INET,
-                            .port = network_order_16(source_port),
-                            .host = network_order_32(network_load_32(address + 12))};
 
-#if defined(MACOS)
-                        to.length = sizeof to;
-#endif
                         if (reply_length &&
                             link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
                         {
@@ -1774,16 +1255,16 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                    mDNS answer.  A successful spoofed reflection
                                    is still held by this global budget; a failed
                                    reflection gets no authority over it. */
-                                bipolar sent = socket_send(
-                                    (b32)link_nearby.socket, reply,
-                                    reply_length, MSG_NOSIGNAL,
-                                    address_of to, sizeof to);
+                                bipolar sent = discovery_lan_reply(
+                                    address_of link_nearby.lan,
+                                    network_load_32(address + 12), source_port,
+                                    reply, reply_length);
 
                                 if (sent == (bipolar)reply_length)
                                         link_nearby.last_reply = now;
                         }
                 }
-                else if (source_port == WATERLINK_MDNS_PORT &&
+                else if (source_port == DISCOVERY_MDNS_PORT &&
                          link_age(now, link_nearby.last_answer) > 1000000)
                 {
                         /* As with legacy-unicast replies above, a refused
@@ -1796,13 +1277,13 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 
         /* RFC 6762 6: a response from any port but 5353 is not mDNS, and
            what it announces is not greeted (Avahi drops it the same way). */
-        if (source_port != WATERLINK_MDNS_PORT)
+        if (source_port != DISCOVERY_MDNS_PORT)
                 found.count = 0;
         if (found.count)
                 link_peers_load(address_of peers);
         for (positive at = 0; at < found.count; at++)
         {
-                struct waterlink_found_instance address_to instance =
+                struct discovery_mdns_instance address_to instance =
                         found.instance + at;
                 p8 ours[23];
 
@@ -1878,25 +1359,6 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
         }
 }
 
-#if !defined(MACOS)
-/* The local IPv4 address the kernel says received this packet. IP_PKTINFO's
-   data is ifindex, spec_dst and the header's destination, each four bytes;
-   spec_dst is the local address selected for the incoming packet. */
-static p32 link_nearby_local(p8 address_to control, positive length,
-                             positive room)
-{
-        byte_reader data;
-
-        //      ifindex, spec_dst, then the header's destination: each four.
-        if (!link_control_find(control, length, room, IPPROTO_IP, IP_PKTINFO,
-                               address_of data) ||
-            byte_reader_left(&data) < 12)
-                return 0;
-        (void)byte_reader_skip(&data, 4);
-        return (p32)byte_reader_uint(&data, 4, true);
-}
-#endif
-
 /*
         The listener's turn: reload the groups if they changed, and send what
         is due. Answers when it next wants a turn.
@@ -1906,7 +1368,7 @@ static p64 link_nearby_tick(p64 now)
         p64 wake = now + 1000000;
 
         link_nearby_reload(now);
-        if (link_nearby.socket < 0 || !link_nearby.groups.count)
+        if (link_nearby.lan.socket < 0 || !link_nearby.groups.count)
                 return wake;
         if (!link_nearby.labels_ready && !link_nearby_labels())
                 return wake;
@@ -1918,16 +1380,16 @@ static p64 link_nearby_tick(p64 now)
         //      new starts the quick announcements over.
         if (link_age(now, link_nearby.interfaces_looked) >= 5000000)
         {
-                p32 before[LINK_INTERFACES];
-                positive had = link_nearby.interfaces;
+                p32 before[DISCOVERY_LAN_INTERFACES];
+                positive had = link_nearby.lan.interfaces;
                 p8 changed;
 
-                memory_copy(before, link_nearby.interface_address,
+                memory_copy(before, link_nearby.lan.address,
                             sizeof before);
                 link_nearby.interfaces_looked = now;
-                link_nearby_interfaces();
-                changed = had != link_nearby.interfaces ||
-                          memory_compare(before, link_nearby.interface_address,
+                discovery_lan_interfaces(address_of link_nearby.lan);
+                changed = had != link_nearby.lan.interfaces ||
+                          memory_compare(before, link_nearby.lan.address,
                                          had * sizeof(p32));
                 if (changed)
                 {
@@ -1975,134 +1437,27 @@ static p64 link_nearby_tick(p64 now)
         return wake;
 }
 
-// Read what is waiting on the mDNS socket, believing only TTL 255.
-#if defined(MACOS)
-/*
-        Read what is waiting on the mDNS socket, believing only TTL 255, with
-        Darwin's recvmsg from libc. It is the same call with the same fields as
-        the Linux read below -- the sender's address, one buffer, and a control
-        buffer for the TTL and the receiving interface -- in Darwin's layouts,
-        which differ in three places:
-
-          struct msghdr has its control length in a 32-bit field, its flags
-          after it, and a 32-bit iovec count, so it is the libc struct and
-          not the Linux record link_message;
-          a control message opens with a 32-bit length, a level and a type
-          (twelve bytes, aligned to four), where Linux's length is 64 bits
-          and its data starts at sixteen. CMSG_FIRSTHDR, CMSG_NXTHDR and
-          CMSG_DATA walk them, and bound the walk by the length the kernel
-          filled;
-          the TTL arrives as a message of type IP_RECVTTL (24), one byte,
-          where Linux's is type IP_TTL with an int; and IP_PKTINFO's
-          message leaves spec_dst zero and names the receiving interface by
-          index, which is looked up among the interfaces joined for its
-          address.
-
-        The reading of the packet is link_nearby_heard, the same on both
-        systems: the packet goes to the confined reader (link_mdns_read_apart).
-*/
+// What is waiting on the network's socket for the local link, each datagram
+// it believes (discovery_lan_receive) heard.
 static fn link_nearby_receive(p64 now)
 {
-        for (positive turn = 0; turn < 64 && link_nearby.socket >= 0; turn++)
+        for (positive turn = 0; turn < 64 && link_nearby.lan.socket >= 0; turn++)
         {
-                p8 packet[WATERLINK_MDNS_MAX + 1];
-                struct sockaddr_in from;
-                struct iovec part = {packet, sizeof packet};
-                p64 control[8];
-                struct msghdr message;
-                struct cmsghdr address_to header;
-                ssize_t got;
+                p8 packet[DISCOVERY_MDNS_MAX + 1];
                 p8 address[16];
-                p32 local = 0;
-                b32 ttl = -1;
+                p32 source = 0, arrived = 0;
+                p16 port = 0;
+                bipolar got = discovery_lan_receive(address_of link_nearby.lan, packet,
+                                                    address_of source, address_of port,
+                                                    address_of arrived);
 
-                memory_zero(address_of from, sizeof from);
-                memory_zero(address_of message, sizeof message);
-                message.msg_name = address_of from;
-                message.msg_namelen = sizeof from;
-                message.msg_iov = address_of part;
-                message.msg_iovlen = 1;
-                message.msg_control = control;
-                message.msg_controllen = sizeof control;
-                got = recvmsg((int)link_nearby.socket, address_of message,
-                              MSG_DONTWAIT);
                 if (got < 0)
                         return;
-                if ((positive)got > WATERLINK_MDNS_MAX)
+                if (!got)
                         continue;
-
-                for (header = CMSG_FIRSTHDR(address_of message); header;
-                     header = CMSG_NXTHDR(address_of message, header))
-                {
-                        if (header->cmsg_level != IPPROTO_IP)
-                                continue;
-                        if (header->cmsg_type == IP_RECVTTL &&
-                            header->cmsg_len >= CMSG_LEN(1))
-                                ttl = *(p8 address_to)CMSG_DATA(header);
-                        else if (header->cmsg_type == IP_PKTINFO &&
-                                 header->cmsg_len >= CMSG_LEN(12))
-                        {
-                                b32 index;
-
-                                memory_copy_apart(address_of index,
-                                                  CMSG_DATA(header),
-                                                  sizeof index);
-                                for (positive at = 0;
-                                     at < link_nearby.interfaces; at++)
-                                        if (link_nearby.interface[at] == index)
-                                                local = link_nearby
-                                                            .interface_address[at];
-                        }
-                }
-                if (ttl != 255)
-                        continue;
-
-                link_address_v4(address,
-                                network_order_32(from.sin_addr.s_addr));
-                link_nearby_heard(packet, (positive)got, address,
-                                  network_order_16(from.sin_port), local, now);
+                link_address_v4(address, source);
+                link_nearby_heard(packet, (positive)got, address, port, arrived, now);
         }
 }
-#else
-static fn link_nearby_receive(p64 now)
-{
-        for (positive turn = 0; turn < 64 && link_nearby.socket >= 0; turn++)
-        {
-                p8 packet[WATERLINK_MDNS_MAX + 1];
-                socket_address_internet from;
-                link_iovec part = {packet, sizeof packet};
-                p64 control[8];
-                link_message message;
-                bipolar got;
-                p8 address[16];
-
-                memory_zero(address_of message, sizeof message);
-                message.name = address_of from;
-                message.name_length = sizeof from;
-                message.parts = address_of part;
-                message.part_count = 1;
-                message.control = control;
-                message.control_length = sizeof control;
-                got = system_call_3(syscall(recvmsg), (positive)link_nearby.socket,
-                                    (positive)address_of message, MSG_DONTWAIT);
-                if (got < 0)
-                        return;
-                if ((positive)got > WATERLINK_MDNS_MAX)
-                        continue;
-
-                if (link_control_int((p8 address_to)control,
-                                     message.control_length, sizeof control,
-                                     IPPROTO_IP, IP_TTL) != 255)
-                        continue;
-
-                link_address_v4(address, network_order_32(from.host));
-                link_nearby_heard(packet, (positive)got, address,
-                                  network_order_16(from.port),
-                                  link_nearby_local((p8 address_to)control,
-                                                    message.control_length,
-                                                    sizeof control), now);
-        }
-}
-#endif
 
 #endif // WATERLINK_NEARBY_INCLUDED

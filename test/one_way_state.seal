@@ -110,6 +110,7 @@ field src/canvas/ui/terminal.c:gone	the far end has gone: the terminal's end, by
 field src/canvas/ui/ui.c:auto_close	a property a document is opened with
 field src/canvas/ui/ui.c:dirty	a popup's picture is due; cleared as a whole with the popup's record when it is presented
 field src/canvas/ui/ui.c:started	a parse state on the stack of one call
+field src/net/discovery.c:asked	what one parsed DNS message held, in a record zeroed for each
 field src/net/net.c:closed	a TLS session that has had its close_notify: the session's end
 field src/net/net.c:done	one netlink exchange's turn, on the stack of the call
 field src/net/net.c:extended_key_usage	what one parsed certificate has, in a record zeroed for each
@@ -130,7 +131,6 @@ field src/sh/net.c:lost	cleared with the whole holding when the lost lease is re
 field src/sh/net.c:skip_loopback	an input of one link search, on the stack of the call
 field src/sh/text.c:shown_any	one run's own tally
 field src/sh/tools.c:timestamp_present	what one parsed record has, in a record zeroed for each
-field src/waterlink/discover.c:asked	what one parsed DNS message held, in a record zeroed for each
 field src/waterlink/nearby.c:linked	read only by link_discovery_reason, which nothing calls: no effect today; if it is ever called this wants an end
 field src/waterlink/nearby.c:refused_code	read only by link_discovery_reason, which nothing calls: no effect today; if it is ever called this wants an end
 field src/waterlink/nearby.c:state_dirty	cleared in service.c, where the state is written out

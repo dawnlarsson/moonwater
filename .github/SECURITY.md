@@ -738,15 +738,17 @@ attacker gets its invariants here once there is a lane that proves them.
   join is done. **It fails closed:** a kernel that will not take the filter
   joins nothing (`WIFI_REFUSE_CONFINE`, said by `moonwater wifi`); a station
   that ends without a status is `WIFI_REFUSE_APART`.
-- **The Waterlink listener's mDNS reader runs apart (`link_mdns_read_apart`,
-  src/waterlink/nearby.c):** every host on the link may send the listener
-  mDNS, and reading it walks names, compression pointers and records of the
-  sender's lengths. The listener is root and keeps the link's key, so the
-  reading (`waterlink_mdns_read`) is done by a child that is nobody, not
+- **The mDNS reader runs apart (`discovery_mdns_read_apart`,
+  src/net/discovery.c, the network's discovery; the Waterlink listener is its
+  caller, src/waterlink/nearby.c):** every host on the link may send the
+  listener mDNS, and reading it walks names, compression pointers and records
+  of the sender's lengths. The listener is root and keeps the link's key, so
+  the reading (`discovery_mdns_read`) is done by a child that is nobody, not
   dumpable, dies with the listener, holds only its end of a socket of whole
   messages and stdio, and is killed at any call but reading a packet from
   that socket and sending the reading back. It is a fork of the listener, so
-  before it confines itself or reads it forgets the link
+  before it confines itself or reads it forgets what its caller names, which
+  for the listener is the link
   (`link_secrets_forget`, MW-2026-188): the key, the cookies' secret, every
   session's keys and frames, the groups' keys and the datagrams last opened;
   `security_hygiene` holds it to that order. A packet shorter than a DNS

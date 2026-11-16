@@ -55,7 +55,6 @@
 #define WATERLINK_COMMAND_INCLUDED
 
 #include "service.c"
-#include "../net/discovery.c" // already in the shell (src/sh/net.c); first here where the link is built without one
 
 static fn link_grants_text(p32 may, p8 address_to text, positive room)
 {
@@ -1655,68 +1654,9 @@ static positive link_code_symbols(string_address text)
         return used;
 }
 
-/*
-        What discovery can use on this machine, asked of every interface but
-        loopback as the listener asks it (link_nearby_join, link_nearby_send):
-        ROUTE when a datagram to the group has a way out of one, JOINS when
-        one takes the group's membership. Each is asked with the interface
-        named, on a socket closed straight after. Asked of no interface the
-        kernel answers from its routes, and a network with no default route --
-        two machines on a cable, a segment that goes nowhere else -- has none
-        to 224.0.0.251: a code was refused there with "no route to a network"
-        and nothing sent, and the doctor failed its route and its discovery,
-        on a network the listener was announcing on.
-*/
-#define LINK_REACH_ROUTE 1
-#define LINK_REACH_JOINS 2
-
-static positive link_reach_found;
-
-static fn link_reach_interface(b32 index, p32 address, p32 mask)
-{
-#if defined(MACOS)
-        struct in_addr out = {network_order_32(address)};
-        link_ip_mreq join = {network_order_32(WATERLINK_MDNS_GROUP),
-                             network_order_32(address)};
-#else
-        link_mreqn out = {0, 0, index};
-        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, index};
-#endif
-        socket_address_internet to = {
-            .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
-            .host = network_order_32(WATERLINK_MDNS_GROUP)};
-        bipolar handle = (address >> 24) == 127 ? -1
-                                               : link_datagram_socket(AF_INET);
-        bipolar joined;
-
-        (void)index;
-        (void)mask;
-        if (handle < 0)
-                return;
-#if defined(MACOS)
-        to.length = sizeof to;
-#endif
-        if (link_option_set((b32)handle, IPPROTO_IP, IP_MULTICAST_IF,
-                            address_of out, sizeof out) >= 0 &&
-            socket_connect((b32)handle, address_of to, sizeof to) >= 0)
-                link_reach_found |= LINK_REACH_ROUTE;
-        joined = link_option_set((b32)handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                                 address_of join, sizeof join);
-        if (joined >= 0 || joined == -EADDRINUSE)
-                link_reach_found |= LINK_REACH_JOINS;
-        socket_close((b32)handle);
-}
-
-static positive link_reach(void)
-{
-        link_reach_found = 0;
-        link_interfaces_each(link_reach_interface);
-        return link_reach_found;
-}
-
 static p8 link_has_route(void)
 {
-        return (link_reach() & LINK_REACH_ROUTE) != 0;
+        return (discovery_lan_reach() & DISCOVERY_LAN_ROUTE) != 0;
 }
 
 static b32 link_pair_here(string_address expect)
@@ -1958,7 +1898,7 @@ static fn link_paths_report(const discovery_found address_to found,
         p8 text[48];
 
         for (positive at = 0; at < here->owns; at++)
-                mine += here->own[at].scope != DISCOVERY_SCOPE_LOOPBACK;
+                mine += here->own[at].scope != NET_SCOPE_LOOPBACK;
         string_format(log, "%spaths udp %p on %p local address%s; multicast "
                            "discovery on the network",
                       prefix, (positive)link_port(), mine, mine == 1 ? "" : "es");
@@ -1997,8 +1937,9 @@ static b32 link_paths_verb(void)
 static p8 link_doctor_list[96];
 static positive link_doctor_used;
 
-static fn link_doctor_add(b32 index, p32 host, p32 mask)
+static fn link_doctor_add(address_any context, b32 index, p32 host, p32 mask)
 {
+        (void)context;
         (void)index;
         (void)mask;
         if ((host >> 24) == 127 || link_doctor_used + 20 >= sizeof link_doctor_list)
@@ -2030,7 +1971,7 @@ static b32 link_doctor(void)
         positive failed = 0;
         positive port = (positive)link_port();
         positive listener;
-        positive reach = link_reach();
+        positive reach = discovery_lan_reach();
 
         host_read_word(LINK_SWITCH_PATH, word, sizeof word);
         on = string_equals((string_address)word, "on");
@@ -2063,7 +2004,7 @@ static b32 link_doctor(void)
 
         link_doctor_used = 0;
         link_doctor_list[0] = 0;
-        link_interfaces_each(link_doctor_add);
+        discovery_interfaces_each(link_doctor_add, null);
         if (link_doctor_used)
                 string_format(log, "  pass  addresses: %s\n",
                               (string_address)link_doctor_list);
@@ -2075,7 +2016,7 @@ static b32 link_doctor(void)
                                    "cable), then moonwater link doctor\n");
         }
 
-        if (reach & LINK_REACH_ROUTE)
+        if (reach & DISCOVERY_LAN_ROUTE)
                 string_format(log, "  pass  route: a route to a network\n");
         else
         {
@@ -2085,7 +2026,7 @@ static b32 link_doctor(void)
                                    "cable), then moonwater link doctor\n");
         }
 
-        if (reach & LINK_REACH_JOINS)
+        if (reach & DISCOVERY_LAN_JOINS)
                 string_format(log, "  pass  discovery: multicast works, so machines "
                                    "find each other with no address\n");
         else

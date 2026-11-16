@@ -15,8 +15,7 @@
 #include "../../src/waterlink/link.c"
 #include "../../src/waterlink/seal.c"
 #include "../../src/waterlink/handshake.c"
-#include "../../src/waterlink/discover.c"
-#include "../../src/net/discovery.c"
+#include "../../src/waterlink/group.c"
 #define SHARED_counted
 #include "../checks.c"
 #undef SHARED_counted
@@ -4554,12 +4553,12 @@ static fn mdns_page_make(void)
 }
 
 static p8 mdns_read_edge(const p8 address_to packet, positive length,
-                           struct waterlink_found address_to found)
+                           struct discovery_mdns_found address_to found)
 {
         p8 address_to at = mdns_page + 4096 - length;
 
         memory_copy(at, packet, length);
-        return waterlink_mdns_read(at, length, found);
+        return discovery_mdns_read(address_of waterlink_mdns_service, at, length, found);
 }
 
 /*
@@ -4726,6 +4725,132 @@ static fn discovery_setting_rows(void)
 }
 
 /*
+        What discovery shares with the rest of the network stack, one copy
+        of each: an interface's kind is told from the kernel's own message by
+        the lease's wireless test and its reading of the driver's word
+        (netlink_link_is_wireless, netlink_link_driver), an IPv4 address's
+        scope is the rule a fetch's public address is judged by
+        (net_scope_v4), and the local network's records are any service's
+        (discovery_mdns_service), waterlink's being one.
+*/
+static p8 discovery_link_fed(discovery_here address_to here, string_address name,
+                             p16 type, string_address driver, p8 marked)
+{
+        netlink_buffer message = {0};
+        p8 built = netlink_begin(&message, RTM_NEWLINK, 0, 1, sizeof(netlink_link)) &&
+                   netlink_attribute_add(&message, IFLA_IFNAME, name,
+                                         string_length(name) + 1);
+
+        if (driver)
+        {
+                positive nested = netlink_nested_begin(&message, IFLA_LINKINFO);
+
+                built &= netlink_attribute_add(&message, IFLA_INFO_KIND, driver,
+                                               string_length(driver));
+                netlink_nested_end(&message, nested);
+        }
+        if (marked)
+                built &= netlink_attribute_add(&message, IFLA_WIRELESS, "mark", 4);
+        if (built && !message.failed)
+        {
+                netlink_link address_to link = netlink_body(&message);
+
+                link->index = (p32)here->interfaces + 1;
+                link->kind = type;
+                built = discovery_link_seen((netlink_header address_to)message.bytes, here);
+        }
+        netlink_forget(&message);
+        return built;
+}
+
+static fn discovery_fold_rows(void)
+{
+        static const struct
+        {
+                string_address name;
+                p16 type;
+                string_address driver;
+                p8 marked;
+                positive kind;
+        } links[] = {
+            {"eth0", 1, null, false, DISCOVERY_KIND_ETHERNET},
+            {"wlp2s0", 1, null, false, DISCOVERY_KIND_WIFI},
+            {"wifi0", 1, null, false, DISCOVERY_KIND_WIFI},
+            {"radio0", 1, "wlan", false, DISCOVERY_KIND_WIFI},
+            {"radio1", 1, null, true, DISCOVERY_KIND_WIFI},
+            {"eth1", 1, "veth", false, DISCOVERY_KIND_VIRTUAL},
+            {"wg0", 65534, "wireguard", false, DISCOVERY_KIND_VPN},
+            {"lo", 772, null, false, DISCOVERY_KIND_LOOPBACK},
+        };
+        static const struct
+        {
+                p32 ip;
+                positive scope;
+                p8 public;
+        } places[] = {
+            {0x08080808, NET_SCOPE_GLOBAL, true},  {0x0a000001, NET_SCOPE_PRIVATE, false},
+            {0xac100001, NET_SCOPE_PRIVATE, false}, {0xac200001, NET_SCOPE_GLOBAL, true},
+            {0xc0a80101, NET_SCOPE_PRIVATE, false}, {0x64400001, NET_SCOPE_SHARED, false},
+            {0x64800001, NET_SCOPE_GLOBAL, true},  {0xa9fe0101, NET_SCOPE_LINK, false},
+            {0x7f000001, NET_SCOPE_LOOPBACK, false}, {0x00000001, NET_SCOPE_OTHER, false},
+            {0xe0000001, NET_SCOPE_OTHER, false},  {0xffffffff, NET_SCOPE_OTHER, false},
+            //      Global by scope, and still no place a fetch goes: the IETF's
+            //      protocol block and the benchmarking one.
+            {0xc0000001, NET_SCOPE_GLOBAL, false}, {0xc6120001, NET_SCOPE_GLOBAL, false},
+        };
+        static const p8 other_type[] = "\x0a_moonwater\x04_udp\x05local";
+        static const discovery_mdns_service other = {other_type, sizeof(other_type), "mw-"};
+        discovery_here here;
+        struct discovery_mdns_found found;
+        p8 packet[DISCOVERY_MDNS_MAX];
+        p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        p8 host[6] = {1, 2, 3, 4, 5, 6};
+        positive wrong = 0, length;
+        p8 own, waterlinks;
+
+        memory_zero(address_of here, sizeof here);
+        for (positive at = 0; at < array_count(links); at++)
+                wrong += !discovery_link_fed(address_of here, links[at].name, links[at].type,
+                                             links[at].driver, links[at].marked) ||
+                         here.interfaces != at + 1 ||
+                         here.interface[at].kind != links[at].kind ||
+                         !string_equals((string_address)here.interface[at].name,
+                                        links[at].name);
+        check("discovery: an interface's kind is told from the kernel's message by "
+              "the lease's wireless test and its reading of the driver's word",
+              wrong == 0);
+
+        wrong = 0;
+        for (positive at = 0; at < array_count(places); at++)
+        {
+                p8 address[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+
+                network_store_32(address + 12, places[at].ip);
+                wrong += net_scope_v4(places[at].ip) != places[at].scope ||
+                         discovery_address_scope(address) != places[at].scope ||
+                         http_address_public(places[at].ip) != places[at].public;
+        }
+        check("discovery: an IPv4 address's scope is the one rule, and a fetch's "
+              "public address is a global one that is no protocol or benchmark block",
+              wrong == 0);
+
+        length = discovery_mdns_announce(address_of other, packet, sizeof packet, instance,
+                                         host, 4242, 0x0a000001, 120, 0, null, 0);
+        own = length && discovery_mdns_read(address_of other, packet, length,
+                                            address_of found) &&
+              found.count == 1 && found.instance[0].port == 4242 &&
+              found.instance[0].label_length == 23 &&
+              !memory_compare(found.instance[0].label, "mw-0102030405060708090a", 23);
+        waterlinks = discovery_mdns_read(address_of waterlink_mdns_service, packet, length,
+                                         address_of found) &&
+                     found.count == 0;
+        check("discovery: the local network's records are any service's: another "
+              "type and label are written, read back as that service's, and are "
+              "nothing to waterlink's",
+              own && waterlinks);
+}
+
+/*
         discovery.c's pure parts: STUN against RFC 5769's vectors (the test
         vectors RFC 8489 names), the request it sends, the trace's line, the
         NAT's reading, an address's scope and text and an interface's kind.
@@ -4767,7 +4892,6 @@ static fn discovery_vectors(void)
             {"ztks57abcd", 1, false, "tun", DISCOVERY_KIND_VPN},
             {"ztks57abcd", 1, false, null, DISCOVERY_KIND_VPN},
             {"wlan0", 1, true, null, DISCOVERY_KIND_WIFI},
-            {"wlp2s0", 1, false, null, DISCOVERY_KIND_WIFI},
             {"radio0", 1, true, null, DISCOVERY_KIND_WIFI},
             {"enp3s0", 1, false, null, DISCOVERY_KIND_ETHERNET},
             {"eth0", 1, false, "veth", DISCOVERY_KIND_VIRTUAL},
@@ -4780,20 +4904,20 @@ static fn discovery_vectors(void)
                 string_address text;
                 positive scope;
         } scopes[] = {
-            {"10.1.2.3", DISCOVERY_SCOPE_PRIVATE},
-            {"172.31.0.1", DISCOVERY_SCOPE_PRIVATE},
-            {"172.32.0.1", DISCOVERY_SCOPE_GLOBAL},
-            {"192.168.7.1", DISCOVERY_SCOPE_PRIVATE},
-            {"100.64.0.1", DISCOVERY_SCOPE_SHARED},
-            {"100.128.0.1", DISCOVERY_SCOPE_GLOBAL},
-            {"169.254.9.9", DISCOVERY_SCOPE_LINK},
-            {"127.0.0.1", DISCOVERY_SCOPE_LOOPBACK},
-            {"203.0.113.9", DISCOVERY_SCOPE_GLOBAL},
-            {"fe80::1", DISCOVERY_SCOPE_LINK},
-            {"fd12:3456::1", DISCOVERY_SCOPE_UNIQUE},
-            {"2001:db8::1", DISCOVERY_SCOPE_GLOBAL},
-            {"::1", DISCOVERY_SCOPE_LOOPBACK},
-            {"ff02::1", DISCOVERY_SCOPE_OTHER},
+            {"10.1.2.3", NET_SCOPE_PRIVATE},
+            {"172.31.0.1", NET_SCOPE_PRIVATE},
+            {"172.32.0.1", NET_SCOPE_GLOBAL},
+            {"192.168.7.1", NET_SCOPE_PRIVATE},
+            {"100.64.0.1", NET_SCOPE_SHARED},
+            {"100.128.0.1", NET_SCOPE_GLOBAL},
+            {"169.254.9.9", NET_SCOPE_LINK},
+            {"127.0.0.1", NET_SCOPE_LOOPBACK},
+            {"203.0.113.9", NET_SCOPE_GLOBAL},
+            {"fe80::1", NET_SCOPE_LINK},
+            {"fd12:3456::1", NET_SCOPE_UNIQUE},
+            {"2001:db8::1", NET_SCOPE_GLOBAL},
+            {"::1", NET_SCOPE_LOOPBACK},
+            {"ff02::1", NET_SCOPE_OTHER},
         };
         static const string_address texts[] = {
             "::1", "2001:db8::1", "fe80::1:0:0:1", "1:0:0:2::3", "1::",
@@ -4961,16 +5085,16 @@ static fn mdns_wire_exact(void)
 {
         p8 instance[10];
         p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
-        p8 packet[WATERLINK_MDNS_MAX];
-        p8 expected[WATERLINK_MDNS_MAX];
+        p8 packet[DISCOVERY_MDNS_MAX];
+        p8 expected[DISCOVERY_MDNS_MAX];
         p8 question[WATERLINK_SERVICE_BYTES + 4];
         positive question_length;
         positive wrong = 0;
         positive rows = 0;
-        struct waterlink_found found;
+        struct discovery_mdns_found found;
 
         random_seeded(instance, 10, 7);
-        question_length = waterlink_mdns_query(packet, sizeof packet) - 12;
+        question_length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet) - 12;
         memory_copy(question, packet + 12, question_length);
         /* Invalid writer contracts are refused before touching the output,
            including lengths that would wrap an additive capacity check. */
@@ -4981,28 +5105,28 @@ static fn mdns_wire_exact(void)
         {
                 memory_fill(packet, 0xa5, sizeof(packet));
                 check("mDNS writer refuses oversized question before writing",
-                      !waterlink_mdns_announce(packet, sizeof(packet), instance,
+                      !discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof(packet), instance,
                           host, 22348, 0, 120, 0, question, invalid_lengths[i]) &&
                       memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
         }
         memory_fill(packet, 0xa5, sizeof(packet));
         check("mDNS writer refuses missing question bytes",
-              !waterlink_mdns_announce(packet, sizeof(packet), instance, host,
+              !discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof(packet), instance, host,
                   22348, 0, 120, 0, null, question_length) &&
               memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
         check("mDNS writer refuses empty declared question",
-              !waterlink_mdns_announce(packet, sizeof(packet), instance, host,
+              !discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof(packet), instance, host,
                   22348, 0, 120, 0, question, 0) &&
               memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
         check("mDNS writer refuses undersized fixed reserve",
-              !waterlink_mdns_announce(packet, 171, instance, host, 22348,
+              !discovery_mdns_announce(address_of waterlink_mdns_service, packet, 171, instance, host, 22348,
                   0, 120, 0, null, 0) &&
               memory_span_byte(packet, 0xa5, sizeof(packet)) == sizeof(packet));
         check("mDNS writer accepts its fixed-reserve boundary",
-              waterlink_mdns_announce(packet, 172, instance, host, 22348,
+              discovery_mdns_announce(address_of waterlink_mdns_service, packet, 172, instance, host, 22348,
                   0, 120, 0, null, 0) > 0);
         check("mDNS writer accepts its question-reserve boundary",
-              waterlink_mdns_announce(packet, 172 + question_length, instance,
+              discovery_mdns_announce(address_of waterlink_mdns_service, packet, 172 + question_length, instance,
                   host, 22348, 0, 120, 0, question, question_length) > 0);
         for (positive shape = 0; shape < 8; shape++)
         {
@@ -5014,7 +5138,7 @@ static fn mdns_wire_exact(void)
                 //      Poisoned first, so a field the builder leaves alone
                 //      shows as the poison rather than as a lucky zero.
                 memory_fill(packet, 0xa5, sizeof packet);
-                got = waterlink_mdns_announce(packet, sizeof packet, instance,
+                got = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance,
                                               host, 22348, address, ttl,
                                               asked ? 0x1234 : 0,
                                               asked ? question : null,
@@ -5031,9 +5155,9 @@ static fn mdns_wire_exact(void)
 
         //      The question a one-shot asker sent is kept whole, to be echoed:
         //      its name, its type and its class, and not a byte more.
-        question_length = waterlink_mdns_query(packet, sizeof packet);
+        question_length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
         check("a question is kept exactly as it was asked",
-              waterlink_mdns_read(packet, question_length, address_of found) &&
+              discovery_mdns_read(address_of waterlink_mdns_service, packet, question_length, address_of found) &&
                   found.asked &&
                   found.question_length == question_length - 12 &&
                   !memory_compare(found.question, packet + 12,
@@ -5046,7 +5170,7 @@ static fn mdns_wire_exact(void)
                                               0, 0, 12, 0, 1};
 
                 check("a question of the root name, at the count bound exactly, is read",
-                      waterlink_mdns_read(smallest, sizeof smallest,
+                      discovery_mdns_read(address_of waterlink_mdns_service, smallest, sizeof smallest,
                                           address_of found) &&
                           !found.asked);
         }
@@ -5093,11 +5217,11 @@ static fn mdns_wire_exact(void)
                 packet[at++] = 0;
                 if (root)
                         check("an SRV to the root target is read but is no endpoint",
-                              waterlink_mdns_read(packet, at, address_of found) &&
+                              discovery_mdns_read(address_of waterlink_mdns_service, packet, at, address_of found) &&
                                   !found.count);
                 else
                         check("the same SRV to a real target is an endpoint",
-                              waterlink_mdns_read(packet, at, address_of found) &&
+                              discovery_mdns_read(address_of waterlink_mdns_service, packet, at, address_of found) &&
                                   found.count == 1 &&
                                   found.instance[0].port == 22348);
         }
@@ -5106,9 +5230,9 @@ static fn mdns_wire_exact(void)
 static fn mdns_parse(void)
 {
         p8 instance[10];
-        struct waterlink_found found;
-        p8 packet[WATERLINK_MDNS_MAX];
-        p8 broken[WATERLINK_MDNS_MAX];
+        struct discovery_mdns_found found;
+        p8 packet[DISCOVERY_MDNS_MAX];
+        p8 broken[DISCOVERY_MDNS_MAX];
         p8 host[6] = {1, 2, 3, 4, 5, 6};
         positive length;
         positive survived = 0;
@@ -5117,7 +5241,7 @@ static fn mdns_parse(void)
         mdns_page_make();
         random_seeded(instance, 10, 1);
 
-        length = waterlink_mdns_announce(packet, sizeof packet, instance, host,
+        length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance, host,
                                          22348, 0x0a000001, 4500, 0, null, 0);
         check("an announcement reads back: one instance, on its port",
               length && mdns_read_edge(packet, length, address_of found) &&
@@ -5152,7 +5276,7 @@ static fn mdns_parse(void)
                                   !found.count);
                 }
         }
-        length = waterlink_mdns_announce(packet, sizeof packet, instance, host,
+        length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance, host,
                                          22348, 0x0a000001, 0, 0, null, 0);
         check("an mDNS goodbye cannot be rediscovered as a live endpoint",
               length && mdns_read_edge(packet, length, address_of found) &&
@@ -5162,7 +5286,7 @@ static fn mdns_parse(void)
         {
                 positive names = 0;
 
-                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance,
                                                  host, 22348, 0x0a000001, 4500,
                                                  0, null, 0);
                 memory_copy(broken, packet, length);
@@ -5182,7 +5306,7 @@ static fn mdns_parse(void)
                               found.instance[0].port == 22348);
         }
 
-        length = waterlink_mdns_query(packet, sizeof packet);
+        length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
         check("a question for the service is one",
               mdns_read_edge(packet, length, address_of found) && found.asked &&
                       !found.response && found.question_length);
@@ -5275,7 +5399,7 @@ static fn mdns_parse(void)
         //      Generated: every cut of a real announcement, and a thousand
         //      random edits of it, each read at the page's edge. Surviving is
         //      the claim; what they read must never be more than was there.
-        length = waterlink_mdns_announce(packet, sizeof packet, instance, host,
+        length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance, host,
                                          22348, 0x0a000001, 4500, 0, null, 0);
         for (positive cut = 0; cut < length; cut++)
         {
@@ -5313,7 +5437,7 @@ static fn mdns_parse(void)
                 }
                 tries++;
                 survived += mdns_read_edge(broken, size, address_of found)
-                                ? found.count <= WATERLINK_FOUND_MAX
+                                ? found.count <= DISCOVERY_MDNS_FOUND_MAX
                                 : !found.count && !found.asked && !found.id;
         }
         check("every cut and 20,000 random edits of an announcement are read "
@@ -5437,7 +5561,7 @@ static b32 pair_vectors(positive count)
 
 static fn hex_line(p8 address_to bytes, positive length)
 {
-        static p8 text[2 * WATERLINK_MDNS_MAX + 2];
+        static p8 text[2 * DISCOVERY_MDNS_MAX + 2];
         positive used = memory_into_hex(text, bytes, length);
 
         text[used++] = '\n';
@@ -5470,15 +5594,15 @@ static b32 mdns_modes(string_address mode)
         {
                 p8 instance[10];
                 p8 host[6] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6};
-                p8 packet[WATERLINK_MDNS_MAX];
+                p8 packet[DISCOVERY_MDNS_MAX];
                 positive length;
 
                 random_seeded(instance, 10, 1);
-                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance,
                                                  host, 22348, 0x0a4d0002, 4500,
                                                  0, null, 0);
                 hex_line(packet, length);
-                length = waterlink_mdns_query(packet, sizeof packet);
+                length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
                 hex_line(packet, length);
                 log_flush();
                 return 0;
@@ -5486,13 +5610,13 @@ static b32 mdns_modes(string_address mode)
 
         //      mdns-read
         {
-                static p8 line[2 * WATERLINK_MDNS_MAX + 4];
+                static p8 line[2 * DISCOVERY_MDNS_MAX + 4];
 
                 for (;;)
                 {
                         positive used = 0;
-                        p8 packet[WATERLINK_MDNS_MAX];
-                        struct waterlink_found found;
+                        p8 packet[DISCOVERY_MDNS_MAX];
+                        struct discovery_mdns_found found;
                         p8 good;
 
                         for (;;)
@@ -5509,7 +5633,7 @@ static b32 mdns_modes(string_address mode)
                                 if (used < sizeof line - 1)
                                         used++;
                         }
-                        if (used % 2 || used / 2 > WATERLINK_MDNS_MAX ||
+                        if (used % 2 || used / 2 > DISCOVERY_MDNS_MAX ||
                             memory_decode_power2(packet, line, used / 2,
                                                  mdns_hex_values(), 4) !=
                                     used / 2)
@@ -5517,14 +5641,14 @@ static b32 mdns_modes(string_address mode)
                                 string_format(log, "bad\n");
                                 continue;
                         }
-                        good = waterlink_mdns_read(packet, used / 2,
+                        good = discovery_mdns_read(address_of waterlink_mdns_service, packet, used / 2,
                                                    address_of found);
                         string_format(log, "%s %s %p", good ? "ok" : "refused",
                                       found.asked ? "asked" : "-",
                                       found.count);
                         for (positive at = 0; good && at < found.count; at++)
                         {
-                                struct waterlink_found_instance address_to one =
+                                struct discovery_mdns_instance address_to one =
                                         found.instance + at;
 
                                 if (one->has_port)
@@ -5590,6 +5714,7 @@ b32 main(void)
         mdns_wire_exact();
         discovery_vectors();
         discovery_setting_rows();
+        discovery_fold_rows();
         return test_report(null);
 }
 #endif /* CHECK_waterlink */
@@ -6957,22 +7082,22 @@ static fn control_messages(void)
         memory_copy(control + 8, has, 8);
         memory_copy(control + 16, address_of value, 4);
         check("a message that was filled whole gives its int",
-              link_control_int(control, 24, sizeof control, SOL_UDP,
+              socket_control_int(control, 24, sizeof control, SOL_UDP,
                                UDP_GRO) == 1200 &&
-                      link_control_int(control, 20, sizeof control, SOL_UDP,
+                      socket_control_int(control, 20, sizeof control, SOL_UDP,
                                        UDP_GRO) == 1200);
         check("sec: one that claims more than the kernel filled is not read, "
               "though the buffer has room for it",
-              link_control_int(control, 16, sizeof control, SOL_UDP,
+              socket_control_int(control, 16, sizeof control, SOL_UDP,
                                UDP_GRO) == -1 &&
-                      link_control_int(control, 19, sizeof control, SOL_UDP,
+                      socket_control_int(control, 19, sizeof control, SOL_UDP,
                                        UDP_GRO) == -1);
         check("sec: nor is what the buffer holds past its room",
-              link_control_int(control, 24, 18, SOL_UDP, UDP_GRO) == -1);
+              socket_control_int(control, 24, 18, SOL_UDP, UDP_GRO) == -1);
         check("and a level or a type that is not asked for is not read",
-              link_control_int(control, 24, sizeof control, SOL_UDP,
+              socket_control_int(control, 24, sizeof control, SOL_UDP,
                                UDP_SEGMENT) == -1 &&
-                      link_control_int(control, 24, sizeof control, IPPROTO_IP,
+                      socket_control_int(control, 24, sizeof control, IPPROTO_IP,
                                        UDP_GRO) == -1);
 
         //      After another message, padded to its eight.
@@ -6992,17 +7117,17 @@ static fn control_messages(void)
         memory_copy(control + 32, has, 8);
         memory_copy(control + 40, address_of value, 4);
         check("the one asked for is found after another, past its padding",
-              link_control_int(control, 48, sizeof control, SOL_UDP,
+              socket_control_int(control, 48, sizeof control, SOL_UDP,
                                UDP_GRO) == 1200 &&
-                      link_control_int(control, 48, sizeof control, IPPROTO_IP,
+                      socket_control_int(control, 48, sizeof control, IPPROTO_IP,
                                        IP_TTL) == 255);
         check("sec: and a second message the filled length cuts short is not",
-              link_control_int(control, 40, sizeof control, SOL_UDP,
+              socket_control_int(control, 40, sizeof control, SOL_UDP,
                                UDP_GRO) == -1);
         size = 8; // smaller than its own header: nothing after it is a message
         memory_copy(control, address_of size, 8);
         check("sec: a message too small to be one ends the walk",
-              link_control_int(control, 48, sizeof control, SOL_UDP,
+              socket_control_int(control, 48, sizeof control, SOL_UDP,
                                UDP_GRO) == -1);
 }
 
@@ -8226,9 +8351,9 @@ static fn coalesced_runs(void)
         positive runs = LINK_SEGMENTS + 6;
         p16 port;
         timespec pause = {0, 20000000};
-        link_iovec part = {run, sizeof run};
+        socket_iovec part = {run, sizeof run};
         p64 control[3];
-        link_message message;
+        socket_message message;
         bipolar got;
 
         link_self.socket = link_socket_open(0, true);
@@ -8547,7 +8672,7 @@ static fn wls_group(void)
                                derived);
         waterlink_group_keys_from(address_of wls_office, derived, "office");
         memory_zero(address_of link_nearby, sizeof link_nearby);
-        link_nearby.socket = -1;
+        link_nearby.lan.socket = -1;
         link_nearby.groups.count = 1;
         string_copy(link_nearby.groups.record[0].namespace, "office");
         memory_copy(link_nearby.groups.record[0].key, derived, 32);
@@ -8759,7 +8884,7 @@ static fn mdns_amplification(void)
         p16 port[LINK_GREETED + 8];
         positive greeted = 0;
         positive answers = 0;
-        p8 packet[WATERLINK_MDNS_MAX], back[WATERLINK_DATAGRAM + 16];
+        p8 packet[DISCOVERY_MDNS_MAX], back[WATERLINK_DATAGRAM + 16];
         p8 loopback4[16];
         socket_address_internet where;
         p32 size = sizeof where;
@@ -8780,11 +8905,11 @@ static fn mdns_amplification(void)
                 network_store_32(control + 20, 0x7f000001);
                 check("sec: a whole IP_PKTINFO message gives the address the "
                       "kernel says received the packet",
-                      link_nearby_local(control, 28, sizeof control) ==
+                      discovery_lan_local(control, 28, sizeof control) ==
                           0x7f000001);
                 check("sec: a message the filled length cuts short is not "
                       "read, though the buffer has room for it",
-                      link_nearby_local(control, 24, sizeof control) == 0);
+                      discovery_lan_local(control, 24, sizeof control) == 0);
         }
         {
                 struct waterlink_group_keys second;
@@ -8815,11 +8940,11 @@ static fn mdns_amplification(void)
                 socket[at] = wls_listener(port + at);
                 wls_seeded(instance, 10, (p8)(at + 1));
                 wls_seeded(host, 6, (p8)at);
-                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance,
                                                  host, port[at], 0, 4500, 0,
                                                  null, 0);
                 link_nearby_heard(packet, length, wls_loopback,
-                                  WATERLINK_MDNS_PORT, 0, 2000000 + at);
+                                  DISCOVERY_MDNS_PORT, 0, 2000000 + at);
         }
         for (positive at = 0; at < array_count(socket); at++)
         {
@@ -8844,11 +8969,10 @@ static fn mdns_amplification(void)
 
                         wls_seeded(instance, 10, (p8)(at + 90));
                         wls_seeded(host, 6, (p8)(at + 90));
-                        length = waterlink_mdns_announce(
-                            packet, sizeof packet, instance, host,
+                        length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance, host,
                             (p16)(30000 + at), 0, 4500, 0, null, 0);
                         link_nearby_heard(packet, length, second_source,
-                                          WATERLINK_MDNS_PORT, 0,
+                                          DISCOVERY_MDNS_PORT, 0,
                                           3000000 + at);
                 }
                 check("sec: the source ceiling leaves the other half for another address",
@@ -8869,23 +8993,23 @@ static fn mdns_amplification(void)
                 wls_seeded(host, 6, (p8)at);
                 memory_copy(place, wls_loopback, 16);
                 place[14] = (p8)(at + 1);
-                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance,
                                                  host, 0, 0, 4500, 0, null, 0);
-                link_nearby_heard(packet, length, place, WATERLINK_MDNS_PORT,
+                link_nearby_heard(packet, length, place, DISCOVERY_MDNS_PORT,
                                   0, 5000000 + at);
         }
         check("sec: announcements naming a place that refuses a greeting "
               "spend none of the budget",
               entropy_draws == greeted && link_nearby.greeted_next == 0);
 
-        link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+        link_nearby.lan.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);
         asker = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
                            0);
         memory_zero(address_of where, sizeof where);
         where.family = AF_INET;
         where.host = network_order_32(HOST_LOOPBACK);
-        if (link_nearby.socket < 0 || asker < 0 ||
+        if (link_nearby.lan.socket < 0 || asker < 0 ||
             socket_bind((b32)asker, address_of where, sizeof where) < 0 ||
             socket_name((b32)asker, address_of where, address_of size) < 0)
         {
@@ -8893,10 +9017,10 @@ static fn mdns_amplification(void)
                 return;
         }
         link_address_v4(loopback4, HOST_LOOPBACK);
-        link_nearby.interfaces = 2;
-        link_nearby.interface_address[0] = 0x0a000001;
-        link_nearby.interface_address[1] = HOST_LOOPBACK;
-        length = waterlink_mdns_query(packet, sizeof packet);
+        link_nearby.lan.interfaces = 2;
+        link_nearby.lan.address[0] = 0x0a000001;
+        link_nearby.lan.address[1] = HOST_LOOPBACK;
+        length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
         link_nearby_heard(packet, length, loopback4, 0, HOST_LOOPBACK,
                           2999999);
         check("sec: a forged source port the kernel cannot answer does not "
@@ -8922,19 +9046,19 @@ static fn mdns_amplification(void)
         check("sec: a one-shot mDNS answer names the address that received "
               "the question, not the first interface", right_address);
         system_close(asker);
-        socket_close((b32)link_nearby.socket);
-        link_nearby.socket = -1;
+        socket_close((b32)link_nearby.lan.socket);
+        link_nearby.lan.socket = -1;
 
         /* The multicast-answer side used to charge before attempting its
            send, unlike the repaired legacy-unicast side. An invalid socket
            is the deterministic kernel refusal: it must neither suppress a
            later honest answer nor let a backward time sample wrap the age. */
         link_nearby.last_answer = 7000000;
-        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+        link_nearby_heard(packet, length, loopback4, DISCOVERY_MDNS_PORT,
                           HOST_LOOPBACK, 8000001);
         check("sec: a refused multicast answer spends no shared answer budget",
               link_nearby.last_answer == 7000000);
-        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+        link_nearby_heard(packet, length, loopback4, DISCOVERY_MDNS_PORT,
                           HOST_LOOPBACK, 6000000);
         check("sec: a backward clock sample cannot bypass the multicast answer interval",
               link_nearby.last_answer == 7000000);
@@ -8946,7 +9070,7 @@ static fn mdns_interface_selection(void)
         bipolar netlink = netlink_open_groups(0);
         bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         p8 packet[64];
-        positive length = waterlink_mdns_query(packet, sizeof packet);
+        positive length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
 
         check("mDNS interface-selection sockets open", netlink >= 0 && sender >= 0);
         if (netlink < 0 || sender < 0)
@@ -8966,19 +9090,19 @@ static fn mdns_interface_selection(void)
                 return;
         }
 
-        link_nearby.socket = sender;
-        link_nearby.interface[0] = (b32)loopback.index;
+        link_nearby.lan.socket = sender;
+        link_nearby.lan.interface[0] = (b32)loopback.index;
         check("an mDNS datagram selects and leaves on the requested interface",
               link_nearby_send(packet, length, 0));
 
         /* The failed option leaves the socket's previous (loopback) choice in
            the kernel. The old helper sent anyway, leaking this interface's
            packet over that stale choice. */
-        link_nearby.interface[0] = 0x7fffffff;
+        link_nearby.lan.interface[0] = 0x7fffffff;
         check("sec: a refused multicast interface cannot fall through to the stale one",
               !link_nearby_send(packet, length, 0));
         socket_close((b32)sender);
-        link_nearby.socket = -1;
+        link_nearby.lan.socket = -1;
 }
 
 /*
@@ -8993,23 +9117,23 @@ static fn mdns_hop_limit(void)
         p32 size = sizeof where;
         b32 one = 1;
         p8 packet[64], back[WATERLINK_DATAGRAM + 16];
-        positive length = waterlink_mdns_query(packet, sizeof packet);
+        positive length = discovery_mdns_query(address_of waterlink_mdns_service, packet, sizeof packet);
         positive answered[2] = {0, 0};
         bipolar asker = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                     SOCK_NONBLOCK, 0);
 
         wls_group();
-        link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+        link_nearby.lan.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);
         memory_zero(address_of where, sizeof where);
         where.family = AF_INET;
         where.host = network_order_32(HOST_LOOPBACK);
-        if (asker < 0 || link_nearby.socket < 0 ||
-            socket_option_set((b32)link_nearby.socket, 0, 12, // IP_RECVTTL
+        if (asker < 0 || link_nearby.lan.socket < 0 ||
+            socket_option_set((b32)link_nearby.lan.socket, 0, 12, // IP_RECVTTL
                               address_of one, sizeof one) < 0 ||
-            socket_bind((b32)link_nearby.socket, address_of where,
+            socket_bind((b32)link_nearby.lan.socket, address_of where,
                         sizeof where) < 0 ||
-            socket_name((b32)link_nearby.socket, address_of to,
+            socket_name((b32)link_nearby.lan.socket, address_of to,
                         address_of size) < 0)
         {
                 check("IPv4 loopback sockets for the hop limit", false);
@@ -9031,8 +9155,8 @@ static fn mdns_hop_limit(void)
               "link, it is",
               answered[0] == 0 && answered[1] == 1);
         system_close(asker);
-        socket_close((b32)link_nearby.socket);
-        link_nearby.socket = -1;
+        socket_close((b32)link_nearby.lan.socket);
+        link_nearby.lan.socket = -1;
 }
 
 /*
@@ -9099,14 +9223,14 @@ static fn mdns_names_one(void)
                                    41004, 41005, 41006, 41007};
         static const p16 zeros[] = {0, 0, 0, 0, 0, 0, 0, 0};
         static const p16 mixed[] = {0, 0, 41100, 41101};
-        p8 packet[WATERLINK_MDNS_MAX];
+        p8 packet[DISCOVERY_MDNS_MAX];
         positive length;
         positive before;
 
         wls_group();
         before = entropy_draws;
         length = wls_mdns_naming(packet, many, 8);
-        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+        link_nearby_heard(packet, length, wls_loopback, DISCOVERY_MDNS_PORT, 0,
                           6000000);
         check("sec: an announcement naming eight instances is one greeting, "
               "to the first",
@@ -9119,7 +9243,7 @@ static fn mdns_names_one(void)
         wls_group();
         before = entropy_draws;
         length = wls_mdns_naming(packet, zeros, 8);
-        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+        link_nearby_heard(packet, length, wls_loopback, DISCOVERY_MDNS_PORT, 0,
                           6100000);
         check("sec: eight instances at port zero are greeted not at all, and "
               "take nothing of the ring",
@@ -9128,7 +9252,7 @@ static fn mdns_names_one(void)
         wls_group();
         before = entropy_draws;
         length = wls_mdns_naming(packet, mixed, 4);
-        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+        link_nearby_heard(packet, length, wls_loopback, DISCOVERY_MDNS_PORT, 0,
                           6200000);
         check("sec: the first instance with a port is the one greeted, past "
               "those without",
@@ -9146,7 +9270,7 @@ static fn mdns_names_one(void)
         link_nearby_heard(packet, length, wls_loopback, 40353, 0, 6300000);
         check("sec: an announcement from a port other than 5353 is not greeted",
               entropy_draws == before);
-        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+        link_nearby_heard(packet, length, wls_loopback, DISCOVERY_MDNS_PORT, 0,
                           6300001);
         check("and the same announcement from 5353 is",
               entropy_draws - before == 1);
@@ -9375,20 +9499,20 @@ static fn pairing_codes(bipolar listener, p16 port)
 
         //      Runs out in the file as well, as the listener's turn finds it.
         wls_group_file(LINK_GROUP_ONCE, boot, 0);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(20000000);
         link_groups_load(address_of groups);
         check("what ran out is dropped from the file, and the listener has "
               "no group left",
               groups.count == 0 && link_nearby.groups.count == 0 &&
-                      link_nearby.socket < 0);
+                      link_nearby.lan.socket < 0);
         wls_group_file(LINK_GROUP_ONCE, boot + 300, 0);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(30000000);
         link_groups_load(address_of groups);
         check("and what has not, is kept", groups.count == 1 &&
                                                link_nearby.groups.count == 1);
-        link_nearby_close();
+        discovery_lan_close(address_of link_nearby.lan);
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
@@ -9519,10 +9643,10 @@ static fn nearby_reload(void)
 
         memory_zero(address_of link_nearby, sizeof link_nearby);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(10000000);
         check("no file is no group, and nothing is opened or closed",
-              link_nearby.groups.count == 0 && link_nearby.socket >= 0 &&
+              link_nearby.groups.count == 0 && link_nearby.lan.socket >= 0 &&
                       !link_nearby.labels_ready);
 
         (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
@@ -9533,7 +9657,7 @@ static fn nearby_reload(void)
                       link_nearby.groups.record[0].may == WATERLINK_MAY_RUN &&
                       link_nearby.keys[0].mark == keys.mark &&
                       !memory_compare(link_nearby.keys[0].psk, keys.psk, 32) &&
-                      link_nearby.labels_ready && link_nearby.socket >= 0 &&
+                      link_nearby.labels_ready && link_nearby.lan.socket >= 0 &&
                       link_nearby.next_announce == 10600000);
 
         link_nearby.groups.record[0].may = 77;
@@ -9586,13 +9710,13 @@ static fn nearby_reload(void)
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         link_nearby_reload(14000000);
         check("a file that is gone is no group, and closes the socket",
-              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+              link_nearby.groups.count == 0 && link_nearby.lan.socket < 0);
 
         (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0644);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(15000000);
         check("sec: a file others can read is no group",
-              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+              link_nearby.groups.count == 0 && link_nearby.lan.socket < 0);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
@@ -9604,16 +9728,29 @@ static fn nearby_reload(void)
         kernel's, made here by hand, so a hostile or short one is as likely
         as a good one.
 */
+//      One address message as the network's walk takes it: gathered by
+//      discovery's visitor, and what it gathered offered to the join.
+static p8 nearby_address_fed(netlink_header address_to header)
+{
+        discovery_here here;
+        p8 went;
+
+        memory_zero(address_of here, sizeof here);
+        went = discovery_address_seen(header, address_of here);
+        discovery_interfaces_visit(address_of here, discovery_lan_join,
+                                   address_of link_nearby.lan);
+        return went;
+}
+
 static fn nearby_address(void)
 {
         p8 message[64];
         netlink_header address_to header = (netlink_header address_to)message;
         netlink_address address_to body = (netlink_address address_to)(message + 16);
         p8 refused_all = true;
-        link_interface_visitor joins = link_nearby_join;
 
         wls_group();
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         memory_zero(message, sizeof message);
         header->length = 16 + 8 + 8;
         header->type = RTM_NEWADDR;
@@ -9622,56 +9759,56 @@ static fn nearby_address(void)
         memory_copy(message + 24, "\x08\x00\x02\x00\x7f\x00\x00\x01", 8);
 
         check("an address of an interface is joined and kept, with its address",
-              link_interface_address(header, address_of joins) &&
-                      link_nearby.interfaces == 1 &&
-                      link_nearby.interface[0] == 1 &&
-                      link_nearby.interface_address[0] == 0x7f000001);
-        (void)link_interface_address(header, address_of joins);
+              nearby_address_fed(header) &&
+                      link_nearby.lan.interfaces == 1 &&
+                      link_nearby.lan.interface[0] == 1 &&
+                      link_nearby.lan.address[0] == 0x7f000001);
+        (void)nearby_address_fed(header);
         check("sec: the same interface again is kept once",
-              link_nearby.interfaces == 1);
+              link_nearby.lan.interfaces == 1);
 
         //      The refresh starts from nothing, and the group is joined on the
         //      socket already: the kernel says so, and it is as good as new.
-        link_nearby.interfaces = 0;
-        (void)link_interface_address(header, address_of joins);
+        link_nearby.lan.interfaces = 0;
+        (void)nearby_address_fed(header);
         check("an interface joined already is joined",
-              link_nearby.interfaces == 1);
+              link_nearby.lan.interfaces == 1);
 
-        link_nearby.interfaces = 0;
+        link_nearby.lan.interfaces = 0;
         body->family = AF_INET6;
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         body->family = AF_INET;
         header->type = RTM_NEWADDR + 1;
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         header->type = RTM_NEWADDR;
         header->length = 16 + 8;
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         header->length = 16 + 8 + 8;
         message[26] = 3; // an attribute that is not the local address
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         message[26] = 2;
         message[24] = 4; // an address of two bytes
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         message[24] = 8;
         body->index = 0x7ffffff0; // an interface nobody has
-        (void)link_interface_address(header, address_of joins);
-        refused_all &= link_nearby.interfaces == 0;
+        (void)nearby_address_fed(header);
+        refused_all &= link_nearby.lan.interfaces == 0;
         check("sec: another family, another message, a short one, another "
               "attribute, a short address and an interface that is not there "
               "are none of them kept",
               refused_all);
 
         body->index = 1;
-        link_nearby.interfaces = LINK_INTERFACES;
-        (void)link_interface_address(header, address_of joins);
+        link_nearby.lan.interfaces = DISCOVERY_LAN_INTERFACES;
+        (void)nearby_address_fed(header);
         check("sec: a table that is full takes no more",
-              link_nearby.interfaces == LINK_INTERFACES);
-        link_nearby_close();
+              link_nearby.lan.interfaces == DISCOVERY_LAN_INTERFACES);
+        discovery_lan_close(address_of link_nearby.lan);
 }
 
 /*
@@ -9692,7 +9829,7 @@ static fn nearby_tick(void)
 
         memory_zero(address_of link_nearby, sizeof link_nearby);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         wake = link_nearby_tick(20000000);
         check("with no group there is nothing to send, and a second to wait",
               wake == 21000000 && link_nearby.announced == 0);
@@ -9721,23 +9858,23 @@ static fn nearby_tick(void)
         //      The memberships are asked for again every five seconds, and a
         //      table that is not the one it was starts the quick announcements
         //      over: here the table it had names an interface nobody has.
-        link_nearby.interfaces = 1;
-        link_nearby.interface[0] = 0x7ffffff0;
-        link_nearby.interface_address[0] = 0x0a000001;
+        link_nearby.lan.interfaces = 1;
+        link_nearby.lan.interface[0] = 0x7ffffff0;
+        link_nearby.lan.address[0] = 0x0a000001;
         link_nearby.interfaces_looked = 22600000;
         (void)link_nearby_tick(23700000);
         check("sec: the table is asked for again every five seconds, and not "
               "sooner",
-              link_nearby.interface[0] == 0x7ffffff0 &&
+              link_nearby.lan.interface[0] == 0x7ffffff0 &&
                       link_nearby.announced == 3);
         (void)link_nearby_tick(27700000);
         check("and when it is not the table it was, the announcements start "
               "again",
-              (link_nearby.interfaces != 1 ||
-               link_nearby.interface[0] != 0x7ffffff0) &&
+              (link_nearby.lan.interfaces != 1 ||
+               link_nearby.lan.interface[0] != 0x7ffffff0) &&
                       link_nearby.announced == 1 && link_nearby.asked == 1);
 
-        link_nearby_close();
+        discovery_lan_close(address_of link_nearby.lan);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
@@ -10099,7 +10236,7 @@ static fn nearby_reload_failures(void)
         memory_zero(address_of link_nearby, sizeof link_nearby);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
-        link_nearby.socket = wls_quiet_socket();
+        link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(10000000);
 
         //      The lowest descriptor there is, and no soft limit above it.
@@ -10119,7 +10256,7 @@ static fn nearby_reload_failures(void)
               "last read, and the socket",
               link_nearby.groups.count == 1 &&
                       link_nearby.groups.record[0].may == WATERLINK_MAY_RUN &&
-                      link_nearby.socket >= 0);
+                      link_nearby.lan.socket >= 0);
         link_nearby_reload(11600000);
         check("and the next look reads it",
               link_nearby.groups.count == 1 &&
@@ -10134,8 +10271,8 @@ static fn nearby_reload_failures(void)
         link_nearby_reload(12800000);
         check("a file that is gone after a look that failed is no groups, "
               "and closes the socket",
-              link_nearby.groups.count == 0 && link_nearby.socket < 0);
-        link_nearby_close();
+              link_nearby.groups.count == 0 && link_nearby.lan.socket < 0);
+        discovery_lan_close(address_of link_nearby.lan);
 }
 
 /*
@@ -12951,14 +13088,14 @@ static fn mdns_apart(void)
         p8 all = true;
         p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
         p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
-        p8 packet[WATERLINK_MDNS_MAX];
+        p8 packet[DISCOVERY_MDNS_MAX];
         positive length;
-        struct waterlink_found here;
-        struct waterlink_found apart;
+        struct discovery_mdns_found here;
+        struct discovery_mdns_found apart;
         p8 read_here;
         p8 read_apart;
 
-        link_mdns_filter_build(address_of filter);
+        discovery_mdns_filter_build(address_of filter);
         for (positive at = 0; at < array_count(rows); at++)
                 all = all && net_filter_run(address_of filter, NET_APART_ARCH, rows[at].number,
                                             none) ==
@@ -12970,46 +13107,46 @@ static fn mdns_apart(void)
                   SECCOMP_RET_KILL_PROCESS);
 
         memory_zero(address_of here, sizeof here);
-        here.count = WATERLINK_FOUND_MAX;
+        here.count = DISCOVERY_MDNS_FOUND_MAX;
         check("the listener believes a reading with every count in its array",
-              link_mdns_believed(address_of here));
-        here.count = WATERLINK_FOUND_MAX + 1;
-        check("and not one more", !link_mdns_believed(address_of here));
+              discovery_mdns_believed(address_of here));
+        here.count = DISCOVERY_MDNS_FOUND_MAX + 1;
+        check("and not one more", !discovery_mdns_believed(address_of here));
         here.count = 1;
         here.instance[0].label_length = sizeof(here.instance[0].label) + 1;
-        check("nor a label longer than its room", !link_mdns_believed(address_of here));
+        check("nor a label longer than its room", !discovery_mdns_believed(address_of here));
         here.instance[0].label_length = 0;
         here.question_length = sizeof(here.question) + 1;
-        check("nor a question longer than its room", !link_mdns_believed(address_of here));
+        check("nor a question longer than its room", !discovery_mdns_believed(address_of here));
 
-        length = waterlink_mdns_announce(packet, sizeof packet, instance, host, 22348,
+        length = discovery_mdns_announce(address_of waterlink_mdns_service, packet, sizeof packet, instance, host, 22348,
                                          0x7f000001u, 120, 0, null, 0);
         memory_zero(address_of here, sizeof here);
-        read_here = waterlink_mdns_read(packet, length, address_of here);
-        read_apart = link_mdns_read_apart(packet, length, address_of apart);
+        read_here = discovery_mdns_read(address_of waterlink_mdns_service, packet, length, address_of here);
+        read_apart = discovery_mdns_read_apart(address_of waterlink_mdns_service, link_secrets_forget, packet, length, address_of apart);
         check("an announcement read apart is the reading made in place",
               length && read_here && read_apart && apart.count == here.count &&
                   !memory_compare(address_of apart, address_of here, sizeof here));
         check("the reader is a process of its own, still there for the next packet",
-              link_mdns.pid > 0 && link_mdns.channel >= 0 && !link_mdns.refused);
+              discovery_mdns_reader.pid > 0 && discovery_mdns_reader.channel >= 0 && !discovery_mdns_reader.refused);
         memory_fill(packet, 0xc0, 64);
         check("noise read apart is no reading",
-              !link_mdns_read_apart(packet, 64, address_of apart) && !apart.count);
+              !discovery_mdns_read_apart(address_of waterlink_mdns_service, link_secrets_forget, packet, 64, address_of apart) && !apart.count);
         {
-                bipolar reader = link_mdns.pid;
+                bipolar reader = discovery_mdns_reader.pid;
 
                 check("sec: a packet of no bytes, or of fewer than a header, is "
                       "no reading and costs no reader: an empty one was its "
                       "channel's end to it, a fork of the listener a datagram",
-                      !link_mdns_read_apart(packet, 0, address_of apart) &&
-                              !link_mdns_read_apart(packet, DNS_HEADER - 1,
+                      !discovery_mdns_read_apart(address_of waterlink_mdns_service, link_secrets_forget, packet, 0, address_of apart) &&
+                              !discovery_mdns_read_apart(address_of waterlink_mdns_service, link_secrets_forget, packet, DNS_HEADER - 1,
                                                     address_of apart) &&
-                              reader > 0 && link_mdns.pid == reader &&
-                              link_mdns.channel >= 0);
+                              reader > 0 && discovery_mdns_reader.pid == reader &&
+                              discovery_mdns_reader.channel >= 0);
         }
-        read_apart = link_mdns_read_apart(packet, length, address_of apart);
-        link_mdns_end();
-        check("and the reader is let go", link_mdns.pid < 0 && link_mdns.channel < 0);
+        read_apart = discovery_mdns_read_apart(address_of waterlink_mdns_service, link_secrets_forget, packet, length, address_of apart);
+        discovery_mdns_reader_end();
+        check("and the reader is let go", discovery_mdns_reader.pid < 0 && discovery_mdns_reader.channel < 0);
 
         //      The reader is a copy of the listener, which keeps the link's
         //      key: what it wipes before it reads, asked of a copy made here.

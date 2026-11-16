@@ -162,30 +162,16 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 
 /*      The kernel's numbers for the socket options and control messages the
         listener and the greeting ask for, by the names the uapi headers give
-        them; wire_constants holds each to the headers. */
+        them; wire_constants holds each to the headers. The IPv4 ones the
+        local network's socket asks for are beside it (src/net/discovery.c). */
 #define SOL_IPV6 41
 #define SOL_UDP 17
 #if defined(MACOS)
-/*      Darwin's numbers (sys/socket.h, netinet/in.h). IP_PKTINFO is the option
-        that turns the destination info on, which Darwin calls IP_RECVPKTINFO.
-        UDP_SEGMENT and UDP_GRO are Linux's alone and stay as they were. */
-#define SO_REUSEPORT 0x0200
+//      Darwin's number (netinet6/in6.h). UDP_SEGMENT and UDP_GRO are Linux's
+//      alone and stay as they were.
 #define IPV6_V6ONLY 27
-#define IP_TTL 4
-#define IP_PKTINFO 26
-#define IP_RECVTTL 24
-#define IP_MULTICAST_IF 9
-#define IP_MULTICAST_TTL 10
-#define IP_ADD_MEMBERSHIP 12
 #else
-#define SO_REUSEPORT 15
 #define IPV6_V6ONLY 26
-#define IP_TTL 2
-#define IP_PKTINFO 8
-#define IP_RECVTTL 12
-#define IP_MULTICAST_IF 32
-#define IP_MULTICAST_TTL 33
-#define IP_ADD_MEMBERSHIP 35
 #endif
 #define UDP_SEGMENT 103
 #define UDP_GRO 104
@@ -1516,77 +1502,6 @@ static fn link_transport_tell(struct link_session address_to s)
         UDP_SEGMENT, which is what the fixed size is for (waterlink.c). A
         kernel or a device that refuses it once is not asked again.
 */
-typedef struct
-{
-        address_any base;
-        positive length;
-} link_iovec;
-
-typedef struct
-{
-        address_any name;
-        b32 name_length;
-        b32 padding;
-        link_iovec address_to parts;
-        positive part_count;
-        address_any control;
-        positive control_length;
-        b32 flags;
-        b32 padding2;
-} link_message;
-
-/*
-        The data of the first control message with this level and type, among
-        the length bytes the kernel filled -- not the room the buffer has,
-        which holds whatever an earlier call left. Each cmsghdr is a length
-        that counts itself, a level and a type, and is padded to eight bytes;
-        a message that claims more than was filled ends the walk. True with
-        data a reader on the message's bytes.
-*/
-static p8 link_control_find(p8 address_to control, positive length,
-                              positive room, b32 level, b32 type,
-                              byte_reader address_to data)
-{
-        byte_reader reader = byte_reader_open(control,
-                                              length < room ? length : room);
-
-        while (byte_reader_left(&reader) >= 16)
-        {
-                p64 size = (p32)byte_reader_uint(&reader, 4, false);
-                b32 has_level;
-                b32 has_type;
-
-                size |= (p64)(p32)byte_reader_uint(&reader, 4, false) << 32;
-                has_level = (p32)byte_reader_uint(&reader, 4, false);
-                has_type = (p32)byte_reader_uint(&reader, 4, false);
-                if (size < 16 || size - 16 > byte_reader_left(&reader))
-                        break;
-                *data = byte_reader_window(&reader, (positive)size - 16);
-                if (has_level == level && has_type == type)
-                        return true;
-                //      The padding, when the kernel kept it: the last message
-                //      may end where the filled length does.
-                (void)byte_reader_skip(
-                        &reader, (positive)(-size & 7) < byte_reader_left(&reader)
-                                         ? (positive)(-size & 7)
-                                         : byte_reader_left(&reader));
-        }
-        return false;
-}
-
-//      The int such a message carries, or -1.
-static b32 link_control_int(p8 address_to control, positive length,
-                            positive room, b32 level, b32 type)
-{
-        byte_reader data;
-
-        return link_control_find(control, length, room, level, type,
-                                 address_of data) &&
-                       byte_reader_left(&data) >= 4
-                       ? (b32)(p32)byte_reader_uint(&data, 4, false)
-                       : -1;
-}
-
 static fn link_batch_flush(void)
 {
         positive count = link_self.batched;
@@ -1598,9 +1513,9 @@ static fn link_batch_flush(void)
         if (count > 1 && link_self.gso && !link_modem_carrying())
         {
                 socket_address_internet6 to;
-                link_iovec part = {link_self.batch, count * WATERLINK_DATAGRAM};
+                socket_iovec part = {link_self.batch, count * WATERLINK_DATAGRAM};
                 p64 control[3];
-                link_message message;
+                socket_message message;
                 bipolar sent;
 
                 positive size = link_destination(address_of to,
@@ -3032,7 +2947,7 @@ static fn link_keep_heard(p8 address_to key)
 }
 
 /*      What a process made of the listener to read strangers' bytes drops
-        before it reads one (link_mdns_child): the reader is apart because
+        before it reads one (discovery_mdns_child): the reader is apart because
         the listener keeps the link's key, and a fork is a copy of the
         listener, the key included. Defined at the end of this file, where
         everything it wipes has been declared. */
@@ -3412,7 +3327,7 @@ static p8 link_carried(p8 address_to datagram, positive length,
 */
 typedef struct
 {
-        link_message message;
+        socket_message message;
         b32 length;
         b32 padding;
 } link_received;
@@ -3430,7 +3345,7 @@ static p8 link_inbound[2][65536];
 static bipolar link_receive(link_run address_to run)
 {
         socket_address_internet6 from[2];
-        link_iovec part[2];
+        socket_iovec part[2];
         p64 control[2][4];
         link_received got[2];
         bipolar count;
@@ -3438,7 +3353,7 @@ static bipolar link_receive(link_run address_to run)
         memory_zero(got, sizeof got);
         for (positive at = 0; at < 2; at++)
         {
-                part[at] = (link_iovec){link_inbound[at], sizeof link_inbound[at]};
+                part[at] = (socket_iovec){link_inbound[at], sizeof link_inbound[at]};
                 got[at].message.name = from + at;
                 got[at].message.name_length = sizeof from[at];
                 got[at].message.parts = part + at;
@@ -3475,7 +3390,7 @@ static bipolar link_receive(link_run address_to run)
 
         for (bipolar at = 0; at < count; at++)
         {
-                b32 segment = link_control_int((p8 address_to)control[at],
+                b32 segment = socket_control_int((p8 address_to)control[at],
                                                got[at].message.control_length,
                                                sizeof control[at], SOL_UDP,
                                                UDP_GRO);
@@ -3984,7 +3899,7 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
                    SYSTEM_POLL_READ, address_of link_self.socket_quiet);
         link_watch(watch, quiet, address_of count, signals, SYSTEM_POLL_READ,
                    signalled);
-        link_watch(watch, quiet, address_of count, link_nearby.socket,
+        link_watch(watch, quiet, address_of count, link_nearby.lan.socket,
                    SYSTEM_POLL_READ, null);
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
@@ -4143,7 +4058,7 @@ static b32 link_serve(string_address ready_text)
                 (void)system_write_all((positive)ready, address_of mark, 1);
                 system_close(ready);
         }
-        link_nearby.socket = -1;
+        link_nearby.lan.socket = -1;
         link_self.server = true;
         link_self.gso = LINK_GSO;
         link_self.state_dirty = true;
@@ -4183,7 +4098,7 @@ static b32 link_serve(string_address ready_text)
                           link_sessions_watch(watch, quiet, signals,
                                               address_of signals_quiet),
                           due < wake ? due : wake, now);
-                if (link_self.socket_quiet && link_nearby.socket < 0)
+                if (link_self.socket_quiet && link_nearby.lan.socket < 0)
                         continue;
                 now = link_self.now = link_now();
                 link_receive_all(now);
@@ -4838,7 +4753,7 @@ static b32 link_client_run(string_address name, p8 kind,
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
-        link_nearby.socket = -1;
+        link_nearby.lan.socket = -1;
         return_if(!link_session_open(s), host_fail("memory", -ENOMEM));
         scope_exit(link_session_close(s));
         memory_copy(s->peer, peer->key, 32);

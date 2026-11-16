@@ -119,7 +119,7 @@
         headless box installed somewhere nobody will stand is the other case,
         and for it a machine joins a group -- a namespace and a secret --
         and pairs by itself with every member it finds on the same local
-        network (discover.c finds them, nearby.c greets them). The rules:
+        network (the network's discovery finds them, nearby.c greets them). The rules:
 
         The secret is the grant. Whoever holds it gets, on every member, what
         that member's join line granted, which is nothing when it granted
@@ -314,7 +314,7 @@ struct waterlink_peer {
         char name[WATERLINK_NAME_MAX];
         unsigned int may;   // WATERLINK_MAY_*
         unsigned int group; // 0 paired by hand, or the mark of the group
-                            // that paired it (discover.c)
+                            // that paired it (group.c)
         unsigned char address[16]; // last seen, v6 or v4 mapped
         unsigned short port;
         unsigned short reserved; // zero, so the record is whole words
