@@ -74878,6 +74878,9 @@ static int new_route_status, fail_old_address, fail_old_route, foreign_deletes;
 static bool old_route, new_route;
 static positive net_seconds(void) { return 100; }
 static void net_flush(void) {}
+/* A lease that is new or moved asks discovery to look again, apart (src/sh/net.c's
+   net_discovery_soon); the seam holds the lease alone, so the ask goes nowhere. */
+static void net_discovery_soon(bool link) { (void)link; }
 static bipolar net_refused(string_address doing, bipolar status) { (void)doing; return status; }
 static bipolar net_write_resolv(p32 server) { (void)server; return 0; }
 static void net_dns_lease_note(p32 server) { (void)server; }

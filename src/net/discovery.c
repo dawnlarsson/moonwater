@@ -247,18 +247,21 @@ static positive discovery_address_text(const p8 address_to address,
         escaped it holds no blank and no semicolon, and its first byte
         follows a quote. At most DISCOVERY_NAME_TEXT bytes with the end. */
 #define DISCOVERY_NAME_TEXT 68
+//      A double quote, by its number: the source scanners that strip strings
+//      take a character constant of it for a string that does not end.
+#define DISCOVERY_QUOTE 0x22
 
 static positive discovery_name_text(const p8 address_to name, p8 address_to text)
 {
         static const p8 hex[] = "0123456789abcdef";
         positive used = 0;
 
-        text[used++] = '"';
+        text[used++] = DISCOVERY_QUOTE;
         for (positive at = 0; name[at] && at < 16; at++)
         {
                 p8 c = name[at];
 
-                if (c > ' ' && c < 0x7f && c != '"' && c != '\\' && c != ';')
+                if (c > ' ' && c < 0x7f && c != DISCOVERY_QUOTE && c != '\\' && c != ';')
                 {
                         text[used++] = c;
                         continue;
@@ -268,7 +271,7 @@ static positive discovery_name_text(const p8 address_to name, p8 address_to text
                 text[used++] = hex[c >> 4];
                 text[used++] = hex[c & 15];
         }
-        text[used++] = '"';
+        text[used++] = DISCOVERY_QUOTE;
         text[used] = end;
         return used;
 }
@@ -876,7 +879,7 @@ static p8 discovery_url_good(const p8 address_to text, positive length)
             text[8] == ':')
                 return false;
         for (positive at = 0; at < length; at++)
-                if (text[at] <= ' ' || text[at] >= 0x7f || text[at] == '"' ||
+                if (text[at] <= ' ' || text[at] >= 0x7f || text[at] == DISCOVERY_QUOTE ||
                     text[at] == '\\' || text[at] == ';')
                         return false;
         return true;
