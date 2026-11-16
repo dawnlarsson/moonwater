@@ -578,3 +578,4 @@ ui_field_full	fe02	meer past er niet in
 =tray-moon-tasks	7246	systeemvak-maan-taken
 =tray-tasks-moon	fda8	systeemvak-taken-maan
 =tray	a12d	systeemvak
+=tab	2e4c	pil

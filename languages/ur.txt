@@ -579,3 +579,4 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =tray-moon-tasks	7246	ٹرے-چاند-کام
 =tray-tasks-moon	fda8	ٹرے-کام-چاند
 =tray	a12d	ٹرے
+=tab	2e4c	کیپسول

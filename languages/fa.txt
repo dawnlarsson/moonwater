@@ -579,3 +579,4 @@ ui_field_full	fe02	بیش از این جا ندارد
 =tray-moon-tasks	7246	سینی-ماه-وظیفه‌ها
 =tray-tasks-moon	fda8	سینی-وظیفه‌ها-ماه
 =tray	a12d	سینی
+=tab	2e4c	کپسول

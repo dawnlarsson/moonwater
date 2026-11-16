@@ -1357,6 +1357,7 @@ static int taskbar_launcher_on(void);
 static void taskbar_hide_set(int on);
 static void taskbar_scale_set(int percent);
 static void taskbar_padding_set(int pixels);
+static void taskbar_clock_set(const char *format);
 static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve);
 static int taskbar_thick(int scale);
 static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
@@ -1403,6 +1404,7 @@ static inline int taskbar_launcher_on(void) { return 0; }
 static inline void taskbar_hide_set(int on) { (void)on; }
 static inline void taskbar_scale_set(int percent) { (void)percent; }
 static inline void taskbar_padding_set(int pixels) { (void)pixels; }
+static inline void taskbar_clock_set(const char *format) { (void)format; }
 static inline int taskbar_thick(int scale) { return COMPOSITOR_PANEL * scale / 100; }
 static inline void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve)
 { (void)moon, (void)tasks, (void)newest, (void)order, (void)before, (void)look, (void)clock, (void)bulge, (void)twelve; }
@@ -17415,12 +17417,13 @@ static unsigned int ui_moon_label(struct ui address_to ui, font_engine address_t
         for (int line = 0; line < 2; line++)
         {
                 const char *two = line ? lower : upper;
-                int baseline = line ? high / 2 + lead / 2 + cap : high / 2 - lead / 2;
+                int baseline = line ? high / 2 + lead / 2 + cap : high / 2 - lead / 2, digits = two[0] && two[1] ? 2 : 1;
 
+                // Two digits a cell each either side of the middle, one (twelve hours' 4) in a cell in the middle.
                 for (int k = 0; k < 2 && two[k]; k++)
                 {
                         int advance = (int)(font_draw(engine, faces, 1, (const p8 address_to)two + k, 1, em, 0, &nowhere, 0, 0, 0xffffff, 0) >> 16);
-                        int x = high / 2 - cell + k * cell + (cell - advance) / 2;
+                        int x = high / 2 - digits * cell / 2 + k * cell + (cell - advance) / 2;
 
                         // Heavier than the face: drawn again a twentieth of a cap to the right, each pixel the more of the two.
                         for (int shift = 0; shift <= grow; shift += grow)

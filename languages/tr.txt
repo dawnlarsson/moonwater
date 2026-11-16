@@ -578,3 +578,4 @@ ui_field_full	fe02	daha fazlası sığmaz
 =tray-moon-tasks	7246	tepsi-ay-görevler
 =tray-tasks-moon	fda8	tepsi-görevler-ay
 =tray	a12d	tepsi
+=tab	2e4c	kapsül

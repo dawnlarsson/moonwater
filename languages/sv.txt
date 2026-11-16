@@ -578,3 +578,4 @@ ui_field_full	fe02	mer ryms inte
 =tray-moon-tasks	7246	fält-måne-uppgifter
 =tray-tasks-moon	fda8	fält-uppgifter-måne
 =tray	a12d	meddelandefält
+=tab	2e4c	kapsel

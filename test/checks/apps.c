@@ -9397,6 +9397,7 @@ b32 main()
         check_taskbar_centre();
         check_taskbar_highlight();
         check_launcher_centred();
+        check_clock_places();
         check_taskbar_tree();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY

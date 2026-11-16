@@ -578,3 +578,4 @@ ui_field_full	fe02	non ce ne sta di più
 =tray-moon-tasks	7246	area-luna-attività
 =tray-tasks-moon	fda8	area-attività-luna
 =tray	a12d	area di notifica
+=tab	2e4c	pillola

@@ -1021,11 +1021,12 @@ static fn check_launcher_anchor(void)
         launcher.anchor.anchored = true;
         launcher.anchor.edge = TASKBAR_BOTTOM;
         launcher.anchor.number = 1;
-        launcher.anchor.button[0] = 1944, launcher.anchor.button[1] = 696, launcher.anchor.button[2] = 21, launcher.anchor.button[3] = 24;
+        // The moon in the middle of its screen's band: the launcher centred on it, 360 in from the screen's left.
+        launcher.anchor.button[0] = 2546, launcher.anchor.button[1] = 696, launcher.anchor.button[2] = 28, launcher.anchor.button[3] = 24;
         launcher.anchor.screen[0] = 1920, launcher.anchor.screen[1] = 0, launcher.anchor.screen[2] = 1280, launcher.anchor.screen[3] = 720;
         launcher.width = 560, launcher.height = 200;
         ui_anchor_set(&launcher.anchor, launcher.own.table, launcher.own.row, launcher.width, launcher.height);
-        kept = table.place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table.place_x[3] == 24 && table.place_y[3] == 496 &&
+        kept = table.place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table.place_x[3] == 360 && table.place_y[3] == 496 &&
                table.place_width[3] == 560 && table.place_height[3] == 200 && table.place_screen[3] == 1;
         check("launcher beside the button: it asks for its place and size as a placement, counted from its screen's top left", kept);
 

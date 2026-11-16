@@ -578,3 +578,4 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =tray-moon-tasks	7246	zone-lune-tâches
 =tray-tasks-moon	fda8	zone-tâches-lune
 =tray	a12d	zone système
+=tab	2e4c	pastille

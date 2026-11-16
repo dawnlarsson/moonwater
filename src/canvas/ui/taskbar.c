@@ -75,6 +75,11 @@ static struct taskbar_state
         unsigned char order[3];                 // the pills' order where they share a place: TASKBAR_PILL_MOON, _TASKS and _TRAY
         int editing;                            // the band is being arranged: each item ringed, a drop aimed at a place, and the Done button
         int clock_tray;                         // the clock is a cell of the tray, not on the moon (`taskbar clock tray`)
+        int clock_tab;                          // the clock is a pill of its own after the tray's (`taskbar clock tab`)
+        int clock_none;                         // no clock anywhere, the moon alone (`taskbar clock none`)
+        char clock_format[SETTING_TRAY_MOST + 1]; // what the clock outside the moon says: the time in the hours the clock reads, and the date
+        char clock_text[SETTING_TRAY_MOST * 4];  // what it says this minute
+        int clock_chars;                        // characters in clock_text
         int clock_12h;                          // the clock reads twelve hours (`time format 12h`): its hours so, and AM and PM left to the menu
         int clock_bulge;                        // how far the clock's digits swell onto the sphere, percent (ui_moon_label's bulge)
         int moon_ink;                           // `taskbar moon look ink`: the moon drawn in ink (ui_moon_paper), not as it is (realistic, the standard)
@@ -242,7 +247,7 @@ static int taskbar_tab_length(int high, int pad, int scale, int characters)
         CELL(TASKBAR_MIC, taskbar.mic_item, glyph, taskbar_mic_cell(view, t, n))                                        \
         CELL(TASKBAR_VOLUME, taskbar.volume_item, glyph, taskbar_volume_cell(view, t, n, ink, ground))                  \
         CELL(-4, taskbar.battery_item && !taskbar.tray_custom, 0, taskbar_say(view, t, n, text, ink, ground))           \
-        CELL(-3, taskbar.clock_tray && !taskbar.tray_custom, 0, taskbar_say(view, t, n, clock, ink, ground))
+        CELL(-3, taskbar.clock_tray && !taskbar.clock_tab && !taskbar.tray_custom, 0, taskbar_say(view, t, n, taskbar_clock_said(clock), ink, ground))
 
 /*
         The band as the kit's layout has it (ui_tree, ui/ui.c). The root is the band's output, where it is in the desktop's
@@ -323,12 +328,16 @@ static int taskbar_before(int slot)
         after, TASKBAR_TRAY), each the kit's padding either side of what it shows: the dot, the microphone and the speaker a mark,
         the battery and a format of the person's a text. Its length, or with t its tree's elements too, margin the room before it.
 */
+static int taskbar_clocked; // the clock's cell, as long as its text (taskbar_lay sets it before it lays the tray)
+
 static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int margin, int scale, int glyph, int square, int cell, int text_w, int high)
 {
+        int clocked = taskbar_clocked;
+
         struct ui_node address_to n = null;
         int length = 0;
 
-#define TASKBAR_CELL(slot, shown, mark, paint) if ((shown) && taskbar_before(slot) == before) length += (mark) ? square : cell;
+#define TASKBAR_CELL(slot, shown, mark, paint) if ((shown) && taskbar_before(slot) == before) length += (mark) ? square : slot == -3 ? clocked : cell;
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
         if (taskbar.tray_custom && taskbar_before(-9) == before)
@@ -339,7 +348,7 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int 
 #define TASKBAR_CELL(slot, shown, mark, paint)                                                                                     \
         if ((shown) && taskbar_before(slot) == before)                                                                              \
         {                                                                                                                           \
-                n = taskbar_open(t, slot, m, 0, (mark) ? square : cell, high);                                                      \
+                n = taskbar_open(t, slot, m, 0, (mark) ? square : slot == -3 ? clocked : cell, high);                               \
                 if (mark)                                                                                                           \
                         taskbar_mark(t, n, mark);                                                                                   \
                 ui_tree_close(t);                                                                                                   \
@@ -354,6 +363,13 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int 
         ui_tree_close(t);
         (void)n;
         return length;
+}
+
+// The clock's own pill (`taskbar clock tab`): its text, the padding either side, a plate of glass after the tray's.
+static fn taskbar_clock_lay(struct ui_tree address_to t, int m, int margin, int length, int high)
+{
+        taskbar_open(t, -3, m, margin, length, high);
+        ui_tree_close(t);
 }
 
 // A pill of tasks, named slot (TASKBAR_TABS, or TASKBAR_TABS_LEFT for the tasks on the moon's left when they are split round it): the tasks
@@ -434,7 +450,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         int apart = 2 * gap;                 // and between one pill and the next, twice it
         int pad = taskbar.padding * scale / 100; // the kit's padding in a glass button (UI_GLASS_PAD, `taskbar padding`), either side of what it shows
         int inset = taskbar_inset(scale), high = thick - 2 * inset, count = (int)view->count, moon, icons = 0, done = 0, split = taskbar.tasks_zone == TASKBAR_ZONE_SPLIT;
-        int square, cell, text_w = 0, glyph, longest, side, trays[2], most, inner = length - 2 * gap, icon_gap = TASKBAR_ICON_GAP * scale / 100;
+        int square, cell, clocked, tab, text_w = 0, glyph, longest, side, trays[2], most, inner = length - 2 * gap, icon_gap = TASKBAR_ICON_GAP * scale / 100;
         int widths[WINDOWS], titled[WINDOWS], zones[3], list[2][WINDOWS], listed[2] = {0, 0}, tabs[2] = {0, 0}, moon_zone = split ? TASKBAR_ZONE_CENTRE : taskbar.moon_zone;
         struct ui_node address_to n;
 
@@ -444,7 +460,10 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         moon = thick <= length - 2 * gap ? thick : 0; // and none on a band too short for it
         icons = (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0);
         glyph = high * 64 / 100;
-        square = glyph + 2 * pad, cell = taskbar_text(high, pad, taskbar.clock_tray ? 5 : 4);
+        square = glyph + 2 * pad, cell = taskbar_text(high, pad, 4);
+        clocked = taskbar_text(high, pad, taskbar.clock_chars > 0 ? taskbar.clock_chars : 5);
+        tab = taskbar.clock_tab ? clocked : 0;
+        taskbar_clocked = clocked;
         if (taskbar.tray_custom)
                 text_w = taskbar_text(high, pad, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
         most = length / 2 - moon - apart;
@@ -462,6 +481,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         int items = icons + (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) + (taskbar.clock_tray != 0);
 
                         square = cell = text_w = items ? most / items : 0;
+                        taskbar_clocked = cell;
                 }
                 trays[0] = taskbar_tray_lay(null, 0, m, 0, scale, glyph, square, cell, text_w, high);
                 trays[1] = taskbar_tray_lay(null, 1, m, 0, scale, glyph, square, cell, text_w, high);
@@ -502,7 +522,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                 if (half - apart - trays[0] - apart - (done ? done + apart : 0) < 0)
                         trays[0] = 0;
                 rooms[0] = half - apart - (trays[1] ? trays[1] + apart : 0);
-                rooms[1] = half - apart - (trays[0] ? trays[0] + apart : 0) - (done ? done + apart : 0);
+                rooms[1] = half - apart - (trays[0] ? trays[0] + apart : 0) - (done ? done + apart : 0) - (tab ? tab + apart : 0);
                 // Both sides at the share of the side with less room for each of its tasks, so the moon's two sides look alike.
                 {
                         int per = 1 << 30;
@@ -531,7 +551,8 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                 else
                         group = inner - moon - apart - ends;
                 pills = (trays[0] > 0) + (trays[1] > 0);
-                tabs[1] = taskbar_tasks_fit(view, list[1], listed[1], group - trays[0] - trays[1] - pills * apart, high, pad, scale, longest, widths, titled);
+                pills += tab > 0;
+                tabs[1] = taskbar_tasks_fit(view, list[1], listed[1], group - trays[0] - trays[1] - tab - pills * apart, high, pad, scale, longest, widths, titled);
                 for (int zone = TASKBAR_ZONE_START; zone <= TASKBAR_ZONE_END; zone++)
                 {
                         int parts = 0;
@@ -540,7 +561,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         if (moon_zone == zone)
                                 zones[zone] += moon, parts++;
                         if (taskbar.tasks_zone == zone)
-                                zones[zone] += tabs[1] + trays[0] + trays[1], parts += (tabs[1] > 0) + (trays[0] > 0) + (trays[1] > 0);
+                                zones[zone] += tabs[1] + trays[0] + trays[1] + tab, parts += (tabs[1] > 0) + (trays[0] > 0) + (trays[1] > 0) + (tab > 0);
                         if (zone == TASKBAR_ZONE_END && done)
                                 zones[zone] += done, parts++;
                         zones[zone] += (parts > 1 ? parts - 1 : 0) * apart;
@@ -597,6 +618,8 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                 taskbar_tasks_lay(t, TASKBAR_TABS, list[1], listed[1], widths, titled, m, 0, pad, side, icon_gap, high);
                                 if (trays[0])
                                         taskbar_tray_lay(t, 0, m, tabs[1] ? apart : 0, scale, glyph, square, cell, text_w, high);
+                                if (tab)
+                                        taskbar_clock_lay(t, m, tabs[1] || trays[0] ? apart : 0, tab, high);
                                 if (done)
                                 {
                                         n = taskbar_open(t, TASKBAR_DONE, m, apart, done, high);
@@ -628,6 +651,8 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         }
                         if (pill == TASKBAR_PILL_TRAY && taskbar.tasks_zone == zone && trays[0])
                                 taskbar_tray_lay(t, 0, m, first ? 0 : apart, scale, glyph, square, cell, text_w, high), first = 0;
+                        if (pill == TASKBAR_PILL_TRAY && taskbar.tasks_zone == zone && tab)
+                                taskbar_clock_lay(t, m, first ? 0 : apart, tab, high), first = 0;
                 }
                 if (zone == TASKBAR_ZONE_END && done)
                 {
@@ -707,7 +732,8 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                   taskbar.tray_custom ? taskbar.tray_chars : -1, 0, language_rtl(),
                                   taskbar.moon_zone | taskbar.tasks_zone << 2 | taskbar.tasks_right << 4 | (int)taskbar.tray_before << 5 |
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
-                                  taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2, {0}};
+                                  taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
+                                      taskbar.clock_chars << 5, {0}};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -840,7 +866,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
         {
                 int reach[4];
 
-                if (which == -4 || which == -3 || which == TASKBAR_TABS || !taskbar_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
+                if (which == -4 || (which == -3 && !taskbar.clock_tab) || which == TASKBAR_TABS || !taskbar_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
                         continue;
                 reach[2] += reach[0] + COMPOSITOR_GLASS_REACH, reach[3] += reach[1] + COMPOSITOR_GLASS_REACH;
                 reach[0] -= COMPOSITOR_GLASS_REACH, reach[1] -= COMPOSITOR_GLASS_REACH;
@@ -1267,25 +1293,30 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
         taskbar_tray_put(into, at, room, word);
 }
 
+static int taskbar_format_render(const char *format, char *into, int room);
+
 static void taskbar_tray_render(void)
 {
-        const char *format = taskbar.tray_format;
-        char *into = taskbar.tray_text;
-        int room = (int)sizeof(taskbar.tray_text), at = 0;
+        // The words of the tray are the language the compositor has published in the window table (its program reads /root/language).
+        language_take(compositor.table ? compositor.table->language : 0);
+        taskbar.tray_text[0] = 0, taskbar.clock_text[0] = 0;
+        taskbar.tray_chars = taskbar.tray_custom ? taskbar_format_render(taskbar.tray_format, taskbar.tray_text, (int)sizeof(taskbar.tray_text)) : 0;
+        taskbar.clock_chars = taskbar.clock_format[0] ? taskbar_format_render(taskbar.clock_format, taskbar.clock_text, (int)sizeof(taskbar.clock_text)) : 0;
+}
+
+// A format's text this minute into into (room bytes), its names filled in (setting_tray_name); answers its characters.
+static int taskbar_format_render(const char *format, char *into, int room)
+{
+        int at = 0, chars = 0;
         timespec now = {0, 0};
         time_t seconds;
         tm broken;
 
-        // The words of the tray are the language the compositor has published in the window table (its program reads /root/language).
-        language_take(compositor.table ? compositor.table->language : 0);
         into[0] = 0;
-        taskbar.tray_chars = 0;
-        if (!taskbar.tray_custom)
-                return;
         clock_gettime(CLOCK_REALTIME, address_of now);
         seconds = now.tv_sec;
         if (!localtime_r(&seconds, &broken))
-                return;
+                return 0;
         for (int each = 0; format[each];)
         {
                 // A brace itself, as every character, only where there is room for it and the end: a text the names filled
@@ -1316,7 +1347,27 @@ static void taskbar_tray_render(void)
         }
         for (int each = 0; into[each]; each++)
                 if (((unsigned char)into[each] & 0xc0) != 0x80)
-                        taskbar.tray_chars++;
+                        chars++;
+        return chars;
+}
+
+// What the clock outside the moon says: its format's text, or the hours and minutes the band has (clock) when it has none.
+static const char *taskbar_clock_said(const char *clock)
+{
+        return taskbar.clock_chars > 0 ? taskbar.clock_text : clock;
+}
+
+// `taskbar clock` outside the moon, and `time format` and `time date`: the format its text is (the time in the hours it is read in, the date
+// after it), the standard tray's clock otherwise.
+static void taskbar_clock_set(const char *format)
+{
+        int at = 0;
+
+        while (format[at] && at < SETTING_TRAY_MOST)
+                taskbar.clock_format[at] = format[at], at++;
+        taskbar.clock_format[at] = 0;
+        taskbar_tray_render();
+        taskbar.stale = 1;
 }
 
 // `taskbar tray`: the format the file keeps ("" or default is the standard, which is drawn as the tray always was).
@@ -1413,11 +1464,15 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                 ui_moon(&ui, x, y, size, UI_ONE / 2, taskbar.glides ? (b64)(seconds / 60 % 60) * UI_ONE / 60 : 0, &look);
         // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim).
         ui_moon_rim(&ui, x, y, size, taskbar_accent(), 0.9);
-        if (taskbar.clock_tray || hours < 0 || !view->engine || !view->face)
+        if (taskbar.clock_tray || taskbar.clock_tab || taskbar.clock_none || hours < 0 || !view->engine || !view->face)
                 return;
         {
                 int shown = taskbar.clock_12h ? (hours % 12 ? hours % 12 : 12) : hours;
                 char upper[3] = {(char)('0' + shown / 10), (char)('0' + shown % 10), 0}, lower[3] = {(char)('0' + minutes / 10), (char)('0' + minutes % 10), 0};
+
+                // Twelve hours are written as they are read, 4 over 20, not 04; twenty-four keep their two digits.
+                if (taskbar.clock_12h && shown < 10)
+                        upper[0] = upper[1], upper[1] = 0;
 
                 taskbar.clock_read = (int)ui_moon_label(&ui, view->engine, view->bold ? view->bold : view->face, x, y, size, upper, lower,
                                                         taskbar.clock_bulge / 100.0, taskbar_accent());
@@ -1548,7 +1603,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
         for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)
-                if (which != -4 && which != -3 && which != TASKBAR_TABS && (redo & taskbar_bit(which)) && taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
+                if (which != -4 && (which != -3 || taskbar.clock_tab) && which != TASKBAR_TABS && (redo & taskbar_bit(which)) &&
+                    taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
                 {
                         stripe[2] += stripe[0], stripe[3] += stripe[1];
                         compositor_union(span, stripe);
@@ -1580,7 +1636,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 if (!n->id || which == TASKBAR_TABS || which == TASKBAR_TABS_LEFT || (which <= TASKBAR_ZONE && which > TASKBAR_DONE) || !(redo & taskbar_bit(which)) ||
                     (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !time_ok))
                         continue;
-                if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE)
+                if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE || (which == -3 && taskbar.clock_tab))
                 {
                         // A tab is lit while its window has the keys, and the launcher's button while the launcher is up; the tray never is.
                         unsigned int mark = which >= 0 ? view->marks[which] : which == TASKBAR_LAUNCHER && view->launcher_lit ? COMPOSITOR_TAB_LIT : 0;
@@ -1879,7 +1935,8 @@ static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsi
         memory_copy(taskbar.order, orders[order >= 0 && order < 6 ? order : 0], sizeof(taskbar.order));
         taskbar.tray_before = before & 63u;
         taskbar.moon_ink = look == 1;
-        taskbar.clock_tray = clock == 1;
+        // The clock: in the moon (0), nowhere (1), a cell of the tray (2) or a pill of its own (3).
+        taskbar.clock_none = clock == 1, taskbar.clock_tray = clock == 2 || clock == 3, taskbar.clock_tab = clock == 3;
         taskbar.clock_bulge = bulge >= 0 && bulge <= 100 ? bulge : 60;
         taskbar.clock_12h = twelve != 0;
         taskbar.stale = 1;

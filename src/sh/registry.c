@@ -164,6 +164,8 @@
 #define SETTING_CLOCK_FORMAT_PATH "/root/time.format"
 // The date beside the standard tray's clock (`time date ymd|dmy|mdy`; off, the standard, shows none): what each order adds to the format.
 #define SETTING_DATE_FORMAT_PATH "/root/time.date"
+#define SETTING_TASKBAR_CLOCK_24H "{time.24h.hour}:{time.24h.min}"             // the clock outside the moon, in 24 hours
+#define SETTING_TASKBAR_CLOCK_12H "{time.12h.hour}:{time.24h.min} {time.ampm}" // and in 12
 #define SETTING_TASKBAR_TRAY_DATE_YMD "  {date.year}-{date.month}-{date.day}"
 #define SETTING_TASKBAR_TRAY_DATE_DMY "  {date.day}.{date.month}.{date.year}"
 #define SETTING_TASKBAR_TRAY_DATE_MDY "  {date.month}/{date.day}/{date.year}"
@@ -717,10 +719,10 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TASKBAR_ORDER_PATH, .standard = "moon-tasks-tray",
                       .usage = "taskbar order [moon-tasks-tray|...]",
                       .help = "the order of the moon, the tasks and the tray where they share a place on the taskbar, any of the six [moon-tasks-tray]"),
-    SETTING_PLAIN_ROW(null, "Taskbar clock place", SETTINGS_CHOICE, 0, ("taskbar", "clock"), "clock ", "moon tray",
+    SETTING_PLAIN_ROW(null, "Taskbar clock place", SETTINGS_CHOICE, 0, ("taskbar", "clock"), "clock ", "moon none tray tab",
                       .path = SETTING_TASKBAR_CLOCK_PATH, .standard = "moon",
-                      .usage = "taskbar clock [moon|tray]",
-                      .help = "the clock in the moon, hours over minutes, or in the tray [moon]"),
+                      .usage = "taskbar clock [moon|none|tray|tab]",
+                      .help = "where the clock is: in the moon, hours over minutes; none, the moon alone; in the tray as text in the time format with the date; or a pill of its own after the tray [moon]"),
     SETTING_PLAIN_ROW(null, "Taskbar clock bulge (percent)", SETTINGS_SLIDER, 0, ("taskbar", "clock", "bulge"), "bulge ", null,
                       .type = SETTING_NUMBER, .path = SETTING_TASKBAR_CLOCK_BULGE_PATH, .standard = "60",
                       .unit = "percent", .low = 0, .high = 100,

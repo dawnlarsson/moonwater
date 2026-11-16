@@ -578,3 +578,4 @@ ui_field_full	fe02	mehr passt nicht hinein
 =tray-moon-tasks	7246	Infobereich-Mond-Aufgaben
 =tray-tasks-moon	fda8	Infobereich-Aufgaben-Mond
 =tray	a12d	Infobereich
+=tab	2e4c	Pille

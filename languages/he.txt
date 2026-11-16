@@ -579,3 +579,4 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =tray-moon-tasks	7246	מגש-ירח-משימות
 =tray-tasks-moon	fda8	מגש-משימות-ירח
 =tray	a12d	מגש
+=tab	2e4c	גלולה

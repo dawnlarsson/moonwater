@@ -578,3 +578,4 @@ ui_field_full	fe02	більше не вміщається
 =tray-moon-tasks	7246	трей-місяць-завдання
 =tray-tasks-moon	fda8	трей-завдання-місяць
 =tray	a12d	трей
+=tab	2e4c	плашка

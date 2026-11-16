@@ -2944,6 +2944,60 @@ static void check_taskbar_centre(void)
 }
 
 /*
+        Where the clock is (`taskbar clock`), in twelve hours as in twenty-four (`time format`): in the moon, with no cell of its own in the
+        tray and the tray the standard one (no format of its own, which a twelve-hour clock used to make, and drew the clock as a cell of
+        text beside the moon); none, the moon alone; a cell of the tray, inside its pill after the tasks, as long as its text in the hours
+        it is read in; or a pill of its own after the tray's, outside it. Each place in both formats.
+*/
+static void check_clock_places(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    b32 moon = 1, none = 1, tray = 1, tab = 1, standard = 1, longer = 1;
+
+    for (int twelve = 0; twelve < 2; twelve++)
+    {
+        int widths[2] = {0, 0};
+
+        taskbar_tray_set("");
+        taskbar_clock_set(twelve ? "{time.12h.hour}:{time.24h.min} {time.ampm}" : "{time.24h.hour}:{time.24h.min}");
+        standard &= !taskbar.tray_custom && taskbar.clock_chars == (twelve ? (taskbar.clock_text[1] == ':' ? 7 : 8) : 5);
+        for (int place = 0; place < 4; place++)
+        {
+            struct taskbar_view view;
+            int cx, cy, cw, ch, px, py, pw, ph, mx, my, mw, mh;
+            b32 clock, pill, moon_at;
+
+            memory_zero(&view, sizeof(view));
+            view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 3, view.lengths = lengths;
+            taskbar_settings_set("bottom", "primary", "battery none\n");
+            taskbar_arrange_set(0, 0, 0, 0, 1u << 1 | 1u << 2, 0, place, 60, twelve);
+            clock = taskbar_slot(&view, -3, &cx, &cy, &cw, &ch) && cw > 0;
+            pill = taskbar_slot(&view, TASKBAR_TRAY, &px, &py, &pw, &ph) && pw > 0;
+            moon_at = taskbar_slot(&view, TASKBAR_LAUNCHER, &mx, &my, &mw, &mh) && mw > 0;
+            standard &= taskbar.clock_12h == twelve;
+            if (place == 0)
+                moon &= moon_at && !clock && !taskbar.clock_tray && !taskbar.clock_tab && !taskbar.clock_none;
+            else if (place == 1)
+                none &= moon_at && !clock && taskbar.clock_none;
+            else if (place == 2)
+                tray &= clock && pill && cx >= px && cx + cw <= px + pw, widths[0] = cw;
+            else
+                tab &= clock && (!pill || cx >= px + pw || cx + cw <= px), widths[1] = cw;
+        }
+        longer &= widths[0] == widths[1] && widths[0] > 0;
+    }
+    taskbar_clock_set("");
+    taskbar_arrange_set(0, 0, 0, 0, 1u << 1 | 1u << 2, 0, 0, 60, 0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    check("clock: in the moon by default, in twelve hours as in twenty-four, and no cell of the tray says it", moon);
+    check("clock: the tray stays the standard in both formats, the clock's own text the time in the hours it is read in", standard);
+    check("clock: none is the moon alone, no clock anywhere", none);
+    check("clock: in the tray it is a cell inside the pill after the tasks", tray);
+    check("clock: as a tab it is a pill of its own, outside the tray's", tab);
+    check("clock: as long as its text in the tray and as a tab alike", longer);
+}
+
+/*
         The launcher opens over the moon: centred on the moon along the band wherever the arrangement puts it (the band's start, its
         middle or its end), off the band on the screen's side, and held inside the screen, so at the start it is at the screen's left
         edge, not past it. A side band's is centred on the moon down the band.
@@ -4531,6 +4585,22 @@ static void band_pictures(string_address face_path)
     pictures_bold = bold > 0 && font_load(&band_bold, bold_bytes, (positive)bold, 0) == 0 ? &band_bold : null;
     font_start(&band_engine, band_atlas, 128, 128);
     memory_zero(&compositor, sizeof(compositor));
+    // The clock's four places, dark at 200 percent in twelve hours: in the moon, none, in the tray and a pill of its own.
+    {
+        static const char *const names[4] = {"clock-moon.ppm", "clock-none.ppm", "clock-tray.ppm", "clock-tab.ppm"};
+        struct pictures_arrange each = standard;
+
+        taskbar_clock_set("{time.12h.hour}:{time.24h.min} {time.ampm}");
+        for (int place = 0; place < 4; place++)
+        {
+            taskbar_arrange_set(TASKBAR_ZONE_CENTRE, 0, 0, 0, 1u << 1 | 1u << 2, 0, place, 60, 1);
+            each.clock_tray = taskbar.clock_tray;
+            pictures_one((string_address)TASKBAR_PICTURES, names[place], &each, 200, 1, 4, 0);
+        }
+        taskbar_arrange_set(TASKBAR_ZONE_CENTRE, 0, 0, 0, 1u << 1 | 1u << 2, 0, 0, 60, 0);
+        taskbar_clock_set("");
+        return;
+    }
     string_copy(string_copy((string_address)into, (string_address)TASKBAR_PICTURES) + string_length((string_address)TASKBAR_PICTURES), (string_address) "round9/");
     system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)into, 0755);
     // The bar, light and dark, at 100 and 200 percent, with 8 tasks, its moon as it is and in ink; the clock's reading of each.

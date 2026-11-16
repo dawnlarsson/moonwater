@@ -578,3 +578,4 @@ ui_field_full	fe02	no cabe más
 =tray-moon-tasks	7246	bandeja-luna-tareas
 =tray-tasks-moon	fda8	bandeja-tareas-luna
 =tray	a12d	bandeja
+=tab	2e4c	pastilla

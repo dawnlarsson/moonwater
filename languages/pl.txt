@@ -578,3 +578,4 @@ ui_field_full	fe02	więcej się nie zmieści
 =tray-moon-tasks	7246	zasobnik-księżyc-zadania
 =tray-tasks-moon	fda8	zasobnik-zadania-księżyc
 =tray	a12d	zasobnik
+=tab	2e4c	pigułka

@@ -579,3 +579,4 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =tray-moon-tasks	7246	الإعلام-القمر-المهام
 =tray-tasks-moon	fda8	الإعلام-المهام-القمر
 =tray	a12d	منطقة الإعلام
+=tab	2e4c	كبسولة

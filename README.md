@@ -115,7 +115,7 @@ moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0
 
 
 # Taskbar
-moonwater taskbar clock [moon|tray]    the clock in the moon, hours over minutes, or in the tray [moon]
+moonwater taskbar clock [moon|none|tray|tab]  where the clock is: in the moon, hours over minutes; none, the moon alone; in the tray as text in the time format with the date; or a pill of its own after the tray [moon]
 moonwater taskbar clock bulge [PERCENT|default]  how far the digits of the clock in the moon swell onto its sphere, 0 flat to 100 percent [60]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [on]

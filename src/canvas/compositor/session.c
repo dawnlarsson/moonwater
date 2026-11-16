@@ -791,25 +791,24 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
         compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
-        // The standard tray in 12 hours, or with the date beside the clock, is a format of its own; a format of the person's own says
+        // The clock outside the moon: the time in the hours `time format` reads it in, and the date `time date` puts after it. The standard
+        // tray stays the standard, so the clock in the moon is the moon's in twelve hours as in twenty-four; a format of the person's own says
         // its hours and its date itself.
-        if (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default") ||
-            string_equals((string_address)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD))
         {
+                char clock[64];
+
                 compositor_word(SETTING_CLOCK_FORMAT_PATH, text, sizeof(text));
-                if (string_equals((string_address)text, (string_address) "12h"))
-                        string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD_12H, sizeof(tray));
+                string_copy_bounded((p8 *)clock, (string_address)(string_equals((string_address)text, (string_address) "12h") ? SETTING_TASKBAR_CLOCK_12H
+                                                                                                                         : SETTING_TASKBAR_CLOCK_24H),
+                                    sizeof(clock));
                 compositor_word(SETTING_DATE_FORMAT_PATH, text, sizeof(text));
                 if (text[0] == 'y' || text[0] == 'd' || text[0] == 'm')
-                {
-                        if (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default"))
-                                string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD, sizeof(tray));
-                        string_append_bounded((string_address)tray,
+                        string_append_bounded((string_address)clock,
                                               (string_address)(text[0] == 'y'   ? SETTING_TASKBAR_TRAY_DATE_YMD
                                                                : text[0] == 'd' ? SETTING_TASKBAR_TRAY_DATE_DMY
                                                                                 : SETTING_TASKBAR_TRAY_DATE_MDY),
-                                              sizeof(tray));
-                }
+                                              sizeof(clock));
+                taskbar_clock_set(clock);
         }
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
