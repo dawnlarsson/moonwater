@@ -4332,6 +4332,18 @@ static void check_taskbar_text(string_address face_path)
 }
 
 /*
+        A row of the log for a wallpaper made cold (ui_moon_night): its wall time and its CPU time (every thread's), and each stage's
+        (ui_moon_stage_wall and ui_moon_stage_cpu): the sky, the surface's grid, the disc, the craters and the rest.
+*/
+static void wallpaper_bench_row(int width, int height, const char address_to look, positive wall, positive cpu)
+{
+    string_format(log, "  wallpaper bench: %p by %p %s cold in %p ms, %p ms of CPU; the sky %p ms (%p of CPU), the grid %p (%p), the disc %p (%p), the craters %p (%p)\n",
+                  (positive)width, (positive)height, (string_address)look, wall / 1000000, cpu / 1000000, ui_moon_stage_wall[0] / 1000000,
+                  ui_moon_stage_cpu[0] / 1000000, ui_moon_stage_wall[1] / 1000000, ui_moon_stage_cpu[1] / 1000000, ui_moon_stage_wall[2] / 1000000,
+                  ui_moon_stage_cpu[2] / 1000000, ui_moon_stage_wall[3] / 1000000, ui_moon_stage_cpu[3] / 1000000);
+}
+
+/*
         A bench of the moon's turn (a row of the log, not a check's verdict): one step of it is the moon's square drawn again and nothing
         else, the clock on it too; what that takes at 100 and 200 percent, and so what the turn costs a second at TASKBAR_MOON_STEPS steps
         a second. At rest the turn costs nothing: no step is taken and the loop is not woken for one (check_moon_motion).
@@ -4402,46 +4414,83 @@ static void check_moon_bench(void)
         string_format(log, "  moon bench: at 32 pixels the disc draws in %p us, the rim's light in %p us, the clock in %p us\n", (at[1] - at[0]) / 50000,
                       (at[2] - at[1]) / 50000, (at[3] - at[2]) / 50000);
     }
-    // The wallpaper whole, cold: 1920 by 1080, dark, dimmed, the glow; and light.
+    // The wallpaper whole, cold, a row a stage: dark and dimmed, the glow, at 1080p and 4K; and light at 1080p.
     {
-        static unsigned int wall[1920 * 1080];
-        struct ui ui;
-        positive at[3];
+        static unsigned int wall[3840 * 2160];
+        static const int sizes[3][3] = {{1920, 1080, 1}, {1920, 1080, 0}, {3840, 2160, 1}};
 
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = wall, ui.pitch = 1920, ui.width = 1920, ui.height = 1080, ui.bottom = 1080, ui.scale = 100;
-        at[0] = clock_monotonic_nanoseconds();
-        ui_moon_night(&ui, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
-        at[1] = clock_monotonic_nanoseconds();
-        ui_moon_night(&ui, 0, 0, 0x5b7fa6u, 1, 0);
-        at[2] = clock_monotonic_nanoseconds();
-        string_format(log, "  wallpaper bench: 1920 by 1080 dark and dimmed in %p ms, light in %p ms, cold\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 1000000);
-        // Its stages, dark and dimmed: the sky (the ground, the stars and their streaks, the glow) and the moon.
+        for (int k = 0; k < 3; k++)
         {
-            int width = 1920, height = 1080, size = width * 95 / 100, left = (width - size) / 2, top = height * 38 / 100;
-            unsigned int options = UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM;
+            struct ui ui;
+            positive at[2], then[2];
 
-            at[0] = clock_monotonic_nanoseconds();
-            ui_moon_paper_ground(&ui, options, 0x5b7fa6u, 1, 0, left + size / 2.0, top + size / 2.0, size / 2.0);
-            at[1] = clock_monotonic_nanoseconds();
-            ui_moon_paper(&ui, left, top, size, 0, options, 0x5b7fa6u);
-            at[2] = clock_monotonic_nanoseconds();
-            string_format(log, "  wallpaper bench: the sky in %p ms, the moon in %p ms\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 1000000);
-        }
-        // And at 4K, cold, whole.
-        {
-            static unsigned int wall4k[3840 * 2160];
-            struct ui big;
-
-            memory_zero(&big, sizeof(big));
-            big.pixels = wall4k, big.pitch = 3840, big.width = 3840, big.height = 2160, big.bottom = 2160, big.scale = 100;
-            at[0] = clock_monotonic_nanoseconds();
-            ui_moon_night(&big, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
-            at[1] = clock_monotonic_nanoseconds();
-            string_format(log, "  wallpaper bench: 3840 by 2160 dark and dimmed in %p ms, cold\n", (at[1] - at[0]) / 1000000);
+            memory_zero(&ui, sizeof(ui));
+            ui.pixels = wall, ui.pitch = (unsigned long)sizes[k][0], ui.width = sizes[k][0], ui.height = sizes[k][1], ui.bottom = sizes[k][1], ui.scale = 100;
+            ui_moon_stage_clock(at);
+            ui_moon_night(&ui, 0, sizes[k][2] ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM : 0, 0x5b7fa6u, 1, 0);
+            ui_moon_stage_clock(then);
+            wallpaper_bench_row(sizes[k][0], sizes[k][1], sizes[k][2] ? "dark and dimmed" : "light", then[0] - at[0], then[1] - at[1]);
         }
     }
 }
+
+#ifdef WALLPAPER_BENCH
+/*
+        The wallpaper's bench alone (checks.c built with -DWALLPAPER_BENCH='"directory/"'): each look made cold at 1080p and 4K, its wall time
+        and the process's CPU time (all its threads), and each picture written to the directory as a PPM, so a change to the renderer can be
+        timed and its pictures compared with the ones before it. Then the program ends.
+*/
+static void wallpaper_bench(string_address into)
+{
+    static unsigned int wall[3840 * 2160];
+    static unsigned char rgb[3840 * 2160 * 3];
+    static const struct
+    {
+        const char *name;
+        int width, height;
+        unsigned int options;
+    } looks[] = {{"wall-1080p-dark-dimmed.ppm", 1920, 1080, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM},
+                 {"wall-1080p-light.ppm", 1920, 1080, 0},
+                 {"wall-1080p-dark-inverted.ppm", 1920, 1080, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS},
+                 {"wall-4k-dark-dimmed.ppm", 3840, 2160, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM},
+                 {"wall-4k-light.ppm", 3840, 2160, 0}};
+
+    for (unsigned int k = 0; k < sizeof(looks) / sizeof(looks[0]); k++)
+    {
+        struct ui ui;
+        positive at[2], then[2];
+        char path[600], head[64];
+        positive said;
+        bipolar handle;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = wall, ui.pitch = (unsigned long)looks[k].width, ui.width = looks[k].width, ui.height = looks[k].height, ui.bottom = looks[k].height,
+        ui.scale = 100;
+        ui_moon_stage_clock(at);
+        ui_moon_night(&ui, 0, looks[k].options, 0x5b7fa6u, 1, 0);
+        ui_moon_stage_clock(then);
+        wallpaper_bench_row(looks[k].width, looks[k].height, looks[k].name, then[0] - at[0], then[1] - at[1]);
+        if (!into[0])
+            continue;
+        for (long at = 0; at < (long)looks[k].width * looks[k].height; at++)
+            rgb[at * 3] = (unsigned char)(wall[at] >> 16), rgb[at * 3 + 1] = (unsigned char)(wall[at] >> 8), rgb[at * 3 + 2] = (unsigned char)wall[at];
+        string_copy(string_copy((string_address)path, into) + string_length(into), (string_address)looks[k].name);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle < 0)
+            continue;
+        string_copy((string_address)head, (string_address) "P6\n");
+        said = 3;
+        said += positive_into_string((p8 *)head + said, (positive)looks[k].width);
+        head[said++] = ' ';
+        said += positive_into_string((p8 *)head + said, (positive)looks[k].height);
+        string_copy((string_address)head + said, (string_address) "\n255\n");
+        said += 5;
+        system_write_all((b32)handle, head, said);
+        system_write_all((b32)handle, rgb, (positive)looks[k].width * (positive)looks[k].height * 3);
+        system_close(handle);
+    }
+}
+#endif
 
 static int settings_row_named(const char address_to label);
 

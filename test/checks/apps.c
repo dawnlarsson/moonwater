@@ -8963,6 +8963,10 @@ b32 main()
         band_pictures(program_argument_count() > 3 ? program_argument(3) : null);
         return 0;
 #endif
+#ifdef WALLPAPER_BENCH
+        wallpaper_bench((string_address)WALLPAPER_BENCH);
+        return 0;
+#endif
         paths[0] = program_argument(1);
         // The kit's UI faces are the repository's Inter files (the arguments after the mono faces), as ui_app_run's are on a machine.
         if (program_argument_count() > 4)
