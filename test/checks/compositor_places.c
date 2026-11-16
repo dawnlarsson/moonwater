@@ -622,7 +622,7 @@ static fn check_glass(void)
                                         b <= COMPOSITOR_GLASS_DARKEST + 3);
                 }
         check("glass: every clear pixel is kept on its side of lightness, so an ink that stands out from the ground does everywhere", kept);
-        check("glass: its program is told the ground, and knocked", table->ground[2] && (compositor.woken & 4u));
+        check("glass: its program is told the ground, and knocked", table->ground[2] && (rows_low(&compositor.woken) & 4u));
 
         // Its own picture changed: composed again where it changed, and nothing blurred.
         blurred = compositor.blurred;

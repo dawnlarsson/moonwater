@@ -236,7 +236,7 @@ static void compositor_layout_read(void)
 
                         compositor_osk_sync();
                         if (row >= 0)
-                                compositor.woken |= 1u << row;
+                                rows_add(&compositor.woken, row);
                 }
         }
 }
@@ -372,7 +372,7 @@ static void compositor_theme_set(unsigned int theme, unsigned int accent, unsign
         }
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (table->pid[row])
-                        compositor.woken |= 1u << row;
+                        rows_add(&compositor.woken, row);
 }
 
 // Whether the local clock says day (SETTING_THEME_DAY_FROM to SETTING_THEME_DAY_UNTIL).
@@ -1469,7 +1469,7 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
         head = table->event_head[row];
         used = head - __atomic_load_n(&table->event_tail[row], __ATOMIC_ACQUIRE);
         last = (head - 1) % WINDOWS_EVENTS;
-        compositor.woken |= 1u << row;
+        rows_add(&compositor.woken, row);
 
         if (type == WINDOW_EVENT_WHEEL && used >= WINDOWS_EVENTS / 2 && used <= WINDOWS_EVENTS &&
             table->event_type[row][last] == WINDOW_EVENT_WHEEL && table->event_b[row][last] == b &&
@@ -1525,8 +1525,8 @@ static struct
         thread *worker[WINDOWS + 1];
         int kick[WINDOWS + 1];          // eventfds, the loop to a thread
         unsigned int asked[WINDOWS + 1]; // COMPOSITOR_DOOR_* asked of a thread
-        unsigned long busy;             // the slots whose door a thread has: not polled
-        unsigned long drained, reopened; // what the threads have done, for the loop to take
+        struct compositor_rows busy;     // the slots whose door a thread has: not polled
+        struct compositor_rows drained, reopened; // what the threads have done, for the loop to take
         int done;                       // the eventfd a thread knocks the loop with, or -1
         int clip;                       // the clipboard's door, as the misc thread has it
         char lines[16][COMPOSITOR_DOOR_LINE];
@@ -1557,11 +1557,11 @@ static void compositor_door_drain(int handle)
 }
 
 // A thread done with what it was asked: the loop is told.
-static void compositor_door_told(unsigned long *into, unsigned int slot)
+static void compositor_door_told(struct compositor_rows *into, unsigned int slot)
 {
         unsigned long one = 1;
 
-        __atomic_or_fetch(into, 1ul << slot, __ATOMIC_RELEASE);
+        rows_add_atomic(into, slot);
         compositor_call(syscall(write), (positive)compositor_doors.done, (positive)&one, sizeof one, 0, 0, 0);
 }
 
@@ -1656,8 +1656,8 @@ static void compositor_knock(void)
         char byte = 0;
 
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((compositor.woken & (1u << row)) && !compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
+                if (rows_has(&compositor.woken, row) && !compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
                         system_write_once(compositor.wake[row], &byte, 1);
-        compositor.woken = 0;
+        rows_none(&compositor.woken);
 }
 

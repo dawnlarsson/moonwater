@@ -890,7 +890,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
         // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
         if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)frame->scale)
-                compositor.woken |= 1u << row;
+                rows_add(&compositor.woken, row);
         compositor.table->window_scale[row] = (unsigned int)frame->scale;
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))

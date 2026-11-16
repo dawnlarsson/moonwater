@@ -569,7 +569,7 @@ static int compositor_glass_side(int row)
                 {
                         compositor.glass_told[row] = ground;
                         compositor.table->ground[row] = ground;
-                        compositor.woken |= 1u << row;
+                        rows_add(&compositor.woken, row);
                 }
         }
         return compositor.glass_side[row] != was;

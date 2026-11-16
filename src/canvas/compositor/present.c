@@ -355,7 +355,7 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
 // are in place, as they were.
 static b32 compositor_card_holds(void)
 {
-        if (compositor_card.list_rows)
+        if (rows_any(&compositor_card.list_rows))
                 return true;
         if (!compositor_card.nowait)
                 return false;
@@ -367,13 +367,13 @@ static b32 compositor_card_holds(void)
 static void compositor_card_release(void)
 {
         for (int row = 0; row < (int)compositor_rows_in_use && compositor.table; row++)
-                if ((compositor.held_rows & compositor_card.rows & (1u << row)) && !(compositor.flip_pending && row == compositor.flip_row))
+                if ((rows_has(&compositor.held_rows, row) && rows_has(&compositor_card.rows, row)) && !(compositor.flip_pending && row == compositor.flip_row))
                 {
                         __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
-                        compositor.held_rows &= ~(1u << row);
-                        compositor.woken |= 1u << row;
+                        rows_del(&compositor.held_rows, row);
+                        rows_add(&compositor.woken, row);
                 }
-        compositor_card.rows = 0;
+        rows_none(&compositor_card.rows);
 }
 
 // When the clients' hold ends: GPU_LATE_NS after the present whose jobs are on the card began, or after the first list's job not waited for did.
@@ -389,7 +389,7 @@ static positive compositor_card_held_until(void)
 // this says.
 static b32 compositor_card_clients_held(positive now)
 {
-        return (compositor_card.on || compositor_card.list_rows) && now < compositor_card_held_until();
+        return (compositor_card.on || rows_any(&compositor_card.list_rows)) && now < compositor_card_held_until();
 }
 
 // The present whose jobs are on the card began at `began`: its time is noted when they are done, and the clients' hold is counted from it.
@@ -487,9 +487,10 @@ static void compositor_card_said(void)
 static void compositor_card_after(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off,
                                   const unsigned char *rows, unsigned int windows)
 {
-        compositor_card.rows = 0;
+        rows_none(&compositor_card.rows);
         for (unsigned int at = 0; at < windows; at++)
-                compositor_card.rows |= rows[at] < WINDOWS ? 1u << rows[at] : 0;
+                if (rows[at] < WINDOWS)
+                        rows_add(&compositor_card.rows, rows[at]);
         memory_copy(compositor_card.clip, clip, (positive)clips * sizeof(clip[0]));
         compositor_card.clips = clips, compositor_card.turning = turning, compositor_card.composed = gpu_composed;
         compositor_card.flip_own = flip_own, compositor_card.back = back, compositor_card.plane_off = plane_off;
@@ -506,25 +507,25 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
 static void compositor_card_lists_settle(b32 hung)
 {
         hung |= gpu_recovered != compositor_card.list_recovered;
-        for (int row = 0; row < (int)compositor_rows_in_use && compositor_card.list_rows; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use && rows_any(&compositor_card.list_rows); row++)
         {
                 int done;
 
-                if (!(compositor_card.list_rows >> row & 1u))
+                if (!rows_has(&compositor_card.list_rows, row))
                         continue;
                 done = hung ? -1 : gpu_done(compositor_card.list_seq[row]);
                 if (done == 0)
                         continue;
-                compositor_card.list_rows &= ~(1u << row), compositor_card.list_seq[row] = 0;
+                rows_del(&compositor_card.list_rows, row), compositor_card.list_seq[row] = 0;
                 if (!compositor.table)
                         continue;
-                if ((compositor.held_rows >> row & 1u) && !(compositor.flip_pending && row == compositor.flip_row) &&
-                    !(compositor_card.on && (compositor_card.rows >> row & 1u)))
+                if (rows_has(&compositor.held_rows, row) && !(compositor.flip_pending && row == compositor.flip_row) &&
+                    !(compositor_card.on && rows_has(&compositor_card.rows, row)))
                 {
                         __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
-                        compositor.held_rows &= ~(1u << row);
+                        rows_del(&compositor.held_rows, row);
                 }
-                compositor.woken |= 1u << row;
+                rows_add(&compositor.woken, row);
                 if (done < 0)
                 {
                         __atomic_store_n(&compositor.table->list_state[row], 2u, __ATOMIC_RELEASE);
@@ -593,7 +594,7 @@ static positive compositor_card_due(positive now)
 // Whether the loop waits on the card this turn: a list's job not waited for, or without a wait a present's jobs or a job still pending.
 static b32 compositor_card_awaits(void)
 {
-        return compositor_card.list_rows || (compositor_card.nowait && (compositor_card.on || (gpu.pending && !gpu_end_said)));
+        return rows_any(&compositor_card.list_rows) || (compositor_card.nowait && (compositor_card.on || (gpu.pending && !gpu_end_said)));
 }
 #else
 static b32 compositor_card_holds(void)

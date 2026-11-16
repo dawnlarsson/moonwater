@@ -1158,9 +1158,9 @@ static int compositor_card_list_submit(int row, unsigned int made, positive pict
                 compositor_gpu_job_failed();
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
-        if (!compositor_card.list_rows)
+        if (!rows_any(&compositor_card.list_rows))
                 compositor_card.list_began = gpu_job_began;
-        compositor_card.list_seq[row] = sequence, compositor_card.list_rows |= 1u << row, compositor_card.list_recovered = gpu_recovered;
+        compositor_card.list_seq[row] = sequence, rows_add(&compositor_card.list_rows, row), compositor_card.list_recovered = gpu_recovered;
         compositor_gpu_state.failures = 0;
         return 1;
 }

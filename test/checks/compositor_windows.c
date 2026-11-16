@@ -620,7 +620,7 @@ static void check_compositor_doors_held(void)
         system_call_2(syscall(nanosleep), (positive)&nap, 0);
         compositor_doors_start(-1);
         compositor_door(1, COMPOSITOR_POLLIN);
-        compositor.woken = 1u << 1;
+        compositor.woken = rows_from(1u << 1);
         compositor_knock();
         compositor_door(1, COMPOSITOR_POLLIN | COMPOSITOR_POLLHUP);
         system_call_1(syscall(exit_group), 0);
@@ -1427,11 +1427,11 @@ static void check_compositor_wake(void)
     // A flip in flight when the machine slept, a window's picture held for it.
     now = clock_monotonic_nanoseconds();
     compositor.flip_pending = 1, compositor.flip_issued = now - 1000, compositor.flip_row = -1;
-    compositor.held_rows = 1u << 3, compositor.taken_held[3] = 9;
+    compositor.held_rows = rows_from(1u << 3), compositor.taken_held[3] = 9;
     compositor.damages = 0;
     compositor_woke(now, COMPOSITOR_WAKE_CLOCK);
     check("wake: the flip the sleep cut off is let go of as landed, and the picture it held is said taken",
-          !compositor.flip_pending && !compositor.held_rows && table.shown[3] == 9);
+          !compositor.flip_pending && !rows_any(&compositor.held_rows) && table.shown[3] == 9);
     {
         int whole = 0;
 
@@ -4228,7 +4228,7 @@ static void check_compositor_divider(void)
     divider_fresh();
     screens_hand(126, 100, 0);
     check("divider: the pointer on the line shows the indicator over all of it, from the top of the screen to its bottom, not one quarter's",
-          compositor.mark[2] > 0 && compositor.mark[1] == 0 && compositor.mark[3] == 256 && compositor.mark_rows == 14u);
+          compositor.mark[2] > 0 && compositor.mark[1] == 0 && compositor.mark[3] == 256 && rows_low(&compositor.mark_rows) == 14u);
     screens_hand(126, 100, 1);
     screens_hand(146, 100, 0);
     check("divider: moved 20 px, the left half is 20 wider and both right quarters 20 narrower, meeting it",
@@ -4259,13 +4259,13 @@ static void check_compositor_divider(void)
             ends &= hover;
             screens_hand(126, along[at], 1);
             took = compositor.resize >= 0 && compositor.shared_row >= 0 &&
-                   (compositor.shared_lo_set | compositor.shared_hi_set) == 14u;
+                   (rows_low(&compositor.shared_lo_set) | rows_low(&compositor.shared_hi_set)) == 14u;
             all &= took;
             if (!hover || !took)
                 string_format(log, "  divider: at y %p: mark %p %p %p, resize %p, shared %p, rows %p\n", (positive)along[at],
-                              (positive)compositor.mark[1], (positive)compositor.mark[3], (positive)compositor.mark_rows,
+                              (positive)compositor.mark[1], (positive)compositor.mark[3], (positive)rows_low(&compositor.mark_rows),
                               (positive)compositor.resize, (positive)compositor.shared_row,
-                              (positive)(compositor.shared_lo_set | compositor.shared_hi_set));
+                              (positive)(rows_low(&compositor.shared_lo_set) | rows_low(&compositor.shared_hi_set)));
             screens_hand(126, along[at], -1);
             compositor.press = COMPOSITOR_NONE;
         }
@@ -4918,7 +4918,7 @@ static void check_compositor_wheel(void)
         if (system_call_2(syscall(pipe2), (positive)knock, O_NONBLOCK) == 0)
         {
             table->event_tail[1] = table->event_head[1];
-            compositor.woken = 0;
+            compositor.woken = rows_from(0);
             compositor.wake[1] = knock[1];
             compositor.hires[0] = 0;
             wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 1);
@@ -4926,7 +4926,7 @@ static void check_compositor_wheel(void)
             compositor_inputs_turn(turn);
             check("forward: a device's event is in its window's ring and the window is knocked on when the turn's devices are read",
                   table->event_head[1] != table->event_tail[1] && system_read_once(knock[0], bytes, sizeof(bytes)) == 1);
-            check("forward: and the row is not owed another knock at the turn's end", !(compositor.woken & 2u));
+            check("forward: and the row is not owed another knock at the turn's end", !(rows_low(&compositor.woken) & 2u));
             turn[0].returned = 0;
             wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 1);
             wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
@@ -4934,7 +4934,7 @@ static void check_compositor_wheel(void)
             check("forward: a device the poll did not name is not read, and nobody is knocked on for it",
                   system_read_once(knock[0], bytes, sizeof(bytes)) < 0);
             compositor_input_read(0);
-            compositor.woken = 0;
+            compositor.woken = rows_from(0);
             table->event_tail[1] = table->event_head[1];
             compositor.wake[1] = was_wake;
             system_close(knock[0]);

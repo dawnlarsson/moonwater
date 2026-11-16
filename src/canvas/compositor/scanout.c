@@ -58,7 +58,7 @@ static void compositor_gpu_pin(positive offset, b32 on)
         else if (compositor_gpu_pins[row])
                 compositor_gpu_pins[row]--;
         __atomic_store_n(&compositor.table->pinned[row],
-                         compositor_gpu_pins[row] || compositor_shows_row(row) || (compositor.dropping & (1u << row)) ? 1u : 0u,
+                         compositor_gpu_pins[row] || compositor_shows_row(row) || rows_has(&compositor.dropping, row) ? 1u : 0u,
                          __ATOMIC_RELEASE);
         if (!compositor_gpu_pins[row])
                 compositor_row_reclaim((int)row);
@@ -154,11 +154,11 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
 
 static void compositor_row_reclaim(int row)
 {
-        if (!(compositor.reclaim & (1u << row)))
+        if (!rows_has(&compositor.reclaim, row))
                 return;
-        if (compositor.showing[row] || (compositor.dropping & (1u << row)) || compositor_gpu_pins[row])
+        if (compositor.showing[row] || rows_has(&compositor.dropping, row) || compositor_gpu_pins[row])
                 return;
-        compositor.reclaim &= ~(1u << row);
+        rows_del(&compositor.reclaim, row);
         if (!compositor.table || __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE))
                 return;
         compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + (positive)row * 2 * compositor.buffer,
@@ -179,7 +179,7 @@ static void compositor_window_fb_drop(int row)
                 }
         compositor.patched[row][0] = compositor.patched[row][1] = 0;
         __atomic_store_n(&compositor.table->pinned[row],
-                         compositor_gpu_pins[row] || (compositor.dropping & (1u << row)) ? 1u : 0u,
+                         compositor_gpu_pins[row] || rows_has(&compositor.dropping, row) ? 1u : 0u,
                          __ATOMIC_RELEASE); // the card's pins hold it too
 }
 
@@ -244,9 +244,9 @@ static struct
         unsigned short clip[COMPOSITOR_DAMAGE][4]; // the present's rectangles, as the screens are told them
         unsigned int clips;
         int turning, composed, flip_own, back, plane_off; // how the present ends (compositor_present_tell)
-        unsigned int rows;          // the rows whose pictures the present's jobs read (bit row)
+        struct compositor_rows rows; // the rows whose pictures the present's jobs read (bit row)
         b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-nowait was there at the start)
-        unsigned int list_rows;     // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
+        struct compositor_rows list_rows; // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
         positive list_seq[WINDOWS], list_began;
         unsigned int list_recovered; // the card's restarts (gpu_recovered) when they were submitted: one since ends them, as a hang does
         unsigned int door_from;     // the door read first at the next turn: the first of those a list's job left for later
@@ -260,14 +260,14 @@ static struct
 */
 static int compositor_card_reads(int row)
 {
-        return row >= 0 && row < WINDOWS && ((compositor_card.on && (compositor_card.rows >> row & 1u)) || (compositor_card.list_rows >> row & 1u));
+        return row >= 0 && row < WINDOWS && ((compositor_card.on && rows_has(&compositor_card.rows, row)) || rows_has(&compositor_card.list_rows, row));
 }
 
 // Whether the doors still to be read this turn wait for a later one: a list's job not waited for was submitted in this turn (listing: one was on the card
 // before the doors were read, a job late past GPU_LATE_NS, which holds no door), and the next list would find the card busy and be refused.
 static b32 compositor_card_door_waits(b32 listing)
 {
-        return compositor_card.lists_nowait && !listing && compositor_card.list_rows;
+        return compositor_card.lists_nowait && !listing && rows_any(&compositor_card.list_rows);
 }
 
 
@@ -466,21 +466,21 @@ static void compositor_flip_done(void)
         compositor.flip_pending = 0;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
-                if (!(compositor.held_rows & (1u << row)))
+                if (!rows_has(&compositor.held_rows, row))
                         continue;
                 if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
                         continue;
-                if (compositor_card.list_rows >> row & 1u) // a list's job draws its picture: the loop's turn gives it back at the job's end
+                if (rows_has(&compositor_card.list_rows, row)) // a list's job draws its picture: the loop's turn gives it back at the job's end
                         continue;
                 __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
-                compositor.held_rows &= ~(1u << row);
-                compositor.woken |= 1u << row;
+                rows_del(&compositor.held_rows, row);
+                rows_add(&compositor.woken, row);
         }
         // A window that left while the card showed it: its framebuffers now, the card being off them.
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((compositor.dropping & (1u << row)) && !compositor_shows_row(row))
+                if (rows_has(&compositor.dropping, row) && !compositor_shows_row(row))
                 {
-                        compositor.dropping &= ~(1u << row);
+                        rows_del(&compositor.dropping, row);
                         compositor_window_fb_drop(row);
                         compositor_row_reclaim(row);
                 }

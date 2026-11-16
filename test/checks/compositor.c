@@ -332,26 +332,26 @@ static void check_compositor_held(void)
     table->frame[1]++;
     compositor_take(1);
     check("held: a picture shown straight is not said taken before the present that shows it",
-          table->shown[1] != table->frame[1] && (compositor.held_rows & 2u));
+          table->shown[1] != table->frame[1] && (rows_low(&compositor.held_rows) & 2u));
     check("held: and one that changed no pixel still asks for that present", compositor.damages > 0);
     compositor.direct_row = -1;
-    compositor.held_rows = 0;
+    compositor.held_rows = rows_from(0);
     // Not shown straight, and no job of the card reading it in place (compositor_card_reads): the next picture is taken at once.
     table->buffer_index[1] = 0;
     table->frame[1]++;
     compositor_take(1);
     check("held: a picture no card job reads in place is said taken at once, and not held",
-          !compositor_card_reads(1) && table->shown[1] == table->frame[1] && !(compositor.held_rows & 2u));
+          !compositor_card_reads(1) && table->shown[1] == table->frame[1] && !(rows_low(&compositor.held_rows) & 2u));
     // A job of the card still reading the row's picture in place (the late present's): the next picture is held as the direct row's is.
-    compositor_card.on = 1, compositor_card.rows = 1u << 1;
+    compositor_card.on = 1, compositor_card.rows = rows_from(1u << 1);
     table->buffer_index[1] = 1;
     table->frame[1]++;
     compositor_take(1);
     check("held: a picture a card job may still read in place is not said taken, and is held for the job's end",
-          compositor_card_reads(1) && table->shown[1] != table->frame[1] && (compositor.held_rows & 2u) &&
+          compositor_card_reads(1) && table->shown[1] != table->frame[1] && (rows_low(&compositor.held_rows) & 2u) &&
               compositor.taken_held[1] == table->frame[1]);
-    compositor_card.on = 0, compositor_card.rows = 0;
-    compositor.held_rows = 0;
+    compositor_card.on = 0, compositor_card.rows = rows_from(0);
+    compositor.held_rows = rows_from(0);
 }
 
 /*
@@ -803,11 +803,11 @@ static void check_compositor_screens(void)
         table->buffer_index[1] = 1;
         table->frame[1]++;
         compositor_take(1);
-        held = compositor.held_rows >> 1 & 1;
+        held = rows_has(&compositor.held_rows, 1);
         compositor_scanout_own();
         compositor_flip_done();
         check("screens: a picture held for a direct window's flip is said taken once the screens are taken again",
-              held && table->shown[1] == table->frame[1] && !compositor.held_rows && compositor.direct_row < 0);
+              held && table->shown[1] == table->frame[1] && !rows_any(&compositor.held_rows) && compositor.direct_row < 0);
     }
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
     memory_zero(&compositor, sizeof(compositor));
@@ -886,7 +886,7 @@ static void check_compositor_scales(void)
     check("scales: before the lines ask anything every screen, the desktop and the table are at 100 percent and a window is too",
           compositor.scale == 100 && table->scale == 100 && compositor_row_scale(1) == 100 && compositor_row_scale(2) == 100 &&
               table->window_scale[1] == 100 && table->window_scale[2] == 100);
-    check("scales: and nothing waits to be drawn or to be told", !compositor.damages && !compositor.woken);
+    check("scales: and nothing waits to be drawn or to be told", !compositor.damages && !rows_any(&compositor.woken));
 
     check("scales: no line asking another scale takes nothing, and damages nothing", compositor_scales_take() == 0 && !compositor.damages);
 
@@ -906,7 +906,7 @@ static void check_compositor_scales(void)
     check("scales: every pixel is drawn again", first_whole);
     compositor_present();
     check("scales: the table says each window's scale once it is drawn, and each program is knocked for it",
-          table->window_scale[1] == 150 && table->window_scale[2] == 75 && (compositor.woken & 6u) == 6u);
+          table->window_scale[1] == 150 && table->window_scale[2] == 75 && (rows_low(&compositor.woken) & 6u) == 6u);
     compositor_knock();
     check("scales: a line that asks what the screens have changes nothing and damages nothing",
           compositor_scales_take() == 0 && !compositor.damages && compositor.scale == 150 && table->scale == 150);

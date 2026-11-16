@@ -1447,9 +1447,9 @@ static void compositor_drag_stop(int row)
         compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
-        compositor.hold_rows = 0;
+        rows_none(&compositor.hold_rows);
         if (resized)
-                compositor.woken |= 1u << row;
+                rows_add(&compositor.woken, row);
 }
 #endif
 
@@ -1478,10 +1478,10 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         if (resized >= 0)
         {
                 compositor_mark_clear();
-                compositor.woken |= 1u << resized;
+                rows_add(&compositor.woken, resized);
                 if (compositor.shared_row >= 0)
                 {
-                        compositor.woken |= compositor.shared_lo_set | compositor.shared_hi_set;
+                        rows_or(&compositor.woken, &compositor.shared_lo_set), rows_or(&compositor.woken, &compositor.shared_hi_set);
                         compositor.shared_row = COMPOSITOR_NONE;
                 }
         }
@@ -1630,14 +1630,12 @@ static int compositor_minimize_press(unsigned int code, int down)
 }
 
 // The windows that own the menus open now (the root of each one's chain), as a bit each.
-static unsigned int compositor_menu_roots(void)
+static void compositor_menu_roots(struct compositor_rows *roots)
 {
-        unsigned int roots = 0;
-
+        rows_none(roots);
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && !(compositor.state[row] & WINDOW_CLOSING))
-                        roots |= 1u << compositor_popup_root(row);
-        return roots;
+                        rows_add(roots, compositor_popup_root(row));
 }
 
 /*
@@ -1645,19 +1643,19 @@ static unsigned int compositor_menu_roots(void)
         does: a drag or a resize of that window is let go where it is, and a button held in it (a selection, a drag in its
         contents) is released with WINDOW_KEY_CANCEL, so the window does not finish it as a click.
 */
-static void compositor_cancel_holds(unsigned int roots)
+static void compositor_cancel_holds(const struct compositor_rows *roots)
 {
         for (unsigned int index = 0; index < 8; index++)
-                if ((compositor.button_down >> index & 1) && compositor.button_row[index] >= 0 && roots >> compositor.button_row[index] & 1)
+                if ((compositor.button_down >> index & 1) && compositor.button_row[index] >= 0 && rows_has(roots, compositor.button_row[index]))
                         compositor_release_as(COMPOSITOR_BTN_LEFT + index, 0, WINDOW_KEY_CANCEL);
-        if ((compositor.drag >= 0 && roots >> compositor.drag & 1) || (compositor.resize >= 0 && roots >> compositor.resize & 1))
+        if ((compositor.drag >= 0 && rows_has(roots, compositor.drag)) || (compositor.resize >= 0 && rows_has(roots, compositor.resize)))
                 compositor_release_as(COMPOSITOR_BTN_LEFT, 0, WINDOW_KEY_CANCEL);
 }
 
 static void compositor_button(unsigned int code, int down)
 {
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top, band, up;
-        unsigned int roots;
+        struct compositor_rows roots;
         positive now;
 
         compositor_pointer_clamp();
@@ -1689,10 +1687,10 @@ static void compositor_button(unsigned int code, int down)
         }
         // A press outside every popup that is open asks them to go, and is theirs: it goes no further, to the window
         // below, the desktop or a tab, with a finger the same as a mouse (compositor_touch_button is this path too).
-        roots = compositor_menu_roots();
+        compositor_menu_roots(&roots);
         if (compositor_popups_close(-1, -1))
         {
-                compositor_cancel_holds(roots);
+                compositor_cancel_holds(&roots);
                 return;
         }
 

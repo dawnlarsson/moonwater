@@ -79,12 +79,12 @@ static void compositor_focus(int row)
         // Both are knocked on, and both lines drawn again: the one with the keys is lit.
         if (was >= 0)
         {
-                compositor.woken |= 1u << was;
+                rows_add(&compositor.woken, was);
                 compositor_damage_row(was);
         }
         if (row >= 0)
         {
-                compositor.woken |= 1u << row;
+                rows_add(&compositor.woken, row);
                 compositor_damage_row(row);
         }
         compositor_tabs_changed();
@@ -335,7 +335,7 @@ static void compositor_want(int row, int width, int height)
         height = height > compositor_most_height() ? compositor_most_height() : height;
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
-        compositor.woken |= 1u << row;
+        rows_add(&compositor.woken, row);
         if (!compositor.showing[row])
                 return;
 
@@ -383,12 +383,12 @@ static void compositor_fit_row(int row)
 */
 static void compositor_scale_fit(void)
 {
-        compositor.fit = 0;
+        rows_none(&compositor.fit);
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (!compositor.showing[row] || compositor.arranged[row] != COMPOSITOR_FLOATING)
                         continue;
-                compositor.fit |= 1u << row;
+                rows_add(&compositor.fit, row);
                 compositor_fit_row(row);
         }
         compositor.fit_until = clock_monotonic_nanoseconds() + 3000000000ull;
@@ -443,7 +443,7 @@ static int compositor_meets(int row, unsigned int edge)
 */
 struct compositor_divider
 {
-        unsigned int lo, hi;
+        struct compositor_rows lo, hi;
         int lo_row, hi_row, vertical, line, from, to; // the line, and the span of it the windows cover
 };
 
@@ -456,7 +456,7 @@ static void compositor_divider_measure(struct compositor_divider *d)
         {
                 int a, b;
 
-                if (!((d->lo | d->hi) >> row & 1))
+                if (!rows_has(&d->lo, row) && !rows_has(&d->hi, row))
                         continue;
                 a = d->vertical ? compositor.y[row] : compositor.x[row];
                 b = a + (int)(d->vertical ? compositor.h[row] : compositor.w[row]);
@@ -464,7 +464,7 @@ static void compositor_divider_measure(struct compositor_divider *d)
                         d->from = a;
                 if (first || b > d->to)
                         d->to = b;
-                if (d->hi >> row & 1)
+                if (rows_has(&d->hi, row))
                         d->line = d->vertical ? compositor.x[row] : compositor.y[row];
                 first = 0;
         }
@@ -482,7 +482,7 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
         from = vertical ? compositor.y[row] : compositor.x[row];
         to = from + (int)(vertical ? compositor.h[row] : compositor.w[row]);
         d->vertical = vertical;
-        d->lo = high ? 0 : 1u << row, d->hi = high ? 1u << row : 0;
+        rows_none(&d->lo), rows_none(&d->hi), rows_add(high ? &d->hi : &d->lo, row);
         d->lo_row = high ? other : row, d->hi_row = high ? row : other;
         while (grew && compositor_tile_cells(compositor.arranged[row]))
         {
@@ -491,7 +491,7 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
                 {
                         int near, far, a, b;
 
-                        if (((d->lo | d->hi) >> each & 1) || !compositor_visible(each) || compositor_popup_parent[each] >= 0 ||
+                        if (rows_has(&d->lo, each) || rows_has(&d->hi, each) || !compositor_visible(each) || compositor_popup_parent[each] >= 0 ||
                             !compositor_tile_cells(compositor.arranged[each]) || compositor_screen_of(each) != screen)
                                 continue;
                         near = vertical ? compositor.x[each] : compositor.y[each];
@@ -501,20 +501,20 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
                         if (a >= to || b <= from || (near != line && far != line))
                                 continue;
                         if (far == line)
-                                d->lo |= 1u << each, d->lo_row = d->lo_row >= 0 ? d->lo_row : each;
+                                rows_add(&d->lo, each), d->lo_row = d->lo_row >= 0 ? d->lo_row : each;
                         else
-                                d->hi |= 1u << each, d->hi_row = d->hi_row >= 0 ? d->hi_row : each;
+                                rows_add(&d->hi, each), d->hi_row = d->hi_row >= 0 ? d->hi_row : each;
                         from = a < from ? a : from;
                         to = b > to ? b : to;
                         grew = 1;
                 }
         }
         // No tile across it: a pair edge to edge with the same extent, whatever the two are, or nothing.
-        if (!d->lo || !d->hi)
+        if (!rows_any(&d->lo) || !rows_any(&d->hi))
         {
                 if (other == COMPOSITOR_NONE)
                         return 0;
-                d->lo = 1u << (high ? other : row), d->hi = 1u << (high ? row : other);
+                rows_none(&d->lo), rows_none(&d->hi), rows_add(&d->lo, high ? other : row), rows_add(&d->hi, high ? row : other);
         }
         compositor_divider_measure(d);
         return 1;
@@ -566,7 +566,7 @@ static void compositor_mark_clear(void)
         int none[4] = {0, 0, 0, 0};
 
         compositor_mark_set(COMPOSITOR_NONE, COMPOSITOR_NONE, none);
-        compositor.mark_rows = 0;
+        rows_none(&compositor.mark_rows);
 }
 
 // The indicator of a divider, over the topmost of its windows (so nothing above it covers it); the other is the one across.
@@ -576,10 +576,10 @@ static void compositor_mark_shared(const struct compositor_divider *d)
 
         compositor_shared_strip(d, rect);
         for (unsigned int at = 0; at < compositor.stacked; at++)
-                if ((d->lo | d->hi) >> compositor.stack[at] & 1)
-                        top = compositor.stack[at], with = d->lo >> top & 1 ? d->hi_row : d->lo_row;
+                if (rows_has(&d->lo, compositor.stack[at]) || rows_has(&d->hi, compositor.stack[at]))
+                        top = compositor.stack[at], with = rows_has(&d->lo, top) ? d->hi_row : d->lo_row;
         compositor_mark_set(top, with, rect);
-        compositor.mark_rows = d->lo | d->hi;
+        compositor.mark_rows = d->lo, rows_or(&compositor.mark_rows, &d->hi);
 }
 
 // The indicator while no button is held: over a divider under the pointer, and none otherwise.
@@ -612,30 +612,31 @@ static void compositor_shared_divider(struct compositor_divider *d)
 static int compositor_shared_begin(int row, unsigned int edge)
 {
         struct compositor_divider d;
-        unsigned int was = compositor.arranged[row], all;
+        unsigned int was = compositor.arranged[row];
+        struct compositor_rows all;
         unsigned int lo_edge, hi_edge;
 
         if (!compositor_shared_at(row, edge, compositor.pointer_x, compositor.pointer_y, &d))
                 return 0;
-        all = d.lo | d.hi;
+        all = d.lo, rows_or(&all, &d.hi);
         lo_edge = d.vertical ? COMPOSITOR_EDGE_RIGHT : COMPOSITOR_EDGE_BOTTOM;
         hi_edge = d.vertical ? COMPOSITOR_EDGE_LEFT : COMPOSITOR_EDGE_TOP;
         compositor_resize_begin(row, edge);
         compositor.arranged[row] = was;
-        compositor.shared_row = d.lo >> row & 1 ? d.hi_row : d.lo_row;
+        compositor.shared_row = rows_has(&d.lo, row) ? d.hi_row : d.lo_row;
         compositor.shared_lo = d.lo_row, compositor.shared_hi = d.hi_row;
         compositor.shared_lo_set = d.lo, compositor.shared_hi_set = d.hi;
         compositor.shared_vertical = d.vertical;
         for (int each = 0; each < (int)compositor_rows_in_use; each++)
         {
-                if (!(all >> each & 1))
+                if (!rows_has(&all, each))
                         continue;
                 compositor.shared_sizes[each] = d.vertical ? (int)compositor.w[each] : (int)compositor.h[each];
                 if (each == row)
                         continue;
                 compositor_hold_take(1, each);
                 compositor_damage_row(each);
-                compositor.edges[each] = d.lo >> each & 1 ? lo_edge : hi_edge;
+                compositor.edges[each] = rows_has(&d.lo, each) ? lo_edge : hi_edge;
                 compositor.far_x[each] = compositor.x[each] + (int)compositor.w[each];
                 compositor.far_y[each] = compositor.y[each] + (int)compositor.h[each];
                 compositor_damage_row(each);
@@ -653,7 +654,9 @@ static void compositor_shared_move(void)
         int vertical = compositor.shared_vertical, travel = vertical ? compositor.pointer_x - compositor.press_x
                                                                          : compositor.pointer_y - compositor.press_y;
         int low = -2147483647, high = 2147483647;
-        unsigned int all = compositor.shared_lo_set | compositor.shared_hi_set;
+        struct compositor_rows all = compositor.shared_lo_set;
+
+        rows_or(&all, &compositor.shared_hi_set);
         struct compositor_divider d;
 
         for (int each = 0; each < (int)compositor_rows_in_use; each++)
@@ -661,9 +664,9 @@ static void compositor_shared_move(void)
                 int size = compositor.shared_sizes[each], least = compositor_least(each, !vertical);
                 int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
 
-                if (!(all >> each & 1))
+                if (!rows_has(&all, each))
                         continue;
-                if (compositor.shared_lo_set >> each & 1)
+                if (rows_has(&compositor.shared_lo_set, each))
                         low = least - size > low ? least - size : low, high = most - size < high ? most - size : high;
                 else
                         low = size - most > low ? size - most : low, high = size - least < high ? size - least : high;
@@ -675,9 +678,9 @@ static void compositor_shared_move(void)
         {
                 int size;
 
-                if (!(all >> each & 1))
+                if (!rows_has(&all, each))
                         continue;
-                size = compositor.shared_sizes[each] + (compositor.shared_lo_set >> each & 1 ? travel : -travel);
+                size = compositor.shared_sizes[each] + (rows_has(&compositor.shared_lo_set, each) ? travel : -travel);
                 if (vertical)
                         compositor_want(each, size, (int)compositor.h[each]);
                 else
@@ -806,8 +809,8 @@ static void compositor_hold_take(int more, int row)
         int rect[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
 
         if (!more)
-                compositor.hold_rows = 0;
-        compositor.hold_rows |= 1u << row;
+                rows_none(&compositor.hold_rows);
+        rows_add(&compositor.hold_rows, row);
         memory_copy(compositor.hold_rect[row], rect, sizeof(rect));
         compositor.hold_how[row] = compositor.arranged[row];
 }
@@ -822,9 +825,9 @@ static int compositor_hold_cancel(void)
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((compositor.hold_rows >> row & 1) && compositor.showing[row])
+                if (rows_has(&compositor.hold_rows, row) && compositor.showing[row])
                         compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
-        compositor.hold_rows = 0;
+        rows_none(&compositor.hold_rows);
         return 1;
 }
 
@@ -2227,8 +2230,9 @@ static void compositor_take(int row)
         if (frame == compositor.seen[row])
                 return;
 
-        unsigned int seen = compositor.seen[row], reclaim = compositor.reclaim;
-        compositor.reclaim &= ~(1u << row);
+        unsigned int seen = compositor.seen[row];
+        struct compositor_rows reclaim = compositor.reclaim;
+        rows_del(&compositor.reclaim, row);
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
         height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
@@ -2264,15 +2268,15 @@ static void compositor_take(int row)
         if (row == compositor.direct_row || compositor_card_reads(row))
         {
                 compositor.taken_held[row] = frame;
-                compositor.held_rows |= 1u << row;
+                rows_add(&compositor.held_rows, row);
         }
         else
                 __atomic_store_n(&table->shown[row], frame, __ATOMIC_RELEASE);
-        compositor.woken |= 1u << row;
+        rows_add(&compositor.woken, row);
 
         if (list_refused)
         {
-                if (compositor.showing[row] && (compositor.held_rows & (1u << row)) && compositor_visible(row))
+                if (compositor.showing[row] && rows_has(&compositor.held_rows, row) && compositor_visible(row))
                         compositor_damage(compositor.x[row], compositor.y[row], 1, 1);
                 return;
         }
@@ -2359,9 +2363,9 @@ static void compositor_take(int row)
                 compositor_place(row, x, y);
                 damage[2] = 0;
                 // The picture a scale taken made: if it is past the room it is asked to fit it.
-                if (compositor.fit & (1u << row))
+                if (rows_has(&compositor.fit, row))
                 {
-                        compositor.fit &= ~(1u << row);
+                        rows_del(&compositor.fit, row);
                         if (clock_monotonic_nanoseconds() < compositor.fit_until)
                                 compositor_fit_row(row);
                 }
@@ -2411,7 +2415,7 @@ static void compositor_take(int row)
                 // A picture the card shows straight from its buffer is said taken by the present that puts it there,
                 // and a present comes only for damage: one that changed no pixel still asks for one (a pixel of the
                 // window on the output), or its program waits on it until something else is damaged.
-                else if (compositor.held_rows & (1u << row))
+                else if (rows_has(&compositor.held_rows, row))
                 {
                         int x = compositor.x[row], y = compositor.y[row];
 
@@ -2493,11 +2497,11 @@ static void compositor_leave(int row)
                         compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
                 compositor.preview_draw = 0;
         }
-        compositor.hold_rows &= ~(1u << row);
-        if (compositor.mark_row == row || compositor.mark_with == row || (compositor.mark_rows >> row & 1))
+        rows_del(&compositor.hold_rows, row);
+        if (compositor.mark_row == row || compositor.mark_with == row || rows_has(&compositor.mark_rows, row))
                 compositor_mark_clear();
         // A window of the divider resized, going, ends the resize: the others are no longer taken with it.
-        if (compositor.shared_row >= 0 && ((compositor.shared_lo_set | compositor.shared_hi_set) >> row & 1))
+        if (compositor.shared_row >= 0 && (rows_has(&compositor.shared_lo_set, row) || rows_has(&compositor.shared_hi_set, row)))
                 compositor.shared_row = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
@@ -2540,7 +2544,7 @@ static void compositor_leave(int row)
         compositor.glass_side[row] = compositor.glass_told[row] = 0;
         // Shown straight: the screen is the compositor's again at the next frame, and the window's framebuffers
         // go when the card is off them (now, if it is).
-        compositor.held_rows &= ~(1u << row);
+        rows_del(&compositor.held_rows, row);
         if (compositor.direct_row == row)
         {
                 compositor.direct_row = -1;
@@ -2549,7 +2553,7 @@ static void compositor_leave(int row)
         if (compositor.plane_row == row)
                 compositor.plane_row = -1;
         if (compositor_shows_row(row) || (compositor.flip_pending && compositor.flip_row == row))
-                compositor.dropping |= 1u << row;
+                rows_add(&compositor.dropping, row);
         else if (compositor.scan_fb[row][0] || compositor.scan_fb[row][1])
                 compositor_window_fb_drop(row);
         // Pinned for a framebuffer the card refused, which was never made: no drop above would let go of it.
@@ -2568,8 +2572,8 @@ static void compositor_leave(int row)
         table->shown[row] = 0;
 
         // MADV_REMOVE: the pages of its two buffers, deferred while the card still shows or pins the row's pages.
-        if ((compositor.dropping & (1u << row)) || compositor_gpu_pins[row])
-                compositor.reclaim |= 1u << row;
+        if (rows_has(&compositor.dropping, row) || compositor_gpu_pins[row])
+                rows_add(&compositor.reclaim, row);
         else
                 compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + row * 2 * compositor.buffer,
                                 2 * compositor.buffer, 9, 0, 0, 0);
@@ -2580,7 +2584,7 @@ static void compositor_leave(int row)
         compositor.text_purpose[row] = 0;
         if (compositor.focus == row)
                 compositor_refocus();
-        compositor.woken &= ~(1u << row);
+        rows_del(&compositor.woken, row);
         __atomic_store_n(&table->pid[row], 0, __ATOMIC_RELEASE);
         compositor_osk_sync();
         if (pointed)
@@ -2726,7 +2730,7 @@ static void compositor_osk_put_away(int row, b32 away)
         }
         compositor.table->state[row] = compositor.state[row];
         compositor_damage_row(row);
-        compositor.woken |= 1u << row;
+        rows_add(&compositor.woken, row);
 }
 
 // The focused row moved up by the overlap with the keyboard's top, as far as its own screen's top allows: nothing when it is
@@ -2803,7 +2807,7 @@ static void compositor_osk_publish(void)
                 unsigned int purpose = focus >= 0 && table->field[focus] ? compositor.text_purpose[focus] : 0;
 
                 if (table->osk_purpose != purpose && keyboard >= 0)
-                        compositor.woken |= 1u << keyboard;
+                        rows_add(&compositor.woken, keyboard);
                 table->osk_purpose = purpose;
                 table->osk_caret = focus >= 0 && table->field[focus] && compositor.caret[focus] > 0 ? (unsigned int)compositor.caret[focus] : 0;
         }
@@ -2881,7 +2885,7 @@ static void compositor_close(int row)
         compositor_close_count(row, compositor.close_asks[row] == 255 ? 1u : compositor.close_asks[row] + 1u);
         compositor.state[row] |= WINDOW_CLOSING;
         compositor.table->state[row] = compositor.state[row];
-        compositor.woken |= 1u << row;
+        rows_add(&compositor.woken, row);
 }
 
 // A door knocked on or closed: the row read, and a closed one let go of and opened again for the next program.
@@ -3256,7 +3260,7 @@ static void compositor_clip_cli_read(void)
 static void compositor_clip_cli(void)
 {
         if (compositor_door_ask(COMPOSITOR_DOOR_MISC, COMPOSITOR_DOOR_DRAIN))
-                compositor_doors.busy |= 1ul << COMPOSITOR_DOOR_MISC;
+                rows_add(&compositor_doors.busy, COMPOSITOR_DOOR_MISC);
         else
                 compositor_door_drain(compositor_clip.door);
         compositor_clip_cli_read();
@@ -3438,7 +3442,7 @@ static void compositor_door(int row, int returned)
 
         if (compositor_door_ask((unsigned int)row, returned & COMPOSITOR_POLLHUP ? COMPOSITOR_DOOR_REOPEN : COMPOSITOR_DOOR_DRAIN))
         {
-                compositor_doors.busy |= 1ul << row;
+                rows_add(&compositor_doors.busy, row);
                 compositor_take(row);
                 compositor_clip_door(row);
                 return;
@@ -3460,21 +3464,22 @@ static void compositor_door(int row, int returned)
 // What the doors' threads have done since the loop last looked: a drained row read again, a reopened one let go.
 static void compositor_doors_done(void)
 {
-        unsigned long count = 0, drained, reopened;
+        unsigned long count = 0;
+        struct compositor_rows drained, reopened;
 
         compositor_call(syscall(read), (positive)compositor_doors.done, (positive)&count, sizeof count, 0, 0, 0);
-        drained = __atomic_exchange_n(&compositor_doors.drained, 0ul, __ATOMIC_ACQ_REL);
-        reopened = __atomic_exchange_n(&compositor_doors.reopened, 0ul, __ATOMIC_ACQ_REL);
-        compositor_doors.busy &= ~(drained | reopened);
+        rows_take(&drained, &compositor_doors.drained);
+        rows_take(&reopened, &compositor_doors.reopened);
+        rows_and_not(&compositor_doors.busy, &drained), rows_and_not(&compositor_doors.busy, &reopened);
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((drained | reopened) >> row & 1)
+                if (rows_has(&drained, row) || rows_has(&reopened, row))
                 {
                         compositor_take(row);
                         compositor_clip_door(row);
-                        if (reopened >> row & 1)
+                        if (rows_has(&reopened, row))
                                 compositor_door_gone(row);
                 }
-        if (drained >> COMPOSITOR_DOOR_MISC & 1)
+        if (rows_has(&drained, COMPOSITOR_DOOR_MISC))
                 compositor_clip_cli_read();
 }
 

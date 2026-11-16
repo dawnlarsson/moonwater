@@ -2718,7 +2718,7 @@ static void gpu_card_rows(void)
         gpu_maps[0].bytes = sizeof(gpu_card_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
         compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
-        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = 0, compositor.woken = 0;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
         memory_zero(&compositor_card, sizeof(compositor_card));
         compositor_card.nowait = 1, compositor_card.looped = 1; // the loop's present, without a wait
         gpu_late_reset();
@@ -2738,9 +2738,9 @@ static void gpu_card_rows(void)
         {
                 int kept_door = compositor.door[2], kept_input = compositor.inputs[0];
                 unsigned int kept_inputs = compositor.input_count;
-                unsigned long kept_busy = compositor_doors.busy;
+                struct compositor_rows kept_busy = compositor_doors.busy;
 
-                compositor.door[2] = 5, compositor.inputs[0] = 6, compositor.input_count = 1, compositor_doors.busy = 0;
+                compositor.door[2] = 5, compositor.inputs[0] = 6, compositor.input_count = 1, compositor_doors.busy = rows_from(0);
                 compositor_loop_wanted(wanted, &held, 1);
                 check("gpu card: while the clients are held no door and no Wayland socket is polled, the input devices are, and the job's sync_file is",
                       wanted[held.inputs].handle == 6 && wanted[held.doors + 2].handle == -1 && held.doors == held.inputs + 1 && !held.wayland_at && !held.done_at &&
@@ -2772,15 +2772,15 @@ static void gpu_card_rows(void)
         gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_card_table.shown[3] = 0;
         drew = gpu_card_present(one, 1);
         compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(clock_monotonic_nanoseconds() - 1000000ull);
-        compositor.held_rows = 1u << 3, compositor.taken_held[3] = 77, compositor.woken = 0; // its door's taken held for the job (compositor_take)
+        compositor.held_rows = rows_from(1u << 3), compositor.taken_held[3] = 77, compositor.woken = rows_from(0); // its door's taken held for the job (compositor_take)
         kept_metric = compositor_metric_card_count;
         gpu_fake_busy = 0, gpu_fake_idle = 1;
         compositor_card_tick();
         check("gpu card: once the fence says done the present ends: nothing on the card, its time noted as the card's, a millisecond or more",
               drew == 1 && !compositor_card.on && !compositor_card_reads(3) && compositor_metric_card_count == kept_metric + 1 &&
                   compositor_metric_card[(compositor_metric_card_at + WINDOWS_METRIC_RUN - 1) % WINDOWS_METRIC_RUN] >= 1000000ull && !compositor_card.fence);
-        check("gpu card: and the window held for the job is told its picture was taken", gpu_card_table.shown[3] == 77 && !(compositor.held_rows & (1u << 3)) &&
-              (compositor.woken & (1u << 3)));
+        check("gpu card: and the window held for the job is told its picture was taken", gpu_card_table.shown[3] == 77 && !(rows_low(&compositor.held_rows) & (1u << 3)) &&
+              (rows_low(&compositor.woken) & (1u << 3)));
 
         // 4. Three rectangles: two jobs on the card, the third submitted once the first is done, none waited for.
         gpu_late_reset();
@@ -2922,8 +2922,8 @@ static void gpu_lists_nowait_rows(void)
         gpu_maps[1].bytes = sizeof(gpu_lists_picture), gpu_maps[1].handle = 8, gpu_maps[1].used = gpu_tick, gpu_maps[1].written = 1, gpu_maps[1].dma = 0, gpu_maps[1].handed = 0;
         compositor_gpu = 1, compositor.card = -1, compositor.table = &gpu_card_table, compositor.width = 2048, compositor.height = 64;
         compositor.scanout = gpu_card_screen, compositor.scanout_pitch = 2048 * 4, compositor.scanout_bytes = sizeof(gpu_card_screen);
-        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = 0, compositor.woken = 0;
-        compositor.dropping = 0, compositor.showing[5] = 1, compositor.x[5] = 100, compositor.y[5] = 10, compositor.w[5] = 64, compositor.h[5] = 4;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1, compositor.flip_pending = 0, compositor.held_rows = rows_from(0), compositor.woken = rows_from(0);
+        compositor.dropping = rows_from(0), compositor.showing[5] = 1, compositor.x[5] = 100, compositor.y[5] = 10, compositor.w[5] = 64, compositor.h[5] = 4;
         memory_zero(&compositor_card, sizeof(compositor_card));
         compositor_card.nowait = 1, compositor_card.lists_nowait = 1;
         gpu_late_reset();
@@ -2944,7 +2944,7 @@ static void gpu_lists_nowait_rows(void)
         check("lists nowait: its records are cut into the list's half, none into the present's", list_ops[0] != 0xdeadbeefu && present_ops[0] == 0xdeadbeefu);
 
         // d. and e. The row's picture is the job's; a present is held, the clients while it is young, the doors after it wait.
-        check("lists nowait: the row's picture is the job's, no other's", compositor_card_reads(5) && !compositor_card_reads(4) && compositor_card.list_rows == 1u << 5);
+        check("lists nowait: the row's picture is the job's, no other's", compositor_card_reads(5) && !compositor_card_reads(4) && rows_low(&compositor_card.list_rows) == 1u << 5);
         compositor_card.nowait = 0;
         check("lists nowait: a present is held while it runs, the present waiting for its jobs or not", compositor_card_holds() && compositor_card_awaits());
         compositor_card.nowait = 1;
@@ -2954,9 +2954,9 @@ static void gpu_lists_nowait_rows(void)
                   !compositor_card_clients_held(compositor_card.list_began + GPU_LATE_NS));
         {
                 int kept_door = compositor.door[2];
-                unsigned long kept_busy = compositor_doors.busy;
+                struct compositor_rows kept_busy = compositor_doors.busy;
 
-                compositor.door[2] = 5, compositor_doors.busy = 0;
+                compositor.door[2] = 5, compositor_doors.busy = rows_from(0);
                 compositor_loop_wanted(wanted, &slots, 1);
                 check("lists nowait: while it holds them no door is polled, and the job's sync_file is", wanted[slots.doors + 2].handle == -1 && slots.fence_at &&
                       wanted[slots.fence_at].handle >= 0 && wanted[slots.fence_at].handle == compositor_card.fence - 1);
@@ -2977,16 +2977,16 @@ static void gpu_lists_nowait_rows(void)
               gpu_fake_submits == submits && compositor_gpu_state.failures == failures && !compositor_gpu_state.cool_until && !compositor_card_reads(6));
 
         // d. The door's taken held for the job; a flip's end leaves it; a turn while the job runs leaves it; the fence's done gives it back.
-        gpu_card_table.shown[5] = 0, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 55, compositor.woken = 0, compositor.flip_pending = 1;
+        gpu_card_table.shown[5] = 0, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 55, compositor.woken = rows_from(0), compositor.flip_pending = 1;
         compositor_flip_done();
-        check("lists nowait: a flip that ends while the job runs leaves the row's door held", gpu_card_table.shown[5] == 0 && (compositor.held_rows >> 5 & 1u));
+        check("lists nowait: a flip that ends while the job runs leaves the row's door held", gpu_card_table.shown[5] == 0 && (rows_has(&compositor.held_rows, 5)));
         compositor_card_tick();
         check("lists nowait: a turn while the job runs asks the card without a wait and leaves the row the job's", compositor_card_reads(5) && gpu_card_table.shown[5] == 0 &&
-              (compositor.held_rows >> 5 & 1u) && gpu_fake_blocking == 0);
+              (rows_has(&compositor.held_rows, 5)) && gpu_fake_blocking == 0);
         gpu_fake_busy = 0, gpu_fake_idle = 1;
         compositor_card_tick();
         check("lists nowait: once the fence says done the turn gives the row back: its door told the picture was taken, nothing the job's, the present free",
-              gpu_card_table.shown[5] == 55 && !(compositor.held_rows >> 5 & 1u) && (compositor.woken >> 5 & 1u) && !compositor_card.list_rows &&
+              gpu_card_table.shown[5] == 55 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) && !rows_any(&compositor_card.list_rows) &&
                   !compositor_card_reads(5) && !compositor_card_holds() && !compositor_card_awaits() && gpu_card_table.list_state[5] == 0 && gpu_fake_blocking == 0);
 
         // A list job that never signals: its row the job's past GPU_LATE_NS (the clients read again), given back by the hang path at its deadline.
@@ -2994,7 +2994,7 @@ static void gpu_lists_nowait_rows(void)
         gpu_fake_idle = 0, gpu_fake_busy = 1;
         gpu_lists_publish(0xff445566u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 66, compositor.woken = 0;
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 66, compositor.woken = rows_from(0);
         compositor.damages = 0;
         now = clock_monotonic_nanoseconds();
         compositor_card.list_began = now - GPU_LATE_NS - 1, gpu_job_began = now - (GPU_HANG_NS - 500000000ull);
@@ -3004,8 +3004,8 @@ static void gpu_lists_nowait_rows(void)
         gpu_job_began = now - GPU_HANG_NS;
         compositor_card_tick();
         check("lists nowait: at its deadline the hang path gives the row's door back, its list refused so the program paints the frame, its window drawn again",
-              gpu_end == GPU_END_HUNG && gpu_card_table.shown[5] == 66 && !(compositor.held_rows >> 5 & 1u) && (compositor.woken >> 5 & 1u) &&
-                  gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows && compositor.damages >= 1 && compositor_gpu_state.cool_until > now);
+              gpu_end == GPU_END_HUNG && gpu_card_table.shown[5] == 66 && !(rows_has(&compositor.held_rows, 5)) && (rows_has(&compositor.woken, 5)) &&
+                  gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows) && compositor.damages >= 1 && compositor_gpu_state.cool_until > now);
         check("lists nowait: and nothing holds the present, the clients or the loop after it: the program is not stuck", !compositor_card_holds() &&
               !compositor_card_clients_held(now) && !compositor_card_awaits() && !compositor_card_reads(5));
 
@@ -3014,21 +3014,21 @@ static void gpu_lists_nowait_rows(void)
         gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0;
         gpu_lists_publish(0xff778899u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 77;
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 77;
         gpu_fake_busy = 0, gpu_fake_errno = 1;
         compositor_card_tick();
         gpu_fake_errno = 0;
         check("lists nowait: a list's job whose fence answers an error gives its row back, its list refused", drawn == 1 && gpu_card_table.shown[5] == 77 &&
-              gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows);
+              gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
         gpu_late_reset();
         gpu_fake_idle = 0, gpu_fake_busy = 1, gpu_before.sequence = 0, gpu.pending = 0, gpu.ctx = 1;
         gpu_lists_publish(0xff998877u);
         drawn = gpu_lists_render(5, damage);
-        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = 1u << 5, compositor.taken_held[5] = 88;
+        gpu_card_table.shown[5] = 0, gpu_card_table.list_state[5] = 1, compositor.held_rows = rows_from(1u << 5), compositor.taken_held[5] = 88;
         gpu_recovered++;
         compositor_card_tick();
         check("lists nowait: and one a restart of the card took, while the card says nothing of it", drawn == 1 && gpu_card_table.shown[5] == 88 &&
-              gpu_card_table.list_state[5] == 2 && !compositor_card.list_rows);
+              gpu_card_table.list_state[5] == 2 && !rows_any(&compositor_card.list_rows));
         gpu_recovered = kept_recovered;
 
         // Without the file: drawn and waited for in place, as it was.
@@ -3040,7 +3040,7 @@ static void gpu_lists_nowait_rows(void)
         gpu_lists_publish(0xff102030u);
         drawn = gpu_lists_render(5, damage);
         check("lists nowait: without the file a list is drawn and waited for in place, as it was: its records in the ops' first half, nothing left on the card",
-              drawn == 1 && gpu_fake_blocking > 0 && !compositor_card.list_rows && !gpu.pending && present_ops[0] != 0xdeadbeefu && list_ops[0] == 0xdeadbeefu &&
+              drawn == 1 && gpu_fake_blocking > 0 && !rows_any(&compositor_card.list_rows) && !gpu.pending && present_ops[0] != 0xdeadbeefu && list_ops[0] == 0xdeadbeefu &&
                   compositor_gscene.room == (1 << 20) / 32 && !compositor_card_door_waits(0));
 
         gpu_late_reset();
@@ -3258,7 +3258,7 @@ static void close_ask_rows(void)
         struct window_row own = {.table = &table, .row = 3};
         struct wayland_facts facts;
         int parent = compositor_popup_parent[3];
-        unsigned int woken = compositor.woken;
+        struct compositor_rows woken = compositor.woken;
 
         compositor.table = &table;
         compositor.showing[3] = 1, compositor.state[3] = 0, compositor.close_asks[3] = 0, compositor_popup_parent[3] = -1;
@@ -3460,12 +3460,12 @@ static void flip_wait_rows(void)
                 static struct windows flip_table;
                 struct windows *kept = compositor.table;
                 positive serial = compositor.flip_serial;
-                unsigned int held = compositor.held_rows, dropping = compositor.dropping;
+                struct compositor_rows held = compositor.held_rows, dropping = compositor.dropping;
                 p8 events[64];
                 unsigned int type = COMPOSITOR_EVENT_FLIP_COMPLETE, length = 32;
                 positive stale = 7, mine = 8;
 
-                compositor.table = &flip_table, compositor.held_rows = compositor.dropping = 0;
+                compositor.table = &flip_table, compositor.held_rows = compositor.dropping = rows_from(0);
                 memory_zero(events, sizeof(events));
                 memory_copy(events, &type, 4), memory_copy(events + 4, &length, 4), memory_copy(events + 8, &stale, 8);
                 memory_copy(events + 32, &type, 4), memory_copy(events + 36, &length, 4), memory_copy(events + 40, &mine, 8);

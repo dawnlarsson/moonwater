@@ -614,6 +614,95 @@ struct compositor_chip
 */
 static unsigned int compositor_rows_in_use = WINDOWS;
 
+/*
+        A set of rows, a bit each, with one past them (the doors' slot that is no row, COMPOSITOR_DOOR_MISC): what the masks of a
+        bit for each row were, 32 bits that could not name a row past 31. The words walked are those of the rows in use and the
+        last; none is ever set past them.
+*/
+#define COMPOSITOR_ROW_WORDS ((WINDOWS + 1 + 63) / 64)
+struct compositor_rows
+{
+        unsigned long long word[COMPOSITOR_ROW_WORDS];
+};
+
+static inline unsigned int compositor_rows_words(void)
+{
+        unsigned int used = (compositor_rows_in_use + 63) / 64;
+
+        return used < COMPOSITOR_ROW_WORDS ? used : COMPOSITOR_ROW_WORDS;
+}
+
+static inline int rows_has(const struct compositor_rows *s, long at)
+{
+        return at >= 0 && at <= WINDOWS && (s->word[at / 64] >> (at % 64) & 1u);
+}
+
+static inline void rows_add(struct compositor_rows *s, long at)
+{
+        if (at >= 0 && at <= WINDOWS)
+                s->word[at / 64] |= 1ULL << (at % 64);
+}
+
+static inline void rows_del(struct compositor_rows *s, long at)
+{
+        if (at >= 0 && at <= WINDOWS)
+                s->word[at / 64] &= ~(1ULL << (at % 64));
+}
+
+// Taken from another thread's set and emptied there, word by word (each word's exchange is the thread's or-fetch's partner).
+static inline void rows_take(struct compositor_rows *into, struct compositor_rows *from)
+{
+        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
+                into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
+}
+
+static inline void rows_add_atomic(struct compositor_rows *s, long at)
+{
+        if (at >= 0 && at <= WINDOWS)
+                __atomic_or_fetch(&s->word[at / 64], 1ULL << (at % 64), __ATOMIC_RELEASE);
+}
+
+static inline int rows_any(const struct compositor_rows *s)
+{
+        for (unsigned int w = 0; w < compositor_rows_words(); w++)
+                if (s->word[w])
+                        return 1;
+        return s->word[COMPOSITOR_ROW_WORDS - 1] != 0;
+}
+
+static inline void rows_none(struct compositor_rows *s)
+{
+        for (unsigned int w = 0; w < compositor_rows_words(); w++)
+                s->word[w] = 0;
+        s->word[COMPOSITOR_ROW_WORDS - 1] = 0;
+}
+
+static inline void rows_or(struct compositor_rows *into, const struct compositor_rows *with)
+{
+        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
+                into->word[w] |= with->word[w];
+}
+
+// The first 64 rows as a word, and a set of them from one: what the checks compare and set (their tables have a few rows).
+static inline unsigned long long rows_low(const struct compositor_rows *s)
+{
+        return s->word[0];
+}
+
+static inline struct compositor_rows rows_from(unsigned long long low)
+{
+        struct compositor_rows s = {{0}};
+
+        s.word[0] = low;
+        return s;
+}
+
+static inline void rows_and_not(struct compositor_rows *into, const struct compositor_rows *without)
+{
+        for (unsigned int w = 0; w < COMPOSITOR_ROW_WORDS; w++)
+                into->word[w] &= ~without->word[w];
+}
+
 struct compositor_poll
 {
         int handle;
@@ -876,14 +965,15 @@ static struct
         unsigned int *overlay_pixels[2];
         unsigned long overlay_pitch, overlay_bytes; // pitch in words
         unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, flip_buffer;
-        unsigned int taken_held[WINDOWS], held_rows, dropping, reclaim, patched[WINDOWS][2];
+        unsigned int taken_held[WINDOWS], patched[WINDOWS][2];
+        struct compositor_rows held_rows, dropping, reclaim;
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
         unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
         unsigned int *under[2];
         int under_rect[2][4];
         int door[WINDOWS], wake[WINDOWS];
-        unsigned int woken;  // the rows to knock on at the end of the pass, a bit each
-        unsigned int fit;    // the rows whose next picture of another size is asked to fit its screen (a scale was taken), a bit each
+        struct compositor_rows woken;  // the rows to knock on at the end of the pass, a bit each
+        struct compositor_rows fit;    // the rows whose next picture of another size is asked to fit its screen (a scale was taken), a bit each
         positive fit_until;  // and until when (compositor_scale_fit)
         unsigned int seen[WINDOWS];     // the frame last taken
         // A window's solid runs (compositor_runs_note): its picture's, mapped when first read, the picture they are of (the tag of
@@ -993,7 +1083,7 @@ static struct
         int drag_keep[4];
         // What a drag or a resize took hold of, for Escape or a right press to put back (compositor_hold_cancel): the rows, a
         // bit each (a divider holds all of its windows), and each one's rectangle and what it filled at the press.
-        unsigned int hold_rows;
+        struct compositor_rows hold_rows;
         int hold_rect[WINDOWS][4];
         unsigned int hold_how[WINDOWS];
         // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
@@ -1018,12 +1108,12 @@ static struct
         int shared_row, shared_lo, shared_hi, shared_vertical;
         // All the windows of a divider's resize (compositor_divider), a bit each, the low side's and the high side's, and the
         // size each had across the line at the press.
-        unsigned int shared_lo_set, shared_hi_set;
+        struct compositor_rows shared_lo_set, shared_hi_set;
         int shared_sizes[WINDOWS];
         // The shared edge's indicator (compositor_mark_set): the rectangle, the window it is drawn over and the other, and all
         // the windows of its divider, a bit each.
         int mark_row, mark_with, mark[4];
-        unsigned int mark_rows;
+        struct compositor_rows mark_rows;
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
         // The keys whose press went to keys_to, one bit a code: their repeats and
@@ -1455,7 +1545,7 @@ static void compositor_lists_set(int on)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (table->pid[row])
-                        compositor.woken |= 1u << row;
+                        rows_add(&compositor.woken, row);
 }
 
 /*
@@ -1718,7 +1808,7 @@ static void compositor_space_retake(void)
         // The keyboard is sized for the output it is on, which may have changed: it is woken to look (osk_tick).
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if (compositor.asks[row] & WINDOW_KEYBOARD)
-                        compositor.woken |= 1u << row;
+                        rows_add(&compositor.woken, row);
 }
 
 /*
@@ -2227,19 +2317,19 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + 2 * WINDOWS + COMPOSIT
 */
 static void compositor_forward(void)
 {
-        unsigned int rows = compositor.woken, kept = 0;
+        struct compositor_rows rows = compositor.woken, kept = {{0}};
         char byte = 0;
 
-        if (!rows)
+        if (!rows_any(&rows))
                 return;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
-                if (!(rows >> row & 1))
+                if (!rows_has(&rows, row))
                         continue;
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (compositor_wl.started && wayland_row_owner(row) >= 0)
                 {
-                        kept |= 1u << row;
+                        rows_add(&kept, row);
                         continue;
                 }
 #endif
@@ -2334,7 +2424,7 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
                 wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
         slots->doors = count;
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
-                wanted[count++] = (struct compositor_poll){held || compositor_doors.busy >> row & 1 ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
+                wanted[count++] = (struct compositor_poll){held || rows_has(&compositor_doors.busy, row) ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
                                                            COMPOSITOR_POLLIN, 0};
         if (compositor_doors.done >= 0 && !held)
         {
@@ -2360,7 +2450,7 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
                 slots->uevents_at = count;
                 wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
         }
-        if (compositor_clip.door >= 0 && !(compositor_doors.busy >> COMPOSITOR_DOOR_MISC & 1))
+        if (compositor_clip.door >= 0 && !rows_has(&compositor_doors.busy, COMPOSITOR_DOOR_MISC))
         {
                 slots->clip_at = count;
                 wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
@@ -2569,7 +2659,7 @@ static b32 compositor_main()
                 // The look at the screens the first take owes (compositor_space_first), once the loop has made its first turn and
                 // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card (nor a
                 // present's job: the take waits for it).
-                if (compositor.probe_owed && turns++ && !compositor_card.on && !compositor_card.list_rows)
+                if (compositor.probe_owed && turns++ && !compositor_card.on && !rows_any(&compositor_card.list_rows))
                 {
                         compositor.probe_owed = 0;
                         compositor_space_retake();
@@ -2783,7 +2873,7 @@ static b32 compositor_main()
                 // A list's job submitted without a wait leaves the doors after it for a later turn, read from the first of them then (the card holds one job of
                 // a list at a time, and the next list would be refused for want of it).
                 {
-                        b32 listing = compositor_card.list_rows != 0;
+                        b32 listing = rows_any(&compositor_card.list_rows);
 
                         for (unsigned int k = 0, row; k < compositor_rows_in_use; k++)
                         {
@@ -2819,9 +2909,9 @@ static b32 compositor_main()
                 // A screen came or went, or the screens are taken now that a flip that held them back has landed (and a present's jobs are done).
                 if (uevents_at && wanted[uevents_at].returned)
                         compositor_uevents_read();
-                if (compositor.space_wanted && !compositor.flip_pending && !compositor_card.on && !compositor_card.list_rows)
+                if (compositor.space_wanted && !compositor.flip_pending && !compositor_card.on && !rows_any(&compositor_card.list_rows))
                         compositor_space_retake();
-                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look && !compositor_card.on && !compositor_card.list_rows)
+                if (compositor.screens_gone && compositor.screens_look && now >= compositor.screens_look && !compositor_card.on && !rows_any(&compositor_card.list_rows))
                 {
                         compositor.screens_look = 0;
                         compositor_space_retake();

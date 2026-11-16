@@ -4752,7 +4752,7 @@ static void compositor_wl_wake(void)
         if (stats.rows > 0)
                 wayland_scales_sweep();
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
+                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
                         compositor_wl_drain(row);
         if (stats.rows > 0 || stats.clients > 0)
         {
@@ -4785,10 +4785,10 @@ static void compositor_wl_wake(void)
                         wayland_keyboard_to(keys);
         }
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
+                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
                 {
                         wayland_row_wake(row);
-                        compositor.woken &= ~(1u << row);
+                        rows_del(&compositor.woken, row);
                 }
         compositor_wl_flush_all();
 }
