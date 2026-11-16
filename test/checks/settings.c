@@ -6229,9 +6229,10 @@ static fn check_settings_groups(void)
 
                 bare &= row && row->read[0] && (string_equals((string_address)row->read[0], (string_address) "name") ||
                                                 string_equals((string_address)row->read[0], (string_address) "language") ||
+                                                string_equals((string_address)row->read[0], (string_address) "version") ||
                                                 string_equals((string_address)row->read[0], (string_address) "machine"));
         }
-        check("settings groups: the rows listed under Machine are the machine's name and its language, and nothing of the desktop, the keyboard, the clock or the screens",
+        check("settings groups: the rows listed under Machine are the machine's name, its build and its language, and nothing of the desktop, the keyboard, the clock or the screens",
               bare && settings.list.count > 0);
 
         // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name.
