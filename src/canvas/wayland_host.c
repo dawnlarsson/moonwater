@@ -1388,13 +1388,20 @@ static int compositor_wl_needs_xform_ordered(const struct wayland_picture *pictu
                 return 1;
         if (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID)
                 return 1;
-        if (picture->src_width > 0 &&
-            (picture->src_x != 0 || picture->src_y != 0 || picture->src_width != picture->width * 256 ||
-             picture->src_height != picture->height * 256))
-                return 1;
-        if (picture->dst_width > 0 &&
-            (picture->dst_width != width || picture->dst_height != height || picture->width != width || picture->height != height))
-                return 1;
+        //      A viewport's source at the buffer's corner, of whole pixels and the window's size, is the buffer's top left as it is: what a copy
+        //      clipped to the window and a lend of the window's size from the buffer's start both read (Chromium keeps a larger buffer through a
+        //      resize and shows its corner this way, a set_source at every step). Anything else a viewport asks is a transform.
+        {
+                int cropped = picture->src_width > 0;
+                long seen_w = cropped ? picture->src_width / 256 : picture->width, seen_h = cropped ? picture->src_height / 256 : picture->height;
+
+                if (cropped && (picture->src_x != 0 || picture->src_y != 0 || picture->src_width % 256 || picture->src_height % 256 ||
+                                seen_w > picture->width || seen_h > picture->height || seen_w != width || seen_h != height))
+                        return 1;
+                if (picture->dst_width > 0 &&
+                    (picture->dst_width != width || picture->dst_height != height || seen_w != width || seen_h != height))
+                        return 1;
+        }
         return 0;
 }
 
