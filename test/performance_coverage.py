@@ -467,6 +467,14 @@ string_first_of_either_or_end
      'alignment, padded strides and negative pitches, value classes that decide each, in place where a caller is, '
      'guard pages before and after every input and output, each x86-64 tier and riscv64 with V and without, on all '
      'three machines; no timing claim')
+# The kit moon's four (the wallpaper's noise, fresnel lift, sky and grain): held to the C the wallpaper had as their stand-ins
+# (check_pixel_rows). The wallpaper bench (check_moon_bench, a row a stage) times the stages they run in, not the routines alone.
+cover('correctness_only', 'test/checks.c#CHECK_verify', '''
+noise_value_q16 memory_toward_dither_u32 memory_ramp_dither_u32 memory_grain_u32
+''', 'against the C the wallpaper had for each: every count to three hundred and a few large, every residue of each pointer, '
+     'coordinates of every kind, weights none to all, ramps of any dwords and of a sky, adds past either end of a byte, guard pages '
+     'round every input and output, each x86-64 tier and riscv64 with V and without, on all three machines; no timing claim of the '
+     'routine alone')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

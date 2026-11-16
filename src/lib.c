@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        511 routines (484 public, 27 local), 499 of them on all three and 12 local to one.
+        515 routines (488 public, 27 local), 503 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -295,6 +295,7 @@
           memory_get64                   public  yes     yes     yes
           memory_give                    public  yes     yes     yes
           memory_glass_over_u32          public  yes     yes     yes
+          memory_grain_u32               public  yes     yes     yes
           memory_growth                  public  yes     yes     yes
           memory_halve_u32               public  yes     yes     yes
           memory_hash_33                 public  yes     yes     yes
@@ -329,6 +330,7 @@
           memory_over_under_out_u32_rect public  yes     yes     yes
           memory_over_under_u32_rect     public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
+          memory_ramp_dither_u32         public  yes     yes     yes
           memory_release                 public  yes     yes     yes
           memory_resample_u32_rect       public  yes     yes     yes
           memory_reserve                 public  yes     yes     yes
@@ -360,6 +362,7 @@
           memory_tint_u32                public  yes     yes     yes
           memory_to_lower_ascii          public  yes     yes     yes
           memory_to_upper_ascii          public  yes     yes     yes
+          memory_toward_dither_u32       public  yes     yes     yes
           memory_translate               public  yes     yes     yes
           memory_translate_planes_u32_rect public  yes     yes     yes
           memory_translate_u32_rect      public  yes     yes     yes
@@ -388,6 +391,7 @@
           network_load_32                public  yes     yes     yes
           network_store_16               public  yes     yes     yes
           network_store_32               public  yes     yes     yes
+          noise_value_q16                public  yes     yes     yes
           p256_add                       public  yes     yes     yes
           p256_multiply                  public  yes     yes     yes
           p256_square                    public  yes     yes     yes
@@ -14445,6 +14449,250 @@ __asm__(
     ASM_END(memory_lerp_u32_row)
 
     //
+    //       noise_value_q16 -- rdi out, rsi x, rdx y, rcx z, r8 count, r9d
+    //       seed: value noise at count points in 16.16, the kit moon's. Each
+    //       coordinate's whole part (an arithmetic shift) times its prime,
+    //       73856093, 19349663 and 83492791, and that plus the prime again
+    //       for the next whole; a corner of the cell is the exclusive or of
+    //       its three with the seed, hashed twice (n ^= n >> 16, n *=
+    //       0x7feb352d, n ^= n >> 15, n *= 0x846ca68b, n ^= n >> 16), its top
+    //       fourteen bits less 8192. The fraction's top fifteen bits f are
+    //       eased: a = f f >> 15, b = a f >> 15, u = a + 2 (a - b), less u
+    //       >> 15 so a whole step stays under 32768. The eight corners are
+    //       eased between, a + ((b - a) u >> 15) along x, then y, then z, so
+    //       the answer is from -8192 to 8191. Every product is a dword's low
+    //       half. SSE2 has no such multiply: two pmuludq, one on the even
+    //       dwords and one on the odd ones shifted down, and a shuffle make
+    //       it; AVX2 has vpmulld. The ease's products and the lerps' fit a
+    //       word each side, so pmaddwd makes them, the high words being zero.
+    //       The axes' products wait in a frame on the stack, aligned to 32.
+    //       Four points a turn, eight with AVX2, the rest one at a time
+    //       through the same body loaded and stored by movd.
+    //
+#define NOISE_X64_MUL(R, T, K)                                                                                          \
+    "movdqa " R ", " T "\n   pmuludq " ASM_LABEL(K) "(%rip), " R "\n   psrlq $32, " T "\n   pmuludq " ASM_LABEL(K) "(%rip), " T "\n" \
+    "pshufd $8, " R ", " R "\n   pshufd $8, " T ", " T "\n   punpckldq " T ", " R "\n"
+#define NOISE_X64_SHIFT(R, T, N) "movdqa " R ", " T "\n   psrld $" #N ", " T "\n   pxor " T ", " R "\n"
+#define NOISE_X64_HASH(R, T) NOISE_X64_SHIFT(R, T, 16) NOISE_X64_MUL(R, T, noise_h1) NOISE_X64_SHIFT(R, T, 15) NOISE_X64_MUL(R, T, noise_h2) NOISE_X64_SHIFT(R, T, 16)
+#define NOISE_X64_CORNER(R, A, B, C)                                                                                   \
+    "movdqa " #A "(%rsp), " R "\n   pxor " #B "(%rsp), " R "\n   pxor " #C "(%rsp), " R "\n   pxor %xmm15, " R "\n"        \
+    NOISE_X64_HASH(R, "%xmm1") NOISE_X64_HASH(R, "%xmm1") "psrld $18, " R "\n   psubd " ASM_LABEL(noise_8192) "(%rip), " R "\n"
+#define NOISE_X64_LERP(A, B, U) "psubd " A ", " B "\n   pmaddwd " U ", " B "\n   psrad $15, " B "\n   paddd " B ", " A "\n"
+#define NOISE_X64_AXIS(U, K, OFF0, OFF1)                                                                               \
+    "movdqa %xmm0, %xmm1\n   psrad $16, %xmm1\n   pand " ASM_LABEL(noise_ffff) "(%rip), %xmm0\n   psrld $1, %xmm0\n"      \
+    "movdqa %xmm0, %xmm2\n   pmaddwd %xmm0, %xmm2\n   psrld $15, %xmm2\n"                                              \
+    "movdqa %xmm2, %xmm3\n   pmaddwd %xmm0, %xmm3\n   psrld $15, %xmm3\n"                                              \
+    "movdqa %xmm2, " U "\n   psubd %xmm3, " U "\n   pslld $1, " U "\n   paddd %xmm2, " U "\n"                              \
+    "movdqa " U ", %xmm3\n   psrld $15, %xmm3\n   psubd %xmm3, " U "\n"                                                \
+    NOISE_X64_MUL("%xmm1", "%xmm2", K) "movdqa %xmm1, " #OFF0 "(%rsp)\n   paddd " ASM_LABEL(K) "(%rip), %xmm1\n"        \
+    "movdqa %xmm1, " #OFF1 "(%rsp)\n"
+#define NOISE_X64_BODY(LOAD)                                                                                           \
+    LOAD " (%rsi), %xmm0\n" NOISE_X64_AXIS("%xmm12", noise_kx, 0, 16)                                                  \
+    LOAD " (%rdx), %xmm0\n" NOISE_X64_AXIS("%xmm13", noise_ky, 32, 48)                                                 \
+    LOAD " (%rcx), %xmm0\n" NOISE_X64_AXIS("%xmm14", noise_kz, 64, 80)                                                 \
+    NOISE_X64_CORNER("%xmm0", 0, 32, 64) NOISE_X64_CORNER("%xmm2", 16, 32, 64) NOISE_X64_LERP("%xmm0", "%xmm2", "%xmm12") \
+    NOISE_X64_CORNER("%xmm3", 0, 48, 64) NOISE_X64_CORNER("%xmm2", 16, 48, 64) NOISE_X64_LERP("%xmm3", "%xmm2", "%xmm12") \
+    NOISE_X64_LERP("%xmm0", "%xmm3", "%xmm13")                                                                         \
+    NOISE_X64_CORNER("%xmm4", 0, 32, 80) NOISE_X64_CORNER("%xmm2", 16, 32, 80) NOISE_X64_LERP("%xmm4", "%xmm2", "%xmm12") \
+    NOISE_X64_CORNER("%xmm3", 0, 48, 80) NOISE_X64_CORNER("%xmm2", 16, 48, 80) NOISE_X64_LERP("%xmm3", "%xmm2", "%xmm12") \
+    NOISE_X64_LERP("%xmm4", "%xmm3", "%xmm13") NOISE_X64_LERP("%xmm0", "%xmm4", "%xmm14")
+#define NOISE_X64_HASH_Y(R, T)                                                                                         \
+    "vpsrld $16, " R ", " T "\n   vpxor " T ", " R ", " R "\n   vpmulld " ASM_LABEL(noise_h1) "(%rip), " R ", " R "\n"       \
+    "vpsrld $15, " R ", " T "\n   vpxor " T ", " R ", " R "\n   vpmulld " ASM_LABEL(noise_h2) "(%rip), " R ", " R "\n"       \
+    "vpsrld $16, " R ", " T "\n   vpxor " T ", " R ", " R "\n"
+#define NOISE_X64_CORNER_Y(R, A, B, C)                                                                                 \
+    "vmovdqa " #A "(%rsp), " R "\n   vpxor " #B "(%rsp), " R ", " R "\n   vpxor " #C "(%rsp), " R ", " R "\n"                \
+    "vpxor %ymm15, " R ", " R "\n" NOISE_X64_HASH_Y(R, "%ymm1") NOISE_X64_HASH_Y(R, "%ymm1")                           \
+    "vpsrld $18, " R ", " R "\n   vpsubd " ASM_LABEL(noise_8192) "(%rip), " R ", " R "\n"
+#define NOISE_X64_LERP_Y(A, B, U) "vpsubd " A ", " B ", " B "\n   vpmaddwd " U ", " B ", " B "\n   vpsrad $15, " B ", " B "\n   vpaddd " B ", " A ", " A "\n"
+#define NOISE_X64_AXIS_Y(U, K, OFF0, OFF1)                                                                             \
+    "vpsrad $16, %ymm0, %ymm1\n   vpand " ASM_LABEL(noise_ffff) "(%rip), %ymm0, %ymm0\n   vpsrld $1, %ymm0, %ymm0\n"      \
+    "vpmaddwd %ymm0, %ymm0, %ymm2\n   vpsrld $15, %ymm2, %ymm2\n   vpmaddwd %ymm0, %ymm2, %ymm3\n   vpsrld $15, %ymm3, %ymm3\n" \
+    "vpsubd %ymm3, %ymm2, " U "\n   vpslld $1, " U ", " U "\n   vpaddd %ymm2, " U ", " U "\n"                              \
+    "vpsrld $15, " U ", %ymm3\n   vpsubd %ymm3, " U ", " U "\n"                                                         \
+    "vpmulld " ASM_LABEL(K) "(%rip), %ymm1, %ymm1\n   vmovdqa %ymm1, " #OFF0 "(%rsp)\n"                                   \
+    "vpaddd " ASM_LABEL(K) "(%rip), %ymm1, %ymm1\n   vmovdqa %ymm1, " #OFF1 "(%rsp)\n"
+    ASM_FUNC(noise_value_q16)
+    "" ASM_RODATA_PUSH "\n   .balign 32\n"
+    "" ASM_LABEL(noise_kx) ": .long 73856093, 73856093, 73856093, 73856093, 73856093, 73856093, 73856093, 73856093\n"
+    "" ASM_LABEL(noise_ky) ": .long 19349663, 19349663, 19349663, 19349663, 19349663, 19349663, 19349663, 19349663\n"
+    "" ASM_LABEL(noise_kz) ": .long 83492791, 83492791, 83492791, 83492791, 83492791, 83492791, 83492791, 83492791\n"
+    "" ASM_LABEL(noise_h1) ": .long 0x7feb352d, 0x7feb352d, 0x7feb352d, 0x7feb352d, 0x7feb352d, 0x7feb352d, 0x7feb352d, 0x7feb352d\n"
+    "" ASM_LABEL(noise_h2) ": .long 0x846ca68b, 0x846ca68b, 0x846ca68b, 0x846ca68b, 0x846ca68b, 0x846ca68b, 0x846ca68b, 0x846ca68b\n"
+    "" ASM_LABEL(noise_ffff) ": .long 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff\n"
+    "" ASM_LABEL(noise_8192) ": .long 8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192\n"
+    "" ASM_LABEL(noise_0123) ": .long 0, 1, 2, 3\n"
+    "" ASM_LABEL(noise_k4) ": .long 295424372, 295424372, 295424372, 295424372\n"
+    "" ASM_LABEL(noise_255) ": .long 255, 255, 255, 255\n"
+    "" ASM_LABEL(noise_256) ": .long 256, 256, 256, 256\n"
+    "" ASM_LABEL(noise_16384) ": .long 16384, 16384, 16384, 16384\n"
+    "" ASM_LABEL(noise_32768) ": .long 32768, 32768, 32768, 32768\n"
+    "" ASM_LABEL(noise_64) ": .short 64, 64, 64, 64, 64, 64, 64, 64\n"
+    "" ASM_LABEL(noise_rgb) ": .long 0x00ffffff, 0x00ffffff, 0x00ffffff, 0x00ffffff\n"
+    "" ASM_LABEL(noise_alpha) ": .long 0xff000000, 0xff000000, 0xff000000, 0xff000000\n"
+    "" ASM_LABEL(noise_colours) ": .short 0xffff, 0xffff, 0xffff, 0, 0xffff, 0xffff, 0xffff, 0\n"
+    ".popsection\n"
+    "test %r8, %r8\n   jz 9f\n"
+    "mov %rsp, %r11\n   sub $192, %rsp\n   and $-32, %rsp\n"
+    "movd %r9d, %xmm15\n   pshufd $0, %xmm15, %xmm15\n"
+    ASM_WIDER("cpu_has_avx2", "5f")
+    "1: cmp $4, %r8\n   jb 3f\n"
+    NOISE_X64_BODY("movdqu") "movdqu %xmm0, (%rdi)\n"
+    "add $16, %rsi\n   add $16, %rdx\n   add $16, %rcx\n   add $16, %rdi\n   sub $4, %r8\n   jmp 1b\n"
+    "3: test %r8, %r8\n   jz 8f\n"
+    NOISE_X64_BODY("movd") "movd %xmm0, (%rdi)\n"
+    "add $4, %rsi\n   add $4, %rdx\n   add $4, %rcx\n   add $4, %rdi\n   dec %r8\n   jmp 3b\n"
+    "5: vpbroadcastd %xmm15, %ymm15\n"
+    "6: cmp $8, %r8\n   jb 7f\n"
+    "vmovdqu (%rsi), %ymm0\n" NOISE_X64_AXIS_Y("%ymm12", noise_kx, 0, 32)
+    "vmovdqu (%rdx), %ymm0\n" NOISE_X64_AXIS_Y("%ymm13", noise_ky, 64, 96)
+    "vmovdqu (%rcx), %ymm0\n" NOISE_X64_AXIS_Y("%ymm14", noise_kz, 128, 160)
+    NOISE_X64_CORNER_Y("%ymm0", 0, 64, 128) NOISE_X64_CORNER_Y("%ymm2", 32, 64, 128) NOISE_X64_LERP_Y("%ymm0", "%ymm2", "%ymm12")
+    NOISE_X64_CORNER_Y("%ymm3", 0, 96, 128) NOISE_X64_CORNER_Y("%ymm2", 32, 96, 128) NOISE_X64_LERP_Y("%ymm3", "%ymm2", "%ymm12")
+    NOISE_X64_LERP_Y("%ymm0", "%ymm3", "%ymm13")
+    NOISE_X64_CORNER_Y("%ymm4", 0, 64, 160) NOISE_X64_CORNER_Y("%ymm2", 32, 64, 160) NOISE_X64_LERP_Y("%ymm4", "%ymm2", "%ymm12")
+    NOISE_X64_CORNER_Y("%ymm3", 0, 96, 160) NOISE_X64_CORNER_Y("%ymm2", 32, 96, 160) NOISE_X64_LERP_Y("%ymm3", "%ymm2", "%ymm12")
+    NOISE_X64_LERP_Y("%ymm4", "%ymm3", "%ymm13") NOISE_X64_LERP_Y("%ymm0", "%ymm4", "%ymm14")
+    "vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rsi\n   add $32, %rdx\n   add $32, %rcx\n   add $32, %rdi\n   sub $8, %r8\n   jmp 6b\n"
+    "7: vzeroupper\n   jmp 1b\n"
+    "8: mov %r11, %rsp\n"
+    "9: " ASM_RET
+    ASM_END(noise_value_q16)
+
+    //
+    //       memory_toward_dither_u32 -- rdi into, rsi target, rdx weight (a
+    //       word a pixel, 0 to 32767), rcx count, r8d x, r9d y: each colour
+    //       of each pixel i moved toward the target's t by the weight w in
+    //       1.15 and dithered, ((i << 15) + (t - i) w + 64 d + 16384) >> 15,
+    //       clamped to a byte, the alpha byte the pixel's own. d is the
+    //       pixel's dither: the hash of noise_value_q16 (once) of its column
+    //       times 73856093 exclusive or its row times 19349663, its two low
+    //       bytes summed less 256, so a triangle from -256 to 254 in 512ths
+    //       of a step. The columns' products are four dwords stepped by four
+    //       primes a turn; in the tail they are shifted down a dword a pixel.
+    //       Each pixel's colours are four dwords: pmaddwd takes the
+    //       difference and the dither interleaved by words against the weight
+    //       and 64, so one multiply is (t - i) w + 64 d. Four pixels a turn,
+    //       the rest one at a time through the same body from a movd.
+    //
+#define TOWARD_X64_HALF(UNPACK, DW, W, OUT)                                                                            \
+    "movdqa %xmm1, %xmm5\n   " UNPACK " %xmm12, %xmm5\n"                                                              \
+    "movdqa %xmm2, %xmm6\n   " UNPACK " %xmm12, %xmm6\n   psubw %xmm5, %xmm6\n"                                          \
+    "movdqa %xmm6, %xmm8\n   punpcklwd " DW ", %xmm6\n   punpckhwd " DW ", %xmm8\n"                                     \
+    "movdqa " W ", %xmm7\n   punpcklwd %xmm11, %xmm7\n   pmaddwd %xmm7, %xmm6\n"                                         \
+    "movdqa " W ", %xmm7\n   punpckhwd %xmm11, %xmm7\n   pmaddwd %xmm7, %xmm8\n"                                         \
+    "movdqa %xmm5, %xmm7\n   punpcklwd %xmm12, %xmm7\n   punpckhwd %xmm12, %xmm5\n"                                      \
+    "pslld $15, %xmm7\n   pslld $15, %xmm5\n   paddd %xmm10, %xmm7\n   paddd %xmm10, %xmm5\n"                              \
+    "paddd %xmm7, %xmm6\n   paddd %xmm5, %xmm8\n   psrad $15, %xmm6\n   psrad $15, %xmm8\n"                              \
+    "packssdw %xmm8, %xmm6\n   movdqa %xmm6, " OUT "\n"
+#define TOWARD_X64_DITHER                                                                                              \
+    "movdqa %xmm15, %xmm0\n   pxor %xmm14, %xmm0\n" NOISE_X64_HASH("%xmm0", "%xmm1")                                  \
+    "movdqa %xmm0, %xmm1\n   psrld $8, %xmm1\n   pand " ASM_LABEL(noise_255) "(%rip), %xmm0\n"                           \
+    "pand " ASM_LABEL(noise_255) "(%rip), %xmm1\n   paddd %xmm1, %xmm0\n   psubd " ASM_LABEL(noise_256) "(%rip), %xmm0\n"
+#define TOWARD_X64_BODY(LOAD, WEIGHTS)                                                                                 \
+    TOWARD_X64_DITHER "packssdw %xmm0, %xmm0\n   punpcklwd %xmm0, %xmm0\n   movdqa %xmm0, %xmm4\n"                     \
+    "punpckldq %xmm0, %xmm0\n   punpckhdq %xmm4, %xmm4\n"                                                               \
+    LOAD " (%rdi), %xmm1\n   " LOAD " (%rsi), %xmm2\n" WEIGHTS                                                          \
+    "punpcklwd %xmm3, %xmm3\n   movdqa %xmm3, %xmm9\n   punpckldq %xmm3, %xmm3\n   punpckhdq %xmm9, %xmm9\n"             \
+    TOWARD_X64_HALF("punpcklbw", "%xmm0", "%xmm3", "%xmm0") TOWARD_X64_HALF("punpckhbw", "%xmm4", "%xmm9", "%xmm4")       \
+    "packuswb %xmm4, %xmm0\n   pand " ASM_LABEL(noise_rgb) "(%rip), %xmm0\n   pand " ASM_LABEL(noise_alpha) "(%rip), %xmm1\n" \
+    "por %xmm1, %xmm0\n"
+    ASM_FUNC(memory_toward_dither_u32)
+    "test %rcx, %rcx\n   jz 9f\n"
+    "movd %r8d, %xmm15\n   pshufd $0, %xmm15, %xmm15\n   paddd " ASM_LABEL(noise_0123) "(%rip), %xmm15\n"
+    NOISE_X64_MUL("%xmm15", "%xmm1", noise_kx)
+    "imul $19349663, %r9d, %eax\n   movd %eax, %xmm14\n   pshufd $0, %xmm14, %xmm14\n"
+    "movdqa " ASM_LABEL(noise_k4) "(%rip), %xmm13\n   pxor %xmm12, %xmm12\n   movdqa " ASM_LABEL(noise_64) "(%rip), %xmm11\n"
+    "movdqa " ASM_LABEL(noise_16384) "(%rip), %xmm10\n"
+    "1: cmp $4, %rcx\n   jb 3f\n"
+    TOWARD_X64_BODY("movdqu", "movq (%rdx), %xmm3\n") "movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rsi\n   add $8, %rdx\n   paddd %xmm13, %xmm15\n   sub $4, %rcx\n   jmp 1b\n"
+    "3: test %rcx, %rcx\n   jz 9f\n"
+    TOWARD_X64_BODY("movd", "movzwl (%rdx), %eax\n   movd %eax, %xmm3\n") "movd %xmm0, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   add $2, %rdx\n   psrldq $4, %xmm15\n   dec %rcx\n   jmp 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_toward_dither_u32)
+
+    //
+    //       memory_ramp_dither_u32 -- rdi into, rsi count, edx x, ecx y, r8
+    //       ramp (six dwords: red, green and blue in 16.16, then each one's
+    //       step a pixel): the k'th pixel's colour is ramp[c] + k ramp[3 + c]
+    //       plus its dither (memory_toward_dither_u32's) times 128 and 32768,
+    //       shifted down sixteen, clamped to a byte, the alpha byte zero.
+    //       Each pixel is four dwords (blue, green, red, none); the four of a
+    //       turn are kept and stepped by four steps, and each takes its dither
+    //       by pshufd. The none dword is 0 plus the dither, which is never a
+    //       whole step, so the alpha is zero. Four pixels a turn, the rest one
+    //       at a time, the first of the four stepped by one step.
+    //
+    ASM_FUNC(memory_ramp_dither_u32)
+    "test %rsi, %rsi\n   jz 9f\n"
+    "movd %edx, %xmm15\n   pshufd $0, %xmm15, %xmm15\n   paddd " ASM_LABEL(noise_0123) "(%rip), %xmm15\n"
+    NOISE_X64_MUL("%xmm15", "%xmm1", noise_kx)
+    "imul $19349663, %ecx, %eax\n   movd %eax, %xmm14\n   pshufd $0, %xmm14, %xmm14\n"
+    "movdqa " ASM_LABEL(noise_k4) "(%rip), %xmm13\n"
+    "movd 8(%r8), %xmm8\n   movd 4(%r8), %xmm0\n   punpckldq %xmm0, %xmm8\n   movd 0(%r8), %xmm0\n   punpcklqdq %xmm0, %xmm8\n"
+    "movd 20(%r8), %xmm9\n   movd 16(%r8), %xmm0\n   punpckldq %xmm0, %xmm9\n   movd 12(%r8), %xmm0\n   punpcklqdq %xmm0, %xmm9\n"
+    "movdqa %xmm8, %xmm10\n   paddd %xmm9, %xmm10\n   movdqa %xmm10, %xmm11\n   paddd %xmm9, %xmm11\n"
+    "movdqa %xmm11, %xmm12\n   paddd %xmm9, %xmm12\n   movdqa %xmm9, %xmm7\n   pslld $2, %xmm7\n"
+    "1: cmp $4, %rsi\n   jb 3f\n"
+    TOWARD_X64_DITHER "pslld $7, %xmm0\n   paddd " ASM_LABEL(noise_32768) "(%rip), %xmm0\n"
+    "pshufd $0x00, %xmm0, %xmm1\n   paddd %xmm8, %xmm1\n   psrad $16, %xmm1\n"
+    "pshufd $0x55, %xmm0, %xmm2\n   paddd %xmm10, %xmm2\n   psrad $16, %xmm2\n   packssdw %xmm2, %xmm1\n"
+    "pshufd $0xaa, %xmm0, %xmm2\n   paddd %xmm11, %xmm2\n   psrad $16, %xmm2\n"
+    "pshufd $0xff, %xmm0, %xmm3\n   paddd %xmm12, %xmm3\n   psrad $16, %xmm3\n   packssdw %xmm3, %xmm2\n"
+    "packuswb %xmm2, %xmm1\n   movdqu %xmm1, (%rdi)\n"
+    "paddd %xmm7, %xmm8\n   paddd %xmm7, %xmm10\n   paddd %xmm7, %xmm11\n   paddd %xmm7, %xmm12\n   paddd %xmm13, %xmm15\n"
+    "add $16, %rdi\n   sub $4, %rsi\n   jmp 1b\n"
+    "3: test %rsi, %rsi\n   jz 9f\n"
+    TOWARD_X64_DITHER "pslld $7, %xmm0\n   paddd " ASM_LABEL(noise_32768) "(%rip), %xmm0\n"
+    "pshufd $0x00, %xmm0, %xmm1\n   paddd %xmm8, %xmm1\n   psrad $16, %xmm1\n   packssdw %xmm1, %xmm1\n   packuswb %xmm1, %xmm1\n"
+    "movd %xmm1, (%rdi)\n   paddd %xmm9, %xmm8\n   psrldq $4, %xmm15\n   add $4, %rdi\n   dec %rsi\n   jmp 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_ramp_dither_u32)
+
+    //
+    //       memory_grain_u32 -- rdi into, rsi add (a signed word a pixel),
+    //       rdx count: each colour of each pixel plus the pixel's word,
+    //       clamped to a byte, the alpha byte as it was. The pixels as words,
+    //       each word added to its pixel's three colours by paddsw (the alpha
+    //       word's add masked to none), packed back by packuswb, which is the
+    //       clamp. Four pixels a turn, the rest one at a time from a movd.
+    //
+    ASM_FUNC(memory_grain_u32)
+    "test %rdx, %rdx\n   jz 9f\n"
+    "pxor %xmm7, %xmm7\n   movdqa " ASM_LABEL(noise_colours) "(%rip), %xmm6\n"
+    "1: cmp $4, %rdx\n   jb 3f\n"
+    "movdqu (%rdi), %xmm0\n   movq (%rsi), %xmm2\n"
+    "punpcklwd %xmm2, %xmm2\n   movdqa %xmm2, %xmm3\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
+    "pand %xmm6, %xmm2\n   pand %xmm6, %xmm3\n"
+    "movdqa %xmm0, %xmm1\n   punpcklbw %xmm7, %xmm0\n   punpckhbw %xmm7, %xmm1\n"
+    "paddsw %xmm2, %xmm0\n   paddsw %xmm3, %xmm1\n   packuswb %xmm1, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $8, %rsi\n   sub $4, %rdx\n   jmp 1b\n"
+    "3: test %rdx, %rdx\n   jz 9f\n"
+    "movd (%rdi), %xmm0\n   movzwl (%rsi), %eax\n   movd %eax, %xmm2\n"
+    "punpcklwd %xmm2, %xmm2\n   punpckldq %xmm2, %xmm2\n   pand %xmm6, %xmm2\n"
+    "punpcklbw %xmm7, %xmm0\n   paddsw %xmm2, %xmm0\n   packuswb %xmm0, %xmm0\n   movd %xmm0, (%rdi)\n"
+    "add $4, %rdi\n   add $2, %rsi\n   dec %rdx\n   jmp 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_grain_u32)
+#undef TOWARD_X64_BODY
+#undef TOWARD_X64_DITHER
+#undef TOWARD_X64_HALF
+#undef NOISE_X64_AXIS_Y
+#undef NOISE_X64_LERP_Y
+#undef NOISE_X64_CORNER_Y
+#undef NOISE_X64_HASH_Y
+#undef NOISE_X64_BODY
+#undef NOISE_X64_AXIS
+#undef NOISE_X64_LERP
+#undef NOISE_X64_CORNER
+#undef NOISE_X64_HASH
+#undef NOISE_X64_SHIFT
+#undef NOISE_X64_MUL
+
+    //
     //       memory_over_u32_rect -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words, r8 width
     //       in words, r9 height. Four pixels a turn, and one at a time for the rest of a row. A source pixel of alpha
     //       255 is the answer whole (through is none, so each colour is its own and the alpha 255), so a turn whose
@@ -26813,6 +27061,169 @@ __asm__(
     "9: " ASM_RET
     ASM_END(memory_lerp_u32_row)
 
+    //       noise_value_q16: x0 out, x1 x, x2 y, x3 z, x4 count, w5 seed; the
+    //       x86_64 block has the reasoning. NEON has the dword product (mul
+    //       .4s), so each is one instruction, and the products along the
+    //       three axes and the eases stay in registers (v24 to v31 and v7);
+    //       v16 to v23 hold the primes, the hash's two, the mask, 8192 and the
+    //       seed, and v8 to v15 are not touched. Four points a turn, the rest
+    //       one at a time into lane 0 by ld1 of a lane.
+#define NOISE_A64_HASH(R, T)                                                                                           \
+    "ushr " T ".4s, " R ".4s, #16\n   eor " R ".16b, " R ".16b, " T ".16b\n   mul " R ".4s, " R ".4s, v19.4s\n"          \
+    "ushr " T ".4s, " R ".4s, #15\n   eor " R ".16b, " R ".16b, " T ".16b\n   mul " R ".4s, " R ".4s, v20.4s\n"          \
+    "ushr " T ".4s, " R ".4s, #16\n   eor " R ".16b, " R ".16b, " T ".16b\n"
+#define NOISE_A64_CORNER(R, A, B, C)                                                                                   \
+    "eor " R ".16b, " A ".16b, " B ".16b\n   eor " R ".16b, " R ".16b, " C ".16b\n   eor " R ".16b, " R ".16b, v23.16b\n"   \
+    NOISE_A64_HASH(R, "v1") NOISE_A64_HASH(R, "v1") "ushr " R ".4s, " R ".4s, #18\n   sub " R ".4s, " R ".4s, v22.4s\n"
+#define NOISE_A64_LERP(A, B, U)                                                                                        \
+    "sub " B ".4s, " B ".4s, " A ".4s\n   mul " B ".4s, " B ".4s, " U ".4s\n   sshr " B ".4s, " B ".4s, #15\n   add " A ".4s, " A ".4s, " B ".4s\n"
+#define NOISE_A64_AXIS(U, K, P0, P1)                                                                                   \
+    "sshr v1.4s, v0.4s, #16\n   and v0.16b, v0.16b, v21.16b\n   ushr v0.4s, v0.4s, #1\n"                                \
+    "mul v2.4s, v0.4s, v0.4s\n   ushr v2.4s, v2.4s, #15\n   mul v3.4s, v2.4s, v0.4s\n   ushr v3.4s, v3.4s, #15\n"       \
+    "sub " U ".4s, v2.4s, v3.4s\n   add " U ".4s, " U ".4s, " U ".4s\n   add " U ".4s, " U ".4s, v2.4s\n"                 \
+    "ushr v3.4s, " U ".4s, #15\n   sub " U ".4s, " U ".4s, v3.4s\n"                                                     \
+    "mul " P0 ".4s, v1.4s, " K ".4s\n   add " P1 ".4s, " P0 ".4s, " K ".4s\n"
+#define NOISE_A64_BODY(LOADX, LOADY, LOADZ)                                                                            \
+    LOADX NOISE_A64_AXIS("v30", "v16", "v24", "v25") LOADY NOISE_A64_AXIS("v31", "v17", "v26", "v27")                  \
+    LOADZ NOISE_A64_AXIS("v7", "v18", "v28", "v29")                                                                    \
+    NOISE_A64_CORNER("v0", "v24", "v26", "v28") NOISE_A64_CORNER("v2", "v25", "v26", "v28") NOISE_A64_LERP("v0", "v2", "v30") \
+    NOISE_A64_CORNER("v3", "v24", "v27", "v28") NOISE_A64_CORNER("v2", "v25", "v27", "v28") NOISE_A64_LERP("v3", "v2", "v30") \
+    NOISE_A64_LERP("v0", "v3", "v31")                                                                                  \
+    NOISE_A64_CORNER("v4", "v24", "v26", "v29") NOISE_A64_CORNER("v2", "v25", "v26", "v29") NOISE_A64_LERP("v4", "v2", "v30") \
+    NOISE_A64_CORNER("v3", "v24", "v27", "v29") NOISE_A64_CORNER("v2", "v25", "v27", "v29") NOISE_A64_LERP("v3", "v2", "v30") \
+    NOISE_A64_LERP("v4", "v3", "v31") NOISE_A64_LERP("v0", "v4", "v7")
+    ASM_FUNC(noise_value_q16)
+    "cbz x4, 9f\n"
+    "mov w9, #0xf45d\n   movk w9, #0x466, lsl #16\n   dup v16.4s, w9\n"
+    "mov w9, #0x409f\n   movk w9, #0x127, lsl #16\n   dup v17.4s, w9\n"
+    "mov w9, #0xffb7\n   movk w9, #0x4f9, lsl #16\n   dup v18.4s, w9\n"
+    "mov w9, #0x352d\n   movk w9, #0x7feb, lsl #16\n   dup v19.4s, w9\n"
+    "mov w9, #0xa68b\n   movk w9, #0x846c, lsl #16\n   dup v20.4s, w9\n"
+    "movi v21.4s, #0xff, msl #8\n   mov w9, #8192\n   dup v22.4s, w9\n   dup v23.4s, w5\n"
+    "1: cmp x4, #4\n   b.lo 3f\n"
+    NOISE_A64_BODY("ld1 {v0.4s}, [x1], #16\n", "ld1 {v0.4s}, [x2], #16\n", "ld1 {v0.4s}, [x3], #16\n")
+    "st1 {v0.4s}, [x0], #16\n   sub x4, x4, #4\n   b 1b\n"
+    "3: cbz x4, 9f\n"
+    NOISE_A64_BODY("ld1 {v0.s}[0], [x1], #4\n", "ld1 {v0.s}[0], [x2], #4\n", "ld1 {v0.s}[0], [x3], #4\n")
+    "st1 {v0.s}[0], [x0], #4\n   sub x4, x4, #1\n   b 3b\n"
+    "9: " ASM_RET
+    ASM_END(noise_value_q16)
+
+    //       memory_toward_dither_u32: x0 into, x1 target, x2 weight, x3 count,
+    //       w4 x, w5 y; the x86_64 block has the reasoning. Eight pixels a
+    //       turn as planes (ld4), each colour widened, (t - i) w by smull and
+    //       smull2, the pixel's 64 d + 16384 and i << 15 added, shifted down
+    //       fifteen, and narrowed by sqxtun then uqxtn, which is the clamp;
+    //       the alpha plane is stored as it was loaded. The columns' products
+    //       are two vectors (v16, v17) stepped by eight primes a turn; in the
+    //       tail, one pixel a turn into lane 0, they are turned a lane down.
+#define TOWARD_A64_DITHER(X, D)                                                                                        \
+    "eor " D ".16b, " X ".16b, v21.16b\n" NOISE_A64_HASH(D, "v25")                                                      \
+    "ushr v25.4s, " D ".4s, #8\n   and " D ".16b, " D ".16b, v22.16b\n   and v25.16b, v25.16b, v22.16b\n"                \
+    "add " D ".4s, " D ".4s, v25.4s\n   sub " D ".4s, " D ".4s, v23.4s\n   shl " D ".4s, " D ".4s, #6\n   add " D ".4s, " D ".4s, v24.4s\n"
+#define TOWARD_A64_PLANE(I, T)                                                                                         \
+    "uxtl v30.8h, " I ".8b\n   uxtl v31.8h, " T ".8b\n   sub v31.8h, v31.8h, v30.8h\n"                                       \
+    "smull v25.4s, v31.4h, v6.4h\n   add v25.4s, v25.4s, v0.4s\n   ushll v7.4s, v30.4h, #15\n   add v25.4s, v25.4s, v7.4s\n" \
+    "smull2 v29.4s, v31.8h, v6.8h\n   add v29.4s, v29.4s, v1.4s\n   ushll2 v7.4s, v30.8h, #15\n   add v29.4s, v29.4s, v7.4s\n" \
+    "sshr v25.4s, v25.4s, #15\n   sshr v29.4s, v29.4s, #15\n   sqxtun v30.4h, v25.4s\n   sqxtun2 v30.8h, v29.4s\n"         \
+    "uqxtn " I ".8b, v30.8h\n"
+#define TOWARD_A64_BODY                                                                                                \
+    TOWARD_A64_DITHER("v16", "v0") TOWARD_A64_DITHER("v17", "v1")                                                      \
+    TOWARD_A64_PLANE("v2", "v26") TOWARD_A64_PLANE("v3", "v27") TOWARD_A64_PLANE("v4", "v28")
+    ASM_FUNC(memory_toward_dither_u32)
+    "cbz x3, 9f\n"
+    "mov w9, #0xf45d\n   movk w9, #0x466, lsl #16\n   dup v18.4s, w9\n"
+    "mov w10, #0x409f\n   movk w10, #0x127, lsl #16\n   mul w10, w10, w5\n   dup v21.4s, w10\n"
+    "dup v16.4s, w4\n   mov w10, #0\n   mov v17.s[0], w10\n   mov w10, #1\n   mov v17.s[1], w10\n   mov w10, #2\n   mov v17.s[2], w10\n"
+    "mov w10, #3\n   mov v17.s[3], w10\n   add v16.4s, v16.4s, v17.4s\n   mul v16.4s, v16.4s, v18.4s\n"
+    "shl v18.4s, v18.4s, #2\n   add v17.4s, v16.4s, v18.4s\n   shl v18.4s, v18.4s, #1\n"
+    "mov w9, #0x352d\n   movk w9, #0x7feb, lsl #16\n   dup v19.4s, w9\n"
+    "mov w9, #0xa68b\n   movk w9, #0x846c, lsl #16\n   dup v20.4s, w9\n"
+    "movi v22.4s, #255\n   movi v23.4s, #1, lsl #8\n   movi v24.4s, #0x40, lsl #8\n"
+    "1: cmp x3, #8\n   b.lo 3f\n"
+    "ld4 {v2.8b, v3.8b, v4.8b, v5.8b}, [x0]\n   ld4 {v26.8b, v27.8b, v28.8b, v29.8b}, [x1], #32\n   ld1 {v6.8h}, [x2], #16\n"
+    TOWARD_A64_BODY
+    "st4 {v2.8b, v3.8b, v4.8b, v5.8b}, [x0], #32\n   add v16.4s, v16.4s, v18.4s\n   add v17.4s, v17.4s, v18.4s\n"
+    "sub x3, x3, #8\n   b 1b\n"
+    "3: cbz x3, 9f\n"
+    "ld4 {v2.b, v3.b, v4.b, v5.b}[0], [x0]\n   ld4 {v26.b, v27.b, v28.b, v29.b}[0], [x1], #4\n   ld1 {v6.h}[0], [x2], #2\n"
+    TOWARD_A64_BODY
+    "st4 {v2.b, v3.b, v4.b, v5.b}[0], [x0], #4\n   ext v16.16b, v16.16b, v17.16b, #4\n   ext v17.16b, v17.16b, v17.16b, #4\n"
+    "sub x3, x3, #1\n   b 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_toward_dither_u32)
+
+    //       memory_ramp_dither_u32: x0 into, x1 count, w2 x, w3 y, x4 ramp; the
+    //       x86_64 block has the reasoning, and the same four dwords a pixel:
+    //       the dither's lane taken by dup, the sums shifted down, narrowed by
+    //       sqxtn and sqxtun (the clamp). Four pixels a turn, the rest one at a
+    //       time, the columns' products turned a lane down by ext.
+    ASM_FUNC(memory_ramp_dither_u32)
+    "cbz x1, 9f\n"
+    "ldr w9, [x4, #8]\n   mov v16.s[0], w9\n   ldr w9, [x4, #4]\n   mov v16.s[1], w9\n   ldr w9, [x4]\n   mov v16.s[2], w9\n   mov v16.s[3], wzr\n"
+    "ldr w9, [x4, #20]\n   mov v17.s[0], w9\n   ldr w9, [x4, #16]\n   mov v17.s[1], w9\n   ldr w9, [x4, #12]\n   mov v17.s[2], w9\n   mov v17.s[3], wzr\n"
+    "add v18.4s, v16.4s, v17.4s\n   add v19.4s, v18.4s, v17.4s\n   add v20.4s, v19.4s, v17.4s\n   shl v21.4s, v17.4s, #2\n"
+    "mov w9, #0xf45d\n   movk w9, #0x466, lsl #16\n   dup v23.4s, w9\n"
+    "dup v22.4s, w2\n   mov w10, #0\n   mov v0.s[0], w10\n   mov w10, #1\n   mov v0.s[1], w10\n   mov w10, #2\n   mov v0.s[2], w10\n"
+    "mov w10, #3\n   mov v0.s[3], w10\n   add v22.4s, v22.4s, v0.4s\n   mul v22.4s, v22.4s, v23.4s\n   shl v23.4s, v23.4s, #2\n"
+    "mov w10, #0x409f\n   movk w10, #0x127, lsl #16\n   mul w10, w10, w3\n   dup v24.4s, w10\n"
+    "mov w9, #0x352d\n   movk w9, #0x7feb, lsl #16\n   dup v25.4s, w9\n"
+    "mov w9, #0xa68b\n   movk w9, #0x846c, lsl #16\n   dup v26.4s, w9\n"
+    "movi v27.4s, #255\n   movi v28.4s, #1, lsl #8\n   movi v29.4s, #0x80, lsl #8\n"
+#define RAMP_A64_DITHER                                                                                                \
+    "eor v0.16b, v22.16b, v24.16b\n"                                                                                   \
+    "ushr v5.4s, v0.4s, #16\n   eor v0.16b, v0.16b, v5.16b\n   mul v0.4s, v0.4s, v25.4s\n"                                 \
+    "ushr v5.4s, v0.4s, #15\n   eor v0.16b, v0.16b, v5.16b\n   mul v0.4s, v0.4s, v26.4s\n"                                 \
+    "ushr v5.4s, v0.4s, #16\n   eor v0.16b, v0.16b, v5.16b\n"                                                              \
+    "ushr v5.4s, v0.4s, #8\n   and v0.16b, v0.16b, v27.16b\n   and v5.16b, v5.16b, v27.16b\n   add v0.4s, v0.4s, v5.4s\n"   \
+    "sub v0.4s, v0.4s, v28.4s\n   shl v0.4s, v0.4s, #7\n   add v0.4s, v0.4s, v29.4s\n"
+    "1: cmp x1, #4\n   b.lo 3f\n"
+    RAMP_A64_DITHER
+    "dup v1.4s, v0.s[0]\n   add v1.4s, v1.4s, v16.4s\n   sshr v1.4s, v1.4s, #16\n"
+    "dup v2.4s, v0.s[1]\n   add v2.4s, v2.4s, v18.4s\n   sshr v2.4s, v2.4s, #16\n"
+    "dup v3.4s, v0.s[2]\n   add v3.4s, v3.4s, v19.4s\n   sshr v3.4s, v3.4s, #16\n"
+    "dup v4.4s, v0.s[3]\n   add v4.4s, v4.4s, v20.4s\n   sshr v4.4s, v4.4s, #16\n"
+    "sqxtn v1.4h, v1.4s\n   sqxtn2 v1.8h, v2.4s\n   sqxtn v3.4h, v3.4s\n   sqxtn2 v3.8h, v4.4s\n"
+    "sqxtun v1.8b, v1.8h\n   sqxtun2 v1.16b, v3.8h\n   st1 {v1.16b}, [x0], #16\n"
+    "add v16.4s, v16.4s, v21.4s\n   add v18.4s, v18.4s, v21.4s\n   add v19.4s, v19.4s, v21.4s\n   add v20.4s, v20.4s, v21.4s\n"
+    "add v22.4s, v22.4s, v23.4s\n   sub x1, x1, #4\n   b 1b\n"
+    "3: cbz x1, 9f\n"
+    RAMP_A64_DITHER
+    "dup v1.4s, v0.s[0]\n   add v1.4s, v1.4s, v16.4s\n   sshr v1.4s, v1.4s, #16\n   sqxtn v1.4h, v1.4s\n   sqxtun v1.8b, v1.8h\n"
+    "st1 {v1.s}[0], [x0], #4\n   add v16.4s, v16.4s, v17.4s\n   ext v22.16b, v22.16b, v22.16b, #4\n   sub x1, x1, #1\n   b 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_ramp_dither_u32)
+
+    //       memory_grain_u32: x0 into, x1 add, x2 count; the x86_64 block has
+    //       the reasoning. Eight pixels a turn as planes, each colour widened,
+    //       the words added by sqadd and narrowed by sqxtun (the clamp), the
+    //       alpha plane stored as loaded; the rest one at a time in lane 0.
+    ASM_FUNC(memory_grain_u32)
+    "cbz x2, 9f\n"
+    "1: cmp x2, #8\n   b.lo 3f\n"
+    "ld4 {v0.8b, v1.8b, v2.8b, v3.8b}, [x0]\n   ld1 {v4.8h}, [x1], #16\n"
+    "uxtl v5.8h, v0.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v0.8b, v5.8h\n"
+    "uxtl v5.8h, v1.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v1.8b, v5.8h\n"
+    "uxtl v5.8h, v2.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v2.8b, v5.8h\n"
+    "st4 {v0.8b, v1.8b, v2.8b, v3.8b}, [x0], #32\n   sub x2, x2, #8\n   b 1b\n"
+    "3: cbz x2, 9f\n"
+    "ld4 {v0.b, v1.b, v2.b, v3.b}[0], [x0]\n   ld1 {v4.h}[0], [x1], #2\n"
+    "uxtl v5.8h, v0.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v0.8b, v5.8h\n"
+    "uxtl v5.8h, v1.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v1.8b, v5.8h\n"
+    "uxtl v5.8h, v2.8b\n   sqadd v5.8h, v5.8h, v4.8h\n   sqxtun v2.8b, v5.8h\n"
+    "st4 {v0.b, v1.b, v2.b, v3.b}[0], [x0], #4\n   sub x2, x2, #1\n   b 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_grain_u32)
+#undef RAMP_A64_DITHER
+#undef TOWARD_A64_BODY
+#undef TOWARD_A64_PLANE
+#undef TOWARD_A64_DITHER
+#undef NOISE_A64_BODY
+#undef NOISE_A64_AXIS
+#undef NOISE_A64_LERP
+#undef NOISE_A64_CORNER
+#undef NOISE_A64_HASH
+
     ASM_FUNC(memory_over_u32_rect)
     "cbz x4, 9f\n   cbz x5, 9f\n"
     "lsl x1, x1, #2\n   lsl x3, x3, #2\n"
@@ -37310,6 +37721,132 @@ __asm__(
     "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 4\n   addi a3, a3, -1\n   bnez a3, 1b\n"
     "9: " ASM_RET
     ASM_END(memory_lerp_u32_row)
+
+    //       noise_value_q16: a0 out, a1 x, a2 y, a3 z, a4 count, a5 seed; the
+    //       x86_64 block has the reasoning. A point at a time in the integer
+    //       registers: mulw makes each product a dword's low half (sign
+    //       extended, so every exclusive or and srliw after it is the dword's
+    //       own), and the eases and lerps are exact in 64 bits. The primes,
+    //       the hash's two and 8192 sit in s0 to s5, saved on the stack.
+#define NOISE_RV_HASH(R)                                                                                               \
+    "srliw t2, " R ", 16\n   xor " R ", " R ", t2\n   mulw " R ", " R ", s3\n"                                         \
+    "srliw t2, " R ", 15\n   xor " R ", " R ", t2\n   mulw " R ", " R ", s4\n"                                         \
+    "srliw t2, " R ", 16\n   xor " R ", " R ", t2\n"
+#define NOISE_RV_CORNER(R, X, Y, Z) X Y Z "xor " R ", " R ", a5\n" NOISE_RV_HASH(R) NOISE_RV_HASH(R) "srliw " R ", " R ", 18\n   subw " R ", " R ", s5\n"
+#define NOISE_RV_LERP(A, B, U) "sub " B ", " B ", " A "\n   mul " B ", " B ", " U "\n   srai " B ", " B ", 15\n   add " A ", " A ", " B "\n"
+#define NOISE_RV_EASE(U)                                                                                               \
+    "slli t0, t0, 48\n   srli t0, t0, 49\n   mul t2, t0, t0\n   srli t2, t2, 15\n   mul t3, t2, t0\n   srli t3, t3, 15\n"     \
+    "sub t3, t2, t3\n   slli t3, t3, 1\n   add t3, t3, t2\n   srli t4, t3, 15\n   sub " U ", t3, t4\n"
+    ASM_FUNC(noise_value_q16)
+    "beqz a4, 9f\n"
+    "addi sp, sp, -64\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n"
+    "li s0, 73856093\n   li s1, 19349663\n   li s2, 83492791\n   li s3, 0x7feb352d\n   li s4, 0x846ca68b\n   li s5, 8192\n"
+    "1: lw t0, 0(a1)\n   sraiw t1, t0, 16\n   mulw a6, t1, s0\n" NOISE_RV_EASE("s6")
+    "lw t0, 0(a2)\n   sraiw t1, t0, 16\n   mulw a7, t1, s1\n" NOISE_RV_EASE("s7")
+    "lw t0, 0(a3)\n   sraiw t1, t0, 16\n   mulw t5, t1, s2\n" NOISE_RV_EASE("t6")
+#define NOISE_RV_X0(R) "mv " R ", a6\n"
+#define NOISE_RV_X1(R) "addw " R ", a6, s0\n"
+#define NOISE_RV_Y0(R) "xor " R ", " R ", a7\n"
+#define NOISE_RV_Y1(R) "addw t2, a7, s1\n   xor " R ", " R ", t2\n"
+#define NOISE_RV_Z0(R) "xor " R ", " R ", t5\n"
+#define NOISE_RV_Z1(R) "addw t2, t5, s2\n   xor " R ", " R ", t2\n"
+    NOISE_RV_CORNER("t0", NOISE_RV_X0("t0"), NOISE_RV_Y0("t0"), NOISE_RV_Z0("t0"))
+    NOISE_RV_CORNER("t1", NOISE_RV_X1("t1"), NOISE_RV_Y0("t1"), NOISE_RV_Z0("t1")) NOISE_RV_LERP("t0", "t1", "s6")
+    NOISE_RV_CORNER("t3", NOISE_RV_X0("t3"), NOISE_RV_Y1("t3"), NOISE_RV_Z0("t3"))
+    NOISE_RV_CORNER("t1", NOISE_RV_X1("t1"), NOISE_RV_Y1("t1"), NOISE_RV_Z0("t1")) NOISE_RV_LERP("t3", "t1", "s6")
+    NOISE_RV_LERP("t0", "t3", "s7")
+    NOISE_RV_CORNER("t4", NOISE_RV_X0("t4"), NOISE_RV_Y0("t4"), NOISE_RV_Z1("t4"))
+    NOISE_RV_CORNER("t1", NOISE_RV_X1("t1"), NOISE_RV_Y0("t1"), NOISE_RV_Z1("t1")) NOISE_RV_LERP("t4", "t1", "s6")
+    NOISE_RV_CORNER("t3", NOISE_RV_X0("t3"), NOISE_RV_Y1("t3"), NOISE_RV_Z1("t3"))
+    NOISE_RV_CORNER("t1", NOISE_RV_X1("t1"), NOISE_RV_Y1("t1"), NOISE_RV_Z1("t1")) NOISE_RV_LERP("t3", "t1", "s6")
+    NOISE_RV_LERP("t4", "t3", "s7") NOISE_RV_LERP("t0", "t4", "t6")
+    "sw t0, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 4\n   addi a3, a3, 4\n   addi a4, a4, -1\n   bnez a4, 1b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n"
+    "addi sp, sp, 64\n"
+    "9: " ASM_RET
+    ASM_END(noise_value_q16)
+#undef NOISE_RV_Z1
+#undef NOISE_RV_Z0
+#undef NOISE_RV_Y1
+#undef NOISE_RV_Y0
+#undef NOISE_RV_X1
+#undef NOISE_RV_X0
+
+    //       memory_toward_dither_u32: a0 into, a1 target, a2 weight, a3 count,
+    //       a4 x, a5 y; the x86_64 block has the reasoning. A pixel at a time:
+    //       its dither from the hash (a6 the column's product, stepped by the
+    //       prime a pixel; a7 the row's), then each colour's sum shifted down
+    //       fifteen and clamped by two branches.
+#define TOWARD_RV_HASH(R)                                                                                              \
+    "srliw t2, " R ", 16\n   xor " R ", " R ", t2\n   mulw " R ", " R ", t5\n"                                         \
+    "srliw t2, " R ", 15\n   xor " R ", " R ", t2\n   mulw " R ", " R ", t6\n"                                         \
+    "srliw t2, " R ", 16\n   xor " R ", " R ", t2\n"
+#define TOWARD_RV_DITHER(R)                                                                                            \
+    "xor " R ", a6, a7\n" TOWARD_RV_HASH(R) "andi t2, " R ", 255\n   srliw " R ", " R ", 8\n   andi " R ", " R ", 255\n"      \
+    "add " R ", " R ", t2\n   addi " R ", " R ", -256\n"
+#define TOWARD_RV_CLAMP(R) "bgez " R ", 5f\n   li " R ", 0\n5: li t2, 255\n   ble " R ", t2, 6f\n   li " R ", 255\n6: "
+#define TOWARD_RV_CHANNEL(SHIFT)                                                                                       \
+    "srli t3, t0, " #SHIFT "\n   andi t3, t3, 255\n   srli t4, t1, " #SHIFT "\n   andi t4, t4, 255\n"                    \
+    "sub t4, t4, t3\n   mul t4, t4, s0\n   slli t3, t3, 15\n   add t3, t3, t4\n   add t3, t3, s1\n   srai t3, t3, 15\n"       \
+    TOWARD_RV_CLAMP("t3") "slli t3, t3, " #SHIFT "\n   or s2, s2, t3\n"
+    ASM_FUNC(memory_toward_dither_u32)
+    "beqz a3, 9f\n"
+    "addi sp, sp, -32\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n"
+    "li t5, 0x7feb352d\n   li t6, 0x846ca68b\n   li t0, 73856093\n   mulw a6, a4, t0\n   li t0, 19349663\n   mulw a7, a5, t0\n"
+    "1: " TOWARD_RV_DITHER("s1") "slli s1, s1, 6\n   li t2, 16384\n   add s1, s1, t2\n"
+    "lwu t0, 0(a0)\n   lwu t1, 0(a1)\n   lhu s0, 0(a2)\n   srli s2, t0, 24\n   slli s2, s2, 24\n"
+    TOWARD_RV_CHANNEL(0) TOWARD_RV_CHANNEL(8) TOWARD_RV_CHANNEL(16)
+    "sw s2, 0(a0)\n   li t0, 73856093\n   addw a6, a6, t0\n"
+    "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 2\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   addi sp, sp, 32\n"
+    "9: " ASM_RET
+    ASM_END(memory_toward_dither_u32)
+
+    //       memory_ramp_dither_u32: a0 into, a1 count, a2 x, a3 y, a4 ramp; the
+    //       x86_64 block has the reasoning. A pixel at a time, each colour's
+    //       16.16 sum (addw, so it wraps as a dword) shifted down by sraiw and
+    //       clamped, then stepped.
+#define RAMP_RV_CHANNEL(V, SHIFT)                                                                                      \
+    "addw t3, " V ", s1\n   sraiw t3, t3, 16\n" TOWARD_RV_CLAMP("t3") "slli t3, t3, " #SHIFT "\n   or s2, s2, t3\n"
+    ASM_FUNC(memory_ramp_dither_u32)
+    "beqz a1, 9f\n"
+    "addi sp, sp, -64\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n"
+    "li t5, 0x7feb352d\n   li t6, 0x846ca68b\n   li t0, 73856093\n   mulw a6, a2, t0\n   li t0, 19349663\n   mulw a7, a3, t0\n"
+    "lw s3, 0(a4)\n   lw s4, 4(a4)\n   lw s5, 8(a4)\n   lw t0, 12(a4)\n   lw t1, 16(a4)\n   lw s6, 20(a4)\n   mv a2, t0\n   mv a3, t1\n"
+    "1: " TOWARD_RV_DITHER("s1") "slli s1, s1, 7\n   li t2, 32768\n   add s1, s1, t2\n   li s2, 0\n"
+    RAMP_RV_CHANNEL("s3", 16) RAMP_RV_CHANNEL("s4", 8) RAMP_RV_CHANNEL("s5", 0)
+    "sw s2, 0(a0)\n   addw s3, s3, a2\n   addw s4, s4, a3\n   addw s5, s5, s6\n   li t0, 73856093\n   addw a6, a6, t0\n"
+    "addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 1b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n"
+    "addi sp, sp, 64\n"
+    "9: " ASM_RET
+    ASM_END(memory_ramp_dither_u32)
+
+    //       memory_grain_u32: a0 into, a1 add, a2 count; the x86_64 block has
+    //       the reasoning. A pixel at a time, each colour plus the word (lh,
+    //       signed) and clamped, the alpha byte kept.
+#define GRAIN_RV_CHANNEL(SHIFT)                                                                                        \
+    "srli t3, t0, " #SHIFT "\n   andi t3, t3, 255\n   add t3, t3, t1\n" TOWARD_RV_CLAMP("t3")                               \
+    "slli t3, t3, " #SHIFT "\n   or t4, t4, t3\n"
+    ASM_FUNC(memory_grain_u32)
+    "beqz a2, 9f\n"
+    "1: lwu t0, 0(a0)\n   lh t1, 0(a1)\n   srli t4, t0, 24\n   slli t4, t4, 24\n"
+    GRAIN_RV_CHANNEL(0) GRAIN_RV_CHANNEL(8) GRAIN_RV_CHANNEL(16)
+    "sw t4, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 2\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9: " ASM_RET
+    ASM_END(memory_grain_u32)
+#undef GRAIN_RV_CHANNEL
+#undef RAMP_RV_CHANNEL
+#undef TOWARD_RV_CHANNEL
+#undef TOWARD_RV_CLAMP
+#undef TOWARD_RV_DITHER
+#undef TOWARD_RV_HASH
+#undef NOISE_RV_EASE
+#undef NOISE_RV_LERP
+#undef NOISE_RV_CORNER
+#undef NOISE_RV_HASH
 
     //       memory_over_u32_rect: with V, a strip of as many pixels as two registers hold at e32 (vl of what is left of
     //       the row, so there is no tail), its sources compared below 0xff000000 (vmsltu) and the strip stored as it is
@@ -55275,6 +55812,22 @@ fn memory_mix_u32_row(p32 address_to into, const p32 address_to ink, const p8 ad
 // count pixels of into, each byte-wise linearly interpolated between a and b by t in 0..256:
 // ((a_ch * (256 - t) + b_ch * t) >> 8). Nothing past count is read or written.
 fn memory_lerp_u32_row(p32 address_to into, const p32 address_to a, const p32 address_to b, positive count, positive t);
+// Value noise at count points, each three coordinates in 16.16, the kit moon's (ui_moon_noise): each corner of a point's cell is the
+// hash, twice, of its whole coordinates times 73856093, 19349663 and 83492791 exclusive or the seed, its top fourteen bits less 8192,
+// and the eight are eased between on a smooth step of the fraction's top fifteen bits; each answer from -8192 to 8191. Nothing past
+// count is read or written.
+fn noise_value_q16(b32 address_to out, const b32 address_to x, const b32 address_to y, const b32 address_to z, positive count, p32 seed);
+// count pixels of into, each colour moved toward target's by the pixel's weight (0 to 32767 of 32768) and dithered: ((i << 15) +
+// (t - i) w + 64 d + 16384) >> 15, clamped to a byte, the alpha byte kept. d is the dither of the pixel at column x + k and row y,
+// from -256 to 254: the hash (once, as noise_value_q16's) of the column times 73856093 exclusive or the row times 19349663, its two
+// low bytes summed less 256.
+fn memory_toward_dither_u32(p32 address_to into, const p32 address_to target, const p16 address_to weight, positive count, p32 x, p32 y);
+// count pixels of into, each colour ramp[c] + k ramp[3 + c] (red, green and blue in 16.16, then each one's step a pixel, as dwords
+// that wrap) plus 128 times the pixel's dither (as memory_toward_dither_u32's) and 32768, shifted down sixteen and clamped to a byte;
+// the alpha byte zero.
+fn memory_ramp_dither_u32(p32 address_to into, positive count, p32 x, p32 y, const b32 address_to ramp);
+// count pixels of into, each colour plus the pixel's add, clamped to a byte; the alpha byte kept.
+fn memory_grain_u32(p32 address_to into, const b16 address_to add, positive count);
 // height rows of width premultiplied ARGB32 pixels of from laid over into (Porter-Duff OVER, opaque result):
 // through = 255 - (over >> 24), each colour channel clamp255(over_ch + (under_ch * through + 127) / 255), alpha 0xff.
 // A source pixel of alpha 255 is stored as it is, and a run of them is a copy that reads nothing of into. Zero width or

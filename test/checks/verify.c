@@ -1037,6 +1037,14 @@ fn check_automaton()
             string_first_of_either_or_end  the lexer's walk to a quote, a
                                            backslash or the end
 
+        and the four the kit's moon was floored onto, against the C its
+        wallpaper had as the C stand-ins of them:
+
+            noise_value_q16                ui_moon_noise, a run of points
+            memory_toward_dither_u32       ui_moon_fresnel's lift, dithered
+            memory_ramp_dither_u32         ui_moon_paper_ground's sky, dithered
+            memory_grain_u32               ui_moon_fresnel's regolith grain
+
         Every input and every output is a room with a page that cannot be
         touched on either side of it. A case is laid flush against the page
         after it, then at residues that walk the start through every
@@ -1179,6 +1187,101 @@ static fn reference_memory_lerp_u32_row(p32 address_to into, const p32 address_t
 {
         for (positive k = 0; k < count; k++)
                 into[k] = reference_ui_stretch_blend(a[k], b[k], (unsigned int)t);
+}
+
+//      The kit moon's hash (ui_moon_hash): a number spread over all of its bits.
+static p32 reference_moon_hash(p32 n)
+{
+        n ^= n >> 16, n *= 0x7feb352du, n ^= n >> 15, n *= 0x846ca68bu, n ^= n >> 16;
+        return n;
+}
+
+//      A pixel's dither, -256 to 254 (512ths of a step): the hash of its column and row, its two low bytes summed less 256.
+static b32 reference_moon_dither(p32 x, p32 y)
+{
+        p32 h = reference_moon_hash(x * 73856093u ^ y * 19349663u);
+
+        return (b32)(h & 255) + (b32)(h >> 8 & 255) - 256;
+}
+
+static b32 reference_moon_ease(b32 f)
+{
+        b32 a = (f * f) >> 15, b = (a * f) >> 15, u = a + 2 * (a - b);
+
+        return u - (u >> 15);
+}
+
+static b32 reference_moon_lerp(b32 a, b32 b, b32 t)
+{
+        return a + (((b - a) * t) >> 15);
+}
+
+static fn reference_noise_value_q16(b32 address_to out, const b32 address_to x, const b32 address_to y, const b32 address_to z,
+                                    positive count, p32 seed)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                p32 ax = (p32)(x[k] >> 16) * 73856093u, ay = (p32)(y[k] >> 16) * 19349663u, az = (p32)(z[k] >> 16) * 83492791u;
+                b32 u = reference_moon_ease((x[k] & 0xffff) >> 1), v = reference_moon_ease((y[k] & 0xffff) >> 1);
+                b32 w = reference_moon_ease((z[k] & 0xffff) >> 1), c[8];
+
+                for (int i = 0; i < 8; i++)
+                        c[i] = (b32)(reference_moon_hash(reference_moon_hash((ax + (i & 1 ? 73856093u : 0)) ^ (ay + (i & 2 ? 19349663u : 0)) ^
+                                                                             (az + (i & 4 ? 83492791u : 0)) ^ seed)) >> 18) - 8192;
+                out[k] = reference_moon_lerp(reference_moon_lerp(reference_moon_lerp(c[0], c[1], u), reference_moon_lerp(c[2], c[3], u), v),
+                                             reference_moon_lerp(reference_moon_lerp(c[4], c[5], u), reference_moon_lerp(c[6], c[7], u), v), w);
+        }
+}
+
+static fn reference_memory_toward_dither_u32(p32 address_to into, const p32 address_to target, const p16 address_to weight, positive count,
+                                             p32 x, p32 y)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                b32 d = reference_moon_dither(x + (p32)k, y) * 64, w = weight[k];
+                p32 out = into[k] & 0xff000000u;
+
+                for (int c = 0; c < 3; c++)
+                {
+                        b32 i = (b32)(into[k] >> (8 * c) & 255), t = (b32)(target[k] >> (8 * c) & 255), v = ((i << 15) + (t - i) * w + d + 16384) >> 15;
+
+                        out |= (p32)(v < 0 ? 0 : v > 255 ? 255 : v) << (8 * c);
+                }
+                into[k] = out;
+        }
+}
+
+static fn reference_memory_ramp_dither_u32(p32 address_to into, positive count, p32 x, p32 y, const b32 address_to ramp)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                b32 d = reference_moon_dither(x + (p32)k, y) * 128;
+                p32 out = 0;
+
+                for (int c = 0; c < 3; c++)
+                {
+                        b32 v = (b32)((p32)ramp[c] + (p32)ramp[3 + c] * (p32)k + (p32)d + 32768u) >> 16;
+
+                        out |= (p32)(v < 0 ? 0 : v > 255 ? 255 : v) << (16 - 8 * c);
+                }
+                into[k] = out;
+        }
+}
+
+static fn reference_memory_grain_u32(p32 address_to into, const b16 address_to add, positive count)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                p32 out = into[k] & 0xff000000u;
+
+                for (int c = 0; c < 3; c++)
+                {
+                        b32 v = (b32)(into[k] >> (8 * c) & 255) + add[k];
+
+                        out |= (p32)(v < 0 ? 0 : v > 255 ? 255 : v) << (8 * c);
+                }
+                into[k] = out;
+        }
 }
 
 static fn reference_memory_mix_const_u32_rect(p32 address_to into, positive into_stride, const p8 address_to cover,
@@ -1608,6 +1711,121 @@ static fn pixel_lerp(void)
                                 (memory_lerp_u32_row)((p32 address_to)into, (const p32 address_to)a, (const p32 address_to)b, count, t);
                                 pixel_after("memory_lerp_u32_row", &out, in, 2, count << 8 | k, t);
                         }
+        }
+}
+
+//      The moon's four: every count, at every residue of each pointer, values of every kind (coordinates past the
+//      lattice's every edge and sign, weights of none, all and between, steps that wrap, adds that saturate either way).
+static fn pixel_noise(void)
+{
+        static const p32 seeds[] = {0, 1, 77u, 405u, 0x80000000u, 0xffffffffu};
+
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c), span = 4 * count;
+
+                PIXEL_EACH(k, count)
+                {
+                        struct pixel_window out, in[3];
+                        p32 seed = seeds[(c + k) % array_count(seeds)];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c, k, 4));
+                        p8 address_to x = pixel_place(&pixel_rooms[1], span, 0, k < 8, pixel_residue(c * 3 + 1, k, 4));
+                        p8 address_to y = pixel_place(&pixel_rooms[2], span, 0, k < 8, pixel_residue(c * 5 + 2, k, 4));
+                        p8 address_to z = pixel_place(&pixel_rooms[3], span, 0, k < 8, pixel_residue(c * 7 + 3, k, 4));
+                        p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, x, span, 0, PIXEL_WORDS);
+                        pixel_in(&in[1], 1, 2, y, span, 0, PIXEL_WORDS);
+                        pixel_in(&in[2], 2, 3, z, span, 0, PIXEL_WORDS);
+                        reference_noise_value_q16((b32 address_to)want, (const b32 address_to)x, (const b32 address_to)y, (const b32 address_to)z, count, seed);
+                        PIXEL_CALL();
+                        (noise_value_q16)((b32 address_to)into, (const b32 address_to)x, (const b32 address_to)y, (const b32 address_to)z, count, seed);
+                        pixel_after("noise_value_q16", &out, in, 3, count << 8 | k, seed);
+                }
+        }
+}
+
+static fn pixel_toward(void)
+{
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c), span = 4 * count;
+
+                PIXEL_EACH(k, count)
+                {
+                        struct pixel_window out, in[2];
+                        p32 x = (p32)next(), y = (p32)next();
+                        p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c, k, 4));
+                        p8 address_to target = pixel_place(&pixel_rooms[1], span, 0, k < 8, pixel_residue(c * 3 + 1, k, 4));
+                        p8 address_to weight = pixel_place(&pixel_rooms[2], 2 * count, 0, k < 8, pixel_residue(c * 5 + 2, k, 2));
+                        p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, target, span, 0, PIXEL_WORDS);
+                        pixel_in(&in[1], 1, 2, weight, 2 * count, 0, PIXEL_BYTES);
+                        //  The weights 0 to 32767: the top bit of each cleared, here and in the copy kept of it.
+                        for (positive at = 0; at < count; at++)
+                        {
+                                ((p16 address_to)weight)[at] &= 0x7fff;
+                                ((p16 address_to)(pixel_kept[1] + (weight - in[1].from)))[at] &= 0x7fff;
+                        }
+                        reference_memory_toward_dither_u32((p32 address_to)want, (const p32 address_to)target, (const p16 address_to)weight, count, x, y);
+                        PIXEL_CALL();
+                        (memory_toward_dither_u32)((p32 address_to)into, (const p32 address_to)target, (const p16 address_to)weight, count, x, y);
+                        pixel_after("memory_toward_dither_u32", &out, in, 2, count << 8 | k, x);
+                }
+        }
+}
+
+static fn pixel_ramp(void)
+{
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c), span = 4 * count;
+
+                PIXEL_EACH(k, count)
+                {
+                        struct pixel_window out, in[1];
+                        p32 x = (p32)next(), y = (p32)next();
+                        p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c, k, 4));
+                        p8 address_to ramp = pixel_place(&pixel_rooms[1], 24, 0, k < 8, pixel_residue(c * 3 + 1, k, 4));
+                        p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, ramp, 24, 0, PIXEL_WORDS);
+                        //  Half the cases a ramp a caller makes: colours inside a byte, steps under one a pixel.
+                        if (k & 1)
+                                for (positive at = 0; at < 6; at++)
+                                {
+                                        b32 value = at < 3 ? (b32)(next() % (256u << 16)) : (b32)(next() % 131072u) - 65536;
+
+                                        ((b32 address_to)ramp)[at] = value, ((b32 address_to)(pixel_kept[0] + (ramp - in[0].from)))[at] = value;
+                                }
+                        reference_memory_ramp_dither_u32((p32 address_to)want, count, x, y, (const b32 address_to)ramp);
+                        PIXEL_CALL();
+                        (memory_ramp_dither_u32)((p32 address_to)into, count, x, y, (const b32 address_to)ramp);
+                        pixel_after("memory_ramp_dither_u32", &out, in, 1, count << 8 | k, y);
+                }
+        }
+}
+
+static fn pixel_grain(void)
+{
+        for (positive c = 0; c < PIXEL_COUNTS; c++)
+        {
+                positive count = PIXEL_COUNT(c), span = 4 * count;
+
+                PIXEL_EACH(k, count)
+                {
+                        struct pixel_window out, in[1];
+                        p8 address_to into = pixel_place(&pixel_rooms[0], span, 0, k < 8, pixel_residue(c, k, 4));
+                        p8 address_to add = pixel_place(&pixel_rooms[1], 2 * count, 0, k < 8, pixel_residue(c * 3 + 1, k, 2));
+                        p8 address_to want = pixel_out(&out, 0, into, span, 0, PIXEL_WORDS);
+
+                        pixel_in(&in[0], 0, 1, add, 2 * count, 0, PIXEL_BYTES);
+                        reference_memory_grain_u32((p32 address_to)want, (const b16 address_to)add, count);
+                        PIXEL_CALL();
+                        (memory_grain_u32)((p32 address_to)into, (const b16 address_to)add, count);
+                        pixel_after("memory_grain_u32", &out, in, 1, count << 8 | k, 0);
+                }
         }
 }
 
@@ -2255,13 +2473,15 @@ static fn pixel_saved(void)
             "memory_add_sat_u8_rect", "memory_copy_rect_reverse_u32", "memory_lerp_u32_row", "memory_mix_const_u32_rect",
             "memory_or_u32", "memory_over_cover_u32_rect", "memory_over_u32_rect", "memory_scale_u8",
             "memory_swizzle_rb_u32", "memory_transpose_u8", "string_first_of_either_or_end", "memory_over_under_u32_rect",
-            "memory_over_under_out_u32_rect"};
+            "memory_over_under_out_u32_rect", "noise_value_q16", "memory_toward_dither_u32", "memory_ramp_dither_u32",
+            "memory_grain_u32"};
         address_any const routines[] = {
             (address_any)memory_add_sat_u8_rect, (address_any)memory_copy_rect_reverse_u32, (address_any)memory_lerp_u32_row,
             (address_any)memory_mix_const_u32_rect, (address_any)memory_or_u32, (address_any)memory_over_cover_u32_rect,
             (address_any)memory_over_u32_rect, (address_any)memory_scale_u8, (address_any)memory_swizzle_rb_u32,
             (address_any)memory_transpose_u8, (address_any)string_first_of_either_or_end, (address_any)memory_over_under_u32_rect,
-            (address_any)memory_over_under_out_u32_rect};
+            (address_any)memory_over_under_out_u32_rect, (address_any)noise_value_q16, (address_any)memory_toward_dither_u32,
+            (address_any)memory_ramp_dither_u32, (address_any)memory_grain_u32};
         positive changed[array_count(names)] = {0}, calls[array_count(names)] = {0};
         positive a = (positive)pixel_rooms[0].low, b = (positive)pixel_rooms[1].low, c = (positive)pixel_rooms[2].low;
         p8 address_to text = pixel_rooms[3].low;
@@ -2290,6 +2510,10 @@ static fn pixel_saved(void)
                             {(positive)text + n, turn ? '"' : '\\', '\''},
                             {a, s, b, s, c, turn ? 0 : s, n, rows},
                             {a, s, b, s, c, turn ? 0 : s, n, rows},
+                            {a, b, c, b, n * rows, 405 + turn},
+                            {a, b, c, n * rows, 5 + turn, 9},
+                            {a, n * rows, 3, 4 + turn, b},
+                            {a, c, n * rows},
                         };
 
                         for (positive r = 0; r < array_count(names); r++)
@@ -2395,6 +2619,10 @@ fn check_pixel_rows(void)
         PIXEL_ROUTINE(pixel_scale);
         PIXEL_ROUTINE(pixel_transpose);
         PIXEL_ROUTINE(pixel_either);
+        PIXEL_ROUTINE(pixel_noise);
+        PIXEL_ROUTINE(pixel_toward);
+        PIXEL_ROUTINE(pixel_ramp);
+        PIXEL_ROUTINE(pixel_grain);
 #undef PIXEL_ROUTINE
         pixel_rooms_close();
         string_format(log, "  NOTE pixel rows: %p cases\n", checks - had);

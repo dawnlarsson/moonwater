@@ -488,6 +488,10 @@ cover('folds_already', 'count', 'memory_invert_u32',
 cover('folds_already', 'count', 'memory_mix_u32_row',
       'the round corners hand it a row of their cover, whose length the frame sets at run time (the corner width, '
       'or the part of it inside the contents); no reachable call site passes a literal')
+for routine in ('noise_value_q16', 'memory_toward_dither_u32', 'memory_ramp_dither_u32', 'memory_grain_u32'):
+    cover('folds_already', 'count', routine,
+          'the kit moon hands it a run of a row of points or pixels whose length the moon\'s size and the run\'s place set at run time; '
+          'no reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_lerp_u32_row',
       'ui_stretch hands it a row of the stretched view width at run time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_over_u32_rect',
