@@ -494,15 +494,25 @@ static void iss_rows_kernel_board(void)
 }
 
 // The radio states rfkill gives (window.c's radio_key_of_type and radio_blocked_detail): a Wi-Fi or Bluetooth switch that blocks is on its key,
-// a block in hardware says to turn the switch, and a type that is no radio of Settings' is none.
+// a block in hardware says to turn the switch, a block in software is the fault only for a radio that was asked for (the machine blocks the others
+// on purpose, until moonwater wifi on or moonwater bluetooth on) and says the command that lifts it, and a type that is no radio of Settings' is none.
 static void iss_rows_radio(void)
 {
         check("radio: a Wi-Fi radio is under the wifi key, a Bluetooth one under bluetooth", string_equals((string_address)radio_key_of_type("wlan"), (string_address)"wifi") &&
               string_equals((string_address)radio_key_of_type("bluetooth"), (string_address)"bluetooth"));
         check("radio: another type is no radio of Settings'", radio_key_of_type("wwan") == null && radio_key_of_type("nfc") == null);
-        check("radio: a radio that is not blocked is no issue", radio_blocked_detail("wlan", 0, 0) == null);
-        check("radio: a block in software says how to unblock", radio_blocked_detail("wlan", 1, 0) != null && string_compare((string_address)radio_blocked_detail("wlan", 1, 0), (string_address)"blocked in software (rfkill): run rfkill unblock wifi (or bluetooth)") == 0);
-        check("radio: a block in hardware is said to be the switch", radio_blocked_detail("bluetooth", 0, 1) != null && string_length((string_address)radio_blocked_detail("bluetooth", 0, 1)) > 20);
+        check("radio: a radio that is not blocked is no issue", radio_blocked_detail("wlan", 0, 0, 0) == null && radio_blocked_detail("wlan", 0, 0, 1) == null);
+        check("radio: a block in software on a radio nobody asked for is no issue, the machine's own default",
+              radio_blocked_detail("wlan", 1, 0, 0) == null && radio_blocked_detail("bluetooth", 1, 0, 0) == null);
+        check("radio: a block in software on a radio that was asked for says the command that lifts it",
+              string_compare((string_address)radio_blocked_detail("wlan", 1, 0, 1), (string_address)"blocked in software (rfkill) though it is switched on: run moonwater wifi on") == 0 &&
+              string_compare((string_address)radio_blocked_detail("bluetooth", 1, 0, 1), (string_address)"blocked in software (rfkill) though it is switched on: run moonwater bluetooth on") == 0);
+        check("radio: a block in hardware is said to be the switch, asked for or not",
+              radio_blocked_detail("bluetooth", 0, 1, 0) != null && string_length((string_address)radio_blocked_detail("bluetooth", 0, 1, 0)) > 20 &&
+              string_compare((string_address)radio_blocked_detail("wlan", 1, 1, 0), (string_address)radio_blocked_detail("wlan", 0, 1, 1)) == 0);
+        check("radio: another type is never blocked", radio_blocked_detail("wwan", 1, 1, 1) == null);
+        check("radio: asked for is the word on, whatever else the radio has, and with no word the radio in use",
+              radio_asked("on", 0) && !radio_asked("off", 40) && !radio_asked("", 40) && !radio_asked("yes", 0) && radio_asked(null, 12) && !radio_asked(null, 0) && !radio_asked(null, -1));
 }
 
 // The worst issue under canvas gpu on the table, read as a copy.

@@ -4240,7 +4240,8 @@ static void places_note(struct places *places, const struct place_kept *kept)
 
 
 // The radio a type of rfkill switch is for, as the Settings key its issue is under (window.c's WINDOWS_KEY_GPU style), or null for a type that is none
-// of the radios Settings has a row for. A radio blocked by a switch, in software or in hardware, is the fault; the detail says which.
+// of the radios Settings has a row for. A radio blocked by its switch in hardware is the fault, and one blocked in software is when it was asked for
+// (radio_asked_on); the detail says which.
 static const char *radio_key_of_type(const char *type)
 {
         if (type && string_equals((string_address)type, (string_address)"wlan"))
@@ -4250,13 +4251,21 @@ static const char *radio_key_of_type(const char *type)
         return null;
 }
 
-static const char *radio_blocked_detail(const char *type, int soft, int hard)
+// What a switch's state says is wrong with its radio, or null when nothing is. A block in hardware is always that. A block in software is only when the
+// radio was asked for (asked): the machine blocks Wi-Fi and Bluetooth in software from boot until moonwater wifi on or moonwater bluetooth on, which is
+// the radio as it was set, and not one a person is to be told to unblock.
+static const char *radio_blocked_detail(const char *type, int soft, int hard, int asked)
 {
-        if (!radio_key_of_type(type) || (!soft && !hard))
+        const char *key = radio_key_of_type(type);
+
+        if (!key || (!soft && !hard))
                 return null;
         if (hard)
                 return "blocked by its hardware switch: turn the radio on at the switch";
-        return "blocked in software (rfkill): run rfkill unblock wifi (or bluetooth)";
+        if (!asked)
+                return null;
+        return string_equals((string_address)key, (string_address)"wifi") ? "blocked in software (rfkill) though it is switched on: run moonwater wifi on"
+                                                                         : "blocked in software (rfkill) though it is switched on: run moonwater bluetooth on";
 }
 
 // Reads a small file of sysfs, whole, into buf (ended): its length, or -1.
@@ -4277,6 +4286,25 @@ static long radio_read_file(const char *path, char *buf, unsigned int room)
         return got;
 }
 
+// Whether a radio was asked for, as src/sh/host/radio.c's radio_kept reads the machine's own record: the word the person last set (word: the first line of
+// /root/wifi.power or /root/bluetooth.power, null when the file is not there) is "on"; with no word, the radio is in use anyway when it has a saved
+// network or a remembered device (list: the length of the first line of /root/wifi or /root/bluetooth), and the machine counts that as on.
+static int radio_asked(const char *word, long list)
+{
+        return word ? string_equals((string_address)word, (string_address)"on") : list > 0;
+}
+
+// The radio under key (wifi or bluetooth) asked for, from the machine's files.
+static int radio_asked_on(const char *key)
+{
+        int wifi = string_equals((string_address)key, (string_address)"wifi");
+        char word[8], list[4];
+
+        if (radio_read_file(wifi ? "/root/wifi.power" : "/root/bluetooth.power", word, sizeof(word)) >= 0)
+                return radio_asked(word, 0);
+        return radio_asked(null, radio_read_file(wifi ? "/root/wifi" : "/root/bluetooth", list, sizeof(list)));
+}
+
 // The path of one of an rfkill switch's files (/sys/class/rfkill/rfkillN/leaf), for N of one digit.
 static void radio_path(char *path, unsigned int room, unsigned int n, const char *leaf)
 {
@@ -4286,8 +4314,8 @@ static void radio_path(char *path, unsigned int room, unsigned int n, const char
         string_append_bounded((string_address)path, (string_address)leaf, room);
 }
 
-// The rfkill switches (/sys/class/rfkill, eight at most): a radio that is blocked is on the board under its key, and one that is not is cleared.
-// Read once a second with the kernel's records (kernel_notices_tick).
+// The rfkill switches (/sys/class/rfkill, eight at most): a radio that is blocked, in hardware or in software after it was asked for, is on the board
+// under its key, and one that is not is cleared. Read once a second with the kernel's records (kernel_notices_tick).
 static void radio_state_tick(struct windows *table)
 {
         if (!table)
@@ -4306,7 +4334,7 @@ static void radio_state_tick(struct windows *table)
                 radio_path(path, sizeof(path), n, "hard");
                 if (radio_read_file(path, hard, sizeof(hard)) < 0)
                         hard[0] = 0;
-                detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1');
+                detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1', soft[0] == '1' && radio_asked_on(key));
                 if (detail)
                         windows_issue_set(table, key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, detail);
                 else
