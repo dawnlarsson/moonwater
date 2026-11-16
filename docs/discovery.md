@@ -6,7 +6,8 @@ of waterlink: it reads the person's switches and hands back what it found,
 so `moonwater ssh`, the update fetcher and the time sync can ask it the same
 way the link does. `moonwater network` is its verb, and bare it says the
 network as one page: each interface, the name servers in their order, and
-what discovery may look up.
+what discovery may look up. It looks on its own at boot and whenever the
+network changes, within the person's switches.
 
 It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
 
@@ -19,13 +20,14 @@ It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
      a VPN (wg, tailscale, zerotier, tun) or other;
    - ports the router maps when asked: PCP (RFC 6887), NAT-PMP (RFC 6886),
      UPnP-IGD;
-   - the public address, by a STUN binding (RFC 8489) to
-     stun.cloudflare.com:3478 and stun.l.google.com:19302. The same mapping
-     from both is a NAT that maps by endpoint, which a hole can be punched
-     through; two mappings is one that cannot be, without help;
-   - where UDP does not get out, the public address over HTTPS
-     (`https://cloudflare.com/cdn-cgi/trace`, read in a confined child as the
-     zone question reads it);
+   - the public address, by a STUN binding (RFC 8489) to the first two
+     servers of the list that resolve (stun.cloudflare.com:3478 and
+     stun.l.google.com:19302 by default). The same mapping from both is a
+     NAT that maps by endpoint, which a hole can be punched through; two
+     mappings is one that cannot be, without help;
+   - where UDP does not get out, the public address over HTTPS (the trace
+     at the URL kept, `https://cloudflare.com/cdn-cgi/trace` by default, read
+     in a confined child as the zone question reads it);
    - TCP listeners, and an HTTP proxy (`HTTPS_PROXY`, by CONNECT).
 2. **Publish and fetch** candidate records, sealed with the group's secret
    and named by a hash of it, through every rendezvous at once: LAN
@@ -34,7 +36,8 @@ It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
    (BEP 44) and Nostr. A rendezvous carries only sealed records, so none of
    them learns more than that a record was put there.
 3. **Race** the candidate pairs (Happy Eyeballs, RFC 8305), punch holes in
-   UDP and TCP, keep a path open with a keepalive every 25 seconds, and
+   UDP and TCP, keep a path open with a keepalive (`network keepalive`,
+   every 10 seconds of quiet by default), and
    move a session to a better path when one appears.
 4. **Carry** the link over UDP, TCP on 443, the proxy's tunnel, a WebSocket
    over HTTPS, or the sound card's modem.
@@ -44,20 +47,76 @@ It follows the algorithm of ICE (RFC 8445). The code is Moonwater's own.
 6. **Report** what it found in `moonwater network discovery`, after
    `moonwater link doctor`'s checks, and in Settings.
 
-## Discovery switches
+## Discovery switches and settings
 
 Every lookup that sends a packet off the machine has a switch of its own,
-named for what it discovers, and `moonwater network discovery off` turns
-them all off at once. Off means no packet leaves for it. Each is on by
-default.
+named for what it discovers, and so do the local network's announcing and
+asking. `moonwater network discovery off` turns them all off at once. Off
+means no packet leaves for it: a gather counts every datagram and
+connection it opens (`discovery_sent`), and the local network's socket
+refuses a packet whose switch is off before it counts or sends it
+(`discovery_lan_allowed`: a response needs LAN announce, a question LAN
+listen). Each is on by default, as it was before it could be turned off.
 
-    moonwater network discovery [on|off]          every lookup below
+    moonwater network discovery [on|off]          every switch below
     moonwater network discovery stun [on|off]     Public address discovery (STUN)
     moonwater network discovery https [on|off]    Public address discovery (HTTPS)
+    moonwater network discovery announce [on|off] LAN announce (mDNS)
+    moonwater network discovery listen [on|off]   LAN listen (mDNS), and a pairing code's sweep
     moonwater network discovery refresh           look again now
+
+Turning a switch on is a deliberate act: Settings takes it only from a key
+or a press of a device plugged into the machine, never from uinput, uhid,
+the on-screen keyboard or the headless pipe (`deliberate` in
+`src/sh/registry.c`, as the SSH server's switch is). Turning one off is
+never refused.
+
+Nothing a lookup asks is fixed in the code. Each setting has its verb, its
+Settings row in the Network group, and a default that is what the code did
+before it could be changed:
+
+    moonwater network discovery stun servers [NAME[:PORT]...|add NAME[:PORT]|remove NAME[:PORT]|reset]
+                                                  stun.cloudflare.com:3478 stun.l.google.com:19302
+    moonwater network discovery stun timeout [MS|default]       1000
+    moonwater network discovery https url [URL|default]         https://cloudflare.com/cdn-cgi/trace
+    moonwater network discovery https timeout [SECONDS|default] 3
+    moonwater network proxy [on|off]                            on: HTTPS_PROXY is taken
+    moonwater network keepalive [SECONDS|default]               10, a quiet link's keepalive
+    moonwater dns default [ADDRESS...|reset]                    1.1.1.1 1.0.0.1
+    moonwater dns internal [on|off]                             on
+    moonwater dns internal suffixes [SUFFIX...|default]         .local .home.arpa .internal .lan .localdomain .home
 
 The servers a lookup asks learn this machine's public address; that is
 written in `.github/SECURITY.md`.
+
+## When it looks
+
+A gather is made when asked (`network discovery refresh`, Settings'
+Discover now, `link doctor`), and by the network's watcher on its own: as
+it starts at boot, at a lease that is new or has moved, and when a link
+comes or goes (at most once in 30 seconds for those). The watcher's gather
+is a child of a child, so neither the lease nor the watcher waits on it,
+and each lookup ends within its time limit. With discovery off, or both its
+lookups off, nothing is started (`discovery_auto_wanted`).
+
+## The lines
+
+`moonwater network discovery` says a line a key, and the line a Settings
+row reads holds the value alone: `public ipv4 203.0.113.7`, `nat
+endpoint-independent`, `learned 2m ago`. How a value was learned and when
+are lines of their own after it (`public ipv4 how STUN, port 40000, as
+stun.cloudflare.com:3478 saw it`, `public ipv4 when 2m ago`), so the command
+line says as much as it did. `moonwater dns` is the same: `dns order`,
+then `dns order from` with each server's source, `dns internal on`, its
+suffixes, its server and how.
+
+Settings finds a value by its key at a line's start or after a blank or a
+semicolon, the first line that has it. Each key is said on its own line
+before any other line holds it, and an interface's name, which the kernel
+lets hold any byte but a slash, a colon and a blank, is said quoted and
+escaped (`"x\x3bnat"`), so a name cannot carry another row's key or end its
+line. The STUN servers and the URL are held by their parsers to bytes that
+cannot either.
 
 ## The rule for a path
 
@@ -78,14 +137,23 @@ machine; this sandbox has no UDP out and no inbound connection.
 - **G1 Gathering** (ac253e74): interfaces and their kinds, IPv4 and IPv6
   with scope, UDP out, STUN's public address and NAT mapping, the HTTPS
   trace where UDP is blocked, the proxy, the switches, the report.
-- **G2 Name servers** (in progress): 1.1.1.1 and 1.0.0.1 first, the
+- **G2 Name servers** (77e24b44): 1.1.1.1 and 1.0.0.1 first, the
   network's servers as the fallback, the network's own names asked of the
   network first, all of it shown in Settings.
+- **G3 Every setting the person's**: the STUN servers, the trace's URL,
+  each lookup's time limit, the proxy, the keepalive, the DNS default list,
+  internal-name routing and its suffixes, and LAN announce and LAN listen
+  as switches of their own, each with its verb and Settings row and today's
+  behaviour as its default; turning a lookup on is deliberate; the lines
+  Settings reads hold their values alone, with how and when on lines of
+  their own, and an interface's name cannot speak for another row; a
+  gather at boot and when the network changes.
 
 ### Phase 1: direct paths, no one in the middle
 
 - **D1 Last-known places and keepalives** (S). Try `/root/link.places`
-  first; a keepalive every 25 s holds a NAT's mapping open.
+  first; a keepalive after `network keepalive` seconds of quiet (10 by
+  default) holds a NAT's mapping open.
 - **D2 IPv6 direct** (S). Global and link-local addresses as candidates;
   both sides send first through a stateful firewall.
 - **D3 Router mappings** (M). PCP (RFC 6887), NAT-PMP (RFC 6886) and
@@ -114,6 +182,13 @@ group's secret.
   (`discovery_mdns_service`), and waterlink's groups announce
   `_waterlink._udp` through them; what is left is the service of
   Moonwater's own.
+- **R1b mDNS over IPv6** (S). The same records on ff02::fb, port 5353,
+  joined on every interface with a link-local address and read at hop
+  limit 255, so a network with no IPv4 finds its machines. Rows: the join
+  and the hop-limit refusal against built control messages.
+- **R6 WS-Discovery** (S-M, optional). UDP 3702 on 239.255.255.250 and
+  ff02::c, answering a Probe with a ProbeMatch, so Windows' network list
+  shows the box. Under LAN announce; the parser runs apart as mDNS's does.
 - **R2 The Worker** (M). The owner's Cloudflare Worker: signed,
   rate-limited requests that only Moonwater can make, records kept with a
   time to live, and a **mailbox** where a sealed message waits until an
@@ -175,6 +250,28 @@ group's secret.
   stick.
 - **P3 NFC** (L). Needs a reader's stack.
 
+### Tunnels: reaching a service of the box from outside
+
+Every tunnel is off until the person turns it on, deliberately, and each
+says in `moonwater network` and Settings what it exposes and to whom.
+
+- **T1 The Worker's edge** (M). The owner's Worker carries HTTP and
+  WebSocket to a box behind a NAT: a box registers by a signed request
+  (its key, a name, a time), the Worker keeps the registration with a time
+  to live, rate-limits every name and every source, and relays only to a
+  box whose registration verifies.
+- **T2 `moonwater network tunnel add NAME PORT`** (S). A local port offered
+  through the edge under a name; off by default, turning it on deliberate
+  (a key or a press of a device plugged into the machine), `network tunnel
+  remove NAME` and `network tunnel off` take it away at once.
+- **T3 One of the person's own boxes as the edge** (M). A box of the group
+  that can be reached (a public address or a mapped port) is the edge for
+  the others, with a certificate of its own from ACME (RFC 8555, HTTP-01 or
+  TLS-ALPN-01), so no Worker is needed.
+- **T4 An IPv6 pinhole as the direct path** (S, with D3). Where the router
+  opens one (PCP, or UPnP's WANIPv6FirewallControl), the port is reached on
+  the box's global IPv6 address with no edge in the middle.
+
 ### Later
 
 Spoken natively, never by installing their code: HyperDHT (hole punching,
@@ -184,5 +281,6 @@ relays, enough to coordinate a punch), and Yggdrasil's public peers.
 ### Suggested order
 
 D1, D2, D4, D5, C2 and D6 are small and cover the most common gaps. Then
-D3, R1 and R2 with its mailbox, C1 and C3, Y1, C4, Y2. Then the rest of
+D3, R1, R1b and R2 with its mailbox, C1 and C3, Y1, C4, Y2, then T1 to T4
+and R6. Then the rest of
 phase 2, phases 5 and 6 as hardware allows, and the "Later" list.
