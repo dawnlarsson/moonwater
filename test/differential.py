@@ -51731,9 +51731,23 @@ int main(int count, char **words)
         #       add` never reached the session's copy, `device lock` never
         #       started its watcher, `link group` never joined. What each
         #       leaves is read after, from the places the verb writes last.
+        #       The watcher is a process of its own that makes usb.watcher
+        #       itself, so the row waits up to five seconds for it (a verb its
+        #       first line ends hands it over unconfirmed: here it was there
+        #       half a second later, never at once). A join is read by the
+        #       group the status lists, not by /root/link: since 948337bf a
+        #       join does not switch the listener on, link on does, and
+        #       /root/link stays off with its reader there or gone.
         script = """python3 - <<'PYEOF'
-import os, subprocess, shutil
+import os, subprocess, shutil, time
 key = "a" * 64
+def waited(test, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while not test():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
 def reset():
     for top in ("/root", "/run/moonwater"):
         shutil.rmtree(top, ignore_errors=True)
@@ -51755,8 +51769,8 @@ rows = [
     ("bind exit add", "bind exit add yyy", lambda: "yyy" in said("bind exit")),
     ("security block add", "security block add " + key, lambda: has("/run/moonwater/security") and key in said("security block")),
     ("security switch", "security tls12 off", lambda: has("/run/moonwater/security")),
-    ("device lock", "device lock", lambda: has("/run/moonwater/usb.watcher")),
-    ("link group", "link group lab S3cretOne11 allow run", lambda: open("/root/link").read().strip() == "on" and "lab" in said("link")),
+    ("device lock", "device lock", lambda: waited(lambda: has("/run/moonwater/usb.watcher"))),
+    ("link group", "link group lab S3cretOne11 allow run", lambda: "group lab:" in said("link")),
     ("link port", "link port 4000", lambda: "4000" in said("link")),
 ]
 for row in rows:
