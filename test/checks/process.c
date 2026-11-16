@@ -5010,8 +5010,11 @@ static fn windows_lists(void)
         check("a table with no lists is one windows_take takes", windows_lists_fit(&table, size, buffer));
         table.lists = lists_at;
 
+        // The reset zeroes the row's list header, which this table (the struct alone, no pictures or lists behind it) does not have.
+        table.lists = 0;
         table.list_state[5] = 2, table.list_seen[5] = 6;
         windows_reset_row(&table, 5);
+        table.lists = lists_at;
         check("a reset row has no list state and no generation seen", !table.list_state[5] && !table.list_seen[5]);
 
         // A header the kit wrote: valid for the picture it is for, and refused for each word that makes it another list.
