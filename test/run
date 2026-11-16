@@ -377,7 +377,7 @@ seam_of_path()
         src/sh/regex_graph.c | src/sh/snapshot.c | src/sh/monitor.c | \
         programs/utilities.c | programs/monitor.sh) echo tools ;;
         src/sh/registry.c) echo machine desktop ;;
-        src/sh/host.c | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
+        src/sh/host.c | src/sh/host/* | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
         src/sh/host_words.h | src/sh/splash_mark.c | main.moonwater.sh) echo machine ;;
         src/sh/languages.c | languages/*) echo machine desktop ;;
         src/sh/edit.c | src/canvas/* | src/audio/* | src/dbus/* | fonts/*) echo desktop ;;
@@ -15615,14 +15615,12 @@ same 'a machine that could not start is not a machine init has retired' \
 #       true; the machine process runs it after it has said it sourced the
 #       script, for the radios unless the verdict is a question, and not
 #       for the name.
-restore_body=$(awk '/^static fn host_restore_session\(bool radio, bool name\)$/,/^}$/' \
-        src/sh/host.c)
+restore_body=$(cat src/sh/host.c src/sh/host/*.c | awk '/^static fn host_restore_session\(bool radio, bool name\)$/,/^}$/')
 restore_order=$(printf '%s\n' "$restore_body" | grep -o '[a-z]*_restore()' | tr '\n' ' ')
 same 'the restores after a disk are run in one order' \
         'radio_restore() usb_restore() name_restore() locale_restore() dns_restore() tune_restore() ' \
         "$restore_order"
-take_body=$(awk '/^static b32 host_take\(host_install address_to install, bool update\)$/,/^}$/' \
-        src/sh/host.c)
+take_body=$(cat src/sh/host.c src/sh/host/*.c | awk '/^static b32 host_take\(host_install address_to install, bool update\)$/,/^}$/')
 restore_spelled=$(printf '%s\n%s\n' "$take_body" "$machine_run_body" |
         grep -c '\(radio\|usb\|name\|locale\|dns\|tune\)_restore()')
 restore_take=$(printf '%s\n' "$take_body" | grep -c 'host_restore_session(true, true);')
@@ -15665,7 +15663,7 @@ same 'reboot(2)'"'"'s magic words and commands are defined once, with the kernel
         "$reboot_defs"
 reboot_calls=$(grep -c 'syscall(reboot), REBOOT_MAGIC, REBOOT_MAGIC_SECOND, command' src/sh/builtin.c)
 reboot_builtin=$(grep -c 'shell_stop(write, REBOOT_RESTART);\|shell_stop(write, REBOOT_POWER_OFF);' src/sh/builtin.c)
-reboot_firmware=$(grep -c 'shell_stop(log, REBOOT_RESTART);' src/sh/host.c)
+reboot_firmware=$(cat src/sh/host.c src/sh/host/*.c | grep -c 'shell_stop(log, REBOOT_RESTART);')
 reboot_machine=$(printf '%s' "$machine_run_body" | tr -d '\n' | tr -s ' ' |
         grep -cF 'shell_stop(log, stopping == SPARK_BIND_POWEROFF ? REBOOT_POWER_OFF : REBOOT_RESTART);')
 same 'reboot, poweroff, the firmware restart and the machine process'"'"'s stop hand the one call the one set' \

@@ -34,6 +34,34 @@
 import os
 import re
 import sys
+import pathlib
+
+
+def source_text(path, **options):
+    """path's text, and for a file test/split.py cut in parts (path.c includes each part, path/part.c, where its text
+       stood) the text it had before the cut: each part put back in its place, without its header, its includes as
+       path.c had them."""
+    path = pathlib.Path(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    folder = path.parent / path.stem
+    if path.suffix != ".c" or not folder.is_dir():
+        return text
+
+    def part(match):
+        body = (folder / match.group(1)).read_text(encoding="utf-8", errors="replace")
+        head = re.match(r"/\*\n {8}\S*%s/%s: .*?\n\*/\n\n" % (re.escape(path.stem), re.escape(match.group(1))), body, re.S)
+        return re.sub(r'^(\s*#\s*include\s+")\.\./', r"\1", body[head.end():] if head else body, flags=re.M)
+    return re.sub(r'^#include "%s/([\w.]+)".*\n' % re.escape(path.stem), part, text, flags=re.M)
+
+
+def split_part(base, name):
+    """Whether base/name is a part of a file test/split.py cut (base.c includes it), which is read with that file."""
+    whole = base + ".c"
+    if not os.path.isfile(whole):
+        return False
+    with open(whole, encoding="utf-8", errors="replace") as handle:
+        return ('#include "%s/%s"' % (os.path.basename(base), name)) in handle.read()
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -57,13 +85,14 @@ FIELD = re.compile(r"(?:->|\.)\s*([a-z_][a-z0-9_]*)\s*=\s*(true|false|1|0)\s*[;,
 def sources():
     for base, _, files in os.walk(os.path.join(ROOT, "src")):
         for name in sorted(files):
-            if name.endswith((".c", ".h", ".inc")):
+            if name.endswith((".c", ".h", ".inc")) and not split_part(base, name):
                 yield os.path.join(base, name)
 
 
 def text_of(path):
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
+    """path's text, comments and strings blanked; a file test/split.py cut in parts is read whole (its parts put back
+       in their places), so a field set in one part and cleared in another is the one file's, as it was."""
+    text = source_text(path)
     text = COMMENT.sub(lambda m: " " * len(m.group(0)) if "\n" not in m.group(0)
                        else re.sub(r"[^\n]", " ", m.group(0)), text)
     return STRING.sub('""', text)

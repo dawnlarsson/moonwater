@@ -68,6 +68,24 @@ import time
 import zlib
 import concurrent.futures
 
+
+def source_text(path, **options):
+    """path's text, and for a file test/split.py cut in parts (path.c includes each part, path/part.c, where its text
+       stood) the text it had before the cut: each part put back in its place, without its header, its includes as
+       path.c had them."""
+    path = pathlib.Path(path)
+    text = path.read_text(**options)
+    folder = path.parent / path.stem
+    if path.suffix != ".c" or not folder.is_dir():
+        return text
+
+    def part(match):
+        body = (folder / match.group(1)).read_text(**options)
+        head = re.match(r"/\*\n {8}\S*%s/%s: .*?\n\*/\n\n" % (re.escape(path.stem), re.escape(match.group(1))), body, re.S)
+        return re.sub(r'^(\s*#\s*include\s+")\.\./', r"\1", body[head.end():] if head else body, flags=re.M)
+    return re.sub(r'^#include "%s/([\w.]+)".*\n' % re.escape(path.stem), part, text, flags=re.M)
+
+
 # Run as a script this module is __main__, so a spec's "from differential
 # import ..." would load a second copy and see a different INPUTS and
 # FIXTURES from the one the workers walk. Register this one under the name.
@@ -38865,7 +38883,7 @@ def harness_image_nodes(argv):
     flood = (ROOT / 'src/moonwater/floodlight.c').read_text()
     bowl = (ROOT / 'src/bowl.c').read_text()
     window = (ROOT / 'src/canvas/window.c').read_text()
-    host = (ROOT / 'src/sh/host.c').read_text()
+    host = source_text(ROOT / 'src/sh/host.c')
 
     def setting(name):
         """One build setting, whose value is a run of adjacent string literals."""
@@ -43284,7 +43302,7 @@ def harness_host_writes(argv):
     #   named by a literal /dev/ path is the kernel's node, not a file.
     for name in ("src/sh/host.c", "src/moonwater/moonwater.c", "src/canvas/screen.c",
                  "src/sh/net.c"):
-        text = (root / name).read_text()
+        text = source_text(root / name)
         if name.endswith("moonwater.c"):
             text = text[text.index("#ifdef MOONWATER_CLI"):]
         for found in opener.finditer(text):
@@ -43314,13 +43332,13 @@ def harness_host_writes(argv):
     #   reads /root/canvas.displays on each write it hears of. No writer of these files opens with O_TRUNC; each one
     #   publishes by rename (host_publish_again, host_write_file), so a reader sees the old bytes or the new, never none.
     for name in ("src/sh/host.c", "src/moonwater/moonwater.c", "src/canvas/screen.c", "src/sh/net.c"):
-        text = (root / name).read_text()
+        text = source_text(root / name)
         for found in re.finditer(r"\bO_TRUNC\b", text):
             line = text[:found.start()].count("\n") + 1
             failures.append("%s:%d opens with O_TRUNC: a state file truncated in place is read empty while it is "
                             "written; publish it by rename instead" % (name, line))
 
-    host = (root / "src/sh/host.c").read_text()
+    host = source_text(root / "src/sh/host.c")
     parent = r'''
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
@@ -46804,7 +46822,7 @@ def harness_moonwater_cli(argv):
             # of its own, and the rows of the pages name those verbs and no other.
             # The README shows some of the rows, and each is a row of the pages,
             # word for word.
-            host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
+            host_source = source_text(HARNESS_ROOT / "src/sh/host.c")
             verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
             dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)(?:, (?:true|false))?\}', verb_table)
             public = [verb for verb in dispatched if verb not in ("boot", "ask", "machine")]
@@ -49101,7 +49119,7 @@ while True:
         least = int(re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll",
                               (HARNESS_ROOT / "src/net/net.c").read_text()).group(1))
         most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll",
-                             (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+                             source_text(HARNESS_ROOT / "src/sh/host.c")).group(1))
         for number, spec in enumerate(specs):
             valid = (spec["length"] >= 48 and spec["mode"] == 4 and 1 <= spec["vn"] <= 4
                      and spec["echo"] is True)
@@ -49242,7 +49260,7 @@ while True:
         # roll the first time it is asked for, one kept until it is changed,
         # a name taken as the person typed it when it reads as a host name and
         # refused when it does not, and the kernel told.
-        host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
+        host_source = source_text(HARNESS_ROOT / "src/sh/host.c")
         lists = {}
         for which in ("adjectives", "nouns"):
             literal = re.search(r"static const p8 name_%s\[\] =((?:\s*\"[^\"]*\")+);" % which,
@@ -50220,7 +50238,7 @@ while True:
         #       command takes that the kernel refuses is a layout saved and never
         #       applied, and one only the kernel has is a layout nobody can pick.
         pairs = re.findall(r'\{"(\w+)", "(\w+)"\}', re.search(
-            r"locale_keyboards\[\] = \{(.*?)\};", (HARNESS_ROOT / "src/sh/host.c").read_text(), re.S).group(1))
+            r"locale_keyboards\[\] = \{(.*?)\};", source_text(HARNESS_ROOT / "src/sh/host.c"), re.S).group(1))
         table = {name for name, xkb in pairs}
         #       And each has the name XKB gives it, which a compositor from a
         #       bowl reads as XKB_DEFAULT_LAYOUT: the country's code where the
@@ -51357,7 +51375,7 @@ while True:
         # row whose command leaves room (the longer ones start it on the line
         # below), and the brightness row keeps its
         # percent sign, which a format string once swallowed.
-        column = int(re.search(r"#define HOST_COLUMN (\d+)", (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        column = int(re.search(r"#define HOST_COLUMN (\d+)", source_text(HARNESS_ROOT / "src/sh/host.c")).group(1))
         lines, finished = session("/tmp/moonwater help 2>&1\n")
         rows = [line for line in lines if line.startswith("  ") and not line.startswith("   ")]
         starts = set()
@@ -53198,7 +53216,7 @@ def harness_moonwater_cli_fuzz(argv):
 
         #   The grammar: the verbs the table answers to, then every verb's page.
         verbs = sorted(set(re.findall(r'^\s+\{"([a-z]+)", (?:host|tune|link)_\w+(?:, (?:true|false))+\},',
-                                      (root / "src/sh/host.c").read_text(), re.M)))
+                                      source_text(root / "src/sh/host.c"), re.M)))
         lines, finished = session("".join(say("help " + verb) for verb in verbs) + say("help"))
         pages = answers(lines)
         described = {}
@@ -53962,7 +53980,7 @@ def harness_moonwater_setup(argv):
     parser.add_argument("--root", default=str(HARNESS_ROOT),
                         help="the tree whose src/sh/host.c is lifted (a parent's, to see it lose)")
     args = parser.parse_args(argv)
-    host = (Path(args.root) / "src/sh/host.c").read_text()
+    host = source_text(Path(args.root) / "src/sh/host.c")
 
     def section(first, following):
         return src_slice(host, first, following, "moonwater_setup")
@@ -54761,7 +54779,7 @@ def harness_moonwater_lock_files(argv):
     parser.add_argument("--root", default=str(HARNESS_ROOT),
                         help="the tree whose src/sh/host.c is lifted (a parent's, to see it lose)")
     args = parser.parse_args(argv)
-    host = (Path(args.root) / "src/sh/host.c").read_text()
+    host = source_text(Path(args.root) / "src/sh/host.c")
 
     def section(first, following):
         return src_slice(host, first, following, "moonwater_lock_files")
@@ -54964,7 +54982,7 @@ def harness_machine_reap(argv):
     """
     import subprocess
     import tempfile
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     first = host.index("static bipolar radio_child;")
     body = host[first:host.index("static fn radio_wifi_keep(void)", first)]
     recover = host[host.index("static fn radio_recover(void)\n{"):host.index("/* What a verb says it did")]
@@ -66981,7 +66999,7 @@ int main(void)
                 checks(newest - 120 * 86400 <= floor <= newest,
                        "MOONWATER_CLOCK_FLOOR %d is not within 120 days before the newest "
                        "commit %d" % (floor, newest))
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     checks("#define SNTP_WALL_LEAST MOONWATER_CLOCK_FLOOR\n" in host,
            "host.c's SNTP_WALL_LEAST is not the clock's floor")
     most = re.search(r"#define SNTP_WALL_MOST (\d+)ll", host)
@@ -69166,7 +69184,7 @@ def harness_sntp_era(argv):
     if not compiler:
         print("sntp era: NOT RUN -- no C compiler")
         return 2
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     try:
         source = sntp_fuzz_source(host).replace(SNTP_FUZZ_DRIVER, SNTP_ERA_DRIVER)
     except ValueError as exc:
@@ -69240,7 +69258,7 @@ def harness_sntp_fuzz(argv):
         python3 test/differential.py --harness sntp_fuzz
     """
     del argv
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     try:
         source = sntp_fuzz_source(host)
     except ValueError as exc:
@@ -78015,7 +78033,7 @@ def harness_wire_constants(argv):
                          r"[ \t]*(?://[^\n]*|/\*[^\n]*)?$", re.M)
     seen = {}
     for path in WIRE_FILES:
-        for name, raw in pattern.findall(wire_linux_side((HARNESS_ROOT / path).read_text())):
+        for name, raw in pattern.findall(wire_linux_side(source_text(HARNESS_ROOT / path))):
             value = int(raw, 0)
             kernel = WIRE_ALIASES.get(name, name)
             if name not in WIRE_ALIASES and not name.startswith(WIRE_FAMILIES):
@@ -78231,7 +78249,7 @@ def harness_security_hygiene(argv):
         (HARNESS_ROOT / "src/waterlink").glob("*.c"))
     for path in network_sources + [HARNESS_ROOT / "src/sh/tools.c",
                                    HARNESS_ROOT / "src/sh/host.c"]:
-        text = uncommented(path.read_text())
+        text = uncommented(source_text(path))
         for call in re.finditer(r"\bsocket_receive\s*\(", text):
             statement = text[call.start():text.index(";", call.start())]
             if "MSG_DONTWAIT" not in statement:
@@ -78394,7 +78412,7 @@ def harness_security_hygiene(argv):
     kmsg_parts = {"id", "ending", "path", "answer->zone", "answer->mode",
                   "HOST_MACHINE_SCRIPT", "name", "reason"}
     for file in ("src/sh/host.c", "src/moonwater/moonwater.c"):
-        text = (HARNESS_ROOT / file).read_text()
+        text = source_text(HARNESS_ROOT / file)
         lines = re.findall(r"string_address line\[\] = \{(.*?)\};\s*host_kmsg\(line\);",
                            text, re.S)
         calls = len(re.findall(r"\bhost_kmsg\(", text)) - len(
@@ -78409,7 +78427,7 @@ def harness_security_hygiene(argv):
         for said in re.findall(r"^\s+radio_keeper_said\((.*?)\);", text, re.M | re.S):
             checks(said.lstrip().startswith('"'),
                    "%s: radio_keeper_said is given a literal, not %s" % (file, said.strip()[:40]))
-    wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
+    wire_source = (net + source_text(HARNESS_ROOT / "src/sh/host.c") +
                    (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
@@ -78507,7 +78525,7 @@ def harness_security_hygiene(argv):
                    "handed to net_apart and name the task in confined_callers" %
                    (caller, name))
     for task, home in apart_tasks.items():
-        text = uncommented((HARNESS_ROOT / home).read_text())
+        text = uncommented(source_text(HARNESS_ROOT / home))
         checks(re.search(r"\bnet_apart\(\s*%s\b" % task, text) is not None,
                "confinement: %s is no longer handed to net_apart in %s" % (task, home))
         for caller in sorted(found_callers.get(task, set())):
@@ -81753,7 +81771,7 @@ int main(int argc, char **argv)
     #   end. A caller who may not (END is root's) must not wait ten seconds
     #   for a detach that is not coming, and a process that never let go is
     #   not one that ran moonwater_end.
-    host = (root / "src/sh/host.c").read_text()
+    host = source_text(root / "src/sh/host.c")
     init_source = (root / "src/sh/system.c").read_text()
     stop_source = r"""
 #include <stdio.h>
@@ -86315,7 +86333,7 @@ def harness_wifi_key_state(argv):
     if not clang:
         print("wifi key state: NOT RUN -- needs clang with ASan/UBSan")
         return 2
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
                                    host, (HARNESS_ROOT / "test/checks.c").read_text())
     source += src_slice(host, "static COLD fn wifi_roam(",
@@ -86745,7 +86763,7 @@ def harness_wifi_eapol_fuzz(argv):
     del argv
     try:
         source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
-                                        (HARNESS_ROOT / "src/sh/host.c").read_text(),
+                                        source_text(HARNESS_ROOT / "src/sh/host.c"),
                                         (HARNESS_ROOT / "test/checks.c").read_text())
     except (ValueError, RuntimeError) as exc:
         print("  FAIL wifi eapol fuzz: " + str(exc))
@@ -87544,7 +87562,7 @@ def harness_wifi_sae_fuzz(argv):
     del argv
     try:
         source = wifi_sae_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
-                                      (HARNESS_ROOT / "src/sh/host.c").read_text(),
+                                      source_text(HARNESS_ROOT / "src/sh/host.c"),
                                       (HARNESS_ROOT / "test/checks.c").read_text())
     except (ValueError, RuntimeError) as exc:
         print("  FAIL wifi sae fuzz: " + str(exc))
@@ -88681,7 +88699,7 @@ def harness_wifi_scan_fuzz(argv):
     """
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     try:
         netlink = src_slice(net, "#define NETLINK_HEADER 16",
                                       "#endif // STANDARD_MODERN_C_NET_NETLINK")
@@ -94492,7 +94510,7 @@ def waterlink_script_scan(shim):
     import subprocess
     import tempfile
     command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    host = source_text(HARNESS_ROOT / "src/sh/host.c")
     scan = src_slice(command, "static p8 link_script_names_secret(",
                         "static b32 link_status(void)")
     #   The scan uses both prefix tests: string_has_prefix, lib.util.c's,
