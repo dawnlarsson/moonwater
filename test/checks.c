@@ -16298,9 +16298,11 @@ static fn pixel_over(void)
         turn; an opaque run from every start to every tail inside a row of noise; runs of three, with every pixel between
         them alpha 0 and colour (premultiplied it cannot be, and it must answer as the reference does); and, for the
         wider turns, opaque and not by turns of eight and of sixteen, and opaque but one pixel at each place of a turn of
-        sixty four, a pixel not opaque in these three made so for certain (its alpha's low bit cleared). That the target
-        is not read on the opaque path is argued from the bodies (no page can be made writable and not readable on
-        x86_64), not held here.
+        sixty four, a pixel not opaque in these three made so for certain (its alpha's low bit cleared); and the word
+        none, which a window's clear parts are, by turns of eight with opaque, and throughout, so a turn of it is a turn
+        whose colours are all none (a test of the colours for the alpha's bits finds it opaque). That the target is not
+        read on the opaque path is argued from the bodies (no page can be made writable and not readable on x86_64), not
+        held here.
 */
 static fn pixel_over_opaque(void)
 {
@@ -16314,7 +16316,7 @@ static fn pixel_over_opaque(void)
                 positive into_span = height ? 4 * ((height - 1) * is + width) : 0, from_span = height ? 4 * ((height - 1) * fs + width) : 0;
 
                 PIXEL_EACH(k, width)
-                        for (positive kind = 0; kind < 8; kind++)
+                        for (positive kind = 0; kind < 10; kind++)
                         {
                                 struct pixel_window out, in[1];
                                 p8 address_to into = pixel_place(&pixel_rooms[0], into_span, 0, k < 8, pixel_residue(shape + kind, k, 4));
@@ -16336,12 +16338,16 @@ static fn pixel_over_opaque(void)
                                                             : kind == 4 ? i / 3 % 2 == 0
                                                             : kind == 5 ? i / 8 % 2 == 0
                                                             : kind == 6 ? i / 16 % 2 == 0
-                                                                        : i % 64 != lone64;
+                                                            : kind == 7 ? i % 64 != lone64
+                                                            : kind == 8 ? i / 8 % 2 == 0
+                                                                        : false;
 
                                                 if (opaque)
                                                         *at |= 0xff000000u;
                                                 else if (kind == 4)
                                                         *at = (*at & 0x00ffffffu) | 1u;
+                                                else if (kind >= 8)
+                                                        *at = 0;
                                                 else if (kind >= 5)
                                                         *at &= 0xfeffffffu;
                                         }
