@@ -1592,13 +1592,17 @@ static int compositor_cursor_probed(int answer)
         compositor_cursor_probe.done = 1;
         if (answer > 0 || (answer < 0 && !compositor_cursor_named()))
         {
-                log_direct(answer > 0 ? str("compositor: the cursor plane's probe: the screen's vblank came with the plane showing; the plane is kept\n")
-                                      : str("compositor: the cursor plane's probe: the card gives no vblank to ask for; the plane is kept\n"));
+                if (answer > 0)
+                        log_direct(str("compositor: the cursor plane's probe: the screen's vblank came with the plane showing; the plane is kept\n"));
+                else
+                        log_direct(str("compositor: the cursor plane's probe: the card gives no vblank to ask for; the plane is kept\n"));
                 return 0;
         }
         compositor_cursor_probe.stopped = 1;
-        log_direct(answer == 0 ? str("compositor: the cursor plane's probe: no vblank within 100 ms of the plane's first picture; the plane is taken off and the pointer drawn\n")
-                               : str("compositor: the cursor plane's probe: the card gives no vblank to ask for, and its driver is refused the plane by name; the pointer is drawn\n"));
+        if (answer == 0)
+                log_direct(str("compositor: the cursor plane's probe: no vblank within 100 ms of the plane's first picture; the plane is taken off and the pointer drawn\n"));
+        else
+                log_direct(str("compositor: the cursor plane's probe: the card gives no vblank to ask for, and its driver is refused the plane by name; the pointer is drawn\n"));
         return -1;
 }
 
