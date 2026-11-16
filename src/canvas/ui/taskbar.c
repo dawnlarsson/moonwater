@@ -1567,6 +1567,30 @@ static void taskbar_battery_refresh(void)
         reading against what is behind it kept in taskbar.clock_read. In twelve hours the hours are so, and AM and PM are the menu's.
 */
 // The accent the moon's rim light is made from: the theme's, or a cool blue where the theme's is a grey (the standard's white).
+static unsigned int taskbar_accent(void);
+
+// The accent the wallpaper's glow is in: the taskbar's, so the moon on the band and the moon on the ground are lit alike.
+static unsigned int taskbar_wall_accent(void)
+{
+        return taskbar_accent();
+}
+
+/*
+        The wallpaper of one screen, width by height pixels at pixels (pitch a row), for compositor_wall_keep: the moon over its sky
+        (ui_moon_night), in the dark theme dimmed (its seas maria percent of its highlands) or inverted, in the light one ink on paper,
+        the accent's glow round it (glow 1) and along the screen's edges too (glow 2).
+*/
+static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow)
+{
+        struct ui ui;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = pixels, ui.pitch = (unsigned long)pitch, ui.width = width, ui.height = height, ui.top = 0, ui.bottom = height, ui.scale = 100;
+        ui_moon_dim_seas = maria / 100.0;
+        ui_moon_night(&ui, 0, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | (dimmed ? UI_MOON_PAPER_DIM : 0) : 0, taskbar_accent(), glow ? 1 : 0,
+                      glow > 1 ? 1 : 0);
+}
+
 static unsigned int taskbar_accent(void)
 {
         unsigned int accent = compositor.table && compositor.table->themed ? compositor.table->accent & 0xffffffu : 0;

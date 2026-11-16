@@ -2944,6 +2944,57 @@ static void check_taskbar_centre(void)
 }
 
 /*
+        The wallpaper as the ground: once the rows are read, `canvas wallpaper moon` makes it for the space, and what the ground was
+        filled with is copied from it (a rectangle, a pixel under a blended picture); made again only when a row, the theme or the space
+        changes, the whole space damaged then and nothing at a present after; `plain` lets it go and the ground is the colour again.
+*/
+static void check_wallpaper_ground(void)
+{
+    static unsigned int target_pixels[320 * 200];
+    static struct windows table;
+    struct compositor_target t;
+    unsigned int damages;
+    b32 made, copied, kept, plain, glow;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&table, sizeof(table));
+    table.themed = 1, table.theme = UI_THEME_DARK, table.accent = 0x5b7fa6u;
+    compositor.table = &table, compositor.width = 320, compositor.height = 200;
+    compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
+    compositor_wall_keep();
+    made = compositor_wall && compositor_wall_w == 320 && compositor_wall_h == 200 && compositor.damages > 0;
+    made &= compositor_wall[100 * 320 + 160] != compositor_wall[5 * 320 + 5];
+    memory_zero(&t, sizeof(t));
+    t.pixels = target_pixels, t.pitch = 320, t.width = 320, t.height = 200, t.x1 = 0, t.y1 = 0, t.x2 = 320, t.y2 = 200;
+    compositor_ground_fill(&t, 40, 30, 200, 150);
+    copied = target_pixels[100 * 320 + 160] == compositor_wall[100 * 320 + 160] && target_pixels[30 * 320 + 40] == compositor_wall[30 * 320 + 40] &&
+             compositor_ground_at(10, 10) == compositor_wall[10 * 320 + 10];
+    compositor.damages = 0;
+    damages = compositor.damages;
+    compositor_wall_keep();
+    kept = compositor.damages == damages;
+    // The glow along the edges too: another wallpaper.
+    {
+        unsigned int before = compositor_wall[2 * 320 + 160];
+
+        compositor_wall_rows.glow = 2;
+        compositor_wall_keep();
+        glow = compositor_wall && compositor.damages > 0 && compositor_wall[2 * 320 + 160] != before;
+    }
+    compositor_wall_rows.moon = 0;
+    compositor_wall_keep();
+    compositor_ground_fill(&t, 40, 30, 200, 150);
+    plain = !compositor_wall && target_pixels[100 * 320 + 160] == compositor_ground && compositor_ground_at(10, 10) == compositor_ground;
+    compositor_wall_rows.moon = 1, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 0;
+    memory_zero(&compositor, sizeof(compositor));
+    check("wallpaper: once the rows are read the moon is made for the space and the space damaged", made);
+    check("wallpaper: the ground is copied from it, a rectangle and a pixel alike", copied);
+    check("wallpaper: kept: a present after makes nothing and damages nothing", kept);
+    check("wallpaper: a row changed makes it again (the glow along the edges)", glow);
+    check("wallpaper: plain lets it go, the ground the colour again", plain);
+}
+
+/*
         The moon's motion. It grows about its middle while the pointer is over it, over the kit's ease, its plate with it, and back when the
         pointer leaves; what a press finds stays the disc at rest. With reduced motion it is grown at once. It turns a step at a time on the
         real clock while a hand has been about, the loop woken for the next step and no sooner, and rests two minutes after the last. And the
@@ -4242,6 +4293,21 @@ static void check_moon_bench(void)
         at[3] = clock_monotonic_nanoseconds();
         string_format(log, "  moon bench: at 32 pixels the disc draws in %p us, the rim's light in %p us, the clock in %p us\n", (at[1] - at[0]) / 50000,
                       (at[2] - at[1]) / 50000, (at[3] - at[2]) / 50000);
+    }
+    // The wallpaper whole, cold: 1920 by 1080, dark, dimmed, the glow; and light.
+    {
+        static unsigned int wall[1920 * 1080];
+        struct ui ui;
+        positive at[3];
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = wall, ui.pitch = 1920, ui.width = 1920, ui.height = 1080, ui.bottom = 1080, ui.scale = 100;
+        at[0] = clock_monotonic_nanoseconds();
+        ui_moon_night(&ui, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
+        at[1] = clock_monotonic_nanoseconds();
+        ui_moon_night(&ui, 0, 0, 0x5b7fa6u, 1, 0);
+        at[2] = clock_monotonic_nanoseconds();
+        string_format(log, "  wallpaper bench: 1920 by 1080 dark and dimmed in %p ms, light in %p ms, cold\n", (at[1] - at[0]) / 1000000, (at[2] - at[1]) / 1000000);
     }
 }
 

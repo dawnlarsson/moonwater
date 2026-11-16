@@ -192,6 +192,44 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
                                                                    (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
 }
 
+/*
+        The wallpaper (`canvas wallpaper moon`): the ground is the moon over its sky (ui_moon_night), each screen its own, made once
+        into compositor_wall, as large as the space, and kept (compositor_wall_keep makes it again only when the space, the theme, the
+        accent or a wallpaper setting changes); what the ground was filled with is copied from it. With none (plain, or no memory) the
+        ground is the background colour, as it always was. The card's path (`canvas gpu on`, alpha) still draws the colour.
+*/
+static unsigned int *compositor_wall;
+static int compositor_wall_w, compositor_wall_h;
+
+// The ground at a point of the space: the wallpaper's pixel, or the colour.
+static inline unsigned int compositor_ground_at(int x, int y)
+{
+        return compositor_wall && x >= 0 && y >= 0 && x < compositor_wall_w && y < compositor_wall_h
+                       ? compositor_wall[(long)y * compositor_wall_w + x]
+                       : compositor_ground;
+}
+
+// The ground over a rectangle of the target: the wallpaper's, where it is, or the colour.
+static void compositor_ground_fill(const struct compositor_target *t, int x, int y, int width, int height)
+{
+        int x2 = x + width, y2 = y + height;
+
+        if (!compositor_wall)
+        {
+                compositor_fill(t, x, y, width, height, compositor_ground);
+                return;
+        }
+        x = x > t->x1 ? x : t->x1, y = y > t->y1 ? y : t->y1;
+        x2 = x2 < t->x2 ? x2 : t->x2, y2 = y2 < t->y2 ? y2 : t->y2;
+        if (x < 0 || y < 0 || x2 > compositor_wall_w || y2 > compositor_wall_h)
+        {
+                compositor_fill(t, x, y, x2 - x, y2 - y, compositor_ground);
+                return;
+        }
+        if (x2 > x && y2 > y)
+                compositor_blit(t, x, y, x2 - x, y2 - y, compositor_wall + (long)y * compositor_wall_w + x, (unsigned long)compositor_wall_w);
+}
+
 // Premultiplied ARGB8888 source-over (matching the GPU kernel's op 11: src + dst * (255 - src_a) / 255, saturating each channel at 255).
 static inline unsigned int compositor_over_pixel(unsigned int dst, unsigned int src)
 {
@@ -241,12 +279,19 @@ static inline unsigned int compositor_over_weighted(unsigned int dst, unsigned i
 #define COMPOSITOR_GROUND_RUN 1024
 
 static void compositor_over_ground(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
-                                   unsigned long width, unsigned long height, int out)
+                                   unsigned long width, unsigned long height, int out, int gx, int gy)
 {
         unsigned int ground[COMPOSITOR_GROUND_RUN];
         fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
             out ? memory_over_under_out_u32_rect : memory_over_under_u32_rect;
 
+        // Over the wallpaper: its rows under the picture's, where the space has them.
+        if (compositor_wall && gx >= 0 && gy >= 0 && gx + (long)width <= compositor_wall_w && gy + (long)height <= compositor_wall_h)
+        {
+                over(into, (positive)into_pitch, from, (positive)from_pitch, compositor_wall + (long)gy * compositor_wall_w + gx, (positive)compositor_wall_w,
+                     (positive)width, (positive)height);
+                return;
+        }
         memory_fill_u32(ground, (positive)(width < COMPOSITOR_GROUND_RUN ? width : COMPOSITOR_GROUND_RUN), compositor_ground);
         for (unsigned long at = 0; at < width; at += COMPOSITOR_GROUND_RUN)
                 over(into + at, (positive)into_pitch, from + at, (positive)from_pitch, ground, 0,
@@ -269,7 +314,7 @@ static void compositor_blit_blend(const struct compositor_target *t, int x, int 
         from = source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x);
         if (ground)
         {
-                compositor_over_ground(into, t->pitch, from, pitch, (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), t->out);
+                compositor_over_ground(into, t->pitch, from, pitch, (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), t->out, x1, y1);
                 return;
         }
         compositor_reading(t);
@@ -716,7 +761,7 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                                                  (unsigned long)width, (unsigned long)height,
                                                  (unsigned long)(x1 - x), (unsigned long)(py - y));
                         if (frame->blend == 2)
-                                compositor_over_ground(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows, t->out);
+                                compositor_over_ground(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows, t->out, x1, py);
                         else
                                 memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows);
                 }
@@ -727,7 +772,7 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                 unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
 
                 for (int px = x1; px < x2; px++)
-                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground : into[px - x1],
+                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground_at(px, py) : into[px - x1],
                                                               compositor_picture_at(frame, px - x, py - y));
         }
 }
@@ -2113,7 +2158,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         for (unsigned int at = 0; at < count; at++)
                 if (frames[at].blend && !compositor_blend_alone(t, frames, at))
                 {
-                        compositor_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1, compositor_ground);
+                        compositor_ground_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw_with(t, &frames[each], radii[each]);
                         compositor_preview_draw(t, frames, count, radii);
@@ -2189,8 +2234,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                 }
 
                 for (unsigned int s = 0; s < spans; s++)
-                        compositor_fill(t, span[s][0], top, span[s][1] - span[s][0], bottom - top,
-                                        compositor_ground);
+                        compositor_ground_fill(t, span[s][0], top, span[s][1] - span[s][0], bottom - top);
         }
 
         for (unsigned int at = 0; at < count; at++)
@@ -2222,7 +2266,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                                 if (occluded)
                                         continue;
                         }
-                        compositor_fill(&square, cx, cy, r, r, compositor_ground);
+                        compositor_ground_fill(&square, cx, cy, r, r);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw_with(&square, &frames[each], radii[each]);
                         compositor_blit(t, cx, cy, r, r, scratch, (unsigned long)r);

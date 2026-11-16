@@ -9399,6 +9399,7 @@ b32 main()
         check_launcher_centred();
         check_clock_places();
         check_moon_motion();
+        check_wallpaper_ground();
         check_taskbar_tree();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY

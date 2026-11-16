@@ -633,6 +633,61 @@ static void compositor_present(void)
         compositor_record_present(began, ended, path);
 }
 
+/*
+        The wallpaper kept for the space (compositor_wall): made again only when the space's size, the screens, the theme, the accent or
+        a row of `canvas wallpaper` changed, the whole space damaged then; nothing at any other present. Each screen has its own moon over
+        its sky, in the dark theme dimmed (the moon as it is, its seas `canvas wallpaper maria` of its highlands) or inverted (chalk on
+        charcoal), in the light one ink on paper, with the accent's glow round it and along the edges as `canvas wallpaper glow` says.
+*/
+static struct
+{
+        int moon, dimmed, maria, glow; // the rows: the moon or plain, dimmed or inverted, the seas' grey (percent), none, glow or edges too
+        int ready;                     // the rows were read
+} compositor_wall_rows = {1, 1, 45, 1, 0};
+
+static void compositor_wall_keep(void)
+{
+        static unsigned int key[8];
+        static positive bytes;
+        unsigned int count = 0, now[8];
+        const int (*screens)[4] = compositor_screens(&count);
+        int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
+
+        // Not before the rows are read: a compositor that has read no settings (a check's) keeps its colour.
+        if (!compositor_wall_rows.ready)
+                return;
+        now[0] = (unsigned int)compositor.width, now[1] = (unsigned int)compositor.height, now[2] = count, now[3] = (unsigned int)dark;
+        now[4] = taskbar_wall_accent(), now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2);
+        now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
+        if (!memory_compare(key, now, sizeof(key)) && (compositor_wall || !compositor_wall_rows.moon))
+                return;
+        memory_copy(key, now, sizeof(key));
+        if (compositor_wall)
+                compositor_call(syscall(munmap), (positive)compositor_wall, bytes, 0, 0, 0, 0);
+        compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        if (!compositor_wall_rows.moon || compositor.width <= 0 || compositor.height <= 0)
+                return;
+        bytes = (positive)compositor.width * (positive)compositor.height * 4;
+        {
+                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return;
+                compositor_wall = (unsigned int *)got;
+        }
+        compositor_wall_w = compositor.width, compositor_wall_h = compositor.height;
+        for (unsigned int at = 0; at < (count ? count : 1); at++)
+        {
+                int x = count ? screens[at][0] : 0, y = count ? screens[at][1] : 0, w = count ? screens[at][2] : compositor.width, h = count ? screens[at][3] : compositor.height;
+
+                if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > compositor_wall_w || y + h > compositor_wall_h)
+                        continue;
+                taskbar_wall_draw(compositor_wall + (long)y * compositor_wall_w + x, compositor_wall_w, w, h, dark, compositor_wall_rows.dimmed,
+                                  compositor_wall_rows.maria, compositor_wall_rows.glow);
+        }
+}
+
 static void compositor_present_frames(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -646,6 +701,7 @@ static void compositor_present_frames(void)
         // Not while a flip is in flight, nor while the card still has jobs that write or read what this present would (compositor_card_holds).
         if (!compositor.damages || compositor.flip_pending || compositor_card_holds())
                 return;
+        compositor_wall_keep();
         compositor_bands_follow();
 
         // What moonwater debug says of the card, once there is a table to say it in.

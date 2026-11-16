@@ -1371,6 +1371,8 @@ static void taskbar_moon_damaged(int band, const int *rect);
 static int taskbar_moon_more(const struct taskbar_view *view);
 static int taskbar_moon_most(int size);
 static void taskbar_spin_set(int seconds);
+static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow);
+static unsigned int taskbar_wall_accent(void);
 static b64 taskbar_shift(void);
 static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
 static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
@@ -1428,6 +1430,9 @@ static inline void taskbar_moon_damaged(int band, const int *rect) { (void)band,
 static inline int taskbar_moon_more(const struct taskbar_view *view) { (void)view; return 0; }
 static inline int taskbar_moon_most(int size) { (void)size; return 0; }
 static inline void taskbar_spin_set(int seconds) { (void)seconds; }
+static inline void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow)
+{ (void)pixels, (void)pitch, (void)width, (void)height, (void)dark, (void)dimmed, (void)maria, (void)glow; }
+static inline unsigned int taskbar_wall_accent(void) { return 0; }
 static inline b64 taskbar_shift(void) { return 0; }
 static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
 { (void)view, (void)before, *x = *y = *width = *height = 0; }

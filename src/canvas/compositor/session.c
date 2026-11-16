@@ -280,10 +280,30 @@ static void compositor_word(const char *path, char *word, unsigned int room)
 */
 static p8 compositor_setting_kept(const char *path, const char *word, long *value);
 
+// `canvas wallpaper` and its rows: what compositor_wall_keep makes the wallpaper with (the theme and the accent it reads itself).
+static void compositor_wall_read(void)
+{
+        static const char *const paths[4] = {SETTING_WALLPAPER_PATH, SETTING_WALLPAPER_DARK_PATH, SETTING_WALLPAPER_MARIA_PATH, SETTING_WALLPAPER_GLOW_PATH};
+        long kept[4];
+        char word[16];
+
+        for (int at = 0; at < 4; at++)
+        {
+                compositor_word(paths[at], word, sizeof(word));
+                compositor_setting_kept(paths[at], word, &kept[at]);
+        }
+        compositor_wall_rows.moon = kept[0] == 0, compositor_wall_rows.dimmed = kept[1] == 0;
+        compositor_wall_rows.maria = kept[2] >= 20 && kept[2] <= 80 ? (int)kept[2] : 45, compositor_wall_rows.glow = (int)kept[3];
+        compositor_wall_rows.ready = 1;
+        compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
 static void compositor_look_read(void)
 {
         char word[16];
         long colour, sized = 0;
+
+        compositor_wall_read();
         int size, look = 0, style, squeeze = 25;
         long percent = 25;
 
