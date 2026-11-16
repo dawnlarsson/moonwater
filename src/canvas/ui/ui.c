@@ -16937,6 +16937,14 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
                 ui_inks(&p->ui, p->own.table->ground[p->own.row]);
                 ui_popmenu_present(p);
         }
+        /*
+                The kit's pointer (ui_kit.pointer_x, _y) and the shape it sends are the app's window's, not the popup's: the popup's events
+                are in its own coordinates, and taken as the window's they lit the settings column's tab under the place the pointer was
+                on the menu. They are the window's again when the popup's events are done.
+        */
+        int owner_x = ui_kit.pointer_x, owner_y = ui_kit.pointer_y;
+        unsigned int owner_shape = ui_kit_shape;
+
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
                 ui_event_context(&event);
@@ -16952,6 +16960,7 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
                 if (p->menu.hot != hot || p->menu.tree.node[0].offset != scroll || p->menu.scroll.hover != lit || p->menu.scroll.held != held)
                         ui_popmenu_present(p);
         }
+        ui_kit.pointer_x = owner_x, ui_kit.pointer_y = owner_y, ui_kit_shape = owner_shape;
         if (p->menu.moving && answer == UI_MENU_NOTHING)
                 ui_popmenu_present(p);
         if (p->own.table->state[p->own.row] & WINDOW_CLOSING)
