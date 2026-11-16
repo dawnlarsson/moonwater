@@ -220,7 +220,7 @@ static p8 link_groups_scrub(positive records)
                 return false;
         if (file_look(handle, (string_address) "", AT_EMPTY_PATH,
                       address_of facts) &&
-            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == LINK_STATE_OWNER &&
             !(facts.mode & 077) &&
             !(facts.size % sizeof(struct link_group_record)))
         {

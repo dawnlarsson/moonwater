@@ -118,6 +118,9 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_STAMPS_PATH link_state_path(LINK_LEAF_STAMPS)
 #define LINK_HOME_DIR link_run_home()
 #define LINK_EXECUTABLE link_executable()
+//      Whose the private files must be: the user's, who runs the link here.
+extern unsigned int geteuid(void);
+#define LINK_STATE_OWNER ((p32)geteuid())
 #else
 #define LINK_SWITCH_PATH "/root/link"
 #define LINK_KEY_PATH "/root/link.key"
@@ -134,6 +137,8 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_STAMPS_PATH "/root/link.stamps"
 #define LINK_HOME_DIR "/root"
 #define LINK_EXECUTABLE "/proc/self/exe"
+//      Whose the private files must be: root's, who runs the link.
+#define LINK_STATE_OWNER 0
 #endif
 
 #define LINK_PEERS_MAX 64
@@ -394,7 +399,7 @@ static bipolar link_read_private_records(string_address path,
                 return handle;
         if (!file_look(handle, (string_address)"", AT_EMPTY_PATH,
                        address_of facts) ||
-            (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != LINK_STATE_OWNER ||
             (facts.mode & 077) || facts.size > room || facts.size % record)
         {
                 system_close(handle);
@@ -1069,7 +1074,9 @@ static p32 link_index_new(void)
 static p8 link_session_open(struct link_session address_to s)
 {
         bipolar mapped = system_call_6(syscall(mmap), 0,
-                                       sizeof(struct waterlink_link), 3, 0x22,
+                                       sizeof(struct waterlink_link),
+                                       FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
                                        (positive)(bipolar)-1, 0);
 
         if (mapped < 0 && mapped > -4096)

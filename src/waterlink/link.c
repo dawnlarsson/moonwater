@@ -406,6 +406,7 @@ static fn waterlink_band_unlink(struct waterlink_link address_to link,
         waterlink_band_left(link, band, at);
 }
 
+static KEEP fn waterlink_band_remove(struct waterlink_link address_to link, p32 at) ASM_C_NAME(waterlink_band_remove);
 static KEEP fn waterlink_band_remove(struct waterlink_link address_to link, p32 at)
 {
         p32 band = waterlink_band_of(link->slot[at].flags);
@@ -481,6 +482,7 @@ static fn waterlink_band_requeue(struct waterlink_link address_to link, p32 at)
 }
 
 // A slot leaves its key's chain, already off the band and the flight.
+static KEEP fn waterlink_slot_free(struct waterlink_link address_to link, p32 at) ASM_C_NAME(waterlink_slot_free);
 static KEEP fn waterlink_slot_free(struct waterlink_link address_to link, p32 at)
 {
         struct waterlink_slot address_to slot = link->slot + at;
@@ -709,6 +711,7 @@ static fn waterlink_lose(struct waterlink_link address_to link, p32 at)
         times with no answer is the path taken to be gone, everything in
         flight counted lost and the window brought to its least.
 */
+static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now) ASM_C_NAME(waterlink_losses);
 static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
 {
         p64 trip = link->smoothed > link->recent ? link->smoothed
@@ -1670,6 +1673,10 @@ p8 waterlink_idle(struct waterlink_link address_to link)
 static KEEP fn waterlink_hold(struct waterlink_link address_to link,
                               struct waterlink_receiving address_to live,
                               struct waterlink_frame address_to head,
+                              p8 address_to payload) ASM_C_NAME(waterlink_hold);
+static KEEP fn waterlink_hold(struct waterlink_link address_to link,
+                              struct waterlink_receiving address_to live,
+                              struct waterlink_frame address_to head,
                               p8 address_to payload)
 {
         p8 key = head->key;
@@ -1773,6 +1780,8 @@ static fn waterlink_held_drop(struct waterlink_link address_to link,
         application will not take one the key pauses there, held, until
         waterlink_resume. An ended key keeps nothing.
 */
+static KEEP fn waterlink_release(struct waterlink_link address_to link, p8 key,
+                                 waterlink_sink sink, address_any context) ASM_C_NAME(waterlink_release);
 static KEEP fn waterlink_release(struct waterlink_link address_to link, p8 key,
                                  waterlink_sink sink, address_any context)
 {

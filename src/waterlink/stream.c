@@ -453,18 +453,7 @@ static bipolar link_stream_socket(void)
 {
         b32 zero = 0;
         b32 family = link_self.v4 ? AF_INET : AF_INET6;
-#if defined(MACOS)
-        bipolar handle = socket_new(family, SOCK_STREAM, 0);
-
-        if (handle >= 0 && (fcntl((int)handle, F_SETFD, FD_CLOEXEC) < 0 ||
-                            fcntl((int)handle, F_SETFL, O_NONBLOCK) < 0))
-        {
-                socket_close((b32)handle);
-                return -EIO;
-        }
-#else
         bipolar handle = socket_new(family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-#endif
         if (handle >= 0 && !link_self.v4)
                 (void)socket_option_set((b32)handle, SOL_IPV6, IPV6_V6ONLY,
                                         address_of zero, sizeof zero);
@@ -677,10 +666,6 @@ static fn link_tcp_accept(p64 now)
 
                 if (fd < 0)
                         return;
-#if defined(MACOS)
-                (void)fcntl((int)fd, F_SETFD, FD_CLOEXEC);
-                (void)fcntl((int)fd, F_SETFL, O_NONBLOCK);
-#endif
                 if (from.family == AF_INET6)
                 {
                         memory_copy(address, from.host, 16);

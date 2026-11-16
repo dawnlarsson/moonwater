@@ -60,9 +60,326 @@
         sys/fcntl.h and netinet/in.h, with their structs in Darwin's layout.
 */
 #include <ifaddrs.h>
-#include <mach-o/dyld.h>
 #include <net/if.h>
 #include <termios.h>
+
+/*
+        THE FILES
+
+        The names of src/sh/file.c the link calls, on libSystem: a look at a
+        name or an open descriptor (fstatat, or fstat for the empty name the
+        Linux build hands AT_EMPTY_PATH with), a whole file published beside
+        its name and renamed over it, the transfer loop, the umask, the
+        environment, a reason's words and the two plain writers. file.c is the
+        shell's, statx and openat2 all through, and is not built on a Mac.
+        file_facts keeps the fields the link reads.
+*/
+
+#define ERROR_EXISTS 17
+#define ERROR_NAME_TOO_LONG 36
+#define ERROR_INPUT_OUTPUT 5
+#define MODE_FORMAT 0170000
+#define MODE_SOCKET 0140000
+#define MODE_LINK 0120000
+#define MODE_FILE 0100000
+#define MODE_BLOCK 0060000
+#define MODE_DIRECTORY 0040000
+#define MODE_CHARACTER 0020000
+#define MODE_PIPE 0010000
+#define FILE_STAGED_NO_REPLACE 4
+#define FILE_STAGED_EXACT_MODE 8
+
+typedef struct
+{
+        b64 seconds;
+        p32 nanoseconds;
+        b32 reserved;
+} file_moment;
+
+//      The fields the link reads, filled from Darwin's stat.
+typedef struct
+{
+        p32 mode;
+        p32 owner;
+        p32 group;
+        p64 inode;
+        p64 size;
+        p64 device;
+        file_moment modified;
+        file_moment changed;
+} file_facts;
+
+extern char *strerror(int number);
+extern char **environ;
+extern int mkstemp(char *template_name);
+extern int fsync(int handle);
+extern int rename(const char *from, const char *to);
+extern int unlink(const char *path);
+extern long pwrite(int handle, const void *data, unsigned long length, long long offset);
+extern long pread(int handle, void *data, unsigned long length, long long offset);
+extern char *getenv(const char *name);
+
+static bool file_look(bipolar directory, string_address path, positive flags,
+                      file_facts address_to out)
+{
+        struct stat facts;
+        int result = path[0] ? fstatat((int)directory, (const char *)path, &facts, (int)flags)
+                             : fstat((int)directory, &facts);
+
+        memory_fill(out, 0, sizeof(file_facts));
+        if (result != 0)
+                return false;
+        out->mode = facts.st_mode;
+        out->owner = facts.st_uid;
+        out->group = facts.st_gid;
+        out->inode = facts.st_ino;
+        out->size = (p64)facts.st_size;
+        out->device = (p64)(p32)facts.st_dev;
+        out->modified.seconds = facts.st_mtimespec.tv_sec;
+        out->modified.nanoseconds = (p32)facts.st_mtimespec.tv_nsec;
+        out->changed.seconds = facts.st_ctimespec.tv_sec;
+        out->changed.nanoseconds = (p32)facts.st_ctimespec.tv_nsec;
+        return true;
+}
+
+static bool file_look_at(string_address path, file_facts address_to out)
+{
+        return file_look(AT_FDCWD, path, 0, out);
+}
+
+static bool file_same_identity(const file_facts address_to one, const file_facts address_to two)
+{
+        return one->inode == two->inode && one->device == two->device;
+}
+
+static positive file_umask(void)
+{
+        mode_t mask = umask(0);
+
+        umask(mask);
+        return mask & 0777;
+}
+
+static string_address address_to file_environment_all(void)
+{
+        return (string_address address_to)environ;
+}
+
+static string_address file_environment(string_address name)
+{
+        return (string_address)getenv((const char *)name);
+}
+
+static string_address file_reason(bipolar code)
+{
+        return (string_address)strerror((int)(code < 0 ? -code : code));
+}
+
+//      The writer convention: a zero length is a string to its terminator.
+static fn plain_out(address_any data, positive length)
+{
+        (void)system_write_all(1, data, length ? length : string_length((string_address)data));
+}
+
+static fn plain_err(address_any data, positive length)
+{
+        (void)system_write_all(2, data, length ? length : string_length((string_address)data));
+}
+
+//      operation is the Linux build's syscall(pwrite64) or syscall(pread64);
+//      on Darwin those name pwrite and pread (lib.c's table).
+static bipolar file_transfer_exact(positive operation, bipolar handle,
+                                   p8 address_to buffer, positive length,
+                                   p64 offset)
+{
+        positive done = 0;
+
+        while (done < length)
+        {
+                long moved = operation == (positive)(syscall(pwrite64))
+                                 ? pwrite((int)handle, buffer + done, length - done, (long long)(offset + done))
+                                 : pread((int)handle, buffer + done, length - done, (long long)(offset + done));
+
+                if (moved < 0)
+                {
+                        if (*__error() == 4)
+                                continue;
+                        return -(bipolar)*__error();
+                }
+                if (moved == 0)
+                        break;
+                done += (positive)moved;
+        }
+        return (bipolar)done;
+}
+
+/*      A whole file, written beside its name and renamed over it: the old
+        bytes or the new, never half of each. NO_REPLACE refuses a name that
+        is there. */
+static bipolar file_publish_with(string_address path, address_any bytes,
+                                 positive length, positive mode, bool sync,
+                                 positive behavior)
+{
+        p8 stage[1100];
+        positive used = string_length(path);
+        int handle;
+        bipolar written;
+        file_facts there;
+
+        if (used + 16 > sizeof(stage))
+                return -ERROR_NAME_TOO_LONG;
+        if ((behavior & FILE_STAGED_NO_REPLACE) && file_look_at(path, address_of there))
+                return -ERROR_EXISTS;
+        memory_copy(stage, path, used);
+        memory_copy(stage + used, ".stage.XXXXXX", 14);
+        handle = mkstemp((char *)stage);
+        if (handle < 0)
+                return -(bipolar)*__error();
+        (void)fchmod(handle, (mode_t)(mode & 07777));
+        written = file_transfer_exact(syscall(pwrite64), handle, (p8 address_to)bytes, length, 0);
+        if (written != (bipolar)length || (sync && fsync(handle) != 0))
+        {
+                (void)close(handle);
+                (void)unlink((const char *)stage);
+                return written < 0 ? written : -ERROR_INPUT_OUTPUT;
+        }
+        (void)close(handle);
+        if (rename((const char *)stage, (const char *)path) != 0)
+        {
+                bipolar error = -(bipolar)*__error();
+
+                (void)unlink((const char *)stage);
+                return error;
+        }
+        return 0;
+}
+
+static bipolar file_publish_bytes(string_address path, address_any bytes,
+                                  positive length, positive mode, bool sync)
+{
+        return file_publish_with(path, bytes, length, mode, sync, 0);
+}
+
+/*
+        THE SHELL'S NAMES
+
+        system_clock_ns (snapshot.c on Linux) on Darwin's clock ids, which the
+        link names by HOST_CLOCK_BOOTTIME and 0; shell_exec_file (shell.c),
+        which here is execve of the path, the listener's own binary; and
+        process_pty_open (pty.c) on posix_openpt.
+*/
+extern int execve(const char *path, char *const arguments[], char *const environment[]);
+extern int posix_openpt(int flags);
+extern int grantpt(int handle);
+extern int unlockpt(int handle);
+extern char *ptsname(int handle);
+
+static positive system_clock_ns(b32 clock)
+{
+        return (positive)clock_gettime_nsec_np((clockid_t)clock);
+}
+
+bipolar shell_exec_file(string_address path, string_address address_to arguments,
+                        positive count, string_address address_to environment)
+{
+        string_address words[64];
+
+        if (count >= array_count(words))
+                return -E2BIG;
+        for (positive at = 0; at < count; at++)
+                words[at] = arguments[at];
+        words[count] = null;
+        (void)execve((const char *)path, (char *const *)words, (char *const *)environment);
+        return -darwin_errno();
+}
+
+static bipolar process_pty_open(b32 address_to master_out, b32 address_to slave_out,
+                                bool nonblocking)
+{
+        int master = posix_openpt(O_RDWR | O_NOCTTY);
+        char *name;
+        int slave;
+
+        if (master < 0)
+                return -darwin_errno();
+        name = master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0
+                   ? ptsname(master) : null;
+        slave = name ? open(name, O_RDWR | O_NOCTTY) : -1;
+        if (slave < 0)
+        {
+                bipolar error = -darwin_errno();
+
+                (void)close(master);
+                return error;
+        }
+        (void)fcntl(master, F_SETFD, FD_CLOEXEC);
+        (void)fcntl(slave, F_SETFD, FD_CLOEXEC);
+        if (nonblocking)
+                (void)fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
+        address_to master_out = master;
+        address_to slave_out = slave;
+        return 0;
+}
+
+/*      The client's terminal raw and back, as edit.c's pair does it on
+        Linux: keys and not lines, no echo, no signals from the keys, no
+        flow control and no output processing. */
+static struct termios edit_modes_before;
+static bool edit_modes_held;
+
+static p8 edit_terminal_raw()
+{
+        struct termios modes;
+
+        if (tcgetattr(0, &edit_modes_before) != 0)
+                return false;
+        modes = edit_modes_before;
+        modes.c_iflag &= ~(tcflag_t)(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR |
+                                      IGNCR | ICRNL | IXON);
+        modes.c_oflag &= ~(tcflag_t)OPOST;
+        modes.c_cflag &= ~(tcflag_t)(CSIZE | PARENB);
+        modes.c_cflag |= CS8;
+        modes.c_lflag &= ~(tcflag_t)(ISIG | ICANON | ECHO | ECHONL | IEXTEN);
+        modes.c_cc[VMIN] = 1;
+        modes.c_cc[VTIME] = 0;
+        if (tcsetattr(0, TCSANOW, &modes) != 0)
+                return false;
+        edit_modes_held = true;
+        return true;
+}
+
+static fn edit_terminal_restore()
+{
+        if (!edit_modes_held)
+                return;
+        (void)tcsetattr(0, TCSANOW, &edit_modes_before);
+        edit_modes_held = false;
+}
+
+/*      In the child: a session of its own, the terminal its controlling one
+        (TIOCSCTTY, _IO('t', 97) on Darwin), and the slave on 0, 1 and 2. */
+extern int setsid(void);
+extern int ioctl(int handle, unsigned long request, ...);
+extern int dup2(int from, int to);
+
+static bipolar process_pty_child_setup(b32 master, b32 slave, bipolar close_one,
+                                       bipolar close_two)
+{
+        if (close_one >= 0 && close_one != master && close_one != slave)
+                (void)close((int)close_one);
+        if (close_two >= 0 && close_two != close_one && close_two != master &&
+            close_two != slave)
+                (void)close((int)close_two);
+        if (setsid() < 0 || ioctl(slave, 0x20007461ul, 0) < 0)
+                return -darwin_errno();
+        (void)close(master);
+        for (int target = 0; target < 3; target++)
+                if (dup2(slave, target) < 0)
+                        return -darwin_errno();
+        if (slave > 2)
+                (void)close(slave);
+        return 0;
+}
 
 #define log plain_out
 #define log_error plain_err

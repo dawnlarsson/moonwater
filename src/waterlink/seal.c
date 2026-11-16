@@ -620,13 +620,13 @@ __asm__(
 
 __asm__(
     ASM_FUNC(waterlink_seal_box)
-    "cmp x3, #64\n   b.hi .Lwaterlink_seal_box_general\n"
-    "adrp x9, cpu_has_aes\n   ldrb w9, [x9, :lo12:cpu_has_aes]\n"
-    "cbz w9, .Lwaterlink_seal_box_general\n"
-    "adrp x9, cpu_has_pclmul\n   ldrb w9, [x9, :lo12:cpu_has_pclmul]\n"
-    "cbz w9, .Lwaterlink_seal_box_general\n"
+    "cmp x3, #64\n   b.hi " ASM_LABEL(waterlink_seal_box_general) "\n"
+    "adrp x9, " ASM_PAGE(cpu_has_aes) "\n   ldrb w9, [x9, " ASM_LO12(cpu_has_aes) "]\n"
+    "cbz w9, " ASM_LABEL(waterlink_seal_box_general) "\n"
+    "adrp x9, " ASM_PAGE(cpu_has_pclmul) "\n   ldrb w9, [x9, " ASM_LO12(cpu_has_pclmul) "]\n"
+    "cbz w9, " ASM_LABEL(waterlink_seal_box_general) "\n"
     "b waterlink_seal_small\n"
-    ".Lwaterlink_seal_box_general:\n"
+    "" ASM_LABEL(waterlink_seal_box_general) ":\n"
     "stp x29, x30, [sp, #-112]!\n   mov x29, sp\n"
     "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n"
     "mov x19, x0\n   mov x20, x1\n   mov x21, x3\n"
@@ -658,13 +658,13 @@ __asm__(
     ASM_RET
     ASM_END(waterlink_seal_box)
     ASM_FUNC(waterlink_open_box)
-    "cmp x2, #64\n   b.hi .Lwaterlink_open_box_general\n"
-    "adrp x9, cpu_has_aes\n   ldrb w9, [x9, :lo12:cpu_has_aes]\n"
-    "cbz w9, .Lwaterlink_open_box_general\n"
-    "adrp x9, cpu_has_pclmul\n   ldrb w9, [x9, :lo12:cpu_has_pclmul]\n"
-    "cbz w9, .Lwaterlink_open_box_general\n"
+    "cmp x2, #64\n   b.hi " ASM_LABEL(waterlink_open_box_general) "\n"
+    "adrp x9, " ASM_PAGE(cpu_has_aes) "\n   ldrb w9, [x9, " ASM_LO12(cpu_has_aes) "]\n"
+    "cbz w9, " ASM_LABEL(waterlink_open_box_general) "\n"
+    "adrp x9, " ASM_PAGE(cpu_has_pclmul) "\n   ldrb w9, [x9, " ASM_LO12(cpu_has_pclmul) "]\n"
+    "cbz w9, " ASM_LABEL(waterlink_open_box_general) "\n"
     "b waterlink_open_small\n"
-    ".Lwaterlink_open_box_general:\n"
+    "" ASM_LABEL(waterlink_open_box_general) ":\n"
     "stp x29, x30, [sp, #-112]!\n   mov x29, sp\n"
     "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n"
     "mov x19, x0\n   mov x20, x1\n   mov x21, x2\n"
@@ -705,8 +705,8 @@ __asm__(
     WATERLINK_SMALL_STREAM
     WATERLINK_SMALL_HASH_BEGIN("x3")
     "dup v28.16b, w2\n"
-    "adrp x10, .Lwaterlink_small_index\n"
-    "add x10, x10, :lo12:.Lwaterlink_small_index\n"
+    "adrp x10, " ASM_PAGE_LABEL(waterlink_small_index) "\n"
+    "add x10, x10, " ASM_LO12_LABEL(waterlink_small_index) "\n"
     WATERLINK_SMALL_SEAL_BLOCK("1", "16", "0")
     "cmp x3, #16\n   b.eq 1f\n"
     WATERLINK_SMALL_SEAL_BLOCK("2", "32", "16")
@@ -757,8 +757,8 @@ __asm__(
     ".arch_extension nocrypto\n"
     ASM_LOCAL_END(waterlink_open_small)
 
-    ".pushsection .rodata\n   .balign 16\n"
-    ".Lwaterlink_small_index:\n"
+    ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(waterlink_small_index) ":\n"
     ".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
     ".byte 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31\n"
     ".byte 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47\n"

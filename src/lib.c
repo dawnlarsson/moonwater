@@ -2577,6 +2577,11 @@ typedef union matrix4
     #name ":\n"
 
 #define ASM_LOCAL_END(name)
+
+// A C function or object the shared assembly calls or reads by its bare
+// name, as the ELF build spells it: written on its declaration, it gives the
+// C symbol that name in place of Darwin's _name.
+#define ASM_C_NAME(name) __asm__(#name)
 #else
 #define ASM_FUNC(name)                  \
     ASM_ROUTINE_SECTION(name)           \
@@ -2606,6 +2611,9 @@ typedef union matrix4
     #name ":\n"
 
 #define ASM_LOCAL_END(name) ".size " #name ", .-" #name "\n" ASM_ROUTINE_SECTION_END
+
+// The C symbol already is the bare name on ELF.
+#define ASM_C_NAME(name)
 #endif
 
 /*
@@ -31145,21 +31153,43 @@ ASM_FUNC(positive_to_string)
     ASM_CALL("x9")
     "" ASM_LABEL(diagnostic_arm64_ready) ":\n   ldp x9, x1, [sp, 16]\n   ldr x0, [x9]\n   ldr x3, [x9, 16]\n   ldr x3, [x3]\n   ldp x4, x5, [sp, 32]\n   adrp x2, " ASM_PAGE(string_diagnostic_format) "\n"
     "add x2, x2, " ASM_LO12(string_diagnostic_format) "\n   cbnz x4, " ASM_LABEL(diagnostic_arm64_report) "\n   add x2, x2, 4\n   mov x4, x5\n"
+#if defined(MACOS)
+    //       Darwin's arm64 passes every variadic argument on the stack, one
+    //       eight-byte slot each, so the two words go there and not in x3, x4.
+    "" ASM_LABEL(diagnostic_arm64_report) ":\n   sub sp, sp, 16\n   stp x3, x4, [sp]\n   bl string_report\n   add sp, sp, 16\n"
+#else
     "" ASM_LABEL(diagnostic_arm64_report) ":\n   bl string_report\n"
+#endif
     "ldp x29, x30, [sp], 48\n" ASM_RET
     ASM_END(string_diagnostic)
 
     ASM_FUNC(string_report)
+#if defined(MACOS)
+    //       x11 is where the saved argument registers start; on Darwin no
+    //       variadic argument is in one, so they start at their end.
+    "mov w10, w1\n   mov x1, x2\n   mov x11, #256\n   b " ASM_LABEL(string_format_enter) "\n"
+#else
     "mov w10, w1\n   mov x1, x2\n   mov x11, #216\n   b " ASM_LABEL(string_format_enter) "\n"
+#endif
     ASM_END(string_report)
 #endif // KERNEL_MODE
     ASM_FUNC(string_format)
+#if defined(MACOS)
+    "mov w10, wzr\n   mov x11, #256\n"
+#else
     "mov w10, wzr\n   mov x11, #208\n"
+#endif
     "" ASM_LABEL(string_format_enter) ":  stp x29, x30, [sp, -256]!\n   ldrb w9, [x1]  // the first byte, before it is wanted\n"
     "mov x29, sp\n   stp x19, x20, [sp, 16]\n   stp x21, x22, [sp, 32]\n   stp x23, x24, [sp, 48]\n   str w10, [sp, 64]\n"
     "stp x2, x3, [sp, 208]\n   stp x4, x5, [sp, 224]\n   stp x6, x7, [sp, 240]  // this pair ends at the caller's arguments\n"
 #ifndef KERNEL_MODE
+#if defined(MACOS)
+    //       Darwin's doubles in a variadic call are on the stack too: the
+    //       vector cursor starts past its area, so each is read from x24.
+    "mov x23, #0\n"
+#else
     "stp q0, q1, [sp, 80]\n   stp q2, q3, [sp, 112]\n   stp q4, q5, [sp, 144]\n   stp q6, q7, [sp, 176]\n   mov x23,  #-176               // eight vector registers, back from x22\n"
+#endif
 #endif
     "mov x19, x0  // the writer\n"
     "mov x20, x1  // where the scan is\n"
@@ -58718,9 +58748,12 @@ __asm__(
 #if ARM64
 
 #if defined(MACOS) || defined(IOS)
-// Darwin passes the syscall number in x16 and traps with svc #0x80.
+// Darwin passes the syscall number in x16 and traps with svc #0x80. A failed
+// call sets the carry and answers a positive errno; the negation after the
+// trap gives every caller Linux's answer, a negative errno, as
+// system_read_retry and the socket routines already make theirs.
 #define SYSCALL_NUMBER_REGISTER "x16"
-#define SYSCALL_INSTRUCTION "svc #0x80"
+#define SYSCALL_INSTRUCTION "svc #0x80\n   cneg x0, x0, cs"
 #else
 // Linux passes the syscall number in x8 and traps with svc #0.
 #define SYSCALL_NUMBER_REGISTER "x8"
@@ -59049,6 +59082,12 @@ typedef struct timespec
         p64 tv_sec;
         p64 tv_nsec;
 } timespec;
+#if defined(MACOS) || defined(IOS)
+//      Darwin's headers define struct timespec only where this name is not
+//      defined, and theirs is these two 64-bit words, so a header included
+//      after this one takes this one.
+#define _STRUCT_TIMESPEC struct timespec
+#endif
 
 // User required implementations
 KEEP b32 main();
@@ -60604,7 +60643,58 @@ typedef b64 ptrdiff_t;
 // no Darwin number, or take other arguments; waterlink's call sites are
 // written per platform for those.
 #define syscall_macos_arm64_pwrite64 0x9a
+#define syscall_macos_arm64_pread64 0x99
 #define syscall_macos_arm64_exit_group 0x1
+// The Linux-only calls the shared C names, as nosys: Darwin's kernel answers
+// it with SIGSYS, and with ENOSYS where SIGSYS is ignored, as the Mac's
+// programs ignore it (src/waterlink/mac.c). A path that has a fallback for an
+// old kernel takes it; one that has none fails with ENOSYS where it would
+// have been a build error.
+#define syscall_macos_arm64_clock_getres syscall_macos_arm64_invalid
+#define syscall_macos_arm64_clock_gettime syscall_macos_arm64_invalid
+#define syscall_macos_arm64_clock_nanosleep syscall_macos_arm64_invalid
+#define syscall_macos_arm64_clock_settime syscall_macos_arm64_invalid
+#define syscall_macos_arm64_clone syscall_macos_arm64_invalid
+#define syscall_macos_arm64_copy_file_range syscall_macos_arm64_invalid
+#define syscall_macos_arm64_dup3 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_faccessat2 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_fchmodat2 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_futex syscall_macos_arm64_invalid
+#define syscall_macos_arm64_getdents64 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_getxattrat syscall_macos_arm64_invalid
+#define syscall_macos_arm64_lgetxattr syscall_macos_arm64_invalid
+#define syscall_macos_arm64_listxattrat syscall_macos_arm64_invalid
+#define syscall_macos_arm64_llistxattr syscall_macos_arm64_invalid
+#define syscall_macos_arm64_memfd_create syscall_macos_arm64_invalid
+#define syscall_macos_arm64_mknodat syscall_macos_arm64_invalid
+#define syscall_macos_arm64_nanosleep syscall_macos_arm64_invalid
+#define syscall_macos_arm64_newfstatat syscall_macos_arm64_invalid
+#define syscall_macos_arm64_openat2 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_pidfd_open syscall_macos_arm64_invalid
+#define syscall_macos_arm64_pidfd_send_signal syscall_macos_arm64_invalid
+#define syscall_macos_arm64_pipe2 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_ppoll syscall_macos_arm64_invalid
+#define syscall_macos_arm64_prctl syscall_macos_arm64_invalid
+#define syscall_macos_arm64_prlimit64 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_renameat2 syscall_macos_arm64_invalid
+#define syscall_macos_arm64_restart_syscall syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigaction syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigpending syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigprocmask syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigqueueinfo syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigreturn syscall_macos_arm64_invalid
+#define syscall_macos_arm64_rt_sigsuspend syscall_macos_arm64_invalid
+#define syscall_macos_arm64_sched_getaffinity syscall_macos_arm64_invalid
+#define syscall_macos_arm64_sched_getscheduler syscall_macos_arm64_invalid
+#define syscall_macos_arm64_setresgid syscall_macos_arm64_invalid
+#define syscall_macos_arm64_setresuid syscall_macos_arm64_invalid
+#define syscall_macos_arm64_setxattrat syscall_macos_arm64_invalid
+#define syscall_macos_arm64_statx syscall_macos_arm64_invalid
+#define syscall_macos_arm64_syncfs syscall_macos_arm64_invalid
+#define syscall_macos_arm64_sysinfo syscall_macos_arm64_invalid
+#define syscall_macos_arm64_tgkill syscall_macos_arm64_invalid
+#define syscall_macos_arm64_uname syscall_macos_arm64_invalid
+#define syscall_macos_arm64_utimensat syscall_macos_arm64_invalid
 #define MS_NONE 0
 #define MS_RDONLY 1
 #define MS_NOSUID 2

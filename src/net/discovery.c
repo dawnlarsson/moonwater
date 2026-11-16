@@ -2517,14 +2517,14 @@ static fn discovery_lan_open(discovery_lan address_to lan)
 
 #if defined(MACOS)
         {
-                struct sockaddr_in local;
+                struct sockaddr_in any; // not `local`, lib.c's __thread
 
-                memory_zero(address_of local, sizeof local);
-                local.sin_len = (unsigned char)sizeof local;
-                local.sin_family = AF_INET;
-                local.sin_port = network_order_16(DISCOVERY_MDNS_PORT);
-                if (bind((b32)lan->socket, (struct sockaddr *)address_of local,
-                         sizeof local) < 0)
+                memory_zero(address_of any, sizeof any);
+                any.sin_len = (unsigned char)sizeof any;
+                any.sin_family = AF_INET;
+                any.sin_port = network_order_16(DISCOVERY_MDNS_PORT);
+                if (bind((b32)lan->socket, (struct sockaddr *)address_of any,
+                         sizeof any) < 0)
                 {
                         discovery_lan_close(lan);
                         return;

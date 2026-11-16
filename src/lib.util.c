@@ -1023,8 +1023,12 @@ bipolar system_read_retry(positive handle, address_any into, positive length);
                       (positive)(bipolar)(directory), (positive)(path),      \
                       (positive)(into), (positive)(flags))
 
+#if defined(MACOS) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+#define system_pipe(pair, flags) darwin_pipe((pair), (positive)(flags))
+#else
 #define system_pipe(pair, flags)                                             \
         system_call_2(syscall(pipe2), (positive)(pair), (positive)(flags))
+#endif
 
 #if (defined(LINUX) || defined(MACOS)) && !defined(KERNEL_MODE)
 /* Linux exposes pollfd as an eight-byte kernel record on every supported
@@ -1163,6 +1167,418 @@ static inline INLINE positive system_nonce()
                 ((positive)address_of value >> 3);
         return system_nonce_stir(value);
 }
+#endif
+
+/*
+        THE PLATFORM ON DARWIN
+
+        A program built here for a Mac (src/waterlink/mac.c is the one) runs
+        on libSystem, which dyld has started before lib.c's _start runs. The C
+        library is libSystem's, so the families of standard that would define
+        its names a second time (the allocator, errno, the descriptor entries,
+        stdio, the clock, math, signals, process, scan, spool, format, lock and
+        the startup wrapper) are not compiled here: each is a collision with
+        the library that is already there.
+
+        What the families above and below need from the platform is said here
+        in C, by libc, for the calls Darwin's kernel has no Linux spelling of:
+        whole writes and waits that retry an interruption, random bytes from
+        getentropy, a fork and a pipe, signal dispositions in Linux's
+        four-word record, the clocks, a nap, descriptors closed above a number,
+        and the allocator's names on malloc.
+
+        One thread. Darwin's threads are pthreads and this library's runtime
+        is clone and a thread register (lib.c, Linux only); here the runtime
+        is one block that the first thread is, locks that are never contended,
+        and a start that refuses. The pool asks sched_getaffinity for its
+        width, which Darwin answers ENOSYS, so the width is 1 and every
+        parallel run is the caller's own, inline, as on a one-processor Linux.
+
+        The Linux-only calls named through syscall() are Darwin's nosys
+        (lib.c's table), which answers SIGSYS; the program ignores SIGSYS
+        (mac.c), so each answers ENOSYS and a caller with a fallback takes it.
+*/
+#if defined(MACOS) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+
+#define STANDARD_SKIP_ALLOCATOR
+#define STANDARD_SKIP_ERROR
+#define STANDARD_SKIP_LOCK
+#define STANDARD_SKIP_SCAN
+#define STANDARD_SKIP_STREAM
+#define STANDARD_SKIP_SPOOL
+#define STANDARD_SKIP_MATH
+#define STANDARD_SKIP_NUMBERS
+#define STANDARD_SKIP_CLOCK
+#define STANDARD_SKIP_STDLIB
+#define STANDARD_SKIP_PROCESS
+#define STANDARD_SKIP_SIGNAL
+#define STANDARD_SKIP_FORMAT
+
+/*      libSystem's headers where they declare what is used, so a file that
+        includes them after this one meets the same declarations (lib.c
+        spells the flags, signals and errno with Darwin's values). Not
+        <unistd.h>, which declares syscall(), lib.c's macro; its few names
+        are declared below. */
+#include <errno.h>
+#include <signal.h>
+#include <sys/fcntl.h>
+#include <sys/random.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <time.h>
+extern long write(int descriptor, const void *data, unsigned long length);
+extern int fork(void);
+extern int pipe(int descriptors[2]);
+extern int close(int descriptor);
+extern int getdtablesize(void);
+extern void *malloc(unsigned long bytes);
+extern void *calloc(unsigned long count, unsigned long size);
+extern void *realloc(void *block, unsigned long bytes);
+extern void free(void *block);
+extern int posix_memalign(void **result, unsigned long alignment, unsigned long bytes);
+extern unsigned long malloc_size(const void *block);
+
+#define darwin_errno() ((bipolar)*__error())
+
+//      The allocator is malloc's. memory_take and memory_give are lib.c's
+//      assembly's to call (string_duplicate, strndup) by their bare names.
+KEEP address_any memory_take(positive bytes) ASM_C_NAME(memory_take);
+KEEP fn memory_give(address_any block) ASM_C_NAME(memory_give);
+KEEP address_any memory_take(positive bytes) { return malloc(bytes ? bytes : 1); }
+KEEP fn memory_give(address_any block) { free(block); }
+static inline INLINE address_any memory_take_zeroed(positive count, positive size) { return calloc(count, size); }
+static inline INLINE address_any memory_resize(address_any block, positive bytes) { return realloc(block, bytes); }
+static inline INLINE positive memory_usable_size(address_any block) { return block ? malloc_size(block) : 0; }
+static inline INLINE address_any memory_take_aligned(positive alignment, positive bytes)
+{
+        void *block = null;
+
+        return posix_memalign(&block, alignment < sizeof(void *) ? sizeof(void *) : alignment,
+                              bytes ? bytes : 1) == 0 ? block : null;
+}
+
+//      One thread: the runtime's names, for the pool and its callers.
+#define THREAD_SHELVES 52
+typedef struct thread
+{
+        struct thread address_to self;
+        b32 error_number;
+        b32 identity;
+        address_any region;
+        address_any run;
+        fn(address_to entry)(address_any);
+        address_any argument;
+        positive slot;
+        positive spare;
+        address_any shelves[THREAD_SHELVES];
+        positive reserved[4];
+} thread;
+
+static thread thread_main;
+static positive threads_live;
+#define thread_self() (address_of thread_main)
+#define LIBRARY_THREAD_RUNTIME 1
+#define LOCK_FREE 0
+#define LOCK_HELD 1
+#define LOCK_WAITED 2
+typedef struct
+{
+        b32 word;
+} lock;
+static inline INLINE fn lock_take(lock address_to it) { it->word = LOCK_HELD; }
+static inline INLINE fn lock_release(lock address_to it) { it->word = LOCK_FREE; }
+static inline INLINE bool lock_try(lock address_to it)
+{
+        if (it->word)
+                return false;
+        it->word = LOCK_HELD;
+        return true;
+}
+//      Nobody else is there to change the word or to be woken.
+static inline INLINE bipolar thread_wait(b32 address_to word, b32 expected)
+{
+        (void)word;
+        (void)expected;
+        return -11;
+}
+static inline INLINE bipolar thread_wake(b32 address_to word, b32 count)
+{
+        (void)word;
+        (void)count;
+        return 0;
+}
+static inline INLINE thread address_to thread_start(fn(address_to entry)(address_any),
+                                                    address_any argument)
+{
+        (void)entry;
+        (void)argument;
+        return null;
+}
+static inline INLINE fn thread_join(thread address_to it) { (void)it; }
+//      The allocator's shelves are malloc's: there is nothing to hand over.
+static inline INLINE fn allocator_shelves_share(void) {}
+#define atomic_load(address) __atomic_load_n(address, __ATOMIC_SEQ_CST)
+
+//      Whole writes, with descriptor 1 handed to the sink when one is set;
+//      lib.c's buffered writers and log call system_write_all by its bare
+//      name, and log_error sets writer_stderr_failed (lib.c's Linux block
+//      keeps both there).
+typedef struct { positive bytes; bipolar error; } system_write_result;
+extern writer standard_output_sink;
+KEEP p8 writer_stderr_failed ASM_C_NAME(writer_stderr_failed);
+KEEP positive system_write_all(positive handle, const address_any data, positive length)
+        ASM_C_NAME(system_write_all);
+
+static system_write_result system_write_all_checked(positive handle, const address_any data,
+                                                    positive length)
+{
+        system_write_result result = {0, 0};
+
+        if (handle == 1 && standard_output_sink)
+        {
+                standard_output_sink((address_any)data, length);
+                result.bytes = length;
+                return result;
+        }
+        while (result.bytes < length)
+        {
+                long wrote = write((int)handle, (const p8 address_to)data + result.bytes,
+                                   length - result.bytes);
+
+                if (wrote < 0)
+                {
+                        if (*__error() == 4)
+                                continue;
+                        result.error = -darwin_errno();
+                        break;
+                }
+                if (wrote == 0)
+                        break;
+                result.bytes += (positive)wrote;
+        }
+        return result;
+}
+
+KEEP positive system_write_all(positive handle, const address_any data, positive length)
+{
+        return system_write_all_checked(handle, data, length).bytes;
+}
+
+static bipolar system_wait4_retry(bipolar process, address_any status,
+                                  positive options, address_any usage)
+{
+        int code = 0;
+        int got;
+
+        do
+                got = wait4((int)process, &code, (int)options, usage);
+        while (got < 0 && *__error() == 4);
+        if (got < 0)
+                return -darwin_errno();
+        if (status)
+                address_to(b32 address_to) status = code;
+        return got;
+}
+
+//      getentropy gives 256 bytes at a call; the flags are Linux's and
+//      ask nothing of it.
+static bipolar system_random_fill(address_any into, positive length,
+                                  positive flags)
+{
+        (void)flags;
+        for (positive used = 0; used < length; used += 256)
+                if (getentropy((p8 address_to)into + used,
+                               length - used < 256 ? length - used : 256) != 0)
+                        return -darwin_errno();
+        return 0;
+}
+
+static inline INLINE positive system_nonce()
+{
+        positive value;
+
+        if (!system_random_fill(address_of value, sizeof value, 0))
+                return value;
+        value = get_cpu_time() ^ ((positive)address_of value >> 3);
+        return system_nonce_stir(value);
+}
+
+//      The pipe with its flags put on each end, as pipe2 would; Darwin's
+//      O_CLOEXEC and O_NONBLOCK are lib.c's spellings here.
+static bipolar darwin_pipe(b32 address_to pair, positive flags)
+{
+        if (pipe(pair) != 0)
+                return -darwin_errno();
+        for (positive at = 0; at < 2; at++)
+        {
+                if (flags & O_CLOEXEC)
+                        (void)fcntl(pair[at], F_SETFD, FD_CLOEXEC);
+                if (flags & O_NONBLOCK)
+                        (void)fcntl(pair[at], F_SETFL, fcntl(pair[at], F_GETFL) | O_NONBLOCK);
+        }
+        return 0;
+}
+
+/*      Linux's two socket flags, which Darwin's socket and accept do not
+        take: bits no Darwin socket type uses, taken off the type before the
+        trap (lib.c's socket_new and socket_accept) and put on the descriptor
+        after it, so a socket is made the one way on both. */
+#define SOCK_NONBLOCK 0x20000000
+#define SOCK_CLOEXEC 0x10000000
+
+static bipolar darwin_socket_flags(bipolar handle, b32 flags)
+{
+        if (handle < 0)
+                return handle;
+        if (((flags & SOCK_CLOEXEC) && fcntl((int)handle, F_SETFD, FD_CLOEXEC) < 0) ||
+            ((flags & SOCK_NONBLOCK) &&
+             fcntl((int)handle, F_SETFL, fcntl((int)handle, F_GETFL) | O_NONBLOCK) < 0))
+        {
+                bipolar error = -darwin_errno();
+
+                (void)close((int)handle);
+                return error;
+        }
+        return handle;
+}
+
+#define socket_new(family, kind, protocol)                                    \
+        darwin_socket_flags((socket_new)((family),                            \
+                                         (kind) & ~(SOCK_NONBLOCK | SOCK_CLOEXEC), \
+                                         (protocol)),                         \
+                            (kind))
+#define socket_accept(listener, from, size, flags)                            \
+        darwin_socket_flags((socket_accept)((listener), (from), (size), 0),   \
+                            (flags))
+
+/*      Netlink and packet sockets are Linux's. net.c's interface walks and
+        DHCP open them; here their families are numbers no Darwin family has,
+        so the socket is refused (EAFNOSUPPORT) and each of those paths
+        answers as on a Linux kernel built without them. lib.c leaves the
+        names out on Darwin so that nothing reaches them by accident; this is
+        that refusal, said once. */
+#define AF_NETLINK 255
+#define AF_PACKET 254
+#define SOL_NETLINK 270
+#define NETLINK_EXT_ACK 11
+#define SO_BINDTODEVICE 0
+#define ETH_P_IP 0x0800
+typedef struct
+{
+        p16 family;
+        p16 padding;
+        p32 port;
+        p32 groups;
+} socket_address_netlink;
+typedef struct
+{
+        p16 family;
+        p16 protocol;
+        p32 index;
+        p16 hatype;
+        p8 pkttype;
+        p8 halen;
+        p8 addr[8];
+} socket_address_packet;
+
+/*      A disposition in Linux's four words (handler, flags, restorer, mask),
+        as system_signal_install and the callers that keep one hand it,
+        carried in Darwin's sigaction (handler, a 32-bit mask, flags). The
+        restorer is Linux's; Darwin has its own trampoline. */
+static bipolar darwin_signal_action(b32 number, const positive address_to action,
+                                    positive address_to previous)
+{
+        struct sigaction in;
+        struct sigaction out;
+
+        memory_fill(address_of in, 0, sizeof in);
+        memory_fill(address_of out, 0, sizeof out);
+        if (action)
+        {
+                in.sa_handler = (void (*)(int))action[0];
+                in.sa_flags = (int)action[1];
+                in.sa_mask = (sigset_t)action[3];
+        }
+        if (sigaction(number, action ? &in : null, &out) != 0)
+                return -darwin_errno();
+        if (previous)
+        {
+                previous[0] = (positive)out.sa_handler;
+                previous[1] = (positive)(p32)out.sa_flags;
+                previous[2] = 0;
+                previous[3] = (positive)out.sa_mask;
+        }
+        return 0;
+}
+
+static inline INLINE bool system_signal_install(
+    b32 number, positive disposition, positive flags, positive restorer,
+    positive address_to previous)
+{
+        positive action[4] = {disposition, flags, 0, 0};
+
+        (void)restorer;
+        return darwin_signal_action(number, action, previous) >= 0;
+}
+
+//      The clocks: Darwin's numbers (CLOCK_REALTIME 0, CLOCK_MONOTONIC 6).
+//      Darwin has no boot clock by that name; its monotonic one, like Linux's
+//      boot clock, keeps counting while the machine sleeps.
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME 6
+#endif
+static HOT positive clock_monotonic_nanoseconds()
+{
+        return (positive)clock_gettime_nsec_np(6);
+}
+
+static fn process_nap_ns(positive nanoseconds)
+{
+        timespec span;
+
+        span.tv_sec = nanoseconds / 1000000000;
+        span.tv_nsec = nanoseconds % 1000000000;
+        (void)nanosleep(address_of span, null);
+}
+
+//      The clock family's names, as the callers spell them (net.c's
+//      certificate dates and socket waits), on libSystem's types.
+typedef struct tm tm;
+typedef struct timeval timeval;
+#define CLOCK_SECONDS_PER_DAY 86400
+
+/*      A forked child lets go of every descriptor from the first number up
+        but the few it still needs. Darwin has no close_range, so each number
+        up to the table's size is closed. */
+#define descriptors_none (~(p32)0)
+
+static COLD bool descriptors_close_outside(p32 from, p32 address_to keep,
+                                           positive count)
+{
+        b32 most = getdtablesize();
+
+        if (most > 65536)
+                most = 65536;
+        for (b32 at = (b32)from; at < most; at++)
+        {
+                bool kept = false;
+
+                for (positive i = 0; i < count; i++)
+                        kept |= keep[i] == (p32)at;
+                if (!kept)
+                        (void)close(at);
+        }
+        return true;
+}
+
+static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
+{
+        p32 keep[2] = {first, second};
+
+        return descriptors_close_outside(from, keep, 2);
+}
+
 #endif
 
 #define system_duplicate(from, to, flags)                                    \
@@ -2217,10 +2633,17 @@ static bipolar system_path_file_finish(system_path_file address_to input,
         system_call_2(syscall(ftruncate), (positive)(handle),                \
                       (positive)(length))
 
+#if defined(MACOS) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+#define system_signal_action(number, action, previous, set_bytes)            \
+        darwin_signal_action((b32)(number),                                  \
+                             (const positive address_to)(action),            \
+                             (positive address_to)(previous))
+#else
 #define system_signal_action(number, action, previous, set_bytes)            \
         system_call_4(syscall(rt_sigaction), (positive)(number),             \
                       (positive)(action), (positive)(previous),              \
                       (positive)(set_bytes))
+#endif
 
 /* Linux gives every signal disposition the same four-word record.  Keep that
    ABI shape at the syscall floor: callers choose the handler, flags and
@@ -2262,7 +2685,11 @@ static inline INLINE bool system_signal_install(
                       (positive)(set), (positive)(previous),                 \
                       (positive)(set_bytes))
 
-#if defined(LIBRARY_THREAD_RUNTIME)
+#if defined(MACOS) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+//      libSystem's fork: the raw trap answers the parent and the child alike
+//      in x0 and tells them apart in x1, and libc's atfork handlers are its.
+#define system_fork() ((bipolar)fork())
+#elif defined(LIBRARY_THREAD_RUNTIME)
 /* The child of a fork is one thread whatever its parent was, so it takes its
    copy of the count back to zero -- or every lock it holds from then on would
    wait for threads that were never copied. Only when the copy is not zero
@@ -2320,7 +2747,12 @@ static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
 
         return descriptors_close_outside(from, keep, 2);
 }
+#endif
 
+/*      Darwin's closers are the platform's own (above); the record and the
+        answering child below are the same calls on both. */
+#if (defined(LINUX) || defined(MACOS)) && !defined(KERNEL_MODE) && \
+        !defined(STANDARD_NO_PLATFORM)
 /*
         One record in the kernel log, which says what level it is, and says 6.
 
@@ -3056,7 +3488,11 @@ static bipolar file_slurp_regular_at(bipolar directory, string_address path,
                                      p8 address_to into, positive capacity,
                                      positive flags)
 {
+#if defined(MACOS)
+        struct stat facts;
+#else
         system_path_identity facts;
+#endif
         bipolar handle;
         bipolar got;
 
@@ -3067,11 +3503,17 @@ static bipolar file_slurp_regular_at(bipolar directory, string_address path,
                                 FILE_READ | O_NONBLOCK | O_CLOEXEC | flags);
         if (handle < 0)
                 return handle;
+#if defined(MACOS)
+        got = fstat((int)handle, address_of facts) == 0 ? 0 : -darwin_errno();
+        if (got >= 0 && (facts.st_mode & 0170000) != 0100000)
+                got = -22;
+#else
         got = system_path_identity_at(handle, (string_address) "",
                                       SYSTEM_PATH_AT_EMPTY_PATH,
                                       SYSTEM_PATH_STATX_TYPE, address_of facts);
         if (got >= 0 && (facts.mode & 0170000) != 0100000)
                 got = -22;
+#endif
         if (got >= 0)
                 got = system_read_retry((positive)handle, into, capacity - 1);
         system_close(handle);
@@ -9937,7 +10379,14 @@ pub address_any memalign(positive alignment, positive bytes)
 #endif // !KERNEL_MODE && !WINDOWS
 
 #endif // STANDARD_MODERN_C_STANDARD_ALLOCATOR
-#if defined(LIBRARY_THREAD_RUNTIME)
+#endif // STANDARD_SKIP_ALLOCATOR
+
+/*      The pool. A Mac build (the platform on Darwin, above) has the
+        allocator from libSystem and the pool on its one thread; everywhere
+        else the pool comes with this allocator, and a build that skips the
+        allocator skips the pool too. */
+#if defined(LIBRARY_THREAD_RUNTIME) && \
+        (!defined(STANDARD_SKIP_ALLOCATOR) || defined(MACOS))
 /*
         THE POOL
 
@@ -12109,8 +12558,6 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
         return !atomic_load(address_of run.base.stop);
 }
 #endif // LIBRARY_THREAD_RUNTIME
-
-#endif // STANDARD_SKIP_ALLOCATOR
 
 /* The remaining POSIX compatibility families in src/lib.util.c. Applets skip
    FILE streams, popen/tmpfile, scanf and the lock stubs. The build tool keeps

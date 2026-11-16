@@ -2197,6 +2197,11 @@ static void link_modem_streams_say(void);
 */
 static string_address link_modem_why(void)
 {
+#if defined(MACOS)
+        //      The modem plays through Moonwater's sound server, which a Mac
+        //      has none of; the Mac's side is the receiver (tools/modem_rx.c).
+        return (string_address) "a Mac has no Moonwater sound server to play on";
+#else
         struct audio_state page;
 
         if (!audio_test_page(&page))
@@ -2206,6 +2211,7 @@ static string_address link_modem_why(void)
         if (page.device[0] == 0)
                 return (string_address) "the sound card has no device";
         return null;
+#endif
 }
 
 static p8 link_modem_ready(void)
