@@ -708,7 +708,7 @@ def edge_cases(args, comp):
     out = {}
     fifo = ["-F", comp.fifo] if comp.fifo else []
     for name in names:
-        if args.edge and name not in args.edge:
+        if (args.edge and name not in args.edge) or name == "hog":
             continue
         env = dict(comp.env)
         try:
@@ -738,6 +738,8 @@ def edge_cases(args, comp):
                 break
     if not args.edge or "output-scale-change" in args.edge:
         out["output-scale-change"] = output_scale_change(args, comp)
+    if not args.edge or "oom-hog" in args.edge:
+        out["oom-hog"] = oom_hog(args, comp)
     return out
 
 
@@ -871,6 +873,57 @@ def x_edge(args, comp, xs):
     print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % ("xwayland-restart", r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
           flush=True)
     return out
+
+
+def oom_hog(args, comp):
+    """A client that makes windows and surfaces with pictures until the kernel's OOM killer takes it, under a memory limit of its
+    own (a cgroup of 256 MiB, so the box is not what runs out): the compositor lives, a client animating beside it keeps its
+    frames, and once the hog is dead the compositor's descriptors are where they were and a new client is answered at once."""
+    r = {"outcome": "skip", "ms": -1, "detail": "no_memory_cgroup_here", "alive": comp.alive(), "recover_ms": 0}
+    try:
+        line = next(l for l in open("/proc/self/cgroup") if ":memory:" in l)
+        group = "/sys/fs/cgroup/memory" + line.strip().split(":", 2)[2].rstrip("/") + "/wlhog-%d" % os.getpid()
+        os.makedirs(group, exist_ok=True)
+        with open(group + "/memory.limit_in_bytes", "w") as f:
+            f.write(str(256 << 20))
+    except (OSError, StopIteration):
+        return r
+    before = proc_sample(comp.pid) if comp.pid else None
+    good = subprocess.Popen([os.path.join(args.bin, "wl-stress"), "-m", "anim", "-t", "20", "-w", "400", "-h", "300"], env=comp.env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    t = ns()
+    hog = subprocess.Popen(["sh", "-c", 'echo $$ > "$0/cgroup.procs" && exec "$1" -c hog', group, os.path.join(args.bin, "wl-edge")], env=comp.env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        hog_out, _ = hog.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        hog.kill()
+        hog_out, _ = hog.communicate()
+    died = (ns() - t) / 1e6
+    good_out, _ = good.communicate(timeout=40)
+    res = parse_result(good_out)
+    time.sleep(1.0)
+    after = proc_sample(comp.pid) if comp.pid else None
+    try:
+        kills = [l.split()[1] for l in open(group + "/memory.oom_control") if l.startswith("oom_kill ")]
+    except OSError:
+        kills = []
+    try:
+        os.rmdir(group)
+    except OSError:
+        pass
+    r["alive"] = comp.alive()
+    rec = run_client(comp, [os.path.join(args.bin, "wl-stress"), "-m", "first"], timeout=8) if r["alive"] else {}
+    r["recover_ms"] = rec.get("connect_to_present_ms", -1)
+    killed = hog.returncode == -9
+    fds_back = bool(before and after and after[1] <= before[1] + 2)
+    r["ms"] = died
+    r["detail"] = "hog_exit=%s oom_kills=%s good_frames=%s good_p99=%s fds=%s->%s rss_kib=%s->%s %s" % (
+        hog.returncode, kills[0] if kills else "?", res.get("frames"), res.get("frame_p99"), before[1] if before else "?", after[1] if after else "?",
+        before[0] if before else "?", after[0] if after else "?", (hog_out or "").strip().replace(" ", "_")[:80])
+    r["outcome"] = "ok" if killed and r["alive"] and res.get("frames", 0) > 100 and fds_back else "fail"
+    print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % ("oom-hog", r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]), flush=True)
+    return r
 
 
 def output_scale_change(args, comp):

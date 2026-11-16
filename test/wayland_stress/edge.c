@@ -1417,6 +1417,65 @@ static void case_input(const char *name, int which)
         say(name, strcmp(s, "ok") ? s : ok ? "ok" : "fail", ms_since(t));
 }
 
+/* ---- counts: ten thousand surfaces in one client, and a client that makes windows until the kernel ends it ---- */
+static void case_many_surfaces(const char *name)
+{
+        struct conn c;
+        struct win w;
+        uint64_t t;
+        if (!connect_to(&c) || !open_win(&c, &w, 1))
+                return say(name, "timeout", -1);
+        t = now_ns();
+        int fd = memfd_create("wl-edge-pool", MFD_CLOEXEC);
+        if (ftruncate(fd, 64 * 64 * 4) < 0)
+                return say(name, "timeout", -1);
+        struct wl_shm_pool *pool = wl_shm_create_pool(c.shm, fd, 64 * 64 * 4);
+        close(fd);
+        int made = 0;
+        for (; made < 10000; made++)
+        {
+                struct wl_surface *s = wl_compositor_create_surface(c.comp);
+                struct wl_region *r = wl_compositor_create_region(c.comp);
+                wl_region_add(r, 0, 0, 10, 10);
+                wl_surface_set_opaque_region(s, r);
+                wl_surface_attach(s, wl_shm_pool_create_buffer(pool, 0, 64, 64, 256, WL_SHM_FORMAT_XRGB8888), 0, 0);
+                wl_surface_commit(s);
+                if ((made & 511) == 511 && !roundtrip_within(&c, 5000))
+                        break;
+        }
+        int ok = roundtrip_within(&c, 5000) && frame_of(&c, w.s, shm_buffer(&c, 300, 200, 0xff447744u), 300, 200, 2000);
+        snprintf(detail, sizeof(detail), "surfaces=%d", made);
+        const char *st = state_of(&c);
+        say(name, strcmp(st, "ok") ? st : ok ? "ok" : "timeout", ms_since(t));
+}
+
+// Windows with pictures, made and kept until the kernel ends the client (the runner puts it under a memory limit of its own).
+static void case_hog(const char *name)
+{
+        struct conn c;
+        (void)name;
+        if (!connect_to(&c))
+                _exit(2);
+        for (long n = 0;; n++)
+        {
+                struct win *w = calloc(1, sizeof(*w));
+                if (!w || !open_win(&c, w, 1))
+                        _exit(3);
+                frame_of(&c, w->s, shm_buffer(&c, 256, 256, 0xff000000u | (uint32_t)n), 256, 256, 50);
+                for (int i = 0; i < 20; i++)
+                {
+                        struct wl_surface *s = wl_compositor_create_surface(c.comp);
+                        wl_surface_attach(s, shm_buffer(&c, 64, 64, 0xff808080u), 0, 0);
+                        wl_surface_commit(s);
+                }
+                if (wl_display_get_error(c.d))
+                {
+                        printf("CASE %s outcome=%s ms=-1 detail=windows=%ld\n", name, state_of(&c), n);
+                        _exit(0);
+                }
+        }
+}
+
 /* ---- the cases ---- */
 static void c_kill_commit(const char *n) { case_killed(n, child_commit); }
 static void c_kill_resize(const char *n) { case_killed(n, child_resize); }
@@ -1465,6 +1524,7 @@ static const struct
     {"state-toggle-storm", c_surf9},          {"lock-released-by-crash", c_in0},
     {"cursor-surface-destroyed", c_in1},      {"button-held-pointer-leaves", c_in2},
     {"key-held-focus-change", c_in3},         {"dnd-to-itself", c_in4},
+    {"surfaces-10000", case_many_surfaces},   {"hog", case_hog},
 };
 
 int main(int argc, char **argv)
