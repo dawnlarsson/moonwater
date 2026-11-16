@@ -481,7 +481,8 @@ static const string_address connective_nat_names[] = {
     "without the router's help or a relay"};
 
 /*      What the NAT does, from what each server saw (answered says which
-        did) and whether the first mapping is an address and port of this
+        did) and whether the first mapping, the first server's or the
+        second's when only it answered, is an address and port of this
         machine's own. */
 static positive connective_nat_classify(p8 answered, const p8 address_to first,
                                         p16 first_port, const p8 address_to second,
@@ -489,7 +490,7 @@ static positive connective_nat_classify(p8 answered, const p8 address_to first,
 {
         if (!(answered & 3))
                 return CONNECTIVE_NAT_UNKNOWN;
-        if ((answered & 1) && own)
+        if (own)
                 return CONNECTIVE_NAT_NONE;
         if ((answered & 3) != 3)
                 return CONNECTIVE_NAT_ONE;
@@ -881,6 +882,72 @@ static fn connective_found_read(connective_found address_to found)
                 memory_zero(found, sizeof(address_to found));
 }
 
+/*      What a gather that learned nothing new keeps of the ones before: the
+        last STUN answer whole (which servers answered, what each saw, the
+        NAT told from it and when) and the last trace's address and when,
+        however many gathers ago they came. */
+static fn connective_found_keep(connective_found address_to found,
+                                const connective_found address_to before)
+{
+        if (!found->answered && before->answered)
+        {
+                found->answered = before->answered;
+                found->nat = before->nat;
+                memory_copy(found->mapped, before->mapped, sizeof found->mapped);
+                memory_copy(found->mapped_port, before->mapped_port,
+                            sizeof found->mapped_port);
+                found->stun_when = before->stun_when;
+        }
+        if (found->https != CONNECTIVE_HTTPS_ANSWERED && before->https_when)
+        {
+                memory_copy(found->trace, before->trace, 16);
+                found->https_when = before->https_when;
+        }
+}
+
+/*      Root's, 0600, never through a link planted at the name, and whole:
+        written under a name of this process's own beside it and renamed
+        over it, so a reader (Settings, another gather) never takes it cut,
+        and a file there of another mode is replaced. A reader takes only a
+        whole record with the magic and the size. */
+static fn connective_found_write(const connective_found address_to found)
+{
+#if !defined(MACOS)
+        p8 beside[64];
+        positive used = string_length(CONNECTIVE_CACHE_PATH);
+        bipolar handle;
+        p8 whole;
+
+        memory_copy(beside, CONNECTIVE_CACHE_PATH, used);
+        beside[used++] = '.';
+        used += positive_into(beside + used,
+                              (positive)system_call(syscall(getpid)));
+        beside[used] = end;
+        (void)system_remove_at(AT_FDCWD, beside, 0);
+        handle = system_open_output_at(AT_FDCWD, (string_address)beside, false,
+                                       0600);
+        if (handle < 0)
+                return;
+        whole = system_write_all((positive)handle, found,
+                                 sizeof(address_to found)) ==
+                sizeof(address_to found);
+        system_close((b32)handle);
+        if (!whole || system_rename_at(AT_FDCWD, beside, AT_FDCWD,
+                                       CONNECTIVE_CACHE_PATH, 0) < 0)
+                (void)system_remove_at(AT_FDCWD, beside, 0);
+#else
+        bipolar handle = system_open_output_at(AT_FDCWD, CONNECTIVE_CACHE_PATH,
+                                               true, 0600);
+
+        if (handle >= 0)
+        {
+                (void)system_write_all((positive)handle, found,
+                                       sizeof(address_to found));
+                system_close((b32)handle);
+        }
+#endif
+}
+
 /*      A gather: the lookups ask allows, each in about a second, and what
         they found kept beside what was found before (a lookup not made
         keeps its last answer and its time, so a switch turned off hides
@@ -904,32 +971,8 @@ static fn connective_gather(positive ask, connective_found address_to found,
         (void)ask;
         (void)here;
 #endif
-        if (!found->answered && before.answered)
-        {
-                memory_copy(found->mapped, before.mapped, sizeof found->mapped);
-                memory_copy(found->mapped_port, before.mapped_port,
-                            sizeof found->mapped_port);
-                found->stun_when = before.stun_when;
-        }
-        if (found->https != CONNECTIVE_HTTPS_ANSWERED &&
-            before.https == CONNECTIVE_HTTPS_ANSWERED)
-        {
-                memory_copy(found->trace, before.trace, 16);
-                found->https_when = before.https_when;
-        }
-        //      Root's, 0600, never through a link planted at the name; a
-        //      reader takes only a whole record with the magic and the size.
-        {
-                bipolar handle = system_open_output_at(AT_FDCWD, CONNECTIVE_CACHE_PATH,
-                                                       true, 0600);
-
-                if (handle >= 0)
-                {
-                        (void)system_write_all((positive)handle, found,
-                                               sizeof(address_to found));
-                        system_close((b32)handle);
-                }
-        }
+        connective_found_keep(found, address_of before);
+        connective_found_write(found);
 }
 
 /*      The proxy a program here is told to use, as host:port with any

@@ -4805,6 +4805,35 @@ static fn connective_vectors(void)
                               CONNECTIVE_NAT_DEPENDENT &&
                           connective_nat_classify(3, a, 4000, b, 4000, false) ==
                               CONNECTIVE_NAT_DEPENDENT);
+                //      The caller's first mapping is the second server's when
+                //      only it answered, and its own is no NAT all the same.
+                check("connective: an address of this machine's own seen by "
+                      "the second server alone is no NAT",
+                      connective_nat_classify(2, a, 1, a, 1, true) == CONNECTIVE_NAT_NONE);
+        }
+
+        {
+                connective_found before, found;
+
+                memory_zero(address_of before, sizeof before);
+                before.answered = 1;
+                before.nat = CONNECTIVE_NAT_ONE;
+                before.mapped[0][15] = 7;
+                before.mapped_port[0] = 4000;
+                before.stun_when = 100;
+                before.https = CONNECTIVE_HTTPS_FAILED;
+                before.trace[15] = 9;
+                before.https_when = 50;
+                memory_zero(address_of found, sizeof found);
+                found.udp = CONNECTIVE_UDP_BLOCKED;
+                found.https = CONNECTIVE_HTTPS_FAILED;
+                connective_found_keep(address_of found, address_of before);
+                check("connective: a gather that learned nothing keeps the last "
+                      "STUN answer whole and a trace from gathers before",
+                      found.answered == 1 && found.nat == CONNECTIVE_NAT_ONE &&
+                          found.mapped[0][15] == 7 && found.mapped_port[0] == 4000 &&
+                          found.stun_when == 100 && found.udp == CONNECTIVE_UDP_BLOCKED &&
+                          found.trace[15] == 9 && found.https_when == 50);
         }
 
         wrong = 0;
