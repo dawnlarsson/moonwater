@@ -5,7 +5,8 @@
     python3 test/split.py FILE                   FILE's plan: each part, where it starts and ends, what it holds, and the
                                                  tools that name FILE and what the split does to each; nothing written
     python3 test/split.py FILE --check           the split made in a copy of the tree and held to the checks below; this
-                                                 tree is not touched
+                                                 tree is not touched. Once FILE is cut, the split as it stands: each part
+                                                 included once, its header, the text put back whole for every reader
     python3 test/split.py FILE --apply           --check, then the same split written into this tree, the tools that name
                                                  FILE moved to the new paths, and the function audit resealed
     python3 test/split.py FILE --carry BRANCH [--split REV]
@@ -1581,6 +1582,47 @@ def check(tree, source, jobs):
     return written
 
 
+def check_standing(tree, source):
+    """A file that is cut, as it stands: each #include of a part names a file of its folder once and every file there is
+       included, each part opens with its header, the text put back has no part's #include left and is the file's whole
+       text for every tool that reads it through its own source_text, and test/run's seam gives the parts the file's."""
+    text = (tree / source).read_text()
+    named = part_line(source).findall(text)
+    there = sorted(p.name for p in (tree / parts_dir(source)).iterdir() if p.is_file())
+    doubled = sorted(set(name for name in named if named.count(name) > 1))
+    if doubled or sorted(named) != there:
+        raise Refused('%s includes %s, and %s/ holds %s' % (source, ', '.join(named), parts_dir(source), ', '.join(there)))
+    say('%s includes each of the %d files of %s/ once' % (source, len(named), parts_dir(source)))
+    for name in named:
+        body = (tree / parts_dir(source) / name).read_text()
+        if strip_header(body, stem(source), name) == body:
+            raise Refused('%s/%s does not open with its header (/* %s/%s: what it holds ... */)' %
+                          (parts_dir(source), name, parts_dir(source), name))
+    say('each part opens with its header')
+    whole = source_text_here(tree / source)
+    if part_line(source).search(whole):
+        raise Refused('%s put back still has a part\'s #include: a part includes a part' % source)
+    readers = 0
+    for path in sorted(str(p.relative_to(tree)) for p in (tree / 'test').rglob('*.py')):
+        body = (tree / path).read_text()
+        if 'def source_text(' not in body or path == 'test/split.py':
+            continue
+        helper = next((n for n in ast.parse(body).body if isinstance(n, ast.FunctionDef) and n.name == 'source_text'), None)
+        if helper is None:
+            continue
+        scope = dict(re=re, pathlib=pathlib)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), path, 'exec'), scope)
+        if scope['source_text'](tree / source) != whole:
+            raise Refused('%s: its source_text does not give %s whole' % (path, source))
+        readers += 1
+    say('the %d tools with a source_text give %s whole, as split.py does (%d lines)' % (readers, source, whole.count('\n')))
+    paths = [source] + ['%s/%s' % (parts_dir(source), name) for name in named]
+    seams = seam_of(tree, paths)
+    if len(set(seams[:len(paths)])) != 1:
+        raise Refused('test/run: seam_of_path gives %s' % ', '.join('%s %s' % pair for pair in zip(paths, seams)))
+    say('test/run: seam_of_path puts %s and its parts in %s' % (source, seams[0] or '-'))
+
+
 def print_plan(source, plan, text, edits=None):
     print('%s, %d lines, cut in %d runs:' % (source, text.count('\n'), len(plan)))
     print('  %-22s %6s %6s %6s  %4s  %s' % ('file', 'from', 'to', 'lines', 'fns', 'sections, or first and last function'))
@@ -1809,8 +1851,13 @@ def main():
         source = arguments.file
         if arguments.carry or arguments.prove:
             return carry_main(arguments, source)
-        if (ROOT / parts_dir(source)).is_dir() and not (arguments.check or arguments.apply):
+        if (ROOT / parts_dir(source)).is_dir():
+            if arguments.apply:
+                raise Refused('%s is cut already: %s/ holds its parts' % (source, parts_dir(source)))
             print('%s is cut: %s/ holds its parts' % (source, parts_dir(source)))
+            if arguments.check:
+                check_standing(ROOT, source)
+                print('the split stands')
             return 0
         text = (ROOT / source).read_text()
         files = set(tracked())
