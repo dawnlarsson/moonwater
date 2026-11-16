@@ -100524,7 +100524,8 @@ static fn profiles(void)
         {
                 const struct bowl_profile address_to row = bowl_profiles + at;
                 p8 packages = true;
-                p8 session = row->libraries || (row->session && row->session[0]);
+                //      A server (ssh) is started by Moonwater from its settings and has no session of its own to start.
+                p8 session = row->libraries || (row->ssh && !row->session) || (row->session && row->session[0]);
                 positive words = 0;
 
                 for (const struct bowl_component address_to part = row->components;
@@ -103581,7 +103582,7 @@ static fn ssh_rows(void)
                     "restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n",
                     "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n",
                     "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a b\n",
-                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8h a\n",
+                    "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd a\n",
                     "restrict,pty ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g a\n",
                     "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHwECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= a\n",
                     "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gAA== a\n",
