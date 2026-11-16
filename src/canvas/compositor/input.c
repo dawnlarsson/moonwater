@@ -1953,6 +1953,14 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
+        // A press on a chevron of the tasks' strip (more windows than the band has icons for): the strip a page on or back.
+        if (tab == TASKBAR_STRIP_BACK || tab == TASKBAR_STRIP_ON)
+        {
+                if (code == COMPOSITOR_BTN_LEFT && taskbar_strip_page(tab == TASKBAR_STRIP_ON ? 1 : -1))
+                        compositor_tabs_changed();
+                return;
+        }
+
         // A press on a window's tab brings the window up, and a middle press asks it to go. The tray takes none.
         if (tab >= 0)
         {
@@ -2602,6 +2610,22 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
         // no window, or to one in the room beside a shorter screen.
         compositor_pointer_clamp();
+        // The wheel over the tasks of a band with more of them than it has icons for scrolls its strip, a tab a notch.
+        if (row < 0)
+        {
+                int over = compositor_band_hit(compositor.pointer_x, compositor.pointer_y);
+                static int strip_notch;
+
+                if ((over >= 0 || over == TASKBAR_STRIP_BACK || over == TASKBAR_STRIP_ON) && taskbar_strip_listed[0] + taskbar_strip_listed[1] >
+                                                                                                   taskbar_strip_shown[0] + taskbar_strip_shown[1])
+                {
+                        int turns = ui_notch_take(&strip_notch, v120);
+
+                        if (turns && taskbar_strip_step(-turns)) // the wheel down (a notch below 0) is on, toward the later tabs
+                                compositor_tabs_changed();
+                        return;
+                }
+        }
         if (row < 0 && !horizontal && taskbar_cell_of(compositor_band_hit(compositor.pointer_x, compositor.pointer_y), TASKBAR_BUTTON_WHEEL) == TASKBAR_ACT_VOLUME_STEP)
         {
                 // The wheel over the tray's volume cell turns the volume, five percent a notch (120ths of one add up).

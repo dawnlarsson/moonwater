@@ -2555,6 +2555,19 @@ static int band_glass(void *context, int x, int y, int width, int height)
 
 /* The view of a band at a position with the three tabs, its pixels cleared: titles, else the three above, which its
    tabs fit. */
+// The tabs' titles, app_ids, icons and sequences a check's view points at (the compositor's are its rows'): zeroed, as many as a check lists.
+#define CHECK_TABS 512
+static const char *check_tab_titles[CHECK_TABS], *check_tab_apps[CHECK_TABS];
+static const unsigned int *check_tab_icons[CHECK_TABS];
+static unsigned int check_tab_seqs[CHECK_TABS];
+
+static void check_view_tabs(struct taskbar_view *view)
+{
+    memory_zero(check_tab_titles, sizeof(check_tab_titles)), memory_zero(check_tab_apps, sizeof(check_tab_apps));
+    memory_zero(check_tab_icons, sizeof(check_tab_icons)), memory_zero(check_tab_seqs, sizeof(check_tab_seqs));
+    view->titles = check_tab_titles, view->apps = check_tab_apps, view->icons = check_tab_icons, view->icon_seqs = check_tab_seqs;
+}
+
 static struct taskbar_view band_view(unsigned int position, const char *const *titles)
 {
     struct taskbar_view view;
@@ -2563,6 +2576,7 @@ static struct taskbar_view band_view(unsigned int position, const char *const *t
     titles = titles ? titles : band_titles;
 
     memory_zero(&view, sizeof(view));
+    check_view_tabs(&view);
     memory_zero(band_pixels, sizeof(band_pixels));
     // A band drawn for its bytes is drawn settled: no highlight still gliding from a band an earlier row drew on the real clock.
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
@@ -2779,9 +2793,9 @@ static void check_taskbar_launcher(void)
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
     taskbar_tray_set("");
     {
-        int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(TASKBAR_TAB_ROOM - 1);
+        int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(TASKBAR_TAB_BITS - 1);
 
-        for (int tab = 0; tab < TASKBAR_TAB_ROOM; tab++)
+        for (int tab = 0; tab < TASKBAR_TAB_BITS; tab++)
             own &= taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(tab);
         check("moon: its redo bit is its own, not the tray's and not a tab's", own);
     }
@@ -2885,7 +2899,7 @@ static void check_taskbar_centre(void)
         for (int ci = 0; ci < 3; ci++)
         {
             struct taskbar_view view;
-            int moon[4], band[4], slot[TASKBAR_TAB_ROOM][4], before[4], after[4], count = counts[ci], gap = TASKBAR_GAP * 2, pills[64][4], listed = 0, which;
+            int moon[4], band[4], slot[TASKBAR_TAB_BITS][4], before[4], after[4], count = counts[ci], gap = TASKBAR_GAP * 2, pills[64][4], listed = 0, which;
 
             memory_zero(&view, sizeof(view));
             view.width = widths[wi], view.height = 1080, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = (unsigned int)count, view.lengths = lengths;
@@ -2948,6 +2962,64 @@ static void check_taskbar_centre(void)
     check("taskbar arrangement: every pill is inside the band, the kit's gap twice from the next, and none meets another", inside && apart);
     check("taskbar arrangement: a point in the middle of the moon, a task or a tray cell is it, and a point between two pills is nothing", hits && gaps_none);
     check("taskbar arrangement: thirty tasks are each their icon alone, still clear of the moon and the trays", bare);
+    // Two hundred windows on a band of 1920: every one has a tab, the icons that fit a strip with a chevron at each end that has more,
+    // the window with the keys always in it, a press on a chevron a page on, the wheel a tab, and none past the band.
+    {
+        static unsigned char strip_marks[CHECK_TABS], strip_lengths[CHECK_TABS];
+        struct taskbar_view view;
+        int shown = 0, lit_shown = 0, inside_band = 1, ends_first = 0, ends_later = 0, band[4], cell[4], paged, stepped, back, on;
+        static __typeof__(taskbar) kept_taskbar;
+
+        kept_taskbar = taskbar;
+        taskbar_arrange_set(TASKBAR_ZONE_CENTRE, TASKBAR_ZONE_START, 0, 0, 1u << 1 | 1u << 2, 0, 0, 60, 0);
+        memory_zero(&view, sizeof(view));
+        check_view_tabs(&view);
+        view.width = 1920, view.height = 1080, view.scale = 100, view.position = TASKBAR_BOTTOM, view.count = 200, view.lengths = strip_lengths;
+        view.marks = strip_marks;
+        memory_zero(strip_marks, sizeof(strip_marks));
+        for (int at = 0; at < 200; at++)
+            strip_lengths[at] = 12, check_tab_titles[at] = "a window";
+        strip_marks[150] = COMPOSITOR_TAB_LIT;
+        taskbar_strip_from[0] = taskbar_strip_from[1] = 0, taskbar_strip_follow = 1, taskbar_strip_lit[0] = taskbar_strip_lit[1] = -1;
+        taskbar_changed();
+        taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+        for (int at = 0; at < 200; at++)
+            if (centre_slots(&view, cell, at))
+            {
+                shown++, lit_shown |= at == 150;
+                inside_band &= cell[0] >= band[0] && cell[0] + cell[2] <= band[0] + band[2];
+            }
+        back = centre_slots(&view, cell, TASKBAR_STRIP_BACK), on = centre_slots(&view, cell, TASKBAR_STRIP_ON);
+        ends_first = back && on;
+        check("taskbar strip: 200 windows on a band of 1920 are a strip of the icons it has room for, every one inside the band, a chevron at each end",
+              shown > 20 && shown < 200 && inside_band && ends_first);
+        check("taskbar strip: the window with the keys is in the strip", lit_shown);
+        // A page back from it, and the wheel a tab on: the strip moves and the keys' window may leave it, until the keys move.
+        {
+            int from = taskbar_strip_from[1];
+
+            paged = taskbar_strip_page(-1) && taskbar_strip_from[1] < from;
+            from = taskbar_strip_from[1];
+            stepped = taskbar_strip_step(1) && taskbar_strip_from[1] == from + 1;
+        }
+        // Scrolled to its start: no chevron back, one on.
+        taskbar_strip_step(-1000);
+        taskbar_changed();
+        ends_later = !centre_slots(&view, cell, TASKBAR_STRIP_BACK) && centre_slots(&view, cell, TASKBAR_STRIP_ON) && centre_slots(&view, cell, 0);
+        check("taskbar strip: a chevron's page and the wheel's tab move the strip, and at its start it has no chevron back and shows the first window",
+              paged && stepped && ends_later);
+        // Forty windows fit as icons: no strip.
+        view.count = 40;
+        taskbar_changed();
+        shown = 0;
+        for (int at = 0; at < 40; at++)
+            shown += centre_slots(&view, cell, at);
+        check("taskbar strip: forty windows on a band of 1920 are forty icons, and no chevron", shown == 40 && !centre_slots(&view, cell, TASKBAR_STRIP_BACK) &&
+              !centre_slots(&view, cell, TASKBAR_STRIP_ON));
+        taskbar = kept_taskbar;
+        taskbar_strip_from[0] = taskbar_strip_from[1] = 0, taskbar_strip_follow = 1;
+        taskbar_changed();
+    }
 
     // The earlier arrangements, and the split read from the right.
     {
@@ -4441,7 +4513,7 @@ static void check_taskbar_text(string_address face_path)
             taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1;
             view = band_view(position, sides);
             taskbar_band(&view, &bx, &by, &bw, &bh);
-            laid &= taskbar_draw(&view, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect) == 1;
+            laid &= taskbar_draw(&view, 1ul << TASKBAR_TAB_BITS, band_glass, null, rect) == 1;
             memory_copy(lit, band_pixels, sizeof(band_pixels));
             laid &= taskbar_slot(&view, -2, &tray[0], &tray[1], &tray[2], &tray[3]);
             band_glass(null, rect[0], rect[1], rect[2], rect[3]);
@@ -5024,8 +5096,8 @@ static void pictures_one(string_address directory, const char *name, const struc
                                            "Notices", "Gallery", "Terminal 2", "build.log", "Chromium", "Mail"};
     static const char *const apps[12] = {"terminal", "settings", "files", "editor", "mixer", "org.mozilla.firefox", "notices", "gallery",
                                          "terminal", "editor", "chromium", "org.gnome.Geary"};
-    static unsigned char marks[TASKBAR_TAB_ROOM], lengths[TASKBAR_TAB_ROOM];
-    static unsigned int rows[TASKBAR_TAB_ROOM];
+    static unsigned char marks[CHECK_TABS], lengths[CHECK_TABS];
+    static unsigned int rows[CHECK_TABS];
     static struct windows *table_scratch;
     struct windows *const table_at = windows_scratch_table(&table_scratch);
     struct taskbar_view view;
@@ -5047,6 +5119,7 @@ static void pictures_one(string_address directory, const char *name, const struc
     taskbar_mic_set(count > 3, 0);
     taskbar.battery_item = 1, taskbar.battery_percent = 82, taskbar.battery_charging = 0;
     memory_zero(&view, sizeof(view));
+    check_view_tabs(&view);
     view.width = 1920 * scale / 100, view.height = 1080 * scale / 100, view.scale = scale, view.position = TASKBAR_BOTTOM;
     pictures_height = view.height, pictures_width = view.width;
     view.pixels = pictures_band, view.band_bytes = sizeof(pictures_band), view.glass = pictures_glass_pixels;
@@ -5054,7 +5127,7 @@ static void pictures_one(string_address directory, const char *name, const struc
     for (int k = 0; k < count; k++)
     {
         view.titles[k] = titles[k % 12], view.apps[k] = apps[k % 12];
-        lengths[k] = compositor_title_length(titles[k % 12], WINDOWS_TITLE), rows[k] = (unsigned char)k;
+        lengths[k] = compositor_title_length(titles[k % 12], WINDOWS_TITLE), rows[k] = (unsigned int)k;
         marks[k] = k == 1 ? COMPOSITOR_TAB_LIT : k == 2 ? COMPOSITOR_TAB_AWAY : 0;
     }
     // 21:47 on 16 November 2026, UTC: the moon's minute.
@@ -5163,6 +5236,10 @@ static void band_pictures(string_address face_path)
     pictures_bold = bold > 0 && font_load(&band_bold, bold_bytes, (positive)bold, 0) == 0 ? &band_bold : null;
     font_start(&band_engine, band_atlas, 128, 128);
     compositor_zero();
+    // Every window a tab: 40 windows, their icons alone, and 200, a strip with its chevrons, at 100 percent, dark and light.
+    pictures_one((string_address)TASKBAR_PICTURES, "overflow-40-dark.ppm", &standard, 100, 1, 40, 0);
+    pictures_one((string_address)TASKBAR_PICTURES, "overflow-200-dark.ppm", &standard, 100, 1, 200, 0);
+    pictures_one((string_address)TASKBAR_PICTURES, "overflow-200-light.ppm", &standard, 100, 0, 200, 0);
     // The tasks grouped and separate, and the bar at -12, 0 and +16 from the screen's edge: dark at 200 percent.
     {
         static const char *const names[5] = {"options-grouped.ppm", "options-separate.ppm", "options-edge-minus-12.ppm", "options-edge-0.ppm",

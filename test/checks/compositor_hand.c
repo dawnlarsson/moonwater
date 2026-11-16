@@ -2974,7 +2974,7 @@ static void check_notices_dot(void)
 
             drawn = band_view(TASKBAR_BOTTOM, null);
             taskbar_band(&drawn, &bx, &by, &bw, &bh);
-            taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
+            taskbar_draw(&drawn, 1ul << TASKBAR_TAB_BITS, band_glass, null, rect);
             notices_shot_write("/tmp/notices-band-1920x24.raw", band_pixels, BAND_W, COMPOSITOR_PANEL, BAND_W);
         }
         /*
@@ -2999,7 +2999,7 @@ static void check_notices_dot(void)
                     __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
                     taskbar_notices_set(1, severity ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING);
                     taskbar_band(&drawn, &bx, &by, &bw, &bh);
-                    taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
+                    taskbar_draw(&drawn, 1ul << TASKBAR_TAB_BITS, band_glass, null, rect);
                     right &= taskbar_slot(&drawn, TASKBAR_NOTICES, &dx, &dy, &dw, &dh) != 0;
                     middle[dark][severity] = band_pixels[(unsigned long)(dy + dh / 2 - by) * BAND_W + (unsigned long)(dx + dw / 2 - bx)] & 0xffffffu;
                     want[dark][severity] = compositor_ink_role(severity ? UI_ERROR : UI_WARNING) & 0xffffffu;
@@ -3237,7 +3237,7 @@ static void check_compositor_volume(void)
                         taskbar_volume_set(says[variant][0], says[variant][1], says[variant][2], says[variant][3]);
                         drawn = band_view(TASKBAR_BOTTOM, titles);
                         taskbar_band(&drawn, &dx, &dy, &dw, &dh);
-                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
+                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_BITS, band_glass, null, rect);
                         memory_copy(cell_lit, band_pixels, sizeof(band_pixels));
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
@@ -3450,7 +3450,7 @@ static void check_compositor_volume(void)
                         taskbar_mic_set(1, variant);
                         drawn = band_view(TASKBAR_BOTTOM, titles);
                         taskbar_band(&drawn, &dx, &dy, &dw, &dh);
-                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_ROOM, band_glass, null, rect);
+                        taskbar_draw(&drawn, 1ul << TASKBAR_TAB_BITS, band_glass, null, rect);
                         memory_copy(mic_lit, band_pixels, sizeof(band_pixels));
                         taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
                         taskbar_slot(&drawn, TASKBAR_MIC, &mx, &my, &mw, &mh);

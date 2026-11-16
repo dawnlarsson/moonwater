@@ -2495,6 +2495,10 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTOR
         X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[2].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_pending, COMPOSITOR_ROWS_ROW) \
+        X(compositor_tab_titles, COMPOSITOR_ROWS_ROW) \
+        X(compositor_tab_apps, COMPOSITOR_ROWS_ROW) \
+        X(compositor_tab_icons, COMPOSITOR_ROWS_ROW) \
+        X(compositor_tab_seqs, COMPOSITOR_ROWS_ROW) \
         X(compositor_polls, COMPOSITOR_ROWS_POLLS) \
         X(compositor_present_frame_room, COMPOSITOR_ROWS_FRAMES) \
         X(compositor_present_row_room, COMPOSITOR_ROWS_LAYERED) \

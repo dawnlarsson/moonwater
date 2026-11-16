@@ -412,18 +412,31 @@ static fn taskbar_clock_lay(struct ui_tree address_to t, int m, int margin, int 
 // A pill of tasks, named slot (TASKBAR_TABS, or TASKBAR_TABS_LEFT for the tasks on the moon's left when they are split round it): the tasks
 // listed in order, each the padding, its icon in its middle across the band, the gap, its title in what is left and the padding, or its icon
 // alone in its middle.
-static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, const int *list, int listed, const int *widths, const int *titled, int m, int margin,
-                            int pad, int side, int gap, int high)
+
+// The strips of the tasks (taskbar_strip): where each side is scrolled to, the chevrons it has, what it shows of what it lists.
+static int taskbar_strip_from[2], taskbar_strip_ends[2][2], taskbar_strip_shown[2], taskbar_strip_listed[2];
+static int taskbar_strip_follow = 1, taskbar_strip_lit[2] = {-1, -1}; // it keeps the window with the keys in it, until the person scrolls it
+static struct ui_grown taskbar_lay_room;      // taskbar_lay's words of every tab
+static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, int strip, const int *list, int listed, const int *widths, const int *titled, int m,
+                            int margin, int pad, int side, int gap, int high)
 {
-        int length = 0, apart = taskbar_apart;
+        int length = 0, apart = taskbar_apart, bare = side + 2 * pad;
 
         for (int k = 0; k < listed; k++)
                 length += widths[list[k]];
         if (!length)
                 return;
+        length += (taskbar_strip_ends[strip][0] + taskbar_strip_ends[strip][1]) * bare;
         // Grouped, one pill of them all; separate, each task a pill of its own in the zone, the kit's gap twice between them.
         if (!taskbar.separate)
                 taskbar_open(t, slot, m, margin, length, high);
+        // A strip that has more before it: its chevron first, an icon long.
+        if (taskbar_strip_ends[strip][0])
+        {
+                taskbar_open(t, TASKBAR_STRIP_BACK, m, taskbar.separate ? margin : 0, bare, high)->justify = UI_CENTER;
+                ui_tree_close(t);
+                margin = apart;
+        }
         for (int k = 0; k < listed; k++)
         {
                 int at = list[k];
@@ -447,21 +460,86 @@ static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, const int *li
                 }
                 ui_tree_close(t);
         }
+        if (taskbar_strip_ends[strip][1])
+        {
+                taskbar_open(t, TASKBAR_STRIP_ON, m, taskbar.separate ? apart : 0, bare, high)->justify = UI_CENTER;
+                ui_tree_close(t);
+        }
         if (!taskbar.separate)
                 ui_tree_close(t);
+}
+
+/*
+        The tasks of a side that cannot all be icons in its room: a strip of as many as fit beside a chevron at each end, from the one the
+        strip is scrolled to (taskbar_strip_from), moved so the window with the keys is in it. The list is cut to them in place and its
+        new length answered; the chevrons each side are said in taskbar_strip_ends. A side whose icons fit is listed whole.
+*/
+
+static int taskbar_strip(const struct taskbar_view *view, int strip, int *list, int listed, int room, int bare)
+{
+        int each = bare + (taskbar.separate ? taskbar_apart : 0), shown, from, lit = -1;
+
+        taskbar_strip_ends[strip][0] = taskbar_strip_ends[strip][1] = 0;
+        taskbar_strip_listed[strip] = listed;
+        if (listed <= 0 || (long)listed * each - (taskbar.separate ? taskbar_apart : 0) <= room)
+                return taskbar_strip_shown[strip] = listed;
+        shown = (room - 2 * each) / each;
+        shown = shown < 1 ? 1 : shown > listed ? listed : shown;
+        for (int k = 0; k < listed && view->marks; k++)
+                if (view->marks[list[k]] & COMPOSITOR_TAB_LIT)
+                        lit = k;
+        // The keys gone to another window: the strip follows them again.
+        if (lit >= 0 && (view->rows ? (int)view->rows[list[lit]] : list[lit]) != taskbar_strip_lit[strip])
+                taskbar_strip_lit[strip] = view->rows ? (int)view->rows[list[lit]] : list[lit], taskbar_strip_follow = 1;
+        from = taskbar_strip_from[strip];
+        if (lit >= 0 && taskbar_strip_follow)
+                from = lit < from ? lit : lit >= from + shown ? lit - shown + 1 : from;
+        from = from > listed - shown ? listed - shown : from;
+        from = from < 0 ? 0 : from;
+        taskbar_strip_from[strip] = from;
+        taskbar_strip_ends[strip][0] = from > 0, taskbar_strip_ends[strip][1] = from + shown < listed;
+        for (int k = 0; k < shown; k++)
+                list[k] = list[from + k];
+        return taskbar_strip_shown[strip] = shown;
+}
+
+// The strip scrolled by `by` tabs (a page is the tabs it shows): it no longer follows the keys until they move to another window.
+static b32 taskbar_strip_step(int by)
+{
+        b32 moved = 0;
+
+        for (int s = 0; s < 2; s++)
+        {
+                int most = taskbar_strip_listed[s] - taskbar_strip_shown[s], to = taskbar_strip_from[s] + by;
+
+                to = to > most ? most : to < 0 ? 0 : to;
+                moved |= to != taskbar_strip_from[s];
+                taskbar_strip_from[s] = to;
+        }
+        taskbar_strip_follow = 0;
+        return moved;
+}
+
+static b32 taskbar_strip_page(int direction)
+{
+        int page = taskbar_strip_shown[0] > taskbar_strip_shown[1] ? taskbar_strip_shown[0] : taskbar_strip_shown[1];
+
+        return taskbar_strip_step(direction * (page > 1 ? page : 1));
 }
 
 // The tasks' widths for room: each what its icon and title ask, or an equal share when they ask for more, and under a share with the room
 // for seven characters of a title, every one its icon alone (so a short title is not kept where a long one beside it is not). Answers
 // their length.
-static int taskbar_tasks_fit(const struct taskbar_view *view, const int *list, int listed, int room, int high, int pad, int scale, int longest,
+static int taskbar_tasks_fit(const struct taskbar_view *view, int strip, int *list, int *listed_at, int room, int high, int pad, int scale, int longest,
                              int *widths, int *titled)
 {
         int sum = 0, share, tabs = 0, side = taskbar_icon_side(high, scale), alone = taskbar_tab_length(high, pad, scale, 7);
-        int gaps = taskbar.separate && listed > 1 ? (listed - 1) * taskbar_apart : 0;
+        int listed = taskbar_strip(view, strip, list, *listed_at, room, side + 2), ends = taskbar_strip_ends[strip][0] + taskbar_strip_ends[strip][1];
+        int gaps = taskbar.separate && listed + ends > 1 ? (listed + ends - 1) * taskbar_apart : 0;
 
-        // Separate, the gaps between the pills are the tasks' too: the room less them, and the length with them.
-        room -= gaps, tabs = gaps;
+        *listed_at = listed;
+        // Separate, the gaps between the pills are the tasks' too: the room less them, and the length with them; the chevrons each an icon long.
+        room -= gaps + ends * (side + 2 * pad), tabs = gaps + ends * (side + 2 * pad);
 
         for (int k = 0; k < listed; k++)
         {
@@ -496,10 +574,14 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
         int pad = taskbar.padding * scale / 100; // the kit's padding in a glass button (UI_GLASS_PAD, `taskbar padding`), either side of what it shows
         int inset = taskbar_inset(scale), high = thick - 2 * inset, count = (int)view->count, moon, icons = 0, done = 0, split = taskbar.tasks_zone == TASKBAR_ZONE_SPLIT;
         int square, cell, clocked, tab, text_w = 0, glyph, longest, side, trays[2], most, inner = length - 2 * gap, icon_gap = TASKBAR_ICON_GAP * scale / 100;
-        int widths[TASKBAR_TAB_ROOM], titled[TASKBAR_TAB_ROOM], zones[3], list[2][TASKBAR_TAB_ROOM], listed[2] = {0, 0}, tabs[2] = {0, 0}, moon_zone = split ? TASKBAR_ZONE_CENTRE : taskbar.moon_zone;
+        int *widths, *titled, zones[3], *list[2], listed[2] = {0, 0}, tabs[2] = {0, 0}, moon_zone = split ? TASKBAR_ZONE_CENTRE : taskbar.moon_zone;
         struct ui_node address_to n;
 
-        high = high < 1 ? 1 : high, count = count < TASKBAR_TAB_ROOM ? count : TASKBAR_TAB_ROOM, side = taskbar_icon_side(high, scale);
+        // Four words a tab (its width, whether it is titled, and its place in each side's list), as many as the tabs: when the memory for
+        // them is not there the band lays no tab, as it lays none that does not fit.
+        count = count > 0 && ui_grown_room(&taskbar_lay_room, 4 * sizeof(int), UI_TREE_GROWN, count) ? count : 0;
+        widths = (int *)taskbar_lay_room.at, titled = widths + count, list[0] = titled + count, list[1] = list[0] + count;
+        high = high < 1 ? 1 : high, side = taskbar_icon_side(high, scale);
         // The numbers: the moon, bare on the band and as thick as it; the tray's items, each its padding either side of its mark or its text,
         // held to half the band; the mark of the speaker and the microphone; and each tab, no longer than its icon and eight thicknesses.
         moon = thick <= length - 2 * gap ? thick : 0; // and none on a band too short for it
@@ -577,7 +659,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                         per = rooms[s] / listed[s];
                         per = per > 0 ? per : 0;
                         for (int s = 0; s < 2; s++)
-                                tabs[s] = taskbar_tasks_fit(view, list[s], listed[s], per * listed[s], high, pad, scale, longest, widths, titled);
+                                tabs[s] = taskbar_tasks_fit(view, s, list[s], &listed[s], per * listed[s], high, pad, scale, longest, widths, titled);
                 }
                 zones[TASKBAR_ZONE_CENTRE] = moon, zones[TASKBAR_ZONE_START] = half, zones[TASKBAR_ZONE_END] = inner - moon - half;
         }
@@ -597,7 +679,8 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         group = inner - moon - apart - ends;
                 pills = (trays[0] > 0) + (trays[1] > 0);
                 pills += tab > 0;
-                tabs[1] = taskbar_tasks_fit(view, list[1], listed[1], group - trays[0] - trays[1] - tab - pills * apart, high, pad, scale, longest, widths, titled);
+                taskbar_strip_ends[0][0] = taskbar_strip_ends[0][1] = 0;
+                tabs[1] = taskbar_tasks_fit(view, 1, list[1], &listed[1], group - trays[0] - trays[1] - tab - pills * apart, high, pad, scale, longest, widths, titled);
                 for (int zone = TASKBAR_ZONE_START; zone <= TASKBAR_ZONE_END; zone++)
                 {
                         int parts = 0;
@@ -649,7 +732,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                 n->pad[2 * m + 1] = apart;
                                 if (trays[1])
                                         taskbar_tray_lay(t, 1, m, 0, scale, glyph, square, cell, text_w, high), first = 0;
-                                taskbar_tasks_lay(t, TASKBAR_TABS_LEFT, list[0], listed[0], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high);
+                                taskbar_tasks_lay(t, TASKBAR_TABS_LEFT, 0, list[0], listed[0], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high);
                         }
                         else if (zone == TASKBAR_ZONE_CENTRE && moon)
                         {
@@ -660,7 +743,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         else
                         {
                                 n->pad[2 * m] = apart;
-                                taskbar_tasks_lay(t, TASKBAR_TABS, list[1], listed[1], widths, titled, m, 0, pad, side, icon_gap, high);
+                                taskbar_tasks_lay(t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, 0, pad, side, icon_gap, high);
                                 if (trays[0])
                                         taskbar_tray_lay(t, 0, m, tabs[1] ? apart : 0, scale, glyph, square, cell, text_w, high);
                                 if (tab)
@@ -692,7 +775,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                 if (trays[1])
                                         taskbar_tray_lay(t, 1, m, first ? 0 : apart, scale, glyph, square, cell, text_w, high), first = 0;
                                 if (tabs[1] > 0)
-                                        taskbar_tasks_lay(t, TASKBAR_TABS, list[1], listed[1], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high), first = 0;
+                                        taskbar_tasks_lay(t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high), first = 0;
                         }
                         if (pill == TASKBAR_PILL_TRAY && taskbar.tasks_zone == zone && trays[0])
                                 taskbar_tray_lay(t, 0, m, first ? 0 : apart, scale, glyph, square, cell, text_w, high), first = 0;
@@ -741,10 +824,13 @@ struct taskbar_key
         int own, padding, launcher;     // the taskbar's settings: its scale, the room round a tab's text, the launcher's button
         int tray, cells, rtl;           // a format of the person's (its characters; -1: the standard cells), the cells there now (a bit each), reading from the right
         int arrange, editing;           // where the pills are (the zones, the side of the newest task, the items before the tasks, the order) and whether it is arranged
-        unsigned char lengths[TASKBAR_TAB_ROOM]; // each tab's title in characters
+        unsigned int lengths;           // each tab's title in characters, their digest (FNV-1a over them)
+        int strip[2], follow;           // where each side's strip is scrolled to, and whether it follows the keys
+        unsigned int marks;             // the tabs' marks, their digest (the lit one is what a strip follows)
+        int spare;                      // none: the key is whole words
 };
 
-_Static_assert(sizeof(struct taskbar_key) == 8 + 16 * 4 + TASKBAR_TAB_ROOM, "a key is compared as bytes, so it has no padding");
+_Static_assert(sizeof(struct taskbar_key) == 8 + 22 * 4, "a key is compared as bytes, so it has no padding");
 
 /*
         The highlight of the tab whose window has the keys: the kit's lit face (ui_glass_button) over that tab, which moves from one tab
@@ -783,13 +869,18 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                   taskbar.moon_zone | taskbar.tasks_zone << 2 | taskbar.tasks_right << 4 | (int)taskbar.tray_before << 5 |
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
-                                      taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, {0}};
+                                      taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, 0,
+                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
-        if (view->lengths)
-                memory_copy(key.lengths, view->lengths, view->count < TASKBAR_TAB_ROOM ? view->count : TASKBAR_TAB_ROOM);
+        key.lengths = key.marks = 2166136261u;
+        for (unsigned int at = 0; at < view->count; at++)
+        {
+                key.lengths = (key.lengths ^ (view->lengths ? view->lengths[at] : 0)) * 16777619u;
+                key.marks = (key.marks ^ (view->marks ? view->marks[at] : 0)) * 16777619u;
+        }
         if (!band->tree.count || memory_compare(&band->key, &key, sizeof(key)))
         {
                 band->key = key;
@@ -906,9 +997,9 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
 // A slot's redo bit: a tab's, the tray's on its own bit past the tabs, and the launcher button's on the one after.
 static unsigned long taskbar_bit(int which)
 {
-        return which == TASKBAR_LAUNCHER ? 1ul << (TASKBAR_TAB_ROOM + 1) : which < 0 ? 1ul << TASKBAR_TAB_ROOM : 1ul << which;
+        return which == TASKBAR_LAUNCHER ? 1ul << (TASKBAR_TAB_BITS + 1) : which < 0 ? 1ul << TASKBAR_TAB_BITS : 1ul << (which % TASKBAR_TAB_BITS);
 }
-_Static_assert(TASKBAR_TAB_ROOM + 2 <= 64, "a redo bit a tab, the tray's and the launcher's, in a word");
+_Static_assert(TASKBAR_TAB_BITS + 2 <= 64, "a redo bit a tab, the tray's and the launcher's, in a word");
 
 /*
         The slots the damage meets, with the blur's reach round each: a change
@@ -1871,13 +1962,14 @@ static struct taskbar_picture
         unsigned int seq;         // and that picture's sequence
         int side;                 // how large it was made
         unsigned int pixels[UI_ICON_MOST * UI_ICON_MOST];
-} taskbar_pictures[TASKBAR_TAB_ROOM]; // by the window's row, past the room by its row's place among them (a picture made again only when it differs)
+};
+static struct ui_grown taskbar_pictures; // by the window's row, as many as the rows (pages touched only for the icons drawn)
 
 static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int which, unsigned int ink)
 {
         ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
-        const char *app = view->apps[which];
+        const char *app = view->apps ? view->apps[which] : null;
         int x = n->x - band->x, y = n->y - band->y, side = n->w < n->h ? n->w : n->h, symbol;
         struct ui ui;
 
@@ -1886,10 +1978,14 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
         memory_zero(&ui, sizeof(ui));
         ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
         ui.scale = taskbar_scaled(view->scale), ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
-        if (view->icons[which] && view->icon_seqs[which] && side <= UI_ICON_MOST)
+        if (view->icons && view->icon_seqs && view->icons[which] && view->icon_seqs[which] && side <= UI_ICON_MOST)
         {
-                struct taskbar_picture address_to kept = &taskbar_pictures[(view->rows ? view->rows[which] : (unsigned int)which) % TASKBAR_TAB_ROOM];
+                unsigned int row = view->rows ? view->rows[which] : (unsigned int)which;
+                struct taskbar_picture address_to kept;
 
+                if (!ui_grown_room(&taskbar_pictures, sizeof(struct taskbar_picture), WINDOWS, (long)row + 1))
+                        return;
+                kept = (struct taskbar_picture address_to)taskbar_pictures.at + row;
                 if (kept->from != view->icons[which] || kept->seq != view->icon_seqs[which] || kept->side != side)
                 {
                         ui_icon_scale(kept->pixels, side, view->icons[which]);
@@ -2027,7 +2123,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 if (!n->id || which == TASKBAR_TABS || which == TASKBAR_TABS_LEFT || (which <= TASKBAR_ZONE && which > TASKBAR_DONE) || !(redo & taskbar_bit(which)) ||
                     (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !time_ok))
                         continue;
-                if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE || (which == -3 && taskbar.clock_tab))
+                if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE || which == TASKBAR_STRIP_BACK ||
+                    which == TASKBAR_STRIP_ON || (which == -3 && taskbar.clock_tab))
                 {
                         // A tab is lit while its window has the keys, and the launcher's button while the launcher is up; the tray never is.
                         unsigned int mark = which >= 0 ? view->marks[which] : which == TASKBAR_LAUNCHER && view->launcher_lit ? COMPOSITOR_TAB_LIT : 0;
@@ -2087,6 +2184,10 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 case TASKBAR_DONE: // its word on its lit face
                         taskbar_say(view, t, n, (const char *)WORDS(tray_done), ink, ground);
                         break;
+                case TASKBAR_STRIP_BACK: // the strip's chevrons, toward the tabs it does not show (turned with a band on a side)
+                case TASKBAR_STRIP_ON:
+                        taskbar_say(view, t, n, (which == TASKBAR_STRIP_BACK) != (m == 0 && language_rtl()) ? "\xe2\x80\xb9" : "\xe2\x80\xba", ink, ground);
+                        break;
                 case -9: // a format of the person's is drawn in its text cell after the tray icons
                         if (taskbar.tray_custom)
                                 taskbar_say(view, t, n, taskbar.tray_text, ink, ground);
@@ -2103,7 +2204,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         if (icon && icon->x >= n->x && icon->y >= n->y && icon->x + icon->w <= n->x + n->w && icon->y + icon->h <= n->y + n->h)
                                 taskbar_tab_icon(view, t, icon, which, ink);
                         if (label && label->w > 0 && label->h > 0 && label->x >= n->x && label->y >= n->y && label->x + label->w <= n->x + n->w &&
-                            label->y + label->h <= n->y + n->h && view->titles[which] && view->titles[which][0])
+                            label->y + label->h <= n->y + n->h && view->titles && view->titles[which] && view->titles[which][0])
                                 taskbar_say(view, t, label, view->titles[which], ink, ground);
                 }
                 }

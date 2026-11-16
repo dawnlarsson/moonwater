@@ -1058,6 +1058,11 @@ static unsigned int compositor_windows(void)
         return count;
 }
 
+// Each tab's title, app_id, icon and its sequence, in the order the tabs are listed: the rows' (compositor_rows_make), one a row.
+static const char **compositor_tab_titles, **compositor_tab_apps;
+static const unsigned int **compositor_tab_icons;
+static unsigned int *compositor_tab_seqs;
+
 // What the taskbar is given of the compositor, filled for each call: the output, the band's buffers and the windows'
 // tabs as compositor_windows lists them (the caller lists them first when they may have changed).
 static struct taskbar_view compositor_taskbar_view(void)
@@ -1075,7 +1080,8 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.face = &compositor.face;
         view.bold = compositor.bold_ok ? &compositor.bold : null;
         view.engine = compositor.engine;
-        view.count = compositor.listing < TASKBAR_TAB_ROOM ? compositor.listing : TASKBAR_TAB_ROOM;
+        view.count = compositor.listing;
+        view.titles = compositor_tab_titles, view.apps = compositor_tab_apps, view.icons = compositor_tab_icons, view.icon_seqs = compositor_tab_seqs;
         view.launcher_lit = compositor_launcher_row() >= 0;
         view.marks = compositor.marks;
         view.lengths = compositor.lengths;
