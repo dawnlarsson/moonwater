@@ -61,9 +61,13 @@
 #define WAYLAND_CLIENTS 32
 #define WAYLAND_IDS 8192        // a client's ids run from 1 to this less one
 #define WAYLAND_OBJECTS 2048    // live objects of one client
-#define WAYLAND_SURFACES 64
-#define WAYLAND_POOLS 96         // a dma-buf buffer is a pool of its own, so this is more than shm needs
-#define WAYLAND_BUFFERS 256
+// Xwayland is one client for every X window of the desktop, with a surface, and a pool and a buffer (a dma-buf's buffer is a pool of
+// its own), for each window it maps: 120 X windows took it past 96 pools, and the protocol error ended Xwayland and every X program
+// with it, where weston and mutter showed them all (test/wayland_stress, x-many-windows). The record is mapped zeroed, so what a
+// client does not use costs no memory.
+#define WAYLAND_SURFACES 256
+#define WAYLAND_POOLS 512
+#define WAYLAND_BUFFERS 1024
 #define WAYLAND_POSITIONERS 8
 #define WAYLAND_MESSAGE 4096    // the largest message, header included, as in libwayland
 #define WAYLAND_ARGS 12
@@ -685,7 +689,8 @@ struct wayland_client
         struct wayland_text texts[WAYLAND_TEXTS];
         unsigned int feedback_id[WAYLAND_FEEDBACKS];
         unsigned char feedback_need[WAYLAND_FEEDBACKS];
-        unsigned char feedbacks, feedback_pending, dmabufs;
+        unsigned short feedbacks;    // up to WAYLAND_FEEDBACKS, a surface's each and a default
+        unsigned char feedback_pending, dmabufs;
         struct wayland_sync_timeline timelines[WAYLAND_TIMELINES];
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
         struct wayland_notify notifies[WAYLAND_NOTIFIES];
@@ -3641,10 +3646,13 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 }
                 s->row = wayland.host->row_open(wayland.host->context, c->slot, popup ? WAYLAND_KIND_POPUP : WAYLAND_KIND_TOPLEVEL, parent,
                                                 s->popup_x, s->popup_y);
+                // No row of the table is free: the window is not shown yet, and each commit asks again, so it is shown when one is let go
+                // of. Its client goes on, as a popup with nothing to hang from does: ending it ended Xwayland, every X program with it,
+                // at the desktop's 33rd window.
                 if (s->row < 0)
                 {
                         s->row = -1;
-                        return wayland_fail(c, s->role_id ? s->role_id : self->id, WAYLAND_NO_MEMORY, "no window left");
+                        return WAYLAND_OK;
                 }
                 wayland.row_client[s->row] = c->slot;
                 wayland.row_surface[s->row] = wayland_surface_index(c, s);
