@@ -376,7 +376,7 @@ static void compositor_taskbar_damage(b64 before)
 // that is (taskbar_slide_now).
 static int compositor_fullscreen_up(void)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if (compositor.fullscreen[row] && compositor_visible((int)row))
                         return 1;
         return 0;
@@ -583,7 +583,7 @@ static void compositor_glass_drop(int row)
 
         if (compositor.backdrop[row])
                 gpu_forget((const void *)(compositor.backdrop[row]), (positive)(compositor.glass_cut[row])), compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
-        for (int other = 0; other < WINDOWS; other++)
+        for (int other = 0; other < (int)compositor_rows_in_use; other++)
                 left |= other != row && compositor.glassy[other];
         if (!left && compositor.frost)
                 compositor_call(syscall(madvise), (positive)compositor.frost, compositor.frost_bytes, 4, 0, 0, 0);

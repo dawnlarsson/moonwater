@@ -464,7 +464,7 @@ static void compositor_flip_done(void)
 {
         compositor_record_vblank(clock_monotonic_nanoseconds());
         compositor.flip_pending = 0;
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (!(compositor.held_rows & (1u << row)))
                         continue;
@@ -477,7 +477,7 @@ static void compositor_flip_done(void)
                 compositor.woken |= 1u << row;
         }
         // A window that left while the card showed it: its framebuffers now, the card being off them.
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((compositor.dropping & (1u << row)) && !compositor_shows_row(row))
                 {
                         compositor.dropping &= ~(1u << row);

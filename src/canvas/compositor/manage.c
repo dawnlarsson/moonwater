@@ -384,7 +384,7 @@ static void compositor_fit_row(int row)
 static void compositor_scale_fit(void)
 {
         compositor.fit = 0;
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (!compositor.showing[row] || compositor.arranged[row] != COMPOSITOR_FLOATING)
                         continue;
@@ -417,7 +417,7 @@ static int compositor_meets(int row, unsigned int edge)
         if (edge != COMPOSITOR_EDGE_LEFT && edge != COMPOSITOR_EDGE_RIGHT && edge != COMPOSITOR_EDGE_TOP &&
             edge != COMPOSITOR_EDGE_BOTTOM)
                 return COMPOSITOR_NONE;
-        for (int other = 0; other < WINDOWS; other++)
+        for (int other = 0; other < (int)compositor_rows_in_use; other++)
         {
                 int ox = compositor.x[other], oy = compositor.y[other], ow = (int)compositor.w[other], oh = (int)compositor.h[other];
 
@@ -452,7 +452,7 @@ static void compositor_divider_measure(struct compositor_divider *d)
 {
         int first = 1;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 int a, b;
 
@@ -487,7 +487,7 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
         while (grew && compositor_tile_cells(compositor.arranged[row]))
         {
                 grew = 0;
-                for (int each = 0; each < WINDOWS; each++)
+                for (int each = 0; each < (int)compositor_rows_in_use; each++)
                 {
                         int near, far, a, b;
 
@@ -626,7 +626,7 @@ static int compositor_shared_begin(int row, unsigned int edge)
         compositor.shared_lo = d.lo_row, compositor.shared_hi = d.hi_row;
         compositor.shared_lo_set = d.lo, compositor.shared_hi_set = d.hi;
         compositor.shared_vertical = d.vertical;
-        for (int each = 0; each < WINDOWS; each++)
+        for (int each = 0; each < (int)compositor_rows_in_use; each++)
         {
                 if (!(all >> each & 1))
                         continue;
@@ -656,7 +656,7 @@ static void compositor_shared_move(void)
         unsigned int all = compositor.shared_lo_set | compositor.shared_hi_set;
         struct compositor_divider d;
 
-        for (int each = 0; each < WINDOWS; each++)
+        for (int each = 0; each < (int)compositor_rows_in_use; each++)
         {
                 int size = compositor.shared_sizes[each], least = compositor_least(each, !vertical);
                 int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
@@ -671,7 +671,7 @@ static void compositor_shared_move(void)
         if (low > high)
                 return;
         travel = travel < low ? low : travel > high ? high : travel;
-        for (int each = 0; each < WINDOWS; each++)
+        for (int each = 0; each < (int)compositor_rows_in_use; each++)
         {
                 int size;
 
@@ -821,7 +821,7 @@ static int compositor_hold_cancel(void)
         compositor.press = COMPOSITOR_NONE;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((compositor.hold_rows >> row & 1) && compositor.showing[row])
                         compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
         compositor.hold_rows = 0;
@@ -873,7 +873,7 @@ static void compositor_tile_others(int row, unsigned int how, int screen)
         unsigned int count, taken = compositor_region_cells(how);
         const int (*screens)[4] = compositor_screens(&count);
 
-        for (int other = 0; other < WINDOWS; other++)
+        for (int other = 0; other < (int)compositor_rows_in_use; other++)
         {
                 unsigned int was = compositor_tile_cells(compositor.arranged[other]), left;
                 int part[4];
@@ -920,7 +920,7 @@ static unsigned int compositor_occupied(int row, int screen)
 {
         unsigned int cells = 0;
 
-        for (int other = 0; other < WINDOWS; other++)
+        for (int other = 0; other < (int)compositor_rows_in_use; other++)
                 if (other != row && compositor.showing[other] && compositor_screen_of(other) == screen)
                         cells |= compositor_tile_cells(compositor.arranged[other]);
         return cells;
@@ -1513,7 +1513,7 @@ static void compositor_first_place(int row, int *x, int *y)
                 if (tx + (int)compositor.w[row] > right || ty + (int)compositor.h[row] > bottom)
                         break;
 
-                for (int other = 0; other < WINDOWS; other++)
+                for (int other = 0; other < (int)compositor_rows_in_use; other++)
                         taken |= other != row && compositor.showing[other] && compositor.x[other] == tx &&
                                  compositor.y[other] == ty;
 
@@ -1673,7 +1673,7 @@ static void compositor_room_follow(void)
         int screens[WINDOW_PLACE_SCREENS][4], room[4];
         unsigned int count = place_screens(screens);
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 unsigned int on;
 
@@ -2678,7 +2678,7 @@ static void compositor_minimize_row(int row)
 // The keyboard's row, a window shown that asks WINDOW_KEYBOARD, or -1 when none is.
 static int compositor_osk_row(void)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if (compositor.showing[row] && (compositor.asks[row] & WINDOW_KEYBOARD))
                         return (int)row;
         return -1;
@@ -2827,7 +2827,7 @@ static void compositor_osk_sync(void)
         if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF &&
             !compositor.osk_turned)
                 want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_keyboard_plugged();
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
                         compositor_osk_unpan((int)row);
         if (keyboard >= 0)
@@ -2980,7 +2980,7 @@ static void compositor_clip_clear(unsigned int which)
         compositor.table->clip_length[which] = 0;
         compositor.table->clip_owner[which] = -1;
         __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor.table->clip_watch[row])
                         compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -3139,7 +3139,7 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned int le
         compositor.table->clip_length[which] = length;
         compositor.table->clip_owner[which] = owner;
         __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor.table->clip_watch[row] && row != owner)
                         compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -3330,7 +3330,7 @@ static void compositor_popup_place(int ax, int ay, int aw, int ah, int width, in
 // The window a popup belongs to at the root of its chain, or the row itself.
 static int compositor_popup_root(int row)
 {
-        for (int hops = 0; hops < WINDOWS && row >= 0 && compositor_popup_parent[row] >= 0; hops++)
+        for (int hops = 0; hops < (int)compositor_rows_in_use && row >= 0 && compositor_popup_parent[row] >= 0; hops++)
                 row = compositor_popup_parent[row];
         return row;
 }
@@ -3358,7 +3358,7 @@ static b32 compositor_popups_close(int root, int keep)
 {
         b32 asked = false;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 b32 kept = false;
 
@@ -3366,7 +3366,7 @@ static b32 compositor_popups_close(int root, int keep)
                         continue;
                 if (root >= 0 && compositor_popup_root(row) != root)
                         continue;
-                for (int link = keep, hops = 0; link >= 0 && hops < WINDOWS; link = compositor_popup_parent[link], hops++)
+                for (int link = keep, hops = 0; link >= 0 && hops < (int)compositor_rows_in_use; link = compositor_popup_parent[link], hops++)
                         kept |= link == row;
                 if (!kept)
                 {
@@ -3414,7 +3414,7 @@ static void compositor_popup_leave(int row)
         compositor_popup_parent[row] = -1;
         compositor_popups_close(row, -1);
         // Asked to go, they are no popups of whatever takes the row next: their link to it is cut.
-        for (int child = 0; child < WINDOWS; child++)
+        for (int child = 0; child < (int)compositor_rows_in_use; child++)
                 if (compositor_popup_parent[child] == row)
                         compositor_popup_parent[child] = -1;
 }
@@ -3466,7 +3466,7 @@ static void compositor_doors_done(void)
         drained = __atomic_exchange_n(&compositor_doors.drained, 0ul, __ATOMIC_ACQ_REL);
         reopened = __atomic_exchange_n(&compositor_doors.reopened, 0ul, __ATOMIC_ACQ_REL);
         compositor_doors.busy &= ~(drained | reopened);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((drained | reopened) >> row & 1)
                 {
                         compositor_take(row);

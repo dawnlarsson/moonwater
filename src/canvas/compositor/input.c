@@ -300,7 +300,7 @@ static int compositor_volume_map(void)
 // The first window showing whose name is word (the table's name, whole), or COMPOSITOR_NONE.
 static int compositor_row_named(const char *word)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
                 const volatile char *name = compositor.table->name[row];
                 unsigned int at = 0;
@@ -1634,7 +1634,7 @@ static unsigned int compositor_menu_roots(void)
 {
         unsigned int roots = 0;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && !(compositor.state[row] & WINDOW_CLOSING))
                         roots |= 1u << compositor_popup_root(row);
         return roots;

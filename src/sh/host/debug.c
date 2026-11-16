@@ -579,7 +579,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  (positive)table->period_seen / 1000, table->period_seen ? (string_address) "" : (string_address) " (no flip measured yet)");
         //      The windows the table holds, each where the compositor put it: its row, its title (a program's, so
         //      spelled), its place in the space and the size of its picture.
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < windows_rows(table); row++)
         {
                 char title[WINDOWS_TITLE];
 
@@ -759,7 +759,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         {
                 unsigned int from_lists = 0;
 
-                for (unsigned int row = 0; row < WINDOWS; row++)
+                for (unsigned int row = 0; row < windows_rows(table); row++)
                         if (table->pid[row] && table->list_state[row] == 1)
                                 from_lists++;
                 host_say(log, "  lists           %p windows drawn from their lists, %p refused; list mode %s\n", (positive)from_lists, (positive)table->list_refused,
@@ -794,7 +794,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                         host_say(log, "    last size     the list %p by %p, the window's picture taken at %p by %p\n", (positive)table->list_size_list[0],
                                  (positive)table->list_size_list[1], (positive)table->list_size_taken[0], (positive)table->list_size_taken[1]);
                 //      The frames each window recorded into its list that did not record whole (the program paints them as pixels), by cause.
-                for (unsigned int row = 0; row < WINDOWS; row++)
+                for (unsigned int row = 0; row < windows_rows(table); row++)
                 {
                         unsigned int lost = 0;
 
@@ -834,7 +834,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         {
                 unsigned int content = 0, modal = 0, icon = 0;
 
-                for (unsigned int row = 0; row < WINDOWS; row++)
+                for (unsigned int row = 0; row < windows_rows(table); row++)
                 {
                         content += table->wl_content[row] != 0;
                         modal += table->wl_modal[row] != 0;

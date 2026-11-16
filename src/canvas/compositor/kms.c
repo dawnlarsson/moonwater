@@ -753,7 +753,7 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
         compositor_pointer_sync();
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.resize = COMPOSITOR_NONE;
-        for (int row = -1; row < WINDOWS; row++)
+        for (int row = -1; row < (int)compositor_rows_in_use; row++)
         {
                 int x = row < 0 ? compositor.real_x : compositor.x[row], y = row < 0 ? compositor.real_y : compositor.y[row];
                 int w = row < 0 ? 1 : (int)compositor.w[row], h = row < 0 ? 1 : (int)compositor.h[row], from, to = 0;

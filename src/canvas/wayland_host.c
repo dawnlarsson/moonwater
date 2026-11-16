@@ -702,7 +702,7 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         }
         // A picture a row shows in place from this pool (compositor_wl_lend) is read where the pool now is: a pool that grew may have moved,
         // and the address it was lent at is then no mapping at all, which the next compose would read.
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor_wl.lent[row].pixels && compositor_wl.lent[row].map == (const unsigned char *)at)
                 {
                         compositor_wl.lent[row].pixels =
@@ -710,7 +710,7 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
                         compositor_wl.lent[row].map = (const unsigned char *)got;
                 }
         // And the layers read in place from it (compositor_wl_layers).
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
                         if (compositor_wl_layers.layer[row][k].map == (const unsigned char *)at)
                         {
@@ -743,7 +743,7 @@ static void compositor_wl_unmap(void *context, void *at, long size)
         if (!at || at == WAYLAND_DMABUF_UNMAPPED)
                 return;
         gpu_forget(at, (positive)size);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (compositor_wl.source[row].map == (const unsigned char *)at)
                         compositor_wl_source_drop(row);
@@ -759,7 +759,7 @@ static void compositor_wl_close(void *context, long fd)
         (void)context;
         if (fd >= 0)
         {
-                for (int row = 0; row < WINDOWS; row++)
+                for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 {
                         if (compositor_wl.source[row].va && compositor_wl.source[row].fd == fd)
                                 compositor_wl_source_drop(row);
@@ -868,7 +868,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         (void)context;
         if (!table || client < 0 || client >= WAYLAND_CLIENTS)
                 return -1;
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 unsigned int none = 0;
 
@@ -1387,7 +1387,7 @@ static void compositor_wl_lent_sync(int start)
                         return;
                 compositor_wl.lent_synced = 0;
         }
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor_lent(row) && compositor_wl.lent[row].fd >= 0)
                 {
                         if (start)
@@ -1418,7 +1418,7 @@ static void compositor_wl_lent_sync(int start)
                         }
                 }
         // The layers of dma-bufs, each bracketed as the picture under them is, for a present that draws their window.
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
                 {
                         struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
@@ -3968,7 +3968,7 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
         (void)context;
         if (!table || which < 0 || which > 1 || !table->clip_on)
                 return -1;
-        for (int at = 0; at < WINDOWS; at++)
+        for (int at = 0; at < (int)compositor_rows_in_use; at++)
                 if (wayland_row_owner(at) == client && now - compositor_clip.gesture[at] <= COMPOSITOR_CLIP_GESTURE_NS &&
                     (row < 0 || at == compositor.focus))
                         row = at;
@@ -4148,7 +4148,7 @@ static void compositor_wl_table(void)
         table->wl_bells = (unsigned int)bells;
         table->wl_icons = (unsigned int)icons;
         table->wl_shortcuts = 0;
-        for (long row = 0; row < WINDOWS; row++)
+        for (long row = 0; row < (long)compositor_rows_in_use; row++)
         {
                 long content, icon, modal, shortcuts;
 
@@ -4751,7 +4751,7 @@ static void compositor_wl_wake(void)
         compositor_wl_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
                         compositor_wl_drain(row);
         if (stats.rows > 0 || stats.clients > 0)
@@ -4784,7 +4784,7 @@ static void compositor_wl_wake(void)
                 if (keys != wayland.keyboard_row)
                         wayland_keyboard_to(keys);
         }
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
                 {
                         wayland_row_wake(row);

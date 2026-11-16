@@ -366,7 +366,7 @@ static b32 compositor_card_holds(void)
 // the ones held for a flip; a row held for a flip still in flight (the one shown straight) is left to it.
 static void compositor_card_release(void)
 {
-        for (int row = 0; row < WINDOWS && compositor.table; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use && compositor.table; row++)
                 if ((compositor.held_rows & compositor_card.rows & (1u << row)) && !(compositor.flip_pending && row == compositor.flip_row))
                 {
                         __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
@@ -506,7 +506,7 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
 static void compositor_card_lists_settle(b32 hung)
 {
         hung |= gpu_recovered != compositor_card.list_recovered;
-        for (int row = 0; row < WINDOWS && compositor_card.list_rows; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use && compositor_card.list_rows; row++)
         {
                 int done;
 

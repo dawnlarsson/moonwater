@@ -103,7 +103,7 @@ static void compositor_glass_touch(const int *rectangle)
         if (compositor.damage_by == COMPOSITOR_OVER)
                 return;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 int box[4], change[4];
 
@@ -336,7 +336,7 @@ static void compositor_land(int row)
 */
 static void compositor_land_keep(void)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
                 positive now;
 
@@ -455,7 +455,7 @@ static void compositor_glide_frame(int row, struct compositor_frame *frame)
 */
 static void compositor_glide_keep(void)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
                 positive now;
 
@@ -1015,7 +1015,7 @@ static void compositor_popup_leave(int row);
 */
 static int compositor_launcher_row(void)
 {
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor.showing[row] && compositor_popup_parent[row] < 0 && !(compositor.state[row] & WINDOW_CLOSING) &&
                     (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE))
                         return row;
@@ -1027,7 +1027,7 @@ static unsigned int compositor_windows(void)
         unsigned int count = 0;
         int bands = compositor_bands();
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 unsigned int place = count;
 
@@ -1145,7 +1145,7 @@ static void compositor_bands_follow(void)
 
         if (compositor_bands() < 2)
                 return;
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 unsigned char screen = (unsigned char)(compositor.showing[row] ? compositor_screen_of(row) + 1 : 0);
 

@@ -365,12 +365,12 @@ static void compositor_theme_set(unsigned int theme, unsigned int accent, unsign
         if (compositor.theme_side != !theme)
         {
                 compositor.theme_side = !theme;
-                for (int row = 0; row < WINDOWS; row++)
+                for (int row = 0; row < (int)compositor_rows_in_use; row++)
                         if (compositor.glassy[row])
                                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (table->pid[row])
                         compositor.woken |= 1u << row;
 }
@@ -1434,7 +1434,7 @@ static void compositor_owed_drop(int row)
 // What every row is owed, tried again: a program that has caught up takes the release that did not fit.
 static void compositor_owed_pass(void)
 {
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor_owed[row] || compositor_owed_any[row])
                         compositor_owed_flush(row);
 }
@@ -1639,7 +1639,7 @@ static void compositor_doors_start(int clip)
         compositor_doors.done = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0); // EFD_CLOEXEC | EFD_NONBLOCK
         if (compositor_doors.done < 0)
                 return;
-        for (unsigned int slot = 0; slot <= WINDOWS; slot++)
+        for (unsigned int slot = 0; slot <= compositor_rows_in_use; slot++)
         {
                 // A kick is read where its thread waits (EFD_CLOEXEC alone: the read blocks), so a thread asked for a wake makes two
                 // calls, the read that ends and the wake's write, where a poll, a read and the write were three.
@@ -1655,7 +1655,7 @@ static void compositor_knock(void)
 {
         char byte = 0;
 
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((compositor.woken & (1u << row)) && !compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
                         system_write_once(compositor.wake[row], &byte, 1);
         compositor.woken = 0;

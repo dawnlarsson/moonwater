@@ -1702,7 +1702,7 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
                 WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, windows_gpu_reasons[refused_why]);
         if (!table->gpu_able && table->gpu_state == WINDOWS_GPU_UP && table->gpu_drawn + table->gpu_processor > 0)
                 WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < windows_rows(table); row++)
                 if (table->pid[row] && table->list_tried[row])
                 {
                         tried += table->list_tried[row];

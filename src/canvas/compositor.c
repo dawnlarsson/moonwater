@@ -607,6 +607,13 @@ struct compositor_chip
 #define COMPOSITOR_KEY_A 30u
 #define COMPOSITOR_KEY_POWER 116u
 
+/*
+        The rows of the window table in use: the high-water of the rows the compositor has made doors for, which the table publishes
+        (windows.rows) and every walk of the rows goes to, where it went to WINDOWS. It is WINDOWS from the start for now; rows made as
+        they are wanted come with the table's sparse layout.
+*/
+static unsigned int compositor_rows_in_use = WINDOWS;
+
 struct compositor_poll
 {
         int handle;
@@ -1446,7 +1453,7 @@ static void compositor_lists_set(int on)
                 return;
         __atomic_store_n(&table->list_mode, on ? 1u : 0u, __ATOMIC_RELEASE);
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (table->pid[row])
                         compositor.woken |= 1u << row;
 }
@@ -1525,12 +1532,12 @@ static int compositor_table(void)
         compositor.table->list_bytes = WINDOW_LIST_BYTES;
         // The layout's version first for a program to read, and the rows a program may take (every one has its doors below).
         __atomic_store_n(&compositor.table->abi, WINDOWS_ABI, __ATOMIC_RELEASE);
-        __atomic_store_n(&compositor.table->rows, (unsigned int)WINDOWS, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.table->rows, compositor_rows_in_use, __ATOMIC_RELEASE);
         compositor_lists_set(0);
         compositor_table_outputs();
 
         // The door is read here and the wake written, each end kept for the session; S_IFIFO.
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 for (int wake = 0; wake < 2; wake++)
                 {
                         windows_door_name((char *)name, row, wake);
@@ -1565,7 +1572,7 @@ static void compositor_table_drop(void)
         }
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0, 0, 0, 0);
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 for (int wake = 0; wake < 2; wake++)
                 {
                         windows_door_name((char *)name, row, wake);
@@ -1709,7 +1716,7 @@ static void compositor_space_retake(void)
         if (turned)
                 compositor_osk_turned();
         // The keyboard is sized for the output it is on, which may have changed: it is woken to look (osk_tick).
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if (compositor.asks[row] & WINDOW_KEYBOARD)
                         compositor.woken |= 1u << row;
 }
@@ -2225,7 +2232,7 @@ static void compositor_forward(void)
 
         if (!rows)
                 return;
-        for (int row = 0; row < WINDOWS; row++)
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (!(rows >> row & 1))
                         continue;
@@ -2326,7 +2333,7 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
         for (unsigned int at = 0; at < compositor.input_count; at++)
                 wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
         slots->doors = count;
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 wanted[count++] = (struct compositor_poll){held || compositor_doors.busy >> row & 1 ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
                                                            COMPOSITOR_POLLIN, 0};
         if (compositor_doors.done >= 0 && !held)
@@ -2778,9 +2785,9 @@ static b32 compositor_main()
                 {
                         b32 listing = compositor_card.list_rows != 0;
 
-                        for (unsigned int k = 0, row; k < WINDOWS; k++)
+                        for (unsigned int k = 0, row; k < compositor_rows_in_use; k++)
                         {
-                                row = (compositor_card.door_from + k) % WINDOWS;
+                                row = (compositor_card.door_from + k) % compositor_rows_in_use;
                                 if (!wanted[doors + row].returned)
                                         continue;
                                 if (compositor_card_door_waits(listing))

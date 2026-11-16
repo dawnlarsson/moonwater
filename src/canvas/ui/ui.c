@@ -25579,7 +25579,7 @@ static b32 ui_lift_row(const struct window_row address_to own, string_address na
 {
         struct windows address_to table = own->table;
 
-        for (unsigned int row = 0; row < WINDOWS; row++)
+        for (unsigned int row = 0; row < windows_rows(table); row++)
         {
                 unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
                 char door_name[48];
