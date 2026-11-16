@@ -301,6 +301,8 @@ ui_field_full	fe02	no cabe más
 =Cursor style	ad1e	Estilo del puntero
 =Date format	7a44	Formato de fecha
 =Devices	f320	Dispositivos
+=Discover now	398a	Descubrir ahora
+=Discovery	2db5	Descubrimiento
 =Files	1b30	Archivos
 =Internal storage	e961	Almacenamiento interno
 =External devices	5769	Dispositivos externos
@@ -333,9 +335,12 @@ ui_field_full	fe02	no cabe más
 =Keyboard	a714	Teclado
 =Language	db9b	Idioma
 =Large pointer stays (ms, or default)	5626	El puntero grande permanece (ms o default)
+=Last-known addresses	86b7	Últimas direcciones conocidas
 =Launcher	44b1	Lanzador
+=Learned	0c7c	Aprendido
 =Left edge	9ce5	Borde izquierdo
 =Linked machines	0cc2	Máquinas vinculadas
+=Local addresses	9f2c	Direcciones locales
 =Long press time (ms, or default)	aff4	Tiempo de pulsación larga (ms o default)
 =Machine	be0e	Equipo
 =Mixer	123a	Mezclador
@@ -346,10 +351,12 @@ ui_field_full	fe02	no cabe más
 =Mouse acceleration	c400	Aceleración del ratón
 =Mouse sensitivity (percent, or default)	8a23	Sensibilidad del ratón (porcentaje o default)
 =Mute	9f74	Silenciar
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Servidores NTS (o default)
 =Name	7306	Nombre
 =Name and code of another machine	4e07	Nombre y código de otra máquina
 =Name servers (auto for the network)	695a	Servidores de nombres (auto para la red)
+=Names of the network	3051	Nombres de la red
 =Names over TLS	075a	Nombres por TLS
 =Natural direction	d977	Dirección natural
 =Network	ad65	Red
@@ -360,6 +367,7 @@ ui_field_full	fe02	no cabe más
 =Open windows where they were last put	8711	Abrir las ventanas donde se dejaron
 =Output device (name, or default)	d73c	Dispositivo de salida (nombre o default)
 =Pair a machine	b39b	Emparejar una máquina
+=Paths	263f	Rutas
 =Plain Text	2bbe	Texto sin formato
 =Pointer	4dca	Puntero
 =Pointer squeeze (percent, or default)	bbee	Compresión del puntero (por ciento, o predeterminado)
@@ -367,6 +375,11 @@ ui_field_full	fe02	no cabe más
 =Power	a5e6	Energía
 =Power profile	8def	Perfil de energía
 =Predict touch and pen	e2b7	Predecir el tacto y el lápiz
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	IPv4 pública
+=Public IPv6	0b39	IPv6 pública
+=Public address discovery (HTTPS)	937e	Descubrimiento de la dirección pública (HTTPS)
+=Public address discovery (STUN)	7691	Descubrimiento de la dirección pública (STUN)
 =Refresh rate	bf6e	Frecuencia de actualización
 =Remembered devices	abbc	Dispositivos recordados
 =Resize border width (pixels, or default)	7fdf	Ancho del borde de cambio de tamaño (píxeles o default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	no cabe más
 =Screen modes	85ad	Modos de pantalla
 =Scroll speed	e7af	Velocidad de desplazamiento
 =Scrolling	74ec	Desplazamiento
+=Servers in order	0a76	Servidores en orden
 =Set the clock from the network	b2a3	Poner el reloj en hora desde la red
 =Settings	8728	Ajustes
 =Shake sensitivity	8d3a	Sensibilidad al agitar
@@ -418,6 +432,7 @@ ui_field_full	fe02	no cabe más
 =Turned by the screen	ea45	Lo gira la pantalla
 =Turned left	507c	Girada a la izquierda
 =Turned right	7a49	Girada a la derecha
+=UDP out	4fd0	UDP saliente
 =Upside down	9dc1	Al revés
 =Volume (percent, or default)	f6e3	Volumen (porcentaje o default)
 =Waterlink	6560	Waterlink

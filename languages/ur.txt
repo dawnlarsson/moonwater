@@ -302,6 +302,8 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Cursor style	ad1e	پوائنٹر کا انداز
 =Date format	7a44	تاریخ کی شکل
 =Devices	f320	ڈیوائسز
+=Discover now	398a	ابھی دریافت کریں
+=Discovery	2db5	دریافت
 =Files	1b30	فائلیں
 =Internal storage	e961	اندرونی اسٹوریج
 =External devices	5769	بیرونی ڈیوائسز
@@ -334,9 +336,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Keyboard	a714	کی بورڈ
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	بڑا پوائنٹر کتنی دیر رہے (ms یا default)
+=Last-known addresses	86b7	آخری معلوم پتے
 =Launcher	44b1	لانچر
+=Learned	0c7c	معلوم ہوا
 =Left edge	9ce5	بائیں کنارہ
 =Linked machines	0cc2	منسلک کمپیوٹر
+=Local addresses	9f2c	مقامی پتے
 =Long press time (ms, or default)	aff4	لمبے دباؤ کا وقت (ms یا default)
 =Machine	be0e	کمپیوٹر
 =Mixer	123a	مکسر
@@ -347,10 +352,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Mouse acceleration	c400	ماؤس ایکسیلریشن
 =Mouse sensitivity (percent, or default)	8a23	ماؤس کی حساسیت (فیصد یا default)
 =Mute	9f74	خاموش
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS سرورز (یا default)
 =Name	7306	نام
 =Name and code of another machine	4e07	دوسرے کمپیوٹر کا نام اور کوڈ
 =Name servers (auto for the network)	695a	نام کے سرورز (auto نیٹ ورک کے لیے)
+=Names of the network	3051	نیٹ ورک کے نام
 =Names over TLS	075a	TLS پر نام
 =Natural direction	d977	قدرتی سمت
 =Network	ad65	نیٹ ورک
@@ -361,6 +368,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Pair a machine	b39b	ایک کمپیوٹر جوڑیں
+=Paths	263f	راستے
 =Plain Text	2bbe	سادہ متن
 =Pointer	4dca	پوائنٹر
 =Pointer squeeze (percent, or default)	bbee	پوائنٹر کا دباؤ (فیصد، یا ڈیفالٹ)
@@ -368,6 +376,11 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Power	a5e6	پاور
 =Power profile	8def	پاور پروفائل
 =Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
+=Proxy	1bfb	پراکسی
+=Public IPv4	0813	عوامی IPv4
+=Public IPv6	0b39	عوامی IPv6
+=Public address discovery (HTTPS)	937e	عوامی پتے کی دریافت (HTTPS)
+=Public address discovery (STUN)	7691	عوامی پتے کی دریافت (STUN)
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
 =Resize border width (pixels, or default)	7fdf	سائز بدلنے کے کنارے کی چوڑائی (پکسل یا default)
@@ -380,6 +393,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Screen modes	85ad	اسکرین کے موڈ
 =Scroll speed	e7af	اسکرول کی رفتار
 =Scrolling	74ec	اسکرول
+=Servers in order	0a76	سرورز ترتیب وار
 =Set the clock from the network	b2a3	گھڑی نیٹ ورک سے سیٹ کریں
 =Settings	8728	ترتیبات
 =Shake sensitivity	8d3a	ہلانے کی حساسیت
@@ -419,6 +433,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Turned by the screen	ea45	اسکرین کی طرف سے گھمایا گیا
 =Turned left	507c	بائیں گھمایا گیا
 =Turned right	7a49	دائیں گھمایا گیا
+=UDP out	4fd0	باہر جانے والا UDP
 =Upside down	9dc1	الٹا
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
 =Waterlink	6560	Waterlink

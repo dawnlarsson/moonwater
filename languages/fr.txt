@@ -301,6 +301,8 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Cursor style	ad1e	Style du pointeur
 =Date format	7a44	Format de la date
 =Devices	f320	Périphériques
+=Discover now	398a	Découvrir maintenant
+=Discovery	2db5	Découverte
 =Files	1b30	Fichiers
 =Internal storage	e961	Stockage interne
 =External devices	5769	Périphériques externes
@@ -333,9 +335,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Keyboard	a714	Clavier
 =Language	db9b	Langue
 =Large pointer stays (ms, or default)	5626	Le grand pointeur reste (ms ou default)
+=Last-known addresses	86b7	Dernières adresses connues
 =Launcher	44b1	Lanceur
+=Learned	0c7c	Appris
 =Left edge	9ce5	Bord gauche
 =Linked machines	0cc2	Machines liées
+=Local addresses	9f2c	Adresses locales
 =Long press time (ms, or default)	aff4	Durée de l'appui long (ms ou default)
 =Machine	be0e	Machine
 =Mixer	123a	Mélangeur
@@ -346,10 +351,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Mouse acceleration	c400	Accélération de la souris
 =Mouse sensitivity (percent, or default)	8a23	Sensibilité de la souris (pourcentage ou default)
 =Mute	9f74	Couper le son
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Serveurs NTS (ou default)
 =Name	7306	Nom
 =Name and code of another machine	4e07	Nom et code d'une autre machine
 =Name servers (auto for the network)	695a	Serveurs de noms (auto pour le réseau)
+=Names of the network	3051	Noms du réseau
 =Names over TLS	075a	Noms par TLS
 =Natural direction	d977	Sens naturel
 =Network	ad65	Réseau
@@ -360,6 +367,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Pair a machine	b39b	Associer une machine
+=Paths	263f	Chemins
 =Plain Text	2bbe	Texte brut
 =Pointer	4dca	Pointeur
 =Pointer squeeze (percent, or default)	bbee	Écrasement du pointeur (pourcentage, ou défaut)
@@ -367,6 +375,11 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	IPv4 publique
+=Public IPv6	0b39	IPv6 publique
+=Public address discovery (HTTPS)	937e	Découverte de l'adresse publique (HTTPS)
+=Public address discovery (STUN)	7691	Découverte de l'adresse publique (STUN)
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
 =Resize border width (pixels, or default)	7fdf	Épaisseur de la bordure de redimensionnement (pixels ou default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Screen modes	85ad	Modes d'écran
 =Scroll speed	e7af	Vitesse de défilement
 =Scrolling	74ec	Défilement
+=Servers in order	0a76	Serveurs par ordre
 =Set the clock from the network	b2a3	Régler l'horloge depuis le réseau
 =Settings	8728	Paramètres
 =Shake sensitivity	8d3a	Sensibilité à la secousse
@@ -418,6 +432,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Turned by the screen	ea45	Pivoté par l'écran
 =Turned left	507c	Pivoté à gauche
 =Turned right	7a49	Pivoté à droite
+=UDP out	4fd0	UDP sortant
 =Upside down	9dc1	À l'envers
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Waterlink	6560	Waterlink

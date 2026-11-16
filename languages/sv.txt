@@ -301,6 +301,8 @@ ui_field_full	fe02	mer ryms inte
 =Cursor style	ad1e	Pekarstil
 =Date format	7a44	Datumformat
 =Devices	f320	Enheter
+=Discover now	398a	Upptäck nu
+=Discovery	2db5	Upptäckt
 =Files	1b30	Filer
 =Internal storage	e961	Intern lagring
 =External devices	5769	Externa enheter
@@ -333,9 +335,12 @@ ui_field_full	fe02	mer ryms inte
 =Keyboard	a714	Tangentbord
 =Language	db9b	Språk
 =Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
+=Last-known addresses	86b7	Senast kända adresser
 =Launcher	44b1	Startare
+=Learned	0c7c	Inhämtat
 =Left edge	9ce5	Vänster kant
 =Linked machines	0cc2	Länkade maskiner
+=Local addresses	9f2c	Lokala adresser
 =Long press time (ms, or default)	aff4	Tid för långt tryck (ms eller default)
 =Machine	be0e	Maskin
 =Mixer	123a	Mixer
@@ -346,10 +351,12 @@ ui_field_full	fe02	mer ryms inte
 =Mouse acceleration	c400	Musacceleration
 =Mouse sensitivity (percent, or default)	8a23	Musens känslighet (procent eller default)
 =Mute	9f74	Ljud av
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS-servrar (eller default)
 =Name	7306	Namn
 =Name and code of another machine	4e07	Namn och kod för en annan maskin
 =Name servers (auto for the network)	695a	Namnservrar (auto för nätverket)
+=Names of the network	3051	Nätverkets namn
 =Names over TLS	075a	Namn över TLS
 =Natural direction	d977	Naturlig riktning
 =Network	ad65	Nätverk
@@ -360,6 +367,7 @@ ui_field_full	fe02	mer ryms inte
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Pair a machine	b39b	Para ihop en maskin
+=Paths	263f	Vägar
 =Plain Text	2bbe	Oformaterad text
 =Pointer	4dca	Pekare
 =Pointer squeeze (percent, or default)	bbee	Pekarens hoptryckning (procent, eller standard)
@@ -367,6 +375,11 @@ ui_field_full	fe02	mer ryms inte
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
 =Predict touch and pen	e2b7	Förutse touch och penna
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	Publik IPv4
+=Public IPv6	0b39	Publik IPv6
+=Public address discovery (HTTPS)	937e	Upptäckt av publik adress (HTTPS)
+=Public address discovery (STUN)	7691	Upptäckt av publik adress (STUN)
 =Refresh rate	bf6e	Uppdateringsfrekvens
 =Remembered devices	abbc	Ihågkomna enheter
 =Resize border width (pixels, or default)	7fdf	Bredd på kanten för storleksändring (pixlar eller default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	mer ryms inte
 =Screen modes	85ad	Skärmlägen
 =Scroll speed	e7af	Rullningshastighet
 =Scrolling	74ec	Rullning
+=Servers in order	0a76	Servrar i ordning
 =Set the clock from the network	b2a3	Ställ klockan från nätverket
 =Settings	8728	Inställningar
 =Shake sensitivity	8d3a	Känslighet för skakning
@@ -418,6 +432,7 @@ ui_field_full	fe02	mer ryms inte
 =Turned by the screen	ea45	Vänds av skärmen
 =Turned left	507c	Vriden åt vänster
 =Turned right	7a49	Vriden åt höger
+=UDP out	4fd0	UDP utåt
 =Upside down	9dc1	Upp och ned
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Waterlink	6560	Waterlink

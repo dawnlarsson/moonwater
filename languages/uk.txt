@@ -301,6 +301,8 @@ ui_field_full	fe02	більше не вміщається
 =Cursor style	ad1e	Стиль вказівника
 =Date format	7a44	Формат дати
 =Devices	f320	Пристрої
+=Discover now	398a	Виявити зараз
+=Discovery	2db5	Виявлення
 =Files	1b30	Файли
 =Internal storage	e961	Внутрішнє сховище
 =External devices	5769	Зовнішні пристрої
@@ -333,9 +335,12 @@ ui_field_full	fe02	більше не вміщається
 =Keyboard	a714	Клавіатура
 =Language	db9b	Мова
 =Large pointer stays (ms, or default)	5626	Великий вказівник залишається (мс або default)
+=Last-known addresses	86b7	Останні відомі адреси
 =Launcher	44b1	Запуск
+=Learned	0c7c	Отримано
 =Left edge	9ce5	Лівий край
 =Linked machines	0cc2	Пов'язані комп'ютери
+=Local addresses	9f2c	Локальні адреси
 =Long press time (ms, or default)	aff4	Час довгого натискання (мс або default)
 =Machine	be0e	Комп'ютер
 =Mixer	123a	Мікшер
@@ -346,10 +351,12 @@ ui_field_full	fe02	більше не вміщається
 =Mouse acceleration	c400	Прискорення миші
 =Mouse sensitivity (percent, or default)	8a23	Чутливість миші (відсотки або default)
 =Mute	9f74	Без звуку
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Сервери NTS (або default)
 =Name	7306	Ім'я
 =Name and code of another machine	4e07	Ім'я та код іншого комп'ютера
 =Name servers (auto for the network)	695a	Сервери імен (auto для мережі)
+=Names of the network	3051	Імена мережі
 =Names over TLS	075a	Імена через TLS
 =Natural direction	d977	Природний напрямок
 =Network	ad65	Мережа
@@ -360,6 +367,7 @@ ui_field_full	fe02	більше не вміщається
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Pair a machine	b39b	Зв'язати комп'ютер
+=Paths	263f	Шляхи
 =Plain Text	2bbe	Звичайний текст
 =Pointer	4dca	Вказівник
 =Pointer squeeze (percent, or default)	bbee	Стискання вказівника (відсоток або типове)
@@ -367,6 +375,11 @@ ui_field_full	fe02	більше не вміщається
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
 =Predict touch and pen	e2b7	Передбачати дотик і перо
+=Proxy	1bfb	Проксі
+=Public IPv4	0813	Публічний IPv4
+=Public IPv6	0b39	Публічний IPv6
+=Public address discovery (HTTPS)	937e	Виявлення публічної адреси (HTTPS)
+=Public address discovery (STUN)	7691	Виявлення публічної адреси (STUN)
 =Refresh rate	bf6e	Частота оновлення
 =Remembered devices	abbc	Запам'ятовані пристрої
 =Resize border width (pixels, or default)	7fdf	Ширина рамки зміни розміру (пікселів або default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	більше не вміщається
 =Screen modes	85ad	Режими екрана
 =Scroll speed	e7af	Швидкість прокрутки
 =Scrolling	74ec	Прокрутка
+=Servers in order	0a76	Сервери за порядком
 =Set the clock from the network	b2a3	Встановлювати годинник за мережею
 =Settings	8728	Налаштування
 =Shake sensitivity	8d3a	Чутливість струшування
@@ -418,6 +432,7 @@ ui_field_full	fe02	більше не вміщається
 =Turned by the screen	ea45	Повертає екран
 =Turned left	507c	Повернуто ліворуч
 =Turned right	7a49	Повернуто праворуч
+=UDP out	4fd0	Вихідний UDP
 =Upside down	9dc1	Догори дриґом
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
 =Waterlink	6560	Waterlink

@@ -301,6 +301,8 @@ ui_field_full	fe02	non ce ne sta di più
 =Cursor style	ad1e	Stile del puntatore
 =Date format	7a44	Formato della data
 =Devices	f320	Dispositivi
+=Discover now	398a	Rileva ora
+=Discovery	2db5	Rilevamento
 =Files	1b30	File
 =Internal storage	e961	Memoria interna
 =External devices	5769	Dispositivi esterni
@@ -333,9 +335,12 @@ ui_field_full	fe02	non ce ne sta di più
 =Keyboard	a714	Tastiera
 =Language	db9b	Lingua
 =Large pointer stays (ms, or default)	5626	Il puntatore grande resta (ms o default)
+=Last-known addresses	86b7	Ultimi indirizzi noti
 =Launcher	44b1	Avviatore
+=Learned	0c7c	Rilevato
 =Left edge	9ce5	Bordo sinistro
 =Linked machines	0cc2	Macchine collegate
+=Local addresses	9f2c	Indirizzi locali
 =Long press time (ms, or default)	aff4	Durata della pressione prolungata (ms o default)
 =Machine	be0e	Macchina
 =Mixer	123a	Mixer
@@ -346,10 +351,12 @@ ui_field_full	fe02	non ce ne sta di più
 =Mouse acceleration	c400	Accelerazione del mouse
 =Mouse sensitivity (percent, or default)	8a23	Sensibilità del mouse (percentuale o default)
 =Mute	9f74	Disattiva audio
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Server NTS (o default)
 =Name	7306	Nome
 =Name and code of another machine	4e07	Nome e codice di un'altra macchina
 =Name servers (auto for the network)	695a	Server dei nomi (auto per la rete)
+=Names of the network	3051	Nomi della rete
 =Names over TLS	075a	Nomi tramite TLS
 =Natural direction	d977	Direzione naturale
 =Network	ad65	Rete
@@ -360,6 +367,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Open windows where they were last put	8711	Apri le finestre dove sono state lasciate
 =Output device (name, or default)	d73c	Dispositivo di uscita (nome o default)
 =Pair a machine	b39b	Abbina una macchina
+=Paths	263f	Percorsi
 =Plain Text	2bbe	Testo semplice
 =Pointer	4dca	Puntatore
 =Pointer squeeze (percent, or default)	bbee	Schiacciamento del puntatore (percentuale, o predefinito)
@@ -367,6 +375,11 @@ ui_field_full	fe02	non ce ne sta di più
 =Power	a5e6	Alimentazione
 =Power profile	8def	Profilo energetico
 =Predict touch and pen	e2b7	Prevedi tocco e penna
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	IPv4 pubblico
+=Public IPv6	0b39	IPv6 pubblico
+=Public address discovery (HTTPS)	937e	Rilevamento dell'indirizzo pubblico (HTTPS)
+=Public address discovery (STUN)	7691	Rilevamento dell'indirizzo pubblico (STUN)
 =Refresh rate	bf6e	Frequenza di aggiornamento
 =Remembered devices	abbc	Dispositivi ricordati
 =Resize border width (pixels, or default)	7fdf	Larghezza del bordo di ridimensionamento (pixel o default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Screen modes	85ad	Modalità dello schermo
 =Scroll speed	e7af	Velocità di scorrimento
 =Scrolling	74ec	Scorrimento
+=Servers in order	0a76	Server in ordine
 =Set the clock from the network	b2a3	Imposta l'orologio dalla rete
 =Settings	8728	Impostazioni
 =Shake sensitivity	8d3a	Sensibilità allo scuotimento
@@ -418,6 +432,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Turned by the screen	ea45	Ruotato dallo schermo
 =Turned left	507c	Ruotato a sinistra
 =Turned right	7a49	Ruotato a destra
+=UDP out	4fd0	UDP in uscita
 =Upside down	9dc1	Capovolto
 =Volume (percent, or default)	f6e3	Volume (percentuale o default)
 =Waterlink	6560	Waterlink

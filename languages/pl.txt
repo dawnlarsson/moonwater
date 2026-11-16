@@ -301,6 +301,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =Cursor style	ad1e	Styl wskaźnika
 =Date format	7a44	Format daty
 =Devices	f320	Urządzenia
+=Discover now	398a	Wykryj teraz
+=Discovery	2db5	Wykrywanie
 =Files	1b30	Pliki
 =Internal storage	e961	Pamięć wewnętrzna
 =External devices	5769	Urządzenia zewnętrzne
@@ -333,9 +335,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Keyboard	a714	Klawiatura
 =Language	db9b	Język
 =Large pointer stays (ms, or default)	5626	Duży wskaźnik pozostaje (ms lub default)
+=Last-known addresses	86b7	Ostatnio znane adresy
 =Launcher	44b1	Uruchamianie
+=Learned	0c7c	Ustalono
 =Left edge	9ce5	Lewa krawędź
 =Linked machines	0cc2	Połączone maszyny
+=Local addresses	9f2c	Adresy lokalne
 =Long press time (ms, or default)	aff4	Czas długiego naciśnięcia (ms lub default)
 =Machine	be0e	Maszyna
 =Mixer	123a	Mikser
@@ -346,10 +351,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Mouse acceleration	c400	Przyspieszenie myszy
 =Mouse sensitivity (percent, or default)	8a23	Czułość myszy (procent lub default)
 =Mute	9f74	Wycisz
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Serwery NTS (lub default)
 =Name	7306	Nazwa
 =Name and code of another machine	4e07	Nazwa i kod innej maszyny
 =Name servers (auto for the network)	695a	Serwery nazw (auto dla sieci)
+=Names of the network	3051	Nazwy sieci
 =Names over TLS	075a	Nazwy przez TLS
 =Natural direction	d977	Naturalny kierunek
 =Network	ad65	Sieć
@@ -360,6 +367,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Pair a machine	b39b	Sparuj maszynę
+=Paths	263f	Ścieżki
 =Plain Text	2bbe	Zwykły tekst
 =Pointer	4dca	Wskaźnik
 =Pointer squeeze (percent, or default)	bbee	Ściśnięcie wskaźnika (procent lub domyślnie)
@@ -367,6 +375,11 @@ ui_field_full	fe02	więcej się nie zmieści
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	Publiczny IPv4
+=Public IPv6	0b39	Publiczny IPv6
+=Public address discovery (HTTPS)	937e	Wykrywanie adresu publicznego (HTTPS)
+=Public address discovery (STUN)	7691	Wykrywanie adresu publicznego (STUN)
 =Refresh rate	bf6e	Częstotliwość odświeżania
 =Remembered devices	abbc	Zapamiętane urządzenia
 =Resize border width (pixels, or default)	7fdf	Szerokość ramki zmiany rozmiaru (piksele lub default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Screen modes	85ad	Tryby ekranu
 =Scroll speed	e7af	Prędkość przewijania
 =Scrolling	74ec	Przewijanie
+=Servers in order	0a76	Serwery w kolejności
 =Set the clock from the network	b2a3	Ustawiaj zegar z sieci
 =Settings	8728	Ustawienia
 =Shake sensitivity	8d3a	Czułość potrząsania
@@ -418,6 +432,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo
+=UDP out	4fd0	UDP wychodzące
 =Upside down	9dc1	Do góry nogami
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
 =Waterlink	6560	Waterlink

@@ -9483,6 +9483,7 @@ b32 main()
                        program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_groups();
         check_settings_device_strip();
+        check_settings_kept();
         check_settings_drive_rows(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                                   program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_keys();

@@ -3438,7 +3438,8 @@ static struct
         string_address scenario;
 } settings_frames;
 
-// The buffer in slot against the whole picture at the kit's time, everything the drawing moves put back after it.
+// The buffer in slot against the whole picture at the kit's time, everything the drawing moves put back after it. A drawing
+// sends the window no event and so grows no field's document: the bytes alone are the whole of what it moves (settings_kept).
 static b32 settings_frames_same(int slot, string_address when)
 {
         const unsigned int address_to shown = windows_buffer(settings_frames.table, settings.own.row, (unsigned int)slot);
@@ -5033,7 +5034,101 @@ static struct
         int parts, part_id[DRIVE_PARTS], part_top[DRIVE_PARTS], part_height[DRIVE_PARTS], part_swatch_role[DRIVE_PARTS];
         struct ui_node part_swatch[DRIVE_PARTS], part_label[DRIVE_PARTS], part_amount[DRIVE_PARTS], part_share[DRIVE_PARTS];
 } drive;
-static p8 drive_settings_kept[sizeof(settings)], drive_kit_kept[sizeof(ui_kit)], drive_items_kept[sizeof(settings_large->item[2])];
+/*
+        The settings window's record, kept and put back around a check that sends it events. A copy of its bytes is right for
+        everything in it but what owns memory: the documents of its two text fields (the filter's and a row's, each nine arrays
+        that are reserved again as they fill and unmapped when the field closes). Put back as bytes, a document the check grew or
+        closed in between names blocks that are gone: the filter's history reached 256 groups once the table had two more Network
+        rows for the checks to type at, its groups moved to a larger block, the bytes put back named the block before the move, and
+        the next filter typed read unmapped memory (a segmentation fault, which took every row after it). So a document is never
+        put back. Each field keeps the document it has now, with the text it had when it was kept, or none when it had none.
+*/
+struct settings_kept
+{
+        p8 bytes[sizeof(settings)];
+        p8 filter[SETTINGS_VALUE], edit[SETTINGS_VALUE];
+};
+
+static fn settings_record_keep(struct settings_kept address_to kept)
+{
+        memory_copy(kept->bytes, &settings, sizeof(settings));
+        ui_text_string(&settings.filter_edit, kept->filter, sizeof(kept->filter));
+        ui_text_string(&settings.edit, kept->edit, sizeof(kept->edit));
+}
+
+// A field whose bytes were just put back, given the document it had before they were (now) and the text it was kept with.
+static fn settings_kept_field(struct ui_text address_to field, struct doc now, const p8 address_to text)
+{
+        // doc_open names the separators and doc_close zeroes them: a document that is open has them.
+        struct doc kept = field->doc;
+
+        field->doc = now;
+        if (!kept.separators)
+        {
+                if (now.separators)
+                        doc_close(&field->doc);
+        }
+        else if (now.separators)
+                ui_text_set(field, text, string_length((string_address)text));
+        else if (doc_open(&field->doc, text, string_length((string_address)text)))
+        {
+                // Closed in between and opened again on its text, a field's document as ui_text_open makes one.
+                field->doc.single_line = kept.single_line;
+                field->doc.auto_close = kept.auto_close;
+                field->doc.normalize_paste = kept.normalize_paste;
+        }
+}
+
+static fn settings_record_put_back(const struct settings_kept address_to kept)
+{
+        struct doc filter = settings.filter_edit.doc, edit = settings.edit.doc;
+
+        memory_copy(&settings, kept->bytes, sizeof(settings));
+        settings_kept_field(&settings.filter_edit, filter, kept->filter);
+        settings_kept_field(&settings.edit, edit, kept->edit);
+}
+
+/*
+        The row that holds it. Between a keep and a put back the filter is set until its history has moved to a larger block,
+        however many groups the checks before left in it, and the row's field, open when kept, is closed; put back, the filter
+        has the text it was kept with and takes another, and the row's field is open on its own text again.
+*/
+static fn check_settings_kept(void)
+{
+        static struct settings_kept kept;
+        struct ui_text address_to filter = settings_filter_field();
+        p8 said[SETTINGS_VALUE];
+        positive room, turns = 0;
+        b32 moved, same, taken, opened;
+
+        ui_text_set(filter, (const p8 address_to) "wired", 5);
+        ui_field_close(&settings.edit);
+        ui_field_begin(&settings.edit, &settings.own, "kept text", 0);
+        settings_record_keep(&kept);
+        room = filter->doc.group_room;
+        while (filter->doc.group_room <= room && turns < 65536)
+                ui_text_set(filter, (const p8 address_to)(turns++ & 1 ? "a" : "b"), 1);
+        moved = room && filter->doc.group_room > room;
+        ui_field_close(&settings.edit);
+        settings_record_put_back(&kept);
+        ui_text_string(&settings.filter_edit, said, sizeof(said));
+        same = string_equals((string_address)said, (string_address) "wired");
+        ui_text_set(&settings.filter_edit, (const p8 address_to) "bluetooth", 9);
+        ui_text_string(&settings.filter_edit, said, sizeof(said));
+        taken = string_equals((string_address)said, (string_address) "bluetooth");
+        ui_text_string(&settings.edit, said, sizeof(said));
+        opened = settings.edit.open && settings.edit.doc.single_line && string_equals((string_address)said, (string_address) "kept text");
+        string_format(log, "  settings kept: the filter's history moved after %p sets (from %p groups of room), same %p, taken %p, the field opened %p\n",
+                      turns, room, (positive)same, (positive)taken, (positive)opened);
+        check("settings kept: a record put back after its filter's history moved to a larger block has the filter's text and takes another",
+              moved && same && taken);
+        check("settings kept: and a row's field closed in between is open on the text it was kept with", opened);
+        ui_field_close(&settings.edit);
+        settings_filter_clear();
+}
+
+static struct settings_kept drive_settings_kept;
+static p8 drive_kit_kept[sizeof(ui_kit)], drive_items_kept[sizeof(settings_large->item[2])];
 static unsigned char drive_expanded_kept[SETTINGS_ALL], drive_live_kept[SETTINGS_ALL];
 static b64 drive_fold_kept[SETTINGS_ALL];
 
@@ -5244,7 +5339,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 check("settings drive rows: the face, the engine and the window load", false);
                 return;
         }
-        memory_copy(drive_settings_kept, &settings, sizeof(settings));
+        settings_record_keep(&drive_settings_kept);
         memory_copy(drive_kit_kept, &ui_kit, sizeof(ui_kit));
         memory_copy(drive_items_kept, settings_large->item[2], sizeof(drive_items_kept));
         memory_copy(drive_expanded_kept, settings_expanded, sizeof(drive_expanded_kept));
@@ -5701,7 +5796,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         memory_copy(settings_large->item[2], drive_items_kept, sizeof(drive_items_kept));
-        memory_copy(&settings, drive_settings_kept, sizeof(settings));
+        settings_record_put_back(&drive_settings_kept);
         memory_copy(&ui_kit, drive_kit_kept, sizeof(ui_kit));
 }
 
@@ -5912,7 +6007,8 @@ static fn check_settings_press(int x, int y)
 static fn check_settings_clicks(void)
 {
         // The window, the kit and the board as they are, put back at the end: the presses leave their ripples and holds in the kit.
-        static p8 kept_settings[sizeof(settings)], kept_kit[sizeof(ui_kit)], kept_board[sizeof(settings_board)];
+        static struct settings_kept kept_settings;
+        static p8 kept_kit[sizeof(ui_kit)], kept_board[sizeof(settings_board)];
         struct ui address_to ui = &settings.ui;
         struct ui_list address_to list = &settings.list;
         static struct windows click_table;
@@ -5922,7 +6018,7 @@ static fn check_settings_clicks(void)
         positive queued = settings.queued;
         b32 gpu_pressed = false, gpu_ok = false, arrow_ok = false, value_ok = false, hover_ok = false;
 
-        memory_copy(kept_settings, &settings, sizeof(settings));
+        settings_record_keep(&kept_settings);
         memory_copy(kept_kit, &ui_kit, sizeof(ui_kit));
         memory_copy(kept_board, &settings_board, sizeof(settings_board));
 
@@ -6049,7 +6145,7 @@ static fn check_settings_clicks(void)
         settings_layout();
         ui_scroll_set(&list->scroll, scroll_before);
         settings_layout();
-        memory_copy(&settings, kept_settings, sizeof(settings));
+        settings_record_put_back(&kept_settings);
         memory_copy(&ui_kit, kept_kit, sizeof(ui_kit));
         memory_copy(&settings_board, kept_board, sizeof(settings_board));
         ui_page_redraw(&settings.page);
@@ -7192,7 +7288,8 @@ static unsigned int rtl_first[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
 static int rtl_width, rtl_height; // the size of the picture a view made
 static int rtl_pressed[400][400];  // what a press at each place was on, left to right
 static positive rtl_pressed_wrong;
-static p8 rtl_settings_kept[sizeof(settings)], rtl_kit_kept[sizeof(ui_kit)];
+static struct settings_kept rtl_settings_kept;
+static p8 rtl_kit_kept[sizeof(ui_kit)];
 
 // The window in group (a number, or -1 for the kit's gallery) drawn whole at the kit's time, right to left or not.
 static fn rtl_draw(int group, int scale, b32 rtl)
@@ -7543,7 +7640,7 @@ static fn check_rtl_mirror(void)
                 check("rtl mirror: the block face, the engine and the window load", false);
                 return;
         }
-        memory_copy(rtl_settings_kept, &settings, sizeof(settings));
+        settings_record_keep(&rtl_settings_kept);
         memory_copy(rtl_kit_kept, &ui_kit, sizeof(ui_kit));
         settings_frames.table = (struct windows address_to)table;
         settings_frames.table->stride = SETTINGS_FRAMES_W;
@@ -7632,7 +7729,7 @@ static fn check_rtl_mirror(void)
         ui_kit.rtl = 0;
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
-        memory_copy(&settings, rtl_settings_kept, sizeof(settings));
+        settings_record_put_back(&rtl_settings_kept);
         memory_copy(&ui_kit, rtl_kit_kept, sizeof(ui_kit));
 }
 

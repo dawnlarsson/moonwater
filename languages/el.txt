@@ -301,6 +301,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Cursor style	ad1e	Στυλ δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
 =Devices	f320	Συσκευές
+=Discover now	398a	Ανακάλυψη τώρα
+=Discovery	2db5	Ανακάλυψη
 =Files	1b30	Αρχεία
 =Internal storage	e961	Εσωτερικός χώρος αποθήκευσης
 =External devices	5769	Εξωτερικές συσκευές
@@ -333,9 +335,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Keyboard	a714	Πληκτρολόγιο
 =Language	db9b	Γλώσσα
 =Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
+=Last-known addresses	86b7	Τελευταίες γνωστές διευθύνσεις
 =Launcher	44b1	Εκκινητής
+=Learned	0c7c	Εντοπίστηκε
 =Left edge	9ce5	Αριστερό άκρο
 =Linked machines	0cc2	Συνδεδεμένα μηχανήματα
+=Local addresses	9f2c	Τοπικές διευθύνσεις
 =Long press time (ms, or default)	aff4	Χρόνος παρατεταμένου πατήματος (ms ή default)
 =Machine	be0e	Μηχάνημα
 =Mixer	123a	Μίκτης
@@ -346,10 +351,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
 =Mute	9f74	Σίγαση
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Διακομιστές NTS (ή default)
 =Name	7306	Όνομα
 =Name and code of another machine	4e07	Όνομα και κωδικός άλλου μηχανήματος
 =Name servers (auto for the network)	695a	Διακομιστές ονομάτων (auto για το δίκτυο)
+=Names of the network	3051	Ονόματα του δικτύου
 =Names over TLS	075a	Ονόματα μέσω TLS
 =Natural direction	d977	Φυσική κατεύθυνση
 =Network	ad65	Δίκτυο
@@ -360,6 +367,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
+=Paths	263f	Διαδρομές
 =Plain Text	2bbe	Απλό κείμενο
 =Pointer	4dca	Δείκτης
 =Pointer squeeze (percent, or default)	bbee	Συμπίεση δείκτη (ποσοστό, ή προεπιλογή)
@@ -367,6 +375,11 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
+=Proxy	1bfb	Μεσολαβητής
+=Public IPv4	0813	Δημόσια IPv4
+=Public IPv6	0b39	Δημόσια IPv6
+=Public address discovery (HTTPS)	937e	Ανακάλυψη δημόσιας διεύθυνσης (HTTPS)
+=Public address discovery (STUN)	7691	Ανακάλυψη δημόσιας διεύθυνσης (STUN)
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
 =Resize border width (pixels, or default)	7fdf	Πλάτος περιγράμματος αλλαγής μεγέθους (pixel ή default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Screen modes	85ad	Λειτουργίες οθόνης
 =Scroll speed	e7af	Ταχύτητα κύλισης
 =Scrolling	74ec	Κύλιση
+=Servers in order	0a76	Διακομιστές με τη σειρά
 =Set the clock from the network	b2a3	Ρύθμιση ρολογιού από το δίκτυο
 =Settings	8728	Ρυθμίσεις
 =Shake sensitivity	8d3a	Ευαισθησία κουνήματος
@@ -418,6 +432,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά
+=UDP out	4fd0	Εξερχόμενο UDP
 =Upside down	9dc1	Ανάποδα
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
 =Waterlink	6560	Waterlink

@@ -301,6 +301,8 @@ ui_field_full	fe02	больше не помещается
 =Cursor style	ad1e	Стиль указателя
 =Date format	7a44	Формат даты
 =Devices	f320	Устройства
+=Discover now	398a	Обнаружить сейчас
+=Discovery	2db5	Обнаружение
 =Files	1b30	Файлы
 =Internal storage	e961	Внутреннее хранилище
 =External devices	5769	Внешние устройства
@@ -333,9 +335,12 @@ ui_field_full	fe02	больше не помещается
 =Keyboard	a714	Клавиатура
 =Language	db9b	Язык
 =Large pointer stays (ms, or default)	5626	Крупный указатель остаётся (мс или default)
+=Last-known addresses	86b7	Последние известные адреса
 =Launcher	44b1	Запуск
+=Learned	0c7c	Получено
 =Left edge	9ce5	Левый край
 =Linked machines	0cc2	Связанные компьютеры
+=Local addresses	9f2c	Локальные адреса
 =Long press time (ms, or default)	aff4	Время долгого нажатия (мс или default)
 =Machine	be0e	Компьютер
 =Mixer	123a	Микшер
@@ -346,10 +351,12 @@ ui_field_full	fe02	больше не помещается
 =Mouse acceleration	c400	Ускорение мыши
 =Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
 =Mute	9f74	Без звука
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	Серверы NTS (или default)
 =Name	7306	Имя
 =Name and code of another machine	4e07	Имя и код другого компьютера
 =Name servers (auto for the network)	695a	Серверы имён (auto для сети)
+=Names of the network	3051	Имена сети
 =Names over TLS	075a	Имена через TLS
 =Natural direction	d977	Естественное направление
 =Network	ad65	Сеть
@@ -360,6 +367,7 @@ ui_field_full	fe02	больше не помещается
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Pair a machine	b39b	Связать компьютер
+=Paths	263f	Пути
 =Plain Text	2bbe	Простой текст
 =Pointer	4dca	Указатель
 =Pointer squeeze (percent, or default)	bbee	Сжатие указателя (процент или по умолчанию)
@@ -367,6 +375,11 @@ ui_field_full	fe02	больше не помещается
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
 =Predict touch and pen	e2b7	Предсказывать касание и перо
+=Proxy	1bfb	Прокси
+=Public IPv4	0813	Публичный IPv4
+=Public IPv6	0b39	Публичный IPv6
+=Public address discovery (HTTPS)	937e	Обнаружение публичного адреса (HTTPS)
+=Public address discovery (STUN)	7691	Обнаружение публичного адреса (STUN)
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
 =Resize border width (pixels, or default)	7fdf	Ширина рамки изменения размера (пикселей или default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	больше не помещается
 =Screen modes	85ad	Режимы экрана
 =Scroll speed	e7af	Скорость прокрутки
 =Scrolling	74ec	Прокрутка
+=Servers in order	0a76	Серверы по порядку
 =Set the clock from the network	b2a3	Устанавливать часы по сети
 =Settings	8728	Настройки
 =Shake sensitivity	8d3a	Чувствительность встряхивания
@@ -418,6 +432,7 @@ ui_field_full	fe02	больше не помещается
 =Turned by the screen	ea45	Поворачивает экран
 =Turned left	507c	Повёрнут влево
 =Turned right	7a49	Повёрнут вправо
+=UDP out	4fd0	Исходящий UDP
 =Upside down	9dc1	Перевёрнут
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Waterlink	6560	Waterlink

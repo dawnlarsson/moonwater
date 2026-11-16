@@ -301,6 +301,8 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Cursor style	ad1e	Stil des Mauszeigers
 =Date format	7a44	Datumsformat
 =Devices	f320	Geräte
+=Discover now	398a	Jetzt erkennen
+=Discovery	2db5	Erkennung
 =Files	1b30	Dateien
 =Internal storage	e961	Interner Speicher
 =External devices	5769	Externe Geräte
@@ -333,9 +335,12 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Keyboard	a714	Tastatur
 =Language	db9b	Sprache
 =Large pointer stays (ms, or default)	5626	Großer Zeiger bleibt (ms oder default)
+=Last-known addresses	86b7	Zuletzt bekannte Adressen
 =Launcher	44b1	Starter
+=Learned	0c7c	Ermittelt
 =Left edge	9ce5	Linker Rand
 =Linked machines	0cc2	Verbundene Maschinen
+=Local addresses	9f2c	Lokale Adressen
 =Long press time (ms, or default)	aff4	Dauer für langes Drücken (ms oder default)
 =Machine	be0e	Gerät
 =Mixer	123a	Mixer
@@ -346,10 +351,12 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Mouse acceleration	c400	Mausbeschleunigung
 =Mouse sensitivity (percent, or default)	8a23	Mausempfindlichkeit (Prozent oder default)
 =Mute	9f74	Stummschalten
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS-Server (oder default)
 =Name	7306	Name
 =Name and code of another machine	4e07	Name und Code einer anderen Maschine
 =Name servers (auto for the network)	695a	Namensserver (auto für das Netzwerk)
+=Names of the network	3051	Namen des Netzwerks
 =Names over TLS	075a	Namen über TLS
 =Natural direction	d977	Natürliche Richtung
 =Network	ad65	Netzwerk
@@ -360,6 +367,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Open windows where they were last put	8711	Fenster dort öffnen, wo sie zuletzt lagen
 =Output device (name, or default)	d73c	Ausgabegerät (Name oder default)
 =Pair a machine	b39b	Maschine koppeln
+=Paths	263f	Pfade
 =Plain Text	2bbe	Nur-Text
 =Pointer	4dca	Zeiger
 =Pointer squeeze (percent, or default)	bbee	Quetschung des Zeigers (Prozent oder Standard)
@@ -367,6 +375,11 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	Öffentliche IPv4
+=Public IPv6	0b39	Öffentliche IPv6
+=Public address discovery (HTTPS)	937e	Erkennung der öffentlichen Adresse (HTTPS)
+=Public address discovery (STUN)	7691	Erkennung der öffentlichen Adresse (STUN)
 =Refresh rate	bf6e	Bildwiederholrate
 =Remembered devices	abbc	Gemerkte Geräte
 =Resize border width (pixels, or default)	7fdf	Breite des Größenänderungsrahmens (Pixel oder default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Screen modes	85ad	Bildschirmmodi
 =Scroll speed	e7af	Scrollgeschwindigkeit
 =Scrolling	74ec	Scrollen
+=Servers in order	0a76	Server in Reihenfolge
 =Set the clock from the network	b2a3	Uhr über das Netzwerk stellen
 =Settings	8728	Einstellungen
 =Shake sensitivity	8d3a	Schüttelempfindlichkeit
@@ -418,6 +432,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Turned by the screen	ea45	Vom Bildschirm gedreht
 =Turned left	507c	Nach links gedreht
 =Turned right	7a49	Nach rechts gedreht
+=UDP out	4fd0	UDP ausgehend
 =Upside down	9dc1	Auf dem Kopf
 =Volume (percent, or default)	f6e3	Lautstärke (Prozent oder default)
 =Waterlink	6560	Waterlink

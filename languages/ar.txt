@@ -302,6 +302,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Cursor style	ad1e	نمط المؤشر
 =Date format	7a44	تنسيق التاريخ
 =Devices	f320	الأجهزة
+=Discover now	398a	اكتشف الآن
+=Discovery	2db5	الاكتشاف
 =Files	1b30	الملفات
 =Internal storage	e961	التخزين الداخلي
 =External devices	5769	الأجهزة الخارجية
@@ -334,9 +336,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Keyboard	a714	لوحة المفاتيح
 =Language	db9b	اللغة
 =Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
+=Last-known addresses	86b7	آخر العناوين المعروفة
 =Launcher	44b1	المشغل
+=Learned	0c7c	تم التعرف
 =Left edge	9ce5	الحافة اليسرى
 =Linked machines	0cc2	الحواسيب المرتبطة
+=Local addresses	9f2c	العناوين المحلية
 =Long press time (ms, or default)	aff4	مدة الضغط المطول (ms أو default)
 =Machine	be0e	الحاسوب
 =Mixer	123a	خلاط الصوت
@@ -347,10 +352,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Mouse acceleration	c400	تسارع الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
 =Mute	9f74	كتم الصوت
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	خوادم NTS (أو default)
 =Name	7306	الاسم
 =Name and code of another machine	4e07	اسم حاسوب آخر ورمزه
 =Name servers (auto for the network)	695a	خوادم الأسماء (auto للشبكة)
+=Names of the network	3051	أسماء الشبكة
 =Names over TLS	075a	الأسماء عبر TLS
 =Natural direction	d977	الاتجاه الطبيعي
 =Network	ad65	الشبكة
@@ -361,6 +368,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Pair a machine	b39b	إقران حاسوب
+=Paths	263f	المسارات
 =Plain Text	2bbe	نص عادي
 =Pointer	4dca	المؤشر
 =Pointer squeeze (percent, or default)	bbee	ضغط المؤشر (بالمئة، أو الافتراضي)
@@ -368,6 +376,11 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
 =Predict touch and pen	e2b7	توقع اللمس والقلم
+=Proxy	1bfb	الوكيل
+=Public IPv4	0813	IPv4 العام
+=Public IPv6	0b39	IPv6 العام
+=Public address discovery (HTTPS)	937e	اكتشاف العنوان العام (HTTPS)
+=Public address discovery (STUN)	7691	اكتشاف العنوان العام (STUN)
 =Refresh rate	bf6e	معدل التحديث
 =Remembered devices	abbc	الأجهزة المحفوظة
 =Resize border width (pixels, or default)	7fdf	عرض حد تغيير الحجم (بكسل أو default)
@@ -380,6 +393,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Screen modes	85ad	أوضاع الشاشة
 =Scroll speed	e7af	سرعة التمرير
 =Scrolling	74ec	التمرير
+=Servers in order	0a76	الخوادم بالترتيب
 =Set the clock from the network	b2a3	ضبط الساعة من الشبكة
 =Settings	8728	الإعدادات
 =Shake sensitivity	8d3a	حساسية الهز
@@ -419,6 +433,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Turned by the screen	ea45	التدوير بواسطة الشاشة
 =Turned left	507c	مدار لليسار
 =Turned right	7a49	مدار لليمين
+=UDP out	4fd0	UDP الصادر
 =Upside down	9dc1	مقلوب
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Waterlink	6560	Waterlink

@@ -302,6 +302,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Cursor style	ad1e	سبک نشانگر
 =Date format	7a44	قالب تاریخ
 =Devices	f320	دستگاه‌ها
+=Discover now	398a	اکنون کشف کن
+=Discovery	2db5	کشف
 =Files	1b30	پرونده‌ها
 =Internal storage	e961	حافظهٔ داخلی
 =External devices	5769	دستگاه‌های خارجی
@@ -334,9 +336,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Keyboard	a714	صفحه‌کلید
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
+=Last-known addresses	86b7	آخرین نشانی‌های شناخته‌شده
 =Launcher	44b1	راه‌انداز
+=Learned	0c7c	به‌دست‌آمده
 =Left edge	9ce5	لبه چپ
 =Linked machines	0cc2	رایانه‌های متصل
+=Local addresses	9f2c	نشانی‌های محلی
 =Long press time (ms, or default)	aff4	زمان فشار طولانی (ms یا default)
 =Machine	be0e	رایانه
 =Mixer	123a	میکسر
@@ -347,10 +352,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Mouse acceleration	c400	شتاب ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
 =Mute	9f74	بی‌صدا
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	سرورهای NTS (یا default)
 =Name	7306	نام
 =Name and code of another machine	4e07	نام و کد یک رایانهٔ دیگر
 =Name servers (auto for the network)	695a	سرورهای نام (auto برای شبکه)
+=Names of the network	3051	نام‌های شبکه
 =Names over TLS	075a	نام‌ها از طریق TLS
 =Natural direction	d977	جهت طبیعی
 =Network	ad65	شبکه
@@ -361,6 +368,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Pair a machine	b39b	جفت کردن یک رایانه
+=Paths	263f	مسیرها
 =Plain Text	2bbe	متن ساده
 =Pointer	4dca	نشانگر
 =Pointer squeeze (percent, or default)	bbee	فشرده‌سازی نشانگر (درصد، یا پیش‌فرض)
@@ -368,6 +376,11 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
+=Proxy	1bfb	پراکسی
+=Public IPv4	0813	IPv4 عمومی
+=Public IPv6	0b39	IPv6 عمومی
+=Public address discovery (HTTPS)	937e	کشف نشانی عمومی (HTTPS)
+=Public address discovery (STUN)	7691	کشف نشانی عمومی (STUN)
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
 =Resize border width (pixels, or default)	7fdf	پهنای لبهٔ تغییر اندازه (پیکسل یا default)
@@ -380,6 +393,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Screen modes	85ad	حالت‌های نمایشگر
 =Scroll speed	e7af	سرعت پیمایش
 =Scrolling	74ec	پیمایش
+=Servers in order	0a76	سرورها به ترتیب
 =Set the clock from the network	b2a3	تنظیم ساعت از روی شبکه
 =Settings	8728	تنظیمات
 =Shake sensitivity	8d3a	حساسیت تکان دادن
@@ -419,6 +433,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست
+=UDP out	4fd0	UDP خروجی
 =Upside down	9dc1	وارونه
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Waterlink	6560	Waterlink

@@ -301,6 +301,8 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Cursor style	ad1e	İmleç stili
 =Date format	7a44	Tarih biçimi
 =Devices	f320	Aygıtlar
+=Discover now	398a	Şimdi keşfet
+=Discovery	2db5	Keşif
 =Files	1b30	Dosyalar
 =Internal storage	e961	Dahili depolama
 =External devices	5769	Harici aygıtlar
@@ -333,9 +335,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Keyboard	a714	Klavye
 =Language	db9b	Dil
 =Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
+=Last-known addresses	86b7	Son bilinen adresler
 =Launcher	44b1	Başlatıcı
+=Learned	0c7c	Öğrenildi
 =Left edge	9ce5	Sol kenar
 =Linked machines	0cc2	Bağlı makineler
+=Local addresses	9f2c	Yerel adresler
 =Long press time (ms, or default)	aff4	Uzun basma süresi (ms veya default)
 =Machine	be0e	Makine
 =Mixer	123a	Karıştırıcı
@@ -346,10 +351,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Mouse acceleration	c400	Fare ivmesi
 =Mouse sensitivity (percent, or default)	8a23	Fare duyarlılığı (yüzde veya default)
 =Mute	9f74	Sessiz
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS sunucuları (veya default)
 =Name	7306	Ad
 =Name and code of another machine	4e07	Başka bir makinenin adı ve kodu
 =Name servers (auto for the network)	695a	Ad sunucuları (ağ için auto)
+=Names of the network	3051	Ağın adları
 =Names over TLS	075a	TLS üzerinden adlar
 =Natural direction	d977	Doğal yön
 =Network	ad65	Ağ
@@ -360,6 +367,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Pair a machine	b39b	Bir makine eşleştir
+=Paths	263f	Yollar
 =Plain Text	2bbe	Düz Metin
 =Pointer	4dca	İşaretçi
 =Pointer squeeze (percent, or default)	bbee	İmleç sıkıştırma (yüzde veya varsayılan)
@@ -367,6 +375,11 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et
+=Proxy	1bfb	Vekil sunucu
+=Public IPv4	0813	Genel IPv4
+=Public IPv6	0b39	Genel IPv6
+=Public address discovery (HTTPS)	937e	Genel adres keşfi (HTTPS)
+=Public address discovery (STUN)	7691	Genel adres keşfi (STUN)
 =Refresh rate	bf6e	Yenileme hızı
 =Remembered devices	abbc	Hatırlanan aygıtlar
 =Resize border width (pixels, or default)	7fdf	Boyutlandırma kenarlığı genişliği (piksel veya default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Screen modes	85ad	Ekran kipleri
 =Scroll speed	e7af	Kaydırma hızı
 =Scrolling	74ec	Kaydırma
+=Servers in order	0a76	Sunucular sırayla
 =Set the clock from the network	b2a3	Saati ağdan ayarla
 =Settings	8728	Ayarlar
 =Shake sensitivity	8d3a	Sallama duyarlılığı
@@ -418,6 +432,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Turned by the screen	ea45	Ekran tarafından döndürülür
 =Turned left	507c	Sola döndürülmüş
 =Turned right	7a49	Sağa döndürülmüş
+=UDP out	4fd0	Giden UDP
 =Upside down	9dc1	Baş aşağı
 =Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
 =Waterlink	6560	Waterlink

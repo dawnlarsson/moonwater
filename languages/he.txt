@@ -302,6 +302,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Cursor style	ad1e	סגנון המצביע
 =Date format	7a44	תבנית תאריך
 =Devices	f320	התקנים
+=Discover now	398a	גלה עכשיו
+=Discovery	2db5	גילוי
 =Files	1b30	קבצים
 =Internal storage	e961	אחסון פנימי
 =External devices	5769	התקנים חיצוניים
@@ -334,9 +336,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Keyboard	a714	מקלדת
 =Language	db9b	שפה
 =Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
+=Last-known addresses	86b7	כתובות אחרונות ידועות
 =Launcher	44b1	משגר
+=Learned	0c7c	נלמד
 =Left edge	9ce5	קצה שמאלי
 =Linked machines	0cc2	מחשבים מקושרים
+=Local addresses	9f2c	כתובות מקומיות
 =Long press time (ms, or default)	aff4	זמן לחיצה ארוכה (ms או default)
 =Machine	be0e	מחשב
 =Mixer	123a	מערבל
@@ -347,10 +352,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Mouse acceleration	c400	האצת העכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
 =Mute	9f74	השתקה
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	שרתי NTS (או default)
 =Name	7306	שם
 =Name and code of another machine	4e07	שם וקוד של מחשב אחר
 =Name servers (auto for the network)	695a	שרתי שמות (auto עבור הרשת)
+=Names of the network	3051	שמות הרשת
 =Names over TLS	075a	שמות דרך TLS
 =Natural direction	d977	כיוון טבעי
 =Network	ad65	רשת
@@ -361,6 +368,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
+=Paths	263f	נתיבים
 =Plain Text	2bbe	טקסט פשוט
 =Pointer	4dca	מצביע
 =Pointer squeeze (percent, or default)	bbee	לחיצת המצביע (אחוזים, או ברירת מחדל)
@@ -368,6 +376,11 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
 =Predict touch and pen	e2b7	חיזוי מגע ועט
+=Proxy	1bfb	פרוקסי
+=Public IPv4	0813	IPv4 ציבורי
+=Public IPv6	0b39	IPv6 ציבורי
+=Public address discovery (HTTPS)	937e	גילוי הכתובת הציבורית (HTTPS)
+=Public address discovery (STUN)	7691	גילוי הכתובת הציבורית (STUN)
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
 =Resize border width (pixels, or default)	7fdf	רוחב מסגרת שינוי הגודל (פיקסלים או default)
@@ -380,6 +393,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Screen modes	85ad	מצבי מסך
 =Scroll speed	e7af	מהירות גלילה
 =Scrolling	74ec	גלילה
+=Servers in order	0a76	שרתים לפי הסדר
 =Set the clock from the network	b2a3	קבע את השעון מהרשת
 =Settings	8728	הגדרות
 =Shake sensitivity	8d3a	רגישות לניעור
@@ -419,6 +433,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה
+=UDP out	4fd0	UDP יוצא
 =Upside down	9dc1	הפוך
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Waterlink	6560	Waterlink

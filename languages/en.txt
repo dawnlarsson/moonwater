@@ -301,6 +301,8 @@ ui_field_full	fe02	that is as much as it holds
 =Cursor style	ad1e	Cursor style
 =Date format	7a44	Date format
 =Devices	f320	Devices
+=Discover now	398a	Discover now
+=Discovery	2db5	Discovery
 =Files	1b30	Files
 =Internal storage	e961	Internal storage
 =External devices	5769	External devices
@@ -333,9 +335,12 @@ ui_field_full	fe02	that is as much as it holds
 =Keyboard	a714	Keyboard
 =Language	db9b	Language
 =Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
+=Last-known addresses	86b7	Last-known addresses
 =Launcher	44b1	Launcher
+=Learned	0c7c	Learned
 =Left edge	9ce5	Left edge
 =Linked machines	0cc2	Linked machines
+=Local addresses	9f2c	Local addresses
 =Long press time (ms, or default)	aff4	Long press time (ms, or default)
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
@@ -346,10 +351,12 @@ ui_field_full	fe02	that is as much as it holds
 =Mouse acceleration	c400	Mouse acceleration
 =Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)
 =Mute	9f74	Mute
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS servers (or default)
 =Name	7306	Name
 =Name and code of another machine	4e07	Name and code of another machine
 =Name servers (auto for the network)	695a	Name servers (auto for the network)
+=Names of the network	3051	Names of the network
 =Names over TLS	075a	Names over TLS
 =Natural direction	d977	Natural direction
 =Network	ad65	Network
@@ -360,6 +367,7 @@ ui_field_full	fe02	that is as much as it holds
 =Open windows where they were last put	8711	Open windows where they were last put
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Pair a machine	b39b	Pair a machine
+=Paths	263f	Paths
 =Plain Text	2bbe	Plain Text
 =Pointer	4dca	Pointer
 =Pointer squeeze (percent, or default)	bbee	Pointer squeeze (percent, or default)
@@ -367,6 +375,11 @@ ui_field_full	fe02	that is as much as it holds
 =Power	a5e6	Power
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	Public IPv4
+=Public IPv6	0b39	Public IPv6
+=Public address discovery (HTTPS)	937e	Public address discovery (HTTPS)
+=Public address discovery (STUN)	7691	Public address discovery (STUN)
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
 =Resize border width (pixels, or default)	7fdf	Resize border width (pixels, or default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	that is as much as it holds
 =Screen modes	85ad	Screen modes
 =Scroll speed	e7af	Scroll speed
 =Scrolling	74ec	Scrolling
+=Servers in order	0a76	Servers in order
 =Set the clock from the network	b2a3	Set the clock from the network
 =Settings	8728	Settings
 =Shake sensitivity	8d3a	Shake sensitivity
@@ -418,6 +432,7 @@ ui_field_full	fe02	that is as much as it holds
 =Turned by the screen	ea45	Turned by the screen
 =Turned left	507c	Turned left
 =Turned right	7a49	Turned right
+=UDP out	4fd0	UDP out
 =Upside down	9dc1	Upside down
 =Volume (percent, or default)	f6e3	Volume (percent, or default)
 =Waterlink	6560	Waterlink

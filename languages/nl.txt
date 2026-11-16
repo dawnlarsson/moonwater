@@ -301,6 +301,8 @@ ui_field_full	fe02	meer past er niet in
 =Cursor style	ad1e	Stijl van de aanwijzer
 =Date format	7a44	Datumnotatie
 =Devices	f320	Apparaten
+=Discover now	398a	Nu detecteren
+=Discovery	2db5	Detectie
 =Files	1b30	Bestanden
 =Internal storage	e961	Interne opslag
 =External devices	5769	Externe apparaten
@@ -333,9 +335,12 @@ ui_field_full	fe02	meer past er niet in
 =Keyboard	a714	Toetsenbord
 =Language	db9b	Taal
 =Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
+=Last-known addresses	86b7	Laatst bekende adressen
 =Launcher	44b1	Starter
+=Learned	0c7c	Geleerd
 =Left edge	9ce5	Linkerrand
 =Linked machines	0cc2	Gekoppelde machines
+=Local addresses	9f2c	Lokale adressen
 =Long press time (ms, or default)	aff4	Duur van lang indrukken (ms of default)
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
@@ -346,10 +351,12 @@ ui_field_full	fe02	meer past er niet in
 =Mouse acceleration	c400	Muisversnelling
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
 =Mute	9f74	Dempen
+=NAT	95ec	NAT
 =NTS servers (or default)	9fd7	NTS-servers (of default)
 =Name	7306	Naam
 =Name and code of another machine	4e07	Naam en code van een andere machine
 =Name servers (auto for the network)	695a	Naamservers (auto voor het netwerk)
+=Names of the network	3051	Namen van het netwerk
 =Names over TLS	075a	Namen via TLS
 =Natural direction	d977	Natuurlijke richting
 =Network	ad65	Netwerk
@@ -360,6 +367,7 @@ ui_field_full	fe02	meer past er niet in
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Pair a machine	b39b	Een machine koppelen
+=Paths	263f	Paden
 =Plain Text	2bbe	Platte tekst
 =Pointer	4dca	Aanwijzer
 =Pointer squeeze (percent, or default)	bbee	Indrukken van de aanwijzer (procent, of standaard)
@@ -367,6 +375,11 @@ ui_field_full	fe02	meer past er niet in
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
+=Proxy	1bfb	Proxy
+=Public IPv4	0813	Publiek IPv4
+=Public IPv6	0b39	Publiek IPv6
+=Public address discovery (HTTPS)	937e	Detectie van het publieke adres (HTTPS)
+=Public address discovery (STUN)	7691	Detectie van het publieke adres (STUN)
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
 =Resize border width (pixels, or default)	7fdf	Breedte van de rand voor formaatwijziging (pixels of default)
@@ -379,6 +392,7 @@ ui_field_full	fe02	meer past er niet in
 =Screen modes	85ad	Schermmodi
 =Scroll speed	e7af	Scrollsnelheid
 =Scrolling	74ec	Scrollen
+=Servers in order	0a76	Servers op volgorde
 =Set the clock from the network	b2a3	Klok instellen via het netwerk
 =Settings	8728	Instellingen
 =Shake sensitivity	8d3a	Gevoeligheid voor schudden
@@ -418,6 +432,7 @@ ui_field_full	fe02	meer past er niet in
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid
+=UDP out	4fd0	UDP uitgaand
 =Upside down	9dc1	Ondersteboven
 =Volume (percent, or default)	f6e3	Volume (procent of default)
 =Waterlink	6560	Waterlink
