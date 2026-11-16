@@ -102,8 +102,7 @@ struct launcher_program
         the machine's own stop and are always there. The two after them are the session's, and each is there only where the system can
         do it (launcher.session, a bit each, LAUNCHER_SLEEP and LAUNCHER_LOG_OUT): Sleep is `moonwater sleep`, offered where the kernel
         says it can suspend to memory (launcher_sleeps: the word mem in /sys/power/state), and Log out is `moonwater desktop stop`,
-        which ends the desktop's session and leaves the text console. There is no Lock: the tree has no screen locker for a button to
-        start, and a button that did nothing would be worse than none.
+        which ends the desktop's session and leaves the text console.
 */
 #define LAUNCHER_POWERS 4
 #define LAUNCHER_ALWAYS 2    // the first of them are the machine's and are always offered
