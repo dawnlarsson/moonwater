@@ -253,22 +253,41 @@ static void check_compositor_cursor_style(void)
     compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: over a window's side edge the shape is a lens along it, filled, 13 out to either point and 5 thick, round above "
+    check("cursor style: over a window's side edge the shape is a lens along it, filled, 10 out to either point and 5 thick, round above "
           "and below and pointed at its ends",
-          other.lens && !other.grow && plane[32 * 64 + 32] == fill && plane[35 * 64 + 32] == fill && (plane[32 * 64 + 44] >> 24) &&
-              plane[32 * 64 + 46] == 0 && (plane[32 * 64 + 20] >> 24) && plane[32 * 64 + 18] == 0 && (plane[37 * 64 + 32] >> 24) &&
-              plane[38 * 64 + 32] == 0 && plane[35 * 64 + 43] == 0 && plane[29 * 64 + 21] == 0);
+          other.lens && !other.grow && plane[32 * 64 + 32] == fill && plane[35 * 64 + 32] == fill && (plane[32 * 64 + 41] >> 24) &&
+              plane[32 * 64 + 43] == 0 && (plane[32 * 64 + 23] >> 24) && plane[32 * 64 + 21] == 0 && (plane[37 * 64 + 32] >> 24) &&
+              plane[38 * 64 + 32] == 0 && plane[35 * 64 + 40] == 0 && plane[29 * 64 + 24] == 0);
+    {
+        int size = other.scale;
+
+        compositor.cursor.squeeze = 25;
+        compositor_pointer_press(COMPOSITOR_BTN_LEFT, 1);
+        compositor.cursor.press.at = 0;
+        compositor_pointer_now(&other);
+        check("cursor style: a button held over a window's edge leaves the lens its size, nothing eased", other.scale == size);
+        compositor_pointer_press(COMPOSITOR_BTN_LEFT, 0);
+        compositor.cursor.press = (struct compositor_sway){0, 0, 0};
+        compositor.cursor.style = 0, compositor.cursor.dyn = 0;
+        compositor_pointer_press(COMPOSITOR_BTN_LEFT, 1);
+        compositor.cursor.press.at = 0;
+        compositor_pointer_now(&other);
+        check("cursor style: and the classic resize arrow its size too", other.scale == compositor_cursor_size());
+        compositor_pointer_press(COMPOSITOR_BTN_LEFT, 0);
+        compositor.cursor.press = (struct compositor_sway){0, 0, 0};
+        compositor.cursor.style = 1, compositor.cursor.dyn = 1;
+    }
     compositor.cursor.shape = CP_RESIZE_V;
     compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: over a top or bottom edge it is the lens stood up", (plane[44 * 64 + 32] >> 24) && plane[46 * 64 + 32] == 0 &&
+    check("cursor style: over a top or bottom edge it is the lens stood up", (plane[41 * 64 + 32] >> 24) && plane[43 * 64 + 32] == 0 &&
                                                                                    (plane[32 * 64 + 37] >> 24) && plane[32 * 64 + 38] == 0);
     compositor.cursor.shape = CP_RESIZE_NWSE;
     compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: and over a corner it lies along the diagonal", plane[38 * 64 + 38] == fill && plane[26 * 64 + 38] == 0);
+    check("cursor style: and over a corner it lies along the diagonal", plane[36 * 64 + 36] == fill && plane[26 * 64 + 38] == 0);
     compositor.cursor.shape = CP_ARROW;
     compositor.cursor.morph = (struct compositor_sway){0, 0, 0};
 

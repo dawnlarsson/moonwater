@@ -1400,7 +1400,7 @@ static void compositor_pointer_now(struct compositor_pointer *p)
 {
         // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
         positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
-        int morph, grow, scale, most;
+        int morph, grow, scale, most, resize;
 
         // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button.
         if (compositor_picture.worn)
@@ -1412,7 +1412,9 @@ static void compositor_pointer_now(struct compositor_pointer *p)
         compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
         morph = compositor_sway_at(&compositor.cursor.morph, now);
         grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
-        scale = (compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now)) + 128) >> 8;
+        // Over a window's edge (a resize) the pointer keeps its size whatever is held: a drag of the edge neither grows it nor eases it.
+        resize = compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW;
+        scale = resize ? compositor_cursor_size() : (compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now)) + 128) >> 8;
         most = (CP_SPAN_MOST << 8) / (compositor.cursor.dyn ? CP_DYN_CELL : CP_CELL);
         *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = scale < most ? scale : most};
         if (!p->dyn)
@@ -1421,7 +1423,7 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                 return;
         }
         // Over a window's edge the shape is the lens along the way the edge moves (45 is 64 over the square root of two), never stretched.
-        if (compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW)
+        if (resize)
         {
                 static const signed char way[4][2] = {{64, 0}, {0, 64}, {45, 45}, {45, -45}};
 
@@ -1445,7 +1447,8 @@ static void compositor_pointer_now(struct compositor_pointer *p)
 
 /*
         A button held or let go. While any button is down the pointer is a little larger, by half the squeeze the settings give
-        (`moonwater canvas cursor squeeze`, 0 to 50 percent, 25 by default, so 12.5 percent), in every style and shape; with none down it
+        (`moonwater canvas cursor squeeze`, 0 to 50 percent, 25 by default, so 12.5 percent), in every style and shape but a window's edge,
+        which keeps its size; with none down it
         is its own size, and it eases from one to the other. `moonwater canvas cursor click off` leaves it its size.
 */
 static void compositor_pointer_press(unsigned int code, int down)

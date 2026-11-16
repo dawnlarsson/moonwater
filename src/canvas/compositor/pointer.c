@@ -211,7 +211,7 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 #define CP_DYN_TEXT_W 4         // the rectangle over text: its half width, half height and corner radius, in cells
 #define CP_DYN_TEXT_H 12
 #define CP_DYN_TEXT_R 2
-#define CP_DYN_LENS_W 13 // the lens over a window's edge: its half length and half thickness, in cells
+#define CP_DYN_LENS_W 10 // the lens over a window's edge: its half length and half thickness, in cells
 #define CP_DYN_LENS_H 5
 #define CP_DYN_SLOW 1500
 #define CP_DYN_FAST 6000
