@@ -604,6 +604,7 @@ static void compositor_preview_keep(void)
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch);
 static positive compositor_lent_va(int row);
 static int compositor_lent(int row);
+static int compositor_lent_swap(int row);
 static unsigned int compositor_lent_fb(int row);
 static void compositor_lent_fb_fail(int row);
 static int compositor_wl_row_async(int row);
@@ -884,7 +885,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            compositor_rounded(row) ? UI_RADIUS * scale / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_line_unlit()};
         if (compositor_lent_pixels(row, &lent_pitch))
-                frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row);
+                frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row), frame->swap = compositor_lent_swap(row);
         frame->blend = compositor_wl_row_blend(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);

@@ -433,7 +433,7 @@ scene:
 	s_load_dwordx8	s[56:63], s[48:49], 0x0
 	s_add_u32	s44, s44, 1
 	s_waitcnt	lgkmcnt(0)
-	s_and_b32	s47, s56, 0xff
+	s_and_b32	s47, s56, 0x7f
 	s_cmp_eq_u32	s47, 2
 	s_cbranch_scc1	.scene_box
 	s_cmp_eq_u32	s47, 3
@@ -715,7 +715,8 @@ scene:
 
 ; a mix (5 | the cover's pitch << 8 | the ink's pitch << 16, x0, y0, x1, y1 in pixels, the place of the cover byte at x0, y0 from the buffer's start, the ink's address in
 ; two words, or the ink's colour in the first when the ink's pitch is 0): memory_mix_u32_row over the rectangle, the covers a table of bytes in the buffer;
-; 12 with the same words is the ink laid over by its cover instead (compositor_over_weighted: a premultiplied picture in a round corner)
+; 12 with the same words is the ink laid over by its cover instead (compositor_over_weighted: a premultiplied picture in a round corner). 0x80 on the kind is
+; an ink picture with red and blue the other way round, swapped as it is loaded (as the image's is)
 .scene_mix:
 	s_cmp_le_i32	s59, s28
 	s_cbranch_scc1	.scene_loop
@@ -776,6 +777,15 @@ scene:
 	v_mov_b32	v67, s62
 .mix_blend:
 	s_waitcnt	vmcnt(0)
+	s_and_b32	s50, s56, 0x80
+	s_cmp_eq_u32	s50, 0
+	s_cbranch_scc1	.mix_ordered
+	s_mov_b32	s50, 0x3000102
+	v_perm_b32	v64, v64, v64, s50
+	v_perm_b32	v65, v65, v65, s50
+	v_perm_b32	v66, v66, v66, s50
+	v_perm_b32	v67, v67, v67, s50
+.mix_ordered:
 	v_bfe_u32	v60, v34, 0, 8
 	v_bfe_u32	v61, v34, 8, 8
 	v_bfe_u32	v62, v34, 16, 8
@@ -795,7 +805,8 @@ scene:
 	s_branch	.scene_loop
 
 ; an image (4 copied, 11 premultiplied alpha-over blended, x0, y0, x1, y1 in pixels, the address of the picture's pixel at x0, y0 in two words, its pitch in pixels):
-; each lane's four loaded by the address and no further than the rectangle and the rows (a lane outside them loads nothing)
+; each lane's four loaded by the address and no further than the rectangle and the rows (a lane outside them loads nothing). 0x80 on the kind is a picture
+; whose red and blue are the other way round (a client's ABGR or XBGR buffer read in place): its bytes 0 and 2 are swapped as they are loaded, before any blend
 .scene_image:
 	s_cmp_le_i32	s59, s28
 	s_cbranch_scc1	.scene_loop
@@ -836,6 +847,15 @@ scene:
 	global_load_dword v37, v[32:33], off offset:12
 	s_mov_b64	exec, s[92:93]
 	s_waitcnt	vmcnt(0)
+	s_and_b32	s50, s56, 0x80
+	s_cmp_eq_u32	s50, 0
+	s_cbranch_scc1	.image_ordered
+	s_mov_b32	s50, 0x3000102
+	v_perm_b32	v34, v34, v34, s50
+	v_perm_b32	v35, v35, v35, s50
+	v_perm_b32	v36, v36, v36, s50
+	v_perm_b32	v37, v37, v37, s50
+.image_ordered:
 	s_cmp_eq_u32	s47, 4
 	s_cbranch_scc1	.image_store
 	overv		v34, v5, v34

@@ -184,6 +184,7 @@ static const gpuasm_op gpuasm_ops[] = {
         {"v_lshl_or_b32", GPUASM_VOP3, 0x36f, "d1s1s1s1"},
         {"v_lshl_add_u32", GPUASM_VOP3, 0x346, "d1s1s1s1"},
         {"v_alignbit_b32", GPUASM_VOP3, 0x14e, "d1s1s1s1"},
+        {"v_perm_b32", GPUASM_VOP3, 0x344, "d1s1s1s1"},
         {"v_bfe_u32", GPUASM_VOP3, 0x148, "d1s1s1s1"},
         {"v_mul_lo_u32", GPUASM_VOP3, 0x169, "d1s1s1"},
         {"v_mad_u64_u32", GPUASM_VOP3B, 0x176, "d2n2s1s1s2"},

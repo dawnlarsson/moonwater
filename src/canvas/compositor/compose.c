@@ -127,6 +127,9 @@ struct compositor_frame
         // the damage but the ground (compositor_blend_alone), so it is laid over a row of the ground and the target is
         // written and not read.
         int blend;
+        // Red and blue the other way round (1): a client's ABGR or XBGR dma-buf the card reads in place (compositor_lent_swap). The card's
+        // records of it say so (0x80 on their kind, gpu.asm swaps the two as it loads them); the processor is never given one to read.
+        int swap;
         // A layer of its row's window (a client's subsurface read where it keeps it, compositor_wl_layers_frames): a frame after the row's own,
         // with the row in rows[] as the window's own frame has, and nothing of a window but its picture (no line, corners, buttons or runs).
         int layer;
@@ -1293,6 +1296,8 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = (unsigned int)frame->pitch;
                 else
                         op[0] |= (unsigned int)frame->pitch << 16, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32);
+                if (frame->swap)
+                        op[0] |= 0x80u;
         }
         if (kind == 5 || kind == 12)
                 op[0] |= (unsigned int)r << 8, op[5] = cover + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), op[6] = frame ? op[6] : colour;

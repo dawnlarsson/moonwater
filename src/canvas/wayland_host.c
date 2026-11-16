@@ -1023,6 +1023,19 @@ static int compositor_lent(int row)
         return row >= 0 && row < WINDOWS && compositor_wl.lent[row].pixels != 0;
 }
 
+// Whether a fourcc is ARGB's or XRGB's bytes with red and blue the other way round.
+static int compositor_wl_fourcc_swapped(unsigned int fourcc)
+{
+        return fourcc == WAYLAND_FOURCC_ABGR8888 || fourcc == WAYLAND_FOURCC_XBGR8888;
+}
+
+// A row's lent picture with red and blue the other way round (an ABGR or XBGR dma-buf): the card swaps them as it reads it (struct
+// compositor_frame's swap), and a copy into the table swaps them as it copies (compositor_wl_seed).
+static int compositor_lent_swap(int row)
+{
+        return compositor_lent(row) && compositor_wl_fourcc_swapped(compositor_wl.lent[row].fourcc);
+}
+
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
 {
         if (!compositor_lent(row))
@@ -1240,7 +1253,22 @@ static void compositor_wl_seed(int row, unsigned int which)
         to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
         if (compositor_wl.lent[row].fd >= 0)
                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-        if (compositor_wl.lent[row].fd >= 0)
+        if (compositor_lent_swap(row))
+        {
+                // Red and blue swapped as the rows come: each read with the streaming loads into its place, and turned there.
+                unsigned int alpha = compositor_wl.lent[row].fourcc == WAYLAND_FOURCC_XBGR8888 ? 0xff000000u : 0;
+
+                for (long y = 0; y < compositor_wl.lent[row].height; y++)
+                {
+                        unsigned int *line = to + (unsigned long)y * (unsigned long)compositor_stride();
+
+                        memory_copy_rect_stream_u32(line, (unsigned long)compositor_wl.lent[row].width,
+                                                    compositor_wl.lent[row].pixels + (unsigned long)y * compositor_wl.lent[row].pitch,
+                                                    compositor_wl.lent[row].pitch, (unsigned long)compositor_wl.lent[row].width, 1);
+                        memory_swizzle_rb_u32(line, line, (positive)compositor_wl.lent[row].width, alpha);
+                }
+        }
+        else if (compositor_wl.lent[row].fd >= 0)
                 memory_copy_rect_stream_u32(to, (unsigned long)compositor_stride(), compositor_wl.lent[row].pixels, compositor_wl.lent[row].pitch,
                                             (unsigned long)compositor_wl.lent[row].width, (unsigned long)compositor_wl.lent[row].height);
         else
@@ -1307,7 +1335,9 @@ static void compositor_wl_settle(int row)
         if (!compositor_lent(row))
                 return;
         // A dma-buf the processor read in place COMPOSITOR_WL_WC_PRESENTS presents running: copied once, and the row's copies made from here on.
-        if (row >= 0 && row < WINDOWS && compositor_wl.lent[row].fd >= 0 && compositor_wl.wc_reads[row] >= COMPOSITOR_WL_WC_PRESENTS)
+        // A picture with red and blue swapped is seeded after the first: the processor cannot read it as it is.
+        if (row >= 0 && row < WINDOWS && compositor_wl.lent[row].fd >= 0 &&
+            compositor_wl.wc_reads[row] >= (compositor_lent_swap(row) ? 1 : COMPOSITOR_WL_WC_PRESENTS))
         {
                 compositor_wl.wc_reads[row] = 0;
                 compositor_wl.wc_copy[row] = 1;
@@ -1341,13 +1371,19 @@ static void compositor_wl_fd_ident(long fd, unsigned long *dev, unsigned long *i
         *dev = (((unsigned long)*(unsigned int *)(info + 136)) << 32) | *(unsigned int *)(info + 140);
 }
 
-static int compositor_wl_needs_xform(const struct wayland_picture *picture, long width, long height)
+/*
+        Whether a picture is anything but ARGB or XRGB 8888 at the window's size, unturned and whole: what the processor's copy and a lend take as
+        they are. With swapped, ABGR and XBGR 8888 are taken too: a lend to a card that composes, which swaps red and blue as it reads them.
+*/
+static int compositor_wl_needs_xform_ordered(const struct wayland_picture *picture, long width, long height, int swapped)
 {
         unsigned int fourcc = picture->fourcc;
+        int order = swapped && compositor_wl_fourcc_swapped(fourcc);
 
-        if (fourcc && fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888)
+        if (fourcc && fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888 && !order)
                 return 1;
-        if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888)
+        if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888 &&
+            !(order && (unsigned long)picture->format == (unsigned long)fourcc))
                 return 1;
         if (picture->transform || picture->y_invert || picture->plane_count > 1)
                 return 1;
@@ -1361,6 +1397,23 @@ static int compositor_wl_needs_xform(const struct wayland_picture *picture, long
             (picture->dst_width != width || picture->dst_height != height || picture->width != width || picture->height != height))
                 return 1;
         return 0;
+}
+
+static int compositor_wl_needs_xform(const struct wayland_picture *picture, long width, long height)
+{
+        return compositor_wl_needs_xform_ordered(picture, width, height, 0);
+}
+
+// Whether the card composes now and may be lent a picture whose red and blue it swaps (an ABGR or XBGR dma-buf: a pool's is the processor's).
+static int compositor_wl_card_swaps(const struct wayland_picture *picture)
+{
+#ifdef MOONWATER_GPU_C
+        return picture->sync_fd >= 0 && compositor_wl_fourcc_swapped(picture->fourcc) && compositor_gpu && compositor_gpu_state.up &&
+               !compositor_gpu_state.dead;
+#else
+        (void)picture;
+        return 0;
+#endif
 }
 
 // The dma-buf reads of the pictures shown in place are bracketed for a present: started before the frames are built and ended after (the
@@ -1505,7 +1558,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                 return compositor_wl_lend_refused(picture, 1);
         if (x < 0 || y < 0 || width <= 0 || height <= 0)
                 return compositor_wl_lend_refused(picture, 2);
-        if (compositor_wl_needs_xform(picture, width, height))
+        if (compositor_wl_needs_xform_ordered(picture, width, height, compositor_wl_card_swaps(picture)))
                 return compositor_wl_lend_refused(picture, 3);
         if (picture->fragile && !(picture->full || !picture->damages))
                 return compositor_wl_lend_refused(picture, 4);

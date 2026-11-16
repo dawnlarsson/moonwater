@@ -2336,6 +2336,13 @@ vop3:
 	v_alignbit_b32	v1, v2, 0x007f007f, v4
 	v_alignbit_b32	v1, v2, v3, 0x007f007f
 	v_alignbit_b32	v1, 0x007f007f, v3, 0x007f007f
+	v_perm_b32	v1, v2, v3, v4
+	v_perm_b32	v255, v254, v253, v252
+	v_perm_b32	v1, s2, v3, v4
+	v_perm_b32	v1, v2, s3, v4
+	v_perm_b32	v1, v2, v3, s4
+	v_perm_b32	v34, v34, v34, s50
+	v_perm_b32	v1, v2, v3, 0x3000102
 	v_alignbit_b32	v1, 0x007f007f, 0x007f007f, 0x007f007f
 	v_alignbit_b32	v1, s2, s2, v4
 	v_alignbit_b32	v1, s2, s3, v4

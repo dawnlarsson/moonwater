@@ -887,6 +887,13 @@ static void compositor_close_mean(struct compositor_frame *frame)
         }
 
         unsigned long count = (unsigned long)side * (unsigned long)side;
+        // A picture with red and blue the other way round (frame->swap) summed them in each other's place.
+        if (frame->swap)
+        {
+                unsigned long red = sum[2];
+
+                sum[2] = sum[0], sum[0] = red;
+        }
         frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
 }
 
