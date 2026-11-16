@@ -1166,6 +1166,15 @@ struct windows
         // rectangle under 32768 pixels), 1 the card not ready, 2 the card busy (gpu_idle false), 3 a blended picture, 4 a picture that needs a
         // transform, 5 the pool cut, 6 the card's map or import refused, 7 the blit failed.
         unsigned int client_card_refused[8];
+        // A client's picture not lent to the card to be composed where the client drew it (compositor_wl_lend), and copied into the table instead,
+        // by reason: 0 no pixels or not the commit's last, 1 a blended (subsurface) picture, 2 placed off the window's corner or no size, 3 needs a
+        // transform (a format other than ARGB or XRGB 8888, a modifier, a turn, a flip, planes, a crop or a scale), 4 an X window's partly damaged
+        // buffer, 5 the processor composes the row (a dma-buf it reads write-combined), 6 larger than a screen or past its buffer, 7 a pitch not
+        // whole pixels, 8 the pool cut under the read, 9 the card refused to map the pool, 10 the card not ready, 11 the dma-buf's import refused.
+        // And the last refused: the shm format, the dma-buf's fourcc (0 for a pool), its modifier and whether it was a dma-buf.
+        unsigned int client_lend_refused[12];
+        unsigned int client_lend_format, client_lend_fourcc, client_lend_dmabuf;
+        unsigned long long client_lend_modifier;
         // A row whose processor reads a lent dma-buf in place: the rows copied once into the table because the card did not draw two
         // presents running (client_wc_seeded), and the presents whose processor read a lent dma-buf in place (client_wc_presents).
         unsigned int client_wc_seeded, client_wc_presents;
@@ -1244,7 +1253,7 @@ struct windows
         unsigned int rows;
 };
 
-#define WINDOWS_ABI 2u // 1 was the layout with no abi and no rows (thirty-two rows, every one with its doors)
+#define WINDOWS_ABI 3u // 1 was the layout with no abi and no rows (thirty-two rows, every one with its doors); 2 had no lend refusals
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)

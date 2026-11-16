@@ -854,6 +854,46 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->client_rects_card || table->client_rects_cpu)
                 host_say(log, "  client rects    %p damage rectangles copied by the card, %p by the processor\n",
                          (positive)table->client_rects_card, (positive)table->client_rects_cpu);
+        //      Why the client pictures were not read in place by the card (compositor_wl_lend) and their damage not copied by it
+        //      (compositor_wl_card_rect): the counts by reason, the nonzero ones, and what the last refused picture was.
+        {
+                static const string_address lend[] = {"no pixels or not the last", "blended", "off its corner", "needs a transform",
+                                                      "an X window's part", "the processor composes it", "too large", "its pitch",
+                                                      "its pool cut", "the card would not map it", "the card not ready", "its import refused"};
+                static const string_address card[] = {"small", "the card not ready", "the card busy", "blended", "needs a transform",
+                                                      "its pool cut", "a map or import refused", "the copy failed"};
+                unsigned int any = 0;
+
+                for (unsigned int at = 0; at < 12; at++)
+                        any |= table->client_lend_refused[at];
+                if (any)
+                {
+                        char fourcc[5] = {(char)(table->client_lend_fourcc & 255u), (char)(table->client_lend_fourcc >> 8 & 255u),
+                                          (char)(table->client_lend_fourcc >> 16 & 255u), (char)(table->client_lend_fourcc >> 24 & 255u), 0};
+
+                        for (unsigned int at = 0; at < 4; at++)
+                                fourcc[at] = fourcc[at] >= 32 && fourcc[at] < 127 ? fourcc[at] : '?';
+                        host_say(log, "  client unlent  ");
+                        for (unsigned int at = 0; at < 12; at++)
+                                if (table->client_lend_refused[at])
+                                        host_say(log, " %s %p;", lend[at], (positive)table->client_lend_refused[at]);
+                        host_say(log, " the last a %s, format %p, fourcc %s, modifier %p\n",
+                                 table->client_lend_dmabuf ? (string_address) "dma-buf" : (string_address) "pool",
+                                 (positive)table->client_lend_format, table->client_lend_fourcc ? (string_address)fourcc : (string_address) "none",
+                                 (positive)table->client_lend_modifier);
+                }
+                any = 0;
+                for (unsigned int at = 0; at < 8; at++)
+                        any |= table->client_card_refused[at];
+                if (any)
+                {
+                        host_say(log, "  client uncarded");
+                        for (unsigned int at = 0; at < 8; at++)
+                                if (table->client_card_refused[at])
+                                        host_say(log, " %s %p;", card[at], (positive)table->client_card_refused[at]);
+                        host_say(log, "\n");
+                }
+        }
         //      A client's dma-buf refused as a framebuffer to scan out (compositor_lent_fb): how many, and what the last one asked and why.
         if (table->client_scan_refused)
         {

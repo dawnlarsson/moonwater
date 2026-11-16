@@ -1461,6 +1461,32 @@ static void compositor_wl_count_card(const unsigned int *rows, unsigned int wind
 // A picture the card or the processor can read where it is: the whole window's, or the part of its buffer the window is (the picture's
 // offset is minus its destination), of the size the window is, from a buffer that holds it. A dma-buf's card address is its import's,
 // which is made here, and is refused (no lend) when the card is not up or has no room for it.
+// A picture not lent (compositor_wl_lend), counted by its reason for moonwater debug: always 0.
+static int compositor_wl_lend_refused(const struct wayland_picture *picture, unsigned int why)
+{
+        struct windows *table = compositor.table;
+
+        if (table && why < sizeof table->client_lend_refused / sizeof table->client_lend_refused[0])
+        {
+                table->client_lend_refused[why]++;
+                table->client_lend_format = (unsigned int)picture->format;
+                table->client_lend_fourcc = picture->fourcc;
+                table->client_lend_modifier = (unsigned long long)picture->modifier;
+                table->client_lend_dmabuf = picture->sync_fd >= 0;
+        }
+        return 0;
+}
+
+// The card's copy of a damage rectangle refused (compositor_wl_card_rect), counted by its reason: always 0.
+static int compositor_wl_card_refused(unsigned int why)
+{
+        struct windows *table = compositor.table;
+
+        if (table && why < sizeof table->client_card_refused / sizeof table->client_card_refused[0])
+                table->client_card_refused[why]++;
+        return 0;
+}
+
 static int compositor_wl_lend(int row, const struct wayland_picture *picture, long width, long height)
 {
         long x = -picture->dest_x, y = -picture->dest_y;
@@ -1473,19 +1499,23 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         // word), so a commit with a part damaged is read in place like any other and that part alone is drawn again (the row's damage,
         // compositor_wl_lent_damage). The one buffer not taken at that word is one the shim says may not be whole (fragile: an X window's,
         // whose server draws on in what it committed): that one is read in place only when all of it is damaged, and copied otherwise.
-        if (!picture->pixels || !picture->map || picture->blend || !picture->last || x < 0 || y < 0 || width <= 0 || height <= 0)
-                return 0;
+        if (!picture->pixels || !picture->map || !picture->last)
+                return compositor_wl_lend_refused(picture, 0);
+        if (picture->blend)
+                return compositor_wl_lend_refused(picture, 1);
+        if (x < 0 || y < 0 || width <= 0 || height <= 0)
+                return compositor_wl_lend_refused(picture, 2);
         if (compositor_wl_needs_xform(picture, width, height))
-                return 0;
+                return compositor_wl_lend_refused(picture, 3);
         if (picture->fragile && !(picture->full || !picture->damages))
-                return 0;
+                return compositor_wl_lend_refused(picture, 4);
         // A row the processor composes is not lent a dma-buf (compositor_wl.wc_copy): its damage is copied with the streaming loads instead.
         if (picture->sync_fd >= 0 && row >= 0 && row < WINDOWS && compositor_wl.wc_copy[row])
-                return 0;
+                return compositor_wl_lend_refused(picture, 5);
         if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
-                return 0;
+                return compositor_wl_lend_refused(picture, 6);
         if (stride & 3 || stride < (unsigned long)picture->width * 4)
-                return 0;
+                return compositor_wl_lend_refused(picture, 7);
         at = picture->pixels + (unsigned long)y * stride + (unsigned long)x * 4;
         // The pool's file cut under the read: the window's first and last pixel are read here, as a copy would read them, so a pool cut before
         // this commit is found now (the SIGBUS handler maps zeros over it and marks it), and the picture is refused as a copy is refused.
@@ -1497,12 +1527,12 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                 (void)probe;
         }
         if (compositor_wl_cut(picture->pixels))
-                return 0;
+                return compositor_wl_lend_refused(picture, 8);
 #ifdef MOONWATER_GPU_C
         if (picture->sync_fd < 0 && compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead &&
             !gpu_va_bytes(at, (positive)(height - 1) * stride + (positive)width * 4) &&
             !gpu_map(at, (positive)(height - 1) * stride + (positive)width * 4))
-                return 0;
+                return compositor_wl_lend_refused(picture, 9);
 #endif
         if (picture->pool_id)
                 dev = 0, ino = picture->pool_id;
@@ -1518,11 +1548,11 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (picture->sync_fd >= 0)
         {
                 if (!gpu_ready())
-                        return 0;
+                        return compositor_wl_lend_refused(picture, 10);
                 // The import is the buffer's, from its start: the same one while the buffer is the same, else a new one.
                 import = same ? compositor_wl.lent[row].import : gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
                 if (!import)
-                        return 0;
+                        return compositor_wl_lend_refused(picture, 11);
                 va = import + (positive)(at - picture->map);
         }
         if (compositor_lent(row) && !same)
@@ -1585,10 +1615,16 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         positive src_va, dst_va;
         volatile unsigned int probe;
 
-        if (!wanted || !gpu_ready() || picture->blend || w <= 0 || h <= 0 || !gpu_idle())
-                return 0;
+        if (!wanted || w <= 0 || h <= 0)
+                return compositor_wl_card_refused(0);
+        if (!gpu_ready())
+                return compositor_wl_card_refused(1);
+        if (picture->blend)
+                return compositor_wl_card_refused(3);
+        if (!gpu_idle())
+                return compositor_wl_card_refused(2);
         if (compositor_wl_needs_xform(picture, picture->row_width, picture->row_height))
-                return 0;
+                return compositor_wl_card_refused(4);
         if (picture->sync_fd < 0 && (!picture->pixels || !picture->map || picture->map_bytes <= 0))
                 return 0;
         extent = 4 * ((stride / 4) * (unsigned long)(h - 1) + (unsigned long)w);
@@ -1601,7 +1637,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 probe += *(const volatile unsigned int *)(src + extent - 4);
                 (void)probe;
                 if (compositor_wl_cut(picture->pixels))
-                        return 0;
+                        return compositor_wl_card_refused(5);
         }
         if (picture->sync_fd < 0)
         {
@@ -1612,7 +1648,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 if (!src_va && (span = compositor_wl_picture_bytes(picture)) && gpu_map(picture->pixels, (positive)span))
                         src_va = gpu_va_bytes(src, extent);
                 if (!src_va)
-                        return 0;
+                        return compositor_wl_card_refused(6);
         }
         else
         {
@@ -1633,7 +1669,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                         compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
                         compositor_wl.source[row].epoch = gpu_epoch;
                         if (!compositor_wl.source[row].va)
-                                return 0;
+                                return compositor_wl_card_refused(6);
                         compositor_wl.source[row].map = picture->map;
                         compositor_wl.source[row].fd = picture->sync_fd;
                         compositor_wl.source[row].size = need_bytes;
@@ -1649,7 +1685,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         if (!dst_va && gpu_map_written(to, compositor.buffer))
                 dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va)
-                return 0;
+                return compositor_wl_card_refused(6);
         if (gpu_blit(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h))
                 return 1;
         // A copy that hung is the card's hang as a present's is (compositor_gpu_job_failed); if it merely timed out late (GPU_END_LATE), wait for completion
@@ -1660,7 +1696,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         if (gpu_end != GPU_END_NONE)
                 compositor_gpu_job_failed();
 #endif
-        return 0;
+        return compositor_wl_card_refused(7);
 }
 
 /*
