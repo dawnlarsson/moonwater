@@ -831,6 +831,32 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
         // The row's standard is on: no file, or a file that says default, hides the band as on does; only "off" keeps it.
         taskbar_hide_set(!string_equals((string_address)fullscreen, (string_address) "off"));
+        // The arrangement: each row's word as the index of its choices (the standard's when nothing is kept), the tray items' a bit each.
+        {
+                static const char *const paths[7] = {SETTING_TASKBAR_MOON_PATH, SETTING_TASKBAR_TASKS_PATH, SETTING_TASKBAR_NEWEST_PATH,
+                                                     SETTING_TASKBAR_ORDER_PATH, SETTING_TASKBAR_MOON_LOOK_PATH, SETTING_TASKBAR_CLOCK_PATH,
+                                                     SETTING_TASKBAR_CLOCK_BULGE_PATH};
+                static const char *const items[6] = {SETTING_TASKBAR_ITEM_NOTICES_PATH, SETTING_TASKBAR_ITEM_MIC_PATH, SETTING_TASKBAR_ITEM_SOUND_PATH,
+                                                     SETTING_TASKBAR_ITEM_BATTERY_PATH, SETTING_TASKBAR_ITEM_TEXT_PATH, SETTING_TASKBAR_ITEM_CLOCK_PATH};
+                long kept[7], side;
+                unsigned int before = 0;
+                char word[16];
+
+                for (int at = 0; at < 7; at++)
+                {
+                        compositor_word(paths[at], word, sizeof(word));
+                        compositor_setting_kept(paths[at], word, &kept[at]);
+                }
+                for (int at = 0; at < 6; at++)
+                {
+                        compositor_word(items[at], word, sizeof(word));
+                        compositor_setting_kept(items[at], word, &side);
+                        before |= (side == 0 ? 1u : 0u) << at;
+                }
+                compositor_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof(word));
+                taskbar_arrange_set((int)kept[0], (int)kept[1], (int)kept[2], (int)kept[3], before, (int)kept[4], (int)kept[5], (int)kept[6],
+                                    string_equals((string_address)word, (string_address) "12h"));
+        }
         compositor_band_room();
         compositor_tabs_changed();
         compositor_bands_where(now);

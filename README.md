@@ -55,6 +55,10 @@ moonwater canvas record report         the report of the presents: the paths, fl
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
 moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
 moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]
+moonwater canvas wallpaper [moon|plain]  the desktop behind the windows: the moon over a night sky that turns with the theme and the accent, or the background colour plain [moon]
+moonwater canvas wallpaper dark [dimmed|inverted]  the moon of the wallpaper in a dark theme: dimmed, as it is with its seas grey, or inverted, chalk lines on charcoal [dimmed]
+moonwater canvas wallpaper glow [none|glow|glow-and-edges]  the light of the accent round the moon: none, a glow, or a glow and a light along the edges of the screen [glow]
+moonwater canvas wallpaper maria [PERCENT|default]  how grey the dark seas of the dimmed moon are, 20 to 80 percent of its highlands [45]
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 
@@ -111,12 +115,25 @@ moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0
 
 
 # Taskbar
+moonwater taskbar clock [moon|tray]    the clock in the moon, hours over minutes, or in the tray [moon]
+moonwater taskbar clock bulge [PERCENT|default]  how far the digits of the clock in the moon swell onto its sphere, 0 flat to 100 percent [60]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [on]
+moonwater taskbar item battery [before|after]  which side of the tasks the battery is on: in the pill before them or in the one after them [after]
+moonwater taskbar item clock [before|after]  which side of the tasks the clock while it is in the tray is on: in the pill before them or in the one after them [after]
+moonwater taskbar item mic [before|after]  which side of the tasks the microphone is on: in the pill before them or in the one after them [before]
+moonwater taskbar item notices [before|after]  which side of the tasks the dot of notices and issues is on: in the pill before them or in the one after them [after]
+moonwater taskbar item sound [before|after]  which side of the tasks the volume is on: in the pill before them or in the one after them [before]
+moonwater taskbar item text [before|after]  which side of the tasks the tray text of a format of your own is on: in the pill before them or in the one after them [after]
 moonwater taskbar launcher [on|off]    a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again, as the logo key alone does [on]
+moonwater taskbar moon [start|center|end]  where the moon is along the taskbar while the tasks are not split about it: its start, its center or its end [center]
+moonwater taskbar moon look [realistic|ink]  the moon on the taskbar as it is, lit and turning, or drawn in ink as the wallpaper can be [realistic]
+moonwater taskbar newest [left|right]  the end of the tasks the newest one is at, left or right [left]
+moonwater taskbar order [moon-tasks-tray|...]  the order of the moon, the tasks and the tray where they share a place on the taskbar, any of the six [moon-tasks-tray]
 moonwater taskbar padding [PX|default]  the room inside each taskbar button before what it shows and after it (the icon and title of a task, the moon, a tray item), 0 to 24 pixels at the taskbar scale [12]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar scale [PERCENT|default]  how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]
+moonwater taskbar tasks [split|start|center|end]  where the tasks are: split either side of the moon by turns, or together at the start, the center or the end of the taskbar [split]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
 moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
 

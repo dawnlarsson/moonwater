@@ -1357,6 +1357,7 @@ static int taskbar_launcher_on(void);
 static void taskbar_hide_set(int on);
 static void taskbar_scale_set(int percent);
 static void taskbar_padding_set(int pixels);
+static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve);
 static int taskbar_thick(int scale);
 static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
 static int taskbar_sliding(positive now);
@@ -1403,6 +1404,8 @@ static inline void taskbar_hide_set(int on) { (void)on; }
 static inline void taskbar_scale_set(int percent) { (void)percent; }
 static inline void taskbar_padding_set(int pixels) { (void)pixels; }
 static inline int taskbar_thick(int scale) { return COMPOSITOR_PANEL * scale / 100; }
+static inline void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve)
+{ (void)moon, (void)tasks, (void)newest, (void)order, (void)before, (void)look, (void)clock, (void)bulge, (void)twelve; }
 static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
 { (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
 static inline int taskbar_sliding(positive now) { (void)now; return 0; }

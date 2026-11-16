@@ -638,7 +638,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                 ui_tree_close(t);
         }
 
-        // The rectangles, turned over for a language that reads from the right, and the names of those the band has not the room for taken back.
+        // The rectangles, turned over for a language that reads from the right, and those the band has not the room for given none, their names taken back.
         ui_tree_close(t);
         ui_tree_close(t);
         ui_tree_run(t, view->width, view->height);
@@ -649,7 +649,10 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                 const struct ui_node address_to band = &t->node[1];
 
                 n = &t->node[at];
-                n->id = n->w > 0 && n->h > 0 && n->x >= band->x && n->y >= band->y && n->x + n->w <= band->x + band->w && n->y + n->h <= band->y + band->h ? n->id : 0;
+                if (n->w > 0 && n->h > 0 && n->x >= band->x && n->y >= band->y && n->x + n->w <= band->x + band->w && n->y + n->h <= band->y + band->h)
+                        continue;
+                n->id = 0;
+                n->w = n->h = 0;
         }
 }
 
@@ -1853,6 +1856,32 @@ static void taskbar_scale_set(int percent)
 static void taskbar_padding_set(int pixels)
 {
         taskbar.padding = pixels >= 0 && pixels <= TASKBAR_PADDING_MOST ? pixels : TASKBAR_PADDING_STANDARD;
+        taskbar.stale = 1;
+}
+
+/*
+        The arrangement as its settings keep it, each the index of its word among its row's choices (registry.c), which is what
+        compositor_setting_kept reads: `taskbar moon` (start center end), `taskbar tasks` (split start center end), `taskbar newest`
+        (left right), `taskbar order` (the six orders of moon, tasks and tray, as the row names them), a bit for each tray item before the
+        tasks (taskbar_item_of's), `taskbar moon look` (realistic ink), `taskbar clock` (moon tray), its bulge in percent, and twelve
+        hours. A word out of range is the standard.
+*/
+static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve)
+{
+        static const unsigned char orders[6][3] = {{TASKBAR_PILL_MOON, TASKBAR_PILL_TASKS, TASKBAR_PILL_TRAY}, {TASKBAR_PILL_MOON, TASKBAR_PILL_TRAY, TASKBAR_PILL_TASKS},
+                                                   {TASKBAR_PILL_TASKS, TASKBAR_PILL_MOON, TASKBAR_PILL_TRAY}, {TASKBAR_PILL_TASKS, TASKBAR_PILL_TRAY, TASKBAR_PILL_MOON},
+                                                   {TASKBAR_PILL_TRAY, TASKBAR_PILL_MOON, TASKBAR_PILL_TASKS}, {TASKBAR_PILL_TRAY, TASKBAR_PILL_TASKS, TASKBAR_PILL_MOON}};
+        static const int zones[4] = {TASKBAR_ZONE_SPLIT, TASKBAR_ZONE_START, TASKBAR_ZONE_CENTRE, TASKBAR_ZONE_END};
+
+        taskbar.moon_zone = moon >= 0 && moon < 3 ? moon : TASKBAR_ZONE_CENTRE;
+        taskbar.tasks_zone = tasks >= 0 && tasks < 4 ? zones[tasks] : TASKBAR_ZONE_SPLIT;
+        taskbar.tasks_right = newest == 1;
+        memory_copy(taskbar.order, orders[order >= 0 && order < 6 ? order : 0], sizeof(taskbar.order));
+        taskbar.tray_before = before & 63u;
+        taskbar.moon_ink = look == 1;
+        taskbar.clock_tray = clock == 1;
+        taskbar.clock_bulge = bulge >= 0 && bulge <= 100 ? bulge : 60;
+        taskbar.clock_12h = twelve != 0;
         taskbar.stale = 1;
 }
 

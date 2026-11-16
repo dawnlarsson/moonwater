@@ -2533,6 +2533,8 @@ static struct taskbar_view band_view(unsigned int position, const char *const *t
 
     memory_zero(&view, sizeof(view));
     memory_zero(band_pixels, sizeof(band_pixels));
+    // A band drawn for its bytes is drawn settled: no highlight still gliding from a band an earlier row drew on the real clock.
+    memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     view.width = BAND_W;
     view.height = BAND_H;
     view.scale = 100;
@@ -3194,9 +3196,10 @@ static void check_taskbar_scale(void)
 }
 
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes pinned here: three tabs, each the window
-   symbol and its title (pinned again when a tab took an icon before its title; before that the tabs were their titles alone).
+   symbol and its title (pinned again when a tab took an icon before its title, and when the tabs became glass pills split about the
+   moon, the clock in it at a check's time; before that the tabs were their titles alone).
    The unthemed table had a tint of its own, which no shell draws: the compositor themes its table at start. */
-#define BAND_UPRIGHT 0xb00f5dd533096ca1ull
+#define BAND_UPRIGHT 0xc346e9c1c817ba4cull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -3829,7 +3832,10 @@ static void check_taskbar_text(string_address face_path)
        the band without them there), and nothing is written outside the tabs; the text of a tab is taller than it is
        wide, and as long and as thick as the bottom band's of the same title is wide and high, to a pixel; and in a tab
        of capital Ts the column with the most ink, their bars, is on the side the tops face: the right for a left band
-       with center and a right band with edge. */
+       with center and a right band with edge. The moon and the tasks are at the band's start, so a side band's tasks have
+       its length as a bottom band's have, and no title the bottom band writes whole is cut there. */
+    taskbar.moon_zone = TASKBAR_ZONE_START, taskbar.tasks_zone = TASKBAR_ZONE_START;
+    taskbar_changed();
     for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position += position == TASKBAR_BOTTOM ? 2 : 1)
         for (int edge = 0; edge < 2; edge++)
         {
@@ -3880,6 +3886,9 @@ static void check_taskbar_text(string_address face_path)
                     continue;
                 }
                 tall &= bottom - top > right - left;
+                if (bottom - top - flat[2 * at] > 1 || flat[2 * at] - (bottom - top) > 1 || right - left - flat[2 * at + 1] > 1 || flat[2 * at + 1] - (right - left) > 1)
+                    string_format(log, "  taskbar text: tab %p on side %p (edge %p) is %p by %p, the bottom band's %p by %p\n", (positive)at, (positive)position,
+                                  (positive)edge, (positive)(bottom - top), (positive)(right - left), (positive)flat[2 * at], (positive)flat[2 * at + 1]);
                 sized &= bottom - top - flat[2 * at] <= 1 && flat[2 * at] - (bottom - top) <= 1 &&
                          right - left - flat[2 * at + 1] <= 1 && flat[2 * at + 1] - (right - left) <= 1;
                 for (int x = 1; x < slot[at][2]; x++)
@@ -3891,6 +3900,7 @@ static void check_taskbar_text(string_address face_path)
                 for (int room = 0; room < 240; room += 3)
                     fits &= band_fit_ok(&view, cuts[at], room);
         }
+    taskbar_standard();
     check("taskbar text: every tab of a band on a side is written in, both sides, both ways", inked);
     check("taskbar text: and nothing is written outside its tabs", inside);
     check("taskbar text: a side tab's text is taller than it is wide", tall);

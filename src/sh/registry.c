@@ -108,6 +108,24 @@
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
 #define SETTING_TASKBAR_LAUNCHER_PATH "/root/taskbar.launcher"
 #define SETTING_TASKBAR_FULLSCREEN_PATH "/root/taskbar.fullscreen"
+#define SETTING_TASKBAR_MOON_PATH "/root/taskbar.moon"
+#define SETTING_TASKBAR_MOON_LOOK_PATH "/root/taskbar.moon.look"
+#define SETTING_TASKBAR_TASKS_PATH "/root/taskbar.tasks"
+#define SETTING_TASKBAR_NEWEST_PATH "/root/taskbar.newest"
+#define SETTING_TASKBAR_ORDER_PATH "/root/taskbar.order"
+#define SETTING_TASKBAR_CLOCK_PATH "/root/taskbar.clock"
+#define SETTING_TASKBAR_CLOCK_BULGE_PATH "/root/taskbar.clock.bulge"
+// A tray item's side of the tasks, one file each, in the order of taskbar.c's taskbar_item_of (its bit in taskbar.tray_before).
+#define SETTING_TASKBAR_ITEM_NOTICES_PATH "/root/taskbar.item.notices"
+#define SETTING_TASKBAR_ITEM_MIC_PATH "/root/taskbar.item.mic"
+#define SETTING_TASKBAR_ITEM_SOUND_PATH "/root/taskbar.item.sound"
+#define SETTING_TASKBAR_ITEM_BATTERY_PATH "/root/taskbar.item.battery"
+#define SETTING_TASKBAR_ITEM_TEXT_PATH "/root/taskbar.item.text"
+#define SETTING_TASKBAR_ITEM_CLOCK_PATH "/root/taskbar.item.clock"
+#define SETTING_WALLPAPER_PATH "/root/canvas.wallpaper"
+#define SETTING_WALLPAPER_DARK_PATH "/root/canvas.wallpaper.dark"
+#define SETTING_WALLPAPER_MARIA_PATH "/root/canvas.wallpaper.maria"
+#define SETTING_WALLPAPER_GLOW_PATH "/root/canvas.wallpaper.glow"
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_TOUCH_LEFT_PATH "/root/canvas.touch.left"
@@ -267,6 +285,26 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
      {"canvas", "background"}, null, 0, .how = SETTING_ALIAS},
+    //  The wallpaper the compositor draws its ground with (ui.c's ui_moon_night): the moon over its sky with the glow of the accent, or
+    //  the background colour plain. In a dark theme the moon is dimmed (as it is, its seas a share of grey) or inverted (the ink look,
+    //  chalk on charcoal); the glow is none, the glow, or the glow and the light along the screen's edges.
+    SETTING_PLAIN_ROW(null, "Wallpaper", SETTINGS_CHOICE, 0, ("canvas", "wallpaper"), "wallpaper ", "moon plain",
+                      .path = SETTING_WALLPAPER_PATH, .standard = "moon",
+                      .usage = "canvas wallpaper [moon|plain]",
+                      .help = "the desktop behind the windows: the moon over a night sky that turns with the theme and the accent, or the background colour plain [moon]"),
+    SETTING_PLAIN_ROW(null, "Wallpaper in the dark theme", SETTINGS_CHOICE, 0, ("canvas", "wallpaper", "dark"), "dark ", "dimmed inverted",
+                      .path = SETTING_WALLPAPER_DARK_PATH, .standard = "dimmed",
+                      .usage = "canvas wallpaper dark [dimmed|inverted]",
+                      .help = "the moon of the wallpaper in a dark theme: dimmed, as it is with its seas grey, or inverted, chalk lines on charcoal [dimmed]"),
+    SETTING_PLAIN_ROW(null, "Wallpaper seas (percent grey)", SETTINGS_SLIDER, 0, ("canvas", "wallpaper", "maria"), "maria ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_WALLPAPER_MARIA_PATH, .standard = "45",
+                      .unit = "percent", .low = 20, .high = 80,
+                      .usage = "canvas wallpaper maria [PERCENT|default]",
+                      .help = "how grey the dark seas of the dimmed moon are, 20 to 80 percent of its highlands [45]"),
+    SETTING_PLAIN_ROW(null, "Wallpaper glow", SETTINGS_CHOICE, 0, ("canvas", "wallpaper", "glow"), "glow ", "none glow glow-and-edges",
+                      .path = SETTING_WALLPAPER_GLOW_PATH, .standard = "glow",
+                      .usage = "canvas wallpaper glow [none|glow|glow-and-edges]",
+                      .help = "the light of the accent round the moon: none, a glow, or a glow and a light along the edges of the screen [glow]"),
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
@@ -631,6 +669,63 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "taskbar text is center or edge, not %s\n",
                       .usage = "taskbar text [center|edge]",
                       .help = "on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]"),
+    //  The arrangement (taskbar.c's taskbar_lay): where the moon and the tasks are along the band, the end the newest task is at, which
+    //  side of the tasks each tray item is on and the order of the pills that share a place; the moon's look, and the clock on the moon
+    //  or in the tray and how far its digits swell onto the sphere. The band's edit mode writes the same files when Done is pressed.
+    SETTING_PLAIN_ROW(null, "Taskbar moon place", SETTINGS_CHOICE, 0, ("taskbar", "moon"), "moon ", "start center end",
+                      .path = SETTING_TASKBAR_MOON_PATH, .standard = "center",
+                      .usage = "taskbar moon [start|center|end]",
+                      .help = "where the moon is along the taskbar while the tasks are not split about it: its start, its center or its end [center]"),
+    SETTING_PLAIN_ROW(null, "Taskbar moon look", SETTINGS_CHOICE, 0, ("taskbar", "moon", "look"), "look ", "realistic ink",
+                      .path = SETTING_TASKBAR_MOON_LOOK_PATH, .standard = "realistic",
+                      .usage = "taskbar moon look [realistic|ink]",
+                      .help = "the moon on the taskbar as it is, lit and turning, or drawn in ink as the wallpaper can be [realistic]"),
+    SETTING_PLAIN_ROW(null, "Taskbar tasks place", SETTINGS_CHOICE, 0, ("taskbar", "tasks"), "tasks ", "split start center end",
+                      .path = SETTING_TASKBAR_TASKS_PATH, .standard = "split",
+                      .usage = "taskbar tasks [split|start|center|end]",
+                      .help = "where the tasks are: split either side of the moon by turns, or together at the start, the center or the end of the taskbar [split]"),
+    SETTING_PLAIN_ROW(null, "Taskbar newest task side", SETTINGS_CHOICE, 0, ("taskbar", "newest"), "newest ", "left right",
+                      .path = SETTING_TASKBAR_NEWEST_PATH, .standard = "left",
+                      .usage = "taskbar newest [left|right]",
+                      .help = "the end of the tasks the newest one is at, left or right [left]"),
+    SETTING_PLAIN_ROW(null, "Taskbar notices place", SETTINGS_CHOICE, 0, ("taskbar", "item", "notices"), "notices ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_NOTICES_PATH, .standard = "after",
+                      .usage = "taskbar item notices [before|after]",
+                      .help = "which side of the tasks the dot of notices and issues is on: in the pill before them or in the one after them [after]"),
+    SETTING_PLAIN_ROW(null, "Taskbar microphone place", SETTINGS_CHOICE, 0, ("taskbar", "item", "mic"), "mic ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_MIC_PATH, .standard = "before",
+                      .usage = "taskbar item mic [before|after]",
+                      .help = "which side of the tasks the microphone is on: in the pill before them or in the one after them [before]"),
+    SETTING_PLAIN_ROW(null, "Taskbar sound place", SETTINGS_CHOICE, 0, ("taskbar", "item", "sound"), "sound ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_SOUND_PATH, .standard = "before",
+                      .usage = "taskbar item sound [before|after]",
+                      .help = "which side of the tasks the volume is on: in the pill before them or in the one after them [before]"),
+    SETTING_PLAIN_ROW(null, "Taskbar battery place", SETTINGS_CHOICE, 0, ("taskbar", "item", "battery"), "battery ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_BATTERY_PATH, .standard = "after",
+                      .usage = "taskbar item battery [before|after]",
+                      .help = "which side of the tasks the battery is on: in the pill before them or in the one after them [after]"),
+    SETTING_PLAIN_ROW(null, "Taskbar tray text place", SETTINGS_CHOICE, 0, ("taskbar", "item", "text"), "text ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_TEXT_PATH, .standard = "after",
+                      .usage = "taskbar item text [before|after]",
+                      .help = "which side of the tasks the tray text of a format of your own is on: in the pill before them or in the one after them [after]"),
+    SETTING_PLAIN_ROW(null, "Taskbar tray clock place", SETTINGS_CHOICE, 0, ("taskbar", "item", "clock"), "clock ", "before after",
+                      .path = SETTING_TASKBAR_ITEM_CLOCK_PATH, .standard = "after",
+                      .usage = "taskbar item clock [before|after]",
+                      .help = "which side of the tasks the clock while it is in the tray is on: in the pill before them or in the one after them [after]"),
+    SETTING_PLAIN_ROW(null, "Taskbar order", SETTINGS_CHOICE, 0, ("taskbar", "order"), "order ",
+                      "moon-tasks-tray moon-tray-tasks tasks-moon-tray tasks-tray-moon tray-moon-tasks tray-tasks-moon",
+                      .path = SETTING_TASKBAR_ORDER_PATH, .standard = "moon-tasks-tray",
+                      .usage = "taskbar order [moon-tasks-tray|...]",
+                      .help = "the order of the moon, the tasks and the tray where they share a place on the taskbar, any of the six [moon-tasks-tray]"),
+    SETTING_PLAIN_ROW(null, "Taskbar clock place", SETTINGS_CHOICE, 0, ("taskbar", "clock"), "clock ", "moon tray",
+                      .path = SETTING_TASKBAR_CLOCK_PATH, .standard = "moon",
+                      .usage = "taskbar clock [moon|tray]",
+                      .help = "the clock in the moon, hours over minutes, or in the tray [moon]"),
+    SETTING_PLAIN_ROW(null, "Taskbar clock bulge (percent)", SETTINGS_SLIDER, 0, ("taskbar", "clock", "bulge"), "bulge ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_CLOCK_BULGE_PATH, .standard = "60",
+                      .unit = "percent", .low = 0, .high = 100,
+                      .usage = "taskbar clock bulge [PERCENT|default]",
+                      .help = "how far the digits of the clock in the moon swell onto its sphere, 0 flat to 100 percent [60]"),
     //  A special row (host.c locale_taskbar_tray) whose file the compositor watches: the whole line is the format.
     {null, "Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)", SETTINGS_FIELD, 0,
      SETTINGS_LINE, {"taskbar", "tray"}, "tray ", null, {"taskbar", "tray"}, null, 0,
