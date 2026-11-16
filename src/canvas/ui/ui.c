@@ -20395,6 +20395,12 @@ static fn ui_list_row_changed(struct ui address_to ui, struct ui_list address_to
 }
 
 // The row under a point of the window, or -1.
+// A row of the window as a list's rows have it drawn, its picture stretched by a pull past an end (ui_scroll_unpull), as the list is now.
+static int ui_list_unpull(const struct ui address_to ui, const struct ui_list address_to l, int y)
+{
+        return ui_scroll_unpull(ui, &l->scroll, l->scroll.scroll, l->y, l->h, y);
+}
+
 static int ui_list_hit(const struct ui address_to ui, const struct ui_list address_to l, int x, int y)
 {
         // The rows are drawn at rest (ui_list_draw) unless the list is taller than UI_STRETCH_VIEW: a pull past an end stretches the picture
@@ -20406,7 +20412,7 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
         ui_list_across(l, &across, &wide);
         if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
-        inside = ui_scroll_unpull(ui, &l->scroll, l->scroll.scroll, l->y, l->h, y) - l->y + at_rest;
+        inside = ui_list_unpull(ui, l, y) - l->y + at_rest;
         if (l->virtual)
         {
                 // A row's number is how many rows are above the point: no place is looked for.
@@ -21451,7 +21457,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int row_height = ui_dev(ui, UI_ROW), room = l->w - 2 * ui_dev(ui, UI_INSET);
         char cut[UI_CUT_TEXT];
 
-        int drawn, rest;
+        int drawn, rest, pointer_y;
 
         ui_scroll_frame(ui, &l->scroll);
         // A virtual list's places are the rows near where this frame has it scrolled to.
@@ -21467,6 +21473,10 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         // The rows are drawn at rest, inside the list's ends, and a pull past an end is the picture stretched (ui_scroll_pull), as Android 12's is.
         drawn = l->scroll.scroll;
         rest = ui_scroll_rest(&l->scroll, drawn, l->h);
+        // The rows' controls are placed at rest, and the item under the pointer (a segment, a swatch, a slider's ghost) is the one the
+        // stretched picture draws under it (ui_list_row_place), as the row lit is (ui_list_hit).
+        pointer_y = l->pointer_y;
+        l->pointer_y = ui_list_unpull(ui, l, pointer_y);
         l->scroll.scroll = rest;
         ui->top = l->y;
         ui->bottom = l->y + l->h;
@@ -21501,6 +21511,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 }
         }
         l->scroll.scroll = drawn;
+        l->pointer_y = pointer_y;
         // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
         ui_scroll_pull(ui, &l->scroll, drawn, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h);
         ui_scroll_draw(ui, &l->scroll);
@@ -21579,6 +21590,9 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         if (id < 0)
                 return -1;
         l->part = -1, l->way = 1;
+        // The row's controls are laid out at rest and drawn stretched with it: the segment, the swatch and the ripple's origin are taken
+        // where the picture shows the point (ui_list_unpull), as the row is (ui_list_hit).
+        y = ui_list_unpull(ui, l, y);
         trailing = ui_list_control(l, id, 1);
         if (trailing && (trailing->kind == UI_TABS || trailing->kind == UI_SWATCHES))
                 l->part = ui_control_hit(ui, trailing, x, y);
@@ -21894,6 +21908,12 @@ static inline b32 ui_page_in_column(const struct ui_page address_to p, int x)
         return ui_rtl() ? x >= p->seam && x < p->width : x >= 0 && x < p->seam;
 }
 
+// A row of the window as the column's groups have it drawn, its picture stretched by a pull past an end (ui_scroll_unpull).
+static int ui_page_column_unpull(const struct ui address_to ui, const struct ui_page address_to p, int y)
+{
+        return ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, p->top, p->bottom - p->top, y);
+}
+
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
 {
         // The groups are drawn at rest (ui_page_column): a pull past an end stretches the picture and moves no group, so the hit boxes
@@ -21902,7 +21922,7 @@ static int ui_page_column_hit(const struct ui address_to ui, const struct ui_pag
 
         if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x))
                 return -1;
-        group = (ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, p->top, p->bottom - p->top, y) - p->top +
+        group = (ui_page_column_unpull(ui, p, y) - p->top +
                  ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top)) / ui_dev(ui, UI_ROW);
 
         return group >= p->column.count ? -1 : group;
@@ -22046,7 +22066,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->row_x = p->width * 100 / ui->scale - c->row_w;
         c->disabled = disabled;
         c->focused = keys;
-        c->item = ui_control_hit(ui, c, ui_kit.pointer_x, ui_kit.pointer_y);
+        // The group lit is the one the stretched picture draws under the pointer, as the one pressed is (ui_page_column_hit).
+        c->item = ui_control_hit(ui, c, ui_kit.pointer_x, ui_page_column_unpull(ui, p, ui_kit.pointer_y));
         c->hover = c->item >= 0;
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
@@ -22122,7 +22143,7 @@ static fn ui_page_column_press(const struct ui address_to ui, struct ui_page add
         // The column is drawn from its row, edge to edge (ui_vtabs_row), so the ripple starts from the row too: from the
         // column's own box it began UI_PAD to the left of the press.
         ui_vtabs_row(c, &rx, &rw);
-        ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + group * c->h), ui_dev(ui, rw), ui_dev(ui, c->h), 8);
+        ui_kit_ripple_start(ui, c, x, ui_page_column_unpull(ui, p, y), ui_dev(ui, rx), ui_dev(ui, c->y + group * c->h), ui_dev(ui, rw), ui_dev(ui, c->h), 8);
 }
 
 /*
@@ -22490,9 +22511,9 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
                         return false;
         }
         c = ui_list_control(l, id, 1);
-        if (!c || c->kind != UI_SLIDER || ui_control_hit(ui, c, x, y) < 0)
+        if (!c || c->kind != UI_SLIDER || ui_control_hit(ui, c, x, ui_list_unpull(ui, l, y)) < 0)
                 return false;
-        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, x, y, true, event->flags);
+        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, x, ui_list_unpull(ui, l, y), true, event->flags);
         if (ui_kit_held != c)
                 return false;
         l->slide = id + 1, l->slid = 0;
@@ -22539,7 +22560,7 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                 if (!p->card)
                 {
                         ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, event->a, event->b, false);
-                        if (ui_control_hit(ui, &p->column, event->a, event->b) != p->column.item)
+                        if (ui_control_hit(ui, &p->column, event->a, ui_page_column_unpull(ui, p, event->b)) != p->column.item)
                                 ui_page_changed(p);
                 }
                 return;

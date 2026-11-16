@@ -5440,6 +5440,111 @@ static fn check_kit_pull_hit(void)
         check("kit page: a column's group is hit where the pulled picture draws it, every line of a column pulled past its top", !off_column);
 }
 
+/*
+        A row's own controls in a pulled list are where the stretched picture draws them too: a press on a swatch the picture shows is that
+        swatch, a press on the row ripples from the row's line drawn under the point, and the column's lit group is the one drawn under the
+        pointer, as the row and the group pressed are (ui_list_hit, ui_page_column_hit).
+*/
+static void pull_swatch_row(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "Accent";
+        row->kind = UI_ROW_SWATCHES;
+        row->words = "ff0000 00ff00 0000ff";
+        row->at = -1;
+}
+
+static fn check_kit_pull_parts(void)
+{
+        static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
+        static struct ui_list l;
+        static struct ui_page p;
+        struct ui ui = terminal.ui;
+        int row, pull, green = 0, off_swatch = 0, off_lit = 0, off_ripple = 0, x, centre;
+        struct ui_control address_to c;
+
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 200, ui.top = 0, ui.bottom = 200, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
+        ui_kit.motion = 0;
+        row = ui_dev(&ui, UI_ROW);
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 100, l.describe = pull_swatch_row, l.empty = "", l.focus = -1, l.hover = l.down = -1;
+        ui_list_place(&ui, &l, 20, 10, 300, 160);
+        ui_list_layout(&ui, &l);
+        // A hand holds the list pulled past its top: the frames draw it there, stretched, till it lets go.
+        ui_scroll_extent(&l.scroll);
+        l.scroll.body.at = ui_kit_time();
+        ui_body_track(&l.scroll.body, -((b64)150 << UI_Q), ui_kit_time());
+        for (int at = 0; at < 400 * 200; at++)
+                pixels[at] = 0xff000000u;
+        ui_list_draw(&ui, &l);
+        pull = l.scroll.scroll;
+        memory_copy(picture, pixels, sizeof(picture));
+        c = ui_list_control(&l, 0, 1);
+        centre = c ? ui_swatches_left(&ui, c) + ui_dev(&ui, UI_SWATCH + UI_SWATCH_GAP) + ui_dev(&ui, UI_SWATCH) / 2 : 0;
+        for (int line = 0; c && pull < -8 && line < l.h; line++)
+        {
+                int y = l.y + line, id;
+                struct ui_control address_to trailing;
+
+                if ((picture[y * 400 + centre] & 0xffffffu) != 0x00ff00u)
+                        continue;
+                green++;
+                ui_list_pointer(&ui, &l, WINDOW_EVENT_MOTION, centre, y, false);
+                ui_list_draw(&ui, &l);
+                trailing = ui_list_control(&l, ui_list_hit(&ui, &l, centre, y), 1);
+                off_lit += !trailing || trailing->item != 1;
+                id = ui_list_pointer(&ui, &l, WINDOW_EVENT_BUTTON, centre, y, true);
+                off_swatch += id < 0 || l.part != 1;
+                ui_list_pointer(&ui, &l, WINDOW_EVENT_BUTTON, centre, y, false);
+        }
+        check("kit list: a press on a swatch of a row in a list pulled past its top is that swatch, wherever the picture draws it", c && green > 0 && !off_swatch);
+        check("kit list: the swatch lit under the pointer in a list pulled past its top is the one drawn there", c && green > 0 && !off_lit);
+
+        // A press on the row away from its swatches ripples from the line of the row drawn under it: the pulled picture's map, as the hit's.
+        pull_draw(&ui, pixels, l.y, l.h, pull);
+        x = l.x + 10;
+        for (int line = 0; line < l.h; line++)
+        {
+                int id = ui_list_pointer(&ui, &l, WINDOW_EVENT_BUTTON, x, l.y + line, true), rx, ry, rw, rh;
+                struct ui_control address_to own = ui_list_control(&l, id, 0);
+                const struct ui_ripple address_to r = null;
+
+                for (int k = 0; own && k < 3; k++)
+                        if (own->ripple[k].live && (!r || own->ripple[k].start >= r->start))
+                                r = &own->ripple[k];
+                if (own)
+                        ui_control_row(own, &rx, &ry, &rw, &rh);
+                off_ripple += !own || !r || (int)(r->y >> UI_Q) != l.y + pull_shown[line] - ry;
+                ui_list_pointer(&ui, &l, WINDOW_EVENT_BUTTON, x, l.y + line, false);
+                for (int k = 0; own && k < 3; k++)
+                        own->ripple[k].live = 0;
+        }
+        check("kit list: a press on a row of a list pulled past its top ripples from the line of it drawn under the press", pull < -8 && !off_ripple);
+        off_lit = 0;
+
+        // The column's group lit while it is pulled past its top is the one its picture draws under the pointer.
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 5 * row, p.top = 10, p.bottom = 10 + 5 * row, p.column_on = 1, p.seam = 150;
+        p.column_box = (struct ui_rect){0, p.top, 150, 5 * row};
+        p.column.count = 10;
+        for (int k = 0; k < 10; k++)
+                p.column.items[k] = "Group";
+        p.column_scroll.view = p.column_scroll.height = 5 * row, p.column_scroll.content = 10 * row;
+        ui_scroll_extent(&p.column_scroll);
+        p.column_scroll.body.at = ui_kit_time();
+        ui_body_track(&p.column_scroll.body, -((b64)150 << UI_Q), ui_kit_time());
+        for (int line = 0; line < 5 * row; line++)
+        {
+                ui_kit.pointer_x = 10, ui_kit.pointer_y = p.top + line;
+                ui_page_column(&ui, &p, false, false);
+                off_lit += p.column.item != ui_page_column_hit(&ui, &p, 10, p.top + line);
+        }
+        check("kit page: the group lit in a column pulled past its top is the one drawn under the pointer, as the one pressed",
+              p.column_scroll.scroll < -8 && !off_lit);
+        ui_kit.pointer_x = ui_kit.pointer_y = 0;
+}
+
 static fn check_kit_virtual(void)
 {
         static unsigned int pixels[400 * 200], scratch[400 * UI_SCRATCH_ROWS];
