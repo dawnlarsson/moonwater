@@ -741,6 +741,13 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_picture(&frames[k]))
                         return COMPOSITOR_GPU_WHY_PICTURE;
+        // The wallpaper, the ground the scene is laid on: mapped once and kept while it is (compositor_wall_take forgets the one let go of).
+        {
+                struct compositor_frame wall;
+
+                if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
+                        return COMPOSITOR_GPU_WHY_PICTURE;
+        }
         if (!compositor_gpu_frames(frames, count, compositor_ground))
                 return g->why;
         if (!compositor_gpu_spots()) // the fingers' marks over the scene, and the pointer over them

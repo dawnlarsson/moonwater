@@ -729,7 +729,7 @@ static void compositor_wall_take(void)
                 thread_join(job->worker);
         job->worker = null;
         if (compositor_wall)
-                compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+                gpu_forget(compositor_wall, compositor_wall_bytes), compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
         compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
         job->pixels = null, job->done = 0;
@@ -773,7 +773,7 @@ static void compositor_wall_keep(void)
                 compositor_wall_say(!compositor_wall_rows.moon ? "canvas wallpaper is plain" : "the space has no screen yet", 0, 0, 0);
                 memory_copy(compositor_wall_key, now, sizeof(now));
                 if (compositor_wall)
-                        compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+                        gpu_forget(compositor_wall, compositor_wall_bytes), compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
                 compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
                 compositor_damage(0, 0, compositor.width, compositor.height);
                 return;
@@ -781,7 +781,7 @@ static void compositor_wall_keep(void)
         // A space of another size: the old picture is no ground for it, so the colour until the new one is made.
         if (compositor_wall && (compositor_wall_w != compositor.width || compositor_wall_h != compositor.height))
         {
-                compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+                gpu_forget(compositor_wall, compositor_wall_bytes), compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
                 compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }

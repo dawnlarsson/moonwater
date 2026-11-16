@@ -1477,6 +1477,19 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
 static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, int edge_line, unsigned int edge);
 
+/*
+        The kept wallpaper as a frame the card's records can copy from (op 4, the ground's whole picture): true when there is one as large as the
+        card's columns and rows, so the card's ground is the processor's (compositor_ground_fill) and not the colour.
+*/
+static b32 compositor_gpu_wall_frame(struct compositor_frame *wall)
+{
+        memory_zero(wall, sizeof(*wall));
+        if (!compositor_wall || compositor_wall_w < (int)compositor_gscene.width || compositor_wall_h < (int)compositor_gscene.height)
+                return false;
+        wall->pixels = compositor_wall, wall->pitch = (unsigned long)compositor_wall_w, wall->width = compositor_wall_w, wall->height = compositor_wall_h;
+        return true;
+}
+
 // The frames, in order, over a ground, then the tints as compositor_preview_draw draws them: every frame's snap preview, then every frame's mark, each
 // over the scene and the frames it lies under drawn again over it (for the lifted preview, which has no area and draws nothing, from the window it names,
 // drawn again whole over the tint, which leaves the pixels compositor_tint leaves by not tinting its contents; from a frame with no area itself, a grid
@@ -1490,7 +1503,22 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         if (g->kept > COMPOSITOR_GPU_TABLES / 2 || g->tables_used > g->tables_size / 2)
                 g->kept = 0, g->tables_used = 0;
         g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
-        compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
+        // The ground: the kept wallpaper copied (a record of its picture, mapped by compositor_gpu_wall), or the colour where there is none.
+        {
+                struct compositor_frame wall;
+
+                if (compositor_gpu_wall_frame(&wall))
+                {
+                        if (!compositor_gpu_va(&wall))
+                        {
+                                g->why = COMPOSITOR_GPU_WHY_PICTURE;
+                                goto refused;
+                        }
+                        compositor_gpu_rect(4, 0, 0, (int)g->width, (int)g->height, 0, &wall, 0, 0);
+                }
+                else
+                        compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
+        }
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_frame(&frames[k]))
                         goto refused;
