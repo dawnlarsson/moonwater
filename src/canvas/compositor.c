@@ -744,9 +744,12 @@ struct compositor_poll
 #define COMPOSITOR_POLLIN 1
 #define COMPOSITOR_POLLHUP 16
 
-#define COMPOSITOR_INPUTS 32 // a lid, the audio jacks and a power button take one each, and a mouse plugged in later needs one
+// The input devices read, and the evdev numbers the hotplug watch can name: as many as the kernel has, INPUT_MAX_CHAR_DEVICES (1024, the
+// input subsystem's character minors: eventN is below it, its dynamic numbers 256 to 1023), where it read 32 and named event0 to event63.
+#define COMPOSITOR_INPUTS 1024
+#define COMPOSITOR_INPUTS_KEPT 32 // the descriptors kept back from the rows for the inputs (a lid, the jacks, a power button, a mouse plugged in later)
 #define COMPOSITOR_WHEEL_JOIN 960 // eight notches, in 120ths: the most one wheel event joined from several holds
-#define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
+#define COMPOSITOR_DEVICES COMPOSITOR_INPUTS
 // A machine slept when the clock that runs through a sleep got this far ahead of the one that does
 // not (or the sleep verb said so), and the screens are taken again, every crtc set anew, at half a
 // second and at two and a half: a card's driver and a monitor are still settling after a wake.
@@ -950,7 +953,7 @@ static struct
         int watch;           // inotify on /dev/input, -1 when there is none
         int probe_owed;      // the first take read the kernel's lists without a look (compositor_space_first): the loop looks, once
         int uevents;         // the kernel's uevents (compositor_uevents_read), -1 when there is no socket for them
-        unsigned long devices; // the evdev numbers that are open
+        unsigned long devices[COMPOSITOR_DEVICES / 64]; // the evdev numbers that are open, a bit each
         int device_number[COMPOSITOR_INPUTS];
 
         int scale;           // device pixels a drawn one is
@@ -2381,7 +2384,7 @@ static struct compositor_poll *compositor_polls(void)
 // The compositor's own descriptors that are no row's fit the share kept for them (COMPOSITOR_DESCRIPTORS_FIXED): the poll list's (but the
 // clients'), the selections and their history, the table, the card, the render node and the buffers given to it, the sound server's
 // socket and each transfer's pipe; a row's three are counted with it.
-_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_FIXED,
+_Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_HISTORY + 3 + 64 <= COMPOSITOR_DESCRIPTORS_FIXED,
                "the compositor's own descriptors fit the numbers kept for them");
 
 /*
@@ -3059,7 +3062,7 @@ static b32 compositor_main()
         compositor_hand_read();
         // The keyboard's setting too (compositor_osk_sync writes the table).
         compositor_osk_setting_read();
-        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) // every slot: one no device is in is said to be none (-1)
                 compositor_input_publish(at);
         compositor_up_say(up);
 

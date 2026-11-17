@@ -4142,7 +4142,8 @@ static void compositor_input_read_device(unsigned int at)
                         system_close(compositor.inputs[at]);
                         compositor.inputs[at] = -1;
                         compositor.table->input_number[at] = -1;
-                        compositor.devices &= ~(1ul << compositor.device_number[at]);
+                        if ((unsigned int)compositor.device_number[at] < COMPOSITOR_DEVICES)
+                                compositor.devices[compositor.device_number[at] / 64] &= ~(1ul << (compositor.device_number[at] % 64));
 
                         // What it held down will never be let go of: not a key, not a button, not a finger. A keyboard's keys are
                         // not told apart by device, so every key down is let go (to the window it went to); a pointer lets go of

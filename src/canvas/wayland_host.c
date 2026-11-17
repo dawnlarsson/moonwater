@@ -3090,7 +3090,7 @@ static void compositor_wl_repeat(void *context, long *rate, long *delay)
         long own_delay = 250, own_period = 33;
 
         (void)context;
-        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+        for (unsigned int at = 0; at < compositor.input_count; at++)
                 if (compositor.repeats[at])
                 {
                         own_delay = compositor.repeat_own[at][0] > 0 ? compositor.repeat_own[at][0] : own_delay;
@@ -3119,7 +3119,7 @@ static long compositor_wl_seat(void *context)
         long caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
 
         (void)context;
-        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+        for (unsigned int at = 0; at < compositor.input_count; at++)
                 if (compositor.touchscreen[at])
                         caps |= WLN_wl_seat_capability_touch;
         return caps;

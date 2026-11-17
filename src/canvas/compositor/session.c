@@ -1091,7 +1091,7 @@ static void compositor_input_add(unsigned int number)
         bipolar handle;
         unsigned int at = 0;
 
-        if (number >= COMPOSITOR_DEVICES || compositor.devices >> number & 1)
+        if (number >= COMPOSITOR_DEVICES || compositor.devices[number / 64] >> (number % 64) & 1)
                 return;
 
         while (at < compositor.input_count && compositor.inputs[at] >= 0)
@@ -1216,7 +1216,7 @@ static void compositor_input_add(unsigned int number)
                 compositor.repeat_now[at][1] = compositor.repeat_own[at][1];
                 compositor_repeat_apply(at);
         }
-        compositor.devices |= 1ul << number;
+        compositor.devices[number / 64] |= 1ul << (number % 64);
         compositor.input_count = at + 1 > compositor.input_count ? at + 1 : compositor.input_count;
         compositor_input_publish(at);
 }

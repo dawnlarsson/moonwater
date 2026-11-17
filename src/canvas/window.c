@@ -659,8 +659,9 @@ struct windows_issue
 #define WINDOWS_OUTPUT_NAME 16
 #define WINDOWS_OUTPUT_MODEL 16 // the monitor's name from its EDID, the descriptor's 13 bytes and a null
 #define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
-// The input devices the compositor reads, the room of the name it keeps of each, and what it found each to be.
-#define WINDOWS_INPUTS 32
+// The input devices the compositor reads (as many as the kernel has: INPUT_MAX_CHAR_DEVICES, where it was 32), the room of the name it
+// keeps of each, and what it found each to be.
+#define WINDOWS_INPUTS 1024
 // The wheel turns the readout keeps for each input: the last WINDOW_WHEEL_RING that were used, on the device's clock, and whether each
 // was a stream's notch (window_wheel_note). `moonwater debug` reads the ones within WINDOW_WHEEL_SPAN_NS (window_wheel_report).
 #define WINDOW_WHEEL_RING 1024
@@ -1262,7 +1263,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 4u // 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 5u // 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)
