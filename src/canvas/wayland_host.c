@@ -4758,6 +4758,17 @@ static int compositor_wl_suspends(unsigned int code, int value, int super)
         return row < 0 ? 0 : (int)wayland_shortcuts_key(row, (long)code, (long)value, super);
 }
 
+// Escape (value 1 a press, 2 a repeat) while a client's drag holds the pointer: the drag cancelled at the press, whichever window has the
+// keys. True when there was a drag, and the key is then no window's.
+static int compositor_wl_drag_escape(int value)
+{
+        if (!compositor_wl.started || !wayland_dragging())
+                return 0;
+        if (value == 1)
+                wayland_drag_cancel();
+        return 1;
+}
+
 /*
         A key that is the window's own to read: the key as it is, to the client that has the keys, with Caps Lock kept here
         where the compositor keeps it, and no repeat (the client repeats at the rate it was told). The compositor's own

@@ -837,6 +837,7 @@ static void compositor_screen_chord(unsigned int code)
 #ifdef CONFIG_MOONWATER_WAYLAND
 // A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
 static int compositor_wl_key(unsigned int code, int value);
+static int compositor_wl_drag_escape(int value);
 static int compositor_wl_hold_counts(int dx, int dy, positive now);
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
@@ -864,6 +865,12 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_hold_cancel();
                 return;
         }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // Escape while a client's drag holds the pointer cancels the drag, whichever window has the keys (a kit window's, a client's that
+        // is not the drag's, none): the source is told it was cancelled and the window under it left, and the key is no window's.
+        if (code == CK_KEY_ESC && value && compositor_wl_drag_escape(value))
+                return;
+#endif
 
         // The snap assist offered after a drop goes at any key that is not a modifier: Escape is only that, and any other key
         // goes on to the window that has the keys, as it would have.
