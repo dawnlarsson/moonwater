@@ -9827,7 +9827,11 @@ static string_address bowl_steam_session[] = {
     "export STEAM_ZENITY=${STEAM_ZENITY:-zenity} GTK_A11Y=none",
     "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
     "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
-    "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
+    // SDL games draw on Canvas directly (SDL 2.0.22 and later read the list, Wayland first, X11 where it is refused): a game through
+    // Xwayland was a frame copied and an event relayed once more for each, and could not be scanned out from its own buffer. The Steam
+    // runtime's SDL (2.32 on the box, which Half-Life 2 loads) has the list; a game with an SDL older than 2.0.22 of its own is set to
+    // x11 in its launch options. Proton's own Wayland driver stays off: Proton games go by Xwayland.
+    "export SDL_VIDEODRIVER=wayland,x11; unset PROTON_ENABLE_WAYLAND",
     "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "

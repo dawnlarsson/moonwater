@@ -1353,7 +1353,7 @@ static fn steam_profile(void)
         positive display_scan = chrome_line(steam ? steam->session : null, "while [ $d -le 32 ];");
         positive run = chrome_line(steam ? steam->session : null, "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"");
         positive sound = chrome_line(steam ? steam->session : null, "PULSE_SERVER=unix:/run/moonwater/pulse/native");
-        positive unset = chrome_line(steam ? steam->session : null, "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND");
+        positive unset = chrome_line(steam ? steam->session : null, "export SDL_VIDEODRIVER=wayland,x11; unset PROTON_ENABLE_WAYLAND");
         positive ended = chrome_line(steam ? steam->session : null, "; exit $status");
         positive wm_socket = chrome_line(steam ? steam->session : null, "-S /run/moonwater/xwm/wm-0");
         positive wrapped = chrome_line(steam ? steam->session : null, "/usr/local/bin/xwayland-moonwater /usr/bin/steam \"$@\"");
@@ -1368,7 +1368,7 @@ static fn steam_profile(void)
               capabilities && capabilities < run);
         check("The sound server is named when it is up, and the session does not start a sound server of its own",
               sound && sound < run && strstr(steam->session[sound - 1], "-S /run/moonwater/pulse/native"));
-        check("SDL and Proton are left to X11 through Xwayland, not Wayland",
+        check("SDL games draw on Canvas directly (Wayland, X11 where refused), and Proton is left to X11 through Xwayland",
               unset && unset < run);
         check("Xwayland starts before Steam, and the session waits for its socket before exporting DISPLAY",
               display_scan && display_scan < xwayland && xwayland && wait && display && xwayland < wait && wait < display && display < run);
