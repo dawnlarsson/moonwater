@@ -4260,6 +4260,7 @@ static void compositor_wl_transfer_run(address_any context)
         long at = (long)context;
         unsigned char bytes[65536];
 
+        compositor_ordinary(0); // a paste is no frame's: ordinary scheduling, not the loop's real time
         if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PUMP)
         {
                 compositor_wl_pump_run(at);

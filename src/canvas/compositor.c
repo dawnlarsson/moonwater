@@ -1440,6 +1440,20 @@ static long compositor_call(positive number, positive a, positive b, positive c,
         return (long)system_call_6(number, a, b, c, d, e, f);
 }
 
+/*
+        The thread that calls it back to ordinary scheduling, at nice: the loop is real time (compositor_main) and a thread takes the policy
+        of the one that made it, so a thread no frame waits for (the wallpaper's, a clipboard transfer's) says so, or it would take a core from
+        a game's threads ahead of every ordinary one. Not allowed, it changes nothing.
+*/
+static void compositor_ordinary(int nice)
+{
+        int none = 0;
+
+        compositor_call(syscall(sched_setscheduler), 0, 0, (positive)&none, 0, 0, 0); // pid 0: this thread; SCHED_OTHER
+        if (nice)
+                compositor_call(syscall(setpriority), 0, (positive)compositor_call(syscall(gettid), 0, 0, 0, 0, 0, 0), (positive)nice, 0, 0, 0);
+}
+
 // Zeroed pages of their own, or null.
 static void *compositor_map_zeroed(unsigned long bytes)
 {
@@ -3006,6 +3020,23 @@ static b32 compositor_main()
                         system_close(oom);
                 }
         }
+        /*
+                The loop is real time: SCHED_FIFO at the lowest priority, the sound server's (src/audio/service.c), so neither cuts into the other's
+                short work, and every ordinary thread (a game's, a build's) waits while a key, a vblank or a commit is worked. At ordinary
+                scheduling the loop took its turn among them: on hasty-tail (four cores) under eight spinning processes a thread woken at 144 Hz,
+                the loop's shape, woke 2028 us late at the 99th percentile and 2515 us at worst; real time, 5 and 7 us (the same thread idle: 40 and
+                50 us at ordinary, 20 and 31 real time). The threads it starts take the policy (the doors, the bands of a frame composed on the
+                processor); the ones no frame waits for go back to ordinary (compositor_ordinary). The compositor starts no program, so nothing else
+                inherits it. A headless one (a test's, a shot's) stays ordinary; not allowed (a test's user namespace, a compositor without the
+                privilege), it changes nothing.
+        */
+        if (!headless)
+        {
+                int lowest = 1;
+
+                compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&lowest, 0, 0, 0); // SCHED_FIFO
+        }
+
         status = headless ? compositor_headless(headless, file) : compositor_card_open();
         if (status < 0)
         {

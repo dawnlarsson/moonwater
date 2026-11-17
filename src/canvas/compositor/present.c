@@ -782,8 +782,9 @@ static fn compositor_wall_run(address_any context)
         struct compositor_wall_job *job = (struct compositor_wall_job *)context;
         unsigned long one = 1;
 
-        // Under every other thread of the compositor (nice 10, and the disc's threads it starts with it): it is never what a frame waits for.
-        compositor_call(syscall(setpriority), 0, (positive)compositor_call(syscall(gettid), 0, 0, 0, 0, 0, 0), 10, 0, 0, 0);
+        // Under every other thread of the compositor (ordinary scheduling at nice 10 where they are real time, and the disc's threads it starts
+        // with it): it is never what a frame waits for, and never ahead of a game's threads.
+        compositor_ordinary(10);
         compositor_wall_make(job);
         job->took = clock_monotonic_nanoseconds() - job->began;
         __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
