@@ -4681,8 +4681,13 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (sync_st > 0)
                         return WAYLAND_STALL;
         }
-        // A dma-buf the GPU is still drawing in: nothing of this commit is done, and it is made again when the buffer is ready.
-        if (buffer >= 0 && !s->pending_sync_acq_set)
+        // A dma-buf the GPU is still drawing in: nothing of this commit is done, and it is made again when the buffer is ready. A commit
+        // with an acquire point (reached above) waits here too, for the implicit fences the kernel keeps of every write to the buffer
+        // (none, and nothing is waited, where the driver attaches none): Chromium's acquire point on the Intel boxes is reached before all
+        // of its drawing into a buffer is, and right after a resize its fresh buffers were read as the zeros they were made with: the
+        // window was the wallpaper, 1 resize in 2 on the processor's path, for as long as the next commits damaged only part of it.
+        // Both are the writer's word that it is done; the commit is made when both say so.
+        if (buffer >= 0)
         {
                 struct wayland_pool *held = &c->pools[c->buffers[c->objects[buffer].link].pool];
 
