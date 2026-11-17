@@ -3623,7 +3623,9 @@ static void check_compositor_tile_square(void)
           "window's line, the whole screen and the room are square with none, and a floating window is round again after each",
           shapes == ~0u);
 
-    // The tiles drawn: the four corners of the picture are the picture, at scale 100, for every tile.
+    // The tiles drawn: the four corners of the picture are the picture, at scale 100, for every tile. The moon's glow at rest is over the
+    // corner of a tile beside it (a touch of it is always there), which is no part of the window's shape: it is put out for these.
+    taskbar.moon_rest = 1;
     for (unsigned int tile = 0; tile < array_count(tiles); tile++)
     {
         int x, y, w, h;
@@ -3645,6 +3647,7 @@ static void check_compositor_tile_square(void)
         if (!ok)
             string_format(log, "  tile square: %s drawn with a cut corner\n", names[tile]);
     }
+    taskbar.moon_rest = 0;
     check("tile square: drawn, the four corners of every tile's picture are the picture", drawn == ~0u);
 
     // The preview of a tile and of the whole screen, at every scale: a window's round corners, with the window's line for a tile and none to fill.

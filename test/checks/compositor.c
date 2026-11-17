@@ -3188,7 +3188,7 @@ static void check_moon_motion(void)
     struct taskbar_view view;
     int sx, sy, sw, sh, which, px, py, pw, ph, damage[1][4];
     positive now = 5000000000000ull;
-    b32 rest, half, full, hit, back, reduced, turns, due, idle, own;
+    b32 rest, half, full, hit, back, reduced, turns, due, idle, own, glow_rest, inside = 1;
 
     compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
@@ -3203,6 +3203,7 @@ static void check_moon_motion(void)
     taskbar_moon_hover(-1);
     taskbar_moon_tick(now, 0);
     rest = taskbar_moon_share() == 0 && taskbar_moon_more(&view) == 0;
+    glow_rest = taskbar_moon_glow_level() == (b64)UI_ONE * TASKBAR_MOON_REST_GLOW / 100;
     // The pointer over it: half way through, between; after, grown by the whole share and its plate with it.
     taskbar_moon_hover(0);
     taskbar_moon_tick(now, 0);
@@ -3218,6 +3219,33 @@ static void check_moon_motion(void)
             if (which == TASKBAR_LAUNCHER)
                 found = pw == sw + 2 * taskbar_moon_more(&view) && px == sx - taskbar_moon_more(&view);
         full &= found;
+    }
+    // Grown whole, at three scales, no plate of the band is past the band: its pixels are the band's, and past it there are none.
+    {
+        static unsigned int band_pixels[4096 * 400];
+        static struct compositor_frame tabs[64];
+        int scales[3] = {100, 150, 300};
+
+        for (int k = 0; k < 3; k++)
+        {
+            struct compositor_frame band;
+            int ax, ay, aw, ah;
+            unsigned int count;
+
+            memory_zero(&band, sizeof(band));
+            view.scale = scales[k];
+            if (!taskbar_anchor(&view, TASKBAR_LAUNCHER, &ax, &ay, &aw, &ah) || view.width > 4096 || ah > 400)
+            {
+                inside = 0;
+                continue;
+            }
+            band.x = 0, band.y = ay, band.width = view.width, band.height = ah, band.pixels = band_pixels, band.pitch = (unsigned long)view.width;
+            count = compositor_panel_tabs(&band, tabs);
+            for (unsigned int at = 0; at < count; at++)
+                inside &= tabs[at].x >= band.x && tabs[at].y >= band.y && tabs[at].x + tabs[at].width <= band.x + band.width &&
+                          tabs[at].y + tabs[at].height <= band.y + band.height;
+        }
+        view.scale = 100;
     }
     // A press just past the disc at rest, inside the grown one, is not the moon's.
     hit = taskbar_hit_reach(&view, sx - 1, sy + sh / 2, 0) != TASKBAR_LAUNCHER && taskbar_hit_reach(&view, sx + sw / 2, sy + sh / 2, 0) == TASKBAR_LAUNCHER;
@@ -3253,6 +3281,8 @@ static void check_moon_motion(void)
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     taskbar_moon_hover(-1);
     check("moon: at rest it is its square, its plate the same", rest);
+    check("moon: at rest a touch of its glow is there, TASKBAR_MOON_REST_GLOW percent of the hover's", glow_rest);
+    check("moon: grown whole at 100, 150 and 300 percent, every plate of the band is inside the band (its pixels are the band's)", inside);
     check("moon: the pointer over it grows it over the kit's ease, half way between", half);
     check("moon: grown by its share, its plate as far round it as the disc", full);
     check("moon: a press finds the disc at rest, not the grown one", hit);

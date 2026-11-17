@@ -410,7 +410,7 @@ static void compositor_moon_keep(positive now)
                         continue;
                 most = taskbar_moon_most(w < h ? w : h);
                 {
-                        int square[4] = {x - most, y - most, w + 2 * most, h + 2 * most}, glow[4], shown = taskbar_moon_share() > 0;
+                        int square[4] = {x - most, y - most, w + 2 * most, h + 2 * most}, glow[4], shown = taskbar_moon_glow_level() > 0;
 
                         // While the glow is shown, or was in the last frame, its square is the moon's damage: past the band, and nothing else.
                         if (taskbar_moon_glow_was(compositor.band_at, shown) | shown && taskbar_moon_glow_square(&view, glow))
@@ -443,7 +443,7 @@ static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
         int square[4];
         positive bytes;
 
-        if (taskbar_moon_share() <= 0 || !taskbar_moon_glow_square(&view, square))
+        if (taskbar_moon_glow_level() <= 0 || !taskbar_moon_glow_square(&view, square))
                 return 0;
         bytes = (positive)square[2] * (positive)square[3] * 4;
         if (compositor_glow[at].bytes < bytes)

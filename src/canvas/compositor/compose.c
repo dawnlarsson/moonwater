@@ -1583,6 +1583,18 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 if (band->builtin ? which == TASKBAR_TABS || !taskbar_slot(&view, which, &x, &y, &width, &height)
                                   : !taskbar_plate(&view, slot, &which, &x, &y, &width, &height))
                         continue;
+                // A plate is the band's pixels, so it is no larger than the band: the moon's, grown, reached past the band's edge and
+                // read rows the band never drew (black) from before or after its buffer.
+                if (x < band->x)
+                        width -= band->x - x, x = band->x;
+                if (y < band->y)
+                        height -= band->y - y, y = band->y;
+                if (x + width > band->x + band->width)
+                        width = band->x + band->width - x;
+                if (y + height > band->y + band->height)
+                        height = band->y + band->height - y;
+                if (width <= 0 || height <= 0)
+                        continue;
                 tabs[count] = *band;
                 tabs[count].x = x;
                 tabs[count].y = y;
