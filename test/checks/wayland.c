@@ -9604,8 +9604,264 @@ static void xw_test_fuzz(void)
         XWCHECK(bad == 0, "10000 rounds of random arguments into every encoder: every answer is a code, every write inside its buffer (%lu bad)", bad);
 }
 
+/*
+        The selection bridge's wire (the clipboard, the primary selection and XDND between X and Wayland): the selection requests and
+        events laid out by hand, XFIXES, the names of targets as Wayland types, Latin-1 and UTF-8 a piece at a time, INCR's framing,
+        and XDND's messages and actions; then every new parser fed every prefix and random bytes, and every new encoder random arguments.
+*/
+static void xw_test_selection(void)
+{
+        unsigned char out[64], ev[32], *b;
+        unsigned int values[2] = {1, 0x400000};
+        struct xwm_event e;
+        struct xwm_atom_name_reply an;
+        struct xwm_property_reply pr;
+        unsigned long size = 0, bad = 0;
+        long n;
+
+        {
+                static const unsigned char want[16] = {22, 0, 4, 0, 0x01, 0x00, 0x40, 0x00, 0x45, 0, 0, 0, 0, 0, 0, 0};
+                n = xwm_enc_set_selection_owner(out, sizeof out, 0x400001, 0x45, 0);
+                XWCHECK(n == 16 && xw_same(out, want, 16), "SetSelectionOwner: opcode 22, 4 units, the owner, the selection, the time");
+                XWCHECK(xwm_enc_set_selection_owner(out, sizeof out, 0, 0x45, 0) == 16, "SetSelectionOwner to none is a request");
+                XWCHECK(xwm_enc_set_selection_owner(out, sizeof out, 1, 0, 0) == XWM_ERR_ARG, "SetSelectionOwner of no selection is refused");
+                XWCHECK(xwm_enc_set_selection_owner(out, 15, 1, 2, 0) == XWM_ERR_SPACE, "SetSelectionOwner into 15 bytes is refused");
+        }
+        {
+                static const unsigned char want[24] = {24, 0, 6, 0, 0x02, 0x00, 0x40, 0x00, 0x45, 0, 0, 0, 0x50, 0, 0, 0, 0x51, 0, 0, 0, 0x10, 0x20, 0, 0};
+                n = xwm_enc_convert_selection(out, sizeof out, 0x400002, 0x45, 0x50, 0x51, 0x2010);
+                XWCHECK(n == 24 && xw_same(out, want, 24), "ConvertSelection: opcode 24, 6 units, requestor, selection, target, property, time");
+                XWCHECK(xwm_enc_convert_selection(out, sizeof out, 0x400002, 0x45, 0x50, 0, 0) == 24, "ConvertSelection into no property (obsolete clients) is a request");
+                XWCHECK(xwm_enc_convert_selection(out, sizeof out, 0x400002, 0x45, 0, 0x51, 0) == XWM_ERR_ARG, "ConvertSelection of no target is refused");
+                XWCHECK(xwm_enc_convert_selection(out, 23, 0x400002, 0x45, 0x50, 0x51, 0) == XWM_ERR_SPACE, "ConvertSelection into 23 bytes is refused");
+        }
+        {
+                static const unsigned char want[12] = {19, 0, 3, 0, 0x02, 0x00, 0x40, 0x00, 0x51, 0, 0, 0};
+                static const unsigned char name[8] = {17, 0, 2, 0, 0x51, 0, 0, 0};
+                n = xwm_enc_delete_property(out, sizeof out, 0x400002, 0x51);
+                XWCHECK(n == 12 && xw_same(out, want, 12), "DeleteProperty: opcode 19, 3 units, the window, the property");
+                XWCHECK(xwm_enc_delete_property(out, sizeof out, 0x400002, 0) == XWM_ERR_ARG, "DeleteProperty of no property is refused");
+                n = xwm_enc_get_atom_name(out, sizeof out, 0x51);
+                XWCHECK(n == 8 && xw_same(out, name, 8), "GetAtomName: opcode 17, 2 units, the atom");
+                XWCHECK(xwm_enc_get_atom_name(out, sizeof out, 0) == XWM_ERR_ARG, "GetAtomName of atom 0 is refused");
+        }
+        {
+                static const unsigned char want[32] = {31, 0, 0, 0, 0x10, 0x20, 0, 0, 0x07, 0x00, 0x60, 0x00, 0x45, 0, 0, 0, 0x50, 0, 0, 0, 0x51, 0, 0, 0};
+                n = xwm_enc_selection_notify(ev, sizeof ev, 0x2010, 0x600007, 0x45, 0x50, 0x51);
+                XWCHECK(n == 32 && xw_same(ev, want, 32), "SelectionNotify as SendEvent carries it: type 31, time, requestor, selection, target, property");
+                n = xwm_enc_send_event(out, sizeof out, 0, 0x600007, 0, ev, 32);
+                XWCHECK(n == 44 && out[12] == 31, "a SelectionNotify is an event SendEvent takes");
+                XWCHECK(xwm_enc_selection_notify(ev, 31, 0, 1, 2, 3, 0) == XWM_ERR_SPACE, "SelectionNotify into 31 bytes is refused");
+                XWCHECK(xwm_enc_selection_notify(ev, 32, 0, 0, 2, 3, 0) == XWM_ERR_ARG, "SelectionNotify to no requestor is refused");
+        }
+        {
+                static const unsigned char want[20] = {2, 0, 5, 0, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0a, 0, 0, 1, 0, 0, 0, 0, 0, 0x40, 0};
+                n = xwm_enc_change_window_attributes(out, sizeof out, 0x400003, XWM_CW_OVERRIDE_REDIRECT | XWM_CW_EVENT_MASK, values, 2);
+                XWCHECK(n == 20 && xw_same(out, want, 20), "ChangeWindowAttributes: override-redirect then the event mask, in the order of their bits");
+                XWCHECK(xwm_enc_change_window_attributes(out, sizeof out, 0x400003, XWM_CW_EVENT_MASK, values, 2) == XWM_ERR_ARG,
+                        "ChangeWindowAttributes with more values than its mask has bits is refused");
+                XWCHECK(xwm_enc_change_window_attributes(out, sizeof out, 0x400003, 0x8000u, values, 1) == XWM_ERR_ARG,
+                        "ChangeWindowAttributes with a bit the protocol has not is refused");
+        }
+        {
+                static const unsigned char version[12] = {140, 0, 3, 0, 5, 0, 0, 0, 0, 0, 0, 0};
+                static const unsigned char select[16] = {140, 2, 4, 0, 0x01, 0x00, 0x40, 0x00, 0x45, 0, 0, 0, 7, 0, 0, 0};
+                n = xwm_enc_xfixes_query_version(out, sizeof out, 140, 5, 0);
+                XWCHECK(n == 12 && xw_same(out, version, 12), "XFIXES QueryVersion: the extension's opcode, minor 0, the version");
+                n = xwm_enc_xfixes_select_selection_input(out, sizeof out, 140, 0x400001, 0x45, XWM_XFIXES_SELECTION_MASK);
+                XWCHECK(n == 16 && xw_same(out, select, 16), "XFIXES SelectSelectionInput: minor 2, the window, the selection, the mask of three");
+                XWCHECK(xwm_enc_xfixes_select_selection_input(out, sizeof out, 140, 0x400001, 0x45, 8) == XWM_ERR_ARG, "a mask bit XFIXES has not is refused");
+                XWCHECK(xwm_enc_xfixes_query_version(out, sizeof out, 100, 5, 0) == XWM_ERR_ARG, "a core opcode is no extension's");
+        }
+        {
+                unsigned char m[32];
+                memset(m, 0, 32);
+                m[0] = 30; xw_u(m, 4, 0x1234, 4); xw_u(m, 8, 0x400001, 4); xw_u(m, 12, 0x600007, 4); xw_u(m, 16, 0x45, 4); xw_u(m, 20, 0x50, 4); xw_u(m, 24, 0x51, 4);
+                b = xw_exact(m, 32);
+                XWCHECK(xwm_parse_event(b, 32, &e) == XWM_OK && e.kind == XWM_EV_SELECTION_REQUEST && e.time == 0x1234 && e.owner == 0x400001 &&
+                        e.requestor == 0x600007 && e.selection == 0x45 && e.target == 0x50 && e.property == 0x51, "SelectionRequest: its six fields");
+                free(b);
+                m[0] = 31; xw_u(m, 8, 0x600007, 4); xw_u(m, 12, 0x45, 4); xw_u(m, 16, 0x50, 4); xw_u(m, 20, 0, 4);
+                b = xw_exact(m, 32);
+                XWCHECK(xwm_parse_event(b, 32, &e) == XWM_OK && e.kind == XWM_EV_SELECTION_NOTIFY && e.requestor == 0x600007 && e.selection == 0x45 &&
+                        e.target == 0x50 && e.property == 0, "SelectionNotify: a refusal is property 0");
+                free(b);
+                m[0] = 29 | 0x80; xw_u(m, 8, 0x400001, 4); xw_u(m, 12, 0x45, 4);
+                b = xw_exact(m, 32);
+                XWCHECK(xwm_parse_event(b, 32, &e) == XWM_OK && e.kind == XWM_EV_SELECTION_CLEAR && e.owner == 0x400001 && e.selection == 0x45 && e.synthetic,
+                        "SelectionClear: the owner that lost it, the selection (a sent one says so)");
+                free(b);
+                memset(m, 0, 32);
+                m[0] = 87; m[1] = 0; xw_u(m, 4, 0x400001, 4); xw_u(m, 8, 0x800004, 4); xw_u(m, 12, 0x45, 4); xw_u(m, 16, 77, 4); xw_u(m, 20, 66, 4);
+                b = xw_exact(m, 32);
+                XWCHECK(xwm_parse_xfixes_selection(b, 32, 87, &e) == XWM_OK && e.kind == XWM_EV_XFIXES_SELECTION && e.window == 0x400001 &&
+                        e.owner == 0x800004 && e.selection == 0x45 && e.time == 77 && e.selection_time == 66 && e.detail == 0,
+                        "XFIXES SelectionNotify: its subtype, window, owner, selection and both times");
+                XWCHECK(xwm_parse_xfixes_selection(b, 32, 88, &e) == XWM_ERR_TYPE, "an event that is not the extension's first is not its SelectionNotify");
+                XWCHECK(xwm_parse_xfixes_selection(b, 32, 30, &e) == XWM_ERR_TYPE, "a core event's code is no extension's");
+                for (unsigned long k = 0; k < 32; k++)
+                        bad += xwm_parse_xfixes_selection(b, k, 87, &e) != XWM_ERR_SHORT;
+                XWCHECK(bad == 0, "every prefix of XFIXES SelectionNotify is short (%lu not)", bad);
+                free(b);
+        }
+        {
+                unsigned char m[44];
+                memset(m, 0, sizeof m);
+                m[0] = 1; xw_u(m, 2, 9, 2); xw_u(m, 4, 3, 4); xw_u(m, 8, 10, 2); memcpy(m + 32, "image/png\0\0\0", 12);
+                b = xw_exact(m, 44);
+                XWCHECK(xwm_parse_atom_name_reply(b, 44, &an) == XWM_OK && an.name_len == 10 && !memcmp(an.name, "image/png", 9) && an.sequence == 9,
+                        "GetAtomName's reply: the name inside its padded length");
+                XWCHECK(xwm_parse_atom_name_reply(b, 43, &an) == XWM_ERR_LENGTH, "a name that runs past the buffer is refused");
+                free(b);
+                xw_u(m, 4, 4, 4);
+                b = xw_exact(m, 44);
+                XWCHECK(xwm_parse_atom_name_reply(b, 44, &an) == XWM_ERR_LENGTH, "a length field that is not the padded name is refused");
+                free(b);
+                bad = 0;
+                xw_u(m, 4, 3, 4);
+                for (unsigned long k = 0; k < 44; k++)
+                {
+                        b = xw_exact(m, k);
+                        int r = xwm_parse_atom_name_reply(b, k, &an);
+                        bad += r == XWM_OK || !xw_bounded(r);
+                        free(b);
+                }
+                XWCHECK(bad == 0, "every prefix of a GetAtomName reply is refused, never read past (%lu bad)", bad);
+        }
+        {
+                static const struct
+                {
+                        const char *name;
+                        int kind;
+                        const char *mime;
+                } rows[] = {
+                    {"UTF8_STRING", XWM_TARGET_UTF8, XWM_TEXT_MIME}, {"TEXT", XWM_TARGET_UTF8, XWM_TEXT_MIME},
+                    {"text/plain;charset=utf-8", XWM_TARGET_UTF8, XWM_TEXT_MIME}, {"text/plain;charset=UTF-8", XWM_TARGET_UTF8, XWM_TEXT_MIME},
+                    {"text/plain", XWM_TARGET_UTF8, XWM_TEXT_MIME}, {"STRING", XWM_TARGET_LATIN1, XWM_TEXT_MIME},
+                    {"image/png", XWM_TARGET_MIME, "image/png"}, {"text/uri-list", XWM_TARGET_MIME, "text/uri-list"},
+                    {"application/x-moonwater-own", XWM_TARGET_MIME, "application/x-moonwater-own"}, {"TARGETS", XWM_TARGET_NONE, 0},
+                    {"TIMESTAMP", XWM_TARGET_NONE, 0}, {"MULTIPLE", XWM_TARGET_NONE, 0}, {"SAVE_TARGETS", XWM_TARGET_NONE, 0},
+                    {"COMPOUND_TEXT", XWM_TARGET_NONE, 0}, {"/etc", XWM_TARGET_NONE, 0}, {"image/", XWM_TARGET_NONE, 0}, {"", XWM_TARGET_NONE, 0}};
+                unsigned char mime[64];
+
+                bad = 0;
+                for (unsigned long r = 0; r < sizeof rows / sizeof rows[0]; r++)
+                {
+                        unsigned long len = strlen(rows[r].name);
+                        long got = xwm_target_mime((const unsigned char *)rows[r].name, len, mime, sizeof mime);
+
+                        if (xwm_target_kind((const unsigned char *)rows[r].name, len) != rows[r].kind ||
+                            (rows[r].mime ? got != (long)strlen(rows[r].mime) || strcmp((char *)mime, rows[r].mime) : got != 0))
+                        {
+                                bad++;
+                                printf("    target %s: kind %d mime %ld\n", rows[r].name, xwm_target_kind((const unsigned char *)rows[r].name, len), got);
+                        }
+                }
+                XWCHECK(bad == 0, "the targets as Wayland types: text of four names is UTF-8, STRING is Latin-1, a type's name passes through, the rest is none (%lu wrong)", bad);
+                XWCHECK(xwm_target_mime((const unsigned char *)"image/png", 9, mime, 9) == XWM_ERR_SPACE, "a type with no room for its null is refused");
+        }
+        {
+                static const unsigned char latin[4] = {'a', 0xe9, 0xff, 'z'};
+                static const unsigned char utf8[6] = {'a', 0xc3, 0xa9, 0xc3, 0xbf, 'z'};
+                static const unsigned char wide[7] = {0xe2, 0x82, 0xac, 0xc3, 0xa9, 0x80, 'q'};
+                unsigned char got[16];
+                struct xwm_utf8_cut cut = {0, 0};
+                unsigned long put;
+
+                put = xwm_latin1_utf8(latin, 4, got);
+                XWCHECK(put == 6 && xw_same(got, utf8, 6), "Latin-1 to UTF-8: e9 and ff are two bytes each");
+                put = xwm_utf8_latin1(&cut, utf8, 2, got);
+                put += xwm_utf8_latin1(&cut, utf8 + 2, 4, got + put);
+                XWCHECK(put == 4 && xw_same(got, latin, 4) && cut.need == 0, "UTF-8 to Latin-1 cut inside a character goes on in the next piece");
+                cut.need = 0;
+                put = xwm_utf8_latin1(&cut, wide, 7, got);
+                XWCHECK(put == 4 && got[0] == '?' && got[1] == 0xe9 && got[2] == '?' && got[3] == 'q', "a character past ff and a stray byte are each one '?'");
+        }
+        {
+                static const unsigned char want[28] = {18, 0, 7, 0, 0x07, 0x00, 0x60, 0x00, 0x51, 0, 0, 0, 0x52, 0, 0, 0, 32, 0, 0, 0, 1, 0, 0, 0, 0x00, 0x00, 0x10, 0x00};
+                unsigned char reply[36];
+
+                XWCHECK(!xwm_incr_needed(0) && !xwm_incr_needed(XWM_INCR_CHUNK) && xwm_incr_needed(XWM_INCR_CHUNK + 1) && xwm_incr_needed(XWM_INCR_SIZE_UNKNOWN),
+                        "INCR: a value of one piece or less goes whole, one longer or of no known size in pieces");
+                n = xwm_enc_incr(out, sizeof out, 0x600007, 0x51, 0x52, 1 << 20);
+                XWCHECK(n == 28 && xw_same(out, want, 28), "INCR's start: ChangeProperty of type INCR, format 32, one element, the size (1 MiB)");
+                n = xwm_enc_incr(out, sizeof out, 0x600007, 0x51, 0x52, 1ul << 40);
+                XWCHECK(n == 28 && xwm_get32(out + 24) == 0xffffffffu, "a size past 32 bits is the largest the element holds (a lower bound)");
+                n = xwm_enc_change_property(out, sizeof out, XWM_PROP_REPLACE, 0x600007, 0x51, 0x53, XWM_FORMAT_8, 0, 0);
+                XWCHECK(n == 24 && xwm_get32(out + 20) == 0, "INCR's end: an empty piece is a ChangeProperty of no elements");
+                memset(reply, 0, sizeof reply);
+                reply[0] = 1; reply[1] = 32; xw_u(reply, 4, 1, 4); xw_u(reply, 8, 0x52, 4); xw_u(reply, 16, 1, 4); xw_u(reply, 32, 5000000, 4);
+                b = xw_exact(reply, 36);
+                XWCHECK(xwm_parse_property_reply(b, 36, &pr) == XWM_OK && xwm_property_incr(&pr, 0x52, &size) && size == 5000000,
+                        "a property reply of type INCR starts a transfer of its size");
+                XWCHECK(!xwm_property_incr(&pr, 0x53, &size), "a property of another type is the value itself");
+                free(b);
+                XWCHECK(xwm_incr_piece(100000, 131072) == XWM_INCR_CHUNK, "a piece is at most XWM_INCR_CHUNK");
+                XWCHECK(xwm_incr_piece(1000, 131072) == 1000, "the last piece is what is left");
+                XWCHECK(xwm_incr_piece(100000, 4120) == 4096, "a piece fits the queue's room less a request's head, in whole units");
+                XWCHECK(xwm_incr_piece(100000, 24) == 0 && xwm_incr_piece(0, 131072) == 0, "no room is no piece, and nothing left is the empty end");
+        }
+        {
+                unsigned int data[5], types[4] = {0x60, 0x61, 0x62, 0x63};
+
+                xwm_dnd_enter(data, 0x400005, XWM_XDND_VERSION, types, 2);
+                XWCHECK(data[0] == 0x400005 && data[1] == 0x05000000u && data[2] == 0x60 && data[3] == 0x61 && data[4] == 0,
+                        "XdndEnter: the source, version 5 in the top byte, two types and a zero");
+                xwm_dnd_enter(data, 0x400005, XWM_XDND_VERSION, types, 4);
+                XWCHECK(data[1] == 0x05000001u && data[4] == 0x62, "XdndEnter of four types: bit 0 says the rest are in XdndTypeList, the first three in it");
+                XWCHECK(xwm_dnd_place(300, 40) == (300u << 16 | 40u) && xwm_dnd_place(-5, 40000) == 32767u, "XdndPosition's place: x high, y low, held to the protocol's range");
+                XWCHECK(xwm_dnd_action(0x70, 0x70, 0x71, 0x72) == XWM_DND_COPY && xwm_dnd_action(0x71, 0x70, 0x71, 0x72) == XWM_DND_MOVE &&
+                        xwm_dnd_action(0x72, 0x70, 0x71, 0x72) == XWM_DND_ASK && xwm_dnd_action(0x73, 0x70, 0x71, 0x72) == 0 && xwm_dnd_action(0, 0, 0x71, 0x72) == 0,
+                        "XdndActionCopy, Move and Ask are the Wayland drag's copy, move and ask; Private and none are no action");
+                XWCHECK(xwm_dnd_action_atom(XWM_DND_MOVE, 0x70, 0x71, 0x72) == 0x71 && xwm_dnd_action_atom(XWM_DND_ASK, 0x70, 0x71, 0x72) == 0x72 &&
+                        xwm_dnd_action_atom(XWM_DND_COPY | XWM_DND_MOVE, 0x70, 0x71, 0x72) == 0x70 && xwm_dnd_action_atom(0, 0x70, 0x71, 0x72) == 0x70,
+                        "a Wayland action as X's: copy first of those it allows, and copy when it came to none");
+        }
+        bad = 0;
+        for (unsigned int round = 0; round < 10000; round++)
+        {
+                unsigned long len = xw_rand() % 80, cap = xw_rand() % 64;
+                unsigned char *in = xw_blank(len ? len : 1), *o = xw_blank(cap ? cap : 1);
+                unsigned int vals[16];
+
+                for (unsigned long i = 0; i < len; i++)
+                        in[i] = (unsigned char)xw_rand();
+                for (unsigned long i = 0; i < 16; i++)
+                        vals[i] = xw_rand();
+                bad += !xw_bounded(xwm_parse_xfixes_selection(in, len, 64 + xw_rand() % 80, &e));
+                bad += !xw_bounded(xwm_parse_atom_name_reply(in, len, &an));
+                if (xwm_parse_atom_name_reply(in, len, &an) == XWM_OK && an.name + an.name_len > in + len)
+                        bad++;
+                bad += !xw_bounded(xwm_parse_event(in, len, &e));
+                n = xwm_enc_set_selection_owner(o, cap, xw_rand(), xw_rand() % 3, xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_convert_selection(o, cap, xw_rand() % 3, xw_rand() % 3, xw_rand() % 3, xw_rand(), xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_delete_property(o, cap, xw_rand() % 3, xw_rand() % 3);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_get_atom_name(o, cap, xw_rand() % 3);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_selection_notify(o, cap, xw_rand(), xw_rand() % 3, xw_rand() % 3, xw_rand(), xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_change_window_attributes(o, cap, xw_rand() % 3, xw_rand() & 0xffffu, vals, xw_rand() % 17);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_xfixes_query_version(o, cap, xw_rand() % 300, xw_rand(), xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_xfixes_select_selection_input(o, cap, xw_rand() % 300, xw_rand() % 3, xw_rand() % 3, xw_rand() % 9);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_incr(o, cap, xw_rand(), xw_rand(), xw_rand() % 3, xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_target_mime(in, len, o, cap);
+                bad += !xw_bounded(n) || (n > 0 && (unsigned long)n + 1 > cap);
+                free(in);
+                free(o);
+        }
+        XWCHECK(bad == 0, "10000 rounds of random bytes into the selection parsers and random arguments into its encoders: codes, inside every buffer (%lu bad)", bad);
+}
+
 int main(void)
 {
+        xw_test_selection();
         xw_test_setup_request();
         xw_test_intern_atom();
         xw_test_get_property();

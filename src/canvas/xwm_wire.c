@@ -91,6 +91,9 @@
 #define XWM_EVENT_CONFIGURE_NOTIFY 22
 #define XWM_EVENT_CONFIGURE_REQUEST 23
 #define XWM_EVENT_PROPERTY_NOTIFY 28
+#define XWM_EVENT_SELECTION_CLEAR 29
+#define XWM_EVENT_SELECTION_REQUEST 30
+#define XWM_EVENT_SELECTION_NOTIFY 31
 #define XWM_EVENT_CLIENT_MESSAGE 33
 #define XWM_EVENT_GENERIC 35
 #define XWM_EVENT_LAST 35
@@ -106,7 +109,11 @@
 #define XWM_OP_GET_GEOMETRY 14
 #define XWM_OP_INTERN_ATOM 16
 #define XWM_OP_CHANGE_PROPERTY 18
+#define XWM_OP_GET_ATOM_NAME 17
+#define XWM_OP_DELETE_PROPERTY 19
 #define XWM_OP_GET_PROPERTY 20
+#define XWM_OP_SET_SELECTION_OWNER 22
+#define XWM_OP_CONVERT_SELECTION 24
 #define XWM_OP_SEND_EVENT 25
 #define XWM_OP_SET_INPUT_FOCUS 42
 
@@ -123,6 +130,15 @@
 #define XWM_XRES_QUERY_VERSION 0
 #define XWM_XRES_QUERY_CLIENT_IDS 4
 #define XWM_XRES_LOCAL_CLIENT_PID 2u
+
+/* The XFIXES extension's requests the window manager makes (its version first, which a server needs before any other), and its
+   SelectionNotify, the first of its events: who owns a selection now, told to a window that asked. */
+#define XWM_XFIXES_QUERY_VERSION 0
+#define XWM_XFIXES_SELECT_SELECTION_INPUT 2
+#define XWM_XFIXES_SET_OWNER 1u               /* the selection's owner is another (or none) */
+#define XWM_XFIXES_WINDOW_DESTROY 2u          /* its owner's window is gone */
+#define XWM_XFIXES_CLIENT_CLOSE 4u            /* its owner's connection is gone */
+#define XWM_XFIXES_SELECTION_MASK 7u
 
 /* The setup reply's status: the first byte. */
 #define XWM_SETUP_FAILED 0
@@ -149,7 +165,9 @@
 #define XWM_ERROR_IMPLEMENTATION 17
 
 /* The window attributes that can be set (ChangeWindowAttributes), by their bit in the value mask. */
+#define XWM_CW_OVERRIDE_REDIRECT 0x200u
 #define XWM_CW_EVENT_MASK 0x800u
+#define XWM_CW_ALL 0x7fffu           /* the fifteen attributes the protocol defines */
 
 /* The event masks a window selects. */
 #define XWM_MASK_STRUCTURE_NOTIFY (1u << 17)
@@ -216,6 +234,10 @@
 #define XWM_EV_ENTER 12
 #define XWM_EV_LEAVE 13
 #define XWM_EV_MAP_NOTIFY 14
+#define XWM_EV_SELECTION_CLEAR 15
+#define XWM_EV_SELECTION_REQUEST 16
+#define XWM_EV_SELECTION_NOTIFY 17
+#define XWM_EV_XFIXES_SELECTION 18  /* XFIXES SelectionNotify, which xwm_parse_xfixes_selection reads: its code is the server's to say */
 
 /*
         What the parsers fill in. A field a kind does not have is zero after xwm_parse_event (it clears the whole struct
@@ -240,6 +262,10 @@ struct xwm_event
         unsigned int value_mask; /* ConfigureRequest: which of its fields the client asked to change */
         unsigned int override;  /* the override-redirect flag */
         unsigned int from_configure;
+        unsigned int owner;     /* SelectionClear, SelectionRequest, XFIXES SelectionNotify: the selection's owner */
+        unsigned int requestor; /* SelectionRequest, SelectionNotify: the window the conversion is for */
+        unsigned int selection, target, property; /* the selection, the type asked for, and the property it goes in (0: refused) */
+        unsigned int selection_time;              /* XFIXES SelectionNotify: when the owner took it */
         int x, y;
         unsigned int width, height, border;
         unsigned int data[XWM_DATA_LONGS];
@@ -276,6 +302,14 @@ struct xwm_error
 struct xwm_atom_reply
 {
         unsigned int sequence, atom;
+};
+
+/* A GetAtomName reply: the name's bytes are a pointer into the buffer the caller passed, which the parser checked. */
+struct xwm_atom_name_reply
+{
+        unsigned int sequence;
+        const unsigned char *name;
+        unsigned long name_len;
 };
 
 struct xwm_extension_reply
@@ -712,6 +746,142 @@ XWM_API long xwm_enc_client_message(unsigned char *out, unsigned long cap, unsig
         return XWM_EVENT_SIZE;
 }
 
+/* GetAtomName: an atom's name, which its reply carries (an atom is never 0). */
+XWM_API long xwm_enc_get_atom_name(unsigned char *out, unsigned long cap, unsigned int atom)
+{
+        long n;
+
+        if (!atom)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT, XWM_OP_GET_ATOM_NAME);
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, atom);
+        return n;
+}
+
+/* DeleteProperty: twelve bytes. */
+XWM_API long xwm_enc_delete_property(unsigned char *out, unsigned long cap, unsigned int window, unsigned int property)
+{
+        long n;
+
+        if (!window || !property)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 12, XWM_OP_DELETE_PROPERTY);
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, window);
+        xwm_put32(out + 8, property);
+        return n;
+}
+
+/* SetSelectionOwner: the owner (0 for none) of a selection, from a time (0: the server's now). Sixteen bytes. */
+XWM_API long xwm_enc_set_selection_owner(unsigned char *out, unsigned long cap, unsigned int owner, unsigned int selection, unsigned int time)
+{
+        long n;
+
+        if (!selection)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 16, XWM_OP_SET_SELECTION_OWNER);
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, owner);
+        xwm_put32(out + 8, selection);
+        xwm_put32(out + 12, time);
+        return n;
+}
+
+/* ConvertSelection: the owner asked for the selection as target, into property of requestor. Twenty-four bytes. */
+XWM_API long xwm_enc_convert_selection(unsigned char *out, unsigned long cap, unsigned int requestor, unsigned int selection, unsigned int target, unsigned int property, unsigned int time)
+{
+        long n;
+
+        if (!requestor || !selection || !target)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 24, XWM_OP_CONVERT_SELECTION);
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, requestor);
+        xwm_put32(out + 8, selection);
+        xwm_put32(out + 12, target);
+        xwm_put32(out + 16, property);
+        xwm_put32(out + 20, time);
+        return n;
+}
+
+/* A SelectionNotify, as the 32 bytes SendEvent carries: the owner's answer to a requestor, property 0 for a refusal. */
+XWM_API long xwm_enc_selection_notify(unsigned char *out, unsigned long cap, unsigned int time, unsigned int requestor, unsigned int selection, unsigned int target, unsigned int property)
+{
+        if (!out || !requestor || !selection)
+                return XWM_ERR_ARG;
+        if (cap < XWM_EVENT_SIZE)
+                return XWM_ERR_SPACE;
+        xwm_zero(out, XWM_EVENT_SIZE);
+        out[0] = XWM_EVENT_SELECTION_NOTIFY;
+        xwm_put32(out + 4, time);
+        xwm_put32(out + 8, requestor);
+        xwm_put32(out + 12, selection);
+        xwm_put32(out + 16, target);
+        xwm_put32(out + 20, property);
+        return XWM_EVENT_SIZE;
+}
+
+/* ChangeWindowAttributes: a value for each bit of the mask, in the order of the bits, as many as the mask has. */
+XWM_API long xwm_enc_change_window_attributes(unsigned char *out, unsigned long cap, unsigned int window, unsigned int mask, const unsigned int *values, unsigned long count)
+{
+        unsigned long bits = 0;
+        long n;
+
+        if (!window || !mask || (mask & ~XWM_CW_ALL) || !values)
+                return XWM_ERR_ARG;
+        for (unsigned int bit = 0; bit < 15; bit++)
+                bits += (mask >> bit) & 1u;
+        if (bits != count)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 12 + XWM_UNIT * count, XWM_OP_CHANGE_WINDOW_ATTRIBUTES);
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, window);
+        xwm_put32(out + 8, mask);
+        for (unsigned long i = 0; i < count; i++)
+                xwm_put32(out + 12 + XWM_UNIT * i, values[i]);
+        return n;
+}
+
+/* XFIXES QueryVersion: twelve bytes, the version the window manager speaks; a server takes no other XFIXES request before it. */
+XWM_API long xwm_enc_xfixes_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 12, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_XFIXES_QUERY_VERSION;
+        xwm_put32(out + 4, client_major);
+        xwm_put32(out + 8, client_minor);
+        return n;
+}
+
+/* XFIXES SelectSelectionInput: the window is told of the selection's owner changing, its owner's window going and its owner's
+   connection closing, as the mask asks. Sixteen bytes. */
+XWM_API long xwm_enc_xfixes_select_selection_input(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int window, unsigned int selection, unsigned int mask)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || !window || !selection || (mask & ~XWM_XFIXES_SELECTION_MASK))
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 16, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_XFIXES_SELECT_SELECTION_INPUT;
+        xwm_put32(out + 4, window);
+        xwm_put32(out + 8, selection);
+        xwm_put32(out + 12, mask);
+        return n;
+}
+
 /* ---- framing: how long the message a server sent is, from its first 32 bytes ---- */
 
 /* The type of a message, with the send-event bit taken off, or XWM_ERR_SHORT when it has no 32 bytes yet. */
@@ -927,6 +1097,31 @@ XWM_API int xwm_parse_atom_reply(const unsigned char *buf, unsigned long len, st
         return XWM_OK;
 }
 
+/* A GetAtomName reply: its name's length at 8, and the name after the 32 bytes, padded; the length field must be the padded name. */
+XWM_API int xwm_parse_atom_name_reply(const unsigned char *buf, unsigned long len, struct xwm_atom_name_reply *out)
+{
+        unsigned long name_len, units;
+
+        if (!buf || !out)
+                return XWM_ERR_ARG;
+        if (len < XWM_HEADER)
+                return XWM_ERR_SHORT;
+        if (buf[0] != XWM_REPLY)
+                return XWM_ERR_TYPE;
+        name_len = xwm_get16(buf + 8);
+        if (name_len > XWM_ATOM_NAME_MAX)
+                return XWM_ERR_CAP;
+        units = xwm_get32(buf + 4);
+        if (units != (name_len + XWM_UNIT - 1) / XWM_UNIT)
+                return XWM_ERR_LENGTH;
+        if ((len - XWM_HEADER) / XWM_UNIT < units)
+                return XWM_ERR_LENGTH;
+        out->sequence = xwm_get16(buf + 2);
+        out->name = buf + XWM_HEADER;
+        out->name_len = name_len;
+        return XWM_OK;
+}
+
 /*
         A GetProperty reply. The value is `elements` of the format, which is 0, 8, 16 or 32; its bytes are capped at
         XWM_PROPERTY_MAX, and the length field must be exactly the value's length in units, so the value sits whole in len.
@@ -1092,6 +1287,12 @@ XWM_API void xwm_event_clear(struct xwm_event *e)
         e->value_mask = 0;
         e->override = 0;
         e->from_configure = 0;
+        e->owner = 0;
+        e->requestor = 0;
+        e->selection = 0;
+        e->target = 0;
+        e->property = 0;
+        e->selection_time = 0;
         e->x = 0;
         e->y = 0;
         e->width = 0;
@@ -1210,6 +1411,29 @@ XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct 
                 out->event = xwm_get32(buf + 8);
                 out->mode = buf[26];
                 break;
+        case XWM_EVENT_SELECTION_CLEAR:
+                out->kind = XWM_EV_SELECTION_CLEAR;
+                out->time = xwm_get32(buf + 4);
+                out->owner = xwm_get32(buf + 8);
+                out->selection = xwm_get32(buf + 12);
+                break;
+        case XWM_EVENT_SELECTION_REQUEST:
+                out->kind = XWM_EV_SELECTION_REQUEST;
+                out->time = xwm_get32(buf + 4);
+                out->owner = xwm_get32(buf + 8);
+                out->requestor = xwm_get32(buf + 12);
+                out->selection = xwm_get32(buf + 16);
+                out->target = xwm_get32(buf + 20);
+                out->property = xwm_get32(buf + 24);
+                break;
+        case XWM_EVENT_SELECTION_NOTIFY:
+                out->kind = XWM_EV_SELECTION_NOTIFY;
+                out->time = xwm_get32(buf + 4);
+                out->requestor = xwm_get32(buf + 8);
+                out->selection = xwm_get32(buf + 12);
+                out->target = xwm_get32(buf + 16);
+                out->property = xwm_get32(buf + 20);
+                break;
         case XWM_EVENT_EXPOSE:
         case XWM_EVENT_REPARENT_NOTIFY:
                 out->kind = XWM_EV_IGNORED;
@@ -1218,6 +1442,242 @@ XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct 
                 break;
         }
         return XWM_OK;
+}
+
+/* XFIXES SelectionNotify: the extension's first event (first_event, which QueryExtension named), 32 bytes. */
+XWM_API int xwm_parse_xfixes_selection(const unsigned char *buf, unsigned long len, unsigned int first_event, struct xwm_event *out)
+{
+        if (!buf || !out)
+                return XWM_ERR_ARG;
+        if (len < XWM_HEADER)
+                return XWM_ERR_SHORT;
+        if (first_event < XWM_EVENT_LAST + 1 || first_event > 127 || (buf[0] & XWM_TYPE_MASK) != first_event)
+                return XWM_ERR_TYPE;
+        xwm_event_clear(out);
+        out->kind = XWM_EV_XFIXES_SELECTION;
+        out->code = first_event;
+        out->synthetic = (buf[0] & XWM_SEND_EVENT_BIT) ? 1 : 0;
+        out->detail = buf[1];
+        out->sequence = xwm_get16(buf + 2);
+        out->window = xwm_get32(buf + 4);
+        out->owner = xwm_get32(buf + 8);
+        out->selection = xwm_get32(buf + 12);
+        out->time = xwm_get32(buf + 16);
+        out->selection_time = xwm_get32(buf + 20);
+        return XWM_OK;
+}
+
+/*
+        ---- a selection's types and bytes: what the bridge between X and Wayland makes of a target, and how a value goes in pieces ----
+
+        An X selection is asked for as a target, an atom whose name says what it is; a Wayland one as a type (a MIME name). Text is
+        UTF8_STRING, TEXT, text/plain;charset=utf-8 or text/plain, all UTF-8, or STRING, which is ISO Latin-1 (ICCCM 2.6.2); a target
+        whose name has a '/' is a type of that very name (image/png, text/uri-list), passed through; anything else (TARGETS,
+        TIMESTAMP, MULTIPLE, a toolkit's own upper-case names) is no type a Wayland client is offered.
+*/
+#define XWM_TARGET_NONE 0
+#define XWM_TARGET_UTF8 1
+#define XWM_TARGET_LATIN1 2
+#define XWM_TARGET_MIME 3
+#define XWM_TEXT_MIME "text/plain;charset=utf-8" /* the type X text is offered to Wayland as, whichever of the text targets it came as */
+
+static int xwm_name_is(const unsigned char *name, unsigned long len, const char *word)
+{
+        unsigned long at = 0;
+
+        for (; word[at]; at++)
+        {
+                unsigned char a = at < len ? name[at] : 0, b = (unsigned char)word[at];
+
+                a = a >= 'A' && a <= 'Z' ? (unsigned char)(a + 32) : a;
+                b = b >= 'A' && b <= 'Z' ? (unsigned char)(b + 32) : b;
+                if (a != b)
+                        return 0;
+        }
+        return at == len;
+}
+
+XWM_API int xwm_target_kind(const unsigned char *name, unsigned long len)
+{
+        if (!name || !len || len > XWM_ATOM_NAME_MAX)
+                return XWM_TARGET_NONE;
+        if (xwm_name_is(name, len, "UTF8_STRING") || xwm_name_is(name, len, "TEXT") || xwm_name_is(name, len, XWM_TEXT_MIME) ||
+            xwm_name_is(name, len, "text/plain;charset=UTF8") || xwm_name_is(name, len, "text/plain"))
+                return XWM_TARGET_UTF8;
+        if (xwm_name_is(name, len, "STRING"))
+                return XWM_TARGET_LATIN1;
+        for (unsigned long at = 0; at < len; at++)
+                if (name[at] == '/')
+                        return name[0] != '/' && at + 1 < len ? XWM_TARGET_MIME : XWM_TARGET_NONE;
+        return XWM_TARGET_NONE;
+}
+
+/* The Wayland type a target is offered as, with its null, into out: its length (no null counted), 0 for none, XWM_ERR_SPACE. */
+XWM_API long xwm_target_mime(const unsigned char *name, unsigned long len, unsigned char *out, unsigned long cap)
+{
+        int kind = xwm_target_kind(name, len);
+        const unsigned char *from = kind == XWM_TARGET_MIME ? name : (const unsigned char *)XWM_TEXT_MIME;
+        unsigned long n = kind == XWM_TARGET_MIME ? len : sizeof XWM_TEXT_MIME - 1;
+
+        if (!out)
+                return XWM_ERR_ARG;
+        if (kind == XWM_TARGET_NONE)
+                return 0;
+        if (cap < n + 1)
+                return XWM_ERR_SPACE;
+        for (unsigned long at = 0; at < n; at++)
+                out[at] = from[at];
+        out[n] = 0;
+        return (long)n;
+}
+
+/* Latin-1 to UTF-8: a byte under 0x80 as it is, any other as two. out has room for twice n; the bytes written. */
+XWM_API unsigned long xwm_latin1_utf8(const unsigned char *in, unsigned long n, unsigned char *out)
+{
+        unsigned long put = 0;
+
+        for (unsigned long at = 0; at < n; at++)
+        {
+                if (in[at] < 0x80)
+                        out[put++] = in[at];
+                else
+                {
+                        out[put++] = (unsigned char)(0xc0 | in[at] >> 6);
+                        out[put++] = (unsigned char)(0x80 | (in[at] & 0x3f));
+                }
+        }
+        return put;
+}
+
+/*
+        UTF-8 to Latin-1, a piece at a time (a character may be cut at a piece's end: cut carries it to the next). A character over
+        0xff, or bytes that are no UTF-8, are each one '?'. out has room for n bytes; the bytes written.
+*/
+struct xwm_utf8_cut
+{
+        unsigned int need, code;
+};
+
+XWM_API unsigned long xwm_utf8_latin1(struct xwm_utf8_cut *cut, const unsigned char *in, unsigned long n, unsigned char *out)
+{
+        unsigned long put = 0;
+
+        for (unsigned long at = 0; at < n; at++)
+        {
+                unsigned char c = in[at];
+
+                if (cut->need)
+                {
+                        if ((c & 0xc0) == 0x80)
+                        {
+                                cut->code = cut->code << 6 | (c & 0x3fu);
+                                if (--cut->need == 0)
+                                        out[put++] = cut->code <= 0xff ? (unsigned char)cut->code : '?';
+                                continue;
+                        }
+                        cut->need = 0;
+                        out[put++] = '?';
+                }
+                if (c < 0x80)
+                        out[put++] = c;
+                else if ((c & 0xe0) == 0xc0)
+                        cut->need = 1, cut->code = c & 0x1fu;
+                else if ((c & 0xf0) == 0xe0)
+                        cut->need = 2, cut->code = c & 0x0fu;
+                else if ((c & 0xf8) == 0xf0)
+                        cut->need = 3, cut->code = c & 0x07u;
+                else
+                        out[put++] = '?';
+        }
+        return put;
+}
+
+/*
+        INCR (ICCCM 2.7.2): a value longer than one piece goes as a property of type INCR whose one element is its size (a lower
+        bound), then piece by piece, each written once the requestor has deleted the last, and an empty piece is the end. A value
+        whose size is not known (one read from a pipe) goes piece by piece whatever it is.
+*/
+#define XWM_INCR_CHUNK 32768            /* one piece, and the most a value sent whole is */
+#define XWM_INCR_SIZE_UNKNOWN (~0ul)
+
+XWM_API int xwm_incr_needed(unsigned long size)
+{
+        return size == XWM_INCR_SIZE_UNKNOWN || size > XWM_INCR_CHUNK;
+}
+
+/* The INCR property that starts a value sent in pieces: its size as one CARDINAL-like element of format 32, capped at 32 bits. */
+XWM_API long xwm_enc_incr(unsigned char *out, unsigned long cap, unsigned int window, unsigned int property, unsigned int incr, unsigned long size)
+{
+        unsigned char value[4];
+
+        if (!incr)
+                return XWM_ERR_ARG;
+        xwm_put32(value, size >= 0xfffffffful ? 0xffffffffu : (unsigned int)size);
+        return xwm_enc_change_property(out, cap, XWM_PROP_REPLACE, window, property, incr, XWM_FORMAT_32, value, 4);
+}
+
+/* Whether a property reply starts an INCR transfer (type INCR, format 32, at least one element: the size, a lower bound). */
+XWM_API int xwm_property_incr(const struct xwm_property_reply *r, unsigned int incr, unsigned long *size)
+{
+        if (!r || !incr || r->type != incr || r->format != XWM_FORMAT_32 || r->value_len < 4)
+                return 0;
+        if (size)
+                *size = xwm_get32(r->value);
+        return 1;
+}
+
+/* The bytes of the next piece: what is left, at most a piece, and at most what the queue to the server has room for once a
+   ChangeProperty's 24 bytes are counted; 0 when there is no room (or nothing is left: the empty piece that ends it). */
+XWM_API unsigned long xwm_incr_piece(unsigned long left, unsigned long room)
+{
+        unsigned long most = room > 24 ? (room - 24) & ~3ul : 0;
+
+        most = most > XWM_INCR_CHUNK ? XWM_INCR_CHUNK : most;
+        return left < most ? left : most;
+}
+
+/*
+        ---- XDND, version 5: the client messages of a drag between the window manager and an X window, and its actions ----
+
+        XdndEnter is the source's window, its version in the top byte of the second word with bit 0 set when it has more than three
+        types (the rest in its XdndTypeList), and the first three types; XdndPosition carries the pointer's root place as x << 16 | y.
+        The actions are atoms (XdndActionCopy, Move, Ask) and a Wayland drag's are bits (copy 1, move 2, ask 4).
+*/
+#define XWM_XDND_VERSION 5
+#define XWM_DND_COPY 1u
+#define XWM_DND_MOVE 2u
+#define XWM_DND_ASK 4u
+
+XWM_API void xwm_dnd_enter(unsigned int *data, unsigned int source, unsigned int version, const unsigned int *types, unsigned long count)
+{
+        data[0] = source;
+        data[1] = (version & 0xffu) << 24 | (count > 3 ? 1u : 0u);
+        for (unsigned long at = 0; at < 3; at++)
+                data[2 + at] = at < count && types ? types[at] : 0;
+}
+
+/* A root place as XdndPosition carries it: each coordinate held to 0..32767. */
+XWM_API unsigned int xwm_dnd_place(long x, long y)
+{
+        unsigned int ux = x < 0 ? 0u : x > 32767 ? 32767u : (unsigned int)x, uy = y < 0 ? 0u : y > 32767 ? 32767u : (unsigned int)y;
+
+        return ux << 16 | uy;
+}
+
+/* An X action as a Wayland one (0 for none or one of no meaning here, such as XdndActionPrivate), and the X atom of the action a
+   Wayland drag came to (the copy one when it came to none, as a source that names nothing is asked for a copy). */
+XWM_API unsigned int xwm_dnd_action(unsigned int atom, unsigned int copy, unsigned int move, unsigned int ask)
+{
+        return atom && atom == copy ? XWM_DND_COPY : atom && atom == move ? XWM_DND_MOVE : atom && atom == ask ? XWM_DND_ASK : 0;
+}
+
+XWM_API unsigned int xwm_dnd_action_atom(unsigned int action, unsigned int copy, unsigned int move, unsigned int ask)
+{
+        if (action & XWM_DND_COPY)
+                return copy;
+        if (action & XWM_DND_MOVE)
+                return move;
+        return action & XWM_DND_ASK ? ask : copy;
 }
 
 #endif /* XWM_WIRE_INCLUDED */
