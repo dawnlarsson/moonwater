@@ -380,14 +380,26 @@ static void check_touch_path(struct ui address_to wui)
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
     check("touch path: a tap puts the caret where the finger is", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 6);
 
-    /* The long press: held still, the word under the finger is selected, and the right button is no menu. */
+    /* The long press: held still, the word under the finger is selected, and the right button is no menu. A finger that is the machine's own. */
+    compositor_input_physical[0] = 1;
     asks = 0;
     touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, false);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
     compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
+    {
+        int holds = 0, held_virtual = 1;
+
+        /* the hold is a button posted by the timer: it is the finger's own, so the row does not refuse it (touch.physical) */
+        for (unsigned int k = table->event_tail[1]; k != table->event_head[1]; k++)
+                if (table->event_type[1][k % WINDOWS_EVENTS] == WINDOW_EVENT_BUTTON && (table->event_flags[1][k % WINDOWS_EVENTS] & WINDOW_KEY_HOLD))
+                        holds++, held_virtual = (table->event_flags[1][k % WINDOWS_EVENTS] & WINDOW_EVENT_VIRTUAL) != 0;
+        check("touch path: a long press of a finger that is the machine's own is not marked virtual (its hold is not refused)",
+              holds > 0 && !held_virtual);
+    }
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
     check("touch path: a long press selects the word under the finger", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 10);
     check("touch path: and the long press asks for no menu", !(asks & UI_TEXT_MENU));
+    compositor_input_physical[0] = 0;
 
     /* The drag after it: the finger moves on, and the selection grows by words to the end of the word it reaches. */
     asks = 0;

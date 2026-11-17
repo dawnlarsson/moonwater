@@ -1605,6 +1605,32 @@ static void check_compositor_rate_fastest(void)
     check("rate: and a 60 Hz frame with no table", ui_kit_frame_ns() == 16666667l);
     ui_kit_table = kept_kit;
 
+    /*
+            Scales and modes taken from the card: a screen with no displays line is drawn at the boot scale (-s), a scale taken refits the
+            floating windows (compositor_scale_set), and a connector that lists 130 modes is listed, not blanked (compositor_modes_room).
+    */
+    {
+        int boot_was = compositor.boot_scale;
+        struct compositor_connected found;
+        positive fit_was = compositor.fit_until;
+        unsigned int at;
+
+        compositor.boot_scale = 200;
+        check("scale: a screen with no displays line is drawn at the boot scale (-s 200 gives 200, as headless does)",
+              compositor_display_scale("no-such-screen") == 200);
+        compositor.boot_scale = boot_was;
+        compositor_scale_set(200);
+        check("scale: a scale taken refits the floating windows (fit_until moves on, the desktop and the table are 200%)",
+              compositor.scale == 200 && compositor.fit_until > fit_was && (!compositor.table || compositor.table->scale == 200));
+        compositor_scale_set(boot_was);
+        card_fake.rate_count = 130;
+        for (at = 0; at < 130; at++)
+                card_fake.rates[at] = 60 + at % 60;
+        compositor_connected_read(&found);
+        check("modes: a connector that lists 130 modes is listed, not blanked for having more than 128",
+              found.count >= 1 && found.size[0][0] > 0 && found.size[0][1] > 0);
+        card_fake.rate_count = 3, memory_copy(card_fake.rates, rates, sizeof(rates));
+    }
     compositor.table = 0;
     card_walk_end();
 }
@@ -5117,6 +5143,17 @@ static void check_compositor_wheel(void)
         flags[4] = table->event_flags[1][(table->event_head[1] - 1) % WINDOWS_EVENTS];
         compositor_post_physical = 0;
         check("origin: one posted while a device of the machine's own is read is not marked", flags[4] == WINDOW_KEY_DOWN);
+        /* A release owed while its device was the machine's own is posted as the machine's (compositor_owed_physical), once the ring has room. */
+        compositor_post_physical = 1;
+        for (unsigned int k = 0; k < WINDOWS_EVENTS + 4; k++)
+                compositor_post(1, WINDOW_EVENT_MOTION, 0, 1, 1);
+        compositor_post(1, WINDOW_EVENT_BUTTON, 0, COMPOSITOR_BTN_LEFT, 0);
+        compositor_post_physical = 0;
+        table->event_tail[1] = table->event_head[1];
+        compositor_owed_pass();
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        check("origin: a release owed while its device was the machine's own is posted as the machine's (a tap on a deliberate row is accepted)",
+              table->event_type[1][at] == WINDOW_EVENT_BUTTON && !(table->event_flags[1][at] & WINDOW_EVENT_VIRTUAL));
         compositor.focus = focus;
         compositor.button_down = 0;
         table->event_tail[1] = table->event_head[1];

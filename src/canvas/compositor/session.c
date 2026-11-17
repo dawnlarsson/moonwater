@@ -1364,7 +1364,7 @@ static unsigned long long compositor_stamp_now;
 // Whether the left button is down on a keyboard window (WINDOW_KEYBOARD): its key requests are read while it is (compositor_osk_read).
 static unsigned char *compositor_osk_held;
 
-static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b);
+static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b, int physical);
 
 /*
         A button or a key let go that a full ring dropped is owed to its window: the window would hold the press for good (a thumb held, a
@@ -1377,6 +1377,8 @@ static unsigned int (*compositor_owed_flags)[8];
 static unsigned char (*compositor_owed_keys)[32];        // the keys (bit of code, codes under 256) whose release the row is owed
 static unsigned int (*compositor_owed_key_flags)[256];
 static unsigned char *compositor_owed_any;             // whether any key of the row is owed
+static unsigned char *compositor_owed_physical;        // the buttons owed whose device was the machine's own, a bit each (compositor_owed)
+static unsigned char (*compositor_owed_key_physical)[32]; // the same for the keys owed (compositor_owed_keys)
 
 static void compositor_owed_flush(int row)
 {
@@ -1386,7 +1388,8 @@ static void compositor_owed_flush(int row)
         {
                 if (!(compositor_owed[row] >> index & 1))
                         continue;
-                if (!compositor_post_now(row, WINDOW_EVENT_BUTTON, compositor_owed_flags[row][index], (int)(COMPOSITOR_BTN_LEFT + index), 0))
+                if (!compositor_post_now(row, WINDOW_EVENT_BUTTON, compositor_owed_flags[row][index], (int)(COMPOSITOR_BTN_LEFT + index), 0,
+                                         compositor_owed_physical[row] >> index & 1))
                         return;
                 compositor_owed[row] &= (unsigned char)~(1u << index);
         }
@@ -1394,7 +1397,8 @@ static void compositor_owed_flush(int row)
         {
                 if (!(compositor_owed_keys[row][code >> 3] >> (code & 7) & 1))
                         continue;
-                if (!compositor_post_now(row, WINDOW_EVENT_KEY, compositor_owed_key_flags[row][code], (int)code, 0))
+                if (!compositor_post_now(row, WINDOW_EVENT_KEY, compositor_owed_key_flags[row][code], (int)code, 0,
+                                         compositor_owed_key_physical[row][code >> 3] >> (code & 7) & 1))
                         return;
                 compositor_owed_keys[row][code >> 3] &= (unsigned char)~(1u << (code & 7));
         }
@@ -1408,15 +1412,23 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         if (row < 0)
                 return 0;
         compositor_owed_flush(row);
-        posted = compositor_post_now(row, type, flags, a, b);
+        posted = compositor_post_now(row, type, flags, a, b, compositor_post_physical);
         if (!posted && type == WINDOW_EVENT_BUTTON && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a - COMPOSITOR_BTN_LEFT < 8)
         {
-                compositor_owed[row] |= (unsigned char)(1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT));
+                unsigned int bit = 1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT);
+
+                compositor_owed[row] |= (unsigned char)bit;
+                compositor_owed_physical[row] = (unsigned char)(compositor_post_physical ? compositor_owed_physical[row] | bit :
+                                                                compositor_owed_physical[row] & ~bit);
                 compositor_owed_flags[row][(unsigned int)a - COMPOSITOR_BTN_LEFT] = flags;
         }
         if (!posted && type == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a < 256 && row < COMPOSITOR_ROWS)
         {
-                compositor_owed_keys[row][(unsigned int)a >> 3] |= (unsigned char)(1u << ((unsigned int)a & 7));
+                unsigned int bit = 1u << ((unsigned int)a & 7);
+
+                compositor_owed_keys[row][(unsigned int)a >> 3] |= (unsigned char)bit;
+                compositor_owed_key_physical[row][(unsigned int)a >> 3] = (unsigned char)(compositor_post_physical ?
+                        compositor_owed_key_physical[row][(unsigned int)a >> 3] | bit : compositor_owed_key_physical[row][(unsigned int)a >> 3] & ~bit);
                 compositor_owed_key_flags[row][(unsigned int)a] = flags;
                 compositor_owed_any[row] = 1;
         }
@@ -1439,7 +1451,7 @@ static void compositor_owed_pass(void)
                         compositor_owed_flush(row);
 }
 
-static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b)
+static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b, int physical)
 {
         struct windows *table = compositor.table;
         unsigned int head, used, last;
@@ -1463,7 +1475,7 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
                 flags |= WINDOW_KEY_HOLD;
         // Not read from a device found to be the machine's own, by the device's read itself: marked (WINDOW_EVENT_VIRTUAL). A pinch has no
         // such bit (it is its WINDOW_PINCH_END), and no event of another type is marked.
-        if (!compositor_post_physical &&
+        if (!physical &&
             (type == WINDOW_EVENT_KEY || type == WINDOW_EVENT_BUTTON || type == WINDOW_EVENT_MOTION || type == WINDOW_EVENT_WHEEL))
                 flags |= WINDOW_EVENT_VIRTUAL;
         head = table->event_head[row];

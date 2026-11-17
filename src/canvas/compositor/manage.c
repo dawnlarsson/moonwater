@@ -421,6 +421,24 @@ static void compositor_scale_fit(void)
 }
 
 /*
+        A scale taken, by a card's screens or by the headless line: the desktop's scale and the table's, the cursor's plane drawn again, the
+        bands' room, the floating windows fitted to it (compositor_scale_fit), the tabs and the screen damaged. The caller sets what the
+        scale is taken from (a screen's own scale) first.
+*/
+static void compositor_scale_set(int scale)
+{
+        compositor.scale = scale;
+        if (compositor.table)
+                compositor.table->scale = (unsigned int)scale;
+        compositor.cursor.plane.scale = 0;
+        compositor_cursor_move();
+        compositor_band_room();
+        compositor_scale_fit();
+        compositor_tabs_changed();
+        compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
+/*
         A shared edge: windows that meet along one line, a divider (compositor_divider_of). A press anywhere along it, from
         one end of the line to the other (compositor_shared_at), takes all of them: compositor_shared_begin takes hold of
         each, and compositor_shared_move grows one side as the other shrinks, so they go on meeting. A corner of a window

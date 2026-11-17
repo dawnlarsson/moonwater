@@ -3354,8 +3354,8 @@ static void check_taskbar_edit(void)
     static unsigned char lengths[3] = {5, 15, 30};
     static char root[64], path[160], word[32];
     struct taskbar_view view;
-    int sx, sy, sw, sh, zx, zy, zw, zh, refused_before;
-    b32 menu = 1, virtual_refused, moved, kept, read_back, left;
+    int sx, sy, sw, sh, zx, zy, zw, zh, moon_before, tasks_before;
+    b32 menu = 1, virtual_refused, moved, kept, read_back, left, dropped_after_done;
 
     compositor_zero();
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
@@ -3374,10 +3374,9 @@ static void check_taskbar_edit(void)
     }
     menu &= taskbar_edit_item(&view, sx + sw / 2, sy + sh / 2) == TASKBAR_LAUNCHER && zw > 0;
     // A virtual device: the press and its release are refused and counted, and the moon stays in the middle.
-    refused_before = compositor_edit_refused;
     compositor_edit_press(&view, 0, sx + sw / 2, sy + sh / 2, 0);
     compositor_edit_release(&view, zx + 2, zy + zh / 2, 0);
-    virtual_refused = compositor_edit_refused == refused_before + 1 && taskbar.moon_zone == TASKBAR_ZONE_CENTRE && !compositor_edit_drag.held;
+    virtual_refused = taskbar.moon_zone == TASKBAR_ZONE_CENTRE && !compositor_edit_drag.held;
     // The machine's own: the moon pressed and let go at the band's start is there, the tasks no longer split round it.
     compositor_edit_press(&view, 0, sx + sw / 2, sy + sh / 2, 1);
     compositor_edit_release(&view, zx + 2, zy + zh / 2, 1);
@@ -3391,6 +3390,15 @@ static void check_taskbar_edit(void)
     compositor_settings_root = root;
     kept = compositor_edit_done();
     left = !taskbar.editing;
+    // A press that Done ends holds nothing after it: the arrangement reopened, its release (the press's own device) drops nothing.
+    taskbar_edit_set(1);
+    compositor_edit_press(&view, 0, sx + sw / 2, sy + sh / 2, 1);
+    compositor_edit_done();
+    taskbar_edit_set(1);
+    moon_before = taskbar.moon_zone, tasks_before = taskbar.tasks_zone;
+    compositor_edit_release(&view, zx + 2, zy + zh / 2, 1);
+    dropped_after_done = !compositor_edit_drag.held && taskbar.moon_zone == moon_before && taskbar.tasks_zone == tasks_before;
+    taskbar_edit_set(0);
     read_back = 1;
     {
         static const char *const paths[2] = {SETTING_TASKBAR_MOON_PATH, SETTING_TASKBAR_TASKS_PATH};
@@ -3433,6 +3441,7 @@ static void check_taskbar_edit(void)
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     check("taskbar edit: the moon is an item of the arrangement, and the menu's clock item is the other format", menu);
     check("taskbar edit: a press of a virtual device (WINDOW_EVENT_VIRTUAL) is refused and moves nothing", virtual_refused);
+    check("taskbar edit: a press that Done ends, then a release after Edit reopens, drops nothing", dropped_after_done);
     check("taskbar edit: the moon pressed and let go at the band's start by the machine's own device is there", moved);
     check("taskbar edit: Done keeps every row of the arrangement and the band leaves it", kept && left);
     check("taskbar edit: the rows read back what Done kept (the moon start, the tasks center, each tray item's side)", read_back);

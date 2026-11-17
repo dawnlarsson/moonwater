@@ -135,13 +135,13 @@ static void compositor_turn_say(const char *name, unsigned int degrees, int hard
 }
 
 // The degrees a screen is turned by its displays line (0 when it has none): the screen is laid out at its turned size.
-// The percent a screen's displays line draws it at: 100 when it has no line or none for it.
+// The percent a screen's displays line draws it at: the program's boot scale (-s, else 100) when it has no line or none for it.
 static int compositor_display_scale(const char *name)
 {
         const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
                                                                    windows_name_length(name));
 
-        return display && display->scale ? (int)display->scale : WINDOWS_SCALE_DEFAULT;
+        return display && display->scale ? (int)display->scale : compositor.boot_scale ? compositor.boot_scale : WINDOWS_SCALE_DEFAULT;
 }
 
 // The percent screen at is drawn at (the desktop's when there is no such screen).
@@ -200,6 +200,28 @@ static unsigned int *compositor_connectors_room(long want)
                 compositor_call(syscall(munmap), (positive)compositor_connector_ids, (positive)(compositor_connector_room * (long)sizeof(unsigned int)), 0, 0, 0, 0);
         compositor_connector_ids = (unsigned int *)got, compositor_connector_room = room;
         return compositor_connector_ids;
+}
+
+// The modes of a connector, read into a list that grows as the connectors' list does (compositor_modes_room): a screen may list more than 128.
+static struct compositor_mode *compositor_modes_list;
+static long compositor_modes_count;
+
+// Room for want modes: the list, or 0 when the memory is not there.
+static struct compositor_mode *compositor_modes_room(long want)
+{
+        long room = compositor_modes_count ? compositor_modes_count : 128, got;
+
+        if (want <= compositor_modes_count)
+                return compositor_modes_list;
+        while (room < want)
+                room *= 2;
+        got = compositor_call(syscall(mmap), 0, (positive)(room * (long)sizeof(struct compositor_mode)), 3, 0x22, (positive)-1, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        if (compositor_modes_list)
+                compositor_call(syscall(munmap), (positive)compositor_modes_list, (positive)(compositor_modes_count * (long)sizeof(struct compositor_mode)), 0, 0, 0, 0);
+        compositor_modes_list = (struct compositor_mode *)got, compositor_modes_count = room;
+        return compositor_modes_list;
 }
 
 struct compositor_connected
@@ -407,24 +429,31 @@ static b32 compositor_connected_read(struct compositor_connected *found)
         for (unsigned int at = 0; at < resources.connector_count && found->count < WINDOWS_OUTPUTS; at++)
         {
                 struct compositor_connector probe = {.connector_id = connectors[at]};
-                struct compositor_mode modes[128];
-                unsigned int encoders[8], n = found->count, asked_modes = 128, asked_encoders = 8;
+                struct compositor_mode *modes = 0;
+                unsigned int encoders[8], n = found->count, asked_modes = 0, asked_encoders = 8;
                 int listed;
 
                 if (compositor_list_kept)
                 {
                         // Room for the lists in the one call: the kernel answers from what it has, and looks at nothing.
-                        probe.mode_count = asked_modes, probe.encoder_count = asked_encoders;
+                        modes = compositor_modes_room(128);
+                        if (!modes)
+                                continue;
+                        probe.mode_count = asked_modes = 128, probe.encoder_count = asked_encoders;
                         probe.modes = (unsigned long)modes;
                         probe.encoders = (unsigned long)encoders;
                 }
                 if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0 ||
                     probe.connection != 1 || !probe.mode_count)
                         continue;
-                if (!compositor_list_kept)
+                if (probe.mode_count > asked_modes)
                 {
-                        // The kernel copies a list only when it fits what was asked for, and says how long it is either way.
-                        asked_modes = probe.mode_count = probe.mode_count > 128 ? 128 : probe.mode_count;
+                        // The kernel copies a list only when it fits what was asked for, and says how long it is either way: a list longer
+                        // than the room is asked again with room for all of it.
+                        modes = compositor_modes_room((long)probe.mode_count);
+                        if (!modes)
+                                continue;
+                        asked_modes = probe.mode_count;
                         asked_encoders = probe.encoder_count = probe.encoder_count > 8 ? 8 : probe.encoder_count;
                         probe.modes = (unsigned long)modes;
                         probe.encoders = (unsigned long)encoders;
@@ -856,6 +885,7 @@ static void compositor_damage_space(void)
 }
 
 static void compositor_scale_fit(void);
+static void compositor_scale_set(int scale);
 
 /*
         The scale each screen's displays line asks, taken by the screens as they are driven. A scale is no mode and no
@@ -881,16 +911,8 @@ static int compositor_scales_take(void)
         }
         if (!changed)
                 return 0;
-        compositor.scale = compositor.output[0].scale;
-        if (compositor.table)
-                compositor.table->scale = (unsigned int)compositor.scale;
-        compositor.cursor.plane.scale = 0;
-        compositor_cursor_move();
+        compositor_scale_set(compositor.output[0].scale);
         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, compositor.outputs);
-        compositor_band_room();
-        compositor_scale_fit();
-        compositor_tabs_changed();
-        compositor_damage(0, 0, compositor.width, compositor.height);
         return 1;
 }
 
@@ -1066,6 +1088,8 @@ static b32 compositor_space_take(int first)
                         // Frames go out at the fastest screen's rate.
                         period = !period || 1000000000ull / refresh < period ? 1000000000ull / refresh : period;
                 }
+                int scale_was = compositor.scale;
+
                 compositor.outputs = lit;
                 if (lit)
                         compositor.scale = compositor.output[0].scale;
@@ -1116,6 +1140,9 @@ static b32 compositor_space_take(int first)
                         compositor_scanout_own();
                         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])was_names, was_count);
                         compositor_band_room();
+                        // A desktop scale taken with the screens refits the floating windows to it (compositor_scale_fit, as compositor_scale_set does).
+                        if (compositor.scale != scale_was)
+                                compositor_scale_fit();
                         compositor_tabs_changed();
                 }
                 compositor.mirror_stale = 1;

@@ -1193,7 +1193,6 @@ static int compositor_moon_band(int x, int y)
         reads every row (it watches /root), so the verbs, Settings and the band agree.
 */
 static const char *compositor_settings_root = "";
-static int compositor_edit_refused; // the arrangement's presses refused for a device that is not the machine's own (WINDOW_EVENT_VIRTUAL)
 
 static int compositor_row_write(const char *path, const char *word)
 {
@@ -1219,6 +1218,12 @@ static int compositor_row_write(const char *path, const char *word)
         return 1;
 }
 
+// The item a press of the arrangement holds until its release: Done ends the press (compositor_edit_done), so a release after it drops nothing.
+static struct
+{
+        int which, band, held;
+} compositor_edit_drag;
+
 // Done: the arrangement kept through its rows, and the band out of it.
 static int compositor_edit_done(void)
 {
@@ -1227,6 +1232,7 @@ static int compositor_edit_done(void)
 
         for (int at = 0; at < count; at++)
                 kept += compositor_row_write(paths[at], words[at]);
+        compositor_edit_drag.held = 0;
         taskbar_edit_set(0);
         compositor_tabs_changed();
         return kept == count;
@@ -1290,11 +1296,6 @@ static void compositor_menu_chose(int id)
         is put away by a press anywhere else (which is then nothing more); the arrangement takes the band's presses: Done, and an item
         pressed and let go elsewhere on the band, from a device plugged into the machine alone.
 */
-static struct
-{
-        int which, band, held;
-} compositor_edit_drag;
-
 /*
         A press of the arrangement on the band of view (its number band) at x, y, from a device that is the machine's own or not (physical):
         0 when it is on nothing of the arrangement's, else 1, taken (refused for a device not the machine's: counted, nothing done).
@@ -1307,10 +1308,7 @@ static int compositor_edit_press(const struct taskbar_view *view, int band, int 
                 return 0;
         // The arrangement is the settings': a device that is not the machine's own moves nothing and keeps nothing.
         if (!physical)
-        {
-                compositor_edit_refused++;
                 return 1;
-        }
         if (which == TASKBAR_DONE)
                 compositor_edit_done();
         else
@@ -1324,9 +1322,7 @@ static int compositor_edit_release(const struct taskbar_view *view, int x, int y
         if (!compositor_edit_drag.held)
                 return 0;
         compositor_edit_drag.held = 0;
-        if (!physical)
-                compositor_edit_refused++;
-        else if (taskbar_edit_drop(view, compositor_edit_drag.which, x, y))
+        if (physical && taskbar_edit_drop(view, compositor_edit_drag.which, x, y))
                 compositor_tabs_changed();
         return 1;
 }
@@ -1354,6 +1350,9 @@ static int compositor_band_hand(unsigned int code, int down)
                         return 1;
                 }
         }
+        // A press held when the arrangement ends is over: its release, after the menu reopens the arrangement, drops nothing.
+        if (!down && code == COMPOSITOR_BTN_LEFT && !taskbar_editing())
+                compositor_edit_drag.held = 0;
         if (!taskbar_editing() || code != COMPOSITOR_BTN_LEFT)
                 return 0;
         if (!down)
@@ -3643,6 +3642,7 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                 {
                 case UI_TOUCH_START:
                         compositor.touch.device = (int)at;
+                        compositor.touch.physical = at < COMPOSITOR_INPUTS && compositor_input_physical[at];
                         compositor.touch.hidden = 1;
                         compositor.touch.closing = COMPOSITOR_NONE;
                         compositor.touch.hold_row = COMPOSITOR_NONE;
@@ -4116,8 +4116,15 @@ static void compositor_touch_tick(positive now)
                 compositor_swipe_hand((unsigned int)compositor.swipe.device, now, &compositor.swipe.landing);
                 return;
         }
-        ui_touch_tick(&compositor.touch.gesture, now, compositor.button_down & 1, &out);
-        compositor_touch_apply((unsigned int)compositor.touch.device, &out, now);
+        // The timer's posts are made outside the device's read: they are the finger's own when the finger was the machine's (touch.physical).
+        {
+                int was = compositor_post_physical;
+
+                ui_touch_tick(&compositor.touch.gesture, now, compositor.button_down & 1, &out);
+                compositor_post_physical = was || compositor.touch.physical;
+                compositor_touch_apply((unsigned int)compositor.touch.device, &out, now);
+                compositor_post_physical = was;
+        }
 }
 
 /* ---- end of touch ---- */

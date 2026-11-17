@@ -385,7 +385,6 @@ struct wayland_host
 #define WAYLAND_LAYERS 8        // the most subsurfaces a window is handed to the host with as layers (row_layers)
 #define WAYLAND_LAYERS_KEPT 1
 #define WAYLAND_LAYERS_ROOT 2
-#define WAYLAND_GONE 32         // buffers read in place that a client is owed back once a frame is drawn: of subsurfaces that went, and of rows a card job may still read
 
 /*
         Objects. An object is an id the client chose (or the server, from WAYLAND_SERVER_BASE), the interface it
@@ -761,10 +760,10 @@ struct wayland_client
         long hold_surface, hold_at;
         struct wayland_ids relative_ids; // its relative pointers
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
-        // The buffers subsurfaces that went (destroyed, or taken off their parent) were read in place from as layers, buffer index and one:
-        // the host has been told they went, and a frame drawn since lets them go (wayland_gone_drawn).
-        unsigned int gone[WAYLAND_GONE];
-        unsigned char gones;
+        // The buffers subsurfaces that went (destroyed, or taken off their parent) and rows a card job may still read were read in place
+        // from, buffer index and one: a list that grows. The host has been told they went, and a frame drawn since lets them go
+        // (wayland_gone_drawn); a buffer is kept until then, however many there are.
+        struct wayland_ids gone;
         struct wayland_table server_table; // the server's ids -> object slot and one (unsigned int), for ids below its count
         unsigned int *server_index;
         // The tables (struct wayland_table), and each one's elements as an array, at the table's reservation: they never move.
@@ -801,6 +800,7 @@ struct wayland_token
         int client;
         unsigned long serial;
         long when;
+        unsigned int gen; // bumped each time the slot is given to a new token: the object that made one holds the gen it was given (its aux)
         char text[33];
 };
 
@@ -1208,6 +1208,7 @@ static void wayland_tables_drop(struct wayland_client *c)
         for (long k = 0; k < 3; k++)
                 wayland_ids_drop(&c->seat_ids[k]);
         wayland_ids_drop(&c->device_ids[0]), wayland_ids_drop(&c->device_ids[1]), wayland_ids_drop(&c->relative_ids);
+        wayland_ids_drop(&c->gone);
         wayland_table_drop(&c->source_table);
         wayland_table_drop(&c->offer_table);
         wayland_table_drop(&c->params_table);
@@ -2353,6 +2354,15 @@ static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surf
         s->readies.count = 0;
 }
 
+/* The frame callbacks a commit takes from a surface: each answered at once when it has no frame to wait for, else kept for the frame. None is left. */
+static void wayland_callbacks_take(struct wayland_client *c, struct wayland_surface *s, long time)
+{
+        for (long at = 0; at < s->callbacks.count; at++)
+                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
+                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), time);
+        s->callbacks.count = 0;
+}
+
 /*
         Presentation feedback: a feedback that will not be answered with a frame is discarded, and its object let go. The
         object's id is looked up in the client's own table, so an id a client has since let go of is none.
@@ -2499,14 +2509,12 @@ static int wayland_row_busy(long row)
 }
 
 // A buffer read in place let go of (index and one), or, while a job of the card may still read its row's pictures, kept until a frame is drawn
-// (the client's gone list, wayland_gone_drawn); let go of at once only past WAYLAND_GONE.
+// (the client's gone list, wayland_gone_drawn); let go of at once only when the memory for the list is not there.
 static void wayland_lent_let(struct wayland_client *c, long row, unsigned int index1)
 {
         if (!index1)
                 return;
-        if (wayland_row_busy(row) && c->gones < WAYLAND_GONE)
-                c->gone[c->gones++] = index1;
-        else
+        if (!wayland_row_busy(row) || !wayland_ids_add(&c->gone, index1))
                 wayland_let_go(c, index1 - 1);
 }
 
@@ -2921,16 +2929,14 @@ static void wayland_lend_end(struct wayland_client *c, struct wayland_surface *s
 }
 
 // The buffers a surface that goes was read in place from (it hangs from no window, or is gone): kept by its client until a frame is drawn
-// without them (wayland_gone_drawn), or let go of at once past WAYLAND_GONE.
+// without them (wayland_gone_drawn), let go of at once only when the memory for the list is not there.
 static void wayland_lend_leave(struct wayland_client *c, struct wayland_surface *s)
 {
         unsigned int kept[2] = {s->lent, s->lent_gone};
 
         s->lent = s->lent_gone = 0;
         for (long at = 0; at < 2; at++)
-                if (kept[at] && c->gones < WAYLAND_GONE)
-                        c->gone[c->gones++] = kept[at];
-                else if (kept[at])
+                if (kept[at] && !wayland_ids_add(&c->gone, kept[at]))
                         wayland_let_go(c, kept[at] - 1);
 }
 
@@ -2940,16 +2946,16 @@ static void wayland_gone_drawn(struct wayland_client *c, int dmabufs)
 {
         long kept = 0;
 
-        for (long at = 0; at < c->gones; at++)
+        for (long at = 0; at < c->gone.count; at++)
         {
-                long index = c->gone[at] - 1;
+                long index = c->gone.id[at] - 1;
 
                 if (!dmabufs && c->pools[c->buffers[index].pool].dmabuf)
-                        c->gone[kept++] = c->gone[at];
+                        c->gone.id[kept++] = c->gone.id[at];
                 else
                         wayland_let_go(c, index);
         }
-        c->gones = (unsigned char)kept;
+        c->gone.count = kept;
 }
 
 // The subsurfaces that hang from no shown window hold no buffer as a layer: theirs go once a frame is drawn without them. also is a surface
@@ -3262,10 +3268,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 // A root with no window has no frame to wait for: the child's callbacks are answered now, as a commit's are.
                 if (root->row < 0)
                 {
-                        for (long at = 0; at < s->callbacks.count; at++)
-                                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
-                                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
-                        s->callbacks.count = 0;
+                        wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
                         wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
                 }
                 s->sub_dirty = 1;
@@ -3406,10 +3409,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         s->transform = s->pending_transform;
         s->alpha = s->pending_alpha;
         s->async_hint = s->pending_async;
-        for (long at = 0; at < s->callbacks.count; at++)
-                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
-                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
-        s->callbacks.count = 0;
+        wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
         wayland_feedback_take(c, s, 1);
 }
 
@@ -3446,10 +3446,7 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
                 s->attach_made = 0;
                 s->attached = 0;
                 s->damages = 0;
-                for (long at = 0; at < s->callbacks.count; at++)
-                        if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
-                                wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
-                s->callbacks.count = 0;
+                wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
                 wayland_feedback_take(c, s, 0);
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
@@ -4719,12 +4716,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         s->damages = 0;
         s->damage_full = 0;
         // The frame callbacks the commit takes. A surface with no window has no frame: its callbacks are answered now.
-        for (long at = 0; at < s->callbacks.count; at++)
-        {
-                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
-                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
-        }
-        s->callbacks.count = 0;
+        wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
         wayland_feedback_take(c, s, s->row >= 0);
         if (s->row < 0 && s->readies.count)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
@@ -4736,7 +4728,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
         struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
 
         if (!s)
-                return op == WLQ_wl_surface_destroy ? WAYLAND_OK : WAYLAND_OK;
+                return WAYLAND_OK;
         switch (op)
         {
         case WLQ_wl_surface_destroy:
@@ -4748,12 +4740,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                 if (s->presentings.count)
                         c->presenting_surfaces--;
                 s->feedbacks.count = s->presentings.count = 0;
-                if (s->role_id)
-                {
-                        // A role object that outlives its surface is inert; the window goes with the surface.
-                        wayland_surface_drop(c, s);
-                        return WAYLAND_OK;
-                }
+                // A role object that outlives its surface is inert; the window goes with the surface.
                 wayland_surface_drop(c, s);
                 return WAYLAND_OK;
         case WLQ_wl_surface_attach:
@@ -9169,13 +9156,17 @@ static int wayland_token_free(void)
                         wayland.token[at].live = 0;
         for (long at = 0; at < wayland.tokens; at++)
                 if (!wayland.token[at].live)
+                {
+                        wayland.token[at].gen++;
                         return (int)at;
+                }
         // None free: the table grown by one (-1 when the memory is not there).
         wayland.token_table.unit = sizeof(struct wayland_token);
         if (wayland.tokens >= 0x7fffffffL || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1))
                 return -1;
         wayland.token = (struct wayland_token *)wayland.token_table.at;
         wayland.token[wayland.tokens].live = 0;
+        wayland.token[wayland.tokens].gen = 0;
         return (int)wayland.tokens++;
 }
 
@@ -9216,7 +9207,9 @@ static void wayland_token_forget(long slot)
 static int wayland_activation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         int at = self->link;
-        struct wayland_token *t = at >= 0 && at < wayland.tokens && wayland.token[at].live && wayland.token[at].client == c->slot
+        // The object's token is the one it was given: the slot's live token is another's once the first is used and the slot given again.
+        struct wayland_token *t = at >= 0 && at < wayland.tokens && wayland.token[at].live && wayland.token[at].client == c->slot &&
+                                          wayland.token[at].gen == self->aux
                                       ? &wayland.token[at] : 0;
 
         if (self->iface == WLI_xdg_activation_v1)
@@ -9235,6 +9228,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                         wayland.token[at].serial = 0;
                         wayland.token[at].text[0] = 0;
                         c->objects[a[0].slot].link = (int)at;
+                        c->objects[a[0].slot].aux = wayland.token[at].gen;
                         return WAYLAND_OK;
                 }
                 if (op != WLQ_xdg_activation_v1_activate)
@@ -9394,12 +9388,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 }
                 return WAYLAND_OK;
         case WLI_zwp_relative_pointer_v1:
-                for (long at = 0; at < c->relative_ids.count; at++)
-                        if (c->relative_ids.id[at] == self->id)
-                        {
-                                c->relative_ids.id[at] = c->relative_ids.id[--c->relative_ids.count];
-                                break;
-                        }
+                wayland_ids_remove(&c->relative_ids, self->id);
                 return WAYLAND_OK;
         case WLI_zwp_pointer_constraints_v1:
         {
@@ -10802,7 +10791,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                 }
         }
         for (long slot = 0; slot < wayland.client_slots; slot++)
-                if (wayland.client[slot] && wayland.client[slot]->gones)
+                if (wayland.client[slot] && wayland.client[slot]->gone.count)
                         wayland_gone_drawn(wayland.client[slot], 1);
 }
 
@@ -10829,7 +10818,7 @@ static void wayland_drawn_rows(int dmabuf_busy_row)
                 wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
         }
         for (long slot = 0; wayland.host && slot < wayland.client_slots; slot++)
-                if (wayland.client[slot] && wayland.client[slot]->gones)
+                if (wayland.client[slot] && wayland.client[slot]->gone.count)
                         wayland_gone_drawn(wayland.client[slot], 0);
 }
 
@@ -10907,7 +10896,7 @@ WAYLAND_API long wayland_frame_wanted(void)
                         return 1;
                 // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows),
                 // and so is a client that holds those of subsurfaces that went.
-                if (c && c->gones)
+                if (c && c->gone.count)
                         return 1;
                 if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].lent_gone &&
                     wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))

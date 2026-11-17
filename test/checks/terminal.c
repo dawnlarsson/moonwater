@@ -374,7 +374,7 @@ static struct
         unsigned int refuse_sets;
         // The rates the panel lists at its size, in the kernel's order (the preferred first, then the fastest), rate_count of them (0: its one mode
         // at 60 Hz), and the rate of the mode on the crtc (0: 60): what Canvas set at the start, then the last set's.
-        unsigned int rates[8], rate_count, crtc_rate;
+        unsigned int rates[160], rate_count, crtc_rate; // a connector may list as many modes as the check gives it (130 in one row)
         // A card whose first connector is a ghost: connected at the first look, with a list of modes that grew by the second (so none is read) and an
         // encoder that can have only a crtc the card has not, and whose second connector is the panel, with no encoder of its own yet.
         int ghost;

@@ -8852,6 +8852,92 @@ static void test_presented_discard_row(void)
 }
 
 /* A child committed under a root with no buffer yet (not mapped): its frame callback is answered without the root mapping. */
+/*
+        The buffers read in place that a busy row's job may still read are kept until a frame is drawn, however many there are: a client that
+        commits 33 times before that frame has none of them released early (wayland_lent_let, wayland_gone_drawn), and all of them at the frame.
+*/
+static void test_gone_list(void)
+{
+        struct wayland_host host = fake_host;
+        struct session s;
+        struct wlc *c;
+        unsigned long buffer[40];
+        long early = 0, at;
+
+        host.row_busy = fake_row_busy;
+        wl_reset();
+        fake.lend = 1;
+        fake_busy = 0;
+        wayland_start(&host);
+        session_open(&s);
+        session_window(&s, 0xff101010);
+        c = s.c;
+        fake_busy = 1;
+        for (at = 0; at < 40; at++)
+        {
+                buffer[at] = wl_buffer_of(&s, 32, 24, 0xff000000u | (unsigned int)(at * 7 + 1), WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer[at], 0L, 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                wlc_pump(c);
+        }
+        early = releases_of(c, s.buffer);
+        for (at = 0; at < 40; at++)
+                early += releases_of(c, buffer[at]);
+        WLCHECK(early == 0, "a client committing 40 times before a frame with a busy row gets no buffer released early (%ld released)", early);
+        fake_busy = 0;
+        wayland_drawn();
+        wlc_pump(c);
+        early = releases_of(c, s.buffer);
+        for (at = 0; at < 39; at++)
+                early += releases_of(c, buffer[at]);
+        WLCHECK(early == 40, "and the frame drawn after the job lets all 40 go (%ld released of 40)", early);
+        wlc_end(c);
+        wayland_stop();
+}
+
+/*
+        A destroyed activation token is the one its object was given, not whichever token the slot holds by then: X is made, committed and used,
+        so its slot is free; Y takes that slot; X is destroyed, and Y, which is still pending, is still made (its commit gives it out).
+*/
+static void test_token_reuse(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long activation, first, second;
+        char given[64];
+        long a;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        activation = wl_global(c, s.registry, WLI_xdg_activation_v1, 1);
+        first = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, first);
+        wlc_send(c, first, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(c);
+        a = event_at(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        WLCHECK(a >= 0, "the first token is given out");
+        if (a >= 0)
+                memcpy(given, c->ev[a].text[0], sizeof given);
+        else
+                given[0] = 0;
+        wlc_forget(c);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
+        second = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, second);
+        wlc_send(c, first, WLQ_xdg_activation_token_v1_destroy);
+        wlc_send(c, second, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(c);
+        a = event_at(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        WLCHECK(a >= 0 && strlen(c->ev[a].text[0]) == 32,
+                "destroying a consumed token does not kill the next token of the same client (its commit gives it out)");
+        wlc_end(c);
+        wayland_stop();
+}
+
 static void test_sub_root_unmapped(void)
 {
         struct session s;
@@ -8903,6 +8989,8 @@ int main(int argc, char **argv)
         test_xwm_moves();
         test_presented_discard_row();
         test_sub_root_unmapped();
+        test_gone_list();
+        test_token_reuse();
         test_frame_overflow();
         test_presentation();
         test_touch();

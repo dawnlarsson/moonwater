@@ -503,6 +503,7 @@ struct compositor_touch
         int resumed;             // the press is being made again without the close button (compositor_touch_resume)
         int hold_row;            // the window a long press landed on, which its lift is told, or COMPOSITOR_NONE
         int holding;             // the long press's right button is being sent: its events carry WINDOW_KEY_HOLD
+        int physical;            // the finger is the machine's own (compositor_input_physical of its device at its start), so its posts are
         int x, y;                // the last place a finger reported: a long press is placed there, whatever the pointer is
         int pinch_row;           // the window a pinch began on (its focal point then), which its updates and end go to, or COMPOSITOR_NONE
         int pinch_level;         // a legacy window's pinch: the scale (1024ths) of the last Ctrl and wheel notch sent
@@ -959,6 +960,7 @@ static struct
         int device_number[COMPOSITOR_INPUTS];
 
         int scale;           // device pixels a drawn one is
+        int boot_scale;      // the percent the program was started at (-s, else WINDOWS_SCALE_DEFAULT): what a screen with no displays line is drawn at
 
         /*
                 The windows: the table every program maps (window.c), each row's door and wake, and the
@@ -1771,27 +1773,15 @@ static void compositor_screens_say(void);
 
 static void compositor_headless_scale(void)
 {
-        static int started;
         const struct windows_display *display;
         int scale;
 
-        if (!started)
-                started = compositor.scale;
         compositor_displays_read(0);
         display = windows_display_of(compositor_display, compositor_displays, COMPOSITOR_HEADLESS_NAME,
                                      windows_name_length(COMPOSITOR_HEADLESS_NAME));
-        scale = display && display->scale ? (int)display->scale : started;
-        if (scale == compositor.scale)
-                return;
-        compositor.scale = scale;
-        if (compositor.table)
-                compositor.table->scale = (unsigned int)scale;
-        compositor.cursor.plane.scale = 0;
-        compositor_cursor_move();
-        compositor_band_room();
-        compositor_scale_fit();
-        compositor_tabs_changed();
-        compositor_damage(0, 0, compositor.width, compositor.height);
+        scale = display && display->scale ? (int)display->scale : compositor.boot_scale ? compositor.boot_scale : WINDOWS_SCALE_DEFAULT;
+        if (scale != compositor.scale)
+                compositor_scale_set(scale);
 }
 
 // The screens taken again (a screen came or went, the arrangement changed), and said in the log when they changed.
@@ -2521,6 +2511,8 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_owed_keys, COMPOSITOR_ROWS_ROW) \
         X(compositor_owed_key_flags, COMPOSITOR_ROWS_ROW) \
         X(compositor_owed_any, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_physical, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owed_key_physical, COMPOSITOR_ROWS_ROW) \
         X(compositor_doors.asked, COMPOSITOR_ROWS_ROW1) \
         X(compositor_record_shots[0].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
@@ -2990,6 +2982,7 @@ static b32 compositor_main()
 #endif
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
+        compositor.boot_scale = compositor.scale;
         if (!headless && !compositor.layout_given)
                 compositor_layout_read();
 
