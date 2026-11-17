@@ -26039,6 +26039,16 @@ static void ui_centre(struct windows address_to table, unsigned int row, int wid
         table->y[row] = y + (screen_height - height) / 2 - offset;
 }
 
+/*
+        A window that asks for no place of its own (WINDOW_PLACE_FREE): the compositor centres it on the screen under the pointer.
+        Its x and y are ui_centre's still, for a compositor that reads no placement.
+*/
+static void ui_free(struct windows address_to table, unsigned int row, int width, int height, int offset)
+{
+        ui_centre(table, row, width, height, offset);
+        windows_place_free(table, row);
+}
+
 // The side of a panel's button a window goes on: above a bottom panel, below a top one, right of a left one, left of the rest.
 static unsigned int ui_panel_side(unsigned int edge)
 {
@@ -26101,8 +26111,8 @@ static void ui_anchor_set(const struct ui_anchor address_to anchor, struct windo
 /*
         A window's first size and place, the same for every app that opens one: width by height device pixels asked, as wide as the
         output at most and as tall as the output less UI_WINDOW_ROOM (ui_app_room: what a window leaves above and below it), beside the
-        band's cell that was pressed where the app was asked to open there (-a) and the compositor left one, else in the middle of the
-        primary screen and UI_WINDOW_RAISE above it. The size is the app's (ui_app_size); the place is read with the first picture.
+        band's cell that was pressed where the app was asked to open there (-a) and the compositor left one, else with no place of
+        its own (ui_free), which the compositor centres on the screen under the pointer. The size is the app's (ui_app_size); the place is read with the first picture.
 */
 #define UI_WINDOW_ROOM (2 * (24 + 24)) // logical pixels of the output's height a window leaves free, above and below it together
 #define UI_WINDOW_RAISE 12             // logical pixels a window in the middle of its screen sits above the middle
@@ -26124,7 +26134,7 @@ static fn ui_app_place(struct ui_app address_to app, int width, int height)
         if (app->anchor.anchored)
                 ui_anchor_set(&app->anchor, table, app->own->row, *app->width, *app->height);
         else
-                ui_centre(table, app->own->row, *app->width, *app->height, ui_px(app->ui, UI_WINDOW_RAISE));
+                ui_free(table, app->own->row, *app->width, *app->height, ui_px(app->ui, UI_WINDOW_RAISE));
 }
 
 /*

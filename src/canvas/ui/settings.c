@@ -6560,7 +6560,7 @@ static int settings_open(void)
 
                 gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                ui_centre(table, row, settings.width, settings.height, 0);
+                ui_free(table, row, settings.width, settings.height, 0);
                 settings_frame();
                 return -1;
         }
@@ -6569,7 +6569,7 @@ static int settings_open(void)
                 int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
 
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                ui_centre(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
+                ui_free(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
         }
         settings_say((string_address) "");
 

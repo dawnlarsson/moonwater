@@ -2153,6 +2153,10 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
                                                                        : (int)(display_w * left / 100));
         table->y[terminal.own.row] = display_y + (cells[0] && cells[1] ? ((int)display_h - (int)terminal.height) / 2
                                                                        : (int)(display_h * top / 100));
+        // The log reader's place is its own (at the left, the terminal across from it); a terminal has none, and the compositor
+        // centres it on the screen under the pointer.
+        if (!terminal.reading)
+                windows_place_free(table, terminal.own.row);
 }
 
 /*

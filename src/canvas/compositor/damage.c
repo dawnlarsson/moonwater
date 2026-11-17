@@ -1009,6 +1009,8 @@ static int compositor_bands(void)
 // The windows that have a tab, in the order they first showed, and what each tab shows: every window on the one band,
 // and on each of several, the windows whose screen it is on (compositor_screen_of).
 static int *compositor_popup_parent;
+// The window a window with no place of its own is centred on when it first shows (a dialog's, a transient's parent): its row + 1, 0 for none.
+static int *compositor_owner;
 static int compositor_popup_top(int root);
 static b32 compositor_popups_close(int root, int keep);
 static b32 compositor_popup_first(int row);

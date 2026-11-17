@@ -153,13 +153,21 @@ struct wayland_rect
         block for a client, release takes it back.
 
         A window: row_open takes a table row for the client's toplevel or popup (the parent's row for a popup,
-        and the popup's place in the parent's picture) and answers it or a negative number, row_close lets it go, row_picture copies a buffer's changed rows
+        and the popup's place in the parent's picture; for a toplevel the row of the window it is for, -1 for none, and for
+        WAYLAND_KIND_PLACED its place on the desktop) and answers it or a negative number, row_close lets it go, row_picture copies a buffer's changed rows
         into it and tells the compositor the picture is new, row_title gives the tab's text, and row_do asks it
         for something (WAYLAND_DO_*). row_facts reads what the compositor says of the window.
 */
 #define WAYLAND_XWAIT_MS 30       // a commit of an X window waits this long for its window manager to say what the window is
 #define WAYLAND_KIND_TOPLEVEL 1
 #define WAYLAND_KIND_POPUP 2
+#define WAYLAND_KIND_PLACED 3 // a toplevel at a place of its own (x, y): an X window that hard-set it, or an override-redirect one alone
+// wayland_xwindow_adopt's popup word: an override-redirect window, an X window that hard-set its place, and the row (+ 1) of the
+// window it is transient for, in the bits above.
+#define WAYLAND_XWINDOW_POPUP 1L
+#define WAYLAND_XWINDOW_PLACED 2L
+#define WAYLAND_XWINDOW_OWNER_SHIFT 8
+#define WAYLAND_XWINDOW_OWNER(row) ((row) >= 0 ? ((long)(row) + 1) << WAYLAND_XWINDOW_OWNER_SHIFT : 0L)
 
 #define WAYLAND_DO_MINIMIZE 1
 #define WAYLAND_DO_MAXIMIZE 2
@@ -556,6 +564,10 @@ struct wayland_surface
         // override-redirect window at (xx, xy) of the output, xdead once its window manager is gone (never shown again), and xwait,
         // the host's ms at which a commit that waited for the word is made without it.
         unsigned char xadopted, xpopup, xdead, xalone; // xalone: an override-redirect one shown as a window of its own (nothing to hang from)
+        // xplaced: an X window that hard-set its place (USPosition or PPosition), at (xx, xy); xowner: the row + 1 of the window it is
+        // transient for (WM_TRANSIENT_FOR), 0 for none, which a window with no place of its own is centred on.
+        unsigned char xplaced;
+        long xowner;
         long xx, xy, xwait;
         // The shortcuts inhibitor: its object, whether it is active (the surface has the keyboard and the inhibitor is not cancelled by
         // the escape chord), and the escape chord's Escape: held down, and since when (the host's ms).
@@ -4229,7 +4241,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 
         if (first)
         {
-                int parent = -1, popup = s->role == WAYLAND_ROLE_POPUP;
+                int parent = -1, popup = s->role == WAYLAND_ROLE_POPUP, placed;
                 struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
 
                 if (popup)
@@ -4256,8 +4268,18 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                         }
                         s->xalone = parent < 0;
                 }
-                s->row = wayland.host->row_open(wayland.host->context, c->slot, popup ? WAYLAND_KIND_POPUP : WAYLAND_KIND_TOPLEVEL, parent,
-                                                s->popup_x, s->popup_y);
+                else
+                {
+                        // A toplevel's parent (xdg_toplevel.set_parent, an X transient's window) is the window it is centred on.
+                        struct wayland_surface *above = !s->xsurface && s->parent ? &c->surfaces[s->parent - 1] : 0;
+
+                        parent = above && above->live && above->row >= 0 ? (int)above->row : s->xsurface && s->xowner > 0 ? (int)s->xowner - 1 : -1;
+                }
+                // An X window that placed itself, or an override-redirect one with nothing to hang from, is where X says.
+                placed = !popup && s->xsurface && (s->xalone || s->xplaced);
+                s->row = wayland.host->row_open(wayland.host->context, c->slot,
+                                                popup ? WAYLAND_KIND_POPUP : placed ? WAYLAND_KIND_PLACED : WAYLAND_KIND_TOPLEVEL,
+                                                placed ? -1 : parent, placed ? s->xx : s->popup_x, placed ? s->xy : s->popup_y);
                 // No row of the table is free: the window is not shown yet, and each commit asks again, so it is shown when one is let go
                 // of. Its client goes on, as a popup with nothing to hang from does: ending it ended Xwayland, every X program with it,
                 // at the desktop's 33rd window.
@@ -11161,13 +11183,16 @@ static struct wayland_surface *wayland_xserial_surface(unsigned long long serial
 }
 
 /*
-        The window manager's word on the X window whose surface set this serial: it is a window, or (popup) an override-redirect
-        window at (x, y) of the output, with this title (plain text, cut to what a title takes). A surface that waited for the word
+        The window manager's word on the X window whose surface set this serial: it is a window, or (popup, WAYLAND_XWINDOW_POPUP) an
+        override-redirect window at (x, y) of the output; a window at (x, y) it placed itself (WAYLAND_XWINDOW_PLACED); one transient for
+        the window of a row (WAYLAND_XWINDOW_OWNER: centred on it), with this title (plain text, cut to what a title takes). A surface that waited for the word
         is shown at the commit that follows. Answers the surface's row (-1 while it has none), or -2 when no surface has the serial
         yet, which the window manager asks of again. Said again, it sets the title anew.
 */
 WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, long x, long y, const char *title)
 {
+        long how = popup;
+
         struct wayland_surface *s = wayland_xserial_surface(serial);
         char text[WAYLAND_TEXT];
         long at = 0;
@@ -11175,9 +11200,12 @@ WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, lo
         if (!s || !s->xsurface || s->xdead)
                 return -2;
         s->xadopted = 1;
+        popup = how & WAYLAND_XWINDOW_POPUP;
         if (s->row < 0)
         {
                 s->xpopup = popup ? 1 : 0;
+                s->xplaced = (how & WAYLAND_XWINDOW_PLACED) ? 1 : 0;
+                s->xowner = how >> WAYLAND_XWINDOW_OWNER_SHIFT;
                 s->xx = x;
                 s->xy = y;
         }

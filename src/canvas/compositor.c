@@ -2500,6 +2500,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
 
 #define COMPOSITOR_ROWS_KEPT(X) \
         X(compositor_popup_parent, COMPOSITOR_ROWS_ROW) \
+        X(compositor_owner, COMPOSITOR_ROWS_ROW) \
         X(compositor_listed, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.offer_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.ask_seen, COMPOSITOR_ROWS_ROW) \
@@ -3551,7 +3552,7 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
 static b32 surface_main()
 {
         bipolar x = 0, y = 0, width = 320, height = 200, colour = 0x3366aa, seconds = -1, flood = 0, alpha = 0;
-        b32 pointer = 0, never = 0, away = 0, sized = 0, focused = 0, glass = 0;
+        b32 pointer = 0, never = 0, away = 0, sized = 0, focused = 0, glass = 0, placed = 0;
         string_address title = null, font = null, text = (string_address) "Moonwater", name = null;
         struct window_row own;
         struct windows *table;
@@ -3582,8 +3583,8 @@ static b32 surface_main()
                 at++;
                 switch (option[1])
                 {
-                case 'x': x = compositor_number(value, 0); break;
-                case 'y': y = compositor_number(value, 0); break;
+                case 'x': x = compositor_number(value, 0), placed = 1; break;
+                case 'y': y = compositor_number(value, 0), placed = 1; break;
                 case 'w': width = compositor_number(value, 0); break;
                 case 'h': height = compositor_number(value, 0); break;
                 case 'c': colour = compositor_number(value, 1); break;
@@ -3619,6 +3620,9 @@ static b32 surface_main()
         }
         table->x[own.row] = (int)x;
         table->y[own.row] = (int)y;
+        // A place given (-x, -y) is the window's own; with none the compositor centres it.
+        if (!placed)
+                windows_place_free(table, own.row);
         table->state[own.row] = away ? WINDOW_MINIMIZED : 0;
         {
                 positive at = 0;

@@ -8808,6 +8808,50 @@ static void test_xwm_moves(void)
         wayland_stop();
 }
 
+/*
+        Where an X window is put: one with no place of its own is a toplevel the compositor centres (no parent); one that hard-set its place
+        (USPosition, PPosition: WAYLAND_XWINDOW_PLACED) is a placed toplevel at X's place; a transient (WAYLAND_XWINDOW_OWNER) is a
+        toplevel whose parent is the window it is for, which the compositor centres it on.
+*/
+static long xwm_places_show(struct session *s, unsigned long serial, long how, long x, long y)
+{
+        struct wlc *c = s->c;
+        unsigned long surface = wlc_id(c, WLI_wl_surface, 6), xwin, buffer;
+
+        wlc_send(c, s->compositor, WLQ_wl_compositor_create_surface, surface);
+        xwin = wlc_id(c, WLI_xwayland_surface_v1, 1);
+        wlc_send(c, s->xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
+        wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, serial, 0UL);
+        wayland_xwindow_adopt(serial, how, x, y, "x");
+        buffer = wl_buffer_of(s, 32, 24, 0xff333333, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        return wayland_xwindow_adopt(serial, how, x, y, "x");
+}
+
+static void test_xwm_places(void)
+{
+        struct session s;
+        long free_row, placed_row, owned_row;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        free_row = xwm_places_show(&s, 0x6161, 0, 7, 9);
+        placed_row = xwm_places_show(&s, 0x6262, WAYLAND_XWINDOW_PLACED, 30, 40);
+        owned_row = free_row >= 0 ? xwm_places_show(&s, 0x6363, WAYLAND_XWINDOW_OWNER(free_row), 7, 9) : -1;
+        WLCHECK(s.c->errors == 0 && free_row >= 0 && fake.row[free_row].kind == WAYLAND_KIND_TOPLEVEL && fake.row[free_row].parent == -1,
+                "an X window with no place of its own is a toplevel with no parent, for the compositor to centre (%ld)", free_row);
+        WLCHECK(placed_row >= 0 && fake.row[placed_row].kind == WAYLAND_KIND_PLACED && fake.row[placed_row].x == 30 &&
+                    fake.row[placed_row].y == 40,
+                "an X window that hard-set its place is a placed toplevel at X's place (%ld)", placed_row);
+        WLCHECK(owned_row >= 0 && fake.row[owned_row].kind == WAYLAND_KIND_TOPLEVEL && fake.row[owned_row].parent == (int)free_row,
+                "an X transient is a toplevel whose parent is the window it is for (%ld)", owned_row);
+        wlc_end(s.c);
+        leak_check("xwm places");
+        wayland_stop();
+}
+
 /* A feedback of a frame that was not drawn, its window let go (a null buffer), is discarded, never answered presented later. */
 static void test_presented_discard_row(void)
 {
@@ -8987,6 +9031,7 @@ int main(int argc, char **argv)
         test_shm();
         test_frames();
         test_xwm_moves();
+        test_xwm_places();
         test_presented_discard_row();
         test_sub_root_unmapped();
         test_gone_list();

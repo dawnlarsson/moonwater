@@ -961,10 +961,20 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
                 // The person's own launch takes the keys with its first window, as a program of the compositor's does.
-                if (kind == WAYLAND_KIND_TOPLEVEL && !compositor_wl.asked[client])
+                if ((kind == WAYLAND_KIND_TOPLEVEL || kind == WAYLAND_KIND_PLACED) && !compositor_wl.asked[client])
                 {
                         compositor_wl.asked[client] = 1;
                         table->asked[row] = (unsigned int)compositor_wl_asked(client);
+                }
+                // A toplevel has no place of its own (xdg asks for none): the compositor centres it, on the window it is for when it has
+                // a parent (a dialog, an X transient). An X window that placed itself (USPosition, PPosition, override-redirect) is where it said.
+                compositor_owner[row] = kind == WAYLAND_KIND_TOPLEVEL && parent >= 0 && parent < (int)compositor_rows_in_use ? parent + 1 : 0;
+                if (kind == WAYLAND_KIND_TOPLEVEL)
+                        table->place[row] = WINDOW_PLACE_FREE;
+                if (kind == WAYLAND_KIND_PLACED)
+                {
+                        table->x[row] = (int)x;
+                        table->y[row] = (int)y;
                 }
                 if (kind == WAYLAND_KIND_POPUP)
                 {

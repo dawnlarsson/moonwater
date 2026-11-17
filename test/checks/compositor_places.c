@@ -21,7 +21,10 @@
         a window is kept on its screen whatever it asked, its top left on it when it is larger; centre is the
         middle of the room at the size asked, up to the room's; maximized fills the room and follows the band when
         it moves, and a double click gives it back the place it would have had; fullscreen is the whole screen; a
-        window that asked for nothing goes where it always went, a step down and across from one in its place.
+        window whose place is its own is where it asked, another asking the same place there too; and one with no
+        place of its own (WINDOW_PLACE_FREE: a program that gave none, a Wayland toplevel, an X window with no
+        USPosition) is centred in the room of the screen under the pointer, or on its owner's window, and kept
+        in the room, at its top left when it is larger (place_free).
 */
 static b32 place_same(const int address_to rect, int x, int y, int width, int height)
 {
@@ -203,8 +206,8 @@ static fn check_compositor_place(void)
                   compositor.w[4] == 120 && compositor.h[4] == 80);
         place_paint(5, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
         place_paint(6, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
-        check("place: a window that asked for nothing is where its program put it, and a second there a step down and across",
-              compositor.x[5] == 130 && compositor.y[5] == 140 && compositor.x[6] == 150 && compositor.y[6] == 160 &&
+        check("place: a window whose place is its own is where its program put it, and a second asking that place is there too",
+              compositor.x[5] == 130 && compositor.y[5] == 140 && compositor.x[6] == 130 && compositor.y[6] == 140 &&
                   !table->want_width[5] && !table->want_width[6]);
         place_paint(7, WINDOW_PLACE_FULLSCREEN, 0, 0, 0, 0, 3, 3, 100, 60);
         check("place: fullscreen fills the output, as a double click does",
@@ -218,13 +221,38 @@ static fn check_compositor_place(void)
         place_paint(10, WINDOW_PLACE_AT, 999999, -999999, 0, 0, 64, 85, 100, 60);
         check("place: nor is a place past WINDOW_PLACE_MOST, which a program writing its row itself could ask",
               compositor.x[10] == 64 && compositor.y[10] == 85);
-        // Two that ask for one place the screen keeps them off (left of it: as 0,0 is for a Wayland or an X top-level, kept to the line
-        // inside) shown in turn: the second steps down and across until it is off the first, not on it (it had been: the place asked was no
-        // window's, the first being where it was kept to).
+        // Two that ask for one place off the screen (left of it) are each kept to the line inside, at the height asked.
         place_paint(11, WINDOW_PLACE_AUTO, 0, 0, 0, 0, -40, 100, 60, 40);
         place_paint(12, WINDOW_PLACE_AUTO, 0, 0, 0, 0, -40, 100, 60, 40);
-        check("place: two windows that ask for a place kept inside the screen are apart, the second a step down from the first",
-              compositor.y[12] > compositor.y[11] && compositor.y[11] == 100);
+        check("place: two windows that ask for a place off the screen are kept inside it where they asked",
+              compositor.y[11] == 100 && compositor.y[12] == 100 && compositor.x[11] == compositor.x[12] && compositor.x[11] >= 0);
+
+        // No place of its own: centred in the room of the screen under the pointer, wherever its x and y said (a Wayland
+        // toplevel's 0,0, a kit app's own centre); a dialog on its owner; one larger than the room at the room's top left.
+        compositor.pointer_x = 10, compositor.pointer_y = 10;
+        place_paint(13, WINDOW_PLACE_FREE, 0, 0, 0, 0, 0, 0, 100, 60);
+        check("place: a window with no place of its own is centred in the room, the band left out, not at the 0,0 it said",
+              compositor.x[13] == 78 && compositor.y[13] == (256 - COMPOSITOR_PANEL - 60) / 2 && table->x[13] == 78);
+        compositor_owner[14] = 13 + 1;
+        place_paint(14, WINDOW_PLACE_FREE, 0, 0, 0, 0, 0, 0, 40, 20);
+        check("place: a dialog with no place of its own is centred on its owner's window",
+              compositor.x[14] == 78 + 30 && compositor.y[14] == compositor.y[13] + 20);
+        compositor_owner[14] = 0;
+        place_paint(15, WINDOW_PLACE_FREE, 0, 0, 0, 0, 0, 0, 240, 240);
+        check("place: one taller than the room is kept to its top left, its line inside",
+              compositor.y[15] == compositor_line(15) && compositor.x[15] == (256 - 240) / 2);
+        {
+                const int wide[4] = {0, 0, 1000, 760}, side[4] = {48, 0, 952, 800}, near_edge[4] = {900, 700, 100, 50};
+
+                place_free(wide, 0, 200, 100, 0, &x, &y);
+                check("place: with no owner, the middle of the room", x == 400 && y == 330);
+                place_free(wide, near_edge, 200, 100, 0, &x, &y);
+                check("place: on an owner at the room's corner, centred on it and kept inside the room", x == 800 && y == 660);
+                place_free(wide, none, 200, 100, 0, &x, &y);
+                check("place: an owner of no size is none", x == 400 && y == 330);
+                place_free(side, 0, 1200, 900, 1, &x, &y);
+                check("place: larger than the room, at the room's top left and its line (the band at the left left out)", x == 49 && y == 1);
+        }
 
         // Two presses on the top of the maximized window: it is given back where it would have been.
         compositor_raise(3);

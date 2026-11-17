@@ -860,7 +860,7 @@ static int editor_start(void)
         // A pinch on the text zooms it (ui_text_pinch): the window takes the pinch, and is not sent it as a wheel with Ctrl.
         __atomic_store_n(&table->pinch_wanted[editor.own.row], 1u, __ATOMIC_RELEASE);
         editor.width = screen_w * 3 / 5, editor.height = screen_h * 3 / 4;
-        ui_centre(table, editor.own.row, editor.width, editor.height, 0);
+        ui_free(table, editor.own.row, editor.width, editor.height, 0);
         ui_scratch_fit(&editor.ui, (unsigned int)screen_w);
         for (positive at = 1; at < (positive)program_argument_count(); at++)
                 if (!editor_open(program_argument(at)) && !editor.count)

@@ -240,6 +240,7 @@ struct compositor_xwm_window
         unsigned long long sync_present; // last present a resize configure was sent on
         unsigned int restore_w, restore_h; // its size before fullscreen
         unsigned int min_w, min_h, max_w, max_h; // WM_NORMAL_HINTS size bounds (0 = unset)
+        unsigned char placed;          // WM_NORMAL_HINTS has USPosition or PPosition: its place is its own, kept where X says
         unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
         unsigned int owner;            // the pid of the program whose window it is, as X-Resource says (0 until it has; compositor_xwm_owned)
         unsigned int asking;           // title requests in flight
@@ -1066,9 +1067,13 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
         else if (p->what == COMPOSITOR_XWM_PROP_NORMAL_HINTS)
         {
                 w->min_w = w->min_h = w->max_w = w->max_h = 0;
+                w->placed = 0;
                 if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
                 {
                         unsigned int flags = xwm_get32(r.value);
+
+                        // USPosition (1) or PPosition (4): the program or the person set where the window goes.
+                        w->placed = (flags & 5u) != 0;
 
                         if ((flags & 16u) && r.value_len >= 28)
                         {
@@ -1204,6 +1209,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         free->protocols = 0;
         free->closes = 0;
         free->transient = 0;
+        free->placed = 0;
         free->x = free->y = 0;
         free->width = free->height = 0;
         free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
@@ -1269,7 +1275,13 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 return;
         if (!(w->state & COMPOSITOR_XWM_ADOPTED) || w->dirty)
         {
-                row = wayland_xwindow_adopt(w->serial, !!(w->state & COMPOSITOR_XWM_POPUPISH), compositor_xwm_from_x(w->x, 0), compositor_xwm_from_x(w->y, 1),
+                // A window that hard-set its place is where X says; one transient for a window that shows is centred on it, and the
+                // rest on the screen under the pointer (compositor_free_place).
+                struct compositor_xwm_window *owner = w->transient ? compositor_xwm_find(w->transient, 0) : 0;
+                long how = ((w->state & COMPOSITOR_XWM_POPUPISH) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
+                           WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
+
+                row = wayland_xwindow_adopt(w->serial, how, compositor_xwm_from_x(w->x, 0), compositor_xwm_from_x(w->y, 1),
                                             w->title);
                 if (row == -2)
                         return;

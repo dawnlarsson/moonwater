@@ -820,6 +820,10 @@ static inline int window_drag_y(int b)
 #define WINDOW_PLACE_HOW 7u        // the mode's bits
 #define WINDOW_PLACE_SCREEN 8u
 #define WINDOW_PLACE_SIZE 16u
+// The window has no place of its own (its program, client or X window hard-set none): where it goes is the compositor's, in the
+// middle of the room of the screen under the pointer, or of its owner's window for a dialog (compositor_free_place). Without it
+// x and y are the window's own, kept where they are (inside the screen).
+#define WINDOW_PLACE_FREE 32u
 // The most a number of a placement can be either way: wider than any desktop, and far inside WINDOW_COORD_MAX.
 #define WINDOW_PLACE_MOST 16384
 // The screens a placement can name, from 1 as it is typed.
@@ -3923,6 +3927,12 @@ static void windows_place_set(struct windows *table, unsigned int row, const str
                 for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                         table->name[row][at] = place->name[at];
         __atomic_store_n(&table->place[row], place->how, __ATOMIC_RELEASE);
+}
+
+// The row's window has no place of its own (WINDOW_PLACE_FREE): the compositor puts it, whatever its x and y say.
+static void windows_place_free(struct windows *table, unsigned int row)
+{
+        __atomic_or_fetch(&table->place[row], WINDOW_PLACE_FREE, __ATOMIC_RELEASE);
 }
 
 /*

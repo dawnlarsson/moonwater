@@ -1634,6 +1634,21 @@ static int place_size(unsigned int asked, int area, int least)
 }
 
 /*
+        Where a window with no place of its own goes (WINDOW_PLACE_FREE), the one rule for the compositor's programs, Wayland's
+        toplevels and X's windows: centred on its owner's rectangle when it has one (a dialog on its parent, a transient on the
+        window it is for), else on the room; kept inside the room (the screen less the taskbar), its line too, and at the room's
+        top left when it is larger. owner is 0 for none, or a rectangle of no size.
+*/
+static void place_free(const int *room, const int *owner, int width, int height, int line, int *x, int *y)
+{
+        const int *on = owner && owner[2] > 0 && owner[3] > 0 ? owner : room;
+
+        *x = on[0] + (on[2] - width) / 2;
+        *y = on[1] + (on[3] - height) / 2;
+        place_clamp(room, width, height, line, x, y);
+}
+
+/*
         Where a placement puts a window on its screen, whose room is room: what the window fills (COMPOSITOR_FLOATING,
         COMPOSITOR_ROOM, COMPOSITOR_MAXIMIZED for the whole screen), and the rectangle. A floating one is the size
         asked for, or the picture's, up to the room's when it is centred in it and the screen's when it is put at
@@ -1763,6 +1778,7 @@ static void compositor_place_read(int row, struct window_place *place)
                 place->x = x;
                 place->y = y;
         }
+        place->how |= how & WINDOW_PLACE_FREE;
         if ((how & WINDOW_PLACE_SCREEN) && screen < WINDOW_PLACE_SCREENS)
         {
                 place->how |= WINDOW_PLACE_SCREEN;
@@ -1934,10 +1950,32 @@ static int compositor_recall(int row, const int (*screens)[4], unsigned int coun
 }
 
 /*
+        Where a row's window with no place of its own goes (place_free): on its owner's window when that shows, in the room of
+        the owner's screen; else in the room of the screen named, or of the one under the pointer.
+*/
+static void compositor_free_place(int row, const struct window_place *place, const int (*screens)[4], unsigned int count, int *x,
+                                  int *y)
+{
+        int owner = compositor_owner[row] - 1, room[4], rect[4];
+        b32 owned = owner >= 0 && owner < (int)compositor_rows_in_use && owner != row && compositor.showing[owner];
+        unsigned int on = place->how & WINDOW_PLACE_SCREEN && place->screen < count ? place->screen
+                          : owned ? place_screen_at(compositor.x[owner] + (int)compositor.w[owner] / 2,
+                                                    compositor.y[owner] + (int)compositor.h[owner] / 2, screens, count)
+                                  : place_screen_at(compositor.pointer_x, compositor.pointer_y, screens, count);
+
+        compositor_room(screens[on], room);
+        if (owned)
+                rect[0] = compositor.x[owner], rect[1] = compositor.y[owner], rect[2] = (int)compositor.w[owner], rect[3] = (int)compositor.h[owner];
+        place_free(room, owned ? rect : 0, (int)compositor.w[row], (int)compositor.h[row], compositor_line(row), x, y);
+}
+
+/*
         Where a window goes the first time it shows, from where its program asked (x, y) and the placement it was
         given: none is where the hand last put a window of its name (compositor_recall), and with nothing kept for it
-        where it asked, a step down and across from any window in that place (compositor_first_place), as it always
-        was; center and at are the rectangle place_rect works out, on the screen named or the first;
+        where it asked when the place is its own, and centred by compositor_free_place when it has none
+        (WINDOW_PLACE_FREE: a program that gave no place, a Wayland toplevel, an X window with no USPosition or
+        PPosition), on its owner or the screen under the pointer, where it was put at 0,0 or where it asked and
+        stepped down and across off any window there; center and at are the rectangle place_rect works out, on the screen named or the first;
         maximized and fullscreen are where it would have gone with none, filling the room or the screen from there,
         so taking it out of that gives it back the place and size it would have had. A size is asked of the
         program as the hand asks one, and the window is shown at it until a picture of it comes.
@@ -1968,7 +2006,9 @@ static void compositor_first_put(int row, int x, int y)
                         compositor_want(row, place_size(place.width, screens[on][2], least_w),
                                         place_size(place.height, screens[on][3], least_h));
                 }
-                compositor_first_place(row, &x, &y);
+                // No place of its own: the compositor's (compositor_free_place). A place of its own is where it is, kept on the screen.
+                if (place.how & WINDOW_PLACE_FREE)
+                        compositor_free_place(row, &place, screens, count, &x, &y);
                 compositor_place(row, x, y);
                 if (how == WINDOW_PLACE_AUTO)
                         return;
@@ -2524,6 +2564,11 @@ static void compositor_leave(int row)
         // A key the keyboard had down is over with it: the next keyboard in the row starts with none held (compositor_osk_read).
         compositor_osk_held[row] = 0;
         compositor_owed_drop(row);
+        // Its owner is no one's now, and it is the owner of no window that shows after it.
+        compositor_owner[row] = 0;
+        for (int other = 0; other < (int)compositor_rows_in_use; other++)
+                if (compositor_owner[other] == row + 1)
+                        compositor_owner[other] = 0;
 
         compositor_stack_remove(row);
         // An armed assist ends with its own window, and loses the thumbnail of one that goes (it is no window to place).
