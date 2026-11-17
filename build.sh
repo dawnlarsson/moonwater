@@ -482,6 +482,26 @@ fi
 #       so the build over there is an ordinary local one and this cannot
 #       recurse.
 #
+#       What the image says about this checkout, as environment words for the
+#       remote build: the commit it is at (twelve hex digits), that commit's
+#       date, and whether the tree has changes. Read before the copy and again
+#       after it (build_remote compares them): the copy is of the tree as it
+#       was while it ran.
+checkout_carry() {
+        commit=$(git -C "$here" rev-parse --short=12 HEAD 2>/dev/null) || return 1
+        carry=
+        case "$commit" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+                carry="MOONWATER_COMMIT=$commit"
+                commit_date=$(git -C "$here" log -1 --format=%cI 2>/dev/null | tr -cd '0-9TZ:+-')
+                [ -z "$commit_date" ] || carry="$carry MOONWATER_COMMIT_DATE=$commit_date"
+                [ -z "$(git -C "$here" status --porcelain 2>/dev/null | head -1)" ] ||
+                        carry="$carry MOONWATER_COMMIT_DIRTY=1"
+                ;;
+        esac
+        printf '%s\n' "$carry"
+}
+
 build_remote() {
         carriage_return=$(printf '\r')
 
@@ -609,6 +629,23 @@ exec "$@"'
                         die "could not link the Lima ssh settings"
                 rsync_rsh="ssh -F $rsync_link/ssh.config"
         fi
+        #       The stamp is read before the copy and again after it, and a
+        #       tracked file written while the copy ran (its time is after the
+        #       marker's) is refused too: an edit made and reverted during the
+        #       copy leaves the tree as it was at both readings, and the copy
+        #       holds it.
+        if carry_before=$(checkout_carry); then
+                :
+        else
+                say "No git checkout here: the image will say commit unknown"
+                carry_before=
+        fi
+        copy_marker=$(mktemp) || die "could not make a marker for the copy"
+        #       A second more, so that a write during the copy is later than
+        #       the marker whatever the clock's resolution: file times are
+        #       coarser than a copy's first moments, and an edit in the same
+        #       tick as the marker would not show.
+        sleep 1
         rsync_status=0
         rsync -az --delete --no-perms ${rsync_rsh:+-e "$rsync_rsh"} \
                 --exclude '/.moonwater-stage-v1' \
@@ -624,7 +661,15 @@ exec "$@"'
                 rm -f "$rsync_link/ssh.config"
                 rmdir "$rsync_link"
         fi
+        #       A file the copy sends (rsync's excludes, below) written after
+        #       the marker: find takes its paths before its tests.
+        changed_during_copy=$(cd "$here" && find . \( -name .git -o -name .claude -o -name linux -o -name artifacts \
+                -o -name fs -o -name dist \) -prune -o -type f -newer "$copy_marker" -print 2>/dev/null | head -1)
+        if carry_after=$(checkout_carry); then :; else carry_after=; fi
+        rm -f -- "$copy_marker"
         [ "$rsync_status" = 0 ] || die "copying the tree failed"
+        [ -z "$changed_during_copy" ] && [ "$carry_after" = "$carry_before" ] ||
+                die "the checkout changed while it was copied to $host: build again once it is still"
 
         # The architecture travels as --arch rather than as a profile, which
         # would replace the default set rather than swap its arch/ member.
@@ -644,21 +689,9 @@ exec "$@"'
         #
         carry=""
         [ -z "${MOONWATER_STOCK:-}" ] || carry="MOONWATER_STOCK=1"
-        # The copy above leaves .git behind, so the remote has no commit to read: the one this checkout is at goes
-        # with it (twelve hex digits, git's date, and whether the tree has changes), for the image to say.
-        if commit=$(git -C "$here" rev-parse --short=12 HEAD 2>/dev/null); then
-                case "$commit" in
-                [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
-                        carry="$carry MOONWATER_COMMIT=$commit"
-                        commit_date=$(git -C "$here" log -1 --format=%cI 2>/dev/null | tr -cd '0-9TZ:+-')
-                        [ -z "$commit_date" ] || carry="$carry MOONWATER_COMMIT_DATE=$commit_date"
-                        [ -z "$(git -C "$here" status --porcelain 2>/dev/null | head -1)" ] ||
-                                carry="$carry MOONWATER_COMMIT_DIRTY=1"
-                        ;;
-                esac
-        else
-                say "No git checkout here: the image will say commit unknown"
-        fi
+        # The copy above leaves .git behind, so the remote has no commit to read: the stamp read before the copy
+        # goes with it, for the image to say.
+        [ -z "$carry_before" ] || carry="$carry $carry_before"
 
         # One build at a time on the build host: the build holds /tmp/moonwater-build.lock, so builds from several
         # trees queue here rather than running out of memory together (a kernel build wants most of an 8 GB VM).
