@@ -5065,8 +5065,13 @@ static void test_clipboard(void)
                 wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)wayland.client[cb->slot]->press_serial);
                 wayland_pointer_button(b.row, 272, 0);
                 wlc_pump(cb);
-                WLCHECK(clip_cancelled(cb, 0) == 1 && wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_drop) == 0 && !wayland_dragging(),
-                        "a drag let go with no type accepted is cancelled, and nothing dropped");
+                WLCHECK(clip_cancelled(cb, 0) == 0 && wayland.drag.live && wayland.drag.released,
+                        "a drag let go before its target answered waits for the answer");
+                fake.now += WAYLAND_DRAG_ANSWER_MS;
+                wayland_idle_tick();
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1 && wlc_count(cb, WLI_wl_data_device, WLE_wl_data_device_drop) == 0 && !wayland.drag.live,
+                        "and with no type accepted by then it is cancelled, and nothing dropped");
                 drag = clip_source(&b, 0, "text/plain");
                 wayland_pointer_button(b.row, 272, 1);
                 wlc_pump(cb);
