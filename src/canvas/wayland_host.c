@@ -3366,7 +3366,21 @@ static long compositor_wl_locks(void *context)
 */
 static void compositor_wl_pointer_hold(void *context, long row, long mode)
 {
+        long was = compositor_wl.hold_row;
+
         (void)context;
+        // A lock let go of with a hint (set_cursor_position_hint: where a game drew the pointer it held, or where Xwayland has an X
+        // game's pointer, which it warps): the pointer is shown there, in the window, where it would otherwise come back where the
+        // lock took it and jump. A hint outside the window's picture is not taken.
+        if (compositor_wl.hold == 1 && mode != 1 && was >= 0 && was < COMPOSITOR_ROWS && wayland.hint_row == was &&
+            wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.w[was] && wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.h[was])
+        {
+                compositor.pointer_x = compositor.x[was] + (int)wayland.hint_x;
+                compositor.pointer_y = compositor.y[was] + (int)wayland.hint_y;
+                compositor_pointer_sync();
+                compositor_pointer_shown();
+        }
+        wayland.hint_row = -1;
         compositor_wl.hold_row = (int)row;
         compositor_wl.hold = (int)mode;
         compositor.cursor.hold_hidden = mode == 1;
@@ -3378,14 +3392,24 @@ static int compositor_wl_held(void)
         return (compositor_wl.hold == 1 || compositor_wl.hold == 2) && compositor_wl.hold_row >= 0;
 }
 
-// The hand's counts, to the window that holds the pointer locked or confined; 1 when locked and the pointer is not to move.
-static int compositor_wl_hold_counts(int dx, int dy, positive now)
+// Whether a client's window holds the pointer locked: the hand's counts are the client's alone, and the pointer is not to move.
+static int compositor_wl_locked(void)
 {
-        if ((compositor_wl.hold != 1 && compositor_wl.hold != 2) || compositor_wl.hold_row < 0)
-                return 0;
-        if (dx || dy)
-                wayland_pointer_relative(compositor_wl.hold_row, dx, dy, (long)(now / 1000));
-        return compositor_wl.hold == 1;
+        return compositor_wl.hold == 1 && compositor_wl.hold_row >= 0;
+}
+
+/*
+        One report of the hand, to the client the pointer is with: the window that holds it (locked or confined), else the one it
+        is over. dx, dy is the motion with the gain, udx, udy the hand's counts as they came (zwp_relative_pointer_v1's two), now
+        the device's stamp. Sent as the report is read, one relative motion a report, and not from the place the pointer reaches,
+        so the counts go on at a screen's edge or the confinement's and a pixel the gain rounds away is still the hand's.
+*/
+static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now)
+{
+        long row = compositor_wl_held() ? compositor_wl.hold_row : wayland.pointer_row;
+
+        if (row >= 0 && (udx || udy))
+                wayland_pointer_relative(row, dx, dy, udx, udy, (long)(now / 1000));
 }
 
 // A pointer confined to a window, moved, is put back inside it.
@@ -5901,6 +5925,8 @@ static void compositor_wl_wake(void)
                         wayland_row_wake(row);
                         rows_del(&compositor.woken, row);
                 }
+        // The hand's counts no motion took (the pointer stopped at an edge), in a frame of their own.
+        wayland_pointer_counts_flush();
         compositor_wl_flush_all();
 }
 

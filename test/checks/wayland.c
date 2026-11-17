@@ -7125,7 +7125,7 @@ static void test_games(void)
         struct gamec a, b, d;
         struct wlc *ca, *cb, *cd;
         struct wl_event_seen *e;
-        unsigned long second, rel, inhibitor;
+        unsigned long second, rel, inhibitor, lock_a;
 
         wl_reset();
         wayland_start(&fake_host);
@@ -7135,7 +7135,8 @@ static void test_games(void)
         cb = b.k.s.c;
         WLCHECK(a.k.s.relative && a.k.s.constraints && a.k.s.idle && a.k.s.shortcuts && a.k.s.tearing, "the games' globals are offered");
 
-        /* relative motion of the pointer over a window: the places it moved, as moved */
+        /* relative motion of the pointer over a window: each report of the hand, the motion with the gain and the hand's own
+           counts apart, at the device's microsecond, in a frame of its own; a place the pointer moved to is no relative motion */
         wayland_keyboard_to(a.k.row);
         wayland_pointer_to(a.k.row, 5, 5);
         rel = wlc_id(ca, WLI_zwp_relative_pointer_v1, 1);
@@ -7143,30 +7144,62 @@ static void test_games(void)
         wlc_forget(ca);
         wayland_pointer_motion(a.k.row, 9, 12);
         wlc_pump(ca);
+        WLCHECK(wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 1 &&
+                    wlc_count(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion) == 0,
+                "a place the pointer moved to is a motion and no relative motion (a place stops at the screen's edge)");
+        wlc_forget(ca);
+        wayland_pointer_relative(a.k.row, 5, 9, 3, 5, 9000);
+        wayland_pointer_relative(a.k.row, 3, 5, 1, 2, 9001);
+        wlc_pump(ca);
+        WLCHECK(ca->events == 0, "the reports' counts wait for the frame of the pointer's motion");
+        wayland_pointer_motion(a.k.row, 10, 14);
+        wlc_pump(ca);
+        WLCHECK(wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_frame) == 1 && wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 1 &&
+                    wlc_count(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion) == 1,
+                "and go in that frame, with the place (Xwayland makes a raw event of a place alone)");
         e = wlc_take(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion);
-        WLCHECK(e && e->u[2] == 4 * 256 && e->u[3] == 7 * 256 && e->u[4] == e->u[2] && e->u[5] == e->u[3],
-                "motion of the pointer is relative motion, the places it moved, accelerated or not the same");
+        WLCHECK(e && e->u[1] == 9001 && e->u[2] == 8 * 256 && e->u[3] == 14 * 256 && e->u[4] == 4 * 256 && e->u[5] == 7 * 256,
+                "summed: the motion with the gain, then the hand's counts as they came, at the last report's microsecond");
+        wlc_forget(ca);
+        wayland_pointer_relative(a.k.row, 0, 0, 2, -1, 9004);
+        wayland_pointer_counts_flush();
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion);
+        WLCHECK(e && e->u[2] == 0 && e->u[4] == 2 * 256 && wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_frame) == 1 &&
+                    wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 0,
+                "counts no motion took (the pointer at the screen's edge) are sent at the pass's end, in a frame of their own");
+        wlc_forget(cb);
+        wayland_pointer_relative(b.k.row, 8, 14, 4, 7, 9002);
+        wlc_pump(cb);
+        WLCHECK(cb->events == 0, "a window the pointer is not over is told nothing of the hand");
 
         /* a lock holds while the window is under the pointer and has the keys, and the hand's counts are the client's */
-        game_lock(&a, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        lock_a = game_lock(&a, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
         wlc_pump(ca);
         e = wlc_take(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_locked);
         WLCHECK(e && fake.hold_row == a.k.row && fake.hold_mode == 1, "a lock on the window under the pointer that has the keys holds it (%ld, mode %ld)",
                 fake.hold_row, fake.hold_mode);
         wlc_forget(ca);
-        wayland_pointer_relative(a.k.row, 5, -3, 7000);
+        wayland_pointer_relative(a.k.row, 5, -3, 5, -3, 7000);
         wlc_pump(ca);
         e = wlc_take(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion);
         WLCHECK(e && e->u[0] == 0 && e->u[1] == 7000 && e->u[2] == 5 * 256 && e->u[3] == (0xffffffffUL & (unsigned long)(-3 * 256)),
                 "the hand's counts of a locked pointer are relative motion, with the time in microseconds");
         WLCHECK(wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 0, "and no motion of a place");
 
-        /* Alt-Tab to another window ends it, and it holds again when its window has the keys again (persistent) */
+        /* Alt-Tab to another window ends it, and it holds again when its window has the keys again (persistent); the place the
+           client hinted is where the host is told the pointer is, in the window's picture */
         wlc_forget(ca);
+        wayland.hint_row = -1;
+        wlc_send(ca, lock_a, WLQ_zwp_locked_pointer_v1_set_cursor_position_hint, 12UL * 256, 34UL * 256);
         wayland_keyboard_to(b.k.row);
         wlc_pump(ca);
         e = wlc_take(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_unlocked);
         WLCHECK(e && fake.hold_mode == 0, "the keys going to another window let the pointer go and say so");
+        WLCHECK(wayland.hint_row == a.k.row && wayland.hint_x == 12 && wayland.hint_y == 34,
+                "a lock let go of tells where its client hinted the pointer is (row %ld at %ld, %ld)", wayland.hint_row, wayland.hint_x,
+                wayland.hint_y);
+        wayland.hint_row = -1;
         wlc_forget(ca);
         wayland_keyboard_to(a.k.row);
         wlc_pump(ca);
@@ -7208,6 +7241,10 @@ static void test_games(void)
         wlc_pump(cb);
         e = wlc_take(cb, WLI_zwp_confined_pointer_v1, WLE_zwp_confined_pointer_v1_confined);
         WLCHECK(e && fake.hold_mode == 2 && fake.hold_row == b.k.row, "a confinement holds the window, mode 2");
+        wlc_forget(cb);
+        wayland_pointer_relative(b.k.row, 6, 2, 3, 1, 9003);
+        wlc_pump(cb);
+        WLCHECK(cb->events == 0, "a client with no relative pointer is sent nothing for a report, not even a frame");
         wlc_send(cb, second, WLQ_zwp_confined_pointer_v1_destroy);
 
         /* the surface gone while it is held, and the client gone while it is held */

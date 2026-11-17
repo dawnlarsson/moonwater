@@ -688,8 +688,9 @@ struct wayland_offer
 struct wayland_constraint
 {
         unsigned int id;
-        unsigned char live, kind, active, oneshot;
+        unsigned char live, kind, active, oneshot, hinted;
         unsigned int surface;
+        int hint_x, hint_y; // a lock's set_cursor_position_hint, 24.8 in the surface's units
 };
 
 // An ext_idle_notification_v1: its object, its timeout in ms, whether it counts input alone (get_input_idle_notification), whether it
@@ -894,6 +895,9 @@ static struct
         long syncobj_ok;
         char drm_node[64];
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
+        long hint_row, hint_x, hint_y;         // where a lock let go of hinted the pointer is: the row and the place in its picture
+        long counts_row, counts[4], counts_micro; // the hand's counts for the frame of the pointer's next motion: its row (-1: none),
+                                                  // dx, dy, the unaccelerated two, the last report's microsecond
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
         long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
         long frames;                           // frames drawn (wayland_frame): a fifo barrier clears at the next one after its commit
@@ -2303,7 +2307,7 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
 
 /* A row given up, whatever its window was. */
 static void wayland_constraints_update(void);
-static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
+static void wayland_counts_send(int frame);
 
 static void wayland_let_go(struct wayland_client *c, long index);
 static void wayland_lent_let(struct wayland_client *c, long row, unsigned int index1);
@@ -6138,6 +6142,8 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         wayland.pointer_y = y;
         if (is && row == wayland.pointer_row && wayland_surface_index(now, is) == wayland.pointer_surface)
                 return;
+        // The hand's counts kept for the surface the pointer leaves are its, sent before the leave.
+        wayland_counts_send(1);
         if (wayland.pointer_row >= 0 && wayland_row_surface(wayland.pointer_row, &old) && wayland.pointer_surface >= 0 &&
             old->surfaces[wayland.pointer_surface].live)
                 was = &old->surfaces[wayland.pointer_surface];
@@ -6178,7 +6184,7 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
 {
         struct wayland_client *c;
         struct wayland_surface *root, *s = 0;
-        long time, *slots, count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
+        long time, *slots, count, sx = 0, sy = 0;
 
         if (wayland.host && wayland_dragging())
         {
@@ -6203,10 +6209,10 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
                 wayland_word(&e, wayland_fixed(sy, s->scale120));
                 wayland_end(&e);
         }
-        // The places the hand moved, to the client's relative pointers: as moved, the same accelerated or not.
-        // When held (locked or confined), raw deltas are sent by wayland_pointer_relative.
-        if (!wayland.hold_mode || row != wayland.hold_row)
-                wayland_relative_send(c, s->scale120, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
+        // The hand's counts since the last motion, in this frame (wayland_pointer_relative): the reports' own, not the places' difference,
+        // which stops at the screen's edge and is a pixel the gain rounded.
+        if (wayland.counts_row == row)
+                wayland_counts_send(0);
         for (long at = 0; at < count; at++)
                 wayland_pointer_frame(c, slots[at]);
 }
@@ -9014,9 +9020,12 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
         nothing (frames are paced to the screen). Each of those is one a surface.
 */
 
-// Relative motion to the relative pointers of a client, in the surface's units: the places of the hand, accelerated or not.
-static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
+// Relative motion to the relative pointers of a client, in the surface's units: the motion with the gain and the hand's counts.
+// How many it went to.
+static long wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
+        long sent = 0;
+
         for (long at = 0; at < c->relative_ids.count; at++)
         {
                 long slot = wayland_slot_of(c, c->relative_ids.id[at]);
@@ -9032,22 +9041,73 @@ static void wayland_relative_send(struct wayland_client *c, long scale120, long 
                 wayland_word(&e, wayland_fixed(udx, scale120));
                 wayland_word(&e, wayland_fixed(udy, scale120));
                 wayland_end(&e);
+                sent++;
         }
+        return sent;
 }
 
-// The hand's counts, to the client whose window holds the pointer locked or confined.
-WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long micro)
+// The counts kept for the frame of the pointer's next motion (wayland_pointer_relative), sent now: in that frame (frame 0, the
+// motion's own closes it) or in one of their own. A client with no relative pointer is sent nothing, no empty frame either.
+static void wayland_counts_send(int frame)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s;
+        long row = wayland.counts_row, *slots, count;
+
+        wayland.counts_row = -1;
+        if (row < 0 || !(s = wayland_row_surface(row, &c)) ||
+            !wayland_relative_send(c, s->scale120, wayland.counts[0], wayland.counts[1], wayland.counts[2], wayland.counts[3],
+                                   wayland.counts_micro) ||
+            !frame)
+                return;
+        count = wayland_seats(c, WLI_wl_pointer, &slots);
+        for (long at = 0; at < count; at++)
+                wayland_pointer_frame(c, slots[at]);
+}
+
+/*
+        One report of the hand (dx, dy with the gain, udx, udy as the hand gave them, micro the device's microsecond), to the client
+        whose window holds the pointer locked or confined, or with none held to the one the pointer is over. Locked, it is sent at
+        once in a wl_pointer frame of its own: no place moves. Free or confined the pointer moves too, and the reports' counts are
+        kept and go in the frame of the place's motion (wayland_pointer_motion), the reports read together summed as their places
+        are; what no motion took (the pointer stopped at an edge) is sent in a frame of its own by wayland_pointer_counts_flush, as
+        the host's pass ends. In one frame because Xwayland reads an X game's raw input from the relative motion of a frame and
+        makes a raw event of the place itself when a frame has a place and no relative motion: an X client was sent the pointer's
+        screen position as raw motion, once a report. A drag holds the pointer for itself.
+*/
+WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long udx, long udy, long micro)
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
         long *slots, count;
 
-        if (!wayland.host || !s || row != wayland.hold_row || (wayland.hold_mode != 1 && wayland.hold_mode != 2))
+        if (!wayland.host || !s || row != (wayland.hold_mode ? wayland.hold_row : wayland.pointer_row) || wayland_dragging() ||
+            !c->relative_ids.count)
                 return;
-        wayland_relative_send(c, s->scale120, dx, dy, dx, dy, micro);
+        if (wayland.hold_mode != 1)
+        {
+                if (wayland.counts_row != row)
+                {
+                        wayland_counts_send(1);
+                        wayland.counts[0] = wayland.counts[1] = wayland.counts[2] = wayland.counts[3] = 0;
+                        wayland.counts_row = row;
+                }
+                wayland.counts[0] += dx, wayland.counts[1] += dy, wayland.counts[2] += udx, wayland.counts[3] += udy;
+                wayland.counts_micro = micro;
+                return;
+        }
+        if (!wayland_relative_send(c, s->scale120, dx, dy, udx, udy, micro))
+                return;
         count = wayland_seats(c, WLI_wl_pointer, &slots);
         for (long at = 0; at < count; at++)
                 wayland_pointer_frame(c, slots[at]);
+}
+
+// The counts no motion took, in a frame of their own (the host's pass ends with it).
+WAYLAND_API void wayland_pointer_counts_flush(void)
+{
+        if (wayland.host)
+                wayland_counts_send(1);
 }
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
@@ -9066,6 +9126,19 @@ static void wayland_constraint_event(struct wayland_client *c, struct wayland_co
 // A constraint let go of: it says so (unless its object is going), and a one-shot one is over.
 static void wayland_constraint_release(struct wayland_client *c, struct wayland_constraint *con, int say)
 {
+        struct wayland_surface *s = con->surface ? &c->surfaces[con->surface - 1] : 0;
+
+        // A lock that held, let go of with a hint on its window's own surface: where in the window's picture the client last drew
+        // the pointer, for the host to show it there (wayland_constraints_update tells it as the hold ends).
+        if (con->active && con->kind == 1 && con->hinted && s && s->live && wayland_root_of(c, s) == s && s->row >= 0)
+        {
+                long wx, wy, ww, wh;
+
+                wayland_window_rect(c, s, s->width, s->height, s->scale120, &wx, &wy, &ww, &wh);
+                wayland.hint_row = s->row;
+                wayland.hint_x = wayland_pixels_floor(con->hint_x / 256, s->scale120) - wx;
+                wayland.hint_y = wayland_pixels_floor(con->hint_y / 256, s->scale120) - wy;
+        }
         if (con->active && say)
                 wayland_constraint_event(c, con, 0);
         con->active = 0;
@@ -9599,6 +9672,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 c->constraints[index].active = 0;
                 c->constraints[index].kind = op == WLQ_zwp_pointer_constraints_v1_lock_pointer ? 1 : 2;
                 c->constraints[index].oneshot = a[4].u == WLN_zwp_pointer_constraints_v1_lifetime_oneshot;
+                c->constraints[index].hinted = 0;
                 c->constraints[index].surface = (unsigned int)(wayland_surface_index(c, surface) + 1);
                 c->objects[a[0].slot].link = (int)index;
                 wayland.constraints++;
@@ -9607,8 +9681,16 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
         }
         case WLI_zwp_locked_pointer_v1:
         case WLI_zwp_confined_pointer_v1:
-                // set_region and set_cursor_position_hint are taken: the whole window is what a hold is, and the pointer is
-                // drawn by the compositor.
+                // set_region is taken: the whole window is what a hold is. A lock's set_cursor_position_hint is kept (at once, not at
+                // the surface's next commit, which the protocol allows the hint to wait for): where the client has drawn the pointer
+                // it holds, and where the pointer is shown when the lock lets it go (wayland_constraint_release).
+                if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint &&
+                    self->link >= 0 && self->link < c->constraint_table.count && c->constraints[self->link].live)
+                {
+                        c->constraints[self->link].hinted = 1;
+                        c->constraints[self->link].hint_x = (int)a[0].i;
+                        c->constraints[self->link].hint_y = (int)a[1].i;
+                }
                 if (op == WLQ_zwp_locked_pointer_v1_destroy)
                 {
                         struct wayland_constraint *con = &c->constraints[self->link];
@@ -10166,7 +10248,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         if (wayland.screens < 0)
                 wayland.screens = 0;
         wayland_dmabuf_load();
-        wayland.hold_row = -1;
+        wayland.hold_row = wayland.hint_row = wayland.counts_row = -1;
         return 0;
 }
 

@@ -838,15 +838,15 @@ static void compositor_screen_chord(unsigned int code)
 // A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
 static int compositor_wl_key(unsigned int code, int value);
 static int compositor_wl_drag_escape(int value);
-static int compositor_wl_hold_counts(int dx, int dy, positive now);
+static int compositor_wl_locked(void);
+static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now);
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
 static int compositor_wl_suspends(unsigned int code, int value, int super);
 #else
 // No Wayland shim in the build: no window holds the pointer, and the hand's counts are nobody's.
-static int compositor_wl_hold_counts(int dx, int dy, positive now)
+static int compositor_wl_locked(void)
 {
-        (void)dx, (void)dy, (void)now;
         return 0;
 }
 #endif
@@ -1825,7 +1825,7 @@ static void compositor_at_hand(void (*act)(unsigned int, int), unsigned int code
 
                 compositor.at_real = 1;
                 compositor_pointer_shown();
-                if ((compositor.pointer_x != led_x || compositor.pointer_y != led_y) && !compositor_wl_hold_counts(0, 0, 0))
+                if ((compositor.pointer_x != led_x || compositor.pointer_y != led_y) && !compositor_wl_locked())
                         compositor_motion();
         }
         act(code, arg);
@@ -2157,7 +2157,7 @@ static void compositor_button(unsigned int code, int down)
                 return;
 
         compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
-        if (!compositor_wl_hold_counts(0, 0, 0))
+        if (!compositor_wl_locked())
                 compositor_pointer_to(under);
         compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
         if (code - COMPOSITOR_BTN_LEFT < 8)
@@ -2529,20 +2529,29 @@ static int compositor_report(positive now, positive stamp)
 
         if (compositor.raw_x || compositor.raw_y)
         {
-                int dx = compositor.raw_x, dy = compositor.raw_y, gain;
+                int dx = compositor.raw_x, dy = compositor.raw_y, gain, ax, ay;
 
                 compositor.raw_x = compositor.raw_y = 0;
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // A client's window holds the pointer locked: the hand's counts are its, and the pointer does not move.
-                if (compositor_wl_hold_counts(dx, dy, now))
+                // A client's window holds the pointer locked: the hand's counts are its, as they came and with no gain (a game's
+                // camera turns by the hand's own counts; its sensitivity is its own), and the pointer does not move.
+                if (compositor_wl_locked())
+                {
+                        compositor_wl_counts(dx, dy, dx, dy, now);
                         return moved;
+                }
 #endif
                 gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now > compositor.stamp ? now - compositor.stamp : 0), compositor.flat,
                                               compositor.sensitivity);
                 compositor.stamp = now;
-                compositor.real_x = compositor_counts(compositor.real_x, compositor_accel(dx, &compositor.accel_x, gain));
-                compositor.real_y = compositor_counts(compositor.real_y, compositor_accel(dy, &compositor.accel_y, gain));
+                ax = compositor_accel(dx, &compositor.accel_x, gain);
+                ay = compositor_accel(dy, &compositor.accel_y, gain);
+                compositor.real_x = compositor_counts(compositor.real_x, ax);
+                compositor.real_y = compositor_counts(compositor.real_y, ay);
 #ifdef CONFIG_MOONWATER_WAYLAND
+                // Free or confined, the client with the pointer is told this report too: the motion with the gain (what the pointer
+                // moved before an edge or the confinement stopped it) and the hand's own counts, at the device's microsecond.
+                compositor_wl_counts(ax, ay, dx, dy, now);
                 compositor_wl_hold_keep();
 #endif
                 compositor_predict_mouse(stamp, now);
@@ -2715,7 +2724,7 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
         // the last motion it was told of, which is none when it opened under a pointer that has not moved. Told once:
         // a wheel that reports in 120ths sends several events to a notch, and each would take two of the ring's places.
-        if (row >= 0 && !compositor_wl_hold_counts(0, 0, 0) &&
+        if (row >= 0 && !compositor_wl_locked() &&
             (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
              compositor.pointer_y - compositor.y[row] != compositor.told_y))
                 compositor_pointer_to(row);
