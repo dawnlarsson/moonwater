@@ -2217,10 +2217,15 @@ static b32 audio_test_run(void)
         The loop's memory is locked (mlockall, current and future pages), so no page is faulted in while the card is refilled: the
         mixing path touches only what is resident. The real-time priority is audio_start's. A refusal (a user with no memory
         limit to speak of) is logged and the loop is the same without the lock.
+
+        Locked as each page is first touched (MCL_ONFAULT), not populated whole: the server maps the window table to say its
+        issues on the board (windows_board_map), and that table is sparse, as large as every window could draw (21.8 TB with
+        its 1,048,576 rows). Locked whole at its mapping, every page of it was faulted in, until the machine ran out: the OOM
+        killer took the sound server, the compositor, the terminal and the shells within twenty seconds of a boot.
 */
 static void audio_lock_memory(void)
 {
-        long locked = audio_call(syscall(mlockall), 1 | 2, 0, 0, 0, 0, 0); // MCL_CURRENT | MCL_FUTURE
+        long locked = audio_call(syscall(mlockall), 1 | 2 | 4, 0, 0, 0, 0, 0); // MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT
 
         if (locked != 0)
                 audio_say("memory is not locked, error", locked);
