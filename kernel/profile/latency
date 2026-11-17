@@ -182,6 +182,27 @@ CONFIG_DEFAULT_BBR=y
 CONFIG_DEFAULT_CUBIC=n
 
 #
+# Queueing disciplines.
+#
+# BBR keeps this machine's own sends from filling the link; the queue in
+# front of the network card is the other half. Without NET_SCHED every
+# interface had the built-in FIFO, 1000 packets deep (box: eth0 r8169 and
+# wlan0, no /proc/net/psched, no net.core.default_qdisc), and a game's
+# packets waited behind whatever else was going out: an upload, a Steam
+# download's acknowledgements, a sync. fq_codel, the default on every
+# interface, gives each flow its own queue and keeps the standing queue
+# near 5 ms; fq is there for a socket or a tool that asks for pacing. BQL
+# holds the driver's own ring to what the link drains in a moment, so the
+# queue is the discipline's to manage and not the card's.
+#
+CONFIG_NET_SCHED=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_DEFAULT=y
+CONFIG_DEFAULT_FQ_CODEL=y
+CONFIG_BQL=y
+
+#
 # PCIe link power.
 #
 # ASPM lets a PCIe link drop to a low power state when it is idle. Forcing
