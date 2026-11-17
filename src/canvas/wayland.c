@@ -733,6 +733,7 @@ struct wayland_feedback
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
+        unsigned char xspace;        // 1 when the client is an X server (wayland_xwayland_client): its outputs are in X's space; one of several
         long in_length;
         unsigned char in[WAYLAND_MESSAGE];
         // A commit that waits for its GPU, and what the client sent from it on: the bytes, the descriptor to ask of, since when.
@@ -898,7 +899,6 @@ static struct
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
         unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
         long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
-        long xwayland_client;                        // the client that is the X server (wayland_xwayland_client): its outputs are in X's space, -1 none
         long idle_notifies;                          // live ext_idle_notification_v1 count across all clients
         unsigned long pool_id;                       // monotonic pool identity counter
         // The pointer's picture a client drew (wl_pointer.set_cursor with a surface, wayland_cursor_picture): the client (its slot, -1 for
@@ -1954,7 +1954,7 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         struct wayland_object *o = &c->objects[slot];
         const struct wayland_screen *screen;
         struct wayland_event e;
-        int xspace = c->slot == wayland.xwayland_client;
+        int xspace = c->xspace;
         long x, y;
 
         if (o->aux >= wayland.screens)
@@ -2068,7 +2068,7 @@ static void wayland_xdg_output_send(struct wayland_client *c, long slot, long ou
         const struct wayland_screen *screen;
         struct wayland_event e;
         long scale120, x, y;
-        int xspace = c->slot == wayland.xwayland_client;
+        int xspace = c->xspace;
 
         if (output >= wayland.screens)
                 return;
@@ -10098,7 +10098,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         wayland.drag.xtarget = -1;
         wayland.cursor_client = wayland.cursor_surface = -1;
-        wayland.xwayland_uid = wayland.xwayland_client = -1;
+        wayland.xwayland_uid = -1;
         wayland.host = host;
         wayland.input_at = host->now(host->context);
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
@@ -10139,9 +10139,10 @@ WAYLAND_API void wayland_xwayland_client(long slot)
 {
         struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
 
-        if (!wayland.host || slot == wayland.xwayland_client)
+        // Each X server is a client of its own (one Xwayland per program run): its own space, marked on it, until it is dropped.
+        if (!wayland.host || !c || c->xspace)
                 return;
-        wayland.xwayland_client = c ? slot : -1;
+        c->xspace = 1;
         for (long at = 0; c && at < c->object_table.count; at++)
                 if (c->objects[at].iface == WLI_zxdg_output_v1)
                         wayland_xdg_output_send(c, at, c->objects[at].aux);
@@ -10185,6 +10186,7 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         c->slot = slot;
         c->pid = pid;
         c->uid = uid;
+        c->xspace = 0;
         c->stalled_sync_handle = -1;
         wayland_tables_init(c);
         wayland.client[slot] = c;
@@ -10228,8 +10230,6 @@ WAYLAND_API void wayland_drop(long slot)
 
         if (!c)
                 return;
-        if (wayland.xwayland_client == slot)
-                wayland.xwayland_client = -1;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
         // The drag's client gone: cancelled. The client a drag is over gone: left (a dropped drag is cancelled).
@@ -11173,36 +11173,44 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
 }
 
 /* The window of the surface whose xwayland_surface_v1 gave this X11 serial: its row, -1 while it has none, -2 when no surface has the serial. */
-WAYLAND_API long wayland_serial_row(unsigned long long serial)
+/* The serials of one X server are its own: each server numbers its windows from its own counter, so two servers name the same serial for
+   two windows. A serial is looked for in the client that is the server (client: its slot, the window manager's, -1 for none). */
+WAYLAND_API long wayland_client_count(void)
 {
-        for (long at = 0; at < wayland.client_slots; at++)
+        return wayland.client_slots;
+}
+
+WAYLAND_API long wayland_client_pid(long slot)
+{
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+
+        return c && c->live ? c->pid : -1;
+}
+
+WAYLAND_API long wayland_serial_row(long client, unsigned long long serial)
+{
+        struct wayland_client *c = client >= 0 && client < wayland.client_slots ? wayland.client[client] : 0;
+
+        for (long slot = 0; c && slot < c->surface_table.count; slot++)
         {
-                struct wayland_client *c = wayland.client[at];
+                struct wayland_surface *s = &c->surfaces[slot];
 
-                for (long slot = 0; c && slot < c->surface_table.count; slot++)
-                {
-                        struct wayland_surface *s = &c->surfaces[slot];
-
-                        if (s->live && s->xserial_set && s->xserial == serial)
-                                return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
-                }
+                if (s->live && s->xserial_set && s->xserial == serial)
+                        return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
         }
         return -2;
 }
 
-static struct wayland_surface *wayland_xserial_surface(unsigned long long serial)
+static struct wayland_surface *wayland_xserial_surface(long client, unsigned long long serial)
 {
-        for (long at = 0; at < wayland.client_slots; at++)
+        struct wayland_client *c = client >= 0 && client < wayland.client_slots ? wayland.client[client] : 0;
+
+        for (long slot = 0; c && slot < c->surface_table.count; slot++)
         {
-                struct wayland_client *c = wayland.client[at];
+                struct wayland_surface *s = &c->surfaces[slot];
 
-                for (long slot = 0; c && slot < c->surface_table.count; slot++)
-                {
-                        struct wayland_surface *s = &c->surfaces[slot];
-
-                        if (s->live && s->xserial_set && s->xserial == serial)
-                                return s;
-                }
+                if (s->live && s->xserial_set && s->xserial == serial)
+                        return s;
         }
         return 0;
 }
@@ -11214,11 +11222,11 @@ static struct wayland_surface *wayland_xserial_surface(unsigned long long serial
         is shown at the commit that follows. Answers the surface's row (-1 while it has none), or -2 when no surface has the serial
         yet, which the window manager asks of again. Said again, it sets the title anew.
 */
-WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, long x, long y, const char *title)
+WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, long popup, long x, long y, const char *title)
 {
         long how = popup;
 
-        struct wayland_surface *s = wayland_xserial_surface(serial);
+        struct wayland_surface *s = wayland_xserial_surface(client, serial);
         char text[WAYLAND_TEXT];
         long at = 0;
 
@@ -11270,10 +11278,10 @@ WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, lo
 }
 
 /* The window manager of an X window is gone: its window is taken away, and its surface is shown no more. */
-WAYLAND_API void wayland_xwindow_gone(unsigned long long serial)
+WAYLAND_API void wayland_xwindow_gone(long client, unsigned long long serial)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = wayland_xserial_surface(serial);
+        struct wayland_surface *s = wayland_xserial_surface(client, serial);
 
         if (!s || !s->xsurface)
                 return;

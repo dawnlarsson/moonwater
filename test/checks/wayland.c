@@ -7279,7 +7279,7 @@ static void test_games(void)
                 fake.screen.scale = was;
                 wayland_screens_changed();
                 wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0x1234UL, 0UL);
-                WLCHECK(cd->errors == 0 && wayland_serial_row(0x1234) == -1,
+                WLCHECK(cd->errors == 0 && wayland_serial_row(cd->slot, 0x1234) == -1,
                         "its serial is known to the window manager, with no window yet (%s)", cd->error_text);
                 wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0x5678UL, 0UL);
                 WLCHECK(refused_with(cd, WLN_xwayland_surface_v1_error_already_associated), "a surface has one serial");
@@ -8209,7 +8209,7 @@ static void test_lent(void)
                 wlc_send(c, x.compositor, WLQ_wl_compositor_create_surface, surface);
                 wlc_send(c, x.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
                 wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, 0x4242UL, 0UL);
-                wayland_xwindow_adopt(0x4242, 0, 0, 0, "x");
+                wayland_xwindow_adopt(c->slot, 0x4242, 0, 0, 0, "x");
                 first = wl_buffer_of(&x, 32, 24, 0xff111111, WLN_wl_shm_format_xrgb8888);
                 next = wl_buffer_of(&x, 32, 24, 0xff222222, WLN_wl_shm_format_xrgb8888);
                 wlc_send(c, surface, WLQ_wl_surface_attach, first, 0L, 0L);
@@ -8784,7 +8784,7 @@ static void test_xwm_moves(void)
         xwin = wlc_id(c, WLI_xwayland_surface_v1, 1);
         wlc_send(c, s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, parent);
         wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, 0x5151UL, 0UL);
-        wayland_xwindow_adopt(0x5151, 0, 0, 0, "parent");
+        wayland_xwindow_adopt(c->slot, 0x5151, 0, 0, 0, "parent");
         pbuf = wl_buffer_of(&s, 32, 24, 0xff111111, WLN_wl_shm_format_xrgb8888);
         wlc_send(c, parent, WLQ_wl_surface_attach, pbuf, 0L, 0L);
         wlc_send(c, parent, WLQ_wl_surface_commit);
@@ -8793,13 +8793,13 @@ static void test_xwm_moves(void)
         xpopup = wlc_id(c, WLI_xwayland_surface_v1, 1);
         wlc_send(c, s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xpopup, popup);
         wlc_send(c, xpopup, WLQ_xwayland_surface_v1_set_serial, 0x5252UL, 0UL);
-        wayland_xwindow_adopt(0x5252, 1, 5, 6, "popup");
+        wayland_xwindow_adopt(c->slot, 0x5252, 1, 5, 6, "popup");
         qbuf = wl_buffer_of(&s, 8, 8, 0xff222222, WLN_wl_shm_format_xrgb8888);
         wlc_send(c, popup, WLQ_wl_surface_attach, qbuf, 0L, 0L);
         wlc_send(c, popup, WLQ_wl_surface_commit);
-        prow = wayland_xwindow_adopt(0x5252, 1, 5, 6, "popup");
+        prow = wayland_xwindow_adopt(c->slot, 0x5252, 1, 5, 6, "popup");
         WLCHECK(c->errors == 0 && prow >= 0, "an override-redirect popup under a parent is shown (%ld, %s)", prow, c->error_text);
-        prow = wayland_xwindow_adopt(0x5252, 1, 10, 12, "popup");
+        prow = wayland_xwindow_adopt(c->slot, 0x5252, 1, 10, 12, "popup");
         WLCHECK(prow >= 0 && fake.row[prow].x == 10 && fake.row[prow].y == 12,
                 "a popup moved by its window manager is placed at its new place in the host (%ld, %ld)", prow >= 0 ? fake.row[prow].x : -1L,
                 prow >= 0 ? fake.row[prow].y : -1L);
@@ -8822,11 +8822,11 @@ static long xwm_places_show(struct session *s, unsigned long serial, long how, l
         xwin = wlc_id(c, WLI_xwayland_surface_v1, 1);
         wlc_send(c, s->xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
         wlc_send(c, xwin, WLQ_xwayland_surface_v1_set_serial, serial, 0UL);
-        wayland_xwindow_adopt(serial, how, x, y, "x");
+        wayland_xwindow_adopt(c->slot, serial, how, x, y, "x");
         buffer = wl_buffer_of(s, 32, 24, 0xff333333, WLN_wl_shm_format_xrgb8888);
         wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
         wlc_send(c, surface, WLQ_wl_surface_commit);
-        return wayland_xwindow_adopt(serial, how, x, y, "x");
+        return wayland_xwindow_adopt(c->slot, serial, how, x, y, "x");
 }
 
 static void test_xwm_places(void)
