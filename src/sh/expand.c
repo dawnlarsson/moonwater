@@ -298,7 +298,10 @@ positive shell_substitution_generation HOT_STATE;
 // Linux accepts a pathname of 4095 bytes in one syscall. Walking beyond this
 // floor would require directory-relative opens; never quietly shorten it.
 #define GLOB_PATH 4096
-#define GLOB_DEPTH 64
+//      Past this many levels the walk asks the stack, as expand_dollar asks
+//      it past EXPAND_DEPTH_ASKED; GLOB_BLOCK is one directory read's bytes.
+#define GLOB_STACK_ASKED 64
+#define GLOB_BLOCK 2048
 
 /*
         What a byte is allowed to become later.
@@ -2067,8 +2070,17 @@ static b8 expand_ifs_kind[256];
 //      IFS, and no high byte while a multibyte IFS character may begin at
 //      one under a UTF-8 locale.
 static b8 expand_ifs_plain[STRING_SET_BYTES];
-static p8 expand_ifs_mb[8][4];
-static b8 expand_ifs_mb_len[8];
+
+//      One multibyte character of IFS, as its bytes. The table holds every
+//      one of them, grown as IFS is read: the set is as long as the value.
+typedef struct
+{
+        p8 bytes[4];
+        b8 width;
+} expand_ifs_char;
+
+static expand_ifs_char address_to expand_ifs_mb;
+static positive expand_ifs_mb_room;
 static positive expand_ifs_mb_count;
 
 /*
@@ -2094,12 +2106,18 @@ static fn expand_ifs_prepare()
                 {
                         positive width = expand_character_step(ifs);
 
-                        if (width > 1 && width <= 4 &&
-                            expand_ifs_mb_count < array_count(expand_ifs_mb))
+                        if (width > 1 && width <= 4)
                         {
-                                memory_copy(expand_ifs_mb[expand_ifs_mb_count],
+                                if (!shell_array_room(expand_ifs_mb,
+                                                      expand_ifs_mb_room,
+                                                      expand_ifs_mb_count + 1))
+                                {
+                                        expand_fail_state();
+                                        return;
+                                }
+                                memory_copy(expand_ifs_mb[expand_ifs_mb_count].bytes,
                                             ifs, width);
-                                expand_ifs_mb_len[expand_ifs_mb_count] = (b8)width;
+                                expand_ifs_mb[expand_ifs_mb_count].width = (b8)width;
                                 expand_ifs_mb_count++;
                                 ifs += width;
                                 continue;
@@ -2154,8 +2172,8 @@ static HOT positive expand_ifs_span(string_address text, positive left)
                 return 0;
 
         for (at = 0; at < expand_ifs_mb_count; at++)
-                if (expand_ifs_mb_len[at] == width &&
-                    !memory_compare(expand_ifs_mb[at], text, width))
+                if (expand_ifs_mb[at].width == width &&
+                    !memory_compare(expand_ifs_mb[at].bytes, text, width))
                         return width;
 
         return 0;
@@ -2944,8 +2962,12 @@ static bool arith_unset HOT_STATE;
 static bool arith_is_lvalue HOT_STATE;
 static expand_reference arith_held HOT_STATE;
 static bipolar arith_held_value HOT_STATE;
-static p8 arith_held_name[EXPAND_LOCAL_NAME] HOT_STATE;
-static p8 arith_held_key[32] HOT_STATE;
+//      The held name and key are grown to their real lengths and kept for as
+//      long as the lvalue is: a store mark rewinds before the assignment reads them.
+static p8 address_to arith_held_name HOT_STATE;
+static positive arith_held_name_room HOT_STATE;
+static p8 address_to arith_held_key HOT_STATE;
+static positive arith_held_key_room HOT_STATE;
 
 /*
         A persistent `name=$((...))` whose whole right-hand side is one
@@ -3098,27 +3120,25 @@ static bool arith_subscript_quiet;
 static fn arith_keep_lvalue(const expand_reference address_to name,
                             bipolar value)
 {
-        if (name->key_length == ARITH_KEY_REFUSED &&
-            name->name_length < EXPAND_LOCAL_NAME)
-        {
-                memory_copy_end(arith_held_name, name->name, name->name_length);
-                arith_held = address_to name;
-                arith_held.name = arith_held_name;
-                arith_held_value = value;
-                arith_is_lvalue = true;
-                return;
-        }
-        if (name->name_length >= EXPAND_LOCAL_NAME ||
-            (name->key && name->key_length >= sizeof(arith_held_key)))
+        //      A refused subscript is not copied: it keeps pointing at its own
+        //      text, which is what the store's complaint quotes.
+        bool keyed = name->key && name->key_length != ARITH_KEY_REFUSED;
+
+        if (!shell_array_room(arith_held_name, arith_held_name_room,
+                              name->name_length + 1) ||
+            (keyed && !shell_array_room(arith_held_key, arith_held_key_room,
+                                        name->key_length + 1)))
         {
                 arith_is_lvalue = false;
+                arith_bad = true;
+                expand_fail_state();
                 return;
         }
 
         memory_copy_end(arith_held_name, name->name, name->name_length);
         arith_held = address_to name;
         arith_held.name = arith_held_name;
-        if (name->key)
+        if (keyed)
         {
                 memory_copy_end(arith_held_key, name->key, name->key_length);
                 arith_held.key = arith_held_key;
@@ -3547,6 +3567,27 @@ static bipolar arith_number_of(expand_reference reference, p8 address_to scratch
 }
 
 /*
+        How deep a parenthesis, a prefix operator or a name's value may nest
+        before the stack is asked about it. Every level is a descent through
+        the ladder of precedences, some two hundred bytes of stack, and nothing
+        held it: 15,000 open parentheses in a value -- [[ $x -eq 1 ]] on input a
+        script was handed -- took the shell down with SIGSEGV. Past this many
+        a level asks how much of the stack is used, once in sixty-four, and
+        past three quarters of it the expression is refused with the stack
+        whole. A chain of names that name one another nests the same way.
+*/
+#define ARITH_NESTING 1024
+#define ARITH_NESTING_MAX 1048576
+static positive arith_nesting HOT_STATE;
+
+static bool arith_nesting_refused()
+{
+        return arith_nesting >= ARITH_NESTING &&
+               (arith_nesting >= ARITH_NESTING_MAX ||
+                (!(arith_nesting & 63) && !shell_stack_within(75)));
+}
+
+/*
         A value that is not a number, read as an expression of its own.
 
         The value is copied first. What it is about to be evaluated as may
@@ -3554,13 +3595,9 @@ static bipolar arith_number_of(expand_reference reference, p8 address_to scratch
         was still being read out of.
 
         A chain that comes back to a name already on it never ends, so the
-        depth is counted rather than trusted -- a=b; b=a has no answer and must
-        say so instead of running until the machine stack is gone.
+        nesting is counted rather than trusted -- a=b; b=a has no answer and
+        must say so instead of running until the machine stack is gone.
 */
-#define ARITH_NAMES 32
-
-static positive arith_names HOT_STATE;
-
 static COLD bipolar arith_named_expression(string_address value)
 {
         p8 held_local[EXPAND_LOCAL_NAME];
@@ -3568,9 +3605,9 @@ static COLD bipolar arith_named_expression(string_address value)
         string_address outer = arith_at;
         bipolar answer;
 
-        if (arith_names >= ARITH_NAMES)
+        if (arith_nesting_refused())
         {
-                arith_bad = true;
+                arith_fail("expression recursion level exceeded");
                 return 0;
         }
 
@@ -3583,7 +3620,7 @@ static COLD bipolar arith_named_expression(string_address value)
                 return 0;
         }
 
-        arith_names++;
+        arith_nesting++;
         arith_at = held;
         answer = arith_expression();
 
@@ -3593,7 +3630,7 @@ static COLD bipolar arith_named_expression(string_address value)
                 arith_fail("arithmetic syntax error in expression");
 
         arith_at = outer;
-        arith_names--;
+        arith_nesting--;
 
         return answer;
 }
@@ -3965,20 +4002,6 @@ done:
         return value;
 }
 
-/*
-        How deep a parenthesis or a prefix operator may nest before the stack
-        is asked about it. Every level is a descent through the ladder of
-        precedences, some two hundred bytes of stack, and nothing held it:
-        15,000 open parentheses in a value -- [[ $x -eq 1 ]] on input a
-        script was handed -- took the shell down with SIGSEGV. Past this many
-        a level asks how much of the stack is used, once in sixty-four, and
-        past three quarters of it the expression is refused with the stack
-        whole; bash's own limit is on the depth of values that name values,
-        which nesting here is not.
-*/
-#define ARITH_NESTING 1024
-#define ARITH_NESTING_MAX 1048576
-static positive arith_nesting HOT_STATE;
 static bipolar arith_primary_step();
 
 static bipolar arith_primary()
@@ -3988,9 +4011,7 @@ static bipolar arith_primary()
         //      Neither dash nor the bash this is read against stops at a
         //      number: this goes as far as the stack does, three quarters
         //      of it, which is ten thousand parentheses and a good deal more.
-        if (arith_nesting >= ARITH_NESTING &&
-            (arith_nesting >= ARITH_NESTING_MAX ||
-             (!(arith_nesting & 63) && !shell_stack_within(75))))
+        if (arith_nesting_refused())
         {
                 arith_fail("expression recursion level exceeded");
                 return 0;
@@ -4367,13 +4388,25 @@ static __attribute__((noinline)) bipolar arith_assign_to(bipolar value, p8 kind,
         }
 
         target = arith_held;
-        memory_copy_end(name_local, arith_held_name, target.name_length);
-        target.name = name_local;
+        //      Copied out before the right-hand side is read, which may hold
+        //      another lvalue over the same buffers. A long one is spilled.
+        target.name = expand_hold(arith_held_name, target.name_length,
+                                  name_local, sizeof(name_local));
+        if (!target.name)
+        {
+                arith_bad = true;
+                return value;
+        }
         //      A refused element keeps pointing at its subscript's text.
         if (target.key && target.key_length != ARITH_KEY_REFUSED)
         {
-                memory_copy_end(key_local, arith_held_key, target.key_length);
-                target.key = key_local;
+                target.key = expand_hold(arith_held_key, target.key_length,
+                                         key_local, sizeof(key_local));
+                if (!target.key)
+                {
+                        arith_bad = true;
+                        return value;
+                }
         }
 
         {
@@ -5384,7 +5417,9 @@ static fn expand_run(string_address command, bool quoted)
         {
                 //      Dash calls a failed pipe fatal to the command and
                 //      says "Pipe call failed" with status 2; bash says it
-                //      cannot make the pipe and goes on with status 0.
+                //      cannot make the pipe and goes on with status 125, the
+                //      status of a substitution that never ran.
+                expand_substitution_done(125);
                 if (!shell_bash_compat)
                 {
                         expand_where();
@@ -5417,6 +5452,7 @@ static fn expand_run(string_address command, bool quoted)
         if (child <= 0)
         {
                 system_close(channel[0]);
+                expand_substitution_done(125);
                 return;
         }
 
@@ -9224,6 +9260,7 @@ static COLD string_address expand_funsub(string_address step, bool quoted)
         if (!text)
         {
                 expand_overflow = true;
+                expand_substitution_done(125);
                 return close + 1;
         }
         memory_copy(text, inner, length);
@@ -9235,6 +9272,7 @@ static COLD string_address expand_funsub(string_address step, bool quoted)
         {
                 expand_where();
                 writer_stderr_once(str("cannot make pipe for command substitution\n"));
+                expand_substitution_done(125);
                 return close + 1;
         }
 
@@ -11070,21 +11108,57 @@ static positive glob_ignore_filter(string_address list)
         return kept;
 }
 
+/*
+        What a level of the walk keeps until it returns: its component, which
+        the matches of every entry are tested against, and its directory
+        block, which the entries are read from. Both are needed again after the
+        walk recurses into a child, so they live here and not on the stack,
+        where a deep tree would need GLOB_PATH bytes and a block for each
+        level. A level gives them back with its mark when it is done.
+*/
+static shell_store glob_frames;
+
+static fn glob_level(p8 address_to prefix, positive used, string_address pattern,
+                     positive depth, bool from_star, p8 address_to component,
+                     p8 address_to block);
+
 static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                     positive depth, bool from_star)
 {
-        p8 component[GLOB_PATH];
+        shell_mark frame;
+        p8 address_to component;
+        p8 address_to block;
+
+        // Deep enough. The tree is only as deep as the stack holds (see
+        // expand_dollar): past GLOB_STACK_ASKED levels the stack is asked.
+        if (depth >= GLOB_STACK_ASKED && !shell_stack_within(50))
+        {
+                glob_failed = true;
+                return;
+        }
+
+        frame = shell_store_mark(address_of glob_frames);
+        // A component is never longer than the pattern it is read from.
+        component = shell_store_take(address_of glob_frames,
+                                     string_length(pattern) + 1);
+        block = shell_store_take_aligned(address_of glob_frames, GLOB_BLOCK);
+        if (component && block)
+                glob_level(prefix, used, pattern, depth, from_star, component,
+                           block);
+        else
+                glob_failed = true;
+        shell_store_rewind(address_of glob_frames, frame);
+}
+
+static fn glob_level(p8 address_to prefix, positive used, string_address pattern,
+                     positive depth, bool from_star, p8 address_to component,
+                     p8 address_to block)
+{
         positive length = 0;
         string_address rest;
         string_address whole;
         bool dotted = shell_shopt_on(DOTGLOB) || glob_ignoring;
         bool folded = shell_shopt_on(NOCASEGLOB);
-
-        if (depth >= GLOB_DEPTH)
-        {
-                glob_failed = true;
-                return;
-        }
 
         // A run of slashes belongs to the prefix, not to any component.
         while (string_is(pattern, '/'))
@@ -11190,7 +11264,6 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                 return;
         }
 
-        p8 block[2048];
         prefix[used] = end;
         bipolar directory = system_open_at(
             AT_FDCWD, used ? prefix : (string_address)".",
@@ -11202,7 +11275,7 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
         bipolar error = 0;
         struct linux_dirent64 address_to entry;
         while (!glob_failed &&
-               (entry = file_directory_next(directory, block, sizeof(block),
+               (entry = file_directory_next(directory, block, GLOB_BLOCK,
                                              address_of have, address_of at,
                                              address_of error)))
         {
@@ -11231,8 +11304,7 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                 memory_copy_apart(prefix + used, named, run);
 
                 // A final matching directory entry needs no second lookup.
-                // Keep the old recursion-limit failure for ordinary patterns.
-                if (!string_get(rest) && (star || depth + 1 < GLOB_DEPTH))
+                if (!string_get(rest))
                 {
                         prefix[out] = end;
                         glob_add(prefix);
