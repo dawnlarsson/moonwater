@@ -221,6 +221,8 @@ static positive compositor_present_lead(void)
         shown: the plate composed into flipped to (flip_own), or the compositor's own screen flipped back to (back), with what a refused flip does.
         At the present for one the processor drew; when its jobs are done for one the card drew (compositor_card_done).
 */
+static void compositor_damage_space(void); // kms.c
+
 static void compositor_present_tell(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off)
 {
         // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
@@ -261,7 +263,15 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                         // Refused once (the card is still on the flip before, EBUSY): the screen keeps the buffer it shows and the frame is
                         // composed again into the other from the next present. Each buffer's stale holds what it misses (the damage of this
                         // present is in the one the screen shows), so nothing is lost; a modeset on every refusal would flicker the screen.
+                        // That next present is asked for here, with this one's rectangles as its damage: it is made once the flip in flight
+                        // lands. Where none was asked, a client that drew its last frame and went idle had that frame composed and never
+                        // shown: the screen kept the one before (a page's dialog over the page as it was before it, the wallpaper through a
+                        // browser's blank first frame) until anything else moved, a pointer over the desktop.
                         compositor_plate_swap();
+                        for (unsigned int at = 0; at < clips; at++)
+                                compositor_damage(clip[at][0], clip[at][1], clip[at][2] - clip[at][0], clip[at][3] - clip[at][1]);
+                        if (!clips)
+                                compositor_damage_space();
                 }
         }
         else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
