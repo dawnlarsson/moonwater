@@ -9930,14 +9930,8 @@ static bool text_locale_utf8();
 static positive file_terminal_step(const p8 address_to at, positive left,
                                    bool utf8, bool address_to printable);
 
-static bool ls_locale_utf8(void)
-{
-        static p8 known;
-
-        if (!known)
-                known = text_locale_utf8() ? 1 : 2;
-        return known == 1;
-}
+//      The locale's UTF-8 answer, taken once at the start of each run.
+static bool ls_utf8_run;
 
 static positive ls_char_at(string_address name, positive length, positive at,
                            bool address_to printable)
@@ -9950,7 +9944,7 @@ static positive ls_char_at(string_address name, positive length, positive at,
                 return 1;
         }
         return file_terminal_step((const p8 address_to)name + at, length - at,
-                                  ls_locale_utf8(), printable);
+                                  ls_utf8_run, printable);
 }
 
 static b8 ls_plain_shell[2][STRING_SET_BYTES];
@@ -13803,6 +13797,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         refuse_if(!ls_order_reserve(count + 1), 2, "%s: memory exhausted\n", program);
 
         ls_program = program;
+        ls_utf8_run = text_locale_utf8();
         ls_selected = (ls_selection){};
         ls_terminal = stream_is_terminal(1);
         ls_zero_after_word = false;
