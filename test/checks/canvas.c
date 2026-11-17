@@ -2004,6 +2004,81 @@ static fn te_clip_types(void)
         te_clip_event(0, &which);
 }
 
+// A place as a drag's event carries it (the compositor's compositor_drag_place).
+static int te_drag_place(int x, int y)
+{
+        return (int)(((unsigned int)(y & 0xffff) << 16) | (unsigned int)(x & 0xffff));
+}
+
+/*
+        The kit's drag and drop (ui_drag, ui_drop) over the window table: a place packed and read back, the slop a press must go past,
+        a drag offered (its copy, actions and serial in the row) and its end, a drop's news in order, what a target takes of the drag's
+        copy at WINDOWS_CLIP_DRAG (the first of its names offered, in the row), and the type it took read once given.
+*/
+static fn te_drag_drop(void)
+{
+        static const p8 uris[] = "file:///root/a.txt\r\n", text[] = "/root/a.txt";
+        struct windows_clip_part parts[2] = {{WINDOWS_CLIP_URIS, uris, sizeof(uris) - 1}, {WINDOWS_CLIP_TEXT, text, sizeof(text) - 1}};
+        struct windows address_to table = windows_scratch_table(&te_clip_table_scratch);
+        struct window_row own = {table, 1, -1, -1, 0, 0, 0, 0, 0};
+        static const char address_to const want[2] = {"image/png", WINDOWS_CLIP_URIS};
+        struct ui u;
+        struct ui_drag d;
+        struct ui_drop drop;
+        struct window_event e;
+        unsigned int serial = table->drag_offer_serial[1];
+        p8 address_to bytes;
+        unsigned long length;
+        long fd;
+
+        memory_zero(&u, sizeof(u));
+        memory_zero(&d, sizeof(d));
+        memory_zero(&drop, sizeof(drop));
+        memory_zero(&e, sizeof(e));
+        u.scale = 200;
+        te_check(window_drag_x(te_drag_place(-7, 300)) == -7 && window_drag_y(te_drag_place(-7, 300)) == 300,
+                 "a drag's place is packed and read back, a negative one too", 0);
+        ui_drag_arm(&d, 100, 100);
+        te_check(!ui_drag_past(&u, &d, 115, 100) && ui_drag_past(&u, &d, 117, 100) && ui_drag_past(&u, &d, 100, 83),
+                 "a press is a drag past the slop at its scale (16 px at 200 percent), either way", 0);
+        te_check(ui_drag_offer(&own, &d, parts, 2, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE) && d.live && !d.armed &&
+                     table->drag_offer_serial[1] == serial + 1 && table->drag_offer_actions[1] == 3 && table->drag_offer_fd[1] >= 0,
+                 "a drag offered names its copy, its actions and a serial in the row", 0);
+        e.type = WINDOW_EVENT_DRAG, e.a = WINDOWS_DRAG_ACTION, e.b = WINDOWS_DRAG_MOVE;
+        te_check(!ui_drag_source(&d, &e) && d.action == WINDOWS_DRAG_MOVE, "its action is told", 0);
+        e.a = WINDOWS_DRAG_ENDED, e.b = 1;
+        te_check(ui_drag_source(&d, &e) && d.finished && !d.live, "and its end, finished: a move is the app's to take away", 0);
+
+        e.a = WINDOWS_DRAG_ENTER, e.b = te_drag_place(12, 34);
+        te_check(ui_drop_event(&drop, &e) == UI_DROP_OVER && drop.over && drop.x == 12 && drop.y == 34 && drop.nth == -1, "a drag over a window is over it", 0);
+        // The drag's copy where the compositor holds it.
+        fd = windows_clip_build(parts, 2);
+        compositor_call(syscall(dup3), (positive)fd, WINDOWS_CLIP_FD + WINDOWS_CLIP_DRAG, O_CLOEXEC, 0, 0, 0);
+        table->clip_length[WINDOWS_CLIP_DRAG] = (unsigned long)window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        serial = table->drop_take_serial[1];
+        te_check(ui_drop_pick(&own, &drop, want, 2, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY) && drop.nth == 0 && string_equals((string_address)drop.name, WINDOWS_CLIP_URIS) &&
+                     table->drop_take[1] == 0 && table->drop_take_actions[1] == WINDOWS_DRAG_COPY && table->drop_take_serial[1] == serial + 1,
+                 "it takes the first of its names it is offered (files, no picture there), said in the row", 0);
+        te_check(ui_drop_pick(&own, &drop, want, 2, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY) && table->drop_take_serial[1] == serial + 1,
+                 "and says it again only when what it takes changes", 0);
+        te_check(!ui_drop_pick(&own, &drop, want, 1, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY) && table->drop_take[1] == -1, "a name it is not offered is none", 0);
+        ui_drop_pick(&own, &drop, want, 2, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY);
+        e.a = WINDOWS_DRAG_DROP, e.b = WINDOWS_DRAG_COPY;
+        te_check(ui_drop_event(&drop, &e) == UI_DROP_DROPPED && drop.dropped && !drop.over, "the release over it is its drop", 0);
+        table->clip_given_length[1] = table->clip_length[WINDOWS_CLIP_DRAG];
+        e.a = WINDOWS_DRAG_READY, e.b = 0;
+        te_check(ui_drop_event(&drop, &e) == UI_DROP_READY && ui_drop_read(&own, &drop, &bytes, &length) && length == sizeof(uris) - 1 &&
+                     !memory_compare(bytes, uris, length),
+                 "and once ready the type it took is read whole", length);
+        windows_clip_free(bytes, length);
+        serial = table->drop_done_serial[1];
+        ui_drop_done(&own, &drop, true);
+        te_check(table->drop_done[1] == 1 && table->drop_done_serial[1] == serial + 1, "it says it is done, and took it", 0);
+        e.a = WINDOWS_DRAG_DONE;
+        te_check(ui_drop_event(&drop, &e) == UI_DROP_DONE && !drop.dropped, "the drag's end is the drop's", 0);
+}
+
 static fn te_clipboard(positive rounds)
 {
         unsigned int me = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0), which;
@@ -2013,6 +2088,7 @@ static fn te_clipboard(positive rounds)
         long fd;
 
         compositor.table = windows_scratch_table(&te_clip_table_scratch);
+        compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         windows_scratch_table(&te_clip_table_scratch)->clip_pid = me;
         windows_scratch_table(&te_clip_table_scratch)->clip_on = 1;
         windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] = windows_scratch_table(&te_clip_table_scratch)->clip_owner[1] = -1;
@@ -2081,6 +2157,7 @@ static fn te_clipboard(positive rounds)
                 }
         }
         te_clip_types();
+        te_drag_drop();
         /*
                 A copy that names a descriptor which is no file to read: a FIFO its program holds open for reading with no
                 writer, which the compositor's open for reading (through /proc) waits on for ever, and the desktop with it. (An
