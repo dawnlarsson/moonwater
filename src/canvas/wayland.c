@@ -876,6 +876,7 @@ static struct
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
         unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
         long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
+        long xwayland_client;                        // the client that is the X server (wayland_xwayland_client): its outputs are in X's space, -1 none
         long idle_notifies;                          // live ext_idle_notification_v1 count across all clients
         unsigned long pool_id;                       // monotonic pool identity counter
         // The pointer's picture a client drew (wl_pointer.set_cursor with a surface, wayland_cursor_picture): the client (its slot, -1 for
@@ -1921,19 +1922,27 @@ static void wayland_global_send(struct wayland_client *c, unsigned long registry
         wayland_end(&e);
 }
 
-/* What a screen says of itself, to one wl_output of a client: geometry, mode, scale, name, done. */
+/* What a screen says of itself, to one wl_output of a client: geometry, mode, scale, name, done (to the X server, in X's space and at
+   scale 1: wayland_x_screen). */
+static void wayland_x_screen(long output, long *x, long *y);
+
 static void wayland_output_send(struct wayland_client *c, long slot)
 {
         struct wayland_object *o = &c->objects[slot];
         const struct wayland_screen *screen;
         struct wayland_event e;
+        int xspace = c->slot == wayland.xwayland_client;
+        long x, y;
 
         if (o->aux >= wayland.screens)
                 return;
         screen = &wayland.screen[o->aux];
+        x = screen->x, y = screen->y;
+        if (xspace)
+                wayland_x_screen(o->aux, &x, &y);
         e = wayland_begin(c, o->id, WLE_wl_output_geometry);
-        wayland_word(&e, (unsigned long)screen->x);
-        wayland_word(&e, (unsigned long)screen->y);
+        wayland_word(&e, (unsigned long)x);
+        wayland_word(&e, (unsigned long)y);
         wayland_word(&e, (unsigned long)screen->physical_width);
         wayland_word(&e, (unsigned long)screen->physical_height);
         wayland_word(&e, WLN_wl_output_subpixel_unknown);
@@ -1950,7 +1959,7 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         if (o->version >= 2)
         {
                 e = wayland_begin(c, o->id, WLE_wl_output_scale);
-                wayland_word(&e, (unsigned long)wayland_max(1, (wayland_min(((long)(screen->scale)), 800) + 99) / 100));
+                wayland_word(&e, xspace ? 1ul : (unsigned long)wayland_max(1, (wayland_min(((long)(screen->scale)), 800) + 99) / 100));
                 wayland_end(&e);
         }
         if (o->version >= 4)
@@ -2012,19 +2021,43 @@ static long wayland_logical_axis(long screen, int vertical, int depth)
         }
 }
 
+/*
+        The X server's space (the client wayland_xwayland_client named): its windows are drawn a buffer pixel a pixel, and its window
+        manager places them at the compositor's pixels less the top left of the screens (xwm.c's compositor_xwm_origin), so each of its
+        outputs is that: at its pixel place less that corner, of its pixel size, whatever its scale. The X root is then the screens as
+        they are laid out, and every X place (a pointer's, a window's, a drag's) is the compositor's.
+*/
+static void wayland_x_screen(long output, long *x, long *y)
+{
+        long ox = 0, oy = 0;
+
+        for (long at = 0; at < wayland.screens; at++)
+        {
+                ox = !at || wayland.screen[at].x < ox ? wayland.screen[at].x : ox;
+                oy = !at || wayland.screen[at].y < oy ? wayland.screen[at].y : oy;
+        }
+        *x = wayland.screen[output].x - ox;
+        *y = wayland.screen[output].y - oy;
+}
+
 static void wayland_xdg_output_send(struct wayland_client *c, long slot, long output)
 {
         const struct wayland_screen *screen;
         struct wayland_event e;
-        long scale120;
+        long scale120, x, y;
+        int xspace = c->slot == wayland.xwayland_client;
 
         if (output >= wayland.screens)
                 return;
         screen = &wayland.screen[output];
-        scale120 = wayland_percent120(screen->scale);
+        scale120 = xspace ? WAYLAND_UNIT : wayland_percent120(screen->scale);
+        if (xspace)
+                wayland_x_screen(output, &x, &y);
+        else
+                x = wayland_logical_axis(output, 0, 0), y = wayland_logical_axis(output, 1, 0);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_position);
-        wayland_word(&e, (unsigned long)wayland_logical_axis(output, 0, 0));
-        wayland_word(&e, (unsigned long)wayland_logical_axis(output, 1, 0));
+        wayland_word(&e, (unsigned long)x);
+        wayland_word(&e, (unsigned long)y);
         wayland_end(&e);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_size);
         wayland_word(&e, (unsigned long)wayland_units(screen->width, scale120));
@@ -3558,6 +3591,8 @@ static int wayland_display_request(struct wayland_client *c, long op, struct way
                 wayland_global_send(c, c->objects[a[0].slot].id, wayland_output_name(screen));
         return WAYLAND_OK;
 }
+
+WAYLAND_API void wayland_xwayland_client(long slot);
 
 /*
         wl_registry.bind: a global by its name, the interface named exactly, a version from one to the one built,
@@ -7314,6 +7349,7 @@ static void wayland_drag_leave(void)
 static void wayland_drag_end(int how)
 {
         int x_end = wayland.drag.xsource || wayland.drag.xtarget >= 0 || wayland.drag.x_seen;
+        unsigned int action = wayland.drag.action;
 
         if (!wayland.drag.live)
                 return;
@@ -7332,7 +7368,7 @@ static void wayland_drag_end(int how)
         wayland.drag.xtarget = -1, wayland.drag.x_accepted = 0, wayland.drag.xsource = 0, wayland.drag.x_seen = 0, wayland.drag.x_bytes = 0;
         // The X side is told last, the drag none by then: it may start another from what it is told.
         if (x_end)
-                wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, 0);
+                wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);
 }
 
 // The drag over (x, y) of row (-1: no window of a client): the surface there entered with an offer of its own, or moved over.
@@ -7723,6 +7759,33 @@ WAYLAND_API int wayland_drag_x_begin(const char *types, long bytes, unsigned lon
         wayland.drag.target = wayland.drag.surface = wayland.drag.offer = wayland.drag.xtarget = -1;
         wayland.drag.action = 0;
         return 1;
+}
+
+/* The actions an X drag offers changed under it (the person held a key, or asked): its offer is told them, and the action worked out again. */
+WAYLAND_API void wayland_drag_x_actions(unsigned long actions)
+{
+        struct wayland_client *t = wayland_drag_target();
+        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count ? &t->offers[wayland.drag.offer] : 0;
+        long slot = o ? wayland_slot_of(t, o->id) : -1;
+
+        actions &= WAYLAND_DRAG_ACTIONS;
+        if (!wayland.drag.live || !wayland.drag.xsource || wayland.drag.dropped || !actions || actions == wayland.drag.x_actions)
+                return;
+        wayland.drag.x_actions = (unsigned int)actions;
+        if (slot >= 0 && t->objects[slot].version >= 3)
+        {
+                struct wayland_event e = wayland_begin(t, o->id, WLE_wl_data_offer_source_actions);
+
+                wayland_word(&e, actions);
+                wayland_end(&e);
+        }
+        wayland_drag_actions();
+}
+
+// Whether an X client's drag is over the Wayland side and not dropped (the host's Escape is its cancel too).
+WAYLAND_API int wayland_x_dragging(void)
+{
+        return wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped;
 }
 
 WAYLAND_API void wayland_drag_x_motion(long row, long x, long y)
@@ -9214,6 +9277,8 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                         surface->xsurface = 1;
                         c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
                         c->objects[a[0].slot].aux = surface->gen;
+                        // The client whose surfaces are X windows is the X server: its outputs are told again in X's space.
+                        wayland_xwayland_client(c->slot);
                 }
                 return WAYLAND_OK;
         }
@@ -9877,7 +9942,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         wayland.drag.xtarget = -1;
         wayland.cursor_client = wayland.cursor_surface = -1;
-        wayland.xwayland_uid = -1;
+        wayland.xwayland_uid = wayland.xwayland_client = -1;
         wayland.host = host;
         wayland.input_at = host->now(host->context);
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
@@ -9911,6 +9976,32 @@ WAYLAND_API void wayland_syncobj_host(const struct wayland_syncobj_host *syncobj
 WAYLAND_API void wayland_xwayland_user(long uid)
 {
         wayland.xwayland_uid = uid;
+}
+
+/* The client that is the X server (its window manager found it by its pid): its outputs are told again, in X's space (wayland_x_screen). */
+WAYLAND_API void wayland_xwayland_client(long slot)
+{
+        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+
+        if (!wayland.host || slot == wayland.xwayland_client)
+                return;
+        wayland.xwayland_client = c ? slot : -1;
+        for (long at = 0; c && at < c->object_table.count; at++)
+                if (c->objects[at].iface == WLI_zxdg_output_v1)
+                        wayland_xdg_output_send(c, at, c->objects[at].aux);
+        for (long at = 0; c && at < c->object_table.count; at++)
+                if (c->objects[at].iface == WLI_wl_output)
+                        wayland_output_send(c, at);
+}
+
+// Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window, one that places itself): its client keeps its
+// own grabs, and the compositor neither puts it away for a press elsewhere nor lets a window it does not hang from over it.
+WAYLAND_API int wayland_row_xoverride(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 ? wayland_row_surface(row, &c) : 0;
+
+        return s && s->xsurface && s->xpopup;
 }
 
 /* A client's socket accepted: its record, with the display, or a refusal. */
@@ -9981,6 +10072,8 @@ WAYLAND_API void wayland_drop(long slot)
 
         if (!c)
                 return;
+        if (wayland.xwayland_client == slot)
+                wayland.xwayland_client = -1;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
         // The drag's client gone: cancelled. The client a drag is over gone: left (a dropped drag is cancelled).

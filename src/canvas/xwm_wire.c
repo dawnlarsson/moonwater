@@ -135,6 +135,9 @@
    SelectionNotify, the first of its events: who owns a selection now, told to a window that asked. */
 #define XWM_XFIXES_QUERY_VERSION 0
 #define XWM_XFIXES_SELECT_SELECTION_INPUT 2
+#define XWM_XTEST_FAKE_INPUT 2 /* XTEST's minor opcode of FakeInput */
+#define XWM_XTEST_KEY_PRESS 2
+#define XWM_XTEST_KEY_RELEASE 3
 #define XWM_XFIXES_SET_OWNER 1u               /* the selection's owner is another (or none) */
 #define XWM_XFIXES_WINDOW_DESTROY 2u          /* its owner's window is gone */
 #define XWM_XFIXES_CLIENT_CLOSE 4u            /* its owner's connection is gone */
@@ -879,6 +882,24 @@ XWM_API long xwm_enc_xfixes_select_selection_input(unsigned char *out, unsigned 
         xwm_put32(out + 4, window);
         xwm_put32(out + 8, selection);
         xwm_put32(out + 12, mask);
+        return n;
+}
+
+/* XTEST FakeInput: a key's press or release (type 2 or 3) of keycode detail, as if the person's, to whatever X has the keyboard or grabs it;
+   its 36 bytes, the time 0 (now) and the root and place unused. */
+XWM_API long xwm_enc_xtest_key(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int type, unsigned int detail)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || (type != XWM_XTEST_KEY_PRESS && type != XWM_XTEST_KEY_RELEASE) || detail < 8 ||
+            detail > 255)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 36, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_XTEST_FAKE_INPUT;
+        out[4] = (unsigned char)type;
+        out[5] = (unsigned char)detail;
         return n;
 }
 

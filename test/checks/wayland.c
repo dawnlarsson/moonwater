@@ -5307,7 +5307,7 @@ static void test_clipboard(void)
 */
 static struct
 {
-        long receives, client, which, fd_ok, accept, end_ok, row, x, y;
+        long receives, client, which, fd_ok, accept, end_ok, end_action, row, x, y;
         long drags[5];
         char mime[64];
 } fx;
@@ -5330,7 +5330,7 @@ static long fake_xdrag(void *context, long what, long row, long x, long y)
         if (what == WAYLAND_XDRAG_OVER)
                 fx.row = row, fx.x = x, fx.y = y;
         if (what == WAYLAND_XDRAG_END)
-                fx.end_ok = x;
+                fx.end_ok = x, fx.end_action = y;
         return what == WAYLAND_XDRAG_OVER ? fx.accept : 0;
 }
 
@@ -5499,6 +5499,7 @@ static void test_bridge(void)
         WLCHECK(wayland_drag_x_begin("text/plain;charset=utf-8\0image/png\0", 35, 3) == 1 && !wayland_dragging(),
                 "an X drag begins, and the pointer stays the X client's (its button and motion are Xwayland's)");
         WLCHECK(wayland_drag_x_begin("text/plain\0", 11, 1) == 0, "and no other drag begins while it is");
+        WLCHECK(wayland_x_dragging() && !wayland_dragging(), "an X drag over the Wayland side is one the host's Escape ends");
         wlc_forget(a.s.c);
         wayland_drag_x_motion(a.row, 12, 14);
         wlc_pump(a.s.c);
@@ -5515,6 +5516,18 @@ static void test_bridge(void)
                 wlc_send(a.s.c, offer, WLQ_wl_data_offer_set_actions, 1L, 1L);
                 wlc_pump(a.s.c);
                 WLCHECK(wayland_drag_x_answer(&action) == 1 && action == 1, "what the target takes (a type, copy) is the X source's status");
+                // The X source asks now (XdndActionAsk, its XdndActionList copy and move): the offer is told, and what the target prefers taken.
+                wlc_forget(a.s.c);
+                wayland_drag_x_actions(4 | 1 | 2);
+                wlc_pump(a.s.c);
+                e = wlc_take(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_source_actions);
+                WLCHECK(e && e->u[0] == 7 && wayland.drag.x_actions == 7, "an X source's actions that change are its offer's source_actions again");
+                wlc_send(a.s.c, offer, WLQ_wl_data_offer_set_actions, 7L, 4L);
+                wlc_pump(a.s.c);
+                WLCHECK(wayland_drag_x_answer(&action) == 1 && action == 4, "and a target that prefers to ask the person is ask to the X source");
+                wlc_send(a.s.c, offer, WLQ_wl_data_offer_set_actions, 3L, 2L);
+                wlc_pump(a.s.c);
+                WLCHECK(wayland_drag_x_answer(&action) == 1 && action == 2, "then the move it chose");
         }
         wlc_forget(a.s.c);
         wayland_drag_x_drop();
@@ -5529,7 +5542,9 @@ static void test_bridge(void)
         before = fx.drags[WAYLAND_XDRAG_END];
         wlc_send(a.s.c, offer, WLQ_wl_data_offer_finish);
         wlc_pump(a.s.c);
-        WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && !wayland.drag.live, "the target's finish ends the X drag, finished");
+        WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && fx.end_action == 2 && !wayland.drag.live,
+                "the target's finish ends the X drag, finished, with the action it came to (move), the one XdndFinished names");
+        WLCHECK(!wayland_x_dragging(), "and none is dragging after");
         wlc_send(a.s.c, offer, WLQ_wl_data_offer_destroy);
         wayland_drag_x_begin("text/plain\0", 11, 1);
         wayland_drag_x_motion(a.row, 3, 3);
@@ -7182,10 +7197,31 @@ static void test_games(void)
         WLCHECK(d.k.s.xshell && d.k.s.xgrab, "the Xwayland shell and the keyboard grab manager are offered");
         {
                 unsigned long surface = wlc_id(cd, WLI_wl_surface, 6), xwin = wlc_id(cd, WLI_xwayland_surface_v1, 1);
+                unsigned long manager = wl_global(cd, d.k.s.registry, WLI_zxdg_output_manager_v1, 3), xdg = wlc_id(cd, WLI_zxdg_output_v1, 3);
+                struct wl_event_seen *size, *scale;
+                long was = fake.screen.scale;
 
+                // At 200 percent an X server is told its screen as the pixels it is: its windows are drawn a buffer pixel a pixel, and
+                // its root is the compositor's pixels (xwm.c's origin aside), so a drag's or a pointer's X place is the compositor's.
+                fake.screen.scale = 200;
+                wayland_screens_changed();
+                wlc_send(cd, manager, WLQ_zxdg_output_manager_v1_get_xdg_output, xdg, d.k.s.output);
+                wlc_pump(cd);
+                size = wlc_take(cd, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_size);
+                WLCHECK(size && size->u[0] == (unsigned long)fake.screen.width / 2, "before it has an X window a client is told its screen in units (%lu)",
+                        size ? size->u[0] : 0);
+                wlc_forget(cd);
                 wlc_send(cd, d.k.s.compositor, WLQ_wl_compositor_create_surface, surface);
                 wlc_send(cd, d.k.s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
                 WLCHECK(cd->errors == 0, "a surface with no role gets an xwayland_surface_v1 (%s)", cd->error_text);
+                wlc_pump(cd);
+                size = wlc_take(cd, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_size);
+                scale = wlc_take(cd, WLI_wl_output, WLE_wl_output_scale);
+                WLCHECK(size && size->u[0] == (unsigned long)fake.screen.width && size->u[1] == (unsigned long)fake.screen.height && scale && scale->u[0] == 1,
+                        "the client whose surface is an X window is the X server: its screen told again as its pixels, at scale 1 (%lu by %lu)",
+                        size ? size->u[0] : 0, size ? size->u[1] : 0);
+                fake.screen.scale = was;
+                wayland_screens_changed();
                 wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0x1234UL, 0UL);
                 WLCHECK(cd->errors == 0 && wayland_serial_row(0x1234) == -1,
                         "its serial is known to the window manager, with no window yet (%s)", cd->error_text);
@@ -9960,6 +9996,17 @@ static void xw_test_selection(void)
                 XWCHECK(xwm_enc_xfixes_query_version(out, sizeof out, 100, 5, 0) == XWM_ERR_ARG, "a core opcode is no extension's");
         }
         {
+                static const unsigned char press[36] = {143, 2, 9, 0, 2, 9};
+                static const unsigned char release[36] = {143, 2, 9, 0, 3, 9};
+                n = xwm_enc_xtest_key(out, sizeof out, 143, XWM_XTEST_KEY_PRESS, 9);
+                XWCHECK(n == 36 && xw_same(out, press, 36), "XTEST FakeInput: minor 2, nine units, a key press of keycode 9 (Escape), the rest none");
+                n = xwm_enc_xtest_key(out, sizeof out, 143, XWM_XTEST_KEY_RELEASE, 9);
+                XWCHECK(n == 36 && xw_same(out, release, 36), "and its release");
+                XWCHECK(xwm_enc_xtest_key(out, sizeof out, 143, 4, 9) == XWM_ERR_ARG && xwm_enc_xtest_key(out, sizeof out, 143, 2, 7) == XWM_ERR_ARG &&
+                            xwm_enc_xtest_key(out, sizeof out, 100, 2, 9) == XWM_ERR_ARG && xwm_enc_xtest_key(out, 35, 143, 2, 9) == XWM_ERR_SPACE,
+                        "a button or motion, a keycode below 8, a core opcode and a buffer one short are refused");
+        }
+        {
                 unsigned char m[32];
                 memset(m, 0, 32);
                 m[0] = 30; xw_u(m, 4, 0x1234, 4); xw_u(m, 8, 0x400001, 4); xw_u(m, 12, 0x600007, 4); xw_u(m, 16, 0x45, 4); xw_u(m, 20, 0x50, 4); xw_u(m, 24, 0x51, 4);
@@ -10136,6 +10183,8 @@ static void xw_test_selection(void)
                 n = xwm_enc_xfixes_select_selection_input(o, cap, xw_rand() % 300, xw_rand() % 3, xw_rand() % 3, xw_rand() % 9);
                 bad += !xw_bounded(n) || !xw_fits(n, cap);
                 n = xwm_enc_incr(o, cap, xw_rand(), xw_rand(), xw_rand() % 3, xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_xtest_key(o, cap, xw_rand() % 300, xw_rand() % 5, xw_rand() % 300);
                 bad += !xw_bounded(n) || !xw_fits(n, cap);
                 n = xwm_target_mime(in, len, o, cap);
                 bad += !xw_bounded(n) || (n > 0 && (unsigned long)n + 1 > cap);

@@ -5046,11 +5046,20 @@ static int compositor_wl_suspends(unsigned int code, int value, int super)
 
 // Escape (value 1 a press, 2 a repeat) while a client's drag holds the pointer: the drag cancelled at the press, whichever window has the
 // keys. True when there was a drag, and the key is then no window's.
+// Whether a row is an override-redirect X window's (manage.c's compositor_row_xoverride).
+static int compositor_wl_row_xoverride(int row)
+{
+        return compositor_wl.started && wayland_row_xoverride(row);
+}
+
 static int compositor_wl_drag_escape(int value)
 {
-        if (!compositor_wl.started || !wayland_dragging())
+        if (!compositor_wl.started || (!wayland_dragging() && !wayland_x_dragging()))
                 return 0;
-        if (value == 1)
+        // An X client's drag across the bridge: its Wayland drag ends and its X source is given the Escape (compositor_xwm_drag_escape).
+        if (value == 1 && wayland_x_dragging())
+                compositor_xwm_drag_escape();
+        else if (value == 1)
                 wayland_drag_cancel();
         return 1;
 }

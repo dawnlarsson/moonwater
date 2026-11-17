@@ -26,15 +26,41 @@ static void compositor_stack_remove(int row)
         compositor.stacked--;
 }
 
-// On top of the others.
+/*
+        Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window): it places itself and keeps its own grabs, as
+        it does under any X window manager, so it stays over the windows the compositor arranges (a press that raises one does not put it
+        under) and is not put away by a press elsewhere or its window losing the keys, as a popup of the compositor's is; its client ends
+        it, as its focus leaves. None without the Wayland shim.
+*/
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_row_xoverride(int row);
+#define compositor_row_xoverride(row) compositor_wl_row_xoverride(row)
+#else
+#define compositor_row_xoverride(row) 0
+#endif
+
+// On top of the others; an override-redirect X window stays over a window raised (compositor_row_xoverride).
 static void compositor_raise(int row)
 {
+        unsigned int over = 0;
+
         if (compositor.stacked && compositor.stack[compositor.stacked - 1] == row)
                 return;
 
         compositor_stack_remove(row);
         compositor.stack[compositor.stacked++] = (unsigned int)row;
         compositor_damage_row(row);
+        for (unsigned int at = 0; !compositor_row_xoverride(row) && at + 1 + over < compositor.stacked; at++)
+        {
+                unsigned int other = compositor.stack[at];
+
+                if (!compositor_row_xoverride((int)other))
+                        continue;
+                memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
+                compositor.stack[compositor.stacked - 1] = other;
+                compositor_damage_row((int)other);
+                over++, at--;
+        }
 }
 
 static unsigned int compositor_modifiers(void);
@@ -3386,7 +3412,7 @@ static b32 compositor_popups_close(int root, int keep)
         {
                 b32 kept = false;
 
-                if (compositor_popup_parent[row] < 0 || !compositor.showing[row])
+                if (compositor_popup_parent[row] < 0 || !compositor.showing[row] || compositor_row_xoverride(row))
                         continue;
                 if (root >= 0 && compositor_popup_root(row) != root)
                         continue;

@@ -61,7 +61,14 @@
         cancel or the source gone). An X drag over a Wayland window finds the window manager's proxy there (XdndAware, mapped over the
         Wayland window under the pointer while an X client drags), whose XdndEnter, XdndPosition, XdndLeave and XdndDrop are a Wayland drag
         of the X side's in the shim (its offer the X source's types, its receive a conversion of XdndSelection), answered by XdndStatus
-        and XdndFinished. XdndActionCopy, Move and Ask are the drag's copy, move and ask.
+        and XdndFinished. XdndActionCopy, Move and Ask are the drag's copy, move and ask: an X source's Ask is ask and the actions of its
+        XdndActionList that Wayland has (copy alone when it lists none), and a Wayland source with a choice lists its own on the
+        selection window (XdndActionList, XdndActionDescription); XdndFinished names the action the drag came to. An X target's
+        XdndProxy is followed (a proxy that names itself: the messages go to it, naming the window under the pointer). The proxy is
+        mapped while any button held on an X window, or a finger down on one, may be an X drag, under that button's pointer or that
+        finger. The host's Escape ends an X drag on both sides: the Wayland drag of it ends, and the X source is given the Escape
+        through XTEST (its grab has the keyboard). X's root is the compositor's pixels, its origin the top left of the screens
+        (compositor_xwm_origin), and the X server is told its outputs so (wayland_xwayland_client), at any scale and layout.
 
         WHAT IT KEEPS
 
@@ -170,6 +177,12 @@
 #define COMPOSITOR_XWM_PROP_XDND_TYPES 15     // the XdndTypeList of an X drag's source (window: the source)
 #define COMPOSITOR_XWM_PROP_XDND_SYNC 16      // a reply that says the names of an X drag's types have come (window: the source)
 #define COMPOSITOR_XWM_PROP_MULTIPLE 17       // a MULTIPLE's pairs (slot: its answer; window: its requestor)
+#define COMPOSITOR_XWM_PROP_XDND_PROXY 18     // the XdndProxy of the X window a Wayland drag is over (window: it)
+#define COMPOSITOR_XWM_PROP_XDND_PROXIED 19   // the XdndProxy of that proxy, which names itself when it is one (window: the X window; slot: the proxy)
+#define COMPOSITOR_XWM_PROP_XDND_ACTIONS 20   // the XdndActionList of an X drag's source (window: the source)
+#define COMPOSITOR_XWM_PROP_XDND_WORDS 21     // its XdndActionDescription (window: the source)
+#define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
+                                        ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
 #define COMPOSITOR_XWM_PROTO_FOCUS 2u
 #define COMPOSITOR_XWM_NO_PLACE (-100000)
@@ -185,6 +198,10 @@
 #define COMPOSITOR_XWM_XRES_NAME "X-Resource"
 #define COMPOSITOR_XWM_XFIXES_SEQ (COMPOSITOR_XWM_COMPOSITE_SEQ + 2) // QueryExtension("XFIXES"), after X-Resource's
 #define COMPOSITOR_XWM_XFIXES_NAME "XFIXES"
+#define COMPOSITOR_XWM_XTEST_SEQ (COMPOSITOR_XWM_COMPOSITE_SEQ + 3) // QueryExtension("XTEST"), after XFIXES's
+#define COMPOSITOR_XWM_XTEST_NAME "XTEST"
+#define COMPOSITOR_XWM_KEY_ESCAPE 9                  // Escape's X keycode (evdev's 1, and 8)
+#define COMPOSITOR_XWM_XA_WINDOW_TYPE 33             // the predefined WINDOW, XdndProxy's type
 #define COMPOSITOR_XWM_ATOM_TYPE 4                   // the predefined ATOM
 #define COMPOSITOR_XWM_NET_REMOVE 0
 #define COMPOSITOR_XWM_NET_ADD 1
@@ -297,6 +314,7 @@ struct compositor_xwm_selection
 struct compositor_xwm_wdrag
 {
         unsigned int target, version, place, action;
+        unsigned int proxy; // where its messages go: the X window's XdndProxy when it names one that names itself, else the window
         unsigned char live, entered, waiting, moved, dropped, aware_no;
         int row;
 };
@@ -309,7 +327,8 @@ struct compositor_xwm_wdrag
 struct compositor_xwm_xdrag
 {
         unsigned int source, version, action, time, told_action;
-        unsigned char entered, naming, began, dropped, cancelled, told_accept, proxy_mapped;
+        unsigned int listed, words; // XdndActionList as the drag's bits (XWM_DND_*), and how many words its XdndActionDescription has
+        unsigned char entered, naming, began, dropped, cancelled, told_accept, proxy_mapped, escaped;
         int proxy_row, proxy_x, proxy_y, proxy_w, proxy_h;
         struct wayland_table types;
 };
@@ -317,6 +336,7 @@ struct compositor_xwm_xdrag
 struct compositor_xwm
 {
         int listen, fd, uid, ready, broken, claimed, composite;  // composite: 1 once the Composite extension has redirected the root
+        unsigned int xtest;            // XTEST's major opcode (an X drag's Escape is given to its source through it), 0 without it
         unsigned int xres;             // X-Resource's major opcode, 0 without it or when its pids are not this compositor's to use
         int peer_pid;                  // the server's pid, from the connection's credentials
         unsigned int resource_base, resource_mask;
@@ -651,6 +671,51 @@ static void compositor_xwm_start_session(void)
         n = xwm_enc_query_extension(req, sizeof req, (const unsigned char *)COMPOSITOR_XWM_XFIXES_NAME, 6);
         if (n > 0)
                 compositor_xwm_queue(req, n);
+        // XTEST, through which an X drag's source is given the Escape the compositor took (compositor_xwm_drag_escape).
+        n = xwm_enc_query_extension(req, sizeof req, (const unsigned char *)COMPOSITOR_XWM_XTEST_NAME, 5);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+}
+
+/*
+        Where X's root is in the compositor's space. Xwayland's windows are drawn a buffer pixel a pixel, so the X root is in the
+        compositor's pixels (Xwayland is told its outputs so, wayland_xwayland_client: each screen at its place in pixels and its size in
+        pixels, whatever its scale); only its origin is another, the top left of the screens as laid out, since an X coordinate is
+        no less than 0 where a screen may be laid out left of or above the compositor's origin. X places are compositor places less
+        the origin, and the other way.
+*/
+static void compositor_xwm_origin(int *ox, int *oy)
+{
+        int count = compositor_output_count();
+
+        *ox = *oy = 0;
+        for (int at = 0; at < count; at++)
+        {
+                int x, y, width, height;
+
+                compositor_output_rect(at, &x, &y, &width, &height);
+                if (!at || x < *ox)
+                        *ox = x;
+                if (!at || y < *oy)
+                        *oy = y;
+        }
+}
+
+// The X place of a compositor place on an axis (vertical: y), and the compositor place of an X one.
+static int compositor_xwm_to_x(int place, int vertical)
+{
+        int ox, oy;
+
+        compositor_xwm_origin(&ox, &oy);
+        return place - (vertical ? oy : ox);
+}
+
+static int compositor_xwm_from_x(int place, int vertical)
+{
+        int ox, oy;
+
+        compositor_xwm_origin(&ox, &oy);
+        return place + (vertical ? oy : ox);
 }
 
 /*
@@ -1204,7 +1269,8 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 return;
         if (!(w->state & COMPOSITOR_XWM_ADOPTED) || w->dirty)
         {
-                row = wayland_xwindow_adopt(w->serial, !!(w->state & COMPOSITOR_XWM_POPUPISH), w->x, w->y, w->title);
+                row = wayland_xwindow_adopt(w->serial, !!(w->state & COMPOSITOR_XWM_POPUPISH), compositor_xwm_from_x(w->x, 0), compositor_xwm_from_x(w->y, 1),
+                                            w->title);
                 if (row == -2)
                         return;
                 w->state |= COMPOSITOR_XWM_ADOPTED;
@@ -1242,8 +1308,8 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
                 if (w->row >= 0)
                         compositor_fullscreen_row(w->row);
                 c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                c.x = w->row >= 0 && compositor.showing[w->row] ? compositor.x[w->row] : 0;
-                c.y = w->row >= 0 && compositor.showing[w->row] ? compositor.y[w->row] : 0;
+                c.x = compositor_xwm_to_x(w->row >= 0 && compositor.showing[w->row] ? compositor.x[w->row] : 0, 0);
+                c.y = compositor_xwm_to_x(w->row >= 0 && compositor.showing[w->row] ? compositor.y[w->row] : 0, 1);
                 c.width = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0
                               ? compositor.w[w->row]
                               : (compositor.width > 0 ? (unsigned int)compositor.width : 1);
@@ -1317,8 +1383,8 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
                 }
         }
         c.mask = 0;
-        c.x = compositor.x[row];
-        c.y = compositor.y[row];
+        c.x = compositor_xwm_to_x(compositor.x[row], 0);
+        c.y = compositor_xwm_to_x(compositor.y[row], 1);
         if (c.x != w->sent_x || c.y != w->sent_y)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
         if (table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]))
@@ -2796,16 +2862,30 @@ static void compositor_xwm_xfixes(const unsigned char *in, long size)
         the drag's end is XdndFinished, accepted when the target finished.
 */
 
-static void compositor_xwm_message32(unsigned int to, unsigned int type, const unsigned int *data)
+// A client message of window to, sent to dest (XDND's proxy: the message names the window under the pointer and goes to its proxy).
+static void compositor_xwm_message_via(unsigned int dest, unsigned int to, unsigned int type, const unsigned int *data)
 {
         unsigned char event[XWM_EVENT_SIZE], req[64];
         long n;
 
-        if (!to || xwm_enc_client_message(event, sizeof event, to, type, data, XWM_DATA_LONGS) != XWM_EVENT_SIZE)
+        if (!to || !dest || xwm_enc_client_message(event, sizeof event, to, type, data, XWM_DATA_LONGS) != XWM_EVENT_SIZE)
                 return;
-        n = xwm_enc_send_event(req, sizeof req, 0, to, 0, event, XWM_EVENT_SIZE);
+        n = xwm_enc_send_event(req, sizeof req, 0, dest, 0, event, XWM_EVENT_SIZE);
         if (n > 0)
                 compositor_xwm_queue(req, n);
+}
+
+static void compositor_xwm_message32(unsigned int to, unsigned int type, const unsigned int *data)
+{
+        compositor_xwm_message_via(to, to, type, data);
+}
+
+// A message of a Wayland drag's to the X window it is over, by way of that window's proxy.
+static void compositor_xwm_wdrag_say(unsigned int type, const unsigned int *data)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+
+        compositor_xwm_message_via(x->wdrag.proxy ? x->wdrag.proxy : x->wdrag.target, x->wdrag.target, type, data);
 }
 
 // The X window of a row (a popup's too), or 0.
@@ -2876,7 +2956,7 @@ static void compositor_xwm_wdrag_position(void)
         struct compositor_xwm *x = &compositor_xwm;
         unsigned int data[5] = {compositor_xwm_id(COMPOSITOR_XWM_SEL_WINDOW), 0, x->wdrag.place, XWM_CURRENT_TIME, x->wdrag.action};
 
-        compositor_xwm_message32(x->wdrag.target, x->atoms[COMPOSITOR_XWM_A_XDND_POSITION], data);
+        compositor_xwm_wdrag_say(x->atoms[COMPOSITOR_XWM_A_XDND_POSITION], data);
         x->wdrag.waiting = 1;
         x->wdrag.moved = 0;
 }
@@ -2887,8 +2967,8 @@ static void compositor_xwm_wdrag_leave(void)
         unsigned int data[5] = {compositor_xwm_id(COMPOSITOR_XWM_SEL_WINDOW), 0, 0, 0, 0};
 
         if (x->wdrag.entered)
-                compositor_xwm_message32(x->wdrag.target, x->atoms[COMPOSITOR_XWM_A_XDND_LEAVE], data);
-        x->wdrag.target = 0;
+                compositor_xwm_wdrag_say(x->atoms[COMPOSITOR_XWM_A_XDND_LEAVE], data);
+        x->wdrag.target = x->wdrag.proxy = 0;
         x->wdrag.entered = x->wdrag.waiting = x->wdrag.moved = x->wdrag.aware_no = 0;
         x->wdrag.row = -1;
 }
@@ -2897,12 +2977,15 @@ static void compositor_xwm_xdrag_reset(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
 
-        x->xdrag.source = x->xdrag.version = x->xdrag.action = x->xdrag.time = x->xdrag.told_action = 0;
-        x->xdrag.entered = x->xdrag.naming = x->xdrag.began = x->xdrag.dropped = x->xdrag.told_accept = 0;
+        x->xdrag.source = x->xdrag.version = x->xdrag.action = x->xdrag.time = x->xdrag.told_action = x->xdrag.listed = x->xdrag.words = 0;
+        x->xdrag.entered = x->xdrag.naming = x->xdrag.began = x->xdrag.dropped = x->xdrag.told_accept = x->xdrag.escaped = 0;
         x->xdrag.types.count = 0;
 }
 
-/* The shim's word of a Wayland drag over an X window (host->xdrag), or of the end of a drag of the X side's. */
+static void compositor_xwm_wdrag_actions(unsigned int actions);
+static void compositor_xwm_xdrag_ask_actions(unsigned int source);
+
+/* The shim's word of a Wayland drag over an X window (host->xdrag), or of the end of a drag of the X side's (py: its action). */
 static long compositor_xwm_xdrag(long what, long row, long px, long py)
 {
         struct compositor_xwm *x = &compositor_xwm;
@@ -2913,7 +2996,11 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
                 // An X drag's end: its source told it finished (the target took it) or not, once it dropped.
                 if (x->xdrag.began || x->xdrag.dropped)
                 {
-                        unsigned int data[5] = {compositor_xwm_id(COMPOSITOR_XWM_PROXY_WINDOW), px ? 1u : 0u, px ? x->xdrag.action : 0, 0, 0};
+                        // The action the drag came to at its end (py: the drag's bits), the one the target finished with.
+                        unsigned int done = py ? xwm_dnd_action_atom((unsigned int)py, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
+                                                                     x->atoms[COMPOSITOR_XWM_A_XDND_ASK])
+                                              : x->xdrag.action;
+                        unsigned int data[5] = {compositor_xwm_id(COMPOSITOR_XWM_PROXY_WINDOW), px ? 1u : 0u, px ? done : 0, 0, 0};
 
                         if (x->xdrag.dropped)
                         {
@@ -2951,7 +3038,7 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
                         wayland_drag_x_finished(0);
                         return 0;
                 }
-                compositor_xwm_message32(x->wdrag.target, x->atoms[COMPOSITOR_XWM_A_XDND_DROP], data);
+                compositor_xwm_wdrag_say(x->atoms[COMPOSITOR_XWM_A_XDND_DROP], data);
                 x->wdrag.dropped = 1;
                 return 0;
         }
@@ -2965,11 +3052,14 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
                         return 0;
                 if (!x->wdrag.live)
                 {
-                        // The drag's first X window: its types' atoms asked for, and XdndSelection owned for its conversions.
+                        // The drag's first X window: its types' atoms asked for, XdndSelection owned for its conversions, and the actions it
+                        // offers listed with their words where it offers more than one or asks (XdndActionList, XdndActionDescription).
                         x->wdrag.live = 1;
                         x->wdrag.dropped = 0;
                         compositor_xwm_dnd_atoms(atoms, 64, 1);
                         compositor_xwm_own(2, compositor_xwm_id(COMPOSITOR_XWM_SEL_WINDOW));
+                        wayland_drag_x_types(&types, &actions);
+                        compositor_xwm_wdrag_actions(actions);
                 }
                 wayland_drag_x_types(&types, &actions);
                 x->wdrag.action = xwm_dnd_action_atom(actions, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
@@ -2978,11 +3068,12 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
                 x->wdrag.moved = 1;
                 if (x->wdrag.target != w->id)
                 {
+                        // A new X window: its XdndProxy first (XDND's proxy), then the XdndAware of the window its messages go to.
                         compositor_xwm_wdrag_leave();
                         x->wdrag.target = w->id;
                         x->wdrag.row = (int)row;
-                        compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, w->id, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, 0, 1),
-                                            w->id, COMPOSITOR_XWM_PROP_XDND_AWARE, 0);
+                        compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, w->id, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 0, 1),
+                                            w->id, COMPOSITOR_XWM_PROP_XDND_PROXY, 0);
                 }
                 else if (x->wdrag.entered && !x->wdrag.waiting)
                         compositor_xwm_wdrag_position();
@@ -2992,7 +3083,66 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
         return 0;
 }
 
-// The X window's XdndAware: entered (version 3 and later, the types in its enter and in XdndTypeList), or no target there.
+/*
+        The XdndProxy of the X window a Wayland drag is over: a proxy that names itself in its own XdndProxy is where the drag's messages
+        go (asked for here, and its XdndAware after), anything else (none, a window gone, one that names another) is no proxy, and the
+        window's own XdndAware is read.
+*/
+static void compositor_xwm_wdrag_proxy(const struct xwm_property_reply *r, const struct compositor_xwm_pending *p)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned int named = r && r->format == XWM_FORMAT_32 && r->value_len >= 4 ? xwm_get32(r->value) : 0, ask;
+        unsigned char req[32];
+
+        if (!x->wdrag.live || p->window != x->wdrag.target)
+                return;
+        if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY && named && named != p->window)
+        {
+                compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, named, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 0, 1),
+                                    p->window, COMPOSITOR_XWM_PROP_XDND_PROXIED, named);
+                return;
+        }
+        x->wdrag.proxy = p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED && named == p->slot ? named : 0;
+        ask = x->wdrag.proxy ? x->wdrag.proxy : p->window;
+        compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, ask, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, 0, 1), p->window,
+                            COMPOSITOR_XWM_PROP_XDND_AWARE, ask);
+}
+
+/* The actions a Wayland drag's source offers, for an X target: XdndActionList and XdndActionDescription on the selection window, the
+   window manager's, when there is a choice in them (more than one, or ask); none when there is not. */
+static void compositor_xwm_wdrag_actions(unsigned int actions)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned int window = compositor_xwm_id(COMPOSITOR_XWM_SEL_WINDOW);
+        unsigned char list[12], words[16];
+        unsigned long count = 0, bytes = 0;
+
+        if (!(actions & XWM_DND_ASK) && actions != (XWM_DND_COPY | XWM_DND_MOVE))
+        {
+                compositor_xwm_put(window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, list, 0);
+                return;
+        }
+        if (actions & XWM_DND_COPY)
+        {
+                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_COPY]);
+                memory_copy(words + bytes, "Copy", 5), bytes += 5;
+        }
+        if (actions & XWM_DND_MOVE)
+        {
+                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_MOVE]);
+                memory_copy(words + bytes, "Move", 5), bytes += 5;
+        }
+        if (actions & XWM_DND_ASK)
+        {
+                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
+                memory_copy(words + bytes, "Ask", 4), bytes += 4;
+        }
+        compositor_xwm_put(window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, list, count * 4);
+        compositor_xwm_put(window, x->atoms[COMPOSITOR_XWM_A_XDND_DESCRIPTIONS], COMPOSITOR_XWM_XA_STRING, XWM_FORMAT_8, words, bytes);
+}
+
+// The X window's XdndAware (its proxy's, through one): entered (version 3 and later, the types in its enter and in XdndTypeList), or no
+// target there.
 static void compositor_xwm_wdrag_aware(const struct xwm_property_reply *r, unsigned int window)
 {
         struct compositor_xwm *x = &compositor_xwm;
@@ -3019,7 +3169,7 @@ static void compositor_xwm_wdrag_aware(const struct xwm_property_reply *r, unsig
                                    list, count * 4);
         }
         xwm_dnd_enter(data, compositor_xwm_id(COMPOSITOR_XWM_SEL_WINDOW), x->wdrag.version, atoms, count);
-        compositor_xwm_message32(x->wdrag.target, x->atoms[COMPOSITOR_XWM_A_XDND_ENTER], data);
+        compositor_xwm_wdrag_say(x->atoms[COMPOSITOR_XWM_A_XDND_ENTER], data);
         x->wdrag.entered = 1;
         compositor_xwm_wdrag_position();
 }
@@ -3066,7 +3216,7 @@ static void compositor_xwm_xdrag_status(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
         unsigned long action = 0;
-        int accepted = x->xdrag.began && wayland_drag_x_answer(&action);
+        int accepted = x->xdrag.began && !x->xdrag.escaped && wayland_drag_x_answer(&action);
         unsigned int data[5] = {compositor_xwm_id(COMPOSITOR_XWM_PROXY_WINDOW), (accepted ? 1u : 0u) | 2u, 0, 0, 0};
 
         data[4] = accepted ? xwm_dnd_action_atom((unsigned int)action, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
@@ -3079,13 +3229,27 @@ static void compositor_xwm_xdrag_status(void)
                 x->xdrag.action = data[4];
 }
 
+/*
+        The Wayland actions of what an X source asks: its action, and for XdndActionAsk the person's choice, which a Wayland target makes
+        (ask), of the actions its XdndActionList names that Wayland has (copy and move); a source that lists none is asked for a copy
+        too, the one action every XDND source has.
+*/
+static unsigned int compositor_xwm_xdrag_actions(void)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned int action = xwm_dnd_action(x->xdrag.action, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
+                                             x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
+
+        if (action == XWM_DND_ASK)
+                return XWM_DND_ASK | ((x->xdrag.listed & (XWM_DND_COPY | XWM_DND_MOVE)) ? x->xdrag.listed & (XWM_DND_COPY | XWM_DND_MOVE) : XWM_DND_COPY);
+        return action ? action : XWM_DND_COPY;
+}
+
 // The X drag's types, named, as Wayland types and actions: the Wayland drag of it begun.
 static void compositor_xwm_xdrag_begin(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
         const unsigned int *atoms = (const unsigned int *)x->xdrag.types.at;
-        unsigned int action = xwm_dnd_action(x->xdrag.action, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
-                                             x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
         long bytes = 0;
 
         wayland_tables_host(&compositor_wl_host);
@@ -3103,9 +3267,7 @@ static void compositor_xwm_xdrag_begin(void)
                 memory_copy(x->type_table.at + bytes, mime, (positive)n + 1);
                 bytes += n + 1;
         }
-        // Ask is any of the three, as the X source asks the person.
-        if (bytes && wayland_drag_x_begin((const char *)x->type_table.at, bytes, action == XWM_DND_ASK ? XWM_DND_COPY | XWM_DND_MOVE | XWM_DND_ASK
-                                                                                 : action ? action : XWM_DND_COPY))
+        if (bytes && wayland_drag_x_begin((const char *)x->type_table.at, bytes, compositor_xwm_xdrag_actions()))
                 x->xdrag.began = 1;
 }
 
@@ -3130,8 +3292,10 @@ static void compositor_xwm_proxy_message(const struct xwm_event *e)
                 {
                         compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, e->data[0], x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, 1024),
                                             e->data[0], COMPOSITOR_XWM_PROP_XDND_TYPES, 0);
+                        compositor_xwm_xdrag_ask_actions(e->data[0]);
                         return;
                 }
+                compositor_xwm_xdrag_ask_actions(e->data[0]);
                 for (int k = 2; k < 5; k++)
                         if (e->data[k] && wayland_table_reach(&x->xdrag.types, x->xdrag.types.count + 1))
                         {
@@ -3148,10 +3312,16 @@ static void compositor_xwm_proxy_message(const struct xwm_event *e)
         {
                 int rx = (int)(e->data[2] >> 16), ry = (int)(e->data[2] & 0xffffu), tab = 0, under;
 
-                if (e->data[4])
+                if (e->data[4] && e->data[4] != x->xdrag.action)
+                {
+                        // The person changed what the X source asks (a key held): the Wayland drag's actions follow.
                         x->xdrag.action = e->data[4];
-                if (!x->xdrag.naming && !x->xdrag.began && !x->xdrag.cancelled && !x->xdrag.dropped)
+                        if (x->xdrag.began)
+                                wayland_drag_x_actions(compositor_xwm_xdrag_actions());
+                }
+                if (!x->xdrag.naming && !x->xdrag.began && !x->xdrag.cancelled && !x->xdrag.dropped && !x->xdrag.escaped)
                         compositor_xwm_xdrag_begin();
+                rx = compositor_xwm_from_x(rx, 0), ry = compositor_xwm_from_x(ry, 1);
                 under = compositor_under(rx, ry, &tab);
                 if (x->xdrag.began)
                         wayland_drag_x_motion(under, under >= 0 ? rx - compositor.x[under] : 0, under >= 0 ? ry - compositor.y[under] : 0);
@@ -3166,7 +3336,7 @@ static void compositor_xwm_proxy_message(const struct xwm_event *e)
         else if (e->atom == x->atoms[COMPOSITOR_XWM_A_XDND_DROP])
         {
                 x->xdrag.time = e->data[2];
-                if (x->xdrag.began)
+                if (x->xdrag.began && !x->xdrag.escaped)
                 {
                         x->xdrag.dropped = 1;
                         wayland_drag_x_drop();
@@ -3197,8 +3367,30 @@ static void compositor_xwm_dnd_reply(const unsigned char *in, long size, const s
                 compositor_xwm_wdrag_aware(in ? &r : 0, p->window);
                 return;
         }
+        if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY || p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED)
+        {
+                compositor_xwm_wdrag_proxy(in ? &r : 0, p);
+                return;
+        }
         if (!x->xdrag.entered || p->window != x->xdrag.source)
                 return;
+        if (p->what == COMPOSITOR_XWM_PROP_XDND_ACTIONS)
+        {
+                // XdndActionList: the actions the X source offers, as the drag's bits (link and private have no Wayland action).
+                x->xdrag.listed = 0;
+                for (unsigned long k = 0; in && r.format == XWM_FORMAT_32 && k + 4 <= r.value_len; k += 4)
+                        x->xdrag.listed |= xwm_dnd_action(xwm_get32(r.value + k), x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE],
+                                                          x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
+                return;
+        }
+        if (p->what == COMPOSITOR_XWM_PROP_XDND_WORDS)
+        {
+                // XdndActionDescription: a word for each action of the list, each with its NUL (the Wayland target asks in its own words).
+                x->xdrag.words = 0;
+                for (unsigned long k = 0; in && r.format == XWM_FORMAT_8 && k < r.value_len; k++)
+                        x->xdrag.words += !r.value[k];
+                return;
+        }
         if (p->what == COMPOSITOR_XWM_PROP_XDND_TYPES)
         {
                 unsigned char req[32];
@@ -3221,6 +3413,69 @@ static int compositor_xwm_row_is_x(int row)
         return row >= 0 && compositor_xwm_of_row(row) != 0;
 }
 
+/* An X source's XdndActionList and XdndActionDescription asked for at its enter (before the reply that says its types are named, so
+   they have come by then and its Wayland drag begins with them). */
+static void compositor_xwm_xdrag_ask_actions(unsigned int source)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned char req[32];
+
+        compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, source, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, 0, 64),
+                            source, COMPOSITOR_XWM_PROP_XDND_ACTIONS, 0);
+        compositor_xwm_wait(req, xwm_enc_get_property(req, sizeof req, 0, source, x->atoms[COMPOSITOR_XWM_A_XDND_DESCRIPTIONS], COMPOSITOR_XWM_XA_STRING, 0,
+                                                      1024),
+                            source, COMPOSITOR_XWM_PROP_XDND_WORDS, 0);
+}
+
+/*
+        Where the hand that drives an X drag is: a button held whose press went to an X window (any button: an X client may drag with any),
+        at the pointer; else a finger down on an X window (Xwayland's emulated pointer follows it), at the finger. 1 with the place.
+*/
+static int compositor_xwm_drag_hand(int *hx, int *hy)
+{
+        for (int button = 0; button < 8; button++)
+                if ((compositor.button_down & (1u << button)) && compositor_xwm_row_is_x(compositor.button_row[button]))
+                {
+                        *hx = compositor.pointer_x, *hy = compositor.pointer_y;
+                        return 1;
+                }
+        for (int at = 0; at < COMPOSITOR_INPUTS; at++)
+                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                        if (compositor.screen_touch[at].id[slot] >= 0 && compositor_xwm_row_is_x((int)wayland_touch_row(compositor.screen_touch[at].id[slot])))
+                        {
+                                compositor_touch_point((unsigned int)at, slot, hx, hy);
+                                return 1;
+                        }
+        return 0;
+}
+
+/*
+        Escape while an X client drags across the bridge (compositor_wl_drag_escape, the host's one Escape for every drag): the Wayland drag
+        of it ends at once (its target left), the X source is told the proxy takes nothing and its drop finishes nothing, and it is given
+        the Escape itself through XTEST, as the person's key, so it ends its own drag (its grab has the keyboard). True when there was one.
+*/
+static int compositor_xwm_drag_escape(void)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned char req[48];
+
+        if (x->fd < 0 || !x->xdrag.entered || x->xdrag.dropped || x->xdrag.escaped)
+                return 0;
+        x->xdrag.escaped = 1;
+        if (x->xdrag.began)
+                wayland_drag_x_leave();
+        x->xdrag.began = 0;
+        compositor_xwm_xdrag_status();
+        if (x->xtest && xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_PRESS, COMPOSITOR_XWM_KEY_ESCAPE) > 0)
+        {
+                compositor_xwm_queue(req, 36);
+                if (xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_RELEASE, COMPOSITOR_XWM_KEY_ESCAPE) > 0)
+                        compositor_xwm_queue(req, 36);
+        }
+        compositor_xwm_flush();
+        return 1;
+}
+
 /* The proxy over the Wayland window under the pointer while an X client drags (it owns XdndSelection and holds the left button on its
    window), on top so the X source finds it; unmapped elsewhere. Then the X source is told again what the Wayland target takes when
    that changed since it was last told. */
@@ -3228,13 +3483,13 @@ static void compositor_xwm_dnd_pass(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
         unsigned int proxy = compositor_xwm_id(COMPOSITOR_XWM_PROXY_WINDOW);
-        int want = -1, tab = 0;
+        int want = -1, tab = 0, hx = 0, hy = 0;
 
         if (!x->claimed || !x->xfixes_event)
                 return;
-        if (x->sel[2].x_owner && (compositor.button_down & 1u) && compositor_xwm_row_is_x(compositor.button_row[0]))
+        if (x->sel[2].x_owner && compositor_xwm_drag_hand(&hx, &hy))
         {
-                int under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+                int under = compositor_under(hx, hy, &tab);
 
                 if (under >= 0 && under < COMPOSITOR_ROWS && !compositor_xwm_row_is_x(under) && wayland_row_owner(under) >= 0 &&
                     compositor.w[under] > 0 && compositor.h[under] > 0)
@@ -3246,8 +3501,8 @@ static void compositor_xwm_dnd_pass(void)
                 struct xwm_configure c;
 
                 c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT | XWM_CONFIGURE_STACK_MODE;
-                c.x = compositor.x[want];
-                c.y = compositor.y[want];
+                c.x = compositor_xwm_to_x(compositor.x[want], 0);
+                c.y = compositor_xwm_to_x(compositor.y[want], 1);
                 c.width = (unsigned int)compositor.w[want];
                 c.height = (unsigned int)compositor.h[want];
                 c.stack_mode = XWM_STACK_ABOVE;
@@ -3256,7 +3511,7 @@ static void compositor_xwm_dnd_pass(void)
                         compositor_xwm_window_op(XWM_OP_MAP_WINDOW, proxy);
                 x->xdrag.proxy_mapped = 1;
                 x->xdrag.proxy_row = want;
-                x->xdrag.proxy_x = c.x, x->xdrag.proxy_y = c.y, x->xdrag.proxy_w = (int)c.width, x->xdrag.proxy_h = (int)c.height;
+                x->xdrag.proxy_x = compositor.x[want], x->xdrag.proxy_y = compositor.y[want], x->xdrag.proxy_w = (int)c.width, x->xdrag.proxy_h = (int)c.height;
         }
         else if (want < 0 && x->xdrag.proxy_mapped)
         {
@@ -3639,7 +3894,7 @@ static void compositor_xwm_error(const unsigned char *in)
                          compositor_xwm_in_at((long)failed.slot) && compositor_xwm.ins[failed.slot].window == failed.window)
                         compositor_xwm_in_end((long)failed.slot, 0);
                 // An X window gone under a drag has no XdndAware; an X source's types that cannot be read are the ones its enter named.
-                else if (failed.what >= COMPOSITOR_XWM_PROP_XDND_AWARE && failed.what <= COMPOSITOR_XWM_PROP_XDND_SYNC)
+                else if (COMPOSITOR_XWM_DND_REPLY(failed.what))
                         compositor_xwm_dnd_reply(0, 0, &failed);
                 else if (failed.what == COMPOSITOR_XWM_PROP_MULTIPLE)
                         compositor_xwm_multiple_reply(0, 0, &failed);
@@ -3685,7 +3940,7 @@ static void compositor_xwm_message(const unsigned char *in, long size, long type
                         compositor_xwm_named(in, size, &found);
                 else if (found.what == COMPOSITOR_XWM_PROP_SEL || found.what == COMPOSITOR_XWM_PROP_SEL_SYNC)
                         compositor_xwm_in_reply(in, size, &found);
-                else if (found.what >= COMPOSITOR_XWM_PROP_XDND_AWARE && found.what <= COMPOSITOR_XWM_PROP_XDND_SYNC)
+                else if (COMPOSITOR_XWM_DND_REPLY(found.what))
                         compositor_xwm_dnd_reply(in, size, &found);
                 else if (found.what == COMPOSITOR_XWM_PROP_MULTIPLE)
                         compositor_xwm_multiple_reply(in, size, &found);
@@ -3706,6 +3961,16 @@ static void compositor_xwm_message(const unsigned char *in, long size, long type
         if (type == XWM_REPLY && xwm_get16(in + 2) == COMPOSITOR_XWM_XFIXES_SEQ)
         {
                 compositor_xwm_xfixes(in, size);
+                return;
+        }
+        if (type == XWM_REPLY && xwm_get16(in + 2) == COMPOSITOR_XWM_XTEST_SEQ)
+        {
+                struct xwm_extension_reply r;
+
+                if (xwm_parse_extension_reply(in, (unsigned long)size, &r) != XWM_OK)
+                        x->broken = 1;
+                else if (r.present && r.major_opcode >= XWM_EXT_MAJOR_FIRST)
+                        x->xtest = r.major_opcode;
                 return;
         }
         if (type == XWM_REPLY)
