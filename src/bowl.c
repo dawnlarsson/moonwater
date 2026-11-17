@@ -2009,6 +2009,42 @@ static string_address address_to bowl_environment(
     string_address address_to inherited);
 
 static bool bowl_input_granted(string_address root);
+static inline int window_input_game(const unsigned char *keys, unsigned int properties);
+
+/* ---- Game controllers: what a bowl sees of the input devices. ---- */
+
+/*
+        The raw HID nodes, /dev/hidraw*, and /dev/uhid. A hidraw node is a
+        device's reports as they come off the wire, a keyboard's keys among
+        them, and a bowl's program is the machine's root in its namespace on
+        the default tier (the node's owner), so every bowl read the keyboard
+        through it: `bowl /bowls/alpine sh -c 'exec 3</dev/hidraw0'` opened
+        the Keychron's on box. uhid makes a HID device of whatever a program
+        writes, as uinput does an input device. Each is /dev/null in the
+        bowl's view, as /dev/uinput is: it opens and refuses every control.
+        A node made after the launch (a device plugged in while the bowl's
+        programs run) is the machine's own as it stands, which on the hardened
+        tier is root's 0600 and closed to the bowl's user; a bowl the grants
+        name has the keeper below, which masks those too.
+*/
+static bipolar bowl_hidraw_mask(void)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 path[BOWL_PATH_LIMIT];
+        bipolar failed = 0;
+
+        if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0)
+                failed = system_mount("/dev/null", "/dev/uhid", 0, MS_BIND, 0);
+        if (failed || !file_walk_open(address_of walk, AT_FDCWD, "/dev"))
+                return failed;
+        while (!failed && (entry = file_walk_next(address_of walk)))
+                if (string_has_prefix(entry->d_name, "hidraw") &&
+                    path_join(path, sizeof(path), "/dev", entry->d_name))
+                        failed = system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
+        file_walk_close(address_of walk);
+        return failed;
+}
 
 /*
         The input devices of a bowl the grants file does not name. A bowl's
@@ -2017,7 +2053,8 @@ static bool bowl_input_granted(string_address root);
         it from a node: the nodes are taken out of its view instead. In its
         own mount namespace /dev/input is an empty tmpfs and /dev/uinput is
         /dev/null, which opens but refuses every control (a pad cannot be
-        made, and no event can be read from the machine).
+        made, and no event can be read from the machine); the raw HID nodes
+        go the same way (bowl_hidraw_mask).
 */
 static bipolar bowl_input_mask(void)
 {
@@ -2036,7 +2073,584 @@ static bipolar bowl_input_mask(void)
                 if (failed)
                         return failed;
         }
-        return 0;
+        return bowl_hidraw_mask();
+}
+
+/*
+        The pads of a bowl the grants file names, and nothing else of the
+        input devices: what Steam needs (Steam Input reads a controller through
+        its hidraw node and makes its virtual pad through /dev/uinput) and what
+        a game reads (the pad's event and joystick nodes, the virtual pad's
+        among them), and never a keyboard's or a pointer's, which are the
+        compositor's and would be every key typed on the machine.
+
+        Until this a grant was the input group (gid 104), whose nodes are every
+        event node of the machine, the keyboards' too, and the bowl's own mask
+        was all that stood between any bowl and them: a mount its namespace
+        owns, which `umount /dev/input` in the bowl takes away. Now the bowl
+        gets no group. The keeper, a process of the machine's root started by
+        the launch before the id drops, enters the bowl's mount namespace and
+        makes the view: /dev/input a tmpfs of its own (which the bowl could not
+        make: a tmpfs its namespace mounts opens no device) holding a node, of
+        the device's own number, for each pad, joystick and accelerometer
+        (window_input_game, the compositor's own rule) and each js node, owned
+        by the bowl's user; each controller's /dev/hidrawN a node of the bowl's
+        user bound over it, and every other hidraw node /dev/null; /dev/uinput
+        a node of the bowl's user; /dev/uhid /dev/null. The nodes bound over
+        others are kept in BOWL_PAD_STAGE, root's 0700. On the hardened tier
+        that is the wall: the bowl's user is not root and in no input group, so
+        a mount it takes away leaves the machine's nodes, root's, closed to it.
+        On the default tier the bowl is root, as everywhere else on that tier.
+
+        The keeper stays for the life of the bowl's programs and hears the
+        kernel's uevents, so a pad plugged in while Steam runs, and the pad
+        Steam makes, appear at once (there is no udev here: SDL is told to
+        watch the directory, bowl_steam_session); one taken out goes. It ends
+        when no process is left in the namespace.
+*/
+#define BOWL_PAD_STAGE "/dev/input/.moonwater"
+#define BOWL_PAD_TEXT 4096
+#define BOWL_PAD_WAIT_MS 2000
+
+static bipolar bowl_pad_go = -1;   // the launch's end of the pipe that tells the keeper the namespace is made
+static bipolar bowl_pad_done = -1; // and of the one the keeper answers on when the view is made
+static bool bowl_pad_root;         // the launch was the machine's root (a launch that was not has no keeper and keeps its view)
+static bool bowl_pad_granted;      // the grants file named the bowl when the launch began
+
+// A sysfs file of a device, /sys/class/CLASS/NAME/LEAF, read into text with its end: its length, or -1.
+static bipolar bowl_pad_read(string_address class, string_address name,
+                             string_address leaf, p8 address_to text, positive room)
+{
+        p8 path[BOWL_PATH_LIMIT];
+        positive used = 0;
+        string_address parts[] = {"/sys/class/", class, "/", name, "/", leaf};
+        bipolar got;
+
+        for (positive at = 0; at < array_count(parts); at++)
+        {
+                positive length = string_length(parts[at]);
+
+                if (used + length + 1 > sizeof(path))
+                        return -1;
+                memory_copy(path + used, parts[at], length);
+                used += length;
+        }
+        path[used] = end;
+        got = file_read_once_at(AT_FDCWD, (string_address)path, text, room - 1);
+        if (got < 0)
+                return -1;
+        text[got] = end;
+        return got;
+}
+
+// A hexadecimal digit's value, or 16 for a byte that is none.
+static positive bowl_pad_hex(p8 byte)
+{
+        if (byte >= '0' && byte <= '9')
+                return (positive)(byte - '0');
+        byte |= 0x20;
+        return byte >= 'a' && byte <= 'f' ? (positive)(byte - 'a' + 10) : 16;
+}
+
+/*
+        A sysfs bitmap (capabilities/key, properties) into bytes, bit n in byte
+        n / 8: the kernel writes it as hexadecimal words of a long, the most
+        significant first, with the leading zero words left out.
+*/
+static fn bowl_pad_bits(p8 address_to text, positive length, p8 address_to bytes, positive room)
+{
+        positive word = 0;
+
+        memory_zero(bytes, room);
+        while (length)
+        {
+                p64 value = 0;
+                positive stop = length;
+                positive start;
+
+                while (stop && bowl_pad_hex(text[stop - 1]) == 16)
+                        stop--;
+                start = stop;
+                while (start && bowl_pad_hex(text[start - 1]) < 16)
+                        start--;
+                if (start == stop)
+                        break;
+                for (positive at = start; at < stop; at++)
+                        value = value << 4 | bowl_pad_hex(text[at]);
+                for (positive at = 0; at < 8; at++)
+                        if (word * 8 + at < room)
+                                bytes[word * 8 + at] = (p8)(value >> (at * 8));
+                word++;
+                length = start;
+        }
+}
+
+// Whether input node name (eventN, jsN) is a game's: a js node always (joydev takes joysticks alone), an event node by window_input_game.
+static bool bowl_pad_event(string_address name)
+{
+        p8 text[BOWL_PAD_TEXT];
+        p8 keys[96];
+        p8 properties[4];
+        bipolar got;
+
+        if (string_has_prefix(name, "js"))
+                return byte_is_digit(name[2]);
+        if (!string_has_prefix(name, "event") || !byte_is_digit(name[5]))
+                return false;
+        got = bowl_pad_read("input", name, "device/capabilities/key", text, sizeof(text));
+        if (got <= 0)
+                return false;
+        bowl_pad_bits(text, (positive)got, keys, sizeof(keys));
+        got = bowl_pad_read("input", name, "device/properties", text, sizeof(text));
+        bowl_pad_bits(text, got > 0 ? (positive)got : 0, properties, sizeof(properties));
+        return window_input_game(keys, (unsigned)properties[0] | (unsigned)properties[1] << 8) != 0;
+}
+
+/*
+        A HID report descriptor's top-level application collections: 1 when
+        one is a joystick, a gamepad or a multi-axis controller (generic
+        desktop usages 4, 5 and 8) and none is a pointer, a mouse, a keyboard
+        or a keypad (1, 2, 6 and 7), else 0. Short items only carry what is
+        read; a long item is passed over by its size.
+*/
+static bool bowl_pad_descriptor(p8 address_to text, positive length)
+{
+        p32 page = 0, usage = 0;
+        positive depth = 0;
+        bool game = false, other = false;
+
+        for (positive at = 0; at < length;)
+        {
+                p8 prefix = text[at];
+                positive size = (prefix & 3) == 3 ? 4 : (prefix & 3);
+                p32 data = 0;
+
+                if (prefix == 0xfe)
+                {
+                        if (at + 1 >= length)
+                                break;
+                        at += 3 + (positive)text[at + 1];
+                        continue;
+                }
+                if (at + 1 + size > length)
+                        break;
+                for (positive byte = 0; byte < size; byte++)
+                        data |= (p32)text[at + 1 + byte] << (byte * 8);
+                switch (prefix & 0xfc)
+                {
+                case 0x04: // usage page (global)
+                        page = data;
+                        break;
+                case 0x08: // usage (local), its page in its high half when it is four bytes
+                        usage = size == 4 ? data : (page << 16) | data;
+                        break;
+                case 0xa0: // collection
+                        if (!depth && data == 1)
+                        {
+                                if (usage == 0x10004 || usage == 0x10005 || usage == 0x10008)
+                                        game = true;
+                                else if (usage == 0x10001 || usage == 0x10002 || usage == 0x10006 ||
+                                         usage == 0x10007)
+                                        other = true;
+                        }
+                        depth++;
+                        usage = 0;
+                        break;
+                case 0xc0: // the end of a collection
+                        depth -= depth != 0;
+                        usage = 0;
+                        break;
+                case 0x80: // input, output and feature: a main item ends the local ones
+                case 0x90:
+                case 0xb0:
+                        usage = 0;
+                        break;
+                }
+                at += 1 + size;
+        }
+        return game && !other;
+}
+
+/*
+        Whether hidraw node name is a game controller's: Valve's (vendor 28de,
+        whose pads speak in a collection of Valve's own), or one whose report
+        descriptor says it is one (bowl_pad_descriptor). The Sony, Nintendo,
+        Microsoft, 8BitDo and the rest of steam-devices' list are pads by their
+        descriptors, and a keyboard or a mouse of the same vendors is not.
+*/
+static bool bowl_pad_hidraw(string_address name)
+{
+        p8 text[BOWL_PAD_TEXT];
+        bipolar got;
+
+        if (!string_has_prefix(name, "hidraw") || !byte_is_digit(name[6]))
+                return false;
+        //      HID_ID=BUS:VENDOR:PRODUCT in hexadecimal, the bus four digits and the vendor eight.
+        got = bowl_pad_read("hidraw", name, "device/uevent", text, sizeof(text));
+        for (positive at = 0; got > 0 && at < (positive)got;)
+        {
+                if (string_has_prefix((string_address)text + at, "HID_ID=") &&
+                    at + 20 <= (positive)got && !memory_compare(text + at + 12, "000028DE", 8))
+                        return true;
+                while (at < (positive)got && text[at] != '\n')
+                        at++;
+                at++;
+        }
+        got = bowl_pad_read("hidraw", name, "device/report_descriptor", text, sizeof(text));
+        return got > 0 && bowl_pad_descriptor(text, (positive)got);
+}
+
+// The device number of a node of a class (its sysfs dev, "MAJOR:MINOR") as mknod takes it, or 0 when it cannot be read.
+static positive bowl_pad_number(string_address class, string_address name)
+{
+        p8 text[32];
+        positive major = 0, minor = 0, at = 0;
+
+        if (bowl_pad_read(class, name, "dev", text, sizeof(text)) <= 0)
+                return 0;
+        while (byte_is_digit(text[at]))
+                major = major * 10 + (positive)(text[at++] - '0');
+        if (text[at++] != ':' || !byte_is_digit(text[at]))
+                return 0;
+        while (byte_is_digit(text[at]))
+                minor = minor * 10 + (positive)(text[at++] - '0');
+        return (minor & 0xff) | (major << 8) | ((minor & ~(positive)0xff) << 12);
+}
+
+// A node of number made at path for owner, 0600, put in its place by a rename (so a watcher of the directory sees it whole).
+static bool bowl_pad_make(string_address path, positive number, p32 owner)
+{
+        p8 made[BOWL_PATH_LIMIT];
+        positive length = string_length(path);
+        positive slash = length;
+
+        while (slash && path[slash - 1] != '/')
+                slash--;
+        if (!number || length + 2 > sizeof(made))
+                return false;
+        memory_copy(made, path, slash);
+        made[slash] = '.';
+        memory_copy(made + slash + 1, path + slash, length - slash + 1);
+        system_remove_at(AT_FDCWD, (string_address)made, 0);
+        if (system_call_4(syscall(mknodat), AT_FDCWD, (positive)made, S_IFCHR | 0600, number) < 0)
+                return false;
+        if (system_change_owner_at(AT_FDCWD, (string_address)made, owner, owner, 0) < 0 ||
+            system_rename_at(AT_FDCWD, made, AT_FDCWD, path, 0) < 0)
+        {
+                system_remove_at(AT_FDCWD, (string_address)made, 0);
+                return false;
+        }
+        return true;
+}
+
+// An input node that came: made in /dev/input when it is a game's (bowl_pad_event).
+static fn bowl_pad_event_add(string_address name, p32 owner)
+{
+        p8 path[BOWL_PATH_LIMIT];
+
+        if (bowl_pad_event(name) && path_join(path, sizeof(path), "/dev/input", name))
+                bowl_pad_make((string_address)path, bowl_pad_number("input", name), owner);
+}
+
+/*
+        A hidraw node that came, or that was there: a controller's is the
+        node of the bowl's user, made in the stage and bound over the
+        machine's; any other is /dev/null.
+*/
+static fn bowl_pad_hidraw_add(string_address name, p32 owner)
+{
+        p8 path[BOWL_PATH_LIMIT];
+        p8 staged[BOWL_PATH_LIMIT];
+
+        if (!path_join(path, sizeof(path), "/dev", name) ||
+            !path_join(staged, sizeof(staged), BOWL_PAD_STAGE, name) ||
+            system_access_at(AT_FDCWD, (string_address)path, 0) < 0)
+                return;
+        if (bowl_pad_hidraw(name) &&
+            bowl_pad_make((string_address)staged, bowl_pad_number("hidraw", name), owner) &&
+            !system_mount((string_address)staged, (string_address)path, 0, MS_BIND, 0))
+                return;
+        system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
+}
+
+// What a class has now, each name handed to each: the view's first making, and again when uevents were lost.
+static fn bowl_pad_scan(string_address directory, fn (*each)(string_address, p32), p32 owner)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, directory))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+                if (!file_is_dot(entry->d_name))
+                        each(entry->d_name, owner);
+        file_walk_close(address_of walk);
+}
+
+// The view made in the bowl's namespace, the keeper's first step: 0, or why not.
+static bipolar bowl_pad_view(p32 owner)
+{
+        p8 staged[] = BOWL_PAD_STAGE "/uinput";
+        bipolar failed = system_mount("tmpfs", "/dev/input", "tmpfs", MS_NOSUID | MS_NOEXEC,
+                                      "mode=0755");
+
+        if (failed)
+                return failed;
+        failed = system_make_directory_at(AT_FDCWD, BOWL_PAD_STAGE, 0700);
+        if (failed)
+                return failed;
+        if (system_access_at(AT_FDCWD, "/dev/uinput", 0) >= 0)
+        {
+                failed = bowl_pad_make((string_address)staged, bowl_pad_number("misc", "uinput"), owner)
+                             ? system_mount((string_address)staged, "/dev/uinput", 0, MS_BIND, 0)
+                             : system_mount("/dev/null", "/dev/uinput", 0, MS_BIND, 0);
+                if (failed)
+                        return failed;
+        }
+        if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0)
+                failed = system_mount("/dev/null", "/dev/uhid", 0, MS_BIND, 0);
+        bowl_pad_scan("/sys/class/input", bowl_pad_event_add, owner);
+        bowl_pad_scan("/sys/class/hidraw", bowl_pad_hidraw_add, owner);
+        return failed;
+}
+
+// The value of key in a uevent (its lines KEY=VALUE, each ended by a null, the last by the one at message[length]), or null.
+static string_address bowl_pad_uevent_value(p8 address_to message, positive length,
+                                            string_address key)
+{
+        positive key_length = string_length(key);
+
+        for (positive at = 0; at < length;)
+        {
+                positive line = at;
+
+                while (at < length && message[at])
+                        at++;
+                if (at - line > key_length && message[line + key_length] == '=' &&
+                    !memory_compare(message + line, key, key_length))
+                        return (string_address)message + line + key_length + 1;
+                at++;
+        }
+        return null;
+}
+
+// One uevent: an input or hidraw node that came is added, one that went is taken out of the view.
+static fn bowl_pad_uevent(p8 address_to message, positive length, p32 owner)
+{
+        string_address action = bowl_pad_uevent_value(message, length, "ACTION");
+        string_address subsystem = bowl_pad_uevent_value(message, length, "SUBSYSTEM");
+        string_address name = bowl_pad_uevent_value(message, length, "DEVNAME");
+        p8 path[BOWL_PATH_LIMIT];
+        bool added, input;
+
+        if (!action || !subsystem || !name)
+                return;
+        added = string_equals(action, "add");
+        if (!added && !string_equals(action, "remove"))
+                return;
+        input = string_equals(subsystem, "input") && string_has_prefix(name, "input/");
+        if (input)
+                name += 6;
+        else if (!string_equals(subsystem, "hidraw"))
+                return;
+        if (!name[0] || name[0] == '.' || string_first_of(name, '/'))
+                return;
+        if (added)
+        {
+                if (input)
+                        bowl_pad_event_add(name, owner);
+                else
+                        bowl_pad_hidraw_add(name, owner);
+                return;
+        }
+        if (path_join(path, sizeof(path), input ? "/dev/input" : BOWL_PAD_STAGE, name))
+                system_remove_at(AT_FDCWD, (string_address)path, 0);
+}
+
+// The mount namespace a process is in, as /proc names it (mnt:[NUMBER]): its length, or 0.
+static positive bowl_pad_namespace(string_address process, p8 address_to into, positive room)
+{
+        p8 path[64];
+        positive length = string_length(process);
+        bipolar got;
+
+        if (length + sizeof("/proc//ns/mnt") > sizeof(path))
+                return 0;
+        memory_copy(path, "/proc/", 6);
+        memory_copy(path + 6, process, length);
+        memory_copy(path + 6 + length, "/ns/mnt", sizeof("/ns/mnt"));
+        got = system_read_link_at(AT_FDCWD, (string_address)path, into, room);
+        return got > 0 ? (positive)got : 0;
+}
+
+// A pidfd of another process in the keeper's mount namespace, or -1 when none is left in it.
+static bipolar bowl_pad_next_process(void)
+{
+        p8 own[64], other[64];
+        positive own_length = bowl_pad_namespace("self", own, sizeof(own));
+        positive self = (positive)system_call(syscall(getpid));
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        bipolar found = -1;
+
+        if (!own_length || !file_walk_open(address_of walk, AT_FDCWD, "/proc"))
+                return -1;
+        while (found < 0 && (entry = file_walk_next(address_of walk)))
+        {
+                positive pid = 0;
+                bool number = byte_is_digit(entry->d_name[0]);
+
+                for (positive at = 0; number && entry->d_name[at]; at++)
+                {
+                        number = byte_is_digit(entry->d_name[at]);
+                        pid = pid * 10 + (positive)(entry->d_name[at] - '0');
+                }
+                if (!number || pid == self ||
+                    bowl_pad_namespace(entry->d_name, other, sizeof(other)) != own_length ||
+                    memory_compare(own, other, own_length))
+                        continue;
+                found = system_call_2(syscall(pidfd_open), pid, 0);
+        }
+        file_walk_close(address_of walk);
+        return found;
+}
+
+/*
+        The keeper: told by go that the launch's namespace is made, it enters
+        it, makes the view and says so on done, then follows the uevents until
+        the namespace has no process left. Its uevent socket is bound before
+        the first scan, so a device that comes during the scan is heard.
+*/
+static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p32 owner)
+{
+        p8 path[64] = "/proc/";
+        p8 message[8192];
+        socket_address_netlink self = {.family = AF_NETLINK, .groups = 1};
+        bipolar heard = socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, 15 /* NETLINK_KOBJECT_UEVENT */);
+        bipolar nothing = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+        bipolar space, watch;
+        positive length = 6;
+        p8 byte = 0;
+
+        //      Of a session of its own and holding none of the launch's files open (a reader of the program's output
+        //      would wait for the keeper too).
+        system_call(syscall(setsid));
+        if (nothing >= 0)
+                for (positive at = 0; at < 3; at++)
+                        system_call_3(syscall(dup3), (positive)nothing, at, 0);
+        if (system_read_once(go, &byte, 1) != 1)
+                exit(0);
+        system_close(go);
+        length += positive_into_string(path + length, launch);
+        memory_copy(path + length, "/ns/mnt", sizeof("/ns/mnt"));
+        space = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        watch = system_call_2(syscall(pidfd_open), launch, 0);
+        if (heard < 0 || socket_bind((b32)heard, address_of self, sizeof(self)) < 0 || space < 0 ||
+            watch < 0 || system_call_2(syscall(setns), (positive)space, CLONE_NEWNS) < 0 ||
+            system_change_directory("/") < 0 || bowl_pad_view(owner))
+                exit(1);
+        system_close(space);
+        system_write_once(done, &byte, 1);
+        system_close(done);
+
+        for (;;)
+        {
+                system_poll_descriptor wanted[2] = {{(b32)heard, SYSTEM_POLL_READ, 0},
+                                                    {(b32)watch, SYSTEM_POLL_READ, 0}};
+                bipolar got;
+
+                if (system_poll_wait(wanted, 2, null, null) < 0)
+                        continue;
+                if (wanted[1].returned)
+                {
+                        system_close(watch);
+                        watch = bowl_pad_next_process();
+                        if (watch < 0)
+                                exit(0);
+                }
+                if (!wanted[0].returned)
+                        continue;
+                got = socket_receive((b32)heard, message, sizeof(message) - 1, MSG_DONTWAIT, 0, 0);
+                if (got == -ENOBUFS)
+                {
+                        //      Uevents were lost: what is there now is looked at again.
+                        bowl_pad_scan("/sys/class/input", bowl_pad_event_add, owner);
+                        bowl_pad_scan("/sys/class/hidraw", bowl_pad_hidraw_add, owner);
+                }
+                if (got > 0)
+                {
+                        message[got] = end;
+                        bowl_pad_uevent(message, (positive)got, owner);
+                }
+        }
+}
+
+/*
+        The keeper of a launch of a bowl the grants file names, started while
+        the launch is still the machine's root: forked twice, so it is no child
+        of the program the launch becomes. owner is the id the bowl's user is
+        on the machine (BOWL_USER_ID on the hardened tier, the launch's own on
+        the default one, where the user is mapped to it).
+*/
+static fn bowl_pad_keeper_start(p32 owner)
+{
+        b32 go[2] = {-1, -1}, done[2] = {-1, -1};
+        positive launch = (positive)system_call(syscall(getpid));
+        bipolar child;
+        positive status = 0;
+
+        if (system_pipe(go, O_CLOEXEC) < 0)
+                return;
+        if (system_pipe(done, O_CLOEXEC) < 0)
+        {
+                system_close(go[0]), system_close(go[1]);
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+        {
+                system_close(go[1]);
+                system_close(done[0]);
+                if (system_fork() == 0)
+                        bowl_pad_keeper(launch, go[0], done[1], owner);
+                exit(0);
+        }
+        system_close(go[0]);
+        system_close(done[1]);
+        if (child < 0)
+        {
+                system_close(go[1]), system_close(done[0]);
+                return;
+        }
+        system_wait4_retry(child, address_of status, 0, null);
+        bowl_pad_go = go[1];
+        bowl_pad_done = done[0];
+}
+
+/*
+        The view the keeper makes, asked for once the launch's namespace is
+        made: whether it was made, in BOWL_PAD_WAIT_MS. A launch with no keeper,
+        or whose keeper failed, is given the mask.
+*/
+static bool bowl_pad_keeper_ready(void)
+{
+        p8 byte = 0;
+        bool ready = false;
+
+        if (bowl_pad_go < 0)
+                return false;
+        if (system_write_once(bowl_pad_go, &byte, 1) == 1)
+        {
+                system_poll_descriptor wanted = {(b32)bowl_pad_done, SYSTEM_POLL_READ, 0};
+                timespec wait = {BOWL_PAD_WAIT_MS / 1000, (BOWL_PAD_WAIT_MS % 1000) * 1000000};
+
+                ready = system_poll_wait(address_of wanted, 1, address_of wait, null) == 1 &&
+                        system_read_once(bowl_pad_done, &byte, 1) == 1;
+        }
+        system_close(bowl_pad_go);
+        system_close(bowl_pad_done);
+        bowl_pad_go = bowl_pad_done = -1;
+        return ready;
 }
 
 static fn bowl_session_prepare_at(string_address home, string_address runtime,
@@ -2068,7 +2682,15 @@ static DEAD_END fn bowl_inside(string_address root,
                                   : bowl_fast_enter(root);
         if (!failed && isolated)
                 failed = bowl_inputs_mount();
-        if (!failed && !bowl_input_granted(root))
+        /*  The pads' view is the keeper's (bowl_pad_keeper_ready); a launch
+            from inside a bowl the grants name, which is no longer the machine's
+            root and has no keeper, keeps the view it was started in, which is
+            that bowl's own or a mask. A package manager's (isolated) view and
+            every other bowl's are masked. Whether the bowl is named was read
+            before the view was entered (bowl_launch): the /etc of the view is
+            a snapshot of the machine's. */
+        if (!failed && (isolated || !bowl_pad_granted ||
+                        (!bowl_pad_keeper_ready() && bowl_pad_root)))
                 failed = bowl_input_mask();
 
         if (failed)
@@ -3646,20 +4268,16 @@ static fn bowl_user_store_prepare(void)
         identity; the dumpable flag the drop cleared is set again so the maps
         can be written and a desktop's crash handlers work.
 */
-static fn bowl_become_user_hardened(bool input)
+static fn bowl_become_user_hardened(void)
 {
-        p32 groups[array_count(bowl_device_groups) + 1];
+        p32 groups[array_count(bowl_device_groups)];
         positive group_count = array_count(bowl_device_groups);
 
         bowl_user_store_prepare();
 
+        //      No input group: the pads of a bowl the grants file names are lent by nodes of its user's own (bowl_pad_keeper).
         for (positive at = 0; at < group_count; at++)
                 groups[at] = bowl_device_groups[at];
-#ifndef SHELL_NO_INPUT_GROUP
-        //      The input group, for a bowl the grants file names (bowl_input_granted).
-        if (input)
-                groups[group_count++] = MOONWATER_INPUT_GID;
-#endif
 
         /*  Dropping from root to the user clears the dumpable flag, which
             makes /proc/self root-owned and would refuse the id-map writes
@@ -3696,31 +4314,16 @@ static fn bowl_become_user_hardened(bool input)
 /*  The launch is run as the user. A refusal of the namespace itself is the
     machine's to make and is not an error; a namespace that was made and could
     not be given its ids is no process to go on with. */
-static fn bowl_become_user(bool input)
+static fn bowl_become_user(void)
 {
         positive uid = (positive)system_call(syscall(geteuid));
         positive gid = (positive)system_call(syscall(getegid));
 
         if (MOONWATER_STRICT_BOWL >= STRICT_TIGHT)
         {
-                bowl_become_user_hardened(input);
+                bowl_become_user_hardened();
                 return;
         }
-
-#ifndef SHELL_NO_INPUT_GROUP
-        /*  A bowl the grants file names keeps the input group: groups are the
-            kernel's ids, not the namespace's, so the input device nodes (mode
-            0660 in that group) stay open to its user after the unshare. It is
-            set before the unshare: the namespace maps no group but the user's
-            own, and setgroups inside it would be refused. Every other bowl keeps
-            none, as it always did. */
-        if (input)
-        {
-                p32 input_group[1] = {MOONWATER_INPUT_GID};
-
-                system_call_2(syscall(setgroups), 1, (positive)input_group);
-        }
-#endif
 
         /*  The maps are written through /proc, and a process that has
             unshared and cannot be mapped is nobody. */
@@ -3797,8 +4400,17 @@ static b32 bowl_launch(string_address root, string_address program,
                               "desktop session\n"));
 
         bowl_resource_limits();
-        if (!isolated && program && !bowl_as_root && bowl_is_root())
-                bowl_become_user(bowl_input_granted(root));
+        bowl_pad_root = bowl_is_root();
+        bowl_pad_granted = bowl_input_granted(root);
+        if (!isolated && program && !bowl_as_root && bowl_pad_root)
+        {
+                //      The keeper is started while this is root, and lends the pads to the id the bowl's user is on the machine.
+                if (bowl_pad_granted)
+                        bowl_pad_keeper_start(MOONWATER_STRICT_BOWL >= STRICT_TIGHT
+                                                  ? (p32)BOWL_USER_ID
+                                                  : (p32)system_call(syscall(geteuid)));
+                bowl_become_user();
+        }
         environment = bowl_environment(file_environment_all());
         environment = bowl_without_exposed_path(environment);
         if (!bowl_capabilities_wanted(environment))
@@ -8476,9 +9088,10 @@ struct bowl_profile
         // The session runs X programs, and so the bowl holds the wrapper
         // that starts their X server (xwayland-moonwater, below).
         bool xwayland;
-        // Whether the profile's bowls need the input devices (a game controller,
-        // Steam Input's pad): install grants the bowl the input group in the
-        // grants file, and remove takes it away.
+        // Whether the profile's bowls need the game controllers (a pad, Steam
+        // Input's virtual pad): install names the bowl in the grants file, so
+        // its launches are lent the pads (bowl_pad_keeper), and remove takes
+        // the line away.
         bool input;
         // Alpine's Chromium runs under musl 1.2.6+, whose pwrite/pwritev
         // call pwritev2, trapped by Chromium's seccomp-bpf sandbox. The
@@ -9799,11 +10412,12 @@ bowl_chrome_pwrite_install(const struct bowl_profile address_to profile)
         Steam's file dialogs) keeps its settings in memory, since the session
         bus has no dconf. Sound goes to Moonwater's server where it is up.
         The graphics device nodes are given to the render group, as the
-        browser's session does; the input nodes are left as the machine has
-        them, so Steam Input's virtual controllers (/dev/uinput) and any
-        controller's event node stay out of reach of the bowl unless the
-        image's device modes say otherwise: Steam's udev rules grant them
-        through logind's uaccess tag, and this image runs no logind.
+        browser's session does. The game controllers are the launch's: the
+        profile names the Arch bowl in the input grants, so each launch of it
+        is lent the pads' event, joystick and hidraw nodes and /dev/uinput,
+        and no keyboard's or pointer's (bowl_pad_keeper), where Steam's own
+        udev rules would grant them through logind's uaccess tag and this
+        image runs neither. With no udev to ask, SDL watches the directories.
 
         Xwayland is started in the bowl as the X server for Steam and the
         games. It runs rootful, as a Wayland client of Canvas: its X windows
@@ -9835,6 +10449,9 @@ static string_address bowl_steam_session[] = {
     // runtime's SDL (2.32 on the box, which Half-Life 2 loads) has the list; a game with an SDL older than 2.0.22 of its own is set to
     // x11 in its launch options. Proton's own Wayland driver stays off: Proton games go by Xwayland.
     "export SDL_VIDEODRIVER=wayland,x11; unset PROTON_ENABLE_WAYLAND",
+    // No udev runs here, so SDL (Steam's own, a game's, Proton's) is told to find the pads by watching /dev/input and /dev: a
+    // pad plugged in later and the virtual pad Steam Input makes are seen as their nodes appear (bowl_pad_keeper makes them).
+    "export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
     "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "

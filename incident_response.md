@@ -2754,6 +2754,60 @@ nothing here. A session already open when a member is forgotten ends within a
 second (`link_sessions_granted`), as for a peer removed by name. The mutation
 lane has not been run on `link_group_held`.
 
+### MW-2026-204: every bowl read the keyboard through its raw HID node, and a granted bowl through the input group
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-18 (COMMIT_BOWL) |
+| Class | Device exposure: an input device's raw reports readable by a sandboxed program |
+| Attacker | 8 (a taken-over program of a bowl), and any bowl program on the hardened tier the input grants name |
+| Found by | The game-controller pass (agent "controllers"), 2026-11-18, on box |
+
+**What happened.** A bowl's view keeps the machine's `/dev`. Its `/dev/input`
+was masked and `/dev/uinput` bound to `/dev/null` (`bowl_input_mask`), but the
+raw HID nodes were left alone: `/dev/hidraw0` and `hidraw1` on box are the
+Keychron keyboard's interfaces, 0600 root, and a bowl program on the default
+tier is root to the kernel (MW-2026-010), so `bowl /bowls/alpine sh -c 'exec
+3</dev/hidraw0'` opened it, and its reads are the key reports as typed.
+`/dev/uhid` (not on box's kernel) would have let one make a HID device of its
+own. Separately, a bowl the input grants named (`/etc/moonwater/input-bowls`,
+the steam profile's) was given the input group, gid 104, whose nodes are every
+event node of the machine, the keyboards' included: on the hardened tier,
+where the bowl's user is a real uid, that group was the whole grant and the
+keyboards came with it. The mask itself is a mount the bowl's own namespace
+owns: `umount /dev/input` inside any bowl takes it away (checked on box).
+
+**The fix.** Every bowl's view has each `/dev/hidraw*` and `/dev/uhid` bound
+to `/dev/null` with the rest of the mask (`bowl_hidraw_mask`). A granted bowl
+gets no input group any more: a keeper process of the machine's root, started
+by the launch before the id drops (`bowl_pad_keeper`), enters the bowl's mount
+namespace and makes `/dev/input` a tmpfs of its own holding a node, owned by
+the bowl's user, for each pad, joystick and accelerometer (`window_input_game`)
+and js node; binds a node of the user's over each game controller's hidraw
+node (report descriptor Joystick, Gamepad or Multi-axis with no keyboard,
+keypad, pointer or mouse collection, or Valve's 28de) and `/dev/null` over the
+rest; and binds a node of the user's over `/dev/uinput`. It follows the
+kernel's uevents for the life of the namespace, so a pad plugged in later and
+the pad Steam Input makes appear (92 us from `UI_DEV_CREATE` to the game
+holding it, on box). On the hardened tier the user owns those nodes only, so a
+mount it takes away leaves the machine's nodes, root's and gid 104's, closed to
+it. On the default tier the bowl is still the machine's root (MW-2026-010's
+owner decision): the masks there keep programs that do not mean to read the
+keyboard from it, and a program that means to can remove them.
+
+**Tests that fail without the fix.** On box, an ungranted scratch bowl: the
+image's shell shows `/dev/hidraw0 f2:0`, the fixed one `1:3`; a granted one
+lists only the pad's `event`/`js` nodes and `.moonwater`, with every hidraw
+node `1:3` and `/dev/uinput` `10:223` owned by the bowl's user. The bowl check
+rows (pad bits, report descriptors, uevent fields, the Steam session's SDL
+words): 1661 checks and 1 failure, the vgem probe's row, which fails on main
+too (1650 and 1).
+
+**Open.** A hidraw node made after an ungranted bowl started is not masked
+(the default tier's root opens it; the hardened tier's user cannot). The
+`input` lane's granted rows now go through the keeper; not run on a booted
+image in this pass.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

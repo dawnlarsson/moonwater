@@ -1291,6 +1291,70 @@ static fn build_profile(void)
         bowl_forget_path(root);
 }
 
+/*
+        The pads a bowl the grants name is lent (bowl_pad_keeper): a sysfs bitmap read into bytes the way the kernel writes
+        it, a HID report descriptor's top-level collections, the fields of a uevent, and the Steam session's SDL words.
+*/
+static fn pad_rows(void)
+{
+        p8 bytes[96];
+        //      capabilities/key of a pad: BTN_SOUTH (0x130) and up in the fifth word, the leading words zero and left out.
+        p8 pad_keys[] = "7fdb000000000000 0 0 0 0\n";
+        p8 one[] = "40\n";
+        p8 none[] = "\n";
+        static const p8 dualsense[] = {0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31,
+                                       0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02, 0xc0};
+        static const p8 switch_pro[] = {0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xa1, 0x01, 0x85, 0x30, 0x05, 0x09,
+                                        0x19, 0x01, 0x29, 0x0a, 0x81, 0x02, 0xc0};
+        static const p8 keyboard[] = {0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7,
+                                      0x81, 0x02, 0xc0};
+        static const p8 mouse_then_pad[] = {0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0xc0,
+                                            0xc0, 0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xc0};
+        static const p8 nested_pad[] = {0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xc0, 0xc0};
+        static const p8 vendor[] = {0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x81, 0x02, 0xc0};
+        static const p8 long_then_pad[] = {0xfe, 0x02, 0x10, 0xaa, 0xbb, 0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xc0};
+        static const p8 four_byte_usage[] = {0x0b, 0x05, 0x00, 0x01, 0x00, 0xa1, 0x01, 0xc0};
+        static const p8 cut[] = {0x05, 0x01, 0x09};
+        p8 uevent[] = "add@/devices/virtual/input/input30/event21\0ACTION=add\0DEVPATH=/devices/virtual/input/input30/event21\0"
+                      "SUBSYSTEM=input\0DEVNAME=input/event21\0SEQNUM=5000\0MAJOR=13\0MINOR=85";
+        const struct bowl_profile address_to steam = bowl_find_profile("steam");
+        positive sdl = chrome_line(steam ? steam->session : null, "SDL_JOYSTICK_DISABLE_UDEV=1");
+        positive run = chrome_line(steam ? steam->session : null, "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"");
+
+        bowl_pad_bits(pad_keys, string_length(pad_keys), bytes, sizeof(bytes));
+        check("A pad's key bits read from sysfs: BTN_SOUTH and BTN_EAST set, BTN_LEFT and KEY_A not",
+              (bytes[0x130 / 8] & 3) == 3 && !(bytes[0x110 / 8] & 1) && !(bytes[3] & 0x40));
+        check("The pad's bits make a game's device by the compositor's rule", window_input_game(bytes, 0) == 1);
+        bowl_pad_bits(one, string_length(one), bytes, 4);
+        check("A properties word of 40 is INPUT_PROP_ACCELEROMETER alone", bytes[0] == 0x40 && !bytes[1]);
+        bowl_pad_bits(none, string_length(none), bytes, 4);
+        check("An empty bitmap is no bits", !bytes[0] && !bytes[1] && !bytes[2] && !bytes[3]);
+        check("A DualSense's descriptor (a gamepad) and a Switch Pro Controller's (a joystick) are pads",
+              bowl_pad_descriptor((p8 address_to)dualsense, sizeof(dualsense)) &&
+                  bowl_pad_descriptor((p8 address_to)switch_pro, sizeof(switch_pro)));
+        check("A keyboard, a mouse with a pad collection after it and a pad inside a keyboard are not",
+              !bowl_pad_descriptor((p8 address_to)keyboard, sizeof(keyboard)) &&
+                  !bowl_pad_descriptor((p8 address_to)mouse_then_pad, sizeof(mouse_then_pad)) &&
+                  !bowl_pad_descriptor((p8 address_to)nested_pad, sizeof(nested_pad)));
+        check("A vendor collection is no pad by its descriptor (Valve's are by their vendor), and a cut descriptor is none",
+              !bowl_pad_descriptor((p8 address_to)vendor, sizeof(vendor)) &&
+                  !bowl_pad_descriptor((p8 address_to)cut, sizeof(cut)));
+        check("A long item is passed over, and a four-byte usage carries its own page",
+              bowl_pad_descriptor((p8 address_to)long_then_pad, sizeof(long_then_pad)) &&
+                  bowl_pad_descriptor((p8 address_to)four_byte_usage, sizeof(four_byte_usage)));
+        check("A uevent's fields are read by their whole names",
+              string_equals(bowl_pad_uevent_value(uevent, sizeof(uevent) - 1, "ACTION"), "add") &&
+                  string_equals(bowl_pad_uevent_value(uevent, sizeof(uevent) - 1, "DEVNAME"), "input/event21") &&
+                  string_equals(bowl_pad_uevent_value(uevent, sizeof(uevent) - 1, "MINOR"), "85") &&
+                  !bowl_pad_uevent_value(uevent, sizeof(uevent) - 1, "DEV") &&
+                  !bowl_pad_uevent_value(uevent, sizeof(uevent) - 1, "add@/devices/virtual/input/input30/event21"));
+        check("The steam profile names its bowl in the input grants", steam && steam->input);
+        check("The Steam session tells SDL to watch the directories for pads before Steam starts",
+              sdl && run && sdl < run &&
+                  chrome_line(steam ? steam->session : null, "SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1") == sdl &&
+                  chrome_line(steam ? steam->session : null, "SDL_HIDAPI_UDEV=0") == sdl);
+}
+
 static fn steam_profile(void)
 {
         const struct bowl_profile address_to steam = bowl_find_profile("steam");
@@ -2455,7 +2519,7 @@ static fn fast_view_nodev(void)
                 }
                 else
                 {
-                        bowl_become_user(false);
+                        bowl_become_user();
                         if (system_call(syscall(getuid)) != BOWL_USER_ID ||
                             system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
                                 exit(77);
@@ -4189,6 +4253,7 @@ b32 main(void)
         multilib_rows();
         record_rows();
         steam_profile();
+        pad_rows();
         downloads();
         download_ceiling();
         secret_lines();
