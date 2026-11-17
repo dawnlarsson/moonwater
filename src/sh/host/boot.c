@@ -824,6 +824,28 @@ static b32 host_canvas_film(string_address address_to arguments, positive count)
         return 0;
 }
 
+/*
+        moonwater canvas keys SECONDS: every key pressed for SECONDS (1 to 60) followed from the kernel's report to the vblank that showed what its
+        window drew of it, each stage stamped by the compositor (src/canvas/record.h); /run/moonwater/record/keys.txt has a line a key at the end.
+*/
+static b32 host_canvas_keys(string_address address_to arguments, positive count)
+{
+        p8 line[16];
+        positive at = 0, used = 0, value;
+
+        return_if(count != 4, host_usage());
+        value = string_digits_max(arguments[3], 2, address_of used);
+        return_if(!used || arguments[3][used] || value < 1 || value > 60, host_usage());
+        at = positive_into_string(line, value);
+        line[at++] = '\n';
+        host_need_root();
+        if (host_write_file((string_address)HOST_RECORD_DIR "/keys", line, at, 0644, false) < 0)
+                return host_refuse("the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
+        host_say(log, "following every key to the screen; %s/keys.txt has them when the time is up and the screen next changes\n",
+                 (string_address)HOST_RECORD_DIR);
+        return 0;
+}
+
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -849,6 +871,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return host_canvas_shot(count);
         if (count >= 3 && string_equals(arguments[2], "film"))
                 return host_canvas_film(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "keys"))
+                return host_canvas_keys(arguments, count);
 
         return_if(count > 3, host_usage());
 

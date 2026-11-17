@@ -686,6 +686,7 @@ static void compositor_film_end(void)
         compositor_record_write_file(COMPOSITOR_RECORD_DIR "/film.txt", text, at);
 }
 
+static int compositor_under(int x, int y, int *tab); // manage.c
 // A frame of the film: the present just made, its rectangle, one write.
 static void compositor_film_frame(unsigned long long when)
 {
@@ -714,7 +715,15 @@ static void compositor_film_frame(unsigned long long when)
         }
         memory_copy(compositor_film.buffer, "MWFILM01", 8);
         compositor_film.buffer[2] = (unsigned int)compositor_records_all;
-        compositor_film.buffer[3] = 0;
+        // The window under the rectangle's middle as this present composed it: bit 31 read in place (lent), bit 30 the table's buffer it
+        // shows, the rest its picture's number (table frame), so a frame that shows an older picture says where it was read from.
+        {
+                int tab, row = compositor_under(x + w / 2, y + h / 2, &tab);
+
+                compositor_film.buffer[3] = row < 0 ? 0 : ((unsigned int)(compositor_lent(row) != 0) << 31) |
+                                                            ((compositor.front[row] & 1u) << 30) |
+                                                            (__atomic_load_n(&compositor.table->frame[row], __ATOMIC_ACQUIRE) & 0x3fffffffu);
+        }
         *(unsigned long long *)(compositor_film.buffer + 4) = when;
         compositor_film.buffer[6] = (unsigned int)w, compositor_film.buffer[7] = (unsigned int)h;
         out = compositor_film.buffer + 8;
@@ -723,6 +732,133 @@ static void compositor_film_frame(unsigned long long when)
                             (unsigned long)w * 4);
         system_write_all((int)compositor_film.fd, (const char *)compositor_film.buffer, 32 + (unsigned long)w * (unsigned long)h * 4);
         compositor_film.frames++;
+}
+
+/*
+        moonwater canvas keys SECONDS: for SECONDS (1 to 60), every key pressed is followed to the screen, each stage stamped on the monotonic
+        clock as it passes: the kernel's report (the event's own time), the compositor's read of it, the key given to the window's client
+        (wayland_key), the client's socket written, the client's next picture of that window, the present that composed it, and the vblank its
+        flip landed on (the photon, give or take the scanout to the row). keys.txt gets a line a key: each stage after the one before in
+        microseconds, and the whole; nothing is written until the end, and each stage while it runs is a compare or two (the ring's open keys).
+*/
+#define COMPOSITOR_KEYTRACE_RING 1024
+#define COMPOSITOR_KEYTRACE_MAX_SECONDS 60
+static struct compositor_keytrace_entry
+{
+        unsigned long long reported, read, sent, flushed, commit, present, shown;
+        int row;
+        unsigned int code;
+} compositor_keytrace_ring[COMPOSITOR_KEYTRACE_RING];
+static struct
+{
+        unsigned long long until;
+        unsigned int count, open; // keys taken; the first that is not yet on the screen
+} compositor_keytrace;
+static char compositor_keytrace_text[COMPOSITOR_KEYTRACE_RING * 112 + 256];
+
+static void compositor_keytrace_read(unsigned int code, unsigned long long reported, unsigned long long now)
+{
+        struct compositor_keytrace_entry *k;
+
+        if (!compositor_keytrace.until || compositor_keytrace.count >= COMPOSITOR_KEYTRACE_RING)
+                return;
+        k = &compositor_keytrace_ring[compositor_keytrace.count++];
+        memory_zero(k, sizeof(*k));
+        k->reported = reported ? reported : now, k->read = now, k->code = code, k->row = -1;
+}
+
+// The newest key read and not yet given to a client is given to this window's.
+static void compositor_keytrace_sent(int row)
+{
+        if (!compositor_keytrace.until || !compositor_keytrace.count)
+                return;
+        for (unsigned int at = compositor_keytrace.count; at-- > compositor_keytrace.open;)
+                if (!compositor_keytrace_ring[at].sent)
+                {
+                        compositor_keytrace_ring[at].sent = clock_monotonic_nanoseconds(), compositor_keytrace_ring[at].row = row;
+                        return;
+                }
+}
+
+// Each stage below is taken by every open key at that stage: the first picture, present and vblank after it.
+static void compositor_keytrace_flushed(void)
+{
+        unsigned long long now = 0;
+
+        if (!compositor_keytrace.until)
+                return;
+        for (unsigned int at = compositor_keytrace.open; at < compositor_keytrace.count; at++)
+                if (compositor_keytrace_ring[at].sent && !compositor_keytrace_ring[at].flushed)
+                        compositor_keytrace_ring[at].flushed = now ? now : (now = clock_monotonic_nanoseconds());
+}
+
+static void compositor_keytrace_commit(int row)
+{
+        unsigned long long now = 0;
+
+        if (!compositor_keytrace.until)
+                return;
+        for (unsigned int at = compositor_keytrace.open; at < compositor_keytrace.count; at++)
+                if (compositor_keytrace_ring[at].flushed && !compositor_keytrace_ring[at].commit && compositor_keytrace_ring[at].row == row)
+                        compositor_keytrace_ring[at].commit = now ? now : (now = clock_monotonic_nanoseconds());
+}
+
+static void compositor_keytrace_present(unsigned long long began, unsigned long long ended)
+{
+        if (!compositor_keytrace.until)
+                return;
+        for (unsigned int at = compositor_keytrace.open; at < compositor_keytrace.count; at++)
+                if (compositor_keytrace_ring[at].commit && !compositor_keytrace_ring[at].present && compositor_keytrace_ring[at].commit <= began)
+                        compositor_keytrace_ring[at].present = ended;
+}
+
+static void compositor_keytrace_shown(unsigned long long when)
+{
+        if (!compositor_keytrace.until)
+                return;
+        for (unsigned int at = compositor_keytrace.open; at < compositor_keytrace.count; at++)
+                if (compositor_keytrace_ring[at].present && !compositor_keytrace_ring[at].shown)
+                        compositor_keytrace_ring[at].shown = when > compositor_keytrace_ring[at].present ? when : compositor_keytrace_ring[at].present;
+        while (compositor_keytrace.open < compositor_keytrace.count && compositor_keytrace_ring[compositor_keytrace.open].shown)
+                compositor_keytrace.open++;
+}
+
+static unsigned int compositor_keytrace_us(char *to, unsigned int at, unsigned int room, unsigned long long from, unsigned long long till)
+{
+        unsigned long long ns = from && till >= from ? till - from : 0;
+
+        if (!from || !till)
+                return compositor_record_cat(to, at, room, " -");
+        at = compositor_record_cat(to, at, room, " ");
+        at = compositor_record_number(to, at, room, ns / 1000);
+        at = compositor_record_cat(to, at, room, ".");
+        at = compositor_record_number(to, at, room, ns / 100 % 10);
+        return at;
+}
+
+static void compositor_keytrace_end(void)
+{
+        unsigned int at = 0, room = sizeof(compositor_keytrace_text);
+        char *to = compositor_keytrace_text;
+
+        compositor_keytrace.until = 0;
+        at = compositor_record_cat(to, at, room, "# us: read sent flushed commit present shown whole (each after the stage before; whole: report to vblank)\n");
+        for (unsigned int k = 0; k < compositor_keytrace.count; k++)
+        {
+                const struct compositor_keytrace_entry *t = &compositor_keytrace_ring[k];
+
+                at = compositor_record_number(to, at, room, t->code);
+                at = compositor_keytrace_us(to, at, room, t->reported, t->read);
+                at = compositor_keytrace_us(to, at, room, t->read, t->sent);
+                at = compositor_keytrace_us(to, at, room, t->sent, t->flushed);
+                at = compositor_keytrace_us(to, at, room, t->flushed, t->commit);
+                at = compositor_keytrace_us(to, at, room, t->commit, t->present);
+                at = compositor_keytrace_us(to, at, room, t->present, t->shown);
+                at = compositor_keytrace_us(to, at, room, t->reported, t->shown);
+                at = compositor_record_cat(to, at, room, "\n");
+        }
+        compositor_record_write_file("keys.txt", to, at);
+        compositor_keytrace.count = compositor_keytrace.open = 0;
 }
 
 static int compositor_record_look_wanted(long long mtime, long long seen, long long read_at)
@@ -789,6 +925,23 @@ static void compositor_record_look(unsigned long long now)
                         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/film.txt", 0, 0, 0, 0);
                 }
         }
+        handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/keys", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                got = (long)system_read_once(handle, word, sizeof(word) - 1);
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/keys", 0, 0, 0, 0);
+                secs = 0;
+                for (long at = 0; at < got && word[at] >= '0' && word[at] <= '9'; at++)
+                        secs = secs * 10 + (unsigned long long)(word[at] - '0');
+                if (secs >= 1 && secs <= COMPOSITOR_KEYTRACE_MAX_SECONDS)
+                {
+                        compositor_keytrace.count = compositor_keytrace.open = 0;
+                        compositor_keytrace.until = now + secs * 1000000000ull;
+                        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/keys.txt", 0, 0, 0, 0);
+                }
+                secs = 0;
+        }
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/shot", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
@@ -833,6 +986,12 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
                 compositor_record_look(ended);
         if (compositor_record_until && compositor_record_mark.damaged)
                 compositor_record_capture(ended);
+        if (compositor_keytrace.until)
+        {
+                compositor_keytrace_present(began, ended);
+                if (ended >= compositor_keytrace.until)
+                        compositor_keytrace_end();
+        }
         if (compositor_film.until)
         {
                 compositor_film_frame(ended);

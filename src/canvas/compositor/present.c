@@ -398,9 +398,23 @@ static void compositor_card_began(positive began)
         compositor_card.began = began;
 }
 
+/*
+        A present whose jobs went to the card is recorded when they are done (compositor_card_done): the record, the film, a shot and the
+        keys' trace read the scanout it composes into, and read when the present was handed to the card they took what that buffer held
+        from two presents before (the card had not drawn it yet): a frame on the screen whole was filmed as an older one, a flash that never
+        was.
+*/
+static struct
+{
+        unsigned long long began;
+        enum compositor_record_path path;
+        int wanted;
+} compositor_card_record;
+
 // The present's frame given up (a job of it refused, hung or its fence an error): not shown, and drawn again whole by the next present.
 static void compositor_card_abandon(void)
 {
+        compositor_card_record.wanted = 0; // not shown: nothing of it is recorded
         compositor_card_fence_close();
         compositor_card.on = 0;
         compositor_card_release();
@@ -433,6 +447,11 @@ static void compositor_card_done(void)
                                 compositor_card.flip_own, compositor_card.back, compositor_card.plane_off);
         compositor_present_on_card = 1;
         compositor_metric_note(clock_monotonic_nanoseconds() - compositor_card.began);
+        if (compositor_card_record.wanted)
+        {
+                compositor_card_record.wanted = 0;
+                compositor_record_present(compositor_card_record.began, clock_monotonic_nanoseconds(), compositor_card_record.path);
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_presented();
         compositor_wl_frame();
@@ -631,6 +650,12 @@ static void compositor_present(void)
         else if (!compositor_card.on)
                 compositor_metric_note(ended - began);
         path = compositor_present_on_card ? COMPOSITOR_RECORD_CARD : compositor.plane_row >= 0 ? COMPOSITOR_RECORD_PLANE : COMPOSITOR_RECORD_PROCESSOR;
+        // Its jobs on the card: recorded when they are done, with the card's composing in the buffer (compositor_card_record).
+        if (compositor_card.on && !jobs_before)
+        {
+                compositor_card_record.began = began, compositor_card_record.path = COMPOSITOR_RECORD_CARD, compositor_card_record.wanted = 1;
+                return;
+        }
         compositor_record_present(began, ended, path);
 }
 

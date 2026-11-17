@@ -857,6 +857,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         int count, target;
 
         taskbar_moon_seen(clock_monotonic_nanoseconds());
+        if (value == 1)
+                compositor_keytrace_read(code, reported, clock_monotonic_nanoseconds());
 
         // Escape while the hand moves or resizes a window puts it back as it was at the press, and is no window's key.
         if (code == CK_KEY_ESC && value && (compositor.drag >= 0 || compositor.resize >= 0))

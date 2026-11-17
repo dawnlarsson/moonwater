@@ -463,6 +463,7 @@ static int compositor_wl_dmabuf_missing(void);
 static void compositor_flip_done(void)
 {
         compositor_record_vblank(clock_monotonic_nanoseconds());
+        compositor_keytrace_shown(compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
         compositor.flip_pending = 0;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {

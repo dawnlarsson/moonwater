@@ -2633,6 +2633,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         if (picture->own_size && compositor.asking[row] && compositor.arranged[row] == COMPOSITOR_FLOATING && !compositor.fullscreen[row] &&
             compositor.resize != row && compositor.shared_row != row)
                 compositor.asking[row] = 0;
+        if (has_content)
+                compositor_keytrace_commit(row);
         if (has_content && !compositor_wl.laying[row].open)
                 compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
@@ -5441,6 +5443,7 @@ static void compositor_wl_flush_all(void)
         for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot))
                         compositor_wl_flush(slot);
+        compositor_keytrace_flushed();
 }
 
 /* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
@@ -5636,6 +5639,8 @@ static int compositor_wl_key(unsigned int code, int value)
                 compositor_clip_gesture(row);
         if (value != 2)
                 wayland_key(row, code, value);
+        if (value == 1)
+                compositor_keytrace_sent(row);
         return 1;
 }
 
