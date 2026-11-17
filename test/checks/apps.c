@@ -3922,10 +3922,11 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
-    "src/canvas/ui/notices.c",  "src/canvas/ui/files.c"};
+    "src/canvas/ui/notices.c",  "src/canvas/ui/files.c",    "src/canvas/ui/installer.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
                                                          "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
-                                                         "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c",  "src/canvas/ui/files.c"};
+                                                         "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c",  "src/canvas/ui/files.c",
+                                                         "src/canvas/ui/installer.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -4053,6 +4054,8 @@ static const struct
     // Each language's own name for itself, which the Language row shows as it is whichever language is taken, and which the
     // languages rows hold to the @name of its file.
     {"src/canvas/ui/ui.c", "language_names[] = {"},
+    // Each keyboard layout by its own name, as the languages are, and the layout's code the keyboard verb takes.
+    {"src/canvas/ui/installer.c", "installer_layouts[] = {"},
 };
 
 // Whether one of the file's tables that are left out is declared at a place of its text: its head stands there, whole.

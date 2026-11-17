@@ -10054,6 +10054,7 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/compress.c" // tar, zstd, gzip and xz
 #include "checks/shell.c" // the shell's reuse, its path stage, the builtins' regressions, slurp, the wait retry and the writer's buffer
 #include "checks/storage.c" // storage's I/O and its formats
+#include "checks/installer.c" // the installer: its drives, its plan, its steps and its write path on a file
 #include "checks/machine.c" // the machine, snapshots, sensors and the browser
 #include "checks/tensor.c" // the tensor routines
 #include "checks/font.c" // the font engine and shaping

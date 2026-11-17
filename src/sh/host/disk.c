@@ -351,26 +351,23 @@ static fn host_mark_set(string_address path)
                 host_fail(path, failed);
 }
 
-/* A session that settled live: its verdict, and the hint a terminal prints
-   about a live session when it first opens. */
+/* A session that settled live: its verdict. The desktop opens the installer
+   on it (moonwater install's window, ui/installer.c); a terminal says nothing. */
 static fn host_settle_live(void)
 {
-        host_mark_set(HOST_HINT);
         host_verdict_set("live", "");
 }
 
 /*
         A session that is live because the install boot chose could not be
         kept (host_take has said why): its verdict is "live DISK", which names
-        the disk kept away from, so that the first terminal's hint and
-        moonwater setup say what happened to it and send nobody to an install
+        the disk kept away from, so that moonwater setup says what happened to it and send nobody to an install
         over it. It was a plain live verdict with no hint, and setup then said
         moonwater setup install DISK keeps it, which erases the disk whose data
         partition would not mount.
 */
 static fn host_settle_kept_away(string_address disk)
 {
-        host_mark_set(HOST_HINT);
         host_verdict_set("live ", disk);
         host_say(log_error, host_label "this session is live, and %s is not used: its Moonwater "
                                        "data is not kept this session. moonwater setup use %s "
@@ -3307,7 +3304,7 @@ static b32 host_boot(void)
                           : host_label "%s has Moonwater's partitions and no image on "
                                        "them: an install that did not finish.\n",
                  chosen->disk);
-        host_say(log, host_label "A terminal will ask what to do with it, or "
+        host_say(log, host_label "The installer asks what to do with it, or "
                       "moonwater setup use, update or live answers from a shell.\n");
         host_booted(known ? address_of settings : null);
         return 0;
@@ -3389,36 +3386,6 @@ static fn host_question(string_address disk)
 }
 
 /*
-        What the first terminal of a live session says of it. kept is the disk
-        boot could not keep, from a "live DISK" verdict; else a disk with a
-        Moonwater data partition is looked for, and the hint names it as one an
-        install would erase, where it offered an install over any disk.
-*/
-static fn host_live_hint(string_address kept)
-{
-        p8 disk[HOST_NAME_ROOM];
-
-        if (kept && kept[0])
-        {
-                host_say(log, host_label "This is a live session: %s has Moonwater's data, which "
-                                         "could not be mounted at boot, so nothing is kept after "
-                                         "power off.\n"
-                              host_label "moonwater setup use %s tries it again; moonwater setup "
-                                         "install %s would erase it.\n",
-                         kept, kept, kept);
-                return;
-        }
-
-        host_say(log, host_label "This is a live session: nothing is kept after power off.\n");
-        if (host_data_disk(disk, sizeof(disk)))
-                host_say(log, host_label "%s already holds Moonwater's data, which moonwater setup "
-                                         "install %s would erase.\n",
-                         disk, disk);
-        else
-                host_say(log, host_label "moonwater setup install DISK puts Moonwater on a disk.\n");
-}
-
-/*
         What a terminal does before it starts its shell, in the pty's child,
         so what this prints and reads is the window.
 
@@ -3455,15 +3422,8 @@ fn host_terminal_opening(void)
                                    HOST_VERDICT_POLL_NS);
         }
         host_verdict_unwatch(notify);
-
-        if (string_has_prefix(verdict, "ask ") &&
-            system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD, HOST_QUESTION_TAKEN,
-                             0) >= 0)
-                host_question(verdict + 4);
-        else if ((string_equals(verdict, "live") || string_has_prefix(verdict, "live ")) &&
-                 system_rename_at(AT_FDCWD, HOST_HINT, AT_FDCWD, HOST_HINT_TAKEN,
-                                  0) >= 0)
-                host_live_hint(verdict[4] == ' ' ? verdict + 5 : null);
+        //      A boot that asks is answered in the installer's window (the desktop opens it on a verdict of live or
+        //      ask), or by moonwater ask, setup use, update or live from a shell: a terminal asks nothing.
 }
 
 // Install -------------------------------------------------------
@@ -3751,6 +3711,70 @@ static bool host_install_place(p64 bytes, b32 sector, storage_format_partition a
 }
 
 /*
+        The layout an install writes, on an open disk (or a file the size of one, which is how the installer's check writes it):
+        the table zeroed at both ends, a GPT with the system and data partitions where host_install_place put them, named
+        HOST_SYSTEM_NAME and HOST_DATA_NAME (what the census and the installer find an install by), a FAT32 on the first and an
+        ext4 on the second, from eighty random bytes, and the whole synced. 0, or the first write's failure.
+*/
+static bipolar host_install_lay(bipolar handle, p64 bytes, b32 sector, storage_format_partition address_to parts, p8 address_to random)
+{
+        storage_format_identity identity;
+        bipolar failed;
+
+        memory_copy(identity.uuid, random, 16);
+        memory_copy(identity.hash_seed, random + 16, 16);
+        memory_copy(parts[0].unique, random + 48, 16);
+        memory_copy(parts[1].unique, random + 64, 16);
+
+        //      Version 4, as the filesystems write theirs (byte 6) and as a
+        //      GPT GUID does (byte 7).
+        {
+                const struct
+                {
+                        p8 address_to bytes;
+                        positive version_at;
+                } random_ids[] = {{identity.uuid, 6},   {identity.hash_seed, 6},
+                                  {random + 32, 7},     {parts[0].unique, 7},
+                                  {parts[1].unique, 7}};
+
+                for (positive at = 0; at < array_count(random_ids); at++)
+                        tools_uuid_version(random_ids[at].bytes, random_ids[at].version_at, 4);
+        }
+        identity.time = (p32)(system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000);
+        identity.label = "moonwater";
+
+        memory_copy(parts[0].type, storage_gpt_system_type, 16);
+        memory_copy(parts[1].type, storage_gpt_linux_type, 16);
+        parts[0].name = HOST_SYSTEM_NAME;
+        parts[1].name = HOST_DATA_NAME;
+
+        failed = storage_format_zero(handle, 0, HOST_ALIGN_BYTES);
+        if (!failed)
+                failed = storage_format_zero(handle, bytes - HOST_ALIGN_BYTES,
+                                             HOST_ALIGN_BYTES);
+        if (!failed)
+                failed = storage_format_gpt(handle, bytes / (p64)sector, (p32)sector,
+                                            random + 32,
+                                            parts, 2);
+        if (!failed)
+                failed = storage_format_fat32(
+                    handle, parts[0].first * (p64)sector,
+                    (parts[0].last - parts[0].first + 1) * (p64)sector, (p32)sector,
+                    parts[0].first, address_of identity);
+        if (!failed)
+                failed = storage_format_zero(handle, parts[1].first * (p64)sector,
+                                             HOST_ALIGN_BYTES);
+        if (!failed)
+                failed = storage_format_ext4(
+                    handle, parts[1].first * (p64)sector,
+                    (parts[1].last - parts[1].first + 1) * (p64)sector,
+                    address_of identity);
+        if (!failed)
+                failed = system_call_1(syscall(fsync), (positive)handle);
+        return failed;
+}
+
+/*
         Refusals first, then one question, then the writes.
 
         The boot image has to be on some other disk -- it is what gets
@@ -3772,7 +3796,6 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         p8 kept[HOST_NAME_ROOM];
         host_medium_search search;
         host_install target;
-        storage_format_identity identity;
         storage_format_partition parts[2];
         p64 bytes = 0;
         b32 sector = 0;
@@ -3947,61 +3970,11 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 return host_fail(device, failed);
         }
 
-        memory_copy(identity.uuid, random, 16);
-        memory_copy(identity.hash_seed, random + 16, 16);
-        memory_copy(parts[0].unique, random + 48, 16);
-        memory_copy(parts[1].unique, random + 64, 16);
-
-        //      Version 4, as the filesystems write theirs (byte 6) and as a
-        //      GPT GUID does (byte 7).
-        {
-                const struct
-                {
-                        p8 address_to bytes;
-                        positive version_at;
-                } random_ids[] = {{identity.uuid, 6},   {identity.hash_seed, 6},
-                                  {random + 32, 7},     {parts[0].unique, 7},
-                                  {parts[1].unique, 7}};
-
-                for (positive at = 0; at < array_count(random_ids); at++)
-                        tools_uuid_version(random_ids[at].bytes, random_ids[at].version_at, 4);
-        }
-        identity.time = (p32)(system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000);
-        identity.label = "moonwater";
-
-        memory_copy(parts[0].type, storage_gpt_system_type, 16);
-        memory_copy(parts[1].type, storage_gpt_linux_type, 16);
-        parts[0].name = HOST_SYSTEM_NAME;
-        parts[1].name = HOST_DATA_NAME;
-
         if (!failed)
         {
                 host_say(log, host_label "partitioning and formatting %s\n", name);
-
-                failed = storage_format_zero(handle, 0, HOST_ALIGN_BYTES);
+                failed = host_install_lay(handle, bytes, sector, parts, random);
         }
-        if (!failed)
-                failed = storage_format_zero(handle, bytes - HOST_ALIGN_BYTES,
-                                             HOST_ALIGN_BYTES);
-        if (!failed)
-                failed = storage_format_gpt(handle, bytes / (p64)sector, (p32)sector,
-                                            random + 32,
-                                            parts, 2);
-        if (!failed)
-                failed = storage_format_fat32(
-                    handle, parts[0].first * (p64)sector,
-                    (parts[0].last - parts[0].first + 1) * (p64)sector, (p32)sector,
-                    parts[0].first, address_of identity);
-        if (!failed)
-                failed = storage_format_zero(handle, parts[1].first * (p64)sector,
-                                             HOST_ALIGN_BYTES);
-        if (!failed)
-                failed = storage_format_ext4(
-                    handle, parts[1].first * (p64)sector,
-                    (parts[1].last - parts[1].first + 1) * (p64)sector,
-                    address_of identity);
-        if (!failed)
-                failed = system_call_1(syscall(fsync), (positive)handle);
 
         //      Written part way, the disk is not left holding half of an install,
         //      and what became of it is said as well as the write's own

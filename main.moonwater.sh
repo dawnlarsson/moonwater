@@ -309,6 +309,22 @@ function desktop_autostart {
   done
 }
 
+# The installer, on a live boot alone: boot's verdict is live (nothing on a disk is kept this session) or ask (a disk holds
+# another build), which is a machine started from the stick. An installed boot's verdict is disk, and starts none. This is the
+# installer's own look at the verdict, not a program of a list: it is started whatever else a session starts.
+function desktop_installer {
+  [ -x /installer ] || return 0
+  desktop_word=
+  [ -r /run/moonwater/verdict ] && IFS= read -r desktop_word < /run/moonwater/verdict
+  case $desktop_word in
+  live* | ask*) ;;
+  *) return 0 ;;
+  esac
+  desktop_font
+  [ -n "$desktop_text" ] || return
+  desktop_run /installer -f "$desktop_text"
+}
+
 # The on-screen keyboard, when the desktop starts it (moonwater keyboard start: the setting on, or auto with a touch screen or
 # no keyboard). It starts hidden, and shows while a text field has the keys.
 function desktop_keyboard {
@@ -437,6 +453,7 @@ function desktop_session {
   if desktop_settled; then
     desktop_autostart
     desktop_keyboard
+    desktop_asked desktop_installer
   fi
   wait $desktop_compositor
   desktop_status=$?

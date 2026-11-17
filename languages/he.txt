@@ -58,6 +58,58 @@ files_reading	64a4	קורא את התיקייה
 files_rename_hint	ad88	שם חדש
 files_unreadable	986c	אין הרשאה לקרוא את התיקייה
 files_up	5940	למעלה
+installer_apps_about	af1b	הן מותקנות במערכת החדשה אחרי שהיא נכתבת.
+installer_apps_head	0024	הוספת אפליקציות
+installer_apps_offline	ff16	התחברו לאינטרנט כדי להוסיף אפליקציות.
+installer_back	4bc2	חזרה
+installer_chrome	d96a	התקנת Chrome
+installer_chrome_about	dde8	דפדפן האינטרנט Chromium.
+installer_disk_about	e7fc	הכונן שממנו המערכת הזו הופעלה אינו מופיע.
+installer_disk_head	1a23	בחרו היכן להתקין
+installer_disk_holds	5343	יש Moonwater
+installer_disk_looking	a6c2	מחפש כוננים
+installer_disk_none	4abc	לא נמצא כונן להתקנה
+installer_disk_removable	742e	נשלף
+installer_done_about	42d4	הפעילו מחדש והוציאו את ה-USB כשהמסך מחשיך.
+installer_done_head	697f	Moonwater מותקן
+installer_erase_again	f179	לחצו שוב כדי למחוק את %s
+installer_failed	0a78	ההתקנה נעצרה: %s
+installer_install	bd40	התקנה
+installer_keyboard_about	2367	הקלידו בשדה למטה כדי לנסות.
+installer_keyboard_head	99a8	בחרו מקלדת
+installer_keyboard_try	2e4c	הקלידו כאן כדי לנסות
+installer_language_about	06be	Moonwater מדבר בה מעכשיו, כאן ואחרי ההתקנה.
+installer_language_head	ebf7	בחרו שפה
+installer_mode_overwrite	0e92	דריסה
+installer_mode_overwrite_about	550e	מוחק את כל הכונן ומתקין את Moonwater מחדש.
+installer_mode_update	0e94	עדכון
+installer_mode_update_about	c729	שומר את הקבצים, האפליקציות וההגדרות שלכם, ומחליף את קבצי המערכת והאתחול.
+installer_network_about	2425	האפליקציות צריכות אותו. אפשר לדלג ולהוסיף אותן מאוחר יותר.
+installer_network_head	274e	התחברות לאינטרנט
+installer_network_offline	2071	לא מחובר. חברו כבל, או הצטרפו ל-Wi-Fi בהגדרות.
+installer_network_online	a9cb	מחובר לאינטרנט
+installer_network_wifi	c1be	הגדרות Wi-Fi
+installer_next	da08	הבא
+installer_reboot	ed8c	הפעלה מחדש
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	מוכן להתקנה
+installer_review_overwrite	34ed	כל מה שבכונן הזה נמחק.
+installer_review_settings	482f	שפה %1$s, מקלדת %2$s
+installer_review_update	87a0	Moonwater בכונן הזה מתעדכן. הנתונים וההגדרות שלכם נשמרים.
+installer_running	f7a4	מתקין את Moonwater
+installer_running_step	4adb	שלב %1$d מתוך %2$d
+installer_skip	c7e2	דילוג
+installer_ssh	6812	התקנת SSH
+installer_ssh_about	a16a	התחברו למחשב הזה ממחשב אחר דרך הרשת.
+installer_steam	5958	התקנת Steam
+installer_steam_about	03e2	חנות וספריית המשחקים של Valve.
+installer_step_apps	1aad	אפליקציות
+installer_step_disk	40c4	כונן
+installer_step_install	bd40	התקנה
+installer_step_keyboard	a714	מקלדת
+installer_step_language	db9b	שפה
+installer_step_network	ad65	רשת
+installer_virtual	757b	לחצו התקנה עם המקלדת, העכבר או המסך של המחשב הזה.
 launcher_log_out	d8b5	התנתקות
 launcher_log_out_armed	8615	התנתקות
 launcher_power_off	ae2f	כיבוי

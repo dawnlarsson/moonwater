@@ -57,6 +57,58 @@ files_reading	64a4	Reading the folder
 files_rename_hint	ad88	New name
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
+installer_apps_about	af1b	They are installed on the new system once it is written.
+installer_apps_head	0024	Add apps
+installer_apps_offline	ff16	Connect to the internet to add apps.
+installer_back	4bc2	Back
+installer_chrome	d96a	Install Chrome
+installer_chrome_about	dde8	The Chromium web browser.
+installer_disk_about	e7fc	The drive this system started from is not listed.
+installer_disk_head	1a23	Choose where to install
+installer_disk_holds	5343	Has Moonwater
+installer_disk_looking	a6c2	Looking for drives
+installer_disk_none	4abc	No drive to install on was found
+installer_disk_removable	742e	Removable
+installer_done_about	42d4	Restart, and take the USB stick out when the screen goes dark.
+installer_done_head	697f	Moonwater is installed
+installer_erase_again	f179	Press again to erase %s
+installer_failed	0a78	The install stopped: %s
+installer_install	bd40	Install
+installer_keyboard_about	2367	Type in the field below to try it.
+installer_keyboard_head	99a8	Choose your keyboard
+installer_keyboard_try	2e4c	Type here to try it
+installer_language_about	06be	Moonwater speaks it from now on, here and once installed.
+installer_language_head	ebf7	Choose your language
+installer_mode_overwrite	0e92	Overwrite
+installer_mode_overwrite_about	550e	Erases the whole drive and installs Moonwater anew.
+installer_mode_update	0e94	Update
+installer_mode_update_about	c729	Keeps your files, apps and settings, and replaces the system and boot files.
+installer_network_about	2425	The apps need it. You can skip this and add them later.
+installer_network_head	274e	Connect to the internet
+installer_network_offline	2071	Not connected. Plug in a cable, or join Wi-Fi in Settings.
+installer_network_online	a9cb	Connected to the internet
+installer_network_wifi	c1be	Wi-Fi settings
+installer_next	da08	Next
+installer_reboot	ed8c	Restart
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	Ready to install
+installer_review_overwrite	34ed	Everything on this drive is erased.
+installer_review_settings	482f	Language %1$s, keyboard %2$s
+installer_review_update	87a0	Moonwater on this drive is updated. Your data and settings are kept.
+installer_running	f7a4	Installing Moonwater
+installer_running_step	4adb	Step %1$d of %2$d
+installer_skip	c7e2	Skip
+installer_ssh	6812	Install SSH
+installer_ssh_about	a16a	Log in to this machine from another over the network.
+installer_steam	5958	Install Steam
+installer_steam_about	03e2	Valve's game store and library.
+installer_step_apps	1aad	Apps
+installer_step_disk	40c4	Disk
+installer_step_install	bd40	Install
+installer_step_keyboard	a714	Keyboard
+installer_step_language	db9b	Language
+installer_step_network	ad65	Network
+installer_virtual	757b	Press Install with this machine's own keyboard, mouse or screen.
 launcher_log_out	d8b5	Log out
 launcher_log_out_armed	8615	log out
 launcher_power_off	ae2f	Power off

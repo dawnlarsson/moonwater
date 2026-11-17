@@ -58,6 +58,58 @@ files_reading	64a4	قراءة المجلد
 files_rename_hint	ad88	اسم جديد
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
+installer_apps_about	af1b	تُثبَّت على النظام الجديد بعد كتابته.
+installer_apps_head	0024	إضافة تطبيقات
+installer_apps_offline	ff16	اتصل بالإنترنت لإضافة التطبيقات.
+installer_back	4bc2	رجوع
+installer_chrome	d96a	تثبيت Chrome
+installer_chrome_about	dde8	متصفح الويب Chromium.
+installer_disk_about	e7fc	القرص الذي بدأ منه هذا النظام غير مدرج.
+installer_disk_head	1a23	اختر مكان التثبيت
+installer_disk_holds	5343	يحتوي على Moonwater
+installer_disk_looking	a6c2	جارٍ البحث عن الأقراص
+installer_disk_none	4abc	لم يُعثر على قرص للتثبيت عليه
+installer_disk_removable	742e	قابل للإزالة
+installer_done_about	42d4	أعد التشغيل وانزع ذاكرة USB عندما تظلم الشاشة.
+installer_done_head	697f	تم تثبيت Moonwater
+installer_erase_again	f179	اضغط مرة أخرى لمسح %s
+installer_failed	0a78	توقف التثبيت: %s
+installer_install	bd40	تثبيت
+installer_keyboard_about	2367	اكتب في الحقل أدناه لتجربته.
+installer_keyboard_head	99a8	اختر لوحة المفاتيح
+installer_keyboard_try	2e4c	اكتب هنا لتجربتها
+installer_language_about	06be	يتحدث Moonwater بها من الآن، هنا وبعد التثبيت.
+installer_language_head	ebf7	اختر لغتك
+installer_mode_overwrite	0e92	الكتابة فوقه
+installer_mode_overwrite_about	550e	يمسح القرص كله ويثبت Moonwater من جديد.
+installer_mode_update	0e94	تحديث
+installer_mode_update_about	c729	يحتفظ بملفاتك وتطبيقاتك وإعداداتك، ويستبدل ملفات النظام والإقلاع.
+installer_network_about	2425	تحتاجه التطبيقات. يمكنك تخطي هذا وإضافتها لاحقاً.
+installer_network_head	274e	الاتصال بالإنترنت
+installer_network_offline	2071	غير متصل. صِل كبلاً، أو انضم إلى شبكة Wi-Fi في الإعدادات.
+installer_network_online	a9cb	متصل بالإنترنت
+installer_network_wifi	c1be	إعدادات Wi-Fi
+installer_next	da08	التالي
+installer_reboot	ed8c	إعادة التشغيل
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	جاهز للتثبيت
+installer_review_overwrite	34ed	يُمسح كل ما على هذا القرص.
+installer_review_settings	482f	اللغة %1$s، لوحة المفاتيح %2$s
+installer_review_update	87a0	يُحدَّث Moonwater على هذا القرص. تبقى بياناتك وإعداداتك.
+installer_running	f7a4	جارٍ تثبيت Moonwater
+installer_running_step	4adb	الخطوة %1$d من %2$d
+installer_skip	c7e2	تخطي
+installer_ssh	6812	تثبيت SSH
+installer_ssh_about	a16a	سجّل الدخول إلى هذا الجهاز من جهاز آخر عبر الشبكة.
+installer_steam	5958	تثبيت Steam
+installer_steam_about	03e2	متجر الألعاب ومكتبتها من Valve.
+installer_step_apps	1aad	التطبيقات
+installer_step_disk	40c4	القرص
+installer_step_install	bd40	التثبيت
+installer_step_keyboard	a714	لوحة المفاتيح
+installer_step_language	db9b	اللغة
+installer_step_network	ad65	الشبكة
+installer_virtual	757b	اضغط تثبيت بلوحة مفاتيح هذا الجهاز أو فأرته أو شاشته.
 launcher_log_out	d8b5	تسجيل الخروج
 launcher_log_out_armed	8615	تسجيل الخروج
 launcher_power_off	ae2f	إيقاف التشغيل

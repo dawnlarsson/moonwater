@@ -53,8 +53,6 @@
 #define HOST_VERDICT HOST_STATE "/verdict"
 #define HOST_QUESTION HOST_STATE "/question"
 #define HOST_QUESTION_TAKEN HOST_STATE "/question.taken"
-#define HOST_HINT HOST_STATE "/hint"
-#define HOST_HINT_TAKEN HOST_STATE "/hint.taken"
 #define HOST_DATA HOST_STATE "/data"
 #define HOST_SYSTEM HOST_STATE "/system"
 #define HOST_MEDIUM HOST_STATE "/medium"
@@ -341,6 +339,7 @@ static fn host_pause(p64 nanoseconds)
 #include "host/security.c" // the verbs dns, security and bind
 #include "host/network.c" // the verb network: the interfaces, the name servers and discovery as one page, and discovery's switches
 #include "host/page.c" // the verbs setup (install, update, update usb, rollback, use, live, removable), status, help, wipe, machine, boot and ask: the page of verbs and its rows, the sticks and an update from one, a rollback, a wipe
+#include "host/install.c" // the verb install: the installer's drives, the one this started from, an update or an overwrite of one and what it wrote read back
 
 /*
         moonwater canvas identify: each screen's number, as a black-on-white badge in that screen's top left corner for three seconds (the window
@@ -984,6 +983,7 @@ static b32 host_main()
             {"status", host_status_verb, true},
             {"help", host_help, true},
             {"setup", host_setup, false, true},
+            {"install", host_install_verb, false, true},
             // Reading needs nothing, and the kernel decides who may set a bound
             // event. init and exit still need root.
             {"bind", host_bind, false, true},

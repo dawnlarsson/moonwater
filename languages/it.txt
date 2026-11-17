@@ -57,6 +57,58 @@ files_reading	64a4	Lettura della cartella
 files_rename_hint	ad88	Nuovo nome
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
+installer_apps_about	af1b	Vengono installate sul nuovo sistema una volta scritto.
+installer_apps_head	0024	Aggiungi app
+installer_apps_offline	ff16	Connettiti a internet per aggiungere app.
+installer_back	4bc2	Indietro
+installer_chrome	d96a	Installa Chrome
+installer_chrome_about	dde8	Il browser web Chromium.
+installer_disk_about	e7fc	L'unità da cui è partito questo sistema non è elencata.
+installer_disk_head	1a23	Scegli dove installare
+installer_disk_holds	5343	Ha Moonwater
+installer_disk_looking	a6c2	Ricerca delle unità
+installer_disk_none	4abc	Nessuna unità su cui installare trovata
+installer_disk_removable	742e	Rimovibile
+installer_done_about	42d4	Riavvia e togli la chiavetta USB quando lo schermo si spegne.
+installer_done_head	697f	Moonwater è installato
+installer_erase_again	f179	Premi di nuovo per cancellare %s
+installer_failed	0a78	L'installazione si è fermata: %s
+installer_install	bd40	Installa
+installer_keyboard_about	2367	Scrivi nel campo qui sotto per provarla.
+installer_keyboard_head	99a8	Scegli la tastiera
+installer_keyboard_try	2e4c	Scrivi qui per provarla
+installer_language_about	06be	Moonwater la parla da ora, qui e una volta installato.
+installer_language_head	ebf7	Scegli la lingua
+installer_mode_overwrite	0e92	Sovrascrivi
+installer_mode_overwrite_about	550e	Cancella tutta l'unità e installa Moonwater da capo.
+installer_mode_update	0e94	Aggiorna
+installer_mode_update_about	c729	Conserva file, app e impostazioni, e sostituisce i file di sistema e di avvio.
+installer_network_about	2425	Le app ne hanno bisogno. Puoi saltare e aggiungerle più tardi.
+installer_network_head	274e	Connettiti a internet
+installer_network_offline	2071	Non connesso. Collega un cavo o accedi a una Wi-Fi nelle Impostazioni.
+installer_network_online	a9cb	Connesso a internet
+installer_network_wifi	c1be	Impostazioni Wi-Fi
+installer_next	da08	Avanti
+installer_reboot	ed8c	Riavvia
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	Pronto per installare
+installer_review_overwrite	34ed	Tutto su questa unità viene cancellato.
+installer_review_settings	482f	Lingua %1$s, tastiera %2$s
+installer_review_update	87a0	Moonwater su questa unità viene aggiornato. Dati e impostazioni restano.
+installer_running	f7a4	Installazione di Moonwater
+installer_running_step	4adb	Passo %1$d di %2$d
+installer_skip	c7e2	Salta
+installer_ssh	6812	Installa SSH
+installer_ssh_about	a16a	Accedi a questa macchina da un'altra attraverso la rete.
+installer_steam	5958	Installa Steam
+installer_steam_about	03e2	Il negozio e la libreria di giochi di Valve.
+installer_step_apps	1aad	App
+installer_step_disk	40c4	Disco
+installer_step_install	bd40	Installa
+installer_step_keyboard	a714	Tastiera
+installer_step_language	db9b	Lingua
+installer_step_network	ad65	Rete
+installer_virtual	757b	Premi Installa con la tastiera, il mouse o lo schermo di questa macchina.
 launcher_log_out	d8b5	Esci
 launcher_log_out_armed	8615	uscire
 launcher_power_off	ae2f	Spegni

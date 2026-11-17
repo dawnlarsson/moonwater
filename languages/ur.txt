@@ -58,6 +58,58 @@ files_reading	64a4	فولڈر پڑھا جا رہا ہے
 files_rename_hint	ad88	نیا نام
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
+installer_apps_about	af1b	سسٹم لکھے جانے کے بعد یہ نئے سسٹم پر انسٹال ہوتی ہیں۔
+installer_apps_head	0024	ایپس شامل کریں
+installer_apps_offline	ff16	ایپس شامل کرنے کے لیے انٹرنیٹ سے جڑیں۔
+installer_back	4bc2	واپس
+installer_chrome	d96a	Chrome انسٹال کریں
+installer_chrome_about	dde8	Chromium ویب براؤزر۔
+installer_disk_about	e7fc	جس ڈرائیو سے یہ سسٹم شروع ہوا وہ فہرست میں نہیں۔
+installer_disk_head	1a23	انسٹال کرنے کی جگہ چنیں
+installer_disk_holds	5343	Moonwater موجود ہے
+installer_disk_looking	a6c2	ڈرائیوز تلاش ہو رہی ہیں
+installer_disk_none	4abc	انسٹال کرنے کے لیے کوئی ڈرائیو نہیں ملی
+installer_disk_removable	742e	ہٹانے کے قابل
+installer_done_about	42d4	دوبارہ شروع کریں اور اسکرین تاریک ہونے پر USB نکال لیں۔
+installer_done_head	697f	Moonwater انسٹال ہو گیا
+installer_erase_again	f179	%s مٹانے کے لیے دوبارہ دبائیں
+installer_failed	0a78	انسٹال رک گیا: %s
+installer_install	bd40	انسٹال
+installer_keyboard_about	2367	آزمانے کے لیے نیچے والے خانے میں لکھیں۔
+installer_keyboard_head	99a8	اپنا کی بورڈ چنیں
+installer_keyboard_try	2e4c	آزمانے کے لیے یہاں لکھیں
+installer_language_about	06be	Moonwater اب سے یہی زبان بولے گا، یہاں اور انسٹال کے بعد۔
+installer_language_head	ebf7	اپنی زبان چنیں
+installer_mode_overwrite	0e92	اوپر لکھیں
+installer_mode_overwrite_about	550e	پوری ڈرائیو مٹا کر Moonwater نئے سرے سے انسٹال کرتا ہے۔
+installer_mode_update	0e94	اپ ڈیٹ
+installer_mode_update_about	c729	آپ کی فائلیں، ایپس اور ترتیبات رکھتا ہے، اور سسٹم اور بوٹ فائلیں بدلتا ہے۔
+installer_network_about	2425	ایپس کو اس کی ضرورت ہے۔ آپ اسے چھوڑ کر بعد میں انہیں شامل کر سکتے ہیں۔
+installer_network_head	274e	انٹرنیٹ سے جڑیں
+installer_network_offline	2071	جڑا نہیں۔ کیبل لگائیں، یا ترتیبات میں Wi-Fi سے جڑیں۔
+installer_network_online	a9cb	انٹرنیٹ سے جڑا ہوا
+installer_network_wifi	c1be	Wi-Fi ترتیبات
+installer_next	da08	اگلا
+installer_reboot	ed8c	دوبارہ شروع کریں
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	انسٹال کے لیے تیار
+installer_review_overwrite	34ed	اس ڈرائیو پر سب کچھ مٹ جاتا ہے۔
+installer_review_settings	482f	زبان %1$s، کی بورڈ %2$s
+installer_review_update	87a0	اس ڈرائیو پر Moonwater اپ ڈیٹ ہوتا ہے۔ آپ کا ڈیٹا اور ترتیبات رہتی ہیں۔
+installer_running	f7a4	Moonwater انسٹال ہو رہا ہے
+installer_running_step	4adb	مرحلہ %1$d از %2$d
+installer_skip	c7e2	چھوڑیں
+installer_ssh	6812	SSH انسٹال کریں
+installer_ssh_about	a16a	نیٹ ورک کے ذریعے کسی اور مشین سے اس مشین میں داخل ہوں۔
+installer_steam	5958	Steam انسٹال کریں
+installer_steam_about	03e2	Valve کا گیم اسٹور اور لائبریری۔
+installer_step_apps	1aad	ایپس
+installer_step_disk	40c4	ڈرائیو
+installer_step_install	bd40	انسٹال
+installer_step_keyboard	a714	کی بورڈ
+installer_step_language	db9b	زبان
+installer_step_network	ad65	نیٹ ورک
+installer_virtual	757b	انسٹال کو اس مشین کے اپنے کی بورڈ، ماؤس یا اسکرین سے دبائیں۔
 launcher_log_out	d8b5	لاگ آؤٹ
 launcher_log_out_armed	8615	لاگ آؤٹ
 launcher_power_off	ae2f	بند کریں

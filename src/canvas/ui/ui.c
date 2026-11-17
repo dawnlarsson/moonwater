@@ -209,7 +209,12 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define MOONWATER_UI_FILES 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES)
+// The installer: the window a live boot opens, which puts Moonwater on a drive (ui/installer.c on the model of ui/installer_model.c).
+#ifndef MOONWATER_UI_INSTALLER
+#define MOONWATER_UI_INSTALLER 1
+#endif
+
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES || MOONWATER_UI_INSTALLER)
 
 #endif /* MOONWATER_CANVAS_UI_SWITCHES */
 
@@ -7854,6 +7859,58 @@ LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_rename_hint, "New name") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
+LANGUAGE_ID(installer_apps_about, "They are installed on the new system once it is written.") \
+LANGUAGE_ID(installer_apps_head, "Add apps") \
+LANGUAGE_ID(installer_apps_offline, "Connect to the internet to add apps.") \
+LANGUAGE_ID(installer_back, "Back") \
+LANGUAGE_ID(installer_chrome, "Install Chrome") \
+LANGUAGE_ID(installer_chrome_about, "The Chromium web browser.") \
+LANGUAGE_ID(installer_disk_about, "The drive this system started from is not listed.") \
+LANGUAGE_ID(installer_disk_head, "Choose where to install") \
+LANGUAGE_ID(installer_disk_holds, "Has Moonwater") \
+LANGUAGE_ID(installer_disk_looking, "Looking for drives") \
+LANGUAGE_ID(installer_disk_none, "No drive to install on was found") \
+LANGUAGE_ID(installer_disk_removable, "Removable") \
+LANGUAGE_ID(installer_done_about, "Restart, and take the USB stick out when the screen goes dark.") \
+LANGUAGE_ID(installer_done_head, "Moonwater is installed") \
+LANGUAGE_ID(installer_erase_again, "Press again to erase %s") \
+LANGUAGE_ID(installer_failed, "The install stopped: %s") \
+LANGUAGE_ID(installer_install, "Install") \
+LANGUAGE_ID(installer_keyboard_about, "Type in the field below to try it.") \
+LANGUAGE_ID(installer_keyboard_head, "Choose your keyboard") \
+LANGUAGE_ID(installer_keyboard_try, "Type here to try it") \
+LANGUAGE_ID(installer_language_about, "Moonwater speaks it from now on, here and once installed.") \
+LANGUAGE_ID(installer_language_head, "Choose your language") \
+LANGUAGE_ID(installer_mode_overwrite, "Overwrite") \
+LANGUAGE_ID(installer_mode_overwrite_about, "Erases the whole drive and installs Moonwater anew.") \
+LANGUAGE_ID(installer_mode_update, "Update") \
+LANGUAGE_ID(installer_mode_update_about, "Keeps your files, apps and settings, and replaces the system and boot files.") \
+LANGUAGE_ID(installer_network_about, "The apps need it. You can skip this and add them later.") \
+LANGUAGE_ID(installer_network_head, "Connect to the internet") \
+LANGUAGE_ID(installer_network_offline, "Not connected. Plug in a cable, or join Wi-Fi in Settings.") \
+LANGUAGE_ID(installer_network_online, "Connected to the internet") \
+LANGUAGE_ID(installer_network_wifi, "Wi-Fi settings") \
+LANGUAGE_ID(installer_next, "Next") \
+LANGUAGE_ID(installer_reboot, "Restart") \
+LANGUAGE_ID(installer_review_drive, "%1$s, %2$s, /dev/%3$s") \
+LANGUAGE_ID(installer_review_head, "Ready to install") \
+LANGUAGE_ID(installer_review_overwrite, "Everything on this drive is erased.") \
+LANGUAGE_ID(installer_review_settings, "Language %1$s, keyboard %2$s") \
+LANGUAGE_ID(installer_review_update, "Moonwater on this drive is updated. Your data and settings are kept.") \
+LANGUAGE_ID(installer_running, "Installing Moonwater") \
+LANGUAGE_ID(installer_running_step, "Step %1$d of %2$d") \
+LANGUAGE_ID(installer_skip, "Skip") \
+LANGUAGE_ID(installer_ssh, "Install SSH") \
+LANGUAGE_ID(installer_ssh_about, "Log in to this machine from another over the network.") \
+LANGUAGE_ID(installer_steam, "Install Steam") \
+LANGUAGE_ID(installer_steam_about, "Valve's game store and library.") \
+LANGUAGE_ID(installer_step_apps, "Apps") \
+LANGUAGE_ID(installer_step_disk, "Disk") \
+LANGUAGE_ID(installer_step_install, "Install") \
+LANGUAGE_ID(installer_step_keyboard, "Keyboard") \
+LANGUAGE_ID(installer_step_language, "Language") \
+LANGUAGE_ID(installer_step_network, "Network") \
+LANGUAGE_ID(installer_virtual, "Press Install with this machine's own keyboard, mouse or screen.") \
 LANGUAGE_ID(launcher_log_out, "Log out") \
 LANGUAGE_ID(launcher_log_out_armed, "log out") \
 LANGUAGE_ID(launcher_power_off, "Power off") \

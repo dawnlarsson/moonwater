@@ -57,6 +57,58 @@ files_reading	64a4	Klasör okunuyor
 files_rename_hint	ad88	Yeni ad
 files_unreadable	986c	Bu klasörü okuma izni yok
 files_up	5940	Yukarı
+installer_apps_about	af1b	Sistem yazıldıktan sonra yeni sisteme kurulurlar.
+installer_apps_head	0024	Uygulama ekle
+installer_apps_offline	ff16	Uygulama eklemek için internete bağlanın.
+installer_back	4bc2	Geri
+installer_chrome	d96a	Chrome'u kur
+installer_chrome_about	dde8	Chromium web tarayıcısı.
+installer_disk_about	e7fc	Bu sistemin başlatıldığı sürücü listelenmez.
+installer_disk_head	1a23	Nereye kurulacağını seçin
+installer_disk_holds	5343	Moonwater var
+installer_disk_looking	a6c2	Sürücüler aranıyor
+installer_disk_none	4abc	Kurulacak sürücü bulunamadı
+installer_disk_removable	742e	Çıkarılabilir
+installer_done_about	42d4	Yeniden başlatın ve ekran karardığında USB belleği çıkarın.
+installer_done_head	697f	Moonwater kuruldu
+installer_erase_again	f179	%s silmek için yeniden basın
+installer_failed	0a78	Kurulum durdu: %s
+installer_install	bd40	Kur
+installer_keyboard_about	2367	Denemek için aşağıdaki alana yazın.
+installer_keyboard_head	99a8	Klavyenizi seçin
+installer_keyboard_try	2e4c	Denemek için buraya yazın
+installer_language_about	06be	Moonwater bundan sonra bu dili konuşur, burada ve kurulduktan sonra.
+installer_language_head	ebf7	Dilinizi seçin
+installer_mode_overwrite	0e92	Üzerine yaz
+installer_mode_overwrite_about	550e	Tüm sürücüyü siler ve Moonwater'ı yeniden kurar.
+installer_mode_update	0e94	Güncelle
+installer_mode_update_about	c729	Dosyalarınızı, uygulamalarınızı ve ayarlarınızı korur, sistem ve önyükleme dosyalarını değiştirir.
+installer_network_about	2425	Uygulamalar buna ihtiyaç duyar. Bunu atlayıp onları sonra ekleyebilirsiniz.
+installer_network_head	274e	İnternete bağlan
+installer_network_offline	2071	Bağlı değil. Bir kablo takın ya da Ayarlar'da bir Wi-Fi'ye katılın.
+installer_network_online	a9cb	İnternete bağlı
+installer_network_wifi	c1be	Wi-Fi ayarları
+installer_next	da08	İleri
+installer_reboot	ed8c	Yeniden başlat
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	Kuruluma hazır
+installer_review_overwrite	34ed	Bu sürücüdeki her şey silinir.
+installer_review_settings	482f	Dil %1$s, klavye %2$s
+installer_review_update	87a0	Bu sürücüdeki Moonwater güncellenir. Verileriniz ve ayarlarınız korunur.
+installer_running	f7a4	Moonwater kuruluyor
+installer_running_step	4adb	Adım %1$d / %2$d
+installer_skip	c7e2	Atla
+installer_ssh	6812	SSH'yi kur
+installer_ssh_about	a16a	Bu makineye ağ üzerinden başka bir makineden girin.
+installer_steam	5958	Steam'i kur
+installer_steam_about	03e2	Valve'ın oyun mağazası ve kitaplığı.
+installer_step_apps	1aad	Uygulamalar
+installer_step_disk	40c4	Disk
+installer_step_install	bd40	Kur
+installer_step_keyboard	a714	Klavye
+installer_step_language	db9b	Dil
+installer_step_network	ad65	Ağ
+installer_virtual	757b	Kur'a bu makinenin kendi klavyesi, faresi veya ekranıyla basın.
 launcher_log_out	d8b5	Oturumu kapat
 launcher_log_out_armed	8615	oturumu kapat
 launcher_power_off	ae2f	Kapat

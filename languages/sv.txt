@@ -57,6 +57,58 @@ files_reading	64a4	Läser mappen
 files_rename_hint	ad88	Nytt namn
 files_unreadable	986c	Den här mappen får inte läsas
 files_up	5940	Upp
+installer_apps_about	af1b	De installeras på det nya systemet när det är skrivet.
+installer_apps_head	0024	Lägg till appar
+installer_apps_offline	ff16	Anslut till internet för att lägga till appar.
+installer_back	4bc2	Tillbaka
+installer_chrome	d96a	Installera Chrome
+installer_chrome_about	dde8	Webbläsaren Chromium.
+installer_disk_about	e7fc	Enheten som det här systemet startade från visas inte.
+installer_disk_head	1a23	Välj var du installerar
+installer_disk_holds	5343	Har Moonwater
+installer_disk_looking	a6c2	Letar efter enheter
+installer_disk_none	4abc	Ingen enhet att installera på hittades
+installer_disk_removable	742e	Flyttbar
+installer_done_about	42d4	Starta om och ta ut USB-minnet när skärmen blir mörk.
+installer_done_head	697f	Moonwater är installerat
+installer_erase_again	f179	Tryck igen för att radera %s
+installer_failed	0a78	Installationen stoppade: %s
+installer_install	bd40	Installera
+installer_keyboard_about	2367	Skriv i fältet nedan för att prova det.
+installer_keyboard_head	99a8	Välj ditt tangentbord
+installer_keyboard_try	2e4c	Skriv här för att prova det
+installer_language_about	06be	Moonwater talar det från och med nu, här och när det är installerat.
+installer_language_head	ebf7	Välj ditt språk
+installer_mode_overwrite	0e92	Skriv över
+installer_mode_overwrite_about	550e	Raderar hela enheten och installerar Moonwater på nytt.
+installer_mode_update	0e94	Uppdatera
+installer_mode_update_about	c729	Behåller dina filer, appar och inställningar, och ersätter system- och startfilerna.
+installer_network_about	2425	Apparna behöver det. Du kan hoppa över detta och lägga till dem senare.
+installer_network_head	274e	Anslut till internet
+installer_network_offline	2071	Inte ansluten. Anslut en kabel, eller anslut till wifi i Inställningar.
+installer_network_online	a9cb	Ansluten till internet
+installer_network_wifi	c1be	Wifi-inställningar
+installer_next	da08	Nästa
+installer_reboot	ed8c	Starta om
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	Redo att installera
+installer_review_overwrite	34ed	Allt på den här enheten raderas.
+installer_review_settings	482f	Språk %1$s, tangentbord %2$s
+installer_review_update	87a0	Moonwater på den här enheten uppdateras. Dina data och inställningar behålls.
+installer_running	f7a4	Installerar Moonwater
+installer_running_step	4adb	Steg %1$d av %2$d
+installer_skip	c7e2	Hoppa över
+installer_ssh	6812	Installera SSH
+installer_ssh_about	a16a	Logga in på den här maskinen från en annan över nätverket.
+installer_steam	5958	Installera Steam
+installer_steam_about	03e2	Valves spelbutik och bibliotek.
+installer_step_apps	1aad	Appar
+installer_step_disk	40c4	Disk
+installer_step_install	bd40	Installera
+installer_step_keyboard	a714	Tangentbord
+installer_step_language	db9b	Språk
+installer_step_network	ad65	Nätverk
+installer_virtual	757b	Tryck på Installera med maskinens eget tangentbord, mus eller skärm.
 launcher_log_out	d8b5	Logga ut
 launcher_log_out_armed	8615	logga ut
 launcher_power_off	ae2f	Stäng av

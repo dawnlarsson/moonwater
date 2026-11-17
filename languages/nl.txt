@@ -57,6 +57,58 @@ files_reading	64a4	De map wordt gelezen
 files_rename_hint	ad88	Nieuwe naam
 files_unreadable	986c	Deze map mag niet worden gelezen
 files_up	5940	Omhoog
+installer_apps_about	af1b	Ze worden op het nieuwe systeem geïnstalleerd zodra het geschreven is.
+installer_apps_head	0024	Apps toevoegen
+installer_apps_offline	ff16	Maak verbinding met internet om apps toe te voegen.
+installer_back	4bc2	Terug
+installer_chrome	d96a	Chrome installeren
+installer_chrome_about	dde8	De webbrowser Chromium.
+installer_disk_about	e7fc	De schijf waarvan dit systeem is opgestart staat er niet bij.
+installer_disk_head	1a23	Kies waar je installeert
+installer_disk_holds	5343	Heeft Moonwater
+installer_disk_looking	a6c2	Schijven zoeken
+installer_disk_none	4abc	Geen schijf gevonden om op te installeren
+installer_disk_removable	742e	Verwisselbaar
+installer_done_about	42d4	Start opnieuw en haal de USB-stick eruit als het scherm donker wordt.
+installer_done_head	697f	Moonwater is geïnstalleerd
+installer_erase_again	f179	Druk nogmaals om %s te wissen
+installer_failed	0a78	De installatie is gestopt: %s
+installer_install	bd40	Installeren
+installer_keyboard_about	2367	Typ in het veld hieronder om het te proberen.
+installer_keyboard_head	99a8	Kies je toetsenbord
+installer_keyboard_try	2e4c	Typ hier om het te proberen
+installer_language_about	06be	Moonwater spreekt het vanaf nu, hier en na de installatie.
+installer_language_head	ebf7	Kies je taal
+installer_mode_overwrite	0e92	Overschrijven
+installer_mode_overwrite_about	550e	Wist de hele schijf en installeert Moonwater opnieuw.
+installer_mode_update	0e94	Bijwerken
+installer_mode_update_about	c729	Houdt je bestanden, apps en instellingen, en vervangt de systeem- en opstartbestanden.
+installer_network_about	2425	De apps hebben het nodig. Je kunt dit overslaan en ze later toevoegen.
+installer_network_head	274e	Verbinden met internet
+installer_network_offline	2071	Geen verbinding. Sluit een kabel aan, of maak verbinding met wifi in Instellingen.
+installer_network_online	a9cb	Verbonden met internet
+installer_network_wifi	c1be	Wifi-instellingen
+installer_next	da08	Volgende
+installer_reboot	ed8c	Opnieuw starten
+installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
+installer_review_head	2296	Klaar om te installeren
+installer_review_overwrite	34ed	Alles op deze schijf wordt gewist.
+installer_review_settings	482f	Taal %1$s, toetsenbord %2$s
+installer_review_update	87a0	Moonwater op deze schijf wordt bijgewerkt. Je gegevens en instellingen blijven.
+installer_running	f7a4	Moonwater wordt geïnstalleerd
+installer_running_step	4adb	Stap %1$d van %2$d
+installer_skip	c7e2	Overslaan
+installer_ssh	6812	SSH installeren
+installer_ssh_about	a16a	Log op deze machine in vanaf een andere via het netwerk.
+installer_steam	5958	Steam installeren
+installer_steam_about	03e2	De gamewinkel en bibliotheek van Valve.
+installer_step_apps	1aad	Apps
+installer_step_disk	40c4	Schijf
+installer_step_install	bd40	Installeren
+installer_step_keyboard	a714	Toetsenbord
+installer_step_language	db9b	Taal
+installer_step_network	ad65	Netwerk
+installer_virtual	757b	Druk op Installeren met het eigen toetsenbord, de muis of het scherm van deze machine.
 launcher_log_out	d8b5	Afmelden
 launcher_log_out_armed	8615	afmelden
 launcher_power_off	ae2f	Uitschakelen

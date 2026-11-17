@@ -54897,17 +54897,15 @@ int main(void)
         host_boot();
         check(have_verdict && !strcmp(verdict_file, "live sdb"),
               "a boot whose disk's data partition would not mount is live, and its verdict names the disk");
-        check(have_hint, "and it leaves the first terminal a hint");
+        check(!have_hint, "and it leaves the first terminal no hint: the desktop's installer is the live session's word");
         //      Why is the take's to say (host_attach's words, which the stub repeats).
         check(strstr(said, "this session is live, and sdb is not used") &&
                   strstr(said, "moonwater setup use sdb tries it again"),
               "and boot says after the take's reason what it did with the disk, and what tries it again");
         said[0] = 0;
         host_terminal_opening();
-        check(strstr(said, "sdb has Moonwater's data, which could not be mounted at boot") &&
-                  strstr(said, "moonwater setup use sdb tries it again") &&
-                  !strstr(said, "puts Moonwater on a disk"),
-              "the first terminal's hint names the disk, says use tries it again, and offers no install");
+        check(!strstr(said, "This is a live session") && !strstr(said, "puts Moonwater on a disk"),
+              "the first terminal says nothing of a live session");
         said[0] = 0;
         host_setup_state();
         check(strstr(said, "live session: sdb's Moonwater data could not be mounted at boot") &&
@@ -54917,19 +54915,14 @@ int main(void)
         fresh("live", true, true);
         installs = 0;
         host_terminal_opening();
-        check(strstr(said, "This is a live session: nothing is kept after power off.") &&
-                  strstr(said, "sdb already holds Moonwater's data, which moonwater setup install sdb "
-                               "would erase") &&
-                  !strstr(said, "puts Moonwater on a disk"),
-              "a plain live session's hint names a disk that holds Moonwater's data as one an install erases");
+        check(!strstr(said, "This is a live session"), "a plain live session's first terminal says nothing of it either");
         said[0] = 0;
         host_setup_state();
         check(strstr(said, "sdb already holds Moonwater's data") && !strstr(said, "install DISK keeps it"),
               "and so does setup's line");
         fresh("live", true, false);
         host_terminal_opening();
-        check(strstr(said, "moonwater setup install DISK puts Moonwater on a disk."),
-              "with no such disk the hint is the one it was");
+        check(!strstr(said, "puts Moonwater on a disk"), "nor with no such disk");
         printf("moonwater boot %u/%u\n", total - bad, total);
         return bad != 0;
 }

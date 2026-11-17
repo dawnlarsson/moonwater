@@ -217,6 +217,9 @@ SHELL_TOOL(SYSTEM, editor, editor_main)
 SHELL_TOOL(SYSTEM, files, files_main)
 #endif
 SHELL_TOOL(SYSTEM, init, system_init)
+#if MOONWATER_UI_INSTALLER
+SHELL_TOOL(SYSTEM, installer, installer_main)
+#endif
 SHELL_TOOL(SYSTEM, klog, klog_main)
 #if MOONWATER_UI_LAUNCHER
 SHELL_TOOL(SYSTEM, launcher, launcher_main)
