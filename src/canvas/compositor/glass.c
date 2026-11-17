@@ -306,16 +306,46 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
         return 1;
 }
 
+/*
+        The band over a window is solid, not glass (compositor_band_solid, a band each): while any window lies under the band or its blur's
+        reach (a window maximized or tiled up to it, the common case, or one moved over it), its plates are the desktop's ground tinted as glass is, with
+        nothing composed or blurred under them. The blur of the window under the band was made again at every frame the window drew there
+        (a browser scrolling under a maximized window's band), and its pixels were the processor's to read; a solid band reads nothing of
+        it, and the window under it is free of the band's needs (a plane can show it but for the band's strip). Over the bare desktop the
+        band is glass as it always was.
+*/
+static unsigned char compositor_band_solid[WINDOWS_OUTPUTS];
+
+// Whether a window of the scene meets the band's rectangle or the reach of its blur round it: a window maximized stops at the band's
+// edge, and the blur read its bottom rows (from its dma-buf, over the bus) at every frame it drew there.
+static int compositor_band_covers(const struct compositor_frame *windows, unsigned int count, const struct compositor_frame *band)
+{
+        int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
+        int x1 = band->x - across, y1 = band->y - down, x2 = band->x + band->width + across, y2 = band->y + band->height + down;
+
+        for (unsigned int at = 0; at < count; at++)
+                if (windows[at].x < x2 && x1 < windows[at].x + windows[at].width && windows[at].y < y2 && y1 < windows[at].y + windows[at].height)
+                        return 1;
+        return 0;
+}
+
 // The glass over a rectangle of the output: the scene under it composed and blurred into compositor.glass, with the
-// blur's reach round it. Answers the row stride, or 0 when there is no memory for it.
+// blur's reach round it; a solid band's (compositor_band_solid) is the desktop's ground, nothing composed. Answers the row stride, or 0
+// when there is no memory for it.
 static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x, int y, int width,
                                  int height)
 {
         int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
         int gw = width + 2 * across, gh = height + 2 * down;
 
-        if ((unsigned long)gw * (unsigned long)gh * 4 > compositor.glass_bytes ||
-            !compositor_blur(compositor.glass, windows, count, x - across, y - down, gw, gh, across, down))
+        if ((unsigned long)gw * (unsigned long)gh * 4 > compositor.glass_bytes)
+                return 0;
+        if (compositor_band_solid[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0])
+        {
+                memory_fill_u32_rect(compositor.glass, (positive)gw, (positive)gw, (positive)gh, compositor_ground | 0xff000000u);
+                return gw;
+        }
+        if (!compositor_blur(compositor.glass, windows, count, x - across, y - down, gw, gh, across, down))
                 return 0;
         return gw;
 }

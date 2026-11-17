@@ -1046,6 +1046,14 @@ static void compositor_present_frames(void)
 
                         compositor_band_frame(&band);
                         view = compositor_taskbar_view();
+                        // Solid over a window, glass over the desktop (compositor_band_solid): a change of which is the whole band made again.
+                        {
+                                unsigned char solid = (unsigned char)compositor_band_covers(frames, windows, &band);
+                                unsigned int at = (unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? (unsigned int)compositor.band_at : 0;
+
+                                if (solid != compositor_band_solid[at])
+                                        compositor_band_solid[at] = solid, redo = COMPOSITOR_TABS_ALL;
+                        }
                         if (!redo && view.pixels)
                                 redo = taskbar_meets(&view, compositor.damage, compositor.damages);
                         // A band slid all the way off its edge (a fullscreen window on top) shows nothing: its glass is not made. Made, the
