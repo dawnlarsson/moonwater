@@ -166,7 +166,7 @@ function audio_stop {
   rm -f /run/moonwater/audio.supervisor /run/moonwater/audio.pid
 }
 
-# The desktop: the compositor, the kernel log and a terminal on it, under a
+# The desktop: the compositor and what `desktop autostart` names (none by default), under a
 # supervisor that starts the compositor again when it ends (at once, after half
 # a second, after two) and gives up to the text console after four short
 # lives. Nothing here is named moonwater_, which would make it an event.
@@ -286,8 +286,8 @@ function desktop_terminal {
   fi
 }
 
-# What the desktop opens when it starts: the programs of `moonwater desktop autostart`, in its order, and nothing else (the kernel
-# log and the console unless the person says other; none is no window). Its line is read once boot has said what /root is, where it
+# What the desktop opens when it starts: the programs of `moonwater desktop autostart`, in its order, and nothing else (none unless
+# the person says other: the desktop starts with no windows). Its line is read once boot has said what /root is, where it
 # is kept. A kit program goes through its own function, so it has its faces: the kernel log is waited for, so what follows stacks over
 # it, and the console takes the keys when it shows, as a key's would. Any other is its path alone. The paths are what the verb
 # keeps (letters, digits and _ . / + -), so nothing in them is read by the shell again.

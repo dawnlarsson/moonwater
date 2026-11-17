@@ -179,10 +179,11 @@
 #define SETTING_PINS_WORDS 32   // words of an entry: its app_id, its executable and the words the program is started with
 #define SETTING_PINS_WORD 512   // bytes of a word
 // The programs the desktop opens when it starts (`desktop autostart`): a line of absolute paths, a blank between, opened in that order, or
-// none, which opens nothing. With no file it is the standard: the kernel log, then the console, stacked over it. setting_autostart_valid
+// none, which opens nothing. With no file it is the standard, none: the desktop starts with no windows (the kernel log and the console were
+// opened by default; the person adds what they want, `desktop autostart add /klog`). setting_autostart_valid
 // says what a line is. It names any number of programs, each a path of any length: there is no cap, as with the rest of the system.
 #define SETTING_DESKTOP_AUTOSTART_PATH "/root/desktop.autostart"
-#define SETTING_AUTOSTART_STANDARD "/klog /terminal"
+#define SETTING_AUTOSTART_STANDARD "" // none
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
 // and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
@@ -956,12 +957,11 @@ static const struct settings_row settings_rows[] = {
     {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
      0, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
     //  What the desktop opens when it starts, in order (desktop.c's desktop_autostart; the machine script's desktop_autostart opens each):
-    //  the desktop opens no window of its own, so these are all there is at its start, the kernel log and the console unless the person
-    //  says other. The whole list is typed in the first row, and one program is added or taken out in the two after it.
+    //  the desktop opens no window of its own, so these are all there is at its start: none unless the person says other. The whole list is typed in the first row, and one program is added or taken out in the two after it.
     {null, "Programs started with the desktop", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"desktop", "autostart"}, "autostart ", null,
      {"desktop", "autostart"}, null, 0,
      .usage = "desktop autostart [PROGRAM...|none|default]",
-     .help = "the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [/klog /terminal]",
+     .help = "the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [none]",
      .about = "Opened in this order when the desktop starts; none starts it with no windows"},
     {null, "Add a program to start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "add"}, null, 0,
      .usage = "desktop autostart add PROGRAM", .help = "open PROGRAM as well when the desktop starts, after the others"},

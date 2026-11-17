@@ -1386,7 +1386,7 @@ static b32 settings_event_real(const struct window_event address_to event)
 */
 static fn check_autostart(void)
 {
-        static const char address_to const good[] = {SETTING_AUTOSTART_STANDARD, "/terminal", "  /klog   /bowls/bin/fire-fox_2.0+x  ", "/a/b/c"};
+        static const char address_to const good[] = {"/klog /terminal", "/terminal", "  /klog   /bowls/bin/fire-fox_2.0+x  ", "/a/b/c"};
         static const char address_to const bad[] = {"", "   ", "klog", "/", "/klog /klog", "/a//b", "/a/./b", "/a/../b", "/a/..", "/a/.", "/a/",
                                                      "/klog;rm", "/a b'c", "/x$(y)", "/k\tlog", "none"};
         static char line[90000];
@@ -1401,8 +1401,8 @@ static fn check_autostart(void)
                 grammar &= setting_autostart_valid(good[each], null);
         for (positive each = 0; each < sizeof(bad) / sizeof(bad[0]); each++)
                 refused &= !setting_autostart_valid(bad[each], &bad_at);
-        check("autostart: the standard is the kernel log, then the console, and lines of absolute paths are lines", grammar &&
-              string_equals((string_address)SETTING_AUTOSTART_STANDARD, (string_address) "/klog /terminal"));
+        check("autostart: the standard is none (the desktop starts with no windows), and lines of absolute paths are lines", grammar &&
+              !SETTING_AUTOSTART_STANDARD[0]);
         check("autostart: nothing, a word that is no path, a path twice, an empty, . or .. part, or a byte a shell reads is none", refused);
         setting_autostart_valid("/klog /a /klog", &bad_at);
         check("autostart: and the fault is where the path named twice starts", bad_at == 9);

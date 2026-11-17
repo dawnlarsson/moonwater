@@ -561,7 +561,7 @@ static b32 desktop_autostart_status(void)
                 return 0;
         }
         host_say(log, host_label "autostart %s\n",
-                 string_equals((string_address)text, "none")                    ? (string_address) "none"
+                 string_equals((string_address)text, "none") || (!text[0] && !SETTING_AUTOSTART_STANDARD[0]) ? (string_address) "none"
                  : text[0] && setting_autostart_valid((const char *)text, null) ? (string_address)text
                                                                                 : (string_address)SETTING_AUTOSTART_STANDARD);
         desktop_give(text);

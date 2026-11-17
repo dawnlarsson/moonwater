@@ -20324,7 +20324,7 @@ desktop)
         off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas"; echo off > "$STUB/desktop" ;;
         rest) echo rest >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
         # The programs the desktop opens: the case's autostart file, else the standard, as the verb says them.
-        autostart) if [ -s "$STUB/autostart" ]; then echo "[Moonwater] autostart $(cat "$STUB/autostart")"; else echo "[Moonwater] autostart /klog /terminal"; fi ;;
+        autostart) if [ -s "$STUB/autostart" ]; then echo "[Moonwater] autostart $(cat "$STUB/autostart")"; else echo "[Moonwater] autostart none"; fi ;;
         esac ;;
 canvas)
         case $2 in
