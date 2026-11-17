@@ -105,7 +105,6 @@
 #define SSH_LOOK_SECONDS 5
 #define SSH_WAIT_NS ((p64)15000000000)
 #define SSH_STOP_NS ((p64)5000000000)
-#define SSH_SESSIONS_MOST 64
 
 /*
         What sshd is told, a line each, which sshd -T is held to. The keys are
@@ -1988,7 +1987,28 @@ static positive ssh_sockets_of(positive pid, p64 address_to inodes, positive mos
         return count;
 }
 
-static positive ssh_sessions(positive listener, ssh_session address_to sessions, positive most, bool ended)
+/*
+        The rows a status prints, held in memory that grows as sessions are
+        found: the first held of room are rows, and a row that could not be
+        held (no memory for it) is counted all the same.
+*/
+typedef struct
+{
+        ssh_session address_to rows;
+        positive room, held;
+} ssh_list;
+
+static bool ssh_list_add(ssh_list address_to list, const ssh_session address_to row)
+{
+        if (list->held == list->room &&
+            !memory_reserve((address_any address_to)&list->rows, &list->room, list->held, list->held + 1,
+                            sizeof(ssh_session), 16))
+                return false;
+        list->rows[list->held++] = *row;
+        return true;
+}
+
+static positive ssh_sessions(positive listener, ssh_list address_to list, bool ended)
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
@@ -2012,9 +2032,10 @@ static positive ssh_sessions(positive listener, ssh_session address_to sessions,
                         count += ssh_signal(pid, 15, (string_address)name);
                         continue;
                 }
-                if (count < most)
+                if (list)
                 {
-                        ssh_session address_to session = &sessions[count];
+                        ssh_session row;
+                        ssh_session address_to session = &row;
                         p8 path[48];
                         p8 number[24];
                         p8 title[128];
@@ -2051,8 +2072,9 @@ static positive ssh_sessions(positive listener, ssh_session address_to sessions,
                                         break;
                         localtime_r(address_of stamp, address_of broken);
                         strftime(session->since, sizeof(session->since), "%H:%M:%S", address_of broken);
-                        count++;
+                        (void)ssh_list_add(list, session);
                 }
+                count++;
         }
         file_walk_close(address_of walk);
         return count;
@@ -2448,7 +2470,7 @@ static fn ssh_supervisor_end(positive listener, string_address why)
 {
         positive status = 0;
         p64 until = system_clock_ns(HOST_CLOCK_BOOTTIME) + SSH_STOP_NS;
-        positive sessions = ssh_sessions(listener, null, 0, true);
+        positive sessions = ssh_sessions(listener, null, true);
         p8 line[SSH_LOG_LINE];
         p8 count[24];
 
@@ -2814,7 +2836,7 @@ static bool ssh_machine_root(void)
 static fn ssh_say_state(const ssh_settings address_to settings)
 {
         static ssh_keys keys;
-        static ssh_session sessions[SSH_SESSIONS_MOST];
+        ssh_list sessions = {0};
         ssh_digests digests;
         p8 fingerprint[64];
         positive listener = ssh_running(null, 0);
@@ -2885,10 +2907,17 @@ static fn ssh_say_state(const ssh_settings address_to settings)
         }
         if (listed && !keys.count)
                 host_say(log, "  keys none: moonwater ssh key add LABEL KEY\n");
-        count = ssh_sessions(listener, sessions, array_count(sessions), false);
-        for (positive at = 0; at < count && at < array_count(sessions); at++)
-                host_say(log, "  session %s from %s since %s\n", (string_address)sessions[at].who, (string_address)sessions[at].from,
-                         (string_address)sessions[at].since);
+        count = ssh_sessions(listener, address_of sessions, false);
+        if (count)
+                host_say(log, "  sessions %p\n", count);
+        for (positive at = 0; at < sessions.held; at++)
+                host_say(log, "  session %s from %s since %s\n", (string_address)sessions.rows[at].who,
+                         (string_address)sessions.rows[at].from, (string_address)sessions.rows[at].since);
+        if (count > sessions.held)
+                host_say(log, "  %p sessions not listed: no memory for their rows\n", count - sessions.held);
+        if (sessions.rows)
+                memory_release((address_any address_to)&sessions.rows, &sessions.room, &sessions.held,
+                               sizeof(ssh_session));
 }
 
 static b32 ssh_log_show(positive asked)
@@ -3041,7 +3070,7 @@ static b32 ssh_key_remove(string_address label)
         ssh_slide(&keys.keys[found], &keys.keys[found + 1], (keys.count - found - 1) * sizeof(keys.keys[0]));
         keys.count--;
         return_if(ssh_keys_save(address_of keys) < 0, host_refuse("ssh: %s could not be written\n", SSH_KEYS));
-        ended = ssh_sessions(ssh_running(null, 0), null, 0, true);
+        ended = ssh_sessions(ssh_running(null, 0), null, true);
         (void)string_join(line, sizeof(line), "key removed: ", label, "; every session ended");
         ssh_log_change((string_address)line);
         host_say(log, host_label "ssh: %s may not log in; %p sessions ended\n", label, ended);
@@ -3123,7 +3152,7 @@ static b32 ssh_dispatch(string_address address_to arguments, positive count)
         }
         if (string_equals(verb, "end") && count == 3)
         {
-                positive ended = ssh_sessions(ssh_running(null, 0), null, 0, true);
+                positive ended = ssh_sessions(ssh_running(null, 0), null, true);
                 p8 number[24];
 
                 number[positive_into_string(number, ended)] = end;
