@@ -136,7 +136,7 @@ static long gpu_fake_fence_error;
 #define GPU_KERNEL_FD 1000
 #define GPU_KERNEL_CARD 1001
 #define GPU_KERNEL_DMABUF 2000
-#define GPU_KERNEL_HANDLES 128
+#define GPU_KERNEL_HANDLES 512 // past the two hundred and one imports the import rows make (no count of imports is a limit)
 #define GPU_KERNEL_UDMABUF 1002
 
 static struct

@@ -1948,7 +1948,8 @@ static void gpu_flight_rows(void)
 
         // 4. The job has ended: the trim unmaps the released import (its reason is the release's), and nothing is pending.
         gpu_fake_busy = 0, gpu_fake_idle = 1;
-        gpu_trim();
+        for (unsigned int t = 0; t < GPU_IMPORT_GRACE; t++) // kept mapped GPU_IMPORT_GRACE ticks after its release, then unmapped
+                gpu_trim();
         check("flight: once the card is idle the trim unmaps the released import, for the release's reason",
               gpu.imports == 0 && gpu.pending == 0 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_RELEASE);
 
@@ -2006,7 +2007,8 @@ static void gpu_import_rows(void)
         check("gpu import: one of two holders letting go leaves it held and mapped", gpu.imports == 1 && !gpu.imported_dead[0] && gpu_kernel.mapped[h] == 1);
         gpu_release_import(first);
         check("gpu import: the last holder letting go releases it", gpu.imports == 1 && gpu.imported_dead[0]);
-        gpu_trim();
+        for (unsigned int t = 0; t < GPU_IMPORT_GRACE; t++) // kept mapped GPU_IMPORT_GRACE ticks after its release, then unmapped
+                gpu_trim();
         check("gpu import: and the trim unmaps it and closes its handle, once, and no handle that was not there",
               gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.closes == 1 && gpu_kernel.refused == 0);
 
@@ -2020,23 +2022,18 @@ static void gpu_import_rows(void)
         gpu_unimport(first, GPU_GONE_UNIMPORT);
         check("gpu import: let go of by the last, it is unmapped and its handle closed", gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
 
-        // 6. The table is full (GPU_IMPORTS): another buffer is refused, and the handle the kernel made for it is closed (not left open).
-        // Dead slots (released while busy) are evicted cleanly when the card is idle.
-        for (unsigned int b = 0; b < GPU_IMPORTS; b++)
+        // 6. No count of imports is a limit: two hundred buffers are each an import (the table grown past its first 64), one more is too, and
+        // one already held asked for again is held twice; let go of while the card is busy, an import is kept dead, not dropped.
+        for (unsigned int b = 0; b < 200; b++)
                 gpu_import_fd(GPU_KERNEL_DMABUF + 1 + (int)b, 4096);
-        before = gpu_kernel.closes;
-        check("gpu import: GPU_IMPORTS buffers fill the import table", gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS);
-        check("gpu import: one past GPU_IMPORTS is refused, and its handle is closed",
-              gpu_import_fd(GPU_KERNEL_DMABUF + GPU_IMPORTS + 1, 4096) == 0 && gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS &&
-                  gpu_kernel.closes == before + 1);
-        check("gpu import: an active import asked for again with the table full is held twice, not refused",
-              gpu_import_fd(GPU_KERNEL_DMABUF + 3, 4096) != 0 && gpu.imports == GPU_IMPORTS);
+        check("gpu import: two hundred buffers are two hundred imports", gpu.imports == 200 && gpu_kernel_live() == 200);
+        check("gpu import: one more is one more import, not refused", gpu_import_fd(GPU_KERNEL_DMABUF + 201, 4096) != 0 && gpu.imports == 201 &&
+              gpu_kernel_live() == 201);
+        check("gpu import: an active import asked for again is held twice, not made again",
+              gpu_import_fd(GPU_KERNEL_DMABUF + 3, 4096) != 0 && gpu.imports == 201);
         gpu.pending = 77, gpu_fake_busy = 1, gpu_fake_idle = 0;
         gpu_unimport(gpu.imported_va[0], GPU_GONE_UNIMPORT);
-        check("gpu import: unimporting one slot while busy marks it dead without dropping it", gpu.imports == GPU_IMPORTS && gpu.imported_dead[0]);
-        gpu_fake_busy = 0, gpu_fake_idle = 1;
-        check("gpu import: once idle, a dead slot is evicted so a new buffer succeeds",
-              gpu_import_fd(GPU_KERNEL_DMABUF + GPU_IMPORTS + 1, 4096) != 0 && gpu.imports == GPU_IMPORTS && gpu_kernel_live() == GPU_IMPORTS);
+        check("gpu import: unimporting one slot while busy marks it dead without dropping it", gpu.imports == 201 && gpu.imported_dead[0]);
         gpu_fake_busy = 0, gpu_fake_idle = 0;
         while (gpu.imports)
                 gpu_unimport(gpu.imported_va[0], GPU_GONE_UNIMPORT);
@@ -4100,6 +4097,7 @@ static void gpu_engine_and_render_regressions(void)
 b32 main(void)
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
+        gpu_imports_room(64);                         // and the import table's first room, which the rows that set an import by hand write in
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;

@@ -13,18 +13,95 @@
 #define GPU_PACKETS 256
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
-#define GPU_IMPORTS 64
+// The imports the table may hold: as many as there are buffers (gpu_imports_room grows it a doubling at a time in a reservation of
+// GPU_IMPORTS_MOST, address space only), where it held 64 and refused the 65th.
+#define GPU_IMPORTS_MOST (1u << 20)
 // The ticks an import let go of stays mapped before it is unmapped (gpu_trim): a client's buffers come round again (Chromium's three or four are lent in turn,
 // each let go of as the next is lent), and a job built or still running in the tick an import was let go of may name it. Taken again within them it is
 // the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped.
 #define GPU_IMPORT_GRACE 8
-static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[GPU_IMPORTS], imports; positive imported_va[GPU_IMPORTS], imported_bytes[GPU_IMPORTS]; unsigned char imported_dead[GPU_IMPORTS], imported_holds[GPU_IMPORTS]; positive imported_dead_at[GPU_IMPORTS]; unsigned int address_to at; positive size, pending; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int address_to at; positive size, pending; } gpu;
+static unsigned char *gpu_import_at_room; // the reservation the import table's arrays are in, and the imports committed in it
+static unsigned int gpu_import_room;
+static p64 *gpu_submit_bos;               // a submit's buffers (the ring, every import and every map), as many as the imports have room for
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 // The memory the dma-buf route may reach: the window table's memfd (fd), mapped at at (its byte 0), the picture part of it (bytes), and pin(offset, on) when a
 // map of its pages is made or let go, so that the program that owns them does not give them back while the card may read them.
 static struct { int fd; unsigned char *at; positive bytes; void (*pin)(positive offset, b32 on); } gpu_shared = {-1, 0, 0, 0};
-#define GPU_MEMFDS 64
-static struct { int fd; void *at; positive bytes; void (*pin)(positive offset, b32 on); } gpu_memfds[GPU_MEMFDS];
+// The compositor's memfds registered for the route, as many as it registers (a table that grows: gpu_memfds_room).
+struct gpu_memfd { int fd; void *at; positive bytes; void (*pin)(positive offset, b32 on); };
+static struct gpu_memfd *gpu_memfds;
+static unsigned int gpu_memfd_count;
+
+// The import table's arrays pointed at their reservation (made at the first need), with room for `want`: 1, or 0 when the memory is not there.
+#define GPU_IMPORT_ARRAYS(X) X(imported, unsigned int) X(imported_va, positive) X(imported_bytes, positive) X(imported_dead, unsigned char) \
+        X(imported_holds, unsigned char) X(imported_dead_at, positive)
+static b32 gpu_imports_room(unsigned int want)
+{
+        positive at = 0, room;
+
+        if (!gpu_import_at_room)
+        {
+                positive bytes = 0;
+                long got;
+
+#define GPU_IMPORT_SIZE(name, type) bytes += ((positive)GPU_IMPORTS_MOST * sizeof(type) + 4095) & ~4095ull;
+                GPU_IMPORT_ARRAYS(GPU_IMPORT_SIZE)
+#undef GPU_IMPORT_SIZE
+                bytes += ((positive)(GPU_IMPORTS_MOST + 64 + 1024) * sizeof(p64) + 4095) & ~4095ull; // the submit's buffers, with the maps
+                got = (long)system_call_6(syscall(mmap), 0, bytes, 0, 0x4022, (positive)-1, 0);
+                if (got < 0 && got > -4096)
+                        return false;
+                gpu_import_at_room = (unsigned char address_to)got;
+        }
+#define GPU_IMPORT_POINT(name, type) gpu.name = (type address_to)(gpu_import_at_room + at), at += ((positive)GPU_IMPORTS_MOST * sizeof(type) + 4095) & ~4095ull;
+        GPU_IMPORT_ARRAYS(GPU_IMPORT_POINT)
+#undef GPU_IMPORT_POINT
+        gpu_submit_bos = (p64 address_to)(gpu_import_at_room + at);
+        if (want <= gpu_import_room)
+                return true;
+        if (want > GPU_IMPORTS_MOST)
+                return false;
+        room = gpu_import_room ? 2 * (positive)gpu_import_room : 64;
+        room = room < want ? want : room > GPU_IMPORTS_MOST ? GPU_IMPORTS_MOST : room;
+        at = 0;
+#define GPU_IMPORT_COMMIT(name, type) \
+        if (system_call_3(syscall(mprotect), (positive)(gpu_import_at_room + at), (room * sizeof(type) + 4095) & ~4095ull, 3) != 0) \
+                return false; \
+        at += ((positive)GPU_IMPORTS_MOST * sizeof(type) + 4095) & ~4095ull;
+        GPU_IMPORT_ARRAYS(GPU_IMPORT_COMMIT)
+#undef GPU_IMPORT_COMMIT
+        if (system_call_3(syscall(mprotect), (positive)gpu_submit_bos, ((room + 64 + 1024) * sizeof(p64) + 4095) & ~4095ull, 3) != 0)
+                return false;
+        gpu_import_room = (unsigned int)room;
+        return true;
+}
+
+// Room for `want` memfds: 1, or 0 when the memory is not there (a fixed array of a reservation, grown a doubling at a time).
+static b32 gpu_memfds_room(unsigned int want)
+{
+        static unsigned int room;
+        positive grown;
+
+        if (!gpu_memfds)
+        {
+                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_IMPORTS_MOST * sizeof(struct gpu_memfd), 0, 0x4022, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return false;
+                gpu_memfds = (struct gpu_memfd address_to)got;
+        }
+        if (want <= room)
+                return true;
+        if (want > GPU_IMPORTS_MOST)
+                return false;
+        grown = room ? 2 * (positive)room : 64;
+        grown = grown < want ? want : grown;
+        if (system_call_3(syscall(mprotect), (positive)gpu_memfds, (grown * sizeof(struct gpu_memfd) + 4095) & ~4095ull, 3) != 0)
+                return false;
+        room = (unsigned int)grown;
+        return true;
+}
 
 // A memfd of the compositor's own, mapped shared at at for bytes, registered for the dma-buf route (gpu_map_as): a map asked inside it is made of all of it, by
 // udmabuf first where the memfd is sealed as udmabuf takes one (gpu_memfd_sealed), so every picture in it is one handle and one address range of the card's.
@@ -32,9 +109,9 @@ __attribute__((unused)) static b32 gpu_register_memfd(int fd, void *at, positive
 {
         int free_slot = -1;
 
-        if (fd < 0 || !at || !bytes)
+        if (fd < 0 || !at || !bytes || !gpu_memfds_room(gpu_memfd_count + 1))
                 return false;
-        for (int i = 0; i < (int)GPU_MEMFDS; i++)
+        for (int i = 0; i < (int)gpu_memfd_count; i++)
         {
                 if (gpu_memfds[i].at == at)
                 {
@@ -45,7 +122,7 @@ __attribute__((unused)) static b32 gpu_register_memfd(int fd, void *at, positive
                         free_slot = i;
         }
         if (free_slot < 0)
-                return false;
+                free_slot = (int)gpu_memfd_count++;
         gpu_memfds[free_slot].fd = fd, gpu_memfds[free_slot].at = at, gpu_memfds[free_slot].bytes = bytes, gpu_memfds[free_slot].pin = pin;
         return true;
 }
@@ -54,7 +131,7 @@ __attribute__((unused)) static void gpu_unregister_memfd(void *at)
 {
         if (!at)
                 return;
-        for (unsigned int i = 0; i < GPU_MEMFDS; i++)
+        for (unsigned int i = 0; i < gpu_memfd_count; i++)
                 if (gpu_memfds[i].at == at)
                 {
                         gpu_memfds[i].fd = -1, gpu_memfds[i].at = 0, gpu_memfds[i].bytes = 0, gpu_memfds[i].pin = 0;
@@ -554,6 +631,8 @@ static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         memory_zero(&gpu, sizeof(gpu));
+        if (gpu_import_at_room)
+                gpu_imports_room(0); // the import table's arrays pointed at their reservation again (its room kept, empty)
         gpu.fd = -1, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0;
         gpu_bins_forget();
         gpu_epoch++;
@@ -1036,7 +1115,7 @@ struct gpu_region
 };
 static b32 gpu_region_of(positive from, positive to, struct gpu_region address_to r)
 {
-        for (unsigned int i = 0; i < GPU_MEMFDS; i++)
+        for (unsigned int i = 0; i < gpu_memfd_count; i++)
                 if (gpu_memfds[i].fd >= 0 && gpu_memfds[i].at && from >= (positive)gpu_memfds[i].at && to <= (positive)gpu_memfds[i].at + gpu_memfds[i].bytes)
                 {
                         r->fd = gpu_memfds[i].fd, r->base = (positive)gpu_memfds[i].at, r->bytes = gpu_memfds[i].bytes, r->pin = gpu_memfds[i].pin, r->whole = true;
@@ -1296,11 +1375,8 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
 {
         positive whole = (bytes + 4095) & ~4095ull, at;
 
-        if (gpu.imports == GPU_IMPORTS && gpu_idle())
-                for (unsigned int i = 0; i < gpu.imports; i++)
-                        if (gpu.imported_dead[i] && gpu_tick - gpu.imported_dead_at[i] >= GPU_IMPORT_GRACE)
-                                gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i = ~0u;
-        at = gpu.imports == GPU_IMPORTS ? 0 : gpu_place(whole);
+        // Room for one more import: the table grown (the memory refuses, and the import is refused as a full table's was).
+        at = gpu_imports_room(gpu.imports + 1) ? gpu_place(whole) : 0;
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
@@ -1903,10 +1979,12 @@ static positive gpu_submit(void)
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op);
         const struct gpu_job job = {gpu_kernels[which].words, GPU_VA + gpu_kernel_at[which], GPU_VA + GPU_ARGS_AT(gpu_slot), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows,
                                     (unsigned int address_to)((p8 address_to)gpu.at + GPU_PACKETS * gpu_slot), GPU_VA + GPU_PACKETS * gpu_slot};
-        p64 bos[1 + GPU_IMPORTS + GPU_MAPS];
+        p64 *bos = gpu_imports_room(gpu.imports) ? gpu_submit_bos : 0;
         positive sequence = 0, began = clock_monotonic_nanoseconds(), kept = gpu_job_began;
         unsigned int named, tries = 0, again = 0;
 
+        if (!bos) // no memory for the list of the job's buffers: the job is not made, as one too late is not
+                return gpu_end = GPU_END_LATE, 0;
         // A slot whose job may still run is not the next job's: its packets and arguments are that job's (gpu_slot_take is the caller's way to a free one).
         if (gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)) && gpu.pending)
                 return gpu_end = GPU_END_LATE, 0;
