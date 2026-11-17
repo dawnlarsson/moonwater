@@ -19,6 +19,12 @@
                      -F as many drag and drop round trips
             first    connect, one frame, and the time to its presentation (STRESS_T0, ns of CLOCK_MONOTONIC set by the runner
                      before the exec, gives the launch to first frame as well)
+            xpaste, xcopy, xdrop, xdrag
+                     the Wayland side of the bridge's rows with an X client (run.py's x_bridge, x-stress's x-clip-* and x-dnd-*), -S
+                     bytes of 'a' + i % 26 checked byte by byte: xpaste pastes what an X client copied, xcopy copies for an X client
+                     to paste ("READY" once the compositor has it), xdrop is a window an X drag drops on, xdrag drags from this
+                     window onto the X window over it (met along the diagonal) (-E: Escape over it instead of the drop, -K: this
+                     client killed half way through the drop's transfer)
         -A draws ARGB with alpha (a translucent window). Output: NOTE lines, and one line "RESULT key=value ..." at the end.
         Exit 0, 1 on a protocol error, 2 when it cannot start, 3 when the mode cannot run here (said in a NOTE).
 */
@@ -1229,6 +1235,290 @@ static int run_clip(void)
         return 0;
 }
 
+/* ---- the X bridge's rows: this client the Wayland side of a copy, a paste or a drag with an X client ---- */
+static int xb_escape, xb_kill;
+static long xb_wrong;
+static int xb_left, xb_entered_dnd, xb_finished, xb_cancelled;
+
+static void *xb_send_thread(void *data)
+{
+        struct sender *s = data;
+        long at = 0, stop = xb_kill ? s->bytes / 2 : s->bytes;
+        while (at < stop)
+        {
+                ssize_t n = write(s->fd, payload_data + at, (size_t)(stop - at));
+                if (n <= 0)
+                        break;
+                at += n;
+        }
+        if (xb_kill)
+        {
+                printf("DYING after %ld bytes\n", at);
+                fflush(stdout);
+                _exit(9);
+        }
+        close(s->fd);
+        free(s);
+        return NULL;
+}
+static void xb_source_send(void *d, struct wl_data_source *s, const char *m, int32_t fd)
+{
+        (void)d, (void)s, (void)m;
+        struct sender *x = malloc(sizeof(*x));
+        x->fd = fd, x->bytes = payload;
+        pthread_t th;
+        pthread_create(&th, NULL, xb_send_thread, x);
+        pthread_detach(th);
+}
+static void xb_source_cancelled(void *d, struct wl_data_source *s)
+{
+        (void)d;
+        xb_cancelled = 1;
+        wl_data_source_destroy(s);
+}
+static void xb_source_finished(void *d, struct wl_data_source *s)
+{
+        (void)d;
+        xb_finished = 1;
+        wl_data_source_destroy(s);
+}
+static const struct wl_data_source_listener xb_source_listener = {source_target, xb_source_send, xb_source_cancelled, source_dnd_drop,
+                                                                  xb_source_finished, source_action};
+
+static void xb_dd_enter(void *d, struct wl_data_device *dd, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y, struct wl_data_offer *o)
+{
+        xb_entered_dnd++;
+        dd_enter(d, dd, serial, s, x, y, o);
+}
+static void xb_dd_leave(void *d, struct wl_data_device *dd)
+{
+        (void)d, (void)dd;
+        xb_left++;
+}
+static const struct wl_data_device_listener xb_dd_listener = {dd_data_offer, xb_dd_enter, xb_dd_leave, dd_motion, dd_drop, dd_selection};
+
+// The offer's text read to its end through a pipe, every byte checked against the pattern (xb_wrong counts those that are not).
+static long xb_receive(struct wl_data_offer *o)
+{
+        int p[2];
+        if (pipe2(p, O_CLOEXEC) < 0)
+                return -1;
+        wl_data_offer_receive(o, "text/plain;charset=utf-8", p[1]);
+        close(p[1]);
+        wl_display_flush(display);
+        long total = 0;
+        static char chunk[65536];
+        uint64_t give_up = now_ns() + 10000000000ull;
+        xb_wrong = 0;
+        for (;;)
+        {
+                struct pollfd f[2] = {{p[0], POLLIN, 0}, {wl_display_get_fd(display), POLLIN, 0}};
+                if (now_ns() > give_up)
+                        break;
+                wl_display_dispatch_pending(display);
+                wl_display_flush(display);
+                if (poll(f, 2, 100) <= 0)
+                        continue;
+                if (f[1].revents & POLLIN)
+                        wl_display_dispatch(display);
+                if (f[0].revents & (POLLIN | POLLHUP))
+                {
+                        ssize_t n = read(p[0], chunk, sizeof(chunk));
+                        if (n <= 0)
+                                break;
+                        for (ssize_t i = 0; i < n; i++)
+                                xb_wrong += chunk[i] != (char)('a' + (total + i) % 26);
+                        total += n;
+                }
+        }
+        close(p[0]);
+        return total;
+}
+
+static void xb_pump(double secs)
+{
+        uint64_t end = now_ns() + (uint64_t)(secs * 1e9);
+        while (now_ns() < end)
+        {
+                wl_display_flush(display);
+                struct pollfd f = {wl_display_get_fd(display), POLLIN, 0};
+                if (poll(&f, 1, 10) > 0)
+                        wl_display_dispatch(display);
+                wl_display_dispatch_pending(display);
+        }
+}
+
+// The person's key on the window (the FIFO), for the serial and the gesture a copy and a paste under the hand ask.
+static int xb_key(void)
+{
+        uint32_t was = serial_key;
+        if (fifo < 0)
+                return 0;
+        inject(1, 30, 1);
+        inject(1, 30, 0);
+        for (uint64_t until = now_ns() + 1000000000ull; serial_key == was && now_ns() < until;)
+                xb_pump(0.01);
+        return serial_key != was;
+}
+
+static int run_xbridge(void)
+{
+        uint64_t t0 = now_ns();
+        if (!seat || !ddm || fifo < 0)
+        {
+                printf("NOTE no wl_seat, no wl_data_device_manager or no input FIFO: %s skipped\n", mode);
+                return 3;
+        }
+        // A seat's pointer may come a moment after the seat (a compositor whose devices are made as it runs says so at the first motion).
+        for (int i = 0; i < 20 && !pointer; i++)
+        {
+                inject(2, 0, 1);
+                wl_display_roundtrip(display);
+                usleep(20000);
+        }
+        data_device = wl_data_device_manager_get_data_device(ddm, seat);
+        wl_data_device_add_listener(data_device, &xb_dd_listener, NULL);
+        payload_data = malloc((size_t)payload);
+        for (long i = 0; i < payload; i++)
+                payload_data[i] = (char)('a' + i % 26);
+        if (!keyboard_focus)
+                xb_key();
+        wait_for(&keyboard_focus, 2.0);
+        wl_display_roundtrip(display);
+        if (!strcmp(mode, "xpaste"))
+        {
+                // The X copy is the compositor's by now: it is offered at the key, the window having the keys.
+                struct wl_data_offer *before = offer_now;
+                xb_key();
+                for (uint64_t until = now_ns() + 3000000000ull; offer_now == before && now_ns() < until;)
+                        xb_pump(0.02);
+                if (!offer_now)
+                {
+                        printf("RESULT mode=xpaste ok=0 bytes=-1 want=%ld wrong=0 ms=-1 why=no_offer\n", payload);
+                        return 0;
+                }
+                xb_key();
+                uint64_t t = now_ns();
+                long n = xb_receive(offer_now);
+                printf("RESULT mode=xpaste ok=%d bytes=%ld want=%ld wrong=%ld ms=%.3f\n", n == payload && !xb_wrong, n, payload, xb_wrong,
+                       (double)(now_ns() - t) / 1e6);
+                return 0;
+        }
+        if (!strcmp(mode, "xcopy"))
+        {
+                struct wl_data_source *src = wl_data_device_manager_create_data_source(ddm);
+                struct wl_data_offer *before = offer_now;
+                wl_data_source_add_listener(src, &source_listener, NULL);
+                wl_data_source_offer(src, "text/plain;charset=utf-8");
+                xb_key();
+                wl_data_device_set_selection(data_device, src, serial_key);
+                for (uint64_t until = now_ns() + 5000000000ull; offer_now == before && now_ns() < until;)
+                        xb_pump(0.02);
+                printf("READY %d\n", offer_now != before);
+                printf("RESULT mode=xcopy ok=%d bytes=%ld ms=%.3f\n", offer_now != before, payload, (double)(now_ns() - t0) / 1e6);
+                fflush(stdout);
+                xb_pump(seconds);
+                return 0;
+        }
+        if (!strcmp(mode, "xdrop"))
+        {
+                printf("READY\n");
+                fflush(stdout);
+                offer_dropped = 0;
+                for (uint64_t until = now_ns() + (uint64_t)(seconds * 1e9); !offer_dropped && now_ns() < until;)
+                        xb_pump(0.01);
+                long n = offer_dropped && offer_now ? xb_receive(offer_now) : -1;
+                if (offer_dropped && offer_now)
+                {
+                        if (ddm_version >= 3)
+                                wl_data_offer_finish(offer_now);
+                        wl_data_offer_destroy(offer_now);
+                        wl_display_roundtrip(display);
+                }
+                printf("RESULT mode=xdrop ok=%d entered=%d dropped=%d bytes=%ld want=%ld wrong=%ld ms=%.3f\n", n == payload && !xb_wrong, xb_entered_dnd,
+                       offer_dropped, n, payload, xb_wrong, (double)(now_ns() - t0) / 1e6);
+                return 0;
+        }
+        // xdrag: "READY" once the window is shown, and a line on the standard input once the X window is (over this one, being mapped
+        // after it); then the hand to the top left, along the diagonal onto this window, pressed there, and right onto the X window.
+        {
+                char line[16];
+
+                xb_pump(0.2);
+                printf("READY\n");
+                fflush(stdout);
+                if (!fgets(line, sizeof line, stdin))
+                        line[0] = 0;
+        }
+        // The hand to the top left, along the diagonal onto this window, a little way in, and pressed: the drag begins on it.
+        for (int i = 0; i < 40; i++)
+                inject(2, 0, -100), inject(2, 1, -100);
+        xb_pump(0.05);
+        for (int i = 0; i < 400 && !pointer_in; i++)
+        {
+                inject(2, 0, 6), inject(2, 1, 6);
+                xb_pump(0.004);
+        }
+        for (int i = 0; i < 6; i++)
+                inject(2, 0, 6), inject(2, 1, 6);
+        xb_pump(0.05);
+        if (!pointer_in)
+        {
+                printf("RESULT mode=xdrag ok=0 why=the_pointer_never_entered\n");
+                return 0;
+        }
+        button_down = 0;
+        inject(1, 272, 1);
+        if (!wait_for(&button_down, 1.0))
+        {
+                printf("RESULT mode=xdrag ok=0 why=no_press\n");
+                return 0;
+        }
+        struct wl_data_source *src = wl_data_device_manager_create_data_source(ddm);
+        wl_data_source_add_listener(src, &xb_source_listener, NULL);
+        wl_data_source_offer(src, "text/plain;charset=utf-8");
+        if (ddm_version >= 3)
+                wl_data_source_set_actions(src, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+        uint64_t t = now_ns();
+        wl_data_device_start_drag(data_device, src, win[0].s, NULL, serial_button);
+        wl_display_flush(display);
+        xb_pump(0.1);
+        // "DRAGGING", and a line on the standard input once the X window is mapped (over the right half of the screen, over this one, it
+        // being mapped after this one's press raised it); then right, a step at a time, until the drag leaves this window, and on.
+        {
+                char line[16];
+
+                printf("DRAGGING\n");
+                fflush(stdout);
+                if (!fgets(line, sizeof line, stdin))
+                        line[0] = 0;
+        }
+        xb_left = 0;
+        for (int i = 0; i < 600 && !xb_left; i++)
+        {
+                inject(2, 0, 5);
+                xb_pump(0.004);
+        }
+        for (int i = 0; i < 20; i++)
+        {
+                inject(2, 0, 5);
+                xb_pump(0.01);
+        }
+        xb_pump(0.2);
+        if (xb_escape)
+        {
+                inject(1, 1, 1);
+                inject(1, 1, 0);
+                xb_pump(0.1);
+        }
+        inject(1, 272, 0);
+        for (uint64_t until = now_ns() + 10000000000ull; !xb_finished && !xb_cancelled && now_ns() < until;)
+                xb_pump(0.01);
+        printf("RESULT mode=xdrag ok=%d left_own=%d finished=%d cancelled=%d bytes=%ld ms=%.3f\n", xb_escape ? xb_cancelled : xb_finished, xb_left, xb_finished,
+               xb_cancelled, payload, (double)(now_ns() - t) / 1e6);
+        return 0;
+}
+
 static void report(void)
 {
         double span = (double)(now_ns() - t_start) / 1e9;
@@ -1258,7 +1548,7 @@ int main(int argc, char **argv)
 {
         int c;
         uint64_t t_exec = now_ns();
-        while ((c = getopt(argc, argv, "m:t:w:h:N:B:RAF:S:n:")) != -1)
+        while ((c = getopt(argc, argv, "m:t:w:h:N:B:RAF:S:n:EK")) != -1)
                 switch (c)
                 {
                 case 'm': mode = optarg; break;
@@ -1272,6 +1562,8 @@ int main(int argc, char **argv)
                 case 'F': fifo_path = optarg; break;
                 case 'S': payload = atol(optarg); break;
                 case 'n': count = atoi(optarg); break;
+                case 'E': xb_escape = 1; break;
+                case 'K': xb_kill = 1; break;
                 default: usage();
                 }
         if (windows < 1 || windows > MAXWIN || nbuffers < 2 || nbuffers > 3)
@@ -1338,6 +1630,15 @@ int main(int argc, char **argv)
                         wl_display_roundtrip(display);
                 running = 0; // no animation
                 return run_clip();
+        }
+        if (!strcmp(mode, "xpaste") || !strcmp(mode, "xcopy") || !strcmp(mode, "xdrop") || !strcmp(mode, "xdrag"))
+        {
+                windows = 1;
+                win_open(&win[0], want_w, want_h, 0);
+                for (int i = 0; i < 20 && !win[0].configured; i++)
+                        wl_display_roundtrip(display);
+                running = 0; // no animation
+                return run_xbridge();
         }
         if (!strcmp(mode, "resize"))
         {

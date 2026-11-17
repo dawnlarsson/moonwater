@@ -5,6 +5,8 @@
             x-stress -m anim [-t SECONDS] [-w W] [-h H]
             x-stress -m overlay [-t SECONDS] [-w W] [-h H]
             x-stress -m x-CASE (the X edge cases; x-dnd needs STRESS_FIFO, the compositor's -i device)
+            x-stress -m x-clip-own | x-clip-paste | x-dnd-to-wl | x-dnd-from-wl (the X side of the bridge's rows, run.py's
+                     x_bridge: STRESS_FIFO, STRESS_BYTES the value's size, STRESS_DIE_AFTER a piece to die at, STRESS_HOLD seconds)
 
         anim draws a frame into one of two pixmaps and shows it with the Present extension (PresentPixmap, what Mesa's
         DRI3 and Present loader does for a vsynced GL swap), the next frame at the CompleteNotify of the last, and says
@@ -505,6 +507,501 @@ static int x_dnd(Display *dpy, char *detail, size_t room)
         return text_ok && done ? 1 : 0;
 }
 
+/*
+        ---- the X side of the bridge between X and Wayland (run.py's x_bridge) ----
+
+        Each value is STRESS_BYTES bytes of 'a' + i % 26, as wl-stress's are, so either side checks every byte. A value longer than a
+        piece (64 KiB here) goes by INCR (ICCCM 2.7.2) whichever side sends it, and STRESS_DIE_AFTER kills this client (SIGKILL) once it
+        has sent or read that many pieces: the other side then has a transfer whose peer is gone in the middle.
+            x-clip-own     a window of this client is given the person's key (the compositor's -i device), then owns CLIPBOARD and answers
+                           TARGETS, UTF8_STRING and STRING; "SERVED n" on each whole answer; it holds for STRESS_HOLD seconds
+            x-clip-paste   the key, then CLIPBOARD converted as UTF8_STRING, INCR read, every byte checked
+            x-dnd-to-wl    an XDND 5 source: the hand on its window, pressed, moved right until a window with XdndAware that is not its
+                           own is under the pointer (a Wayland window's, through the window manager's proxy), entered, positioned,
+                           accepted, dropped, its XdndSelection converted (INCR), finished
+            x-dnd-from-wl  an XDND 5 target over the right half of the screen: "READY x y w h", then whatever comes (entered,
+                           positions, a drop converted as UTF8_STRING and checked, or a leave), for STRESS_HOLD seconds
+*/
+static long xb_bytes(void)
+{
+        const char *b = getenv("STRESS_BYTES");
+        return b ? atol(b) : 4096;
+}
+
+static int xb_die_after(void)
+{
+        const char *d = getenv("STRESS_DIE_AFTER");
+        return d ? atoi(d) : 0;
+}
+
+static double xb_hold(void)
+{
+        const char *h = getenv("STRESS_HOLD");
+        return h ? atof(h) : 8.0;
+}
+
+static void xb_fill(unsigned char *p, long at, long n)
+{
+        for (long i = 0; i < n; i++)
+                p[i] = (unsigned char)('a' + (at + i) % 26);
+}
+
+// How many of n bytes at offset at are not the pattern.
+static long xb_wrong(const unsigned char *p, long at, long n)
+{
+        long bad = 0;
+        for (long i = 0; i < n; i++)
+                bad += p[i] != (unsigned char)('a' + (at + i) % 26);
+        return bad;
+}
+
+static int xb_next(Display *dpy, XEvent *e, uint64_t until)
+{
+        while (!XPending(dpy))
+        {
+                if (now_ns() >= until)
+                        return 0;
+                usleep(1000);
+        }
+        XNextEvent(dpy, e);
+        return 1;
+}
+
+// The window has the keys and has had a key of the person's (the compositor's -i device): what a copy or a paste under the hand asks.
+static int xb_gesture(Display *dpy, Window w)
+{
+        uint64_t until = now_ns() + 3000000000ull;
+        Window focus;
+        int revert, pressed = 0;
+        XEvent e;
+
+        if (x_fifo < 0)
+        {
+                const char *fifo = getenv("STRESS_FIFO");
+                if (!fifo || (x_fifo = open(fifo, O_WRONLY | O_NONBLOCK)) < 0)
+                        return 0;
+        }
+        // A window an X client opens after its first does not take the keys (the compositor gives them to a window the person asked
+        // for): the hand is put on it, along the diagonal from the top left until the X server has it there, and clicks.
+        XGetInputFocus(dpy, &focus, &revert);
+        if (focus != w)
+        {
+                Window rr, child = None;
+                int rx, ry, wx, wy, over = 0;
+                unsigned int mask;
+
+                for (int i = 0; i < 40; i++)
+                        x_inject(2, 0, -100), x_inject(2, 1, -100);
+                for (int i = 0; i < 400 && !over; i++)
+                {
+                        x_inject(2, 0, 6), x_inject(2, 1, 6);
+                        usleep(4000);
+                        XQueryPointer(dpy, DefaultRootWindow(dpy), &rr, &child, &rx, &ry, &wx, &wy, &mask);
+                        over = child == w;
+                }
+                for (int i = 0; i < 8; i++)
+                        x_inject(2, 0, 6), x_inject(2, 1, 6);
+                usleep(20000);
+                x_inject(1, 272, 1);
+                x_inject(1, 272, 0);
+        }
+        for (;;)
+        {
+                XGetInputFocus(dpy, &focus, &revert);
+                if (focus == w || now_ns() >= until)
+                        break;
+                usleep(10000);
+        }
+        x_inject(1, 30, 1);
+        x_inject(1, 30, 0);
+        while (!pressed && xb_next(dpy, &e, until))
+                pressed = e.type == KeyPress && e.xkey.window == w;
+        return pressed;
+}
+
+static int x_clip_own(Display *dpy, char *detail, size_t room)
+{
+        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), targets = XInternAtom(dpy, "TARGETS", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+        Atom incr = XInternAtom(dpy, "INCR", False);
+        long total = xb_bytes(), chunk = 65536, served = 0, pieces = 0;
+        int die = xb_die_after(), owned;
+        Window w = x_window(dpy, 80, 80, 1600, 900, 0x305070u, 0), requestor = None;
+        Atom property = None, type = None;
+        long at = -1;
+        unsigned char *data = malloc((size_t)chunk);
+        uint64_t until;
+        XEvent e;
+
+        XSelectInput(dpy, w, KeyPressMask | FocusChangeMask | StructureNotifyMask);
+        XSync(dpy, False);
+        usleep(300000);
+        if (!xb_gesture(dpy, w))
+        {
+                snprintf(detail, room, "no_key_reached_the_window");
+                return 0;
+        }
+        XSetSelectionOwner(dpy, clip, w, CurrentTime);
+        owned = XGetSelectionOwner(dpy, clip) == w;
+        printf("OWNED %d\n", owned);
+        fflush(stdout);
+        until = now_ns() + (uint64_t)(xb_hold() * 1e9);
+        while (xb_next(dpy, &e, until))
+        {
+                if (e.type == SelectionRequest)
+                {
+                        XSelectionRequestEvent *r = &e.xselectionrequest;
+                        XSelectionEvent n = {0};
+                        Atom prop = r->property ? r->property : r->target;
+
+                        n.type = SelectionNotify, n.requestor = r->requestor, n.selection = r->selection, n.target = r->target, n.time = r->time;
+                        n.property = None;
+                        if (r->target == targets)
+                        {
+                                Atom list[3] = {targets, utf8, XA_STRING};
+                                XChangeProperty(dpy, r->requestor, prop, XA_ATOM, 32, PropModeReplace, (unsigned char *)list, 3);
+                                n.property = prop;
+                        }
+                        else if ((r->target == utf8 || r->target == XA_STRING) && total <= chunk)
+                        {
+                                xb_fill(data, 0, total);
+                                XChangeProperty(dpy, r->requestor, prop, r->target, 8, PropModeReplace, data, (int)total);
+                                n.property = prop;
+                                printf("SERVED %ld\n", total);
+                                fflush(stdout);
+                                served++;
+                        }
+                        else if ((r->target == utf8 || r->target == XA_STRING) && requestor == None)
+                        {
+                                long size = total;
+                                XSelectInput(dpy, r->requestor, PropertyChangeMask);
+                                XChangeProperty(dpy, r->requestor, prop, incr, 32, PropModeReplace, (unsigned char *)&size, 1);
+                                n.property = prop;
+                                requestor = r->requestor, property = prop, type = r->target, at = 0;
+                        }
+                        XSendEvent(dpy, r->requestor, False, NoEventMask, (XEvent *)&n);
+                        XFlush(dpy);
+                }
+                else if (e.type == PropertyNotify && requestor != None && e.xproperty.window == requestor && e.xproperty.atom == property &&
+                         e.xproperty.state == PropertyDelete)
+                {
+                        long n = total - at > chunk ? chunk : total - at;
+
+                        if (die && pieces >= die)
+                        {
+                                printf("DYING after %ld pieces\n", pieces);
+                                fflush(stdout);
+                                kill(getpid(), SIGKILL);
+                        }
+                        xb_fill(data, at, n);
+                        XChangeProperty(dpy, requestor, property, type, 8, PropModeReplace, data, (int)n);
+                        XFlush(dpy);
+                        pieces++;
+                        at += n;
+                        if (n == 0)
+                        {
+                                printf("SERVED %ld\n", total);
+                                fflush(stdout);
+                                served++;
+                                requestor = None;
+                        }
+                }
+                else if (e.type == SelectionClear)
+                        break;
+        }
+        snprintf(detail, room, "owned=%d_served=%ld_bytes=%ld", owned, served, total);
+        return served > 0;
+}
+
+/* CLIPBOARD (or the XdndSelection of a drop) converted as target into this window's property, read whole or by INCR, each byte checked:
+   the bytes read, -1 for a refusal or a timeout; *wrong the bytes that were not the pattern. */
+static long xb_convert(Display *dpy, Window w, Atom selection, Atom target, Time time, int die, double secs, long *wrong, double *ms)
+{
+        Atom prop = XInternAtom(dpy, "XSTRESS_BRIDGE", False), incr = XInternAtom(dpy, "INCR", False);
+        uint64_t t0 = now_ns(), until = t0 + (uint64_t)(secs * 1e9);
+        long total = 0, pieces = 0;
+        int incremental = 0, notified = 0;
+        XEvent e;
+
+        *wrong = 0;
+        XSelectInput(dpy, w, KeyPressMask | FocusChangeMask | StructureNotifyMask | PropertyChangeMask);
+        XConvertSelection(dpy, selection, target, prop, w, time);
+        XFlush(dpy);
+        while (xb_next(dpy, &e, until))
+        {
+                Atom type;
+                int format;
+                unsigned long count, after;
+                unsigned char *data = NULL;
+
+                if (e.type == SelectionNotify && e.xselection.requestor == w && !notified)
+                {
+                        notified = 1;
+                        if (e.xselection.property == None)
+                                return -1;
+                        if (XGetWindowProperty(dpy, w, prop, 0, 0x1fffffff, True, AnyPropertyType, &type, &format, &count, &after, &data) != Success)
+                                return -1;
+                        if (type == incr)
+                                incremental = 1;
+                        else
+                        {
+                                *wrong += xb_wrong(data, 0, (long)count);
+                                total = (long)count;
+                                XFree(data);
+                                *ms = (double)(now_ns() - t0) / 1e6;
+                                return total;
+                        }
+                        if (data)
+                                XFree(data);
+                }
+                else if (e.type == PropertyNotify && incremental && e.xproperty.window == w && e.xproperty.atom == prop && e.xproperty.state == PropertyNewValue)
+                {
+                        if (XGetWindowProperty(dpy, w, prop, 0, 0x1fffffff, True, AnyPropertyType, &type, &format, &count, &after, &data) != Success)
+                                return -1;
+                        if (!count)
+                        {
+                                if (data)
+                                        XFree(data);
+                                *ms = (double)(now_ns() - t0) / 1e6;
+                                return total;
+                        }
+                        *wrong += xb_wrong(data, total, (long)count);
+                        total += (long)count;
+                        XFree(data);
+                        if (die && ++pieces >= die)
+                        {
+                                printf("DYING after %ld pieces\n", pieces);
+                                fflush(stdout);
+                                kill(getpid(), SIGKILL);
+                        }
+                }
+        }
+        *ms = (double)(now_ns() - t0) / 1e6;
+        return incremental ? total : -1;
+}
+
+static int x_clip_paste(Display *dpy, char *detail, size_t room)
+{
+        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+        Window w = x_window(dpy, 80, 80, 1600, 900, 0x507030u, 0);
+        long want = xb_bytes(), wrong = 0, got;
+        double ms = -1;
+
+        XSelectInput(dpy, w, KeyPressMask | FocusChangeMask | StructureNotifyMask | PropertyChangeMask);
+        XSync(dpy, False);
+        usleep(300000);
+        if (!xb_gesture(dpy, w))
+        {
+                snprintf(detail, room, "no_key_reached_the_window");
+                return 0;
+        }
+        got = xb_convert(dpy, w, clip, utf8, CurrentTime, xb_die_after(), 10.0, &wrong, &ms);
+        snprintf(detail, room, "bytes=%ld_of_%ld_wrong=%ld_paste_ms=%.1f", got, want, wrong, ms);
+        return got == want && !wrong;
+}
+
+static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
+{
+        Atom aware = XInternAtom(dpy, "XdndAware", False), enter = XInternAtom(dpy, "XdndEnter", False), position = XInternAtom(dpy, "XdndPosition", False);
+        Atom status = XInternAtom(dpy, "XdndStatus", False), leave = XInternAtom(dpy, "XdndLeave", False), drop = XInternAtom(dpy, "XdndDrop", False);
+        Atom finished = XInternAtom(dpy, "XdndFinished", False), selection = XInternAtom(dpy, "XdndSelection", False);
+        Atom copy = XInternAtom(dpy, "XdndActionCopy", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False), incr = XInternAtom(dpy, "INCR", False);
+        Window root = DefaultRootWindow(dpy), a, over = None, rr, child, requestor = None;
+        Atom property = None, type = None;
+        long total = xb_bytes(), chunk = 65536, at = 0;
+        int ax, ay, rx = 0, ry = 0, wx, wy, on_a = 0, entered = 0, accepted = 0, dropped = 0, done = 0, ok = 0, served = 0;
+        unsigned int mask;
+        unsigned char *data = malloc((size_t)chunk);
+        uint64_t t0;
+
+        if (!getenv("STRESS_FIFO") || (x_fifo = open(getenv("STRESS_FIFO"), O_WRONLY | O_NONBLOCK)) < 0)
+        {
+                snprintf(detail, room, "no_STRESS_FIFO");
+                return 3;
+        }
+        a = x_window(dpy, 100, 200, 300, 200, 0x406080u, 1);
+        XSelectInput(dpy, a, ButtonPressMask | ButtonReleaseMask | PointerMotionMask);
+        XSync(dpy, False);
+        usleep(600000);
+        XTranslateCoordinates(dpy, a, root, 0, 0, &ax, &ay, &child);
+        for (int i = 0; i < 40; i++)
+                x_inject(2, 0, -100), x_inject(2, 1, -100);
+        for (int i = 0; i < 400 && !on_a; i++)
+        {
+                x_inject(2, 0, 6), x_inject(2, 1, 6);
+                usleep(4000);
+                XQueryPointer(dpy, root, &rr, &child, &rx, &ry, &wx, &wy, &mask);
+                on_a = child == a && rx > ax + 20 && ry > ay + 20;
+        }
+        if (!on_a)
+        {
+                snprintf(detail, room, "the_hand_never_reached_the_source");
+                return 0;
+        }
+        x_inject(1, 272, 1);
+        usleep(60000);
+        XSetSelectionOwner(dpy, selection, a, CurrentTime);
+        t0 = now_ns();
+        // Right, a step at a time, until a window with XdndAware that is not this client's own accepts.
+        for (int i = 0; i < 300 && !(accepted && over != a && over != None); i++)
+        {
+                x_inject(2, 0, 6);
+                usleep(6000);
+                XQueryPointer(dpy, root, &rr, &child, &rx, &ry, &wx, &wy, &mask);
+                if (child != over)
+                {
+                        if (over != None && entered)
+                                x_client_message(dpy, over, leave, (long)a, 0, 0, 0, 0), entered = 0, accepted = 0;
+                        over = child;
+                        Atom t;
+                        int f;
+                        unsigned long count, after;
+                        unsigned char *p = NULL;
+                        if (over != None && over != a && XGetWindowProperty(dpy, over, aware, 0, 1, False, XA_ATOM, &t, &f, &count, &after, &p) == Success &&
+                            count == 1)
+                                x_client_message(dpy, over, enter, (long)a, 5L << 24, (long)utf8, 0, 0), entered = 1;
+                        if (p)
+                                XFree(p);
+                }
+                if (entered)
+                        x_client_message(dpy, over, position, (long)a, 0, (long)rx << 16 | ry, CurrentTime, (long)copy);
+                XFlush(dpy);
+                for (uint64_t wait_status = now_ns() + 30000000ull; entered && now_ns() < wait_status;)
+                {
+                        XEvent e;
+                        if (!xb_next(dpy, &e, wait_status))
+                                break;
+                        if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == status)
+                        {
+                                accepted = e.xclient.data.l[1] & 1;
+                                break;
+                        }
+                }
+        }
+        x_inject(1, 272, 0);
+        if (entered && accepted)
+                x_client_message(dpy, over, drop, (long)a, 0, CurrentTime, 0, 0), dropped = 1;
+        else if (entered)
+                x_client_message(dpy, over, leave, (long)a, 0, 0, 0, 0);
+        XFlush(dpy);
+        for (uint64_t end = now_ns() + 10000000000ull; dropped && !done && now_ns() < end;)
+        {
+                XEvent e;
+                if (!xb_next(dpy, &e, end))
+                        break;
+                if (e.type == SelectionRequest)
+                {
+                        XSelectionRequestEvent *r = &e.xselectionrequest;
+                        XSelectionEvent n = {0};
+                        Atom prop = r->property ? r->property : r->target;
+
+                        n.type = SelectionNotify, n.requestor = r->requestor, n.selection = r->selection, n.target = r->target, n.time = r->time;
+                        n.property = None;
+                        if (r->target == utf8 && total <= chunk)
+                        {
+                                xb_fill(data, 0, total);
+                                XChangeProperty(dpy, r->requestor, prop, utf8, 8, PropModeReplace, data, (int)total);
+                                n.property = prop, served = 1;
+                        }
+                        else if (r->target == utf8)
+                        {
+                                long size = total;
+                                XSelectInput(dpy, r->requestor, PropertyChangeMask);
+                                XChangeProperty(dpy, r->requestor, prop, incr, 32, PropModeReplace, (unsigned char *)&size, 1);
+                                n.property = prop, requestor = r->requestor, property = prop, type = utf8, at = 0;
+                        }
+                        XSendEvent(dpy, r->requestor, False, NoEventMask, (XEvent *)&n);
+                        XFlush(dpy);
+                }
+                else if (e.type == PropertyNotify && requestor != None && e.xproperty.window == requestor && e.xproperty.atom == property &&
+                         e.xproperty.state == PropertyDelete)
+                {
+                        long n = total - at > chunk ? chunk : total - at;
+                        xb_fill(data, at, n);
+                        XChangeProperty(dpy, requestor, property, type, 8, PropModeReplace, data, (int)n);
+                        XFlush(dpy);
+                        at += n;
+                        if (!n)
+                                requestor = None, served = 1;
+                }
+                else if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == finished)
+                        done = 1, ok = (e.xclient.data.l[1] & 1) != 0;
+        }
+        snprintf(detail, room, "entered=%d_accepted=%d_dropped=%d_served=%d_finished=%d_ok=%d_bytes=%ld_drag_ms=%.1f", entered, accepted, dropped, served, done, ok,
+                 total, (double)(now_ns() - t0) / 1e6);
+        return done && ok && served;
+}
+
+static int x_dnd_from_wl(Display *dpy, char *detail, size_t room)
+{
+        Atom aware = XInternAtom(dpy, "XdndAware", False), enter = XInternAtom(dpy, "XdndEnter", False), position = XInternAtom(dpy, "XdndPosition", False);
+        Atom status = XInternAtom(dpy, "XdndStatus", False), leave = XInternAtom(dpy, "XdndLeave", False), drop = XInternAtom(dpy, "XdndDrop", False);
+        Atom finished = XInternAtom(dpy, "XdndFinished", False), selection = XInternAtom(dpy, "XdndSelection", False);
+        Atom copy = XInternAtom(dpy, "XdndActionCopy", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+        int sw = DisplayWidth(dpy, DefaultScreen(dpy)), sh = DisplayHeight(dpy, DefaultScreen(dpy));
+        // Override-redirect, so it is where it says (over the right half), and mapped while the Wayland drag is held, over the window it began in.
+        Window b = x_window(dpy, sw / 2, 0, sw - sw / 2, sh, 0x608040u, 1), child;
+        int bx = 0, by = 0;
+        long version = 5, want = xb_bytes(), got = -2, wrong = 0, positions = 0;
+        int entered = 0, dropped = 0, left = 0, types_utf8 = 0;
+        double ms = -1;
+        uint64_t until = now_ns() + (uint64_t)(xb_hold() * 1e9);
+        XEvent e;
+
+        XSelectInput(dpy, b, PropertyChangeMask);
+        XChangeProperty(dpy, b, aware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&version, 1);
+        XSync(dpy, False);
+        usleep(400000);
+        XTranslateCoordinates(dpy, b, DefaultRootWindow(dpy), 0, 0, &bx, &by, &child);
+        printf("READY %d %d %d %d\n", bx, by, sw - sw / 2, sh);
+        fflush(stdout);
+        while (!dropped && !left && xb_next(dpy, &e, until))
+        {
+                if (e.type != ClientMessage || e.xclient.window != b)
+                        continue;
+                Atom m = (Atom)e.xclient.message_type;
+                Window source = (Window)e.xclient.data.l[0];
+                if (m == enter)
+                {
+                        entered++;
+                        for (int k = 2; k < 5; k++)
+                                types_utf8 |= (Atom)e.xclient.data.l[k] == utf8;
+                        if (e.xclient.data.l[1] & 1)
+                        {
+                                Atom t, *list = NULL;
+                                int f;
+                                unsigned long count, after;
+                                Atom typelist = XInternAtom(dpy, "XdndTypeList", False);
+                                if (XGetWindowProperty(dpy, source, typelist, 0, 64, False, XA_ATOM, &t, &f, &count, &after, (unsigned char **)&list) == Success && list)
+                                {
+                                        for (unsigned long k = 0; k < count; k++)
+                                                types_utf8 |= list[k] == utf8;
+                                        XFree(list);
+                                }
+                        }
+                }
+                else if (m == position)
+                {
+                        positions++;
+                        x_client_message(dpy, source, status, (long)b, types_utf8 ? 1 : 0, 0, 0, types_utf8 ? (long)copy : 0);
+                        XFlush(dpy);
+                }
+                else if (m == leave)
+                        left = 1;
+                else if (m == drop)
+                {
+                        dropped = 1;
+                        got = xb_convert(dpy, b, selection, utf8, (Time)e.xclient.data.l[2], xb_die_after(), 10.0, &wrong, &ms);
+                        x_client_message(dpy, source, finished, (long)b, got == want && !wrong ? 1 : 0, got == want && !wrong ? (long)copy : 0, 0, 0);
+                        XFlush(dpy);
+                }
+        }
+        snprintf(detail, room, "entered=%d_positions=%ld_text=%d_dropped=%d_left=%d_bytes=%ld_of_%ld_wrong=%ld_read_ms=%.1f", entered, positions, types_utf8, dropped,
+                 left, got, want, wrong, ms);
+        if (getenv("STRESS_EXPECT_LEAVE"))
+                return entered && left && !dropped;
+        return dropped && got == want && !wrong;
+}
+
 static int run_xcase(Display *dpy, const char *name)
 {
         char detail[160] = "-";
@@ -624,6 +1121,21 @@ static int run_xcase(Display *dpy, const char *name)
                 XDestroyWindow(dpy, w[1]);
                 XSync(dpy, False);
                 usleep(300000);
+        }
+        else if (!strcmp(name, "x-clip-own") || !strcmp(name, "x-clip-paste") || !strcmp(name, "x-dnd-to-wl") || !strcmp(name, "x-dnd-from-wl"))
+        {
+                int got = !strcmp(name, "x-clip-own")     ? x_clip_own(dpy, detail, sizeof(detail))
+                          : !strcmp(name, "x-clip-paste") ? x_clip_paste(dpy, detail, sizeof(detail))
+                          : !strcmp(name, "x-dnd-to-wl")  ? x_dnd_to_wl(dpy, detail, sizeof(detail))
+                                                          : x_dnd_from_wl(dpy, detail, sizeof(detail));
+
+                if (got == 3)
+                {
+                        printf("CASE %s outcome=skip ms=-1 detail=%s\n", name, detail);
+                        return 0;
+                }
+                printf("CASE %s outcome=%s ms=%.3f detail=%s\n", name, got ? "ok" : "fail", (double)(now_ns() - x_t0) / 1e6, detail);
+                return 0;
         }
         else if (!strcmp(name, "x-dnd"))
         {

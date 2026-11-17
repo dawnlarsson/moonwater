@@ -698,15 +698,19 @@ def bench(args, comp):
         if (not args.only or any(n.startswith("x") or n == "edge" for n in args.only)) and os.path.exists(xs):
             if comp.start_x():
                 xenv = {"DISPLAY": comp.display}
-                xa = run_client(comp, [xs, "-m", "anim", "-t", str(args.seconds)], xenv, t0=True, timeout=args.seconds + 30)
-                results["x-anim"] = xa
-                results["startup"]["open_ms"] = xa.get("open_ms")
-                results["startup"]["first_complete_ms"] = xa.get("first_complete_ms")
-                print("  x-anim: " + " ".join(f"{k}={v}" for k, v in xa.items() if k in SHOWN or k == "_notes"), flush=True)
-                results["x-overlay"] = overlay(args, comp, xs, xenv)
-                print("  x-overlay: %s" % results["x-overlay"], flush=True)
+                if not args.only or any(n != "x-bridge" for n in args.only):
+                    xa = run_client(comp, [xs, "-m", "anim", "-t", str(args.seconds)], xenv, t0=True, timeout=args.seconds + 30)
+                    results["x-anim"] = xa
+                    results["startup"]["open_ms"] = xa.get("open_ms")
+                    results["startup"]["first_complete_ms"] = xa.get("first_complete_ms")
+                    print("  x-anim: " + " ".join(f"{k}={v}" for k, v in xa.items() if k in SHOWN or k == "_notes"), flush=True)
+                    results["x-overlay"] = overlay(args, comp, xs, xenv)
+                    print("  x-overlay: %s" % results["x-overlay"], flush=True)
                 if not args.only or "edge" in args.only:
                     results.setdefault("edge", {}).update(x_edge(args, comp, xs))
+                # The bridge between X and Wayland (the clipboard, the primary selection's path and drag and drop), with its own rows.
+                if not args.only or "x-bridge" in args.only:
+                    results.setdefault("edge", {}).update(x_bridge(args, comp, xs))
             else:
                 results["x-anim"] = {"_notes": ["no Xwayland on this compositor here"]}
         if "soak" in args.only:
@@ -892,6 +896,214 @@ def x_edge(args, comp, xs):
     out["xwayland-restart"] = r
     print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % ("xwayland-restart", r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]),
           flush=True)
+    return out
+
+
+# ---- the bridge between X and Wayland: an X client and a Wayland client on one compositor, each the other's side ----
+X_BRIDGE = ["clip-x-to-wl-small", "clip-x-to-wl-large", "clip-wl-to-x-small", "clip-wl-to-x-large", "dnd-x-to-wl", "dnd-wl-to-x",
+            "dnd-wl-to-x-escape", "clip-x-owner-killed", "clip-x-requestor-killed", "dnd-wl-source-killed"]
+BRIDGE_SMALL, BRIDGE_LARGE, BRIDGE_DND = 4096, 3 << 20, 256 << 10
+
+
+def words(line):
+    out = {}
+    for word in line.split()[1:]:
+        k, _, v = word.partition("=")
+        out[k] = v
+    return out
+
+
+class Side:
+    """A client of one of the bridge's rows, started and read a line at a time (its READY, OWNED and SERVED lines say how far it is)."""
+
+    def __init__(self, argv, env):
+        self.lines, self.rest = [], b""
+        self.p = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def go(self):
+        try:
+            self.p.stdin.write(b"go\n")
+            self.p.stdin.flush()
+        except OSError:
+            pass
+
+    def take(self, timeout):
+        import select
+        r, _, _ = select.select([self.p.stdout], [], [], timeout)
+        if not r:
+            return True
+        got = os.read(self.p.stdout.fileno(), 65536)
+        if not got:
+            return False
+        self.rest += got
+        *done, self.rest = self.rest.split(b"\n")
+        self.lines += [l.decode(errors="replace") for l in done]
+        return True
+
+    def wait(self, prefix, timeout):
+        end = time.time() + timeout
+        while True:
+            for l in self.lines:
+                if l.startswith(prefix):
+                    return l
+            if time.time() >= end or not self.take(max(0.0, min(0.1, end - time.time()))):
+                return None
+
+    def finish(self, timeout, kill=False):
+        if kill and self.p.poll() is None:
+            self.p.terminate()
+        end = time.time() + timeout
+        while time.time() < end and self.take(max(0.0, min(0.1, end - time.time()))):
+            if self.p.poll() is not None and not self.take(0):
+                break
+        if self.p.poll() is None:
+            self.p.kill()
+        self.p.wait()
+        while self.take(0):
+            pass
+        if self.rest:
+            self.lines.append(self.rest.decode(errors="replace"))
+            self.rest = b""
+        return self.lines
+
+    @staticmethod
+    def find(lines, prefix):
+        for l in lines:
+            if l.startswith(prefix):
+                return words(l)
+        return None
+
+
+def bridge_case(name, args, comp, xs):
+    wl = os.path.join(args.bin, "wl-stress")
+    fifo = ["-F", comp.fifo]
+    xenv = dict(comp.env, DISPLAY=comp.display, STRESS_FIFO=comp.fifo)
+    wenv = dict(comp.env)
+
+    def xrun(case, bytes_, extra=None, timeout=40):
+        env = dict(xenv, STRESS_BYTES=str(bytes_), **(extra or {}))
+        try:
+            p = subprocess.run([xs, "-m", case], env=env, capture_output=True, text=True, timeout=timeout)
+            lines = p.stdout.splitlines()
+        except subprocess.TimeoutExpired as e:
+            lines = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")).splitlines()
+        return lines
+
+    def wrun(mode, bytes_, extra=(), timeout=40):
+        try:
+            p = subprocess.run([wl, "-m", mode, "-S", str(bytes_)] + list(extra) + fifo, env=wenv, capture_output=True, text=True, timeout=timeout)
+            lines = p.stdout.splitlines()
+        except subprocess.TimeoutExpired as e:
+            lines = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")).splitlines()
+        return lines
+
+    def x_to_wl(bytes_, die=0):
+        extra = {"STRESS_HOLD": "8"}
+        if die:
+            extra["STRESS_DIE_AFTER"] = str(die)
+        own = Side([xs, "-m", "x-clip-own"], dict(xenv, STRESS_BYTES=str(bytes_), **extra))
+        owned = own.wait("OWNED", 10)
+        time.sleep(0.3)
+        paste = Side.find(wrun("xpaste", bytes_), "RESULT ") or {}
+        lines = own.finish(3, kill=True)
+        served = sum(1 for l in lines if l.startswith("SERVED"))
+        return owned, paste, served, lines
+
+    def wl_to_x(bytes_, die=0):
+        copy = Side([wl, "-m", "xcopy", "-S", str(bytes_), "-t", "10"] + fifo, wenv)
+        ready = copy.wait("READY", 10)
+        case = Side.find(xrun("x-clip-paste", bytes_, {"STRESS_DIE_AFTER": str(die)} if die else None), "CASE ") or {}
+        return ready, case, copy
+
+    if name.startswith("clip-x-to-wl"):
+        bytes_ = BRIDGE_SMALL if name.endswith("small") else BRIDGE_LARGE
+        owned, paste, served, lines = x_to_wl(bytes_)
+        ok = paste.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail",
+                "detail": "owned=%s_served=%d_bytes=%s_of_%d_wrong=%s_paste_ms=%s" % (bool(owned), served, paste.get("bytes"), bytes_, paste.get("wrong"),
+                                                                                    paste.get("ms"))}
+    if name.startswith("clip-wl-to-x"):
+        bytes_ = BRIDGE_SMALL if name.endswith("small") else BRIDGE_LARGE
+        ready, case, copy = wl_to_x(bytes_)
+        copy.finish(3, kill=True)
+        return {"outcome": case.get("outcome", "none") if ready else "fail",
+                "detail": ("copied_" if ready else "never_copied_") + case.get("detail", "no_CASE_line")}
+    if name == "dnd-x-to-wl":
+        drop = Side([wl, "-m", "xdrop", "-S", str(BRIDGE_DND), "-t", "20", "-w", "1600", "-h", "900"] + fifo, wenv)
+        ready = drop.wait("READY", 10)
+        time.sleep(0.3)
+        case = Side.find(xrun("x-dnd-to-wl", BRIDGE_DND), "CASE ") or {}
+        res = Side.find(drop.finish(12, kill=False) if drop.wait("RESULT", 12) else drop.finish(2, kill=True), "RESULT ") or {}
+        ok = bool(ready) and case.get("outcome") == "ok" and res.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail", "detail": "x:%s_wayland:dropped=%s_bytes=%s_wrong=%s" % (case.get("detail", "-"), res.get("dropped"),
+                                                                                                         res.get("bytes"), res.get("wrong"))}
+    if name.startswith("dnd-wl-to-x") or name == "dnd-wl-source-killed":
+        escape, killed = name.endswith("escape"), name == "dnd-wl-source-killed"
+        extra = {"STRESS_HOLD": "20"}
+        if escape:
+            extra["STRESS_EXPECT_LEAVE"] = "1"
+        # The Wayland window, its drag begun (its press raises it), then the X window over the right half (mapped after, so over it),
+        # then the drag on to it.
+        flags = ["-E"] if escape else ["-K"] if killed else []
+        size = BRIDGE_DND if not killed else BRIDGE_LARGE
+        source = Side([wl, "-m", "xdrag", "-S", str(size), "-w", "1600", "-h", "900"] + flags + fifo, wenv)
+        shown = source.wait("READY", 10)
+        source.go()
+        dragging = source.wait("DRAGGING", 10)
+        target = Side([xs, "-m", "x-dnd-from-wl"], dict(xenv, STRESS_BYTES=str(size), **extra))
+        ready = target.wait("READY", 10) and shown and dragging
+        source.go()
+        res = Side.find(source.finish(15) if source.wait("RESULT", 15) else source.finish(2, kill=True), "RESULT ") or {}
+        lines = target.finish(15) if target.wait("CASE", 15) else target.finish(2, kill=True)
+        case = Side.find(lines, "CASE ") or {}
+        if killed:
+            # The source killed half way: the X side ends (it is not left waiting), and dropped what came.
+            ok = bool(ready) and "dropped=1" in case.get("detail", "")
+        else:
+            ok = bool(ready) and case.get("outcome") == "ok" and res.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail", "detail": "x:%s_wayland:%s" % (case.get("detail", "no_CASE"),
+                                                                                  "_".join("%s=%s" % kv for kv in sorted(res.items())) or "no_RESULT")}
+    if name == "clip-x-owner-killed":
+        # The X owner killed after three pieces of its INCR: the compositor goes on, and the next X copy crosses whole.
+        owned, paste, served, lines = x_to_wl(BRIDGE_LARGE, die=3)
+        died = any(l.startswith("DYING") for l in lines)
+        owned2, paste2, served2, _ = x_to_wl(BRIDGE_SMALL)
+        ok = died and paste2.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail", "detail": "died=%d_then_bytes=%s_then_next_copy_ok=%s" % (died, paste.get("bytes"), paste2.get("ok"))}
+    if name == "clip-x-requestor-killed":
+        # The X requestor killed after three pieces of the compositor's INCR: the next X paste is whole.
+        ready, case, copy = wl_to_x(BRIDGE_LARGE, die=3)
+        case2 = Side.find(xrun("x-clip-paste", BRIDGE_LARGE), "CASE ") or {}
+        copy.finish(3, kill=True)
+        ok = bool(ready) and case2.get("outcome") == "ok"
+        return {"outcome": "ok" if ok else "fail", "detail": "first=%s_then=%s" % (case.get("outcome", "killed"), case2.get("detail", "no_CASE"))}
+    return {"outcome": "none", "detail": "no_such_case"}
+
+
+def x_bridge(args, comp, xs):
+    """The bridge's rows: copies and pastes each way, small and past 1 MiB (INCR), drags each way, a drag Escaped over its X target, and
+    the side killed in the middle of a transfer (the X owner of a copy, the X requestor of a paste, the Wayland source of a drag). Each
+    is judged as an edge case is: its outcome, the compositor alive, and its Xwayland serving after."""
+    out = {}
+    if not comp.fifo or not comp.display:
+        note(f"{comp.name}: no input device or no Xwayland: the bridge's rows are not run")
+        return out
+    for name in X_BRIDGE:
+        if args.edge and name not in args.edge:
+            continue
+        t = ns()
+        try:
+            r = bridge_case(name, args, comp, xs)
+        except Exception as e:  # a row's runner that breaks is the row's failure, not the bench's
+            r = {"outcome": "fail", "detail": "runner:" + str(e).replace(" ", "_")[:120]}
+        r["ms"] = (ns() - t) / 1e6
+        r["alive"] = comp.alive() if not args.real else True
+        r["recover_ms"] = x_alive(args, comp, xs) if r["alive"] else -1
+        out[name] = r
+        print("  edge %-30s %-26s alive=%d recover=%.1f ms=%.1f %s" % (name, r["outcome"], r["alive"], r["recover_ms"], r["ms"], r["detail"]), flush=True)
+        if r["recover_ms"] < 0:
+            note(f"{comp.name}: its Xwayland did not come through {name}")
+            break
     return out
 
 
