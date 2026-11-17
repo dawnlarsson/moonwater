@@ -907,7 +907,11 @@ static fn installer_begin(void)
         installer.child = 0;
         installer.chosen = -1;
         installer.step = INSTALLER_STEP_LANGUAGE;
-        installer.x86 = X64;
+#ifdef X64
+        installer.x86 = X64; // X64 is lib.c's only on x86-64: the build tool, built on an arm64 host, has none
+#else
+        installer.x86 = 0;
+#endif
         installer_settings();
         installer_go(INSTALLER_STEP_LANGUAGE);
 }
