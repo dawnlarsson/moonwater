@@ -615,6 +615,7 @@ struct wayland_buffer
         unsigned long plane_offset[4], plane_stride[4];
         unsigned char y_invert;
         unsigned char rel_pending;
+        unsigned char explicit_sync; // its last commit had an acquire point, waited for before the commit was taken (wayland_syncobj_check)
         unsigned short rel_timeline;
         unsigned long long rel_point;
         unsigned int id;
@@ -2785,6 +2786,9 @@ static void wayland_fill_picture_meta(struct wayland_picture *picture, const str
         picture->height = b->height;
         picture->format = b->format;
         picture->sync_fd = p->dmabuf ? p->fd : -1;
+        // Every picture of the buffer, its own commit's and one handed again (a root under its layers, a subsurface laid over it): the
+        // buffer's writes are done since its commit's acquire point was reached, whoever reads it after.
+        picture->explicit_sync = b->explicit_sync;
         picture->pool_id = p->id;
         picture->transform = transform;
         picture->y_invert = b->y_invert;
@@ -2826,9 +2830,14 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         long ox, oy, wx = window->x, wy = window->y, ww = window->width, wh = window->height;
         long tw, th;
 
-        if (root->row < 0 || !child->held || (child != root && !child->sub_parent))
+        //      The root's picture is the buffer it holds, or the one it lent the host to read in place: laid again from either under a
+        //      translucent subsurface. Only from one it held, a window whose picture was lent had nothing laid under its translucent
+        //      subsurface's next commit, which was laid over the last (Chromium's omnibox dropdown darkened its shadow at every commit).
+        unsigned int shown = child->held ? child->held : child == root ? child->lent : 0;
+
+        if (root->row < 0 || !shown || (child != root && !child->sub_parent))
                 return;
-        b = &c->buffers[child->held - 1];
+        b = &c->buffers[shown - 1];
         p = &c->pools[b->pool];
         wayland_zero(&picture, sizeof picture);
         wayland_sub_offset(c, child, &ox, &oy);
@@ -2862,6 +2871,36 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
                 root->need_full = 1;
         root->budget_used += picture.full ? wayland_min(tw, ww) * wayland_min(th, wh) : picture.damage[0].width * picture.damage[0].height;
+}
+
+/*
+        Where a window's subsurfaces are laid when only `only` of it is: a subsurface with a viewport or a transform is laid whole, not cut to
+        the rectangle (wayland_child_copy can cut only a picture laid as it is), so the rectangle reaches as far as each such one that meets it.
+        The root is laid again over all of that first: a translucent subsurface laid whole over a root drawn again only where its own damage
+        was is laid over its own last picture everywhere else, and its shadow darkened at every commit (Chromium's omnibox dropdown, whose
+        surface has a viewport, under a caret that blinks).
+*/
+static struct wayland_rect wayland_flatten_reach(struct wayland_client *c, struct wayland_surface *root, struct wayland_rect only)
+{
+        long x1 = only.x, y1 = only.y, x2 = only.x + only.width, y2 = only.y + only.height;
+
+        if (!c->subsurfaces)
+                return only;
+        for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
+        {
+                struct wayland_surface *child = &c->surfaces[sub_it.at];
+                long ox, oy;
+
+                if (child == root || !child->held || wayland_root_of(c, child) != root ||
+                    !(child->source_width > 0 || child->dest_width > 0 || child->transform || c->buffers[child->held - 1].y_invert))
+                        continue;
+                wayland_sub_offset(c, child, &ox, &oy);
+                if (ox >= x2 || oy >= y2 || ox + child->width <= x1 || oy + child->height <= y1)
+                        continue;
+                x1 = wayland_min(x1, ox), y1 = wayland_min(y1, oy);
+                x2 = wayland_max(x2, ox + child->width), y2 = wayland_max(y2, oy + child->height);
+        }
+        return (struct wayland_rect){x1, y1, x2 - x1, y2 - y1};
 }
 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
@@ -3353,7 +3392,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                                 rect.width = x2 - rect.x;
                                 rect.height = y2 - rect.y;
                         }
-                        if (root->held)
+                        if (root->held || root->lent)
                                 wayland_child_copy(c, root, &rect, &window);
                         wayland_flatten(c, wayland_surface_index(c, root), &rect, &window);
                 }
@@ -4311,7 +4350,6 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 picture.own_size = wayland.host->row_facts(wayland.host->context, (int)s->row, &now) >= 0 && now.width == s->told_width &&
                                    now.height == s->told_height;
         }
-        picture.explicit_sync = b->rel_pending;
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
         // A picture the host reads in place keeps its buffer: it is the surface's lent buffer, and the one it replaced is let go of when
         // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.
@@ -4492,7 +4530,13 @@ static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surfac
         long tl;
 
         if (!s->pending_sync_acq_set && !s->pending_sync_rel_set)
+        {
+                if (b)
+                        b->explicit_sync = 0; // a commit of it without points is synchronized by its implicit fences again
                 return;
+        }
+        if (b)
+                b->explicit_sync = (unsigned char)(s->pending_sync_acq_set != 0);
         tl = s->pending_sync_rel_slot;
         if (s->pending_sync_rel_set && b && tl >= 0 && tl < c->timeline_table.count && c->timelines[tl].live)
         {
@@ -4655,7 +4699,21 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         }
                         window = wayland_window_of(c, s);
                         if (!s->layered) // as layers they are the host's, over the picture as it is now (wayland_show)
-                                wayland_flatten(c, wayland_surface_index(c, s), s->shown_full ? 0 : &s->shown_rect, &window);
+                        {
+                                struct wayland_rect reach;
+                                const struct wayland_rect *only = s->shown_full ? 0 : &s->shown_rect;
+
+                                if (only)
+                                {
+                                        reach = wayland_flatten_reach(c, s, *only);
+                                        if (reach.x != only->x || reach.y != only->y || reach.width != only->width || reach.height != only->height)
+                                        {
+                                                wayland_child_copy(c, s, &reach, &window);
+                                                only = &reach;
+                                        }
+                                }
+                                wayland_flatten(c, wayland_surface_index(c, s), only, &window);
+                        }
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
                         wayland_row_take(c, s);
                 }
@@ -4923,6 +4981,7 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                 c->buffers[slot].plane_count = 1;
                 c->buffers[slot].y_invert = 0;
                 c->buffers[slot].rel_pending = 0;
+                c->buffers[slot].explicit_sync = 0;
                 c->buffers[slot].id = c->objects[a[0].slot].id;
                 c->buffers[slot].held = c->buffers[slot].zombie = 0;
                 c->objects[a[0].slot].link = (int)slot;
@@ -8519,6 +8578,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         }
         c->buffers[buffer].y_invert = (flags & 1) ? 1 : 0;
         c->buffers[buffer].rel_pending = 0;
+        c->buffers[buffer].explicit_sync = 0;
         c->buffers[buffer].id = c->objects[id_slot].id;
         c->buffers[buffer].held = c->buffers[buffer].zombie = 0;
         c->objects[id_slot].link = (int)buffer;
