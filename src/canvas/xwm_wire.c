@@ -118,6 +118,11 @@
 #define XWM_COMPOSITE_REDIRECT_SUBWINDOWS 2
 #define XWM_REDIRECT_AUTOMATIC 0
 #define XWM_REDIRECT_MANUAL 1
+/* The X-Resource extension (1.2): QueryVersion, and QueryClientIds, which says the pid of the client that made a resource as the server
+   has it (its peer's credentials, not a property the client sets). */
+#define XWM_XRES_QUERY_VERSION 0
+#define XWM_XRES_QUERY_CLIENT_IDS 4
+#define XWM_XRES_LOCAL_CLIENT_PID 2u
 
 /* The setup reply's status: the first byte. */
 #define XWM_SETUP_FAILED 0
@@ -626,6 +631,40 @@ XWM_API long xwm_enc_composite_redirect_subwindows(unsigned char *out, unsigned 
         return n;
 }
 
+/* X-Resource QueryClientIds for one resource, the pid only: sixteen bytes, one spec of the resource's client and the LocalClientPID
+   mask. Any resource of a client names the client (the server keeps the client's part of the id). */
+XWM_API long xwm_enc_xres_client_pid(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int resource)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || !resource)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 16, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_XRES_QUERY_CLIENT_IDS;
+        xwm_put32(out + 4, 1);
+        xwm_put32(out + 8, resource);
+        xwm_put32(out + 12, XWM_XRES_LOCAL_CLIENT_PID);
+        return n;
+}
+
+/* X-Resource QueryVersion: twelve bytes, the client's version as two bytes (1.2). */
+XWM_API long xwm_enc_xres_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || client_major > 255 || client_minor > 255)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 8, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_XRES_QUERY_VERSION;
+        out[4] = (unsigned char)client_major;
+        out[5] = (unsigned char)client_minor;
+        return n;
+}
+
 /*
         SendEvent: the 32 bytes of an event, which the server delivers to the destination. The event is one the protocol
         sends: a type from 2 to 35 (a reply or an error is never sent).
@@ -994,6 +1033,42 @@ XWM_API int xwm_parse_extension_reply(const unsigned char *buf, unsigned long le
         out->major_opcode = buf[9];
         out->first_event = buf[10];
         out->first_error = buf[11];
+        return XWM_OK;
+}
+
+/*
+        The QueryClientIds reply: its ids after the 32 bytes, each a spec (client, mask), a length in bytes and the value. The pid is
+        the value of an id whose mask is LocalClientPID and whose length is four; 0 when the server has none (a client it cannot
+        see the credentials of). Every id is held to the reply's length, so a value is never read past what came.
+*/
+XWM_API int xwm_parse_xres_client_pid(const unsigned char *buf, unsigned long len, unsigned int *pid)
+{
+        unsigned long units, at = XWM_HEADER, last;
+        unsigned int ids;
+
+        if (!buf || !pid)
+                return XWM_ERR_ARG;
+        if (len < XWM_HEADER)
+                return XWM_ERR_SHORT;
+        units = xwm_get32(buf + 4);
+        if (xwm_reply_fits(buf, len, units) != XWM_OK)
+                return xwm_reply_fits(buf, len, units);
+        last = XWM_HEADER + units * XWM_UNIT;
+        ids = xwm_get32(buf + 8);
+        *pid = 0;
+        for (unsigned int k = 0; k < ids; k++)
+        {
+                unsigned long length;
+
+                if (last - at < 12)
+                        return XWM_ERR_LENGTH;
+                length = xwm_get32(buf + at + 8);
+                if (length > last - at - 12 || xwm_pad4(length) > last - at - 12)
+                        return XWM_ERR_LENGTH;
+                if ((xwm_get32(buf + at + 4) & XWM_XRES_LOCAL_CLIENT_PID) && length == 4)
+                        *pid = xwm_get32(buf + at + 12);
+                at += 12 + xwm_pad4(length);
+        }
         return XWM_OK;
 }
 

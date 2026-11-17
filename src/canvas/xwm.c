@@ -96,6 +96,7 @@
 #define COMPOSITOR_XWM_PROP_STATE 6
 #define COMPOSITOR_XWM_PROP_WM_HINTS 7
 #define COMPOSITOR_XWM_PROP_NORMAL_HINTS 8
+#define COMPOSITOR_XWM_PROP_OWNER 9          // not a property: X-Resource's pid of the window's client (compositor_xwm_ask_owner)
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
 #define COMPOSITOR_XWM_PROTO_FOCUS 2u
 #define COMPOSITOR_XWM_NO_PLACE (-100000)
@@ -107,6 +108,8 @@
 #define COMPOSITOR_XWM_ATOM_FIRST_SEQ 2              // the sequence of the first InternAtom: ChangeWindowAttributes on the root is the first request
 #define COMPOSITOR_XWM_COMPOSITE_SEQ (COMPOSITOR_XWM_ATOM_FIRST_SEQ + COMPOSITOR_XWM_ATOMS) // QueryExtension("Composite"), after the atoms
 #define COMPOSITOR_XWM_COMPOSITE_NAME "Composite"
+#define COMPOSITOR_XWM_XRES_SEQ (COMPOSITOR_XWM_COMPOSITE_SEQ + 1) // QueryExtension("X-Resource"), after Composite's
+#define COMPOSITOR_XWM_XRES_NAME "X-Resource"
 #define COMPOSITOR_XWM_ATOM_TYPE 4                   // the predefined ATOM
 #define COMPOSITOR_XWM_NET_REMOVE 0
 #define COMPOSITOR_XWM_NET_ADD 1
@@ -146,6 +149,7 @@ struct compositor_xwm_window
         unsigned int restore_w, restore_h; // its size before fullscreen
         unsigned int min_w, min_h, max_w, max_h; // WM_NORMAL_HINTS size bounds (0 = unset)
         unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
+        unsigned int owner;            // the pid of the program whose window it is, as X-Resource says (0 until it has; compositor_xwm_owned)
         unsigned int asking;           // title requests in flight
         unsigned int dirty;            // the shim has not the window's latest title
         char title[COMPOSITOR_XWM_TITLE];
@@ -159,6 +163,8 @@ struct compositor_xwm_pending
 struct compositor_xwm
 {
         int listen, fd, uid, ready, broken, claimed, composite;  // composite: 1 once the Composite extension has redirected the root
+        unsigned int xres;             // X-Resource's major opcode, 0 without it or when its pids are not this compositor's to use
+        int peer_pid;                  // the server's pid, from the connection's credentials
         unsigned int resource_base, resource_mask;
         int poll_at;                   // where the two polls are in the loop's list, relative to the wayland polls; -1 without a socket
         unsigned int root, seq, atoms[COMPOSITOR_XWM_ATOMS];
@@ -421,6 +427,62 @@ static void compositor_xwm_start_session(void)
         n = xwm_enc_query_extension(req, sizeof req, (const unsigned char *)COMPOSITOR_XWM_COMPOSITE_NAME, 9);
         if (n > 0)
                 compositor_xwm_queue(req, n);
+        // X-Resource, for whose each window is (compositor_xwm_owned): its reply at COMPOSITOR_XWM_XRES_SEQ (compositor_xwm_xres).
+        n = xwm_enc_query_extension(req, sizeof req, (const unsigned char *)COMPOSITOR_XWM_XRES_NAME, 10);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+}
+
+/*
+        The QueryExtension reply for X-Resource. Its pids are the server's view of its clients, so they are this compositor's to act
+        on (the taskbar's force stop) only when the server is in the compositor's pid namespace: a server in an isolated bowl has
+        its own numbers, which name other processes here. Without the extension, or in another namespace, an X window's row keeps
+        the server's pid, and nothing that acts on a row's program acts on the server for one window.
+*/
+static void compositor_xwm_xres(const unsigned char *in, long size)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        struct xwm_extension_reply r;
+        char mine[64], theirs[64], path[48] = "/proc/";
+        long a, b;
+        unsigned char req[16];
+        long n;
+
+        x->xres = 0;
+        if (xwm_parse_extension_reply(in, (unsigned long)size, &r) != XWM_OK || !r.present || r.major_opcode < XWM_EXT_MAJOR_FIRST)
+                return;
+        if (x->peer_pid <= 1)
+                return;
+        positive_into_string((p8 *)path + 6, (positive)x->peer_pid);
+        string_append_bounded((p8 *)path, "/ns/pid", sizeof path);
+        a = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive) "/proc/self/ns/pid", (positive)mine, sizeof mine - 1, 0, 0);
+        b = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)theirs, sizeof theirs - 1, 0, 0);
+        if (a <= 0 || a != b || memory_compare(mine, theirs, (positive)a))
+        {
+                compositor_xwm_log("xwm: the X server is in another pid namespace: its windows' rows keep its pid\n");
+                return;
+        }
+        n = xwm_enc_xres_query_version(req, sizeof req, r.major_opcode, 1, 2);
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        x->xres = r.major_opcode;
+}
+
+/*
+        A window's owner, into its row: the row's pid becomes the program's (the shim made the row with the server's, the client of
+        the shim). Only a pid that is a process here and none of the desktop's own: not 1, not this compositor, not the server.
+*/
+static void compositor_xwm_owned(struct compositor_xwm_window *w)
+{
+        struct windows *table = compositor.table;
+        unsigned int now;
+
+        if (!w->owner || w->row < 0 || !table || w->row >= (int)compositor_rows_in_use)
+                return;
+        now = __atomic_load_n(&table->pid[w->row], __ATOMIC_ACQUIRE);
+        if (!now || now == WINDOWS_TAKING || now == w->owner)
+                return;
+        __atomic_compare_exchange_n(&table->pid[w->row], &now, w->owner, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
 /* The QueryExtension reply for Composite: when the extension is there, the root's subwindows are redirected (Manual). */
@@ -499,6 +561,32 @@ static int compositor_xwm_ask(unsigned int window, unsigned int what, unsigned i
         p->what = what;
         x->pending_count++;
         return 0;
+}
+
+/* X-Resource's word on whose the window is: the pid of the client that made it, as the server knows it from its connection (never
+   what the client says of itself, as _NET_WM_PID is). Asked once a window maps, with the properties, and waited for the same way. */
+static void compositor_xwm_ask_owner(unsigned int window)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+        unsigned char req[16];
+        long n;
+        struct compositor_xwm_pending *p;
+
+        if (!x->xres)
+                return;
+        n = xwm_enc_xres_client_pid(req, sizeof req, x->xres, window);
+        if (n <= 0 || compositor_xwm_queue(req, n) != 0)
+                return;
+        if (x->pending_count == x->pending_room && !compositor_xwm_pending_grow())
+        {
+                x->broken = 1;
+                return;
+        }
+        p = &x->pending[(x->pending_at + x->pending_count) % x->pending_room];
+        p->seq = x->seq;
+        p->window = window;
+        p->what = COMPOSITOR_XWM_PROP_OWNER;
+        x->pending_count++;
 }
 
 /* The oldest request waited for has been answered (or refused): it is no longer waited for. */
@@ -817,6 +905,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         free->state = 0;
         free->serial = 0;
         free->row = -1;
+        free->owner = 0;
         free->protocols = 0;
         free->closes = 0;
         free->transient = 0;
@@ -895,6 +984,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
         if (row < 0 || w->row == (int)row)
                 return;
         w->row = (int)row;
+        compositor_xwm_owned(w);
         if (w->state & COMPOSITOR_XWM_FULLSCREEN)
                 compositor_fullscreen_row((int)row);
         else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
@@ -1088,6 +1178,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_WM_HINTS, COMPOSITOR_XWM_XA_WM_HINTS, 0);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_NORMAL_HINTS, COMPOSITOR_XWM_XA_WM_NORMAL_HINTS, 0);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_STATE, compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_STATE], COMPOSITOR_XWM_ATOM_TYPE);
+                if (!w->owner)
+                        compositor_xwm_ask_owner(e->window);
                 // The type is asked last: its reply says the others have come.
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_TYPE, compositor_xwm.atoms[COMPOSITOR_XWM_A_TYPE], COMPOSITOR_XWM_ATOM_TYPE);
                 compositor_xwm_window_op(XWM_OP_MAP_WINDOW, e->window);
@@ -1348,12 +1440,35 @@ static void compositor_xwm_message(const unsigned char *in, long size, long type
                 struct compositor_xwm_pending found = x->pending[x->pending_at];
 
                 compositor_xwm_pending_done();
+                if (found.what == COMPOSITOR_XWM_PROP_OWNER)
+                {
+                        struct compositor_xwm_window *w = compositor_xwm_find(found.window, 0);
+                        unsigned int pid = 0;
+
+                        if (xwm_parse_xres_client_pid(in, (unsigned long)size, &pid) != XWM_OK)
+                        {
+                                x->broken = 1;
+                                return;
+                        }
+                        if (w && pid > 1 && pid != (unsigned int)x->peer_pid &&
+                            pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
+                        {
+                                w->owner = pid;
+                                compositor_xwm_owned(w);
+                        }
+                        return;
+                }
                 compositor_xwm_property(in, size, &found);
                 return;
         }
         if (type == XWM_REPLY && xwm_get16(in + 2) == COMPOSITOR_XWM_COMPOSITE_SEQ)
         {
                 compositor_xwm_composite(in, size);
+                return;
+        }
+        if (type == XWM_REPLY && xwm_get16(in + 2) == COMPOSITOR_XWM_XRES_SEQ)
+        {
+                compositor_xwm_xres(in, size);
                 return;
         }
         if (type == XWM_REPLY)
@@ -1529,6 +1644,8 @@ static void compositor_xwm_accept(void)
                 return;
         }
         x->fd = (int)fd;
+        x->peer_pid = credentials[0];
+        x->xres = 0;
         x->ready = 0;
         x->broken = 0;
         x->in_len = 0;

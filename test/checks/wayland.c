@@ -8808,6 +8808,30 @@ static void xw_test_extensions(void)
         memcpy(bad, reply, 32);
         bad[8] = 2;
         XWCHECK(xwm_parse_extension_reply(bad, 32, &r) == XWM_ERR_ARG, "a present flag that is neither 0 nor 1 is refused");
+        {
+                // X-Resource: QueryClientIds for one window's client, the pid only, and its reply read to the pid.
+                static const unsigned char ids[16] = {140, 4, 4, 0, 1, 0, 0, 0, 0x05, 0x00, 0x40, 0x00, 2, 0, 0, 0};
+                unsigned char rep[48] = {1, 0, 9, 0, 4, 0, 0, 0, 1, 0, 0, 0};
+                unsigned int pid = 7;
+
+                n = xwm_enc_xres_client_pid(out, sizeof out, 140, 0x00400005);
+                XWCHECK(n == 16 && xw_same(out, ids, 16), "X-Resource QueryClientIds: minor 4, one spec, the window's client, LocalClientPID");
+                XWCHECK(xwm_enc_xres_client_pid(out, sizeof out, 140, 0) == XWM_ERR_ARG, "QueryClientIds of resource 0 (every client) is refused");
+                XWCHECK(xwm_enc_xres_client_pid(out, 15, 140, 5) == XWM_ERR_SPACE, "QueryClientIds into 15 bytes is refused");
+                n = xwm_enc_xres_query_version(out, sizeof out, 140, 1, 2);
+                XWCHECK(n == 8 && out[1] == 0 && out[4] == 1 && out[5] == 2 && out[2] == 2, "X-Resource QueryVersion 1.2: eight bytes");
+                // One id: spec (client 0x00400000, mask 2), length 4, the pid 4242.
+                rep[32 + 0] = 0x00, rep[32 + 2] = 0x40, rep[32 + 4] = 2, rep[32 + 8] = 4, rep[32 + 12] = 0x92, rep[32 + 13] = 0x10;
+                XWCHECK(xwm_parse_xres_client_pid(rep, 48, &pid) == XWM_OK && pid == 4242, "QueryClientIds reply: the pid of a LocalClientPID id");
+                rep[32 + 4] = 1;
+                XWCHECK(xwm_parse_xres_client_pid(rep, 48, &pid) == XWM_OK && pid == 0, "an id of another mask is no pid");
+                rep[32 + 4] = 2, rep[32 + 8] = 200;
+                XWCHECK(xwm_parse_xres_client_pid(rep, 48, &pid) == XWM_ERR_LENGTH, "an id whose length is past the reply is refused");
+                rep[32 + 8] = 4, rep[8] = 3;
+                XWCHECK(xwm_parse_xres_client_pid(rep, 48, &pid) == XWM_ERR_LENGTH, "more ids than the reply holds is refused");
+                rep[8] = 1;
+                XWCHECK(xwm_parse_xres_client_pid(rep, 40, &pid) == XWM_ERR_LENGTH, "a reply shorter than its length is refused");
+        }
         memcpy(bad, reply, 32);
         bad[4] = 1;
         XWCHECK(xwm_parse_extension_reply(bad, 32, &r) == XWM_ERR_LENGTH, "an extension reply whose length is not zero units is refused");
