@@ -43,6 +43,7 @@ function moonwater_ctrl_alt_delete {
 # The compositor is the desktop. Canvas holds the card and fills it with the desktop's colour between
 # one compositor and the next; a desktop that is not the compositor's is what `desktop boot` starts.
 function moonwater_canvas_on {
+  memory_start
   bus_start
   audio_start
   desktop_start
@@ -63,6 +64,18 @@ function key_ctrl_shift_t {
 # PATH and shell commands. -x puts away the one that is up, so the same chord opens it and closes it.
 function key_super_space {
   desktop_asked desktop_launcher
+}
+
+# The memory in the kernel log from as early in a boot as the script runs, and every minute after (moonwater memory log):
+# installed, usable, available, shared, and the largest memfds with who holds them, so a boot that runs out of memory
+# leaves what took it in the log. One at a time, however often this is called.
+function memory_start {
+  if [ -s /run/moonwater/memory.log ] && kill -0 $(cat /run/moonwater/memory.log) 2> /dev/null; then
+    return 0
+  fi
+  mkdir -p /run/moonwater
+  moonwater memory log > /dev/null 2>&1 < /dev/null &
+  echo $! > /run/moonwater/memory.log
 }
 
 # The session bus (src/dbus): where a bowl's programs ask how the desktop looks (dark or light, the accent) and are told when
@@ -221,6 +234,7 @@ function desktop_wait_for {
 # and finds this one's supervisor if there is one. moonwater.early=0 on the kernel's command line keeps the machine
 # process from calling it.
 function desktop_early {
+  memory_start
   [ -e /run/moonwater/verdict ] && return 0
   desktop_on || return 0
   desktop_start

@@ -334,6 +334,7 @@ static fn host_pause(p64 nanoseconds)
 #include "host/setting.c" // the verbs splash, taskbar, mouse, language and audio, and the canvas's settings; the clock kept and restored at boot, and the name
 #include "host/debug.c" // the verbs debug, notices, sensors, name, time, timezone, ntp and keyboard
 #include "host/profile.c" // the verb profile: where a program's processor time goes, sampled by the kernel
+#include "host/memory.c" // the verb memory: installed, usable, available and shared memory and the largest memfds, once or to the kernel log every minute
 #include "host/desktop.c" // the verb desktop: the desktop a machine starts, and which one
 #include "host/security.c" // the verbs dns, security and bind
 #include "host/network.c" // the verb network: the interfaces, the name servers and discovery as one page, and discovery's switches
@@ -984,6 +985,7 @@ static b32 host_main()
             {"notices", host_notices, false, true},
             {"sensors", host_sensors, false},
             {"profile", host_profile, false},
+            {"memory", host_memory, false},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false, true},
             {"brightness", tune_brightness, false, true},
