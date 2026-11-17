@@ -1181,6 +1181,37 @@ static fn span_checks(void)
         check("a number times ten past the word",
               !positive_append_digit(address_of value, 0, positive_max) &&
                   value == positive_max / 10 + 1);
+        {
+                /* the checked scanner's range test at the 64-bit boundary: the
+                   largest word reads, one past it and any longer run do not */
+                positive got = 0;
+
+                check("checked digits take the largest word and refuse one past it",
+                      string_digits_checked_exact((string_address)"18446744073709551615", 10, address_of got) &&
+                          got == positive_max &&
+                      !string_digits_checked_exact((string_address)"18446744073709551616", 10, address_of got) &&
+                      !string_digits_checked_exact((string_address)"184467440737095516150", 10, address_of got) &&
+                      string_digits_checked_exact((string_address)"1844674407370955161", 10, address_of got) &&
+                          got == 1844674407370955161ull);
+        }
+        {
+                /* a poll's wait: a timespec out of range is refused before the
+                   arithmetic, and the ceiling is whole milliseconds, with a
+                   limit past the poll's int at the clamp */
+                timespec wait = {.tv_sec = -1, .tv_nsec = 0};
+                timespec negative_ns = {.tv_sec = 0, .tv_nsec = -1};
+                timespec whole_second = {.tv_sec = 3, .tv_nsec = 1000000000};
+                timespec odd = {.tv_sec = 0, .tv_nsec = 1500001};
+                timespec long_wait = {.tv_sec = 3000000, .tv_nsec = 0};
+
+                check("a negative timespec is refused at once",
+                      system_poll_milliseconds(address_of wait) == -22 &&
+                      system_poll_milliseconds(address_of negative_ns) == -22 &&
+                      system_poll_milliseconds(address_of whole_second) == -22);
+                check("a wait rounds up to the whole millisecond and a long one clamps",
+                      system_poll_milliseconds(address_of odd) == 2 &&
+                      system_poll_milliseconds(address_of long_wait) == 0x7fffffff);
+        }
 
         {
                 /* the 16_40 variants against the generic: every span length of the text, both limits */
@@ -1813,32 +1844,34 @@ static fn name_list_checks(void)
                 know is named, and a name written twice is a column written
                 twice -- `lsns -o TYPE,TYPE` prints TYPE beside TYPE.
         */
-        p8 columns[8] = {0xa5};
+        p32 columns[8] = {0xa5};
+        p32 address_to columns_list = columns;
+        positive columns_room = array_count(columns);
         positive have = 99;
         p8 unknown[UL_COLUMN_NAME];
 
         check("table defaults without an output option",
               ul_table_column_list(null, table_columns, 3, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_OK &&
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_OK &&
               have == 1 && !columns[0]);
         check("table defaults stay bounded",
               ul_table_column_list(null, table_columns, 0, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_UNKNOWN &&
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_UNKNOWN &&
               !have);
         check("table append keeps the defaults in front",
               ul_table_column_list("+other", table_columns, 3, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_OK &&
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_OK &&
               have == 2 && !columns[0] && columns[1] == 1);
         check("table keeps a column named twice",
               ul_table_column_list("value,value", table_columns, 3, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_OK &&
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_OK &&
               have == 2 && !columns[0] && !columns[1]);
         check("table refuses an empty list without a word",
               ul_table_column_list("", table_columns, 3, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_EMPTY);
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_EMPTY);
         check("table names the column it does not know",
               ul_table_column_list("value,nosuch", table_columns, 3, table_selected, 1,
-                                   columns, address_of have, unknown) == UL_COLUMNS_UNKNOWN &&
+                                   address_of columns_list, address_of columns_room, address_of have, unknown) == UL_COLUMNS_UNKNOWN &&
               !string_compare(unknown, "nosuch"));
         typedef struct
         {
@@ -1850,7 +1883,7 @@ static fn name_list_checks(void)
             {(string_address)"Beta", 22},
             {(string_address)"gamma", 33},
         };
-        p8 selected[4];
+        p32 selected[4];
         positive count = 0;
 
         check("name list case fold and trailing comma",
@@ -1952,37 +1985,48 @@ static fn name_list_checks(void)
         check("column diagnostic truncates only within its owned buffer",
               name_list_columns("alpha,unknown", definitions,
                   sizeof(definitions[0]), array_count(definitions), selected,
-                  address_of count, short_name, 3) == NAME_LIST_UNKNOWN &&
+                  address_of count, array_count(selected), short_name, 3) == NAME_LIST_UNKNOWN &&
               count == 1 && !memory_compare(short_name, "un\0\xa5", 4));
         count = 1;
         check("column empty append refuses a seeded prefix",
               name_list_columns("", definitions, sizeof(definitions[0]),
                   array_count(definitions), selected, address_of count,
-                  null, 0) == NAME_LIST_EMPTY && count == 1);
+                  array_count(selected), null, 0) == NAME_LIST_EMPTY && count == 1);
         count = 0;
         check("column repeats take an entry each, as util-linux's lsblk -o NAME,NAME does",
               name_list_columns("alpha,alpha,Beta,gamma", definitions,
                   sizeof(definitions[0]), array_count(definitions), selected,
-                  address_of count, unknown, sizeof(unknown)) == NAME_LIST_OK &&
+                  address_of count, array_count(selected), unknown,
+                  sizeof(unknown)) == NAME_LIST_OK &&
               count == 4 && selected[0] == 0 && selected[1] == 0 &&
               selected[2] == 1 && selected[3] == 2);
         {
-                static p8 wide[256];
-                static char long_list[256 * 6 + 8];
+                /* 257 names of one column: a selection with no cap takes all
+                   of them, and a name it does not know is still named after
+                   256 that were taken. */
+                static p32 wide[257];
+                static char repeats[257 * 6 + 8];
                 positive at = 0;
 
                 for (positive n = 0; n < 256; n++)
                 {
-                        memory_copy_apart(long_list + at, "alpha,", 6);
+                        memory_copy_apart(repeats + at, "alpha,", 6);
                         at += 6;
                 }
-                memory_copy_apart(long_list + at, "Beta", 5);
+                memory_copy_apart(repeats + at, "alpha", 6);
                 count = 0;
-                check("column capacity refuses the name past the selection's room",
-                      name_list_columns(long_list, definitions, sizeof(definitions[0]),
+                check("column repeats past 256 names take an entry each",
+                      name_list_columns(repeats, definitions, sizeof(definitions[0]),
                           array_count(definitions), wide, address_of count,
-                          unknown, sizeof(unknown)) == NAME_LIST_UNKNOWN &&
-                      count == 256 && string_equals(unknown, "Beta"));
+                          array_count(wide), unknown, sizeof(unknown)) == NAME_LIST_OK &&
+                      count == 257 && wide[256] == 0);
+                memory_copy_apart(repeats + 256 * 6, "nosuch", 7);
+                count = 0;
+                check("column unknown name past 256 names is still named",
+                      name_list_columns(repeats, definitions, sizeof(definitions[0]),
+                          array_count(definitions), wide, address_of count,
+                          array_count(wide), unknown, sizeof(unknown)) == NAME_LIST_UNKNOWN &&
+                      count == 256 && string_equals(unknown, "nosuch"));
         }
 
         p8 lock_fields[] = "  1\tPOSIX\vowner";
@@ -2175,7 +2219,7 @@ _Static_assert(sizeof(ul_table_column) == 32, "field facts must fit column paddi
 
 static fn table_projection_modes(address_any row,
     const ul_table_column address_to columns, positive count,
-    p8 address_to selected, positive selected_count, ul_table_field field)
+    p32 address_to selected, positive selected_count, ul_table_field field)
 {
         ul_table_column callbacks[64];
         p8 expected[8192];
@@ -2219,7 +2263,8 @@ static fn table_projection_check(string_address name, address_any row,
                                  const table_projection address_to expected,
                                  positive projection_count)
 {
-        p8 scratch[96], selected[64];
+        p8 scratch[96];
+        p32 selected[64];
         for (positive i = 0; i < projection_count; i++)
         {
                 memory_fill(scratch, 0xa5, sizeof(scratch));
@@ -2264,7 +2309,7 @@ static fn table_projection_checks(void)
         static const string_address numbers[] = {
             "", "0", "1", "4294967295", "18446744073709551615",
         };
-        p8 selected[] = {0, 0};
+        p32 selected[] = {0, 0};
         ul_table_column column = {"number", "N\tUM", 0, false,
                                    TABLE_STRING, .decimal = true};
         for (positive i = 0; i < array_count(numbers); i++)
@@ -2423,7 +2468,7 @@ static fn table_typed_projection_checks(void)
         table_projection_check("lsblk measured zero", &device_view, ul_lsblk_columns,
             UL_LSBLK_COLUMNS, ul_lsblk_field, measured, array_count(measured));
         ul_ipc_row ipc = {.id = p64_max, .count = p64_max, .pid_one = p64_max};
-        p8 selected[] = {UL_IPC_ID, UL_IPC_MSGS, UL_IPC_LSPID, UL_IPC_STATUS};
+        p32 selected[] = {UL_IPC_ID, UL_IPC_MSGS, UL_IPC_LSPID, UL_IPC_STATUS};
         string_address expected = "{\n   \"ipc\": [\n      {\n"
             "         \"id\": \"18446744073709551615\",\n"
             "         \"msgs\": \"18446744073709551615\",\n"
@@ -2443,7 +2488,8 @@ static fn table_typed_projection_checks(void)
 static fn table_limit_checks(void)
 {
         ul_limit_row rows[UL_RESOURCES];
-        p8 scratch[96], expected[8192], selected[5];
+        p8 scratch[96], expected[8192];
+        p32 selected[5];
         static const p64 values[] = {0, 1, 999, 10000000000ull,
                                      UL_LIMIT_INFINITE - 1, UL_LIMIT_INFINITE};
         for (positive shape = 0; shape < 32; shape++)
@@ -2505,17 +2551,17 @@ static fn table_limit_checks(void)
         //      Answers which of the three things happened, as the shared
         //      reader does, and hands back the name it could not place.
         check("prlimit preserves duplicate selected columns",
-              ul_limit_columns("soft,SOFT,units", selected, &count,
+              ul_limit_columns("soft,SOFT,units", selected, array_count(selected), &count,
                                refused) == UL_COLUMNS_OK &&
               count == 3 && selected[0] == UL_LIMIT_SOFT &&
               selected[1] == UL_LIMIT_SOFT && selected[2] == UL_LIMIT_UNITS);
         check("prlimit rejects appended defaults syntax",
-              ul_limit_columns("+SOFT", selected, &count,
+              ul_limit_columns("+SOFT", selected, array_count(selected), &count,
                                refused) == UL_COLUMNS_UNKNOWN);
         check("prlimit refuses an empty list without a word",
-              ul_limit_columns("", selected, &count, refused) == UL_COLUMNS_EMPTY);
+              ul_limit_columns("", selected, array_count(selected), &count, refused) == UL_COLUMNS_EMPTY);
         check("prlimit names the column it does not know",
-              ul_limit_columns("soft,nosuch", selected, &count,
+              ul_limit_columns("soft,nosuch", selected, array_count(selected), &count,
                                refused) == UL_COLUMNS_UNKNOWN &&
               !string_compare(refused, "nosuch"));
 }
@@ -2529,7 +2575,8 @@ static string_address table_pair_field(address_any opaque, p8 column,
 
 static fn table_printable_checks(void)
 {
-        p8 value[97], expected[8192], selected[] = {0, 1, 0};
+        p8 value[97], expected[8192];
+        p32 selected[] = {0, 1, 0};
         string_address row[] = {value, "one\ntwo\n"};
         ul_table_column columns[] = {
             {"value", "VALUE", 0, false, TABLE_STRING},

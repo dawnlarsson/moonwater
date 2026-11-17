@@ -367,11 +367,11 @@ static inline bool string_digits_checked(string_address address_to text,
                 if (digit >= base)
                         break;
 
-                positive scaled;
-
-                if (__builtin_mul_overflow(got, base, address_of scaled) ||
-                    __builtin_add_overflow(scaled, digit, address_of got))
+                // got * base + digit fits when got is at most the largest
+                // value that leaves digit room: a range test, no overflow op.
+                if (got > (positive_max - digit) / base)
                         return false;
+                got = got * base + digit;
 
                 at++;
                 any = true;
@@ -409,8 +409,10 @@ static inline bool positive_append_digit(positive address_to value,
 {
         positive made;
 
-        if (__builtin_mul_overflow(address_to value, 10, address_of made) ||
-            __builtin_add_overflow(made, digit, address_of made) || made > limit)
+        if (address_to value > (positive_max - digit) / 10)
+                return false;
+        made = address_to value * 10 + digit;
+        if (made > limit)
                 return false;
 
         address_to value = made;
@@ -1067,6 +1069,25 @@ extern b32 system_poll_libc(address_any descriptors, p32 count,
 extern b32 address_to system_poll_error(void) __asm__("___error");
 #endif
 
+/* The milliseconds a wait of limit is, rounded up to the whole millisecond:
+   -22 for a timespec that is not one (a negative second or nanosecond, or
+   nanoseconds of a second or more), judged before any arithmetic, and a
+   limit past 2000000 seconds, or past what poll's int takes, is 0x7fffffff. */
+static inline INLINE bipolar system_poll_milliseconds(timespec address_to limit)
+{
+        if (limit->tv_sec < 0 || limit->tv_nsec < 0 ||
+            limit->tv_nsec >= 1000000000)
+                return -22;
+        if (limit->tv_sec > 2000000)
+                return 0x7fffffff;
+
+        p64 milliseconds = (p64)limit->tv_sec * 1000 +
+                           (p64)(limit->tv_nsec / 1000000) +
+                           (limit->tv_nsec % 1000000 != 0);
+        return milliseconds > 0x7fffffffull ? 0x7fffffff
+                                            : (bipolar)milliseconds;
+}
+
 /* Wait for the descriptors for as long as limit says (null waits for ever).
    Answers the count of ready ones, or the negative errno, as the Linux call
    does.  On Darwin the wait is poll, and:
@@ -1088,13 +1109,11 @@ static inline INLINE bipolar system_poll_wait(
                 return -22;
         if (limit)
         {
-                p64 milliseconds = 0x7fffffffull;
+                bipolar milliseconds = system_poll_milliseconds(limit);
 
-                if (limit->tv_sec <= 2000000)
-                        milliseconds = limit->tv_sec * 1000 +
-                                       (limit->tv_nsec + 999999) / 1000000;
-                wait = milliseconds > 0x7fffffffull ? 0x7fffffff
-                                                    : (b32)milliseconds;
+                if (milliseconds < 0)
+                        return milliseconds;
+                wait = (b32)milliseconds;
         }
         ready = system_poll_libc(descriptors, (p32)count, wait);
         return ready < 0 ? -(bipolar)*system_poll_error() : (bipolar)ready;
@@ -2840,6 +2859,20 @@ typedef struct
         positive used;
 } byte_store;
 
+/* Copy the front of a span into a buffer of size bytes and terminate it with
+   a zero: at most size - 1 bytes of the span, so the terminator always fits.
+   Returns how many bytes were kept, which is less than length exactly when
+   the span was cut. size must be at least one. */
+static inline positive memory_copy_clamped(p8 address_to into, positive size,
+                                           address_any from, positive length)
+{
+        positive kept = min(length, size - 1);
+
+        memory_copy_apart(into, from, kept);
+        into[kept] = 0;
+        return kept;
+}
+
 /* A bounded byte sink borrows storage and never grows it. Empty spans do
    nothing, including for a null source. Return whether the complete span
    fitted; callers choose whether truncation is an error or display policy. */
@@ -4279,7 +4312,9 @@ static inline INLINE positive table_index(const table_view address_to view, posi
 {
         if (!view->order) return shown;
         return view->order_size == 1 ? ((p8 address_to)view->order)[shown]
-            : ((positive address_to)view->order)[shown];
+            : view->order_size == sizeof(p32)
+                ? ((p32 address_to)view->order)[shown]
+                : ((positive address_to)view->order)[shown];
 }
 
 /* Width as written with \xNN replacements, every byte before at literal. The
@@ -4555,21 +4590,46 @@ static inline INLINE fn table_json(const table_view address_to view, byte_span n
 #define NAME_LIST_CASE_SENSITIVE 1
 #define NAME_LIST_UNIQUE 2
 #define NAME_LIST_REJECT_TRAILING 4
+/* The most columns a table program's column table may hold: name_list_select
+   refuses a wider table, and every table the programs hand these routines is
+   narrower. A selection has no bound of its own: it holds one 32-bit column
+   number per name, repeats included, and a caller grows it to
+   name_list_capacity before the call. The per-column arrays a table program
+   keeps (widths, indexed by column number) are sized by this. */
+#define NAME_LIST_DEFINITIONS_MAX 256
 typedef struct
 {
         string_address at;
         positive length;
 } name_list_error;
 
+static bool name_list_holds(const p32 address_to selected, positive found,
+                            positive count)
+{
+        for (positive i = 0; i < count; i++)
+                if (selected[i] == found)
+                        return true;
+        return false;
+}
+
+/* A default list written in bytes into a selection, entry by entry. */
+static void name_list_fill(p32 address_to selected, const p8 address_to from,
+                           positive count)
+{
+        for (positive i = 0; i < count; i++)
+                selected[i] = from[i];
+}
+
 static COLD bool name_list_select(
     string_address text, const void address_to definitions, positive stride,
-    positive definition_count, p8 address_to selected,
+    positive definition_count, p32 address_to selected,
     positive address_to selected_count, positive maximum, p8 policy,
     name_list_error address_to error)
 {
         if (error)
                 address_to error = (name_list_error){text, 0};
-        if (definition_count > 256 || stride < sizeof(string_address) ||
+        if (definition_count > NAME_LIST_DEFINITIONS_MAX ||
+            stride < sizeof(string_address) ||
             address_to selected_count > maximum)
                 return false;
 
@@ -4602,13 +4662,13 @@ static COLD bool name_list_select(
                         return false;
 
                 bool add = !(policy & NAME_LIST_UNIQUE) ||
-                           !memory_first_of(selected, (p8)found,
+                           !name_list_holds(selected, found,
                                             address_to selected_count);
                 if (add)
                 {
                         if (address_to selected_count == maximum)
                                 return false;
-                        selected[(address_to selected_count)++] = (p8)found;
+                        selected[(address_to selected_count)++] = (p32)found;
                 }
 
                 if (!*comma)
@@ -4625,36 +4685,55 @@ static COLD bool name_list_select(
         return address_to selected_count != 0;
 }
 
-enum { NAME_LIST_OK, NAME_LIST_EMPTY, NAME_LIST_UNKNOWN };
+enum { NAME_LIST_OK, NAME_LIST_EMPTY, NAME_LIST_UNKNOWN, NAME_LIST_NOROOM };
 
-/* A column list may name a column more than once, and every name takes its
-   own entry in the selection, so the selection is sized for the most names a
-   list may hold rather than for the number of columns there are. A caller's
-   selection array must hold this many entries. */
-#define NAME_LIST_SELECT_MAX 256
+/* The most entries a selection of text can take: one per name, and a name is
+   what lies between two commas. A caller that makes room for this many more
+   entries than it holds cannot be refused for room. */
+static positive name_list_capacity(string_address text)
+{
+        positive names = 1;
+
+        for (string_address at = text; string_get(at); at++)
+                names += string_get(at) == ',';
+        return names;
+}
+
+/* Room in a selection of used entries for wanted in all, grown in memory when
+   it is short: false only when the allocator refuses. The caller's array and
+   room are the selection's, and this is the one place they grow. */
+static bool name_list_room(p32 address_to address_to selected,
+                           positive address_to room, positive used,
+                           positive wanted)
+{
+        return wanted <= *room ||
+               array_store_reserve(*selected, *room, used, wanted, 16);
+}
 
 /* Column-list policy: retain repeats and trailing commas, reject an empty
-   argument even with a seeded prefix, and report the first rejected span. */
+   argument even with a seeded prefix, and report the first rejected span.
+   The selection has selected_room entries and selected_count of them are in
+   use; NAME_LIST_NOROOM when the text could need more than is left. */
 static COLD b32 name_list_columns(
     string_address text, const void address_to definitions, positive stride,
-    positive definition_count, p8 address_to selected,
-    positive address_to selected_count, p8 address_to unknown, positive room)
+    positive definition_count, p32 address_to selected,
+    positive address_to selected_count, positive selected_room,
+    p8 address_to unknown, positive room)
 {
         if (room)
                 unknown[0] = 0;
         if (!string_get(text))
                 return NAME_LIST_EMPTY;
+        if (address_to selected_count + name_list_capacity(text) > selected_room)
+                return NAME_LIST_NOROOM;
         name_list_error error;
         if (name_list_select(text, definitions, stride, definition_count,
-                             selected, selected_count, NAME_LIST_SELECT_MAX, 0,
+                             selected, selected_count, selected_room, 0,
                              address_of error))
                 return NAME_LIST_OK;
         if (room)
-        {
-                positive kept = min(error.length, room - 1);
-                memory_copy_apart(unknown, (address_any)error.at, kept);
-                unknown[kept] = 0;
-        }
+                memory_copy_clamped(unknown, room, (address_any)error.at,
+                                    error.length);
         return NAME_LIST_UNKNOWN;
 }
 #endif // KERNEL_MODE
@@ -13633,7 +13712,6 @@ static b32 strerror_r(b32 number, string_address into, positive size)
         p8 built[ERROR_MESSAGE_MAX];
         string_address source = system_error_message(number);
         positive length;
-        positive room;
 
         bool known = source != null;
         if (known)
@@ -13651,9 +13729,7 @@ static b32 strerror_r(b32 number, string_address into, positive size)
         if (is_null(into) || size == 0)
                 return known ? ERANGE : EINVAL;
 
-        room = length < size ? length : size - 1;
-        memory_copy_apart(into, source, room);
-        into[room] = end;
+        memory_copy_clamped(into, size, source, length);
         return known ? (length < size ? 0 : ERANGE) : EINVAL;
 }
 
@@ -28994,18 +29070,18 @@ fn free(address_any block);
 #define stream_terminal_attributes_request 0x5401
 
 /*
-        How deep a pushback goes.
+        How deep a pushback goes before it spills.
 
         The standard promises one byte and says a second may fail. One is
         genuinely all a conforming program may rely on, and one is also
         exactly what a hand-rolled tokeniser reaches for at the worst possible
         moment -- the first byte of the stream, before any read, where a
         design that pushes back into the read buffer has nowhere to put it.
-        This is a separate small array for that reason: it works at offset
-        zero, it works on an unbuffered stream, and it works on a pipe. Eight
-        rather than one because the array costs eight bytes either way once
-        the struct is aligned, and a recursive-descent parser that wants three
-        is not doing anything unreasonable.
+        The first eight bytes are kept in the struct: that works at offset
+        zero, on an unbuffered stream, and on a pipe, and a recursive-descent
+        parser that wants three is not doing anything unreasonable. Past
+        eight the stack is a heap run, grown as the caller pushes, so ungetc
+        refuses only when the allocator does.
 */
 #define stream_pushback_bytes 8
 
@@ -29086,8 +29162,14 @@ struct stream
         //      process filled. See the block above stdlib_buffers_are_ours.
         positive owner;
 
+        //      The pushback stack. Its first stream_pushback_bytes bytes live
+        //      here; byte i past those is pushback_spill[i - stream_pushback_bytes],
+        //      in a run stream_pushback_push grows on the heap and
+        //      stream_pushback_free gives back when the stream closes.
         positive pushback_used;
         p8 pushback[stream_pushback_bytes];
+        p8 address_to pushback_spill;
+        positive pushback_spill_room;
 
         p8 single[1];
 
@@ -29196,13 +29278,35 @@ positive stream_put_bytes(stream address_to handle, address_any data,
 #define stream_trap_open(path, flags, permissions)                           \
         error_result(system_open_at_mode(AT_FDCWD, (path), (flags), (permissions)))
 
+/*
+        Write all of length bytes, retrying the rest after an interrupted call.
+
+        system_write_all_checked stops at the first failure and returns the
+        prefix it wrote, EINTR included, so the loop starts the next write at
+        the byte after the prefix. A signal handler without SA_RESTART is
+        common enough that stopping there would drop a staged buffer's tail.
+        Any other failure is the caller's, with errno set, and so is a write
+        that stops short with no error: it made no progress and nothing says
+        why.
+*/
 static positive stream_trap_write(b32 descriptor, address_any from, positive length)
 {
-        system_write_result result =
-                system_write_all_checked((positive)descriptor, from, length);
-        if (result.bytes != length)
-                errno = result.error < 0 ? (b32)-result.error : EIO;
-        return result.bytes;
+        positive done = 0;
+        bipolar error = 0;
+
+        while (done < length)
+        {
+                system_write_result result = system_write_all_checked(
+                    (positive)descriptor, (p8 address_to)from + done, length - done);
+
+                done += result.bytes;
+                error = result.error;
+                if (error != -EINTR)
+                        break;
+        }
+        if (done != length)
+                errno = error < 0 ? (b32)-error : EIO;
+        return done;
 }
 
 /*
@@ -29369,6 +29473,49 @@ static fn stream_face_reading(stream address_to handle)
 {
         if (handle->write_used != 0)
                 stream_flush_output(handle);
+}
+
+/*
+        The pushback stack's three operations, the only code that knows where
+        a byte of it lives. The caller of pop has checked pushback_used is not
+        zero. Push grows the spill run one byte at a time, and is false only
+        when the allocator refuses. Free gives the run back and is what
+        stream_close does with it.
+*/
+static inline INLINE b32 stream_pushback_pop(stream address_to handle)
+{
+        positive at = --handle->pushback_used;
+
+        return at < stream_pushback_bytes
+                   ? (b32)handle->pushback[at]
+                   : (b32)handle->pushback_spill[at - stream_pushback_bytes];
+}
+
+static bool stream_pushback_push(stream address_to handle, p8 byte)
+{
+        positive at = handle->pushback_used;
+
+        if (at < stream_pushback_bytes)
+                handle->pushback[at] = byte;
+        else
+        {
+                positive spill_at = at - stream_pushback_bytes;
+
+                if (!memory_resize_reserve(address_of handle->pushback_spill,
+                                           address_of handle->pushback_spill_room,
+                                           spill_at + 1, 16))
+                        return false;
+                handle->pushback_spill[spill_at] = byte;
+        }
+        handle->pushback_used = at + 1;
+        return true;
+}
+
+static inline INLINE void stream_pushback_free(stream address_to handle)
+{
+        stream_release(handle->pushback_spill);
+        handle->pushback_spill = null;
+        handle->pushback_spill_room = 0;
 }
 
 /*
@@ -29643,8 +29790,17 @@ stream address_to stream_reopen(string_address path, string_address mode,
 
         if (descriptor < 0)
         {
+                // The old file is closed and the new one never opened, so
+                // nothing read ahead of it may be served, and the stream
+                // neither reads nor writes: stream_close's state, with the
+                // failure still reported.
                 handle->descriptor = -1;
+                handle->flags &= ~(STREAM_READABLE | STREAM_WRITABLE);
                 handle->flags |= STREAM_FAILED;
+                handle->read_head = 0;
+                handle->read_tail = 0;
+                handle->pushback_used = 0;
+                stream_pushback_free(handle);
                 return null;
         }
 
@@ -29693,6 +29849,7 @@ b32 stream_close(stream address_to handle)
 
         stream_reset_buffer(handle);
         handle->pushback_used = 0;
+        stream_pushback_free(handle);
         handle->descriptor = -1;
         handle->flags &= ~(STREAM_BUFFER_OURS | STREAM_READABLE | STREAM_WRITABLE);
 
@@ -30172,8 +30329,7 @@ sized stream_read(address_any into, sized size, sized count,
 
                 if (handle->pushback_used != 0)
                 {
-                        handle->pushback_used--;
-                        bytes[done++] = handle->pushback[handle->pushback_used];
+                        bytes[done++] = (p8)stream_pushback_pop(handle);
                         continue;
                 }
 
@@ -30241,10 +30397,7 @@ b32 stream_get_byte(stream address_to handle)
         }
 
         if (handle->pushback_used != 0)
-        {
-                handle->pushback_used--;
-                return (b32)handle->pushback[handle->pushback_used];
-        }
+                return stream_pushback_pop(handle);
 
         /*
                 Unread input proves both that the buffer is ready and that
@@ -30292,13 +30445,10 @@ b32 stream_unget_byte(b32 byte, stream address_to handle)
             !(handle->flags & STREAM_READABLE))
                 return EOF;
 
-        if (handle->pushback_used >= stream_pushback_bytes)
-                return EOF;
-
         stream_ready(handle);
 
-        handle->pushback[handle->pushback_used] = (p8)byte;
-        handle->pushback_used++;
+        if (!stream_pushback_push(handle, (p8)byte))
+                return EOF;
         handle->flags &= ~STREAM_AT_END;
         return (b32)(p8)byte;
 }
@@ -30438,8 +30588,7 @@ static positive stream_take_line(stream address_to handle, p8 address_to into,
 
         if (handle->pushback_used != 0)
         {
-                handle->pushback_used--;
-                into[0] = handle->pushback[handle->pushback_used];
+                into[0] = (p8)stream_pushback_pop(handle);
 
                 if ((b32)into[0] == delimiter)
                         address_to found_delimiter = true;

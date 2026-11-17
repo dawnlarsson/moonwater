@@ -1584,7 +1584,74 @@ static p8 empty_mode_stays_bounded(void)
         return bounded;
 }
 
-static fn interrupt_write(b32 number) { (void)number; }
+/* The interrupted-write row's pipe: the handler empties the read end, which
+   is what lets the blocked write go on, and counts what it took. */
+static bipolar interrupt_drain_fd;
+static positive interrupt_drained;
+
+static fn interrupt_write(b32 number)
+{
+        p8 sink[4096];
+        bipolar got;
+
+        (void)number;
+        while ((got = read(interrupt_drain_fd, sink, sizeof sink)) > 0)
+                interrupt_drained += (positive)got;
+}
+
+/* Forty pushes, past the eight the struct holds, read back in the order a
+   stack gives: the ninth push used to be refused. The reads go part by fgetc
+   and part by fread, so both the byte path and the bulk path see the spill. */
+static p8 pushback_spill_holds(void)
+{
+        b32 descriptor = (b32)system_call_2(syscall(memfd_create),
+                                            (positive)"pushback-spill", 1);
+        FILE *file;
+        p8 pushed[40], read_back[30];
+        p8 okay = descriptor >= 0;
+
+        if (!okay)
+                return false;
+        file = fdopen(descriptor, "r+");
+        if (!file)
+        {
+                close(descriptor);
+                return false;
+        }
+        for (positive i = 0; i < array_count(pushed); i++)
+        {
+                pushed[i] = (p8)(i * 37 + 11);
+                okay &= ungetc(pushed[i], file) == pushed[i];
+        }
+        for (positive i = 0; i < 10; i++)
+                okay &= fgetc(file) == pushed[array_count(pushed) - 1 - i];
+        okay &= fread(read_back, 1, array_count(read_back), file) ==
+                array_count(read_back);
+        for (positive i = 0; i < array_count(read_back); i++)
+                okay &= read_back[i] == pushed[array_count(pushed) - 11 - i];
+        okay &= fgetc(file) == EOF;
+        fclose(file);
+        return okay;
+}
+
+/* A freopen that fails leaves no byte of the old file readable: the one read
+   ahead is not served, and the stream says it failed. */
+static p8 failed_reopen_reads_nothing(void)
+{
+        FILE address_to file;
+        p8 okay;
+
+        lay_down("abc");
+        file = pick_up();
+        if (!file)
+                return false;
+        okay = fgetc(file) == 'a';
+        okay &= freopen("/nonexistent/moonwater-check", "r", file) == null &&
+                ferror(file);
+        okay &= fgetc(file) == EOF;
+        fclose(file);
+        return okay;
+}
 
 static p8 bounded_line_reads(void)
 {
@@ -1657,23 +1724,28 @@ static p8 checked_write_errors(void)
         clearerr(f);
 
         /* Leave the pipe full, block, and interrupt without SA_RESTART. The
-           periodic timer also prevents a lost first signal hanging the test. */
+           handler empties the pipe, so the blocked write goes on from what it
+           moved -- nothing, when the signal came first -- and every staged
+           byte completes: the bytes taken by the handler and the ones left
+           are the pipe's capacity plus the length written. The periodic
+           timer also prevents a lost first signal hanging the test. */
         signal_action wanted = { .handler = interrupt_write }, previous;
         if (sigaction(SIGALRM, &wanted, &previous) ||
             fcntl(ends[1], 4, 0UL)) return false;
         p64 timer[4] = {0, 20000, 0, 20000};
         if (system_call_3(syscall(setitimer), 0, (positive)timer, 0)) return false;
-        correct &= system_write_all(ends[1], "x", 1) == 0;
-        result = system_write_all_checked(ends[1], "x", 1);
-        correct &= !result.bytes && result.error == -EINTR;
-        errno = 0;
-        correct &= fputc('x', f) == EOF && errno == EINTR && ferror(f);
+        interrupt_drain_fd = ends[0];
+        interrupt_drained = 0;
+        correct &= fwrite(bytes, 1, length, f) == length && !ferror(f);
         memory_fill(timer, 0, sizeof(timer));
         system_call_3(syscall(setitimer), 0, (positive)timer, 0);
         sigaction(SIGALRM, &previous, 0);
         clearerr(f);
-        correct &= read(ends[0], bytes, length) == capacity;
-        for (positive i = 0; i < (positive)capacity; i++)
+        bipolar left = read(ends[0], bytes, length);
+        correct &= left >= 0 &&
+                   interrupt_drained + (positive)left == capacity + length &&
+                   interrupt_drained >= (positive)capacity;
+        for (positive i = 0; i < (positive)left; i++)
                 correct &= bytes[i] == 0x5a;
         close(ends[0]);
         wanted.handler = SIG_IGN;
@@ -1843,7 +1915,8 @@ b32 main(void)
                 return body_allocation_failure();
         if (!empty_mode_stays_bounded() || !checked_write_errors() ||
             !bounded_line_reads() || !bounded_stream_positions() ||
-            !write_after_pushback())
+            !write_after_pushback() || !pushback_spill_holds() ||
+            !failed_reopen_reads_nothing())
                 return 1;
         trace_body();
         p8 fits = dynamic_buffer_fits_one_shelf();

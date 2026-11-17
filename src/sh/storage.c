@@ -2668,7 +2668,8 @@ static const storage_column_descriptor storage_column_table[] = {
 
 typedef struct
 {
-        p8 columns[NAME_LIST_SELECT_MAX];
+        p32 address_to columns;
+        positive columns_room;
         positive count;
         string_address operand;
         /*  A relative or symlinked spelling names the same mount as its
@@ -2782,10 +2783,14 @@ static b32 storage_columns(string_address list,
                 list++;
         else
                 options->count = 0;
+        if (!name_list_room(address_of options->columns,
+                            address_of options->columns_room, options->count,
+                            options->count + name_list_capacity(list)))
+                return NAME_LIST_NOROOM;
         return name_list_columns(list, storage_column_table,
             sizeof(storage_column_table[0]), STORAGE_COLUMN_MAX,
-            options->columns, address_of options->count, unknown,
-            STORAGE_COLUMN_NAME);
+            options->columns, address_of options->count, options->columns_room,
+            unknown, STORAGE_COLUMN_NAME);
 }
 
 #define storage_column_name(column) storage_column_table[(column)].name
@@ -3270,6 +3275,9 @@ static fn storage_findmnt_release(storage_findmnt_options address_to options,
                                   positive operand_room, positive target_room,
                                   positive second_room)
 {
+        if (options->columns)
+                array_store_release(options->columns, options->columns_room,
+                                    options->count);
         if (options->operand_path)
                 memory_free((p8 address_to)options->operand_path, operand_room);
         if (options->target_path)
@@ -3300,15 +3308,29 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
             {"hyperlink", 'y', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
             {null},
         };
-        storage_findmnt_options options = {
-            .columns = {STORAGE_TARGET, STORAGE_SOURCE,
-                        STORAGE_FSTYPE, STORAGE_OPTIONS},
-            .count = 4,
-        };
+        storage_findmnt_options options = {0};
+        static const p32 default_columns[] = {STORAGE_TARGET, STORAGE_SOURCE,
+                                             STORAGE_FSTYPE, STORAGE_OPTIONS};
+        if (!name_list_room(address_of options.columns,
+                            address_of options.columns_room, 0,
+                            array_count(default_columns)))
+        {
+                if (diagnostic)
+                        diagnostic(str("findmnt: out of memory\n"));
+                return 2;
+        }
+        memory_copy_apart(options.columns, default_columns,
+                          sizeof(default_columns));
+        options.count = array_count(default_columns);
+        positive operand_room = 0;
+        positive target_room = 0;
+        positive second_room = 0;
+        scope_exit(storage_findmnt_release(address_of options, operand_room,
+                                           target_room, second_room));
         storage_mount_table table;
         positive query_id = 0;
         bool have_query_id = false;
-        positive widths[NAME_LIST_SELECT_MAX] = {0};
+        positive widths[NAME_LIST_DEFINITIONS_MAX] = {0};
         argument_cursor taking = {.argc = argc, .argv = argv, .at = 1};
         string_address value;
         b32 option;
@@ -3387,6 +3409,12 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
 
                         if (fault == STORAGE_COLUMNS_EMPTY)
                                 return 1;
+                        if (fault == NAME_LIST_NOROOM)
+                        {
+                                if (diagnostic)
+                                        diagnostic(str("findmnt: out of memory\n"));
+                                return 2;
+                        }
                         if (fault)
                         {
                                 if (diagnostic)
@@ -3420,11 +3448,6 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
         if (!storage_mount_table_load(address_of table, diagnostic))
                 return 1;
 
-        positive operand_room = 0;
-        positive target_room = 0;
-        positive second_room = 0;
-        scope_exit(storage_findmnt_release(address_of options, operand_room,
-                                           target_room, second_room));
         scope_exit(storage_mount_table_release(address_of table));
         if (options.operand)
                 options.operand_path = (string_address)storage_word_path(
@@ -3498,7 +3521,7 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
                 storage_findmnt_view data = {&table, lines, &options};
                 table_view view = {.output = output, .context = &data,
                     .cell = storage_findmnt_get, .write = storage_findmnt_field,
-                    .order = options.columns, .order_size = 1, .count = options.count,
+                    .order = options.columns, .order_size = sizeof(p32), .count = options.count,
                     .separator = " ", .pairs = options.pairs};
                 if (!direct) table_measure(&view, matched, !options.no_headings,
                                             false, true, 0, widths, null);

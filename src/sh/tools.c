@@ -13778,9 +13778,6 @@ static bool diff_slurp(diff_side address_to side, string_address path,
         if (!tail)
                 return false;
 
-        if (!start)
-                start = tail;
-
         side->base = start;
         side->size = have;
 
@@ -18829,13 +18826,17 @@ typedef struct
 #define UL_COLUMNS_OK NAME_LIST_OK
 #define UL_COLUMNS_EMPTY NAME_LIST_EMPTY
 #define UL_COLUMNS_UNKNOWN NAME_LIST_UNKNOWN
+#define UL_COLUMNS_NOROOM NAME_LIST_NOROOM
 #define UL_COLUMN_NAME 64
 
-/*      The empty list is the reference's silent refusal; anything else names
-        the column nobody knew. */
+/*      The empty list is the reference's silent refusal; the allocator
+        refusing to hold a list is out of memory; anything else names the
+        column nobody knew. */
 #define ul_columns_refused(program, fault, unknown) \
         ((fault) == UL_COLUMNS_EMPTY \
              ? 1 \
+             : (fault) == UL_COLUMNS_NOROOM \
+             ? string_report(log_error, 2, "%s: out of memory\n", (program)) \
              : string_report(log_error, 1, "%s: unknown column: %s\n", \
                              (program), (string_address)(unknown)))
 
@@ -18871,7 +18872,7 @@ typedef string_address (*ul_table_field)(address_any row, p8 column,
 enum { UL_LAYOUT_FREE = 1, UL_LAYOUT_DECLARED = 2, UL_LAYOUT_PAD = 4, UL_LAYOUT_EXTRA = 8 };
 static fn ul_table_out_mode(address_any rows, positive row_size, positive count,
     const ul_table_column address_to definitions, positive definition_count,
-    p8 address_to columns, positive column_count, bool headings, bool raw,
+    p32 address_to columns, positive column_count, bool headings, bool raw,
     ul_table_field field_of, p8 layout);
 #define ul_table_out(...) ul_table_out_mode(__VA_ARGS__, 0)
 
@@ -18997,13 +18998,14 @@ static const ul_table_column ul_limit_definitions[] = {
 /*      prlimit reads a column list by the same three rules as the listing
         tools: empty is a silent refusal, an unknown name is named, and a
         repeated name is a repeated column. */
-static b32 ul_limit_columns(string_address text, p8 address_to columns,
-                            positive address_to count, p8 address_to unknown)
+static b32 ul_limit_columns(string_address text, p32 address_to columns,
+                            positive room, positive address_to count,
+                            p8 address_to unknown)
 {
         address_to count = 0;
         return name_list_columns(text, ul_limit_definitions,
             sizeof(ul_limit_definitions[0]), UL_LIMIT_COLUMNS, columns, count,
-            unknown, UL_COLUMN_NAME);
+            room, unknown, UL_COLUMN_NAME);
 }
 
 static positive ul_limit_text(p64 value, p8 address_to into)
@@ -19041,7 +19043,7 @@ static string_address ul_limit_field(address_any opaque, p8 column,
 /* Specialize the shared engine for fixed resource metadata and its getter;
    the other inventories keep the out-of-line, size-shared renderer. */
 static __attribute__((flatten)) fn ul_limit_table(ul_limit_row address_to rows,
-    positive count, p8 address_to columns, positive column_count,
+    positive count, p32 address_to columns, positive column_count,
     bool headings, bool raw)
 {
         ul_table_out(rows, sizeof(rows[0]), count, ul_limit_definitions,
@@ -19127,16 +19129,24 @@ static b32 util_linux_prlimit()
         if (command)
                 return ul_exec(taking.first, "prlimit");
 
-        p8 columns[NAME_LIST_SELECT_MAX] = {
+        static const p8 limit_defaults[] = {
             UL_LIMIT_RESOURCE, UL_LIMIT_DESCRIPTION, UL_LIMIT_SOFT,
             UL_LIMIT_HARD, UL_LIMIT_UNITS,
         };
+        string_address listed = file_option_value(address_of taking, 'o');
+        positive wanted = listed ? name_list_capacity(listed) : 0;
+        p32 address_to columns = null;
+        positive columns_room = 0;
         positive column_count = UL_LIMIT_COLUMNS;
         p8 unknown[UL_COLUMN_NAME];
-        if (file_option_value(address_of taking, 'o'))
+        if (wanted < UL_LIMIT_COLUMNS)
+                wanted = UL_LIMIT_COLUMNS;
+        if (!name_list_room(address_of columns, address_of columns_room, 0, wanted))
+                return ul_columns_refused("prlimit", UL_COLUMNS_NOROOM, unknown);
+        name_list_fill(columns, limit_defaults, array_count(limit_defaults));
+        if (listed)
         {
-                b32 fault = ul_limit_columns(
-                    file_option_value(address_of taking, 'o'), columns,
+                b32 fault = ul_limit_columns(listed, columns, columns_room,
                     address_of column_count, unknown);
 
                 if (fault)
@@ -21153,10 +21163,10 @@ static b32 ul_lsns_type(string_address name)
         return at < UL_NS_COUNT ? (b32)at : -1;
 }
 
-static bool ul_table_column_add(p8 address_to columns, positive address_to count,
-                                positive maximum, p8 column)
+static bool ul_table_column_add(p32 address_to columns, positive address_to count,
+                                positive maximum, p32 column)
 {
-        if (memory_first_of(columns, column, address_to count))
+        if (name_list_holds(columns, column, address_to count))
                 return true;
 
         if (address_to count == maximum)
@@ -21176,18 +21186,21 @@ static bool ul_table_column_add(p8 address_to columns, positive address_to count
 static b32 ul_table_column_list(
     string_address text, const ul_table_column address_to definitions,
     positive definition_count, const p8 address_to defaults,
-    positive default_count, p8 address_to columns, positive address_to count,
-    p8 address_to unknown)
+    positive default_count, p32 address_to address_to columns,
+    positive address_to room, positive address_to count, p8 address_to unknown)
 {
         bool append = text && string_is(text, '+');
 
         address_to count = 0;
         unknown[0] = 0;
+        if (!name_list_room(columns, room, 0,
+                            default_count + (text ? name_list_capacity(text) : 0)))
+                return UL_COLUMNS_NOROOM;
         if (!text || append)
         {
                 if (default_count > definition_count)
                         return UL_COLUMNS_UNKNOWN;
-                memory_copy_apart(columns, (address_any)defaults, default_count);
+                name_list_fill(address_to columns, defaults, default_count);
                 address_to count = default_count;
                 if (!text)
                         return UL_COLUMNS_OK;
@@ -21195,7 +21208,8 @@ static b32 ul_table_column_list(
         }
 
         return name_list_columns(text, definitions, sizeof(definitions[0]),
-            definition_count, columns, count, unknown, UL_COLUMN_NAME);
+            definition_count, address_to columns, count, address_to room,
+            unknown, UL_COLUMN_NAME);
 }
 
 /*      Every one of these programs asks for its columns the same way: room
@@ -21206,13 +21220,14 @@ static b32 ul_table_column_list(
         defaults it falls back to and the name it complains as. */
 #define ul_columns_take(program, definitions, maximum, defaults, \
                         default_count, text) \
-        p8 columns[NAME_LIST_SELECT_MAX]; \
+        p32 address_to columns = null; \
+        positive columns_room = 0; \
         positive column_count = 0; \
         p8 unknown[UL_COLUMN_NAME]; \
         { \
                 b32 fault = ul_table_column_list(text, definitions, maximum, \
-                    defaults, default_count, columns, \
-                    address_of column_count, unknown); \
+                    defaults, default_count, address_of columns, \
+                    address_of columns_room, address_of column_count, unknown); \
                 if (fault) \
                         return ul_columns_refused(program, fault, unknown); \
         }
@@ -21286,24 +21301,24 @@ static inline INLINE table_cell ul_table_cell(address_any context, positive row,
 
 static fn ul_table_json(string_address name, address_any rows,
     positive stride, positive count, const ul_table_column address_to definitions,
-    p8 address_to columns, positive column_count, ul_table_field field)
+    p32 address_to columns, positive column_count, ul_table_field field)
 {
         ul_table_data data = {rows, stride, definitions, field, false};
         table_view view = {.output = log, .context = &data, .cell = ul_table_cell,
-            .order = columns, .order_size = 1, .count = column_count};
+            .order = columns, .order_size = sizeof(p32), .count = column_count};
         table_json(&view, (byte_span){name, string_length(name)}, count, false);
 }
 
 static fn ul_table_out_mode(address_any rows, positive row_size, positive count,
     const ul_table_column address_to definitions, positive definition_count,
-    p8 address_to columns, positive column_count, bool headings, bool raw,
+    p32 address_to columns, positive column_count, bool headings, bool raw,
     ul_table_field field_of, p8 layout)
 {
-        positive widths[NAME_LIST_SELECT_MAX];
+        positive widths[NAME_LIST_DEFINITIONS_MAX];
         if (!count || definition_count > array_count(widths)) return;
         ul_table_data data = {rows, row_size, definitions, field_of, raw};
         table_view view = {.output = log, .context = &data, .cell = ul_table_cell,
-            .order = columns, .order_size = 1, .count = column_count, .separator = " ",
+            .order = columns, .order_size = sizeof(p32), .count = column_count, .separator = " ",
             .pad_last = !raw && (layout & UL_LAYOUT_PAD) != 0, .pad_extra = (layout & UL_LAYOUT_EXTRA) != 0};
         for (positive col = 0; col < column_count; col++)
                 view.multipart |= definitions[columns[col]].multiline;
@@ -21318,7 +21333,7 @@ static fn ul_table_out_mode(address_any rows, positive row_size, positive count,
 static fn ul_table_print(string_address json_name, address_any rows,
                          positive row_size, positive count,
                          const ul_table_column address_to definitions,
-                         positive definition_count, p8 address_to columns,
+                         positive definition_count, p32 address_to columns,
                          positive column_count, bool headings, bool raw,
                          ul_table_field field_of, p8 layout)
 {
@@ -21386,7 +21401,7 @@ static b32 tools_uuidparse()
         bool raw = (taking.flags & FILE_FLAG('r')) != 0;
         text_refuse(json && raw, "--json and --raw cannot be combined");
 
-        p8 columns[32] = {
+        static const p8 uuid_defaults[] = {
             TOOLS_UUID_COLUMN_UUID, TOOLS_UUID_COLUMN_VARIANT,
             TOOLS_UUID_COLUMN_TYPE, TOOLS_UUID_COLUMN_TIME,
         };
@@ -21394,10 +21409,18 @@ static b32 tools_uuidparse()
         string_address output = file_option_value(address_of taking, 'o');
         // util-linux fails an empty list without a word.
         return_if(output && !string_get(output), text_done(1));
+        p32 address_to columns = null;
+        positive columns_room = 0;
+        positive wanted = output ? name_list_capacity(output) : 0;
+        if (wanted < array_count(uuid_defaults))
+                wanted = array_count(uuid_defaults);
+        if (!name_list_room(address_of columns, address_of columns_room, 0, wanted))
+                return text_done(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
+        name_list_fill(columns, uuid_defaults, array_count(uuid_defaults));
         column_count = output ? 0 : 4;
         if (output && !name_list_select(output, tools_uuid_definitions, sizeof(tools_uuid_definitions[0]),
                                         array_count(tools_uuid_definitions), columns, address_of column_count,
-                                        32, NAME_LIST_REJECT_TRAILING, null))
+                                        columns_room, NAME_LIST_REJECT_TRAILING, null))
                 return text_done(string_diagnostic(&text_diagnostic, 1, output, "unknown or excessive output column"));
 
         /*
@@ -21864,14 +21887,20 @@ static b32 util_linux_lsclocks()
         static const p8 defaults[] = {UL_LSCLOCK_ID, UL_LSCLOCK_NAME,
             UL_LSCLOCK_TYPE, UL_LSCLOCK_TIME, UL_LSCLOCK_RESOL,
             UL_LSCLOCK_ISO_TIME};
-        p8 columns[UL_LSCLOCK_COLUMNS];
+        p32 address_to columns = null;
+        positive columns_room = 0;
         positive column_count = 0;
         string_address selected = file_option_value(address_of taking, 'o');
         if (!selected) selected = file_environment("LSCLOCKS_COLUMNS");
         p8 unknown[UL_COLUMN_NAME];
+        // -A writes every column, so the room is at least the table's.
+        if (!name_list_room(address_of columns, address_of columns_room, 0,
+                            UL_LSCLOCK_COLUMNS))
+                return text_done(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
         b32 fault = ul_table_column_list(selected, ul_lsclock_columns,
                                          UL_LSCLOCK_COLUMNS, defaults,
-                                         array_count(defaults), columns,
+                                         array_count(defaults), address_of columns,
+                                         address_of columns_room,
                                          address_of column_count, unknown);
         if (fault)
                 return text_done(fault == UL_COLUMNS_EMPTY ? 1
@@ -21880,7 +21909,7 @@ static b32 util_linux_lsclocks()
                                         (string_address)unknown));
         if (!selected && (taking.flags & FILE_FLAG('A')))
                 for (column_count = 0; column_count < UL_LSCLOCK_COLUMNS; column_count++)
-                        columns[column_count] = (p8)column_count;
+                        columns[column_count] = (p32)column_count;
 
         p8 monotonic[32], boottime[32];
         bool want_offset = false;
@@ -26247,7 +26276,7 @@ static string_address ul_wipefs_field(address_any opaque, p8 column,
 }
 
 static fn ul_wipefs_parsable(ul_wipefs_work address_to work,
-                             p8 address_to columns, positive column_count)
+                             p32 address_to columns, positive column_count)
 {
         for (positive row = 0; row < work->count; row++)
         {
@@ -27730,7 +27759,7 @@ static fn ul_lscpu_summary(bool json, bool hex, bool bytes)
 
         if (ul_lscpu_failed)
                 return;
-        p8 columns[] = {0, 1};
+        p32 columns[] = {0, 1};
         ul_table(json ? "lscpu" : null, rows.items, rows.count, ul_lscpu_summary_columns,
                  columns, array_count(columns), false, false, ul_lscpu_summary_field);
 }
@@ -27884,7 +27913,7 @@ static bool ul_lscpu_show(ul_lscpu_cpu address_to cpu, p8 filter)
                (filter == 'c' && !cpu->online);
 }
 
-static fn ul_lscpu_parse(p8 address_to columns, positive column_count,
+static fn ul_lscpu_parse(p32 address_to columns, positive column_count,
                          bool defaults, p8 filter)
 {
         string_address prelude =
@@ -28421,7 +28450,7 @@ static fn ul_lsmem_summary()
                     (string_address)"Memmap on memory parameter:",
                     ul_lsmem.memmap};
         ul_lsmem_summary_columns[0].width = ul_lsmem_bytes ? 36 : 32;
-        p8 columns[] = {0, 1};
+        p32 columns[] = {0, 1};
         ul_table_out(items, sizeof(items[0]), count,
                      ul_lsmem_summary_columns, 2, columns, 2,
                      false, false, ul_lscpu_summary_field);
@@ -28470,16 +28499,18 @@ static b32 util_linux_lsmem()
         bool every = (taking.flags & FILE_FLAG('a')) != 0;
         if (splitting)
         {
-                p8 split_columns[UL_LSMEM_COLUMNS];
+                p32 address_to split_columns = null;
+                positive split_room = 0;
                 positive split_count = 0;
                 b32 split_fault = ul_table_column_list(
                     splitting, ul_lsmem_columns, UL_LSMEM_COLUMNS, null, 0,
-                    split_columns, address_of split_count, unknown);
+                    address_of split_columns, address_of split_room,
+                    address_of split_count, unknown);
                 if (split_fault)
                         return ul_columns_refused("lsmem", split_fault, unknown);
                 for (positive i = 0; i < split_count; i++)
                 {
-                        p8 column = split_columns[i];
+                        p32 column = split_columns[i];
                         if (column == UL_LSMEM_RANGE ||
                             column == UL_LSMEM_SIZE ||
                             column == UL_LSMEM_BLOCK)
@@ -29489,7 +29520,7 @@ static fn ul_lsblk_rows(bool list, bool dependencies, bool all, bool noempty,
 
 /*      Rows after the first open where the one before closed: libsmartcols
         writes "},{" on one line and indents only the first. */
-static positive ul_lsblk_json_row(positive row, p8 address_to columns,
+static positive ul_lsblk_json_row(positive row, p32 address_to columns,
                                    positive column_count, positive indent,
                                    bool after)
 {
@@ -29504,7 +29535,7 @@ static positive ul_lsblk_json_row(positive row, p8 address_to columns,
         }
         for (positive i = 0; i < column_count; i++)
         {
-                p8 column = columns[i];
+                p32 column = columns[i];
                 if (i)
                         log(",\n", 2);
                 writer_fill_bulk(log, indent + 3, ' ');
@@ -29568,7 +29599,7 @@ static positive ul_lsblk_json_row(positive row, p8 address_to columns,
         return next;
 }
 
-static fn ul_lsblk_json_out(p8 address_to columns, positive column_count)
+static fn ul_lsblk_json_out(p32 address_to columns, positive column_count)
 {
         log("{\n   \"blockdevices\": [",
             sizeof("{\n   \"blockdevices\": [") - 1);
@@ -30384,14 +30415,14 @@ static const argument_option ul_lsipc_options[] = {
     {"version", 'V'}, {null},
 };
 
-static fn ul_lsipc_newline(p8 address_to columns, positive column_count)
+static fn ul_lsipc_newline(p32 address_to columns, positive column_count)
 {
         for (positive row = 0; row < ul_ipc.count; row++)
         {
                 if (row) log("\n", 1);
                 for (positive field = 0; field < column_count; field++)
                 {
-                        p8 column = columns[field];
+                        p32 column = columns[field];
                         p8 scratch[96];
                         string_address value = ul_ipc_field(
                             ul_ipc.rows + row, column, scratch);
@@ -30564,7 +30595,8 @@ static fn ul_ipcs_table(p8 type)
         static const struct
         {
                 string_address title, id, empty_heading, human_heading;
-                p8 count, columns[7];
+                p8 count;
+                p32 columns[7];
         } views[] = {
             {"Message Queues", "msqid",
              "key        msqid      owner      perms      used-bytes   messages    \n",
@@ -30596,7 +30628,7 @@ static fn ul_ipcs_table(p8 type)
         ul_ipcs_columns[UL_IPC_ID].heading = views[type].id;
         ul_table_out_mode(ul_ipc.rows + first, sizeof(ul_ipc.rows[0]), rows,
                      ul_ipcs_columns, UL_IPC_COLUMNS,
-                     (p8 address_to)views[type].columns, views[type].count,
+                     (p32 address_to)views[type].columns, views[type].count,
                      true, false, ul_ipcs_field, UL_LAYOUT_PAD | UL_LAYOUT_DECLARED |
                          (type == UL_IPC_SHARED ? UL_LAYOUT_EXTRA : 0));
 }
@@ -31493,7 +31525,8 @@ static b32 tools_fincore_main()
             TOOLS_FINCORE_RES, TOOLS_FINCORE_PAGES,
             TOOLS_FINCORE_SIZE, TOOLS_FINCORE_FILE,
         };
-        p8 columns[TOOLS_FINCORE_COLUMNS];
+        p32 address_to columns = null;
+        positive columns_room = 0;
         positive column_count = 0;
         string_address output = file_option_value(address_of taking, 'o');
         if (output && !string_get(output))
@@ -31501,8 +31534,8 @@ static b32 tools_fincore_main()
         p8 unknown[UL_COLUMN_NAME];
         if (ul_table_column_list(
                 output, tools_fincore_columns, TOOLS_FINCORE_COLUMNS,
-                defaults, array_count(defaults), columns,
-                address_of column_count, unknown))
+                defaults, array_count(defaults), address_of columns,
+                address_of columns_room, address_of column_count, unknown))
                 return string_report(log_error, 1, "%s: %s\n", "fincore", "unknown output column");
 
         text_begin("fincore");
