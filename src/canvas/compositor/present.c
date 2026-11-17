@@ -1048,6 +1048,11 @@ static void compositor_present_frames(void)
                         view = compositor_taskbar_view();
                         if (!redo && view.pixels)
                                 redo = taskbar_meets(&view, compositor.damage, compositor.damages);
+                        // A band slid all the way off its edge (a fullscreen window on top) shows nothing: its glass is not made. Made, the
+                        // blur's reach over the screen's edge met each frame of the window, and the processor read the window's dma-buf for
+                        // it every frame, two of which made the row copied (wc_copy) and composed every third frame of a fullscreen game.
+                        if (taskbar_shift() >= UI_ONE)
+                                redo = 0;
                         if (redo)
                         {
                                 if (stay_live_direct && !saved_direct_pixels && windows)

@@ -521,7 +521,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
             "it is not wholly on the screen", "it is too short past its corners and close button", "it meets the tabs",
             "the card has no overlay for it", "the card refused its framebuffer", "the card refused the overlay",
             "the desktop spans more than one screen", "a finger's mark is drawn", "a screen is turned",
-            "it is drawn from its list (the card writes its picture)", "its picture is a client's buffer, read in place"};
+            "it is drawn from its list (the card writes its picture)", "its picture is a client's buffer, read in place",
+            "it is a client's window that is not fullscreen (the overlay is for a fullscreen one)"};
         const struct windows address_to table;
         char driver[17];
         unsigned int screens;

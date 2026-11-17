@@ -190,7 +190,7 @@ static struct
                 long fd, size;
                 unsigned long dev, ino, modifier;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
-                unsigned int fourcc, offset, scan_fb, scan_handle, scan_fourcc; // scan_fourcc: the format scan_fb was made as
+                unsigned int fourcc, offset, scan_fb, scan_fourcc; // scan_fourcc: the format scan_fb was made as
                 int synced, scan_failed;
         } *lent;
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
@@ -1141,20 +1141,61 @@ static positive compositor_lent_va(int row)
         return compositor_lent(row) ? compositor_wl_live(compositor_wl.lent[row].va, compositor_wl.lent[row].epoch) : 0;
 }
 
+/*
+        A client buffer's framebuffer the card may still scan out is not removed until it is off it: RMFB of a framebuffer a plane shows turns
+        that plane off (the kernel disables what uses it), so the one on the screen, the overlay's, and any while a flip is on its way (the
+        card scans the one before it until the flip lands, and which that is is not kept) wait here, and go at the next flip's end or present
+        (compositor_wl_graves_sweep). Removed at once, a fullscreen window shown straight from its client's buffers had the framebuffer on the
+        screen taken away at the client's next commit, before the flip to the new one, which blanked the screen for that frame. Full, the oldest
+        goes at once, as before.
+*/
+#define COMPOSITOR_WL_GRAVES 16
+static unsigned int compositor_wl_graves[COMPOSITOR_WL_GRAVES];
+static unsigned int compositor_wl_grave_count;
+
+static int compositor_wl_fb_scanned(unsigned int fb)
+{
+        return fb && (compositor.flip_pending || fb == compositor.on_screen || fb == compositor.plane_fb);
+}
+
+static void compositor_wl_rmfb(unsigned int fb)
+{
+        if (fb && compositor.card >= 0)
+                system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
+}
+
+static void compositor_wl_graves_sweep(void)
+{
+        unsigned int kept = 0;
+
+        for (unsigned int at = 0; at < compositor_wl_grave_count; at++)
+                if (compositor_wl_fb_scanned(compositor_wl_graves[at]))
+                        compositor_wl_graves[kept++] = compositor_wl_graves[at];
+                else
+                        compositor_wl_rmfb(compositor_wl_graves[at]);
+        compositor_wl_grave_count = kept;
+}
+
 static void compositor_wl_lent_drop_fb(int row)
 {
-        if (compositor_wl.lent[row].scan_fb)
-        {
-                unsigned int close[2] = {compositor_wl.lent[row].scan_handle, 0};
+        unsigned int fb = compositor_wl.lent[row].scan_fb;
 
-                if (compositor.card >= 0)
-                {
-                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor_wl.lent[row].scan_fb);
-                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                }
-                compositor_wl.lent[row].scan_fb = 0;
-                compositor_wl.lent[row].scan_handle = 0;
+        if (!fb)
+                return;
+        compositor_wl.lent[row].scan_fb = 0;
+        if (!compositor_wl_fb_scanned(fb))
+        {
+                compositor_wl_rmfb(fb);
+                return;
         }
+        if (compositor_wl_grave_count == COMPOSITOR_WL_GRAVES)
+        {
+                compositor_wl_rmfb(compositor_wl_graves[0]);
+                for (unsigned int at = 1; at < COMPOSITOR_WL_GRAVES; at++)
+                        compositor_wl_graves[at - 1] = compositor_wl_graves[at];
+                compositor_wl_grave_count--;
+        }
+        compositor_wl_graves[compositor_wl_grave_count++] = fb;
 }
 
 /*
@@ -1263,8 +1304,14 @@ static unsigned int compositor_lent_fb(int row)
                 compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], refused < 0 ? (int)-refused : (int)refused);
                 return 0;
         }
+        // The framebuffer holds the buffer: the handle goes now. Kept, a handle closed later could be the number a later import of the same
+        // dma-buf (PRIME gives one handle a buffer on a file) or of another buffer was given, and closing it took that one's away.
+        {
+                unsigned int close[2] = {prime.handle, 0};
+
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+        }
         compositor_wl.lent[row].scan_fb = fb.fb_id;
-        compositor_wl.lent[row].scan_handle = prime.handle;
         compositor_wl.lent[row].scan_fourcc = fourcc;
         return fb.fb_id;
 }
@@ -5154,11 +5201,14 @@ static int compositor_wl_dmabuf_signaled(void *context, long fd)
 }
 
 // Whether a job of the card may still read a row's pictures in place (the present's, which does not wait for its jobs): the shim keeps the buffers
-// such a picture was read from until a frame is drawn (wayland_host.row_busy).
+// such a picture was read from until a frame is drawn (wayland_host.row_busy). So does the display scanning a row's buffer out (shown straight, or
+// on the overlay), or about to: the buffer a picture replaced is the screen's until the flip away from it lands, and a commit that came before
+// then let it go to its client, which drew into the buffer on the screen.
 static int compositor_wl_row_busy(void *context, int row)
 {
         (void)context;
-        return compositor_card_reads(row);
+        return compositor_card_reads(row) ||
+               (row >= 0 && (row == compositor.direct_row || row == compositor.plane_row || (compositor.flip_pending && row == compositor.flip_row)));
 }
 
 static const struct wayland_host compositor_wl_host = {

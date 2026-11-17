@@ -457,6 +457,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
+static void compositor_wl_graves_sweep(void);   // wayland_host.c: the client framebuffers the card was still on, removed once it is off them
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 static int compositor_wl_dmabuf_missing(void);
 #endif
@@ -487,6 +488,7 @@ static void compositor_flip_done(void)
                         compositor_row_reclaim(row);
                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_graves_sweep();
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
 #endif
@@ -905,14 +907,15 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
 }
 
 // The window the card can show straight: the top one, opaque, square and filling the output at the size it drew, with
-// nothing over it but the tabs, a pointer on its own plane, and a framebuffer of its buffer; -1 when there is none.
+// nothing over it but the tabs, a pointer on its own plane or none (hidden), and a framebuffer of its buffer; -1 when there is none.
 static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
         int row;
 
         // On more than one screen every frame is composed: a flip, the overlay and the window's framebuffer are one
         // crtc's, and the scanout is the whole space.
-        if (compositor.card < 0 || compositor_cursor_in_scene() || !windows ||
+        // A pointer drawn into the scene is over the window, unless it is hidden (a game's, which asked for none): then nothing is.
+        if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) || !windows ||
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw || compositor_output_count() > 1 ||
             compositor_spots_any(0))
                 return -1;
@@ -923,7 +926,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
                 return -1;
         if (!compositor_lent(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return -1;
-        if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
+        // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass.
+        if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
             compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
@@ -1584,7 +1588,8 @@ static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned in
 // then patched in.
 static b32 compositor_present_overlaid(int row, const struct compositor_frame *frames, unsigned int count, unsigned int windows)
 {
-        unsigned int which = compositor.front[row], fb = compositor_window_fb(row, which), buffer = compositor.overlay_back;
+        unsigned int which = compositor.front[row], fb = compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, which),
+                     buffer = compositor.overlay_back;
         int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
@@ -1624,7 +1629,10 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         }
         if (fb != compositor.on_screen || drawn || (!shown && compositor.overlay_on))
         {
-                if (!compositor_atomic(fb, row, which, drawn || !shown, shown ? rect : 0, buffer))
+                // The overlay is in the commit only when it changes: a new picture of the tabs, or off where it was on. A fullscreen window
+                // with nothing over it flips its primary alone, each frame a plane's fast update, where every flip also set the idle overlay
+                // off again.
+                if (!compositor_atomic(fb, row, which, drawn || (!shown && compositor.overlay_on), shown ? rect : 0, buffer))
                 {
                         compositor.overlay_state = -1;
                         compositor_overlay_off();
@@ -1691,8 +1699,12 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
-        if (compositor.table->glass[row] || frame->blend)
+        if (compositor.glassy[row] || frame->blend)
                 return *why = 5, -1;
+        // A window with the flags of a client's (or a popup's: no close, no grab), which the glass test refused as glass, goes on the overlay only
+        // fullscreen, where it is not shown straight (its framebuffer or its flip refused); windowed it is composed, as it always was.
+        if (compositor.table->glass[row] && !compositor.fullscreen[row])
+                return *why = 18, -1;
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
         // the card, after it has drawn the pictures), so none is shown straight.

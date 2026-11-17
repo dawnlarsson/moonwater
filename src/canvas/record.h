@@ -716,20 +716,43 @@ static void compositor_film_frame(unsigned long long when)
         memory_copy(compositor_film.buffer, "MWFILM01", 8);
         compositor_film.buffer[2] = (unsigned int)compositor_records_all;
         // The window under the rectangle's middle as this present composed it: bit 31 read in place (lent), bit 30 the table's buffer it
-        // shows, the rest its picture's number (table frame), so a frame that shows an older picture says where it was read from.
+        // shows, bit 29 shown straight (below), the rest its picture's number (table frame), so a frame that shows an older picture says
+        // where it was read from.
         {
                 int tab, row = compositor_under(x + w / 2, y + h / 2, &tab);
 
                 compositor_film.buffer[3] = row < 0 ? 0 : ((unsigned int)(compositor_lent(row) != 0) << 31) |
                                                             ((compositor.front[row] & 1u) << 30) |
-                                                            (__atomic_load_n(&compositor.table->frame[row], __ATOMIC_ACQUIRE) & 0x3fffffffu);
+                                                            (__atomic_load_n(&compositor.table->frame[row], __ATOMIC_ACQUIRE) & 0x1fffffffu);
         }
         *(unsigned long long *)(compositor_film.buffer + 4) = when;
         compositor_film.buffer[6] = (unsigned int)w, compositor_film.buffer[7] = (unsigned int)h;
         out = compositor_film.buffer + 8;
-        for (int row = 0; row < h; row++)
-                memory_copy(out + (unsigned long)row * (unsigned long)w, compositor.scanout + (unsigned long)(y + row) * stride + (unsigned long)x,
-                            (unsigned long)w * 4);
+        // A window shown straight is the screen: its buffer is filmed (the client's, or the table's it is scanned from), not the compositor's
+        // scanout, which the present did not draw. Bit 29 of word 3 says so.
+        {
+                const unsigned int *from = compositor.scanout;
+                unsigned long pitch = stride;
+                int direct = compositor.direct_row;
+
+                if (direct >= 0 && direct < (int)compositor_rows_in_use && compositor.plane_row != direct && compositor.on_screen &&
+                    compositor.on_screen != compositor.fb && compositor.x[direct] == 0 && compositor.y[direct] == 0)
+                {
+                        unsigned long lent_pitch = 0;
+                        const unsigned int *lent = compositor_lent_pixels(direct, &lent_pitch);
+
+                        if (lent)
+                                from = lent, pitch = lent_pitch;
+                        else if (compositor.table)
+                                from = (const unsigned int *)((const char *)compositor.table + compositor.pixels +
+                                                              ((unsigned long)direct * 2 + (compositor.front[direct] & 1u)) * compositor.buffer),
+                                pitch = (unsigned long)compositor_stride();
+                        compositor_film.buffer[3] |= 1u << 29;
+                }
+                for (int row = 0; row < h; row++)
+                        memory_copy(out + (unsigned long)row * (unsigned long)w, from + (unsigned long)(y + row) * pitch + (unsigned long)x,
+                                    (unsigned long)w * 4);
+        }
         system_write_all((int)compositor_film.fd, (const char *)compositor_film.buffer, 32 + (unsigned long)w * (unsigned long)h * 4);
         compositor_film.frames++;
 }
