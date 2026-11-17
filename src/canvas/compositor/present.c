@@ -924,8 +924,10 @@ static void compositor_wall_keep(void)
                 compositor_wall = null, compositor_wall_w = compositor_wall_h = 0;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
-        // The moon at the turn it is at while it turns, and the step of the clock that is.
-        if (taskbar_motion_about(clock_monotonic_nanoseconds()))
+        // The moon at the turn it is at while it turns, and the step of the clock that is; the first one made at the clock's step too,
+        // so the first hand after a start does not make the moon's squares again to move it from turn 0 to the clock's (190 ms of four
+        // cores at 1920 by 1080, in the first pointer move of a session; the first drag of a bench read 2000 ms of processor a second).
+        if (!compositor_wall_stepped || taskbar_motion_about(clock_monotonic_nanoseconds()))
                 compositor_wall_stepped = compositor_wall_step_now(), compositor_wall_turn = compositor_wall_turn_of(compositor_wall_stepped);
         memory_copy(job->key, now, sizeof(now));
         compositor_wall_start(compositor_wall_turn, 0);

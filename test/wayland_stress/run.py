@@ -149,6 +149,23 @@ class Compositor:
         self.x_before = before
         return ok and self.proc.poll() is None
 
+    def settle(self, quiet_s=0.2, most_s=5.0):
+        # What the first frame set going done before a row runs: the compositor's processor time still for quiet_s, at most most_s.
+        # Moonwater makes its wallpaper on every core once its first frame is out (about 200 ms of processor at 1920 by 1080, on four
+        # cores); the 0.3 s after the startup client covers it here, and this covers a slower machine, where the first row's
+        # cpu_ms_per_s would be the wallpaper's.
+        end = time.time() + most_s
+        last, still = cpu_ticks(self.pid), time.time()
+        while time.time() < end:
+            time.sleep(0.05)
+            now = cpu_ticks(self.pid)
+            if now is None:
+                return
+            if now != last:
+                last, still = now, time.time()
+            elif time.time() - still >= quiet_s:
+                return
+
     def find_display(self, timeout=10):
         end = time.time() + timeout
         while time.time() < end:
@@ -646,6 +663,7 @@ def bench(args, comp):
             results["startup"]["first_frame_ms"] = comp.start_ms + first.get("exec_to_present_ms", 0)
             results["startup"]["connect_to_present_ms"] = first["connect_to_present_ms"]
         time.sleep(0.3)
+        comp.settle()
         hung = 0
         for name, argv, env in scenarios(args, comp):
             if args.only and name not in args.only:
