@@ -1143,12 +1143,28 @@ static b32 process_coresched()
                 }
         }
 
-        string_address words[256];
+        //      The command is the operands from first_word on. Where they
+        //      stand in a row to the end of argv (the usual line, and every
+        //      one after --), argv is the vector timeout passes; where an
+        //      option stands among them (getopt permutes), the words are
+        //      gathered into a vector grown to what the line holds.
         positive word_count = file_operand_count - first_word;
-        refuse_if(word_count >= array_count(words), 1, "coresched: too many arguments\n");
-        for (positive at = 0; at < word_count; at++)
-                words[at] = file_operand_at(first_word + at);
-        words[word_count] = null;
+        positive first_at = word_count ? file_operand_list[first_word] : 0;
+        bool in_a_row = !word_count || first_at + word_count == program_argument_count();
+        for (positive at = 1; at < word_count && in_a_row; at++)
+                in_a_row = file_operand_list[first_word + at] == first_at + at;
+        string_address address_to words = in_a_row ? program_argument_list() + first_at : null;
+        positive words_room = 0;
+
+        if (!in_a_row)
+        {
+                refuse_if(!memory_reserve((address_any address_to)&words, &words_room, 0, word_count + 1,
+                                          sizeof(string_address), 16),
+                          1, "coresched: memory exhausted\n");
+                for (positive at = 0; at < word_count; at++)
+                        words[at] = file_operand_at(first_word + at);
+                words[word_count] = null;
+        }
 
         if (file_meta(address_of taking, "[get] [--source PID]\n"
                       "       coresched new [-t TYPE] --dest PID|-- COMMAND\n"
