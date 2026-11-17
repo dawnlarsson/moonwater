@@ -8499,6 +8499,8 @@ struct bowl_profile
         // Moonwater's, by links in its /usr/local (bowl_bins_at): what a build
         // run as root asks for by name is the distribution's.
         bool bins_first;
+        // The bowl holds en_US.UTF-8, the locale the Steam Runtime's container runs its games in (bowl_profile_locales).
+        bool locales;
 };
 
 /*
@@ -8735,6 +8737,48 @@ static const struct bowl_component bowl_graphics_components[] = {
 */
 #define BOWL_CHROME_SOCKET "/run/moonwater/wayland-0"
 
+/*
+        The GPU drivers and the shader caches of the programs the steam and chrome sessions start, two lines of each script
+        (the sessions are this binary's, so an image that carries a change has it at the next start, with no install).
+
+        Vulkan's drivers are the machine's own GPUs' only. The bowl holds every vendor's (a disk moves between machines and a
+        card can be changed, so install does not look at the card), and the Vulkan loader opens every driver it finds at each
+        vkCreateInstance: the software one (lavapipe, which loads LLVM) is then a second device that a game or Steam's GPU
+        list sees, and the Intel ones are opened on an AMD machine to say no. The line reads the PCI vendor of each render
+        node (0x1002 AMD: RADV; 0x8086 Intel: ANV and, for Ivy Bridge to Broadwell, HasVK; 0x1af4 VirtIO: Venus) and names the
+        manifests the bowl has of those in VK_DRIVER_FILES, for both of a manifest's architectures where the bowl keeps two
+        files (Mesa 26 keeps one, naming the library without a path, which the 32-bit loader finds in lib32). A render node
+        of no listed vendor (vgem, vkms, a card with no Mesa Vulkan driver) adds nothing, and with nothing found the loader
+        is left to find what it finds, software included; so is a person who set VK_DRIVER_FILES or VK_ICD_FILENAMES.
+        pressure-vessel (Steam's runtime container) reads the variable and gives the game those drivers alone. Measured on
+        box (Mesa 26.2.7, vulkaninfo --summary in the steam bowl, 10 runs, twice): 19.4-23.3 ms a run with the four drivers,
+        9.6-11.0 ms with RADV alone, and one device listed instead of RADV and llvmpipe; in the soldier runtime the
+        container's driver list goes from lvp, radeon, intel and intel_hasvk to radeon.
+
+        The shader caches are where Mesa and Steam put them: Mesa's under $HOME/.cache (XDG_CACHE_HOME is not set by
+        Moonwater), and each game's under the Steam library's steamapps/shadercache/APPID, which Steam names in
+        MESA_SHADER_CACHE_DIR for that game, beside Fossilize's pipeline caches (Steam's shader pre-caching, left on) and
+        Proton's DXVK and vkd3d-proton caches. On an installed machine $HOME is the data partition, so they outlive a
+        reboot (measured on box: 647 MiB under shadercache/220 for Half-Life 2, radeonsi's and RADV's Fossilize databases).
+        On a live machine with no data partition $HOME is in memory, where each Mesa cache's own limit (1 GiB) is memory
+        taken from the games: there the line sets MESA_SHADER_CACHE_MAX_SIZE to a sixteenth of the machine's memory, at
+        least 128 MiB and at most 1 GiB, unless the person set it.
+*/
+#define BOWL_VULKAN_PICK(root)                                                                                              \
+        "[ -n \"$VK_DRIVER_FILES$VK_ICD_FILENAMES\" ] || { files=; "                                                       \
+        "for vendor in /sys/class/drm/renderD*/device/vendor; do "                                                          \
+        "case $(cat \"$vendor\" 2>/dev/null) in 0x1002) want=radeon ;; 0x8086) want='intel intel_hasvk' ;; "              \
+        "0x1af4) want=virtio ;; *) continue ;; esac; "                                                                      \
+        "for name in $want; do for json in " root "/usr/share/vulkan/icd.d/${name}_icd.*json; do "                        \
+        "[ -e \"$json\" ] || continue; json=${json#" root "}; "                                                             \
+        "case :$files: in *:$json:*) ;; *) files=${files:+$files:}$json ;; esac; done; done; done; "                       \
+        "[ -z \"$files\" ] || export VK_DRIVER_FILES=$files; }"
+#define BOWL_SHADER_CACHE_LIVE                                                                                              \
+        "case $(stat -f -c %T \"$HOME\" 2>/dev/null) in tmpfs|ramfs) [ -n \"$MESA_SHADER_CACHE_MAX_SIZE\" ] || { kb=0; "   \
+        "while read -r key value unit; do [ \"$key\" = MemTotal: ] && kb=$value && break; done < /proc/meminfo; "          \
+        "mb=$((kb / 16384)); [ $mb -ge 128 ] || mb=128; [ $mb -le 1024 ] || mb=1024; "                                     \
+        "export MESA_SHADER_CACHE_MAX_SIZE=${mb}M; } ;; esac"
+
 static string_address bowl_chrome_alpine[] = {
     "chromium", BOWL_GRAPHICS_ALPINE_PACKAGES, null};
 
@@ -8772,6 +8816,8 @@ static string_address bowl_chrome_session[] = {
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
     // syscall-only shim routes pwrite* back to __NR_pwrite64 inside the bowl
     // while leaving static host binaries unaffected and sandboxes enabled.
+    BOWL_VULKAN_PICK(BOWL_ROOT_PREFIX "alpine"),
+    BOWL_SHADER_CACHE_LIVE,
     "if [ -r " BOWL_ROOT_PREFIX "alpine" BOWL_CHROME_PWRITE_LIBRARY " ]; then "
     "export LD_PRELOAD=" BOWL_CHROME_PWRITE_LIBRARY "${LD_PRELOAD:+:$LD_PRELOAD}; fi",
     "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "
@@ -9053,6 +9099,77 @@ bowl_xwayland_install(const struct bowl_profile address_to profile)
         bowl_guest_install(profile, BOWL_XWAYLAND_DIRECTORY, BOWL_XWAYLAND_WRAPPER,
                            (const p8 address_to)bowl_xwayland_script,
                            sizeof(bowl_xwayland_script) - 1, 0, null, 0);
+}
+
+/*
+        The locale the Steam Runtime's container asks for. pressure-vessel runs every game with en_US.UTF-8 there, and
+        where the bowl (its host) has none it compiles one into the container at every launch (pv-locale-gen: "Container
+        startup will be faster if missing locales are created at OS level"). Measured on box, the soldier runtime's
+        `run -- /bin/true` from the steam bowl: 589-649 ms a start with no en_US.UTF-8 in the bowl, 151-155 ms with it,
+        which every game launched through the runtime (Steam Linux Runtime 1.0, 2.0, 3.0, and Proton) pays. Arch's glibc
+        builds it from /etc/locale.gen: the line is added when the file has it not, and locale-gen is run when the line was
+        added or the archive is missing (1 s, once; 3 MiB). The bowl's own LANG stays C.UTF-8, as every bowl's: this is only
+        the locale a program that names it finds. A bowl with no locale-gen (not Arch's) is left alone, and a locale-gen
+        that fails is said and does not stop the install: the runtime then makes the locale itself, as it did.
+*/
+#define BOWL_LOCALE_GEN "/etc/locale.gen"
+#define BOWL_LOCALE_ARCHIVE "/usr/lib/locale/locale-archive"
+#define BOWL_LOCALE_LINE "en_US.UTF-8 UTF-8"
+
+// Whether the text of a locale.gen has the line, uncommented and whole.
+static bool bowl_locale_listed(string_address text)
+{
+        positive length = sizeof(BOWL_LOCALE_LINE) - 1;
+
+        for (string_address at = text; at && *at;)
+        {
+                string_address found = string_find(at, BOWL_LOCALE_LINE);
+
+                if (!found)
+                        return false;
+                if ((found == text || found[-1] == '\n') &&
+                    (!found[length] || found[length] == '\n' || found[length] == ' ' || found[length] == '\t'))
+                        return true;
+                at = found + 1;
+        }
+        return false;
+}
+
+static fn __attribute__((__noinline__)) bowl_profile_locales(string_address root)
+{
+        static p8 text[16384];
+        static string_address argv[] = {"/usr/bin/locale-gen", null};
+        bipolar got;
+
+        if (!bowl_has(root, "/usr/bin/locale-gen"))
+                return;
+        got = bowl_slurp_in_root(root, BOWL_LOCALE_GEN, text, sizeof(text));
+        if (got < 0 || (positive)got >= sizeof(text) - 1)
+                text[0] = end;
+        if (bowl_locale_listed(text) && bowl_has(root, BOWL_LOCALE_ARCHIVE))
+                return;
+        if (!bowl_locale_listed(text))
+        {
+                bipolar handle = bowl_open_in_root(root, BOWL_LOCALE_GEN, FILE_APPEND | O_CLOEXEC);
+                bool ok = handle >= 0;
+
+                if (ok && got > 0 && text[got - 1] != '\n')
+                        ok = system_write_all((positive)handle, "\n", 1) == 1;
+                if (ok)
+                        ok = system_write_all((positive)handle, BOWL_LOCALE_LINE "\n", sizeof(BOWL_LOCALE_LINE)) ==
+                             (bipolar)sizeof(BOWL_LOCALE_LINE);
+                if (handle >= 0)
+                        system_close(handle);
+                if (!ok)
+                {
+                        string_format(log, bowl_label "could not add %s to %s: games make it at every start\n",
+                                      BOWL_LOCALE_LINE, BOWL_LOCALE_GEN);
+                        log_flush();
+                        return;
+                }
+        }
+        (void)bowl_setup_isolated(root, argv[0], argv, "locale-gen could not make en_US.UTF-8: games make it at every start\n",
+                                  null);
 }
 
 /* Preload ELF shared library compiled freestanding from test/chrome_pwrite_shim.c
@@ -9717,6 +9834,8 @@ static string_address bowl_steam_session[] = {
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",
     "[ \"$gl\" = card ] || export LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-1} GSK_RENDERER=${GSK_RENDERER:-cairo}",
+    BOWL_VULKAN_PICK(BOWL_ROOT_PREFIX "arch"),
+    BOWL_SHADER_CACHE_LIVE,
     // Rootless, through the wrapper, when Canvas listens for a window manager of Xwayland: Steam runs under it, so the X server
     // ends with Steam. Status 125 is that the server could not be started, and the rootful one below is the fallback.
     "if [ -S " BOWL_STEAM_WM " ]; then",
@@ -10002,7 +10121,7 @@ static const struct bowl_profile bowl_profiles[] = {
      false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true, false, false, true},
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
-     false, null, BOWL_STEAM_UNAVAILABLE, true, true, true},
+     false, null, BOWL_STEAM_UNAVAILABLE, true, true, true, false, false, null, null, false, true},
     {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
      "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
      bowl_ssh_components, null, false, null, null, false, false, false, false, true},
@@ -10753,6 +10872,8 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                                                            part->expose);
                 if (!failed && profile->ssh)
                         failed = ssh_profile_record(distro->root);
+                if (!failed && profile->locales)
+                        bowl_profile_locales(distro->root);
                 if (failed)
                         return failed;
         }

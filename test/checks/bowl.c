@@ -1374,7 +1374,7 @@ static fn steam_profile(void)
               display_scan && display_scan < xwayland && xwayland && wait && display && xwayland < wait && wait < display && display < run);
         check("The session skips vgem and vkms render nodes when probing for hardware GL",
               chrome_line(steam ? steam->session : null, "\"$node/device\"") != 0 &&
-                  chrome_line(steam ? steam->session : null, "driver_name=") != 0);
+                  chrome_line(steam ? steam->session : null, "*DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue") != 0);
         check("The session ends Xwayland when Steam ends, and gives Steam's exit status back",
               ended && ended > run && strstr(steam->session[ended - 1], "kill $xwayland"));
         check("The session passes the arguments it was given to Steam",
@@ -1455,6 +1455,56 @@ static fn steam_profile(void)
                 check("The wrapper is written where the bowl runs it from, and is small",
                       string_equals(BOWL_XWAYLAND_WRAPPER, "/usr/local/bin/xwayland-moonwater") && sizeof(bowl_xwayland_script) < 8192);
         }
+        {
+                const struct bowl_profile address_to sessions[] = {steam, chrome};
+                string_address roots[] = {BOWL_ROOT_PREFIX "arch/usr/share/vulkan/icd.d/", BOWL_ROOT_PREFIX "alpine/usr/share/vulkan/icd.d/"};
+                string_address starts[] = {"/usr/bin/steam \"$@\"",
+                                           "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "};
+
+                p8 picks[2] = {0}, kept[2] = {0}, caps[2] = {0}, homes[2] = {0};
+
+                for (positive at = 0; at < 2; at++)
+                {
+                        string_address address_to lines = sessions[at] ? sessions[at]->session : null;
+                        positive pick = chrome_line(lines, "/sys/class/drm/renderD*/device/vendor");
+                        positive cache = chrome_line(lines, "MESA_SHADER_CACHE_MAX_SIZE=${mb}M");
+                        positive run = chrome_line(lines, starts[at]);
+                        string_address picked = pick ? lines[pick - 1] : (string_address)"";
+                        string_address capped = cache ? lines[cache - 1] : (string_address)"";
+
+                        picks[at] = pick && run && pick < run && strstr(picked, "export VK_DRIVER_FILES=$files") &&
+                                    strstr(picked, roots[at]) && strstr(picked, "0x1002) want=radeon") &&
+                                    strstr(picked, "0x8086) want='intel intel_hasvk'") && strstr(picked, "0x1af4) want=virtio") &&
+                                    strstr(picked, "*) continue");
+                        kept[at] = string_has_prefix(picked, "[ -n \"$VK_DRIVER_FILES$VK_ICD_FILENAMES\" ] ||") &&
+                                   strstr(picked, "[ -z \"$files\" ] ||") && strstr(picked, "json=${json#" BOWL_ROOT_PREFIX);
+                        caps[at] = cache && run && cache < run && strstr(capped, "stat -f -c %T \"$HOME\"") &&
+                                   strstr(capped, "tmpfs|ramfs)") && strstr(capped, "[ -n \"$MESA_SHADER_CACHE_MAX_SIZE\" ] ||") &&
+                                   strstr(capped, "MemTotal:") &&
+                                   strstr(capped, "mb=$((kb / 16384)); [ $mb -ge 128 ] || mb=128; [ $mb -le 1024 ] || mb=1024");
+                        homes[at] = lines && !chrome_line(lines, "MESA_SHADER_CACHE_DIR") && !chrome_line(lines, "XDG_CACHE_HOME") &&
+                                    !chrome_line(lines, "DXVK_STATE_CACHE") && !chrome_line(lines, "MESA_SHADER_CACHE_DISABLE");
+                }
+                check("The steam session names the Vulkan drivers of the machine's own GPUs before Steam starts", picks[0]);
+                check("The chrome session names the Vulkan drivers of the machine's own GPUs before the browser starts", picks[1]);
+                check("The steam and chrome sessions keep a person's own Vulkan driver list, and name none when they found none",
+                      kept[0] && kept[1]);
+                check("The steam and chrome sessions cap Mesa's shader cache only where $HOME is in memory, and keep a person's own cap",
+                      caps[0] && caps[1]);
+                check("The steam and chrome sessions name no shader cache directory: Steam's per game and Mesa's own, under $HOME, are kept",
+                      homes[0] && homes[1]);
+        }
+        check("The steam profile makes the Steam Runtime's locale in its bowl, and no other profile does",
+              steam && steam->locales && chrome && !chrome->locales && graphics && !graphics->locales &&
+                  bowl_find_profile("desktop") && !bowl_find_profile("desktop")->locales && bowl_find_profile("build") &&
+                  !bowl_find_profile("build")->locales && bowl_find_profile("ssh") && !bowl_find_profile("ssh")->locales);
+        check("A locale.gen lists en_US.UTF-8 when the line is there whole, at the start, after a newline or before a comment",
+              bowl_locale_listed("en_US.UTF-8 UTF-8\n") && bowl_locale_listed("# head\nen_US.UTF-8 UTF-8") &&
+                  bowl_locale_listed("# head\n#en_US.UTF-8 UTF-8\nen_US.UTF-8 UTF-8  # mine\n"));
+        check("A locale.gen does not list it when the line is commented, longer, inside another line, or not there",
+              !bowl_locale_listed("#en_US.UTF-8 UTF-8\n") && !bowl_locale_listed("# en_US.UTF-8 UTF-8\n") &&
+                  !bowl_locale_listed("en_US.UTF-8 UTF-8x\n") && !bowl_locale_listed("xen_US.UTF-8 UTF-8\n") &&
+                  !bowl_locale_listed("de_DE.UTF-8 UTF-8\n") && !bowl_locale_listed("") && !bowl_locale_listed(null));
 #if X64
         check("Steam is on this machine's architecture: the profile can be installed", steam && !steam->unavailable);
 #else
