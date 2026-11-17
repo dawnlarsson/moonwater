@@ -4590,14 +4590,22 @@ static bool build_tool_on(build_tool_entry address_to one)
 /*
         The commit this tree is at, taken once per build: twelve hex digits
         of HEAD, "-dirty" after them when the tree has changes, and the
-        commit's date as git spells it. Outside a git checkout, or with no git
-        to ask, both are "unknown", and the build goes on: the identity is for
-        telling a stick's build from another and is never a reason to stop.
-        What git says is kept only when it has the shape it is given here, so
-        a header line made of it is always one clean string.
+        commit's date as git spells it. A tree with no .git or no git to ask
+        (the copy build.sh sends to a build host, which leaves .git behind)
+        takes both from MOONWATER_COMMIT (the twelve digits),
+        MOONWATER_COMMIT_DATE and MOONWATER_COMMIT_DIRTY=1, which the sending
+        side sets from its own checkout; with neither, both are
+        "unknown", said in a line of its own, and the build goes on: the
+        identity is for telling a stick's build from another and is never a
+        reason to stop. What git or the sender says is kept only when it has
+        the shape it is given here, so a header line made of it is always one
+        clean string.
 */
 static string_address build_commit_hash;
 static string_address build_commit_date;
+
+static string_address build_commit_shaped(string_address said, positive used,
+                                          positive room, bool date);
 
 static string_address build_commit_ask(string_address address_to words,
                                        positive room, bool date)
@@ -4612,6 +4620,12 @@ static string_address build_commit_ask(string_address address_to words,
                 used++;
         said[used] = end;
 
+        return build_commit_shaped((string_address)said, used, room, date);
+}
+
+static string_address build_commit_shaped(string_address said, positive used,
+                                          positive room, bool date)
+{
         if (!used || used > room)
                 return null;
 
@@ -4645,7 +4659,24 @@ static fn build_commit_take()
 
         if (!build_have("git") ||
             (!build_is_type(".git", S_IFDIR) && !build_is_type(".git", S_IFREG)))
+        {
+                string_address sent = string_get_environment(environ, "MOONWATER_COMMIT");
+                string_address sent_date = string_get_environment(environ, "MOONWATER_COMMIT_DATE");
+
+                string_address dirty = string_get_environment(environ, "MOONWATER_COMMIT_DIRTY");
+
+                hash = sent ? build_commit_shaped(sent, string_length(sent), 12, false) : null;
+                date = sent_date ? build_commit_shaped(sent_date, string_length(sent_date), 40, true) : null;
+                if (hash && string_length(hash) == 12)
+                {
+                        build_commit_hash = dirty && *dirty == '1' ? build_join(hash, "-dirty", null) : hash;
+                        if (date)
+                                build_commit_date = date;
+                        return;
+                }
+                build_say("No commit to stamp: no git checkout here and no MOONWATER_COMMIT, so the image says commit unknown");
                 return;
+        }
 
         words[0] = "git";
         words[1] = "rev-parse";
@@ -6697,9 +6728,9 @@ static b32 build_remote(string_address host, string_address remote,
         string_address sent[BUILD_ARGUMENT_ROOM];
         positive many = 0;
 
-        /* Five fixed build words, --arch and its name, plus the five-word
-           staging front must fit. */
-        return_if(count + 12 >= BUILD_ARGUMENT_ROOM, build_die("too many remote build arguments"));
+        /* Five fixed build words, --arch and its name, the three commit
+           words, plus the five-word staging front must fit. */
+        return_if(count + 15 >= BUILD_ARGUMENT_ROOM, build_die("too many remote build arguments"));
 
         build_say(build_join("Checking ", host, null));
 
@@ -6851,6 +6882,20 @@ static b32 build_remote(string_address host, string_address remote,
                 request[at++] = "env";
                 if (stock && *stock)
                         request[at++] = "MOONWATER_STOCK=1";
+                //      The copy sent leaves .git behind, so the commit this
+                //      side is at goes with it, for the image to say.
+                build_commit_take();
+                if (build_commit_hash[0] != 'u')
+                {
+                        positive digits = 12;
+
+                        request[at++] = build_join("MOONWATER_COMMIT=",
+                                                   build_text_keep(build_commit_hash, digits), null);
+                        if (string_length(build_commit_hash) > digits)
+                                request[at++] = "MOONWATER_COMMIT_DIRTY=1";
+                        if (build_commit_date[0] != 'u')
+                                request[at++] = build_join("MOONWATER_COMMIT_DATE=", build_commit_date, null);
+                }
                 request[at++] = "sh";
                 request[at++] = "build.sh";
                 for (positive which = 0; which < count; which++)

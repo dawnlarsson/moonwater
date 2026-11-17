@@ -633,6 +633,21 @@ exec "$@"'
         #
         carry=""
         [ -z "${MOONWATER_STOCK:-}" ] || carry="MOONWATER_STOCK=1"
+        # The copy above leaves .git behind, so the remote has no commit to read: the one this checkout is at goes
+        # with it (twelve hex digits, git's date, and whether the tree has changes), for the image to say.
+        if commit=$(git -C "$here" rev-parse --short=12 HEAD 2>/dev/null); then
+                case "$commit" in
+                [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+                        carry="$carry MOONWATER_COMMIT=$commit"
+                        commit_date=$(git -C "$here" log -1 --format=%cI 2>/dev/null | tr -cd '0-9TZ:+-')
+                        [ -z "$commit_date" ] || carry="$carry MOONWATER_COMMIT_DATE=$commit_date"
+                        [ -z "$(git -C "$here" status --porcelain 2>/dev/null | head -1)" ] ||
+                                carry="$carry MOONWATER_COMMIT_DIRTY=1"
+                        ;;
+                esac
+        else
+                say "No git checkout here: the image will say commit unknown"
+        fi
 
         # One build at a time on the build host: the build holds /tmp/moonwater-build.lock, so builds from several
         # trees queue here rather than running out of memory together (a kernel build wants most of an 8 GB VM).
