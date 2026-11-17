@@ -141,6 +141,16 @@ prepare() {
 	on "$1" "test -x /bowls/arch/usr/bin/python3 && echo have" | grep -q have
 }
 
+# Plug-in cases (round 2): every test/perf/bench-cases/NAME.sh defines case_NAME MACHINE GPU PATH; see bench-cases/README.txt.
+run_cases() {
+	for f in "$HERE"/bench-cases/*.sh; do
+		[ -e "$f" ] || continue
+		name=$(basename "$f" .sh)
+		. "$f"
+		"case_$name" "$1" "$2" "$3" || say "case $name $1 $2: failed"
+	done
+}
+
 for m in $MACHINES; do
 	if ! on "$m" 'echo up' | grep -q up; then say "$m: not reachable"; put "$m" - - skip reachable 0; continue; fi
 	if ! prepare "$m"; then say "$m: no Arch bowl with python3 (the Chromium tools cannot run there yet)"; put "$m" - - skip bowl 0; continue; fi
@@ -149,6 +159,8 @@ for m in $MACHINES; do
 		stage_keys "$m" "$g"
 		stage_stale "$m" "$g"
 		stage_resize "$m" "$g"
+		if [ "$m" = box ]; then cpath=card; else cpath=processor; fi
+		run_cases "$m" "$g" "$cpath"
 	done
 	# Chromium of the throwaway profile closed, and the card's canvas gpu on, as the machine was found.
 	on "$m" 'for d in /proc/[0-9]*; do grep -q cperf-auto $d/cmdline 2>/dev/null && kill ${d#/proc/} 2>/dev/null; done; moonwater canvas gpu on' > /dev/null
