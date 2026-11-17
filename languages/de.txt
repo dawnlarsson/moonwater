@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Überschreiben
 installer_mode_overwrite_about	550e	Löscht das ganze Laufwerk und installiert Moonwater neu.
 installer_mode_update	0e94	Aktualisieren
 installer_mode_update_about	c729	Behält deine Dateien, Apps und Einstellungen und ersetzt die System- und Startdateien.
+installer_mode_use	5c94	Verwenden
+installer_mode_use_about	08a1	Startet diese Version mit den Dateien und Einstellungen des Laufwerks und schreibt nichts darauf.
 installer_network_about	2425	Die Apps brauchen es. Du kannst das überspringen und sie später hinzufügen.
 installer_network_head	274e	Mit dem Internet verbinden
-installer_network_offline	2071	Nicht verbunden. Steck ein Kabel ein oder tritt in den Einstellungen einem WLAN bei.
+installer_network_offline	c2e1	Nicht verbunden. Steck ein Kabel ein oder tritt unten einem WLAN bei.
 installer_network_online	a9cb	Mit dem Internet verbunden
-installer_network_wifi	c1be	WLAN-Einstellungen
 installer_next	da08	Weiter
 installer_reboot	ed8c	Neu starten
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Bereit zur Installation
 installer_review_overwrite	34ed	Alles auf diesem Laufwerk wird gelöscht.
 installer_review_settings	482f	Sprache %1$s, Tastatur %2$s
 installer_review_update	87a0	Moonwater auf diesem Laufwerk wird aktualisiert. Deine Daten und Einstellungen bleiben.
+installer_review_use	5a47	Die Daten dieses Laufwerks werden so verwendet, wie sie sind. Nichts wird darauf geschrieben.
 installer_running	f7a4	Moonwater wird installiert
 installer_running_step	4adb	Schritt %1$d von %2$d
 installer_skip	c7e2	Überspringen
@@ -108,7 +110,18 @@ installer_step_install	bd40	Installieren
 installer_step_keyboard	a714	Tastatur
 installer_step_language	db9b	Sprache
 installer_step_network	ad65	Netzwerk
+installer_use	9ba0	Dieses Laufwerk verwenden
+installer_use_done_about	5aab	Deine Dateien und Einstellungen auf diesem Laufwerk bleiben ab jetzt erhalten, bis zum Ausschalten.
+installer_use_done_head	c26d	Die Daten dieses Laufwerks sind in Gebrauch
 installer_virtual	757b	Drücke Installieren mit der eigenen Tastatur, Maus oder dem Bildschirm dieses Rechners.
+installer_wifi_join	5399	Beitreten
+installer_wifi_joined	9370	Verbunden
+installer_wifi_looking	60d2	Suche nach WLAN-Netzen
+installer_wifi_none	1d7b	Keine WLAN-Netze in Reichweite
+installer_wifi_off	a42c	WLAN ist aus.
+installer_wifi_on	0c01	WLAN einschalten
+installer_wifi_password	ca99	Passwort für %s
+installer_wifi_saved	79e4	Gespeichert
 launcher_log_out	d8b5	Abmelden
 launcher_log_out_armed	8615	abmelden
 launcher_power_off	ae2f	Ausschalten
@@ -377,6 +390,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Discover now	398a	Jetzt erkennen
 =Discovery	2db5	Erkennung
 =Files	1b30	Dateien
+=Install Moonwater	06fc	Moonwater installieren
 =Internal storage	e961	Interner Speicher
 =External devices	5769	Externe Geräte
 =Display	d9b5	Anzeige

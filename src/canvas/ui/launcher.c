@@ -131,9 +131,63 @@ static const struct launcher_program launcher_programs[] = {
 #if MOONWATER_UI_FILES
     {"Files", "files folders browser directory", "/files", 0},
 #endif
+#if MOONWATER_UI_INSTALLER // last, and listed only where launcher_offered says
+    {"Install Moonwater", "install installer disk drive", "/installer", 0},
+#endif
 };
 
 #define LAUNCHER_PROGRAMS (sizeof(launcher_programs) / sizeof(launcher_programs[0]))
+
+/*
+        Whether a desktop program is listed: every one, but the installer where this session keeps a drive inside the machine. Boot's
+        verdict (/run/moonwater/verdict) says live or ask on a stick, and disk NAME where an install's data is kept; a NAME that says it is
+        removable, or is on a USB bus, is a stick made with setup install, which is an installer's place too. Asked once a start.
+*/
+static b32 launcher_offered(positive at)
+{
+        static int offer = -1;
+        char verdict[64], path[160], text[8], link[256];
+        bipolar got;
+
+        if (!string_equals((string_address)launcher_programs[at].command, (string_address) "/installer"))
+                return true;
+        if (offer >= 0)
+                return offer;
+        offer = 0;
+        got = file_slurp_once_at(AT_FDCWD, (string_address) "/run/moonwater/verdict", (p8 address_to)verdict, sizeof(verdict) - 1);
+        // A live session (live, ask) is a stick's; no verdict is a machine boot has not settled, or no Moonwater's: not offered.
+        if (got >= 4 && (!memory_compare(verdict, "live", 4) || !memory_compare(verdict, "ask ", 4)))
+                offer = 1;
+        else if (got > 5 && !memory_compare(verdict, "disk ", 5))
+        {
+                positive length = 5;
+
+                while (length < (positive)got && verdict[length] > ' ' && verdict[length] != '/')
+                        length++;
+                verdict[length] = 0;
+                string_copy_bounded((string_address)path, (string_address) "/sys/block/", sizeof(path));
+                string_append_bounded((string_address)path, (string_address)verdict + 5, sizeof(path));
+                string_append_bounded((string_address)path, (string_address) "/removable", sizeof(path));
+                got = file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)text, sizeof(text) - 1);
+                offer = got > 0 && text[0] == '1';
+                string_copy_bounded((string_address)path, (string_address) "/sys/class/block/", sizeof(path));
+                string_append_bounded((string_address)path, (string_address)verdict + 5, sizeof(path));
+                got = system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)link, sizeof(link) - 1);
+                if (got > 0 && got < (bipolar)sizeof(link))
+                        link[got] = 0, offer |= string_find((string_address)link, (string_address) "/usb") != null;
+        }
+        return offer;
+}
+
+// How many desktop programs are listed with nothing typed.
+static positive launcher_offered_count(void)
+{
+        positive count = 0;
+
+        for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
+                count += launcher_offered(at) != 0;
+        return count;
+}
 
 // Names of PATH that are the system's own machinery and not something a person starts.
 static const char address_to const launcher_hidden[] = {"compositor", "init", "launcher", null};
@@ -350,16 +404,17 @@ static fn launcher_search(void)
         {
                 launcher.named_length = 0;
                 for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
-                {
-                        launcher.entry[at].kind = LAUNCHER_WINDOW;
-                        launcher.entry[at].index = (unsigned short)at;
-                }
-                launcher.entries = LAUNCHER_PROGRAMS;
+                        if (launcher_offered(at))
+                        {
+                                launcher.entry[count].kind = LAUNCHER_WINDOW;
+                                launcher.entry[count++].index = (unsigned short)at;
+                        }
+                launcher.entries = count;
                 return;
         }
 
         for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
-                programs[at] = launcher_program_rank(launcher.text, length, &launcher_programs[at]);
+                programs[at] = launcher_offered(at) ? launcher_program_rank(launcher.text, length, &launcher_programs[at]) : 0;
 
         // A command line leads with the command row, unless the text is the whole name of a desktop program.
         first = line;

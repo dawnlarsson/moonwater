@@ -65,3 +65,6 @@ src/canvas/ui/ui.c	Alt
 src/canvas/ui/ui.c	Super
 src/canvas/ui/ui.c	Plain Text
 src/canvas/ui/ui.c	Shell
+src/canvas/ui/launcher.c	Install Moonwater
+src/canvas/ui/launcher.c	install installer disk drive
+src/canvas/ui/installer.c	Install Moonwater

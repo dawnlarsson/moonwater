@@ -28,8 +28,8 @@
 #undef SHARED_counted
 
 #define ICHECK_ROOT "/tmp/moonwater-installer-check"
-#define ICHECK_W 760
-#define ICHECK_H 600
+#define ICHECK_W 800
+#define ICHECK_H 660
 
 static fn icheck_write(string_address path, string_address text)
 {
@@ -179,6 +179,11 @@ static fn icheck_plan(void)
         count = installer_plan(&c, false, plan, sizeof(plan));
         check("installer plan: the keyboard changed reaches it; Steam is not run off x86-64",
               icheck_has(plan, "/moonwater keyboard de\n") && !icheck_has(plan, "steam") && count == 6);
+        c.mode = INSTALLER_USE;
+        installer_plan(&c, false, plan, sizeof(plan));
+        check("installer plan: Use is the verb's use, the third answer of the terminal's question",
+              icheck_has(plan, "/moonwater install sda use yes\n") && installer_mode_at(2) == INSTALLER_USE && installer_mode_at(1) == INSTALLER_UPDATE &&
+                  installer_mode_at(0) == INSTALLER_OVERWRITE);
         string_copy((string_address)c.drive, (string_address) "loop0");
         check("installer plan: no plan for a loop device", installer_plan(&c, true, plan, sizeof(plan)) == 0 && !plan[0]);
         {
@@ -315,47 +320,183 @@ static fn icheck_write_path(void)
 }
 
 /* ---- the pictures ---- */
+/*
+        Each step as the desktop shows it: the moon wallpaper (ui_moon_night, the light theme's paper or the dark one's with its stars),
+        the window's glass over it as the compositor makes it (what is under the window blurred, then tinted toward the theme's side by
+        compositor_glass_tint, whose mean is the ground the window's inks are worked out from, ui_inks), the window's picture laid over
+        that, its corners rounded and a hairline round it, and a soft shadow under it. The grain the compositor lays over glass is left
+        out. Written as PPMs, light and dark for every step.
+*/
+#define ICHECK_SCREEN_W 1280
+#define ICHECK_SCREEN_H 820
+#define ICHECK_X ((ICHECK_SCREEN_W - ICHECK_W) / 2)
+#define ICHECK_Y ((ICHECK_SCREEN_H - ICHECK_H) / 2)
+#define ICHECK_RADIUS 16
 
 static unsigned int icheck_pixels[ICHECK_W * ICHECK_H], icheck_scratch[1400 * UI_SCRATCH_ROWS];
+static unsigned int icheck_wall[2][ICHECK_SCREEN_W * ICHECK_SCREEN_H], icheck_glass[2][ICHECK_W * ICHECK_H], icheck_ground[2];
+static unsigned int icheck_blur[ICHECK_SCREEN_W * ICHECK_SCREEN_H];
 static p8 icheck_atlas[1024 * 1024];
 static font_face icheck_faces[2];
-static unsigned int icheck_ground = 0xc7d0dcu; // under the glass: the light desktop's tone; the dark one's for the dark pictures
+static int icheck_dark;
+
+// A box blur of a picture's channels, radius r, across then down, in place.
+static fn icheck_box_blur(unsigned int address_to p, int w, int h, int r)
+{
+        static unsigned int line[ICHECK_SCREEN_W > ICHECK_SCREEN_H ? ICHECK_SCREEN_W : ICHECK_SCREEN_H];
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+                int outer = pass ? w : h, inner = pass ? h : w;
+
+                for (int o = 0; o < outer; o++)
+                {
+                        unsigned int sum[3] = {0, 0, 0};
+
+                        for (int i = -r; i <= r; i++)
+                        {
+                                int at = i < 0 ? 0 : i >= inner ? inner - 1 : i;
+                                unsigned int v = pass ? p[at * w + o] : p[o * w + at];
+
+                                for (int c = 0; c < 3; c++)
+                                        sum[c] += v >> (16 - 8 * c) & 255;
+                        }
+                        for (int i = 0; i < inner; i++)
+                        {
+                                int add = i + r + 1 >= inner ? inner - 1 : i + r + 1, drop = i - r < 0 ? 0 : i - r;
+                                unsigned int a = pass ? p[add * w + o] : p[o * w + add], d = pass ? p[drop * w + o] : p[o * w + drop];
+
+                                line[i] = 0xff000000u | (sum[0] / (2 * r + 1)) << 16 | (sum[1] / (2 * r + 1)) << 8 | sum[2] / (2 * r + 1);
+                                for (int c = 0; c < 3; c++)
+                                        sum[c] += (a >> (16 - 8 * c) & 255) - (d >> (16 - 8 * c) & 255);
+                        }
+                        for (int i = 0; i < inner; i++)
+                                if (pass)
+                                        p[i * w + o] = line[i];
+                                else
+                                        p[o * w + i] = line[i];
+                }
+        }
+}
+
+// The desktop and the glass under the window, for one theme: the wallpaper, and the window's rectangle of it blurred and tinted.
+static fn icheck_backdrop(int dark)
+{
+        struct ui wall;
+        unsigned long sums[3] = {0, 0, 0};
+
+        memory_zero(&wall, sizeof(wall));
+        wall.pixels = icheck_wall[dark], wall.pitch = ICHECK_SCREEN_W, wall.width = ICHECK_SCREEN_W, wall.height = ICHECK_SCREEN_H;
+        wall.bottom = ICHECK_SCREEN_H, wall.scale = 100;
+        ui_moon_night(&wall, 0, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS : 0, UI_ACCENT_DAWN, 1, 0);
+        memory_copy(icheck_blur, icheck_wall[dark], sizeof(icheck_blur));
+        for (int k = 0; k < 3; k++)
+                icheck_box_blur(icheck_blur, ICHECK_SCREEN_W, ICHECK_SCREEN_H, 18);
+        for (int y = 0; y < ICHECK_H; y++)
+                for (int x = 0; x < ICHECK_W; x++)
+                {
+                        unsigned int under = icheck_blur[(y + ICHECK_Y) * ICHECK_SCREEN_W + x + ICHECK_X];
+
+                        icheck_glass[dark][y * ICHECK_W + x] = compositor_glass_tint(under & 0xffffffu, dark ? 0 : 1);
+                        sums[0] += under >> 16 & 255, sums[1] += under >> 8 & 255, sums[2] += under & 255;
+                }
+        icheck_ground[dark] = compositor_glass_tint((unsigned int)(sums[0] / (ICHECK_W * ICHECK_H) << 16 | sums[1] / (ICHECK_W * ICHECK_H) << 8 |
+                                                                   sums[2] / (ICHECK_W * ICHECK_H)),
+                                                    dark ? 0 : 1);
+}
+
+// Whether a point of the window is inside its rounded corners, and how much (0 to 255) at the edge.
+static unsigned int icheck_inside(int x, int y)
+{
+        int cx = x < ICHECK_RADIUS ? ICHECK_RADIUS : x >= ICHECK_W - ICHECK_RADIUS ? ICHECK_W - ICHECK_RADIUS - 1 : x;
+        int cy = y < ICHECK_RADIUS ? ICHECK_RADIUS : y >= ICHECK_H - ICHECK_RADIUS ? ICHECK_H - ICHECK_RADIUS - 1 : y;
+        int dx = (x - cx) * 16, dy = (y - cy) * 16, d2 = dx * dx + dy * dy, r = ICHECK_RADIUS * 16;
+
+        if (d2 <= (r - 8) * (r - 8))
+                return 255;
+        if (d2 >= (r + 8) * (r + 8))
+                return 0;
+        // A pixel's width of edge, linear in the distance.
+        for (int k = 0; k < 16; k++)
+                if (d2 <= (r - 8 + k) * (r - 8 + k))
+                        return (unsigned int)(255 - k * 16);
+        return 0;
+}
+
+static unsigned int icheck_over(unsigned int under, unsigned int over, unsigned int alpha)
+{
+        unsigned int out = 0;
+
+        for (int c = 0; c < 3; c++)
+        {
+                unsigned int u = under >> (16 - 8 * c) & 255, o = over >> (16 - 8 * c) & 255;
+
+                out |= ((o * alpha + u * (255 - alpha) + 127) / 255) << (16 - 8 * c);
+        }
+        return out;
+}
 
 static fn icheck_ppm(string_address dir, string_address name)
 {
         p8 path[256], head[64];
-        static p8 row[3 * ICHECK_W];
+        static p8 row[3 * ICHECK_SCREEN_W];
         positive length;
         bipolar handle;
+        int dark = icheck_dark;
 
         string_copy_bounded(path, dir, sizeof(path));
         string_append_bounded(path, (string_address) "/", sizeof(path));
         string_append_bounded(path, name, sizeof(path));
+        string_append_bounded(path, (string_address)(dark ? "-dark.ppm" : "-light.ppm"), sizeof(path));
         handle = system_open_at_mode(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (handle < 0)
                 return;
         string_copy(head, (string_address) "P6\n");
         length = 3;
-        length += positive_into_string(head + length, ICHECK_W);
+        length += positive_into_string(head + length, ICHECK_SCREEN_W);
         head[length++] = ' ';
-        length += positive_into_string(head + length, ICHECK_H);
+        length += positive_into_string(head + length, ICHECK_SCREEN_H);
         string_copy(head + length, (string_address) "\n255\n");
         length += 5;
         system_write_once((b32)handle, head, length);
-        for (int y = 0; y < ICHECK_H; y++)
+        for (int y = 0; y < ICHECK_SCREEN_H; y++)
         {
-                for (int x = 0; x < ICHECK_W; x++)
+                for (int x = 0; x < ICHECK_SCREEN_W; x++)
                 {
-                        // The window is glass: its premultiplied picture over a ground like the desktop's, as the compositor lays it.
-                        unsigned int pixel = icheck_pixels[y * ICHECK_W + x], alpha = pixel >> 24, rest = 255 - alpha;
+                        unsigned int pixel = icheck_wall[dark][y * ICHECK_SCREEN_W + x];
+                        int wx = x - ICHECK_X, wy = y - ICHECK_Y;
 
-                        for (int c = 0; c < 3; c++)
+                        // The shadow: a dark veil that fades over 24 pixels out from the window, a little lower than it.
                         {
-                                unsigned int under = (icheck_ground >> (16 - 8 * c)) & 255, over = (pixel >> (16 - 8 * c)) & 255;
-                                unsigned int mixed = over + (under * rest + 127) / 255;
+                                // How far from the window's rounded outline, moved 8 down: the corners' arcs, not a square's.
+                                int sy = wy - 8, cx = wx < ICHECK_RADIUS ? ICHECK_RADIUS : wx >= ICHECK_W - ICHECK_RADIUS ? ICHECK_W - ICHECK_RADIUS - 1 : wx;
+                                int cy = sy < ICHECK_RADIUS ? ICHECK_RADIUS : sy >= ICHECK_H - ICHECK_RADIUS ? ICHECK_H - ICHECK_RADIUS - 1 : sy;
+                                int dx = wx - cx, dy = sy - cy, far = 0;
 
-                                row[x * 3 + c] = (p8)(mixed > 255 ? 255 : mixed);
+                                while ((far + ICHECK_RADIUS) * (far + ICHECK_RADIUS) < dx * dx + dy * dy && far < 24)
+                                        far++;
+
+                                if (far < 24)
+                                        pixel = icheck_over(pixel, 0, (unsigned int)((24 - far) * (dark ? 5 : 3)));
                         }
+                        if (wx >= 0 && wy >= 0 && wx < ICHECK_W && wy < ICHECK_H)
+                        {
+                                unsigned int inside = icheck_inside(wx, wy), picture = icheck_pixels[wy * ICHECK_W + wx], alpha = picture >> 24;
+                                unsigned int glass = icheck_glass[dark][wy * ICHECK_W + wx], laid = 0;
+
+                                // The picture is premultiplied: its colour plus what of the glass its alpha leaves.
+                                for (int c = 0; c < 3; c++)
+                                {
+                                        unsigned int g = glass >> (16 - 8 * c) & 255, o = picture >> (16 - 8 * c) & 255, v = o + (g * (255 - alpha) + 127) / 255;
+
+                                        laid |= (v > 255 ? 255 : v) << (16 - 8 * c);
+                                }
+                                // The frame's hairline just inside the corners, as the compositor gives a floating window.
+                                if (inside && inside < 255)
+                                        laid = icheck_over(laid, dark ? 0x5a5a62u : 0xb4b4bcu, 160);
+                                pixel = icheck_over(pixel, laid, inside);
+                        }
+                        row[x * 3] = (p8)(pixel >> 16), row[x * 3 + 1] = (p8)(pixel >> 8), row[x * 3 + 2] = (p8)pixel;
                 }
                 system_write_once((b32)handle, row, sizeof(row));
         }
@@ -375,14 +516,83 @@ static fn icheck_draw(string_address dir, string_address name)
         icheck_ppm(dir, name);
 }
 
+// The networks the Network step lists, as `moonwater wifi` says them.
+static const char icheck_wifi_said[] = "[Moonwater] wifi on\n"
+                                       "[Moonwater] * Moonbase            -48 dBm ####  wpa3    5 GHz ch 36\n"
+                                       "[Moonwater] + Tranquility         -61 dBm ###.  wpa2    2.4 GHz ch 6\n"
+                                       "[Moonwater]   Library guest       -72 dBm ##..  open    2.4 GHz ch 11\n"
+                                       "[Moonwater]   Apollo 5G           -80 dBm #...  wpa2    5 GHz ch 149\n";
+
+// Every step, in one theme.
+static fn icheck_steps(string_address dir, int dark)
+{
+        struct installer_big address_to big;
+
+        icheck_dark = dark;
+        big = installer.big;
+        installer.ui.glass = 1;
+        ui_inks(&installer.ui, icheck_ground[dark]);
+        installer.width = ICHECK_W, installer.height = ICHECK_H;
+        installer.focused = true;
+        installer.x86 = true;
+        ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+        ui_inks(&installer.ui, icheck_ground[dark]);
+
+        icheck_draw(dir, (string_address) "1-language");
+        installer_act(1);
+        icheck_draw(dir, (string_address) "2-keyboard");
+        installer_act(1);
+        installer.next_look = installer.next_wifi = 1ll << 62; // the tick is not run here: the networks are the fixture's
+        memory_copy(big->said, icheck_wifi_said, sizeof(icheck_wifi_said) - 1);
+        big->said_length = sizeof(icheck_wifi_said) - 1;
+        installer_heard();
+        installer.choice.online = false;
+        icheck_draw(dir, (string_address) "3-network-offline");
+        installer_pick_network(3);
+        icheck_draw(dir, (string_address) "3-network-password");
+        big->net_chosen = -1;
+        installer.choice.online = true;
+        icheck_draw(dir, (string_address) "3-network-online");
+        installer_act(1);
+        icheck_draw(dir, (string_address) "4-disk-none-chosen");
+        installer_choose_drive(0);
+        installer.choice.mode = INSTALLER_UPDATE;
+        icheck_draw(dir, (string_address) "4-disk-update");
+        installer.choice.mode = INSTALLER_USE;
+        icheck_draw(dir, (string_address) "4-disk-use");
+        installer.choice.mode = INSTALLER_UPDATE;
+        installer_act(1);
+        installer.choice.online = false;
+        icheck_draw(dir, (string_address) "5-apps-offline");
+        installer.choice.online = true;
+        icheck_draw(dir, (string_address) "5-apps-none");
+        installer_act(10);
+        installer_act(12);
+        big->hover_card = 1, big->focus_card = -1;
+        icheck_draw(dir, (string_address) "5-apps-chosen");
+        big->hover_card = -1;
+        installer_act(1);
+        icheck_draw(dir, (string_address) "6-review-update");
+        installer_act(0);
+        installer_act(0);
+        installer_choose_drive(1);
+        installer_act(1);
+        installer_act(1);
+        icheck_draw(dir, (string_address) "6-review-overwrite");
+        installer.step = INSTALLER_STEP_RUN, installer.commands = 4, installer.at = 1;
+        string_copy((string_address)big->last, (string_address) "writing this build to nvme0n1p1, from sdb1");
+        icheck_draw(dir, (string_address) "7-progress");
+        installer.step = INSTALLER_STEP_DONE;
+        icheck_draw(dir, (string_address) "8-done");
+}
+
 static fn icheck_pictures(string_address regular, string_address bold, string_address dir)
 {
         positive size = 0, bytes;
         long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
         b32 loaded = true;
 
-        installer.ui.engine = (font_engine address_to)engine;
-        font_start(installer.ui.engine, icheck_atlas, 1024, 1024);
+        font_start((font_engine address_to)engine, icheck_atlas, 1024, 1024);
         for (int k = 0; k < 2; k++)
         {
                 bytes = compositor_map_file(k ? bold : regular, &size);
@@ -391,55 +601,63 @@ static fn icheck_pictures(string_address regular, string_address bold, string_ad
         check("installer pictures: the faces load", loaded);
         if (!loaded)
                 return;
-        icheck_window_start();
-        installer.ui.engine = (font_engine address_to)engine;
-        installer.ui.regular = &icheck_faces[0];
-        installer.ui.bold = &icheck_faces[1];
-        installer.ui.scratch = icheck_scratch;
-        installer.ui.scratch_width = 1400;
-        installer.ui.scale = 100;
-        installer.width = ICHECK_W, installer.height = ICHECK_H;
-        installer.focused = true;
-        installer.x86 = true;
-        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
-        ui_kit.now = 1000000000ll;
+        icheck_backdrop(0);
+        icheck_backdrop(1);
+        for (int dark = 0; dark < 2; dark++)
+        {
+                memory_zero(&installer.ui, sizeof(installer.ui));
+                installer.ui.engine = (font_engine address_to)engine;
+                installer.ui.regular = &icheck_faces[0];
+                installer.ui.bold = &icheck_faces[1];
+                installer.ui.scratch = icheck_scratch;
+                installer.ui.scratch_width = 1400;
+                installer.ui.scale = 100;
+                ui_kit.now = 1000000000ll;
+                {
+                        struct ui saved = installer.ui;
 
-        icheck_draw(dir, (string_address) "1-language.ppm");
-        installer_act(1);
-        icheck_draw(dir, (string_address) "2-keyboard.ppm");
-        installer_act(1);
-        icheck_draw(dir, (string_address) "3-network-offline.ppm");
-        installer.choice.online = true;
-        icheck_draw(dir, (string_address) "3-network-online.ppm");
-        installer_act(1);
-        icheck_draw(dir, (string_address) "4-disk-none-chosen.ppm");
-        installer_choose_drive(0);
-        installer.choice.mode = INSTALLER_UPDATE;
-        icheck_draw(dir, (string_address) "4-disk-update.ppm");
-        installer_act(1);
+                        icheck_window_start(); // zeroes the state; the ui is put back
+                        installer.ui = saved;
+                }
+                icheck_steps(dir, dark);
+        }
+}
+
+// The cards' own hit target: a press and its release on a card choose it, a press that leaves it does not; the Wi-Fi list read.
+static fn icheck_cards(void)
+{
+        struct installer_big address_to big = installer.big;
+        struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0}, up = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
+        b32 on;
+        struct installer_network nets[INSTALLER_NETWORKS];
+        int count;
+
+        installer.step = INSTALLER_STEP_APPS, installer.choice.online = true, installer.choice.profiles = 0;
+        installer_draw(icheck_pixels);
+        check("installer cards: each card has its box", big->card_box[0].w > 0 && big->card_box[2].h >= INSTALLER_CARD_H - 1);
+        ui_kit.pointer_x = big->card_box[2].x + 20, ui_kit.pointer_y = big->card_box[2].y + big->card_box[2].h / 2;
+        installer_cards_event(&down);
+        installer_cards_event(&up);
+        on = (installer.choice.profiles & INSTALLER_SSH) != 0;
+        check("installer cards: a press and its release anywhere on a card choose it", on);
+        installer_cards_event(&down);
+        ui_kit.pointer_x = 1, ui_kit.pointer_y = 1;
+        installer_cards_event(&up);
+        check("installer cards: a press let go off the card leaves it as it was", (installer.choice.profiles & INSTALLER_SSH) != 0);
         installer.choice.online = false;
-        icheck_draw(dir, (string_address) "5-apps-offline.ppm");
-        installer.choice.online = true;
-        installer_act(10);
-        installer_act(12);
-        icheck_draw(dir, (string_address) "5-apps-online.ppm");
-        installer_act(1);
-        icheck_draw(dir, (string_address) "6-review-update.ppm");
-        installer_act(0);
-        installer_act(0);
-        installer_choose_drive(1);
-        installer_act(1);
-        installer_act(1);
-        icheck_draw(dir, (string_address) "6-review-overwrite.ppm");
-        installer.step = INSTALLER_STEP_RUN, installer.commands = 4, installer.at = 1;
-        string_copy((string_address)installer.big->last, (string_address) "writing this build to nvme0n1p1, from sdb1");
-        icheck_draw(dir, (string_address) "7-progress.ppm");
-        installer.step = INSTALLER_STEP_DONE;
-        icheck_draw(dir, (string_address) "8-done.ppm");
-        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 0);
-        icheck_ground = 0x1a2030u;
-        installer.step = INSTALLER_STEP_APPS;
-        icheck_draw(dir, (string_address) "5-apps-online-dark.ppm");
+        ui_kit.pointer_x = big->card_box[0].x + 20, ui_kit.pointer_y = big->card_box[0].y + 20;
+        installer_cards_event(&down);
+        installer_cards_event(&up);
+        check("installer cards: offline, a press on a card chooses nothing", !(installer.choice.profiles & INSTALLER_CHROME));
+
+        count = installer_wifi_parse(icheck_wifi_said, sizeof(icheck_wifi_said) - 1, nets, INSTALLER_NETWORKS, &on);
+        check("installer wifi: the networks Settings' list reads are read, the label passed over", count == 4 && on &&
+                                                                                                     string_equals((string_address)nets[0].name, (string_address) "Moonbase") &&
+                                                                                                     nets[0].joined && nets[0].bars == 4 &&
+                                                                                                     string_equals((string_address)nets[3].name, (string_address) "Apollo 5G"));
+        check("installer wifi: saved, open and the bars", nets[1].saved && !nets[1].joined && nets[2].open && !nets[2].saved && nets[2].bars == 2);
+        count = installer_wifi_parse("[Moonwater] wifi off\n", 21, nets, INSTALLER_NETWORKS, &on);
+        check("installer wifi: a radio that is off says so", !count && !on);
 }
 
 b32 main()
@@ -449,7 +667,10 @@ b32 main()
         icheck_window();
         icheck_write_path();
         if (program_argument_count() > 3)
+        {
                 icheck_pictures(program_argument(1), program_argument(2), program_argument(3));
+                icheck_cards();
+        }
         return test_report(null);
 }
 #endif

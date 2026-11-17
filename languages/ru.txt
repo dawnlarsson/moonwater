@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Перезаписать
 installer_mode_overwrite_about	550e	Стирает весь диск и устанавливает Moonwater заново.
 installer_mode_update	0e94	Обновить
 installer_mode_update_about	c729	Сохраняет ваши файлы, приложения и настройки и заменяет файлы системы и загрузки.
+installer_mode_use	5c94	Использовать
+installer_mode_use_about	08a1	Запускает эту версию с файлами и настройками диска и ничего на него не записывает.
 installer_network_about	2425	Он нужен приложениям. Можно пропустить и добавить их позже.
 installer_network_head	274e	Подключиться к интернету
-installer_network_offline	2071	Нет подключения. Подключите кабель или войдите в Wi-Fi в Настройках.
+installer_network_offline	c2e1	Нет подключения. Подключите кабель или войдите в сеть Wi-Fi ниже.
 installer_network_online	a9cb	Подключено к интернету
-installer_network_wifi	c1be	Настройки Wi-Fi
 installer_next	da08	Далее
 installer_reboot	ed8c	Перезагрузить
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Готово к установке
 installer_review_overwrite	34ed	Всё на этом диске будет стёрто.
 installer_review_settings	482f	Язык %1$s, клавиатура %2$s
 installer_review_update	87a0	Moonwater на этом диске будет обновлён. Ваши данные и настройки сохранятся.
+installer_review_use	5a47	Данные этого диска используются как есть. На него ничего не записывается.
 installer_running	f7a4	Установка Moonwater
 installer_running_step	4adb	Шаг %1$d из %2$d
 installer_skip	c7e2	Пропустить
@@ -108,7 +110,18 @@ installer_step_install	bd40	Установка
 installer_step_keyboard	a714	Клавиатура
 installer_step_language	db9b	Язык
 installer_step_network	ad65	Сеть
+installer_use	9ba0	Использовать этот диск
+installer_use_done_about	5aab	Ваши файлы и настройки на этом диске сохраняются с этого момента до выключения.
+installer_use_done_head	c26d	Данные этого диска используются
 installer_virtual	757b	Нажмите «Установить» с клавиатуры, мыши или экрана этой машины.
+installer_wifi_join	5399	Подключиться
+installer_wifi_joined	9370	Подключено
+installer_wifi_looking	60d2	Поиск сетей Wi-Fi
+installer_wifi_none	1d7b	Нет сетей Wi-Fi в зоне действия
+installer_wifi_off	a42c	Wi-Fi выключен.
+installer_wifi_on	0c01	Включить Wi-Fi
+installer_wifi_password	ca99	Пароль для %s
+installer_wifi_saved	79e4	Сохранена
 launcher_log_out	d8b5	Выйти
 launcher_log_out_armed	8615	выйти
 launcher_power_off	ae2f	Выключить
@@ -377,6 +390,7 @@ ui_field_full	fe02	больше не помещается
 =Discover now	398a	Обнаружить сейчас
 =Discovery	2db5	Обнаружение
 =Files	1b30	Файлы
+=Install Moonwater	06fc	Установить Moonwater
 =Internal storage	e961	Внутреннее хранилище
 =External devices	5769	Внешние устройства
 =Display	d9b5	Экран

@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Overschrijven
 installer_mode_overwrite_about	550e	Wist de hele schijf en installeert Moonwater opnieuw.
 installer_mode_update	0e94	Bijwerken
 installer_mode_update_about	c729	Houdt je bestanden, apps en instellingen, en vervangt de systeem- en opstartbestanden.
+installer_mode_use	5c94	Gebruiken
+installer_mode_use_about	08a1	Start deze versie met de bestanden en instellingen van de schijf, en schrijft er niets op.
 installer_network_about	2425	De apps hebben het nodig. Je kunt dit overslaan en ze later toevoegen.
 installer_network_head	274e	Verbinden met internet
-installer_network_offline	2071	Geen verbinding. Sluit een kabel aan, of maak verbinding met wifi in Instellingen.
+installer_network_offline	c2e1	Geen verbinding. Sluit een kabel aan, of maak hieronder verbinding met wifi.
 installer_network_online	a9cb	Verbonden met internet
-installer_network_wifi	c1be	Wifi-instellingen
 installer_next	da08	Volgende
 installer_reboot	ed8c	Opnieuw starten
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Klaar om te installeren
 installer_review_overwrite	34ed	Alles op deze schijf wordt gewist.
 installer_review_settings	482f	Taal %1$s, toetsenbord %2$s
 installer_review_update	87a0	Moonwater op deze schijf wordt bijgewerkt. Je gegevens en instellingen blijven.
+installer_review_use	5a47	De gegevens op deze schijf worden gebruikt zoals ze zijn. Er wordt niets op geschreven.
 installer_running	f7a4	Moonwater wordt geïnstalleerd
 installer_running_step	4adb	Stap %1$d van %2$d
 installer_skip	c7e2	Overslaan
@@ -108,7 +110,18 @@ installer_step_install	bd40	Installeren
 installer_step_keyboard	a714	Toetsenbord
 installer_step_language	db9b	Taal
 installer_step_network	ad65	Netwerk
+installer_use	9ba0	Deze schijf gebruiken
+installer_use_done_about	5aab	Je bestanden en instellingen op deze schijf blijven vanaf nu bewaard, tot uitschakelen.
+installer_use_done_head	c26d	De gegevens van deze schijf zijn in gebruik
 installer_virtual	757b	Druk op Installeren met het eigen toetsenbord, de muis of het scherm van deze machine.
+installer_wifi_join	5399	Verbinden
+installer_wifi_joined	9370	Verbonden
+installer_wifi_looking	60d2	Wifi-netwerken zoeken
+installer_wifi_none	1d7b	Geen wifi-netwerken binnen bereik
+installer_wifi_off	a42c	Wifi staat uit.
+installer_wifi_on	0c01	Wifi aanzetten
+installer_wifi_password	ca99	Wachtwoord voor %s
+installer_wifi_saved	79e4	Opgeslagen
 launcher_log_out	d8b5	Afmelden
 launcher_log_out_armed	8615	afmelden
 launcher_power_off	ae2f	Uitschakelen
@@ -377,6 +390,7 @@ ui_field_full	fe02	meer past er niet in
 =Discover now	398a	Nu detecteren
 =Discovery	2db5	Detectie
 =Files	1b30	Bestanden
+=Install Moonwater	06fc	Moonwater installeren
 =Internal storage	e961	Interne opslag
 =External devices	5769	Externe apparaten
 =Display	d9b5	Scherm

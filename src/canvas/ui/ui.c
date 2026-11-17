@@ -7885,11 +7885,12 @@ LANGUAGE_ID(installer_mode_overwrite, "Overwrite") \
 LANGUAGE_ID(installer_mode_overwrite_about, "Erases the whole drive and installs Moonwater anew.") \
 LANGUAGE_ID(installer_mode_update, "Update") \
 LANGUAGE_ID(installer_mode_update_about, "Keeps your files, apps and settings, and replaces the system and boot files.") \
+LANGUAGE_ID(installer_mode_use, "Use") \
+LANGUAGE_ID(installer_mode_use_about, "Runs this build with the drive's files and settings, and writes nothing to it.") \
 LANGUAGE_ID(installer_network_about, "The apps need it. You can skip this and add them later.") \
 LANGUAGE_ID(installer_network_head, "Connect to the internet") \
-LANGUAGE_ID(installer_network_offline, "Not connected. Plug in a cable, or join Wi-Fi in Settings.") \
+LANGUAGE_ID(installer_network_offline, "Not connected. Plug in a cable, or join a Wi-Fi network below.") \
 LANGUAGE_ID(installer_network_online, "Connected to the internet") \
-LANGUAGE_ID(installer_network_wifi, "Wi-Fi settings") \
 LANGUAGE_ID(installer_next, "Next") \
 LANGUAGE_ID(installer_reboot, "Restart") \
 LANGUAGE_ID(installer_review_drive, "%1$s, %2$s, /dev/%3$s") \
@@ -7897,6 +7898,7 @@ LANGUAGE_ID(installer_review_head, "Ready to install") \
 LANGUAGE_ID(installer_review_overwrite, "Everything on this drive is erased.") \
 LANGUAGE_ID(installer_review_settings, "Language %1$s, keyboard %2$s") \
 LANGUAGE_ID(installer_review_update, "Moonwater on this drive is updated. Your data and settings are kept.") \
+LANGUAGE_ID(installer_review_use, "This drive's data is used as it is. Nothing is written to it.") \
 LANGUAGE_ID(installer_running, "Installing Moonwater") \
 LANGUAGE_ID(installer_running_step, "Step %1$d of %2$d") \
 LANGUAGE_ID(installer_skip, "Skip") \
@@ -7910,7 +7912,18 @@ LANGUAGE_ID(installer_step_install, "Install") \
 LANGUAGE_ID(installer_step_keyboard, "Keyboard") \
 LANGUAGE_ID(installer_step_language, "Language") \
 LANGUAGE_ID(installer_step_network, "Network") \
+LANGUAGE_ID(installer_use, "Use this drive") \
+LANGUAGE_ID(installer_use_done_about, "Your files and settings on this drive are kept from now on, until power off.") \
+LANGUAGE_ID(installer_use_done_head, "This drive's data is in use") \
 LANGUAGE_ID(installer_virtual, "Press Install with this machine's own keyboard, mouse or screen.") \
+LANGUAGE_ID(installer_wifi_join, "Join") \
+LANGUAGE_ID(installer_wifi_joined, "Connected") \
+LANGUAGE_ID(installer_wifi_looking, "Looking for Wi-Fi networks") \
+LANGUAGE_ID(installer_wifi_none, "No Wi-Fi networks in range") \
+LANGUAGE_ID(installer_wifi_off, "Wi-Fi is off.") \
+LANGUAGE_ID(installer_wifi_on, "Turn on Wi-Fi") \
+LANGUAGE_ID(installer_wifi_password, "Password for %s") \
+LANGUAGE_ID(installer_wifi_saved, "Saved") \
 LANGUAGE_ID(launcher_log_out, "Log out") \
 LANGUAGE_ID(launcher_log_out_armed, "log out") \
 LANGUAGE_ID(launcher_power_off, "Power off") \
@@ -21632,6 +21645,9 @@ enum
         UI_ICON_WIRED,    // three boxes joined: a wired link
         UI_ICON_BATTERY,  // a cell, value percent full
         UI_ICON_NOTE,     // a log: lines in a frame
+        UI_ICON_GLOBE,    // a globe, its meridian and parallels: the web, a browser (the installer's Chrome card)
+        UI_ICON_GAMEPAD,  // a pad, its cross and two buttons: games (the installer's Steam card)
+        UI_ICON_KEY,      // a key, its bow and its bit: a login from afar (the installer's SSH card)
         UI_ICON_COUNT
 };
 
@@ -21660,6 +21676,12 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
                            {UI_ICON_LINE, 38, 24, 38, 32, 0}, {UI_ICON_BOX, 4, 32, 16, 42, 2}, {UI_ICON_BOX, 32, 32, 44, 42, 2}},
         [UI_ICON_BATTERY] = {{UI_ICON_RING, 4, 14, 40, 34, 4}, {UI_ICON_BOX, 40, 20, 44, 28, 2}},
         [UI_ICON_NOTE] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_LINE, 12, 18, 36, 18, 0}, {UI_ICON_LINE, 12, 24, 36, 24, 0}, {UI_ICON_LINE, 12, 30, 28, 30, 0}},
+        [UI_ICON_GLOBE] = {{UI_ICON_RING, 6, 6, 42, 42, 18}, {UI_ICON_RING, 15, 6, 33, 42, 9}, {UI_ICON_LINE, 7, 24, 41, 24, 0}, {UI_ICON_LINE, 11, 15, 37, 15, 0},
+                           {UI_ICON_LINE, 11, 33, 37, 33, 0}},
+        [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
+                             {UI_ICON_BOX, 34, 25, 40, 31, 3}},
+        [UI_ICON_KEY] = {{UI_ICON_RING, 4, 14, 24, 34, 10}, {UI_ICON_BOX, 11, 21, 17, 27, 3}, {UI_ICON_LINE, 24, 24, 44, 24, 0}, {UI_ICON_LINE, 37, 24, 37, 32, 0},
+                         {UI_ICON_LINE, 43, 24, 43, 30, 0}},
 };
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.

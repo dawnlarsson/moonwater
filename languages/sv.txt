@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Skriv över
 installer_mode_overwrite_about	550e	Raderar hela enheten och installerar Moonwater på nytt.
 installer_mode_update	0e94	Uppdatera
 installer_mode_update_about	c729	Behåller dina filer, appar och inställningar, och ersätter system- och startfilerna.
+installer_mode_use	5c94	Använd
+installer_mode_use_about	08a1	Kör den här versionen med enhetens filer och inställningar, och skriver inget till den.
 installer_network_about	2425	Apparna behöver det. Du kan hoppa över detta och lägga till dem senare.
 installer_network_head	274e	Anslut till internet
-installer_network_offline	2071	Inte ansluten. Anslut en kabel, eller anslut till wifi i Inställningar.
+installer_network_offline	c2e1	Inte ansluten. Anslut en kabel, eller anslut till ett wifi-nätverk nedan.
 installer_network_online	a9cb	Ansluten till internet
-installer_network_wifi	c1be	Wifi-inställningar
 installer_next	da08	Nästa
 installer_reboot	ed8c	Starta om
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Redo att installera
 installer_review_overwrite	34ed	Allt på den här enheten raderas.
 installer_review_settings	482f	Språk %1$s, tangentbord %2$s
 installer_review_update	87a0	Moonwater på den här enheten uppdateras. Dina data och inställningar behålls.
+installer_review_use	5a47	Den här enhetens data används som den är. Inget skrivs till den.
 installer_running	f7a4	Installerar Moonwater
 installer_running_step	4adb	Steg %1$d av %2$d
 installer_skip	c7e2	Hoppa över
@@ -108,7 +110,18 @@ installer_step_install	bd40	Installera
 installer_step_keyboard	a714	Tangentbord
 installer_step_language	db9b	Språk
 installer_step_network	ad65	Nätverk
+installer_use	9ba0	Använd den här enheten
+installer_use_done_about	5aab	Dina filer och inställningar på den här enheten behålls från och med nu, tills strömmen bryts.
+installer_use_done_head	c26d	Den här enhetens data används
 installer_virtual	757b	Tryck på Installera med maskinens eget tangentbord, mus eller skärm.
+installer_wifi_join	5399	Anslut
+installer_wifi_joined	9370	Ansluten
+installer_wifi_looking	60d2	Letar efter wifi-nätverk
+installer_wifi_none	1d7b	Inga wifi-nätverk inom räckhåll
+installer_wifi_off	a42c	Wifi är av.
+installer_wifi_on	0c01	Slå på wifi
+installer_wifi_password	ca99	Lösenord för %s
+installer_wifi_saved	79e4	Sparat
 launcher_log_out	d8b5	Logga ut
 launcher_log_out_armed	8615	logga ut
 launcher_power_off	ae2f	Stäng av
@@ -377,6 +390,7 @@ ui_field_full	fe02	mer ryms inte
 =Discover now	398a	Upptäck nu
 =Discovery	2db5	Upptäckt
 =Files	1b30	Filer
+=Install Moonwater	06fc	Installera Moonwater
 =Internal storage	e961	Intern lagring
 =External devices	5769	Externa enheter
 =Display	d9b5	Skärm

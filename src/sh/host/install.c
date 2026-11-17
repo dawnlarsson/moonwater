@@ -201,6 +201,8 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         int mode = -1;
         bool yes = false;
         bool interactive;
+        bool keeps;
+        p8 kept[HOST_NAME_ROOM];
         int found;
         b32 failed;
 
@@ -213,6 +215,8 @@ static b32 host_install_verb(string_address address_to arguments, positive count
                 mode = INSTALLER_UPDATE, words++;
         else if (count > words && string_equals(arguments[words], "overwrite"))
                 mode = INSTALLER_OVERWRITE, words++;
+        else if (count > words && string_equals(arguments[words], "use"))
+                mode = INSTALLER_USE, words++;
         if (count > words && string_equals(arguments[words], HOST_YES))
                 yes = true, words++;
         return_if(count != words || !host_name_valid(name), host_usage());
@@ -220,7 +224,7 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         interactive = host_asks();
         return_if(!interactive && !yes,
                   host_refuse("installing writes %s and nothing here can be asked: moonwater install %s %s " HOST_YES "\n", name, name,
-                              mode == INSTALLER_UPDATE ? "update" : "overwrite"));
+                              installer_mode_word(mode < 0 ? INSTALLER_OVERWRITE : mode)));
         host_state_ready();
 
         host_install_boot_drive(boot, sizeof(boot));
@@ -235,8 +239,22 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         return_if(!drive, host_refuse("there is no drive called %s\n", name));
         if (mode < 0)
                 mode = drive->moonwater ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
-        return_if(mode == INSTALLER_UPDATE && !drive->moonwater,
-                  host_refuse("%s holds no Moonwater to update: moonwater install %s overwrite erases it and installs anew\n", name, name));
+        return_if(mode != INSTALLER_OVERWRITE && !drive->moonwater,
+                  host_refuse("%s holds no Moonwater to %s: moonwater install %s overwrite erases it and installs anew\n", name,
+                              installer_mode_word(mode), name));
+        //      A session started from an installed stick keeps the stick's data: it writes another drive (overwrite, update)
+        //      and goes on keeping the stick's, and it cannot take a second drive's data on top (use).
+        keeps = host_session_disk(kept, sizeof(kept));
+        return_if(keeps && mode == INSTALLER_USE, host_refuse("this session already keeps %s, so %s's data cannot be used too\n", kept, name));
+        if (mode == INSTALLER_USE)
+        {
+                host_census census;
+                host_install address_to install;
+
+                host_census_take(address_of census);
+                install = host_census_find(address_of census, name);
+                return install ? host_take(install, false) : host_refuse("%s is no longer here\n", name);
+        }
 
         installer_size(drive->bytes, (char address_to)size, sizeof(size));
         host_say(log, mode == INSTALLER_UPDATE
@@ -254,7 +272,11 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         }
 
         if (mode == INSTALLER_OVERWRITE)
+        {
+                host_install_beside = keeps;
                 failed = host_install_disk(name, true, true);
+                host_install_beside = false;
+        }
         else
         {
                 host_census census;
@@ -262,7 +284,7 @@ static b32 host_install_verb(string_address address_to arguments, positive count
 
                 host_census_take(address_of census);
                 install = host_census_find(address_of census, name);
-                failed = install ? host_take(install, true) : host_refuse("%s is no longer here\n", name);
+                failed = !install ? host_refuse("%s is no longer here\n", name) : keeps ? host_update(install) : host_take(install, true);
         }
         if (failed)
                 return failed;

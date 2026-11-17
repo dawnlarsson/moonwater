@@ -84,11 +84,12 @@ installer_mode_overwrite	0e92	דריסה
 installer_mode_overwrite_about	550e	מוחק את כל הכונן ומתקין את Moonwater מחדש.
 installer_mode_update	0e94	עדכון
 installer_mode_update_about	c729	שומר את הקבצים, האפליקציות וההגדרות שלכם, ומחליף את קבצי המערכת והאתחול.
+installer_mode_use	5c94	שימוש
+installer_mode_use_about	08a1	מפעיל את הגרסה הזו עם הקבצים וההגדרות של הכונן, ולא כותב עליו דבר.
 installer_network_about	2425	האפליקציות צריכות אותו. אפשר לדלג ולהוסיף אותן מאוחר יותר.
 installer_network_head	274e	התחברות לאינטרנט
-installer_network_offline	2071	לא מחובר. חברו כבל, או הצטרפו ל-Wi-Fi בהגדרות.
+installer_network_offline	c2e1	לא מחובר. חברו כבל, או הצטרפו לרשת Wi-Fi למטה.
 installer_network_online	a9cb	מחובר לאינטרנט
-installer_network_wifi	c1be	הגדרות Wi-Fi
 installer_next	da08	הבא
 installer_reboot	ed8c	הפעלה מחדש
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -96,6 +97,7 @@ installer_review_head	2296	מוכן להתקנה
 installer_review_overwrite	34ed	כל מה שבכונן הזה נמחק.
 installer_review_settings	482f	שפה %1$s, מקלדת %2$s
 installer_review_update	87a0	Moonwater בכונן הזה מתעדכן. הנתונים וההגדרות שלכם נשמרים.
+installer_review_use	5a47	הנתונים בכונן הזה משמשים כמו שהם. דבר לא נכתב עליו.
 installer_running	f7a4	מתקין את Moonwater
 installer_running_step	4adb	שלב %1$d מתוך %2$d
 installer_skip	c7e2	דילוג
@@ -109,7 +111,18 @@ installer_step_install	bd40	התקנה
 installer_step_keyboard	a714	מקלדת
 installer_step_language	db9b	שפה
 installer_step_network	ad65	רשת
+installer_use	9ba0	שימוש בכונן הזה
+installer_use_done_about	5aab	הקבצים וההגדרות שלכם בכונן הזה נשמרים מעכשיו, עד הכיבוי.
+installer_use_done_head	c26d	הנתונים בכונן הזה בשימוש
 installer_virtual	757b	לחצו התקנה עם המקלדת, העכבר או המסך של המחשב הזה.
+installer_wifi_join	5399	הצטרפות
+installer_wifi_joined	9370	מחובר
+installer_wifi_looking	60d2	מחפש רשתות Wi-Fi
+installer_wifi_none	1d7b	אין רשתות Wi-Fi בטווח
+installer_wifi_off	a42c	ה-Wi-Fi כבוי.
+installer_wifi_on	0c01	הפעלת Wi-Fi
+installer_wifi_password	ca99	סיסמה עבור %s
+installer_wifi_saved	79e4	שמורה
 launcher_log_out	d8b5	התנתקות
 launcher_log_out_armed	8615	התנתקות
 launcher_power_off	ae2f	כיבוי
@@ -378,6 +391,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Discover now	398a	גלה עכשיו
 =Discovery	2db5	גילוי
 =Files	1b30	קבצים
+=Install Moonwater	06fc	התקנת Moonwater
 =Internal storage	e961	אחסון פנימי
 =External devices	5769	התקנים חיצוניים
 =Display	d9b5	מסך

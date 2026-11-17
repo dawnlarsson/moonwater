@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Üzerine yaz
 installer_mode_overwrite_about	550e	Tüm sürücüyü siler ve Moonwater'ı yeniden kurar.
 installer_mode_update	0e94	Güncelle
 installer_mode_update_about	c729	Dosyalarınızı, uygulamalarınızı ve ayarlarınızı korur, sistem ve önyükleme dosyalarını değiştirir.
+installer_mode_use	5c94	Kullan
+installer_mode_use_about	08a1	Bu sürümü sürücünün dosyaları ve ayarlarıyla çalıştırır, ona hiçbir şey yazmaz.
 installer_network_about	2425	Uygulamalar buna ihtiyaç duyar. Bunu atlayıp onları sonra ekleyebilirsiniz.
 installer_network_head	274e	İnternete bağlan
-installer_network_offline	2071	Bağlı değil. Bir kablo takın ya da Ayarlar'da bir Wi-Fi'ye katılın.
+installer_network_offline	c2e1	Bağlı değil. Bir kablo takın ya da aşağıdan bir Wi-Fi ağına katılın.
 installer_network_online	a9cb	İnternete bağlı
-installer_network_wifi	c1be	Wi-Fi ayarları
 installer_next	da08	İleri
 installer_reboot	ed8c	Yeniden başlat
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Kuruluma hazır
 installer_review_overwrite	34ed	Bu sürücüdeki her şey silinir.
 installer_review_settings	482f	Dil %1$s, klavye %2$s
 installer_review_update	87a0	Bu sürücüdeki Moonwater güncellenir. Verileriniz ve ayarlarınız korunur.
+installer_review_use	5a47	Bu sürücünün verileri olduğu gibi kullanılır. Ona hiçbir şey yazılmaz.
 installer_running	f7a4	Moonwater kuruluyor
 installer_running_step	4adb	Adım %1$d / %2$d
 installer_skip	c7e2	Atla
@@ -108,7 +110,18 @@ installer_step_install	bd40	Kur
 installer_step_keyboard	a714	Klavye
 installer_step_language	db9b	Dil
 installer_step_network	ad65	Ağ
+installer_use	9ba0	Bu sürücüyü kullan
+installer_use_done_about	5aab	Bu sürücüdeki dosyalarınız ve ayarlarınız bundan sonra, kapanana dek korunur.
+installer_use_done_head	c26d	Bu sürücünün verileri kullanımda
 installer_virtual	757b	Kur'a bu makinenin kendi klavyesi, faresi veya ekranıyla basın.
+installer_wifi_join	5399	Katıl
+installer_wifi_joined	9370	Bağlı
+installer_wifi_looking	60d2	Wi-Fi ağları aranıyor
+installer_wifi_none	1d7b	Menzilde Wi-Fi ağı yok
+installer_wifi_off	a42c	Wi-Fi kapalı.
+installer_wifi_on	0c01	Wi-Fi'yi aç
+installer_wifi_password	ca99	%s için parola
+installer_wifi_saved	79e4	Kayıtlı
 launcher_log_out	d8b5	Oturumu kapat
 launcher_log_out_armed	8615	oturumu kapat
 launcher_power_off	ae2f	Kapat
@@ -377,6 +390,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Discover now	398a	Şimdi keşfet
 =Discovery	2db5	Keşif
 =Files	1b30	Dosyalar
+=Install Moonwater	06fc	Moonwater'ı kur
 =Internal storage	e961	Dahili depolama
 =External devices	5769	Harici aygıtlar
 =Display	d9b5	Ekran

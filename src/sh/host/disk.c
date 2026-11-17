@@ -3783,6 +3783,10 @@ static bipolar host_install_lay(bipolar handle, p64 bytes, b32 sector, storage_f
         itself: the exclusive open fails. Removable media is refused unless
         asked for, because the stick being installed from is removable too.
 */
+/* An install made from a session that keeps another disk's data (a stick installed with setup install): the drive is written and
+   the session goes on keeping the stick's, where it was refused. moonwater install sets it. */
+static bool host_install_beside;
+
 static b32 host_install_locked(string_address asked, bool removable, bool said_yes)
 {
         string_address name = host_disk_word(asked);
@@ -3820,7 +3824,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
 
         /*      Keeping a second disk's data over the first's is what host_take
                 refuses, and it is asked now and not after the erase. */
-        if (host_session_disk(kept, sizeof(kept)))
+        if (!host_install_beside && host_session_disk(kept, sizeof(kept)))
                 return host_refuse("this session already keeps %s; installing on "
                                    "another disk starts from a live session\n", kept);
 
@@ -4089,7 +4093,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                                            "settings, so %s starts with the defaults\n",
                  name);
 
-        if (host_take(address_of target, false))
+        if (!host_install_beside && host_take(address_of target, false))
                 return 1;
 
         host_say(log, host_label "Moonwater is installed on %s. Power off and take "

@@ -1,24 +1,32 @@
 /*
         The installer: the window a live boot opens on the desktop (the machine script's desktop_installer, on a verdict of live
-        or ask; an installed boot's is disk, and starts none), which puts Moonwater on a drive in six steps, a trail of them
-        along its top and Back and Next at its foot:
+        or ask; an installed boot's is disk, and starts none; the launcher offers it too, as Install Moonwater, where this
+        session does not keep a drive inside the machine), which puts Moonwater on a drive in six steps. A stepper of them runs
+        along its top (a step done is a check in the accent, the step it is at its number ringed in the accent, a step to come
+        its number in the quiet ink) and Back and Next at its foot; what a step says is a column 640 wide in the middle.
 
             Language   the system's language, of the seventeen: chosen, it is the live session's at once (moonwater language),
                        so this window and every other speaks it, and the install carries it
             Keyboard   the layout, with a field to try it in: chosen, it is the session's at once (moonwater keyboard)
-            Network    whether the machine is online (a default route), and Settings opened for Wi-Fi; it can be skipped
+            Network    whether the machine is online (a default route), and the networks `moonwater wifi` hears, as Settings'
+                       Wi-Fi list reads them: a press on one joins it (`moonwater wifi add NAME`, its passphrase typed in a field
+                       here and given to the verb's input, never its words), and Turn on Wi-Fi where the radio is off; skippable
             Disk       the drives `moonwater install list` names, less the one this booted from, and for the one chosen,
                        Overwrite (the drive erased and installed anew) or, where it holds Moonwater, Update (its system and boot
-                       files replaced, its data and settings kept)
-            Apps       Chrome, Steam (x86-64 alone) and SSH, a card each, run once the drive is written; offline, the cards
-                       are there and cannot be chosen, and say why
+                       files replaced, its data and settings kept) or Use (this build run with its data, and nothing written:
+                       the three answers the terminal's question gave)
+            Apps       Chrome, Steam (x86-64 alone) and SSH, a card each: its symbol, its name and a line, and a check box in the
+                       accent; the whole card is pressed to choose it, and a card chosen is ringed in the accent. They are run once
+                       the drive is written; offline, the cards are there, dim, cannot be chosen, and the line under the title says
+                       why
             Install    what will be done, the drive named by its model, size and device; Install, and for an overwrite Install
                        pressed again, with a key or a press from a device of the machine's own: one from a virtual device
                        (WINDOW_EVENT_VIRTUAL: uinput, the on-screen keyboard, the Wayland shim) is refused, as a deliberate
                        Settings row refuses it
 
         Then the plan (installer_model.c) is run a command at a time, each one's last line said under the progress, and the
-        window ends on Restart. A command that fails stops it there, with its words, and Back goes to the review.
+        window ends on Restart (Use ends with the drive's data kept, and nothing to restart for). A command that fails stops it
+        there, with its words, and Back goes to the review.
 
             installer [-f FONT.ttf] [-b BOLD.ttf] [-m MOONWATER]
 
@@ -30,9 +38,12 @@
 
 #include "installer_model.c"
 
-#define INSTALLER_WIDTH 760 // logical pixels
-#define INSTALLER_HEIGHT 600
+#define INSTALLER_WIDTH 800 // logical pixels
+#define INSTALLER_HEIGHT 660
+#define INSTALLER_COLUMN 640           // what a step says, in the middle of the window
+#define INSTALLER_CARD_H 96            // an app's card
 #define INSTALLER_LOOK_NS 1000000000ll // the network looked at this often
+#define INSTALLER_WIFI_NS 4000000000ll // and the networks heard asked again this often, while the Network step shows
 #define INSTALLER_SAID 8192            // what a command said, kept to its last line
 
 enum
@@ -46,7 +57,17 @@ enum
         INSTALLER_STEP_RUN,
         INSTALLER_STEP_DONE,
 };
-#define INSTALLER_TRAIL 6 // the steps the trail names: the run and its end are the last one's
+#define INSTALLER_STEPS 6 // the steps the stepper names: the run and its end are the last one's
+
+// What the command running is for.
+enum
+{
+        INSTALLER_JOB_NONE,
+        INSTALLER_JOB_LIST,  // moonwater install list: the drives
+        INSTALLER_JOB_WIFI,  // moonwater wifi: the networks heard
+        INSTALLER_JOB_JOIN,  // moonwater wifi add, or wifi on
+        INSTALLER_JOB_PLAN,  // a command of the plan
+};
 
 // The layouts the Keyboard row offers (registry.c's "keyboard" row), each by its own name, as the languages are.
 static const struct
@@ -62,22 +83,37 @@ static const struct
 #define INSTALLER_LAYOUTS (sizeof(installer_layouts) / sizeof(installer_layouts[0]))
 #define INSTALLER_LANGUAGES (sizeof(language_names) / sizeof(language_names[0]))
 
+// An app's card: its bit, its symbol, its words.
+static const struct
+{
+        unsigned int bit;
+        int icon;
+        unsigned int title, about;
+} installer_apps[3] = {{INSTALLER_CHROME, UI_ICON_GLOBE, LANGUAGE_installer_chrome, LANGUAGE_installer_chrome_about},
+                       {INSTALLER_STEAM, UI_ICON_GAMEPAD, LANGUAGE_installer_steam, LANGUAGE_installer_steam_about},
+                       {INSTALLER_SSH, UI_ICON_KEY, LANGUAGE_installer_ssh, LANGUAGE_installer_ssh_about}};
+
 struct installer_big
 {
         struct ui_view view;
-        struct ui_list list;                        // the step's choices: the languages, the layouts or the drives
-        struct ui_trail trail;
-        struct ui_rect trail_box;
+        struct ui_list list;                        // the step's choices: the languages, the layouts, the networks or the drives
+        struct ui_rect stepper, field_box, pass_box, card_box[3], icon_box[3], tick_box[3];
         struct ui_text field;                       // the keyboard's try-it field
-        struct ui_control try_it, modes, meter, callout, card[3], icon[3], box[3];
+        struct ui_text pass;                        // a network's passphrase
+        struct ui_control try_it, pass_c, modes, meter, callout;
+        struct ui_tween card_hover[3], card_press[3], card_on[3];
+        int hover_card, press_card, focus_card;     // the card under the pointer, the one pressed, the one the keys are on (-1 none)
         struct installer_drive drives[INSTALLER_DRIVES];
         int drive_count;
+        struct installer_network nets[INSTALLER_NETWORKS];
+        int net_count, net_chosen;                  // the networks heard, and the one a passphrase is asked for (-1 none)
+        b32 wifi_on, wifi_read;
         char said[INSTALLER_SAID];                  // what the command running said
         positive said_length;
         char last[160];                             // its last line
         char plan[INSTALLER_PLAN];
         char note[160];                             // what the window says of what was just refused
-        char line[2][160];                          // the review's lines
+        char line[3][160];                          // the review's lines, a passphrase's question
         char says[96];                              // what Install's next press does
 };
 
@@ -96,31 +132,48 @@ static struct
         b32 hand;          // the event being taken is a key or a press of a device of the machine's (no WINDOW_EVENT_VIRTUAL)
         b32 listed;        // the drives were listed
         int chosen;        // the drive chosen, by its place in drives, -1 none
-        // The command running: its process and output, which of the plan it is and how many there are, and whether one failed.
+        // The command running: its process and output, what it is for, which of the plan it is and how many there are, and whether one failed.
         bipolar child;
         bipolar output;
-        int at, commands;
-        b32 failed, listing;
-        b64 next_look;
+        int job, at, commands;
+        b32 failed;
+        b64 next_look, next_wifi;
 } installer;
 
 static struct ui_app installer_app;
 
 /* ---- the commands ---- */
 
-// A command started with its output to a pipe this end reads, its input nothing (so the verb's yes is its answer): false when it could not be.
-static b32 installer_start(string_address address_to words, positive count)
+/*
+        A command started with its output to a pipe this end reads, and for its input a line of input (a passphrase, which the verb
+        reads from its input and never from its words, where ps would show it) or nothing, so the verb's yes is its answer and it
+        asks nothing: false when it could not be.
+*/
+static b32 installer_start(string_address address_to words, positive count, int job, const char address_to input)
 {
-        int ends[2] = {-1, -1};
+        int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
+        positive length = input ? string_length((string_address)input) : 0;
         bipolar child;
 
-        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+        if (installer.output >= 0 || system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
                 return false;
         system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
+        if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
+                       system_write_once((b32)feeds[1], input, length) != (bipolar)length || system_write_once((b32)feeds[1], "\n", 1) != 1))
+        {
+                system_close(ends[0]), system_close(ends[1]);
+                if (feeds[0] >= 0)
+                        system_close(feeds[0]);
+                if (feeds[1] >= 0)
+                        system_close(feeds[1]);
+                return false;
+        }
+        if (feeds[1] >= 0)
+                system_close(feeds[1]);
         child = system_fork();
         if (child == 0)
         {
-                bipolar quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
+                bipolar quiet = feeds[0] >= 0 ? feeds[0] : system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
 
                 if (quiet >= 0)
                         system_call_3(syscall(dup3), (positive)quiet, 0, 0);
@@ -130,12 +183,14 @@ static b32 installer_start(string_address address_to words, positive count)
                 system_call_1(syscall(exit), 127);
         }
         system_close(ends[1]);
+        if (feeds[0] >= 0)
+                system_close(feeds[0]);
         if (child < 0)
         {
                 system_close(ends[0]);
                 return false;
         }
-        installer.child = child, installer.output = ends[0];
+        installer.child = child, installer.output = ends[0], installer.job = job;
         installer.big->said_length = 0, installer.big->said[0] = 0;
         return true;
 }
@@ -165,7 +220,7 @@ static b32 installer_run_at(int at)
         char line[256];
         string_address words[8];
         const char address_to c = installer.big->plan;
-        positive length = 0;
+        positive length = 0, count;
 
         for (int k = 0; k < at && *c; c++)
                 if (*c == '\n')
@@ -175,15 +230,11 @@ static b32 installer_run_at(int at)
         line[length] = 0;
         if (!length)
                 return false;
+        count = installer_words(line, words, 8);
         // The plan names the moonwater command by its path in the image; one the window was given (-m) is that one.
-        if (!memory_compare(line, "/moonwater ", 11) && installer.moonwater && !string_equals(installer.moonwater, (string_address) "/moonwater"))
-        {
-                positive count = installer_words(line, words, 8);
-
+        if (string_equals(words[0], (string_address) "/moonwater") && installer.moonwater)
                 words[0] = installer.moonwater;
-                return installer_start(words, count);
-        }
-        return installer_start(words, installer_words(line, words, 8));
+        return installer_start(words, count, INSTALLER_JOB_PLAN, null);
 }
 
 // What a command said kept, and its last line: the last whole line it wrote, else what it is writing.
@@ -218,20 +269,49 @@ static fn installer_listed(void)
         big->drive_count = installer_targets(big->drives, count);
         installer.listed = true;
         installer.chosen = big->drive_count == 1 ? 0 : -1;
+        if (installer.chosen == 0)
+                string_copy_bounded((string_address)installer.choice.drive, (string_address)big->drives[0].name, sizeof(installer.choice.drive));
 }
 
-// The command that ran has ended, its status said: the next of the plan, or the end of it.
+// The networks `moonwater wifi` said, read back.
+static fn installer_heard(void)
+{
+        struct installer_big address_to big = installer.big;
+
+        big->net_count = installer_wifi_parse(big->said, big->said_length, big->nets, INSTALLER_NETWORKS, &big->wifi_on);
+        big->wifi_read = true;
+        if (big->net_chosen >= big->net_count)
+                big->net_chosen = -1;
+}
+
+// The command that ran has ended, its status said: what it was for, then the next of the plan, or the end of it.
 static fn installer_ended(positive status)
 {
         b32 ok = (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
+        int job = installer.job;
 
+        installer.job = INSTALLER_JOB_NONE;
         installer_last_line();
-        if (installer.listing)
+        if (job == INSTALLER_JOB_LIST)
         {
-                installer.listing = false;
                 installer_listed();
                 return;
         }
+        if (job == INSTALLER_JOB_WIFI)
+        {
+                installer_heard();
+                return;
+        }
+        if (job == INSTALLER_JOB_JOIN)
+        {
+                // A join said what came of it; the networks are asked again at once, so the one joined shows so.
+                if (!ok)
+                        string_copy_bounded((string_address)installer.big->note, (string_address)installer.big->last, sizeof(installer.big->note));
+                installer.next_wifi = installer.next_look = 0;
+                return;
+        }
+        if (job != INSTALLER_JOB_PLAN)
+                return;
         if (!ok)
         {
                 installer.failed = true;
@@ -272,7 +352,8 @@ static fn installer_drain(void)
                 big->said_length += (positive)got < sizeof(big->said) ? (positive)got : sizeof(big->said) - 1;
                 big->said[big->said_length] = 0;
         }
-        installer_last_line();
+        if (installer.job == INSTALLER_JOB_PLAN)
+                installer_last_line();
         installer.dirty = true;
         if (got == -11) // EAGAIN: it writes on
                 return;
@@ -291,9 +372,17 @@ static fn installer_list(void)
         if (installer.output >= 0)
                 return;
         installer.listed = false;
-        installer.listing = installer_start(words, 3);
-        if (!installer.listing)
+        if (!installer_start(words, 3, INSTALLER_JOB_LIST, null))
                 installer.listed = true, installer.big->drive_count = 0;
+}
+
+// The networks heard, asked again (the Network step's own feed, as Settings' Wi-Fi list runs `moonwater wifi`).
+static fn installer_wifi(void)
+{
+        string_address words[3] = {installer.moonwater, (string_address) "wifi", null};
+
+        if (installer.output < 0)
+                installer_start(words, 2, INSTALLER_JOB_WIFI, null);
 }
 
 // A setting put in force in the live session at once, as the person chose it (moonwater language, moonwater keyboard).
@@ -314,7 +403,7 @@ static b32 installer_can_next(void)
         return installer.step < INSTALLER_STEP_REVIEW;
 }
 
-// The choice of the drive chosen, its mode one it can have: Update only where it holds Moonwater.
+// The choice of the drive chosen, its mode one it can have: Update and Use only where it holds Moonwater.
 static fn installer_choose_drive(int at)
 {
         struct installer_drive address_to d;
@@ -329,7 +418,7 @@ static fn installer_choose_drive(int at)
         installer.dirty = true;
 }
 
-// A step gone to: its list's rows made, and what a step needs on arriving (the drives listed, the network looked at).
+// A step gone to: its list's rows made, and what a step needs on arriving (the drives listed, the networks asked).
 static fn installer_go(int step)
 {
         struct ui_list address_to l = &installer.big->list;
@@ -338,6 +427,7 @@ static fn installer_go(int step)
                 return;
         installer.step = step;
         installer.big->note[0] = 0;
+        installer.big->net_chosen = -1;
         l->hover = l->down = -1;
         l->scroll.scroll = 0;
         l->focus = 0;
@@ -356,7 +446,7 @@ static fn installer_go(int step)
                         installer_list();
         }
         if (step == INSTALLER_STEP_NETWORK)
-                installer.next_look = 0;
+                installer.next_look = installer.next_wifi = 0;
         installer.dirty = true;
 }
 
@@ -388,6 +478,57 @@ static fn installer_pick_layout(int at)
         installer.dirty = true;
 }
 
+// A network pressed: an open one, or one saved, is joined at once; another asks its passphrase first.
+static fn installer_pick_network(int at)
+{
+        struct installer_big address_to big = installer.big;
+        const struct installer_network address_to n;
+        string_address words[5];
+
+        if (at < 0 || at >= big->net_count)
+                return;
+        n = &big->nets[at];
+        big->list.focus = at;
+        installer.dirty = true;
+        if (n->joined)
+                return;
+        if (!n->open && !n->saved)
+        {
+                big->net_chosen = at;
+                if (!big->pass.doc.selections)
+                {
+                        ui_field_open(&big->pass, &installer.own, "");
+                        big->pass.most = 63;
+                }
+                else
+                        ui_field_open(&big->pass, &installer.own, "");
+                big->pass.masked = true;
+                ui_field_focus(&big->pass, true);
+                return;
+        }
+        words[0] = installer.moonwater, words[1] = (string_address) "wifi", words[2] = (string_address) "add", words[3] = (string_address)n->name, words[4] = null;
+        installer_start(words, 4, INSTALLER_JOB_JOIN, null);
+}
+
+// The passphrase given: the network chosen joined with it, read by the verb from its input ("-").
+static fn installer_join(void)
+{
+        struct installer_big address_to big = installer.big;
+        char secret[96];
+        positive length;
+        string_address words[6];
+
+        if (big->net_chosen < 0 || big->net_chosen >= big->net_count || !big->pass.doc.selections)
+                return;
+        length = doc_read(&big->pass.doc, 0, (p8 address_to)secret, sizeof(secret) - 1);
+        secret[length] = 0;
+        words[0] = installer.moonwater, words[1] = (string_address) "wifi", words[2] = (string_address) "add";
+        words[3] = (string_address)big->nets[big->net_chosen].name, words[4] = (string_address) "-", words[5] = null;
+        if (length && installer_start(words, 5, INSTALLER_JOB_JOIN, secret))
+                big->net_chosen = -1, ui_field_focus(&big->pass, false);
+        memory_zero(secret, sizeof(secret));
+}
+
 // A profile's card thrown: its bit, when the network is there to fetch it (offline, a card is no choice).
 static fn installer_toggle(unsigned int bit)
 {
@@ -412,7 +553,7 @@ static b32 installer_install(void)
         installer.commands = installer_plan(&installer.choice, installer.x86, installer.big->plan, sizeof(installer.big->plan));
         installer.at = 0, installer.failed = false;
         installer.big->last[0] = 0;
-        if (!installer.commands)
+        if (!installer.commands || installer.output >= 0)
                 return false;
         installer.step = INSTALLER_STEP_RUN;
         if (!installer_run_at(0))
@@ -425,6 +566,8 @@ static b32 installer_install(void)
 
 static fn installer_describe(int id, struct ui_row address_to row)
 {
+        struct installer_big address_to big = installer.big;
+
         if (installer.step == INSTALLER_STEP_LANGUAGE && id < (int)INSTALLER_LANGUAGES)
         {
                 row->label = language_names[id].name;
@@ -439,10 +582,19 @@ static fn installer_describe(int id, struct ui_row address_to row)
                 row->value = installer_layouts[id].code;
                 row->dim = !row->mark;
         }
-        else if (installer.step == INSTALLER_STEP_DISK && id < installer.big->drive_count)
+        else if (installer.step == INSTALLER_STEP_NETWORK && id < big->net_count)
+        {
+                const struct installer_network address_to n = &big->nets[id];
+
+                row->label = n->name;
+                row->bars = n->bars ? n->bars : 1;
+                row->mark = n->joined;
+                row->note = n->joined ? WORDS(installer_wifi_joined) : n->saved ? WORDS(installer_wifi_saved) : null;
+        }
+        else if (installer.step == INSTALLER_STEP_DISK && id < big->drive_count)
         {
                 static char sizes[INSTALLER_DRIVES][24];
-                const struct installer_drive address_to d = &installer.big->drives[id];
+                const struct installer_drive address_to d = &big->drives[id];
 
                 installer_size(d->bytes, sizes[id], sizeof(sizes[id]));
                 row->label = d->model[0] ? d->model : d->name;
@@ -461,32 +613,33 @@ static fn installer_damaged(int top, int bottom)
 
 static b32 installer_act(int which);
 
-// A profile's card: its icon, its title and its line, and its box at the end; off and with the note where the machine is offline.
-static fn installer_card(int k, const char address_to icon, const char address_to title, const char address_to about, unsigned int bit)
+// An app's card: a box the window paints (installer_cards_paint) with its symbol's place, its name and its line, and its check box's place.
+static fn installer_card(int k)
 {
         struct installer_big address_to big = installer.big;
-        struct ui_control address_to card = &big->card[k], address_to mark = &big->icon[k], address_to box = &big->box[k];
 
-        if (!card->kind)
-                card->kind = UI_CARD, ui_control_start(card);
-        if (!mark->kind)
-                mark->kind = UI_AVATAR, mark->variant = 1, ui_control_start(mark);
-        if (!box->kind)
-                box->kind = UI_CHECKBOX, ui_control_start(box);
-        mark->label = icon;
-        box->label = "";
-        box->on = (installer.choice.profiles & bit) != 0 && installer.choice.online;
-        box->disabled = card->disabled = !installer.choice.online;
-        ui_row(.control = card, .class = "panel level gap3")
+        ui_row(.host = &big->card_box[k], .class = "panel.level.gap3", .h = INSTALLER_CARD_H)
         {
-                ui_control(mark, .w = 40, .h = 40);
+                ui_host(&big->icon_box[k], .w = 48, .h = 48);
                 ui_col(.grow = 1, .class = "gap2")
                 {
-                        ui_text(title, .class = "title");
-                        ui_text(about, .class = "quiet");
+                        ui_text(language_text(installer_apps[k].title), .class = "title", .size = 18);
+                        ui_text(installer.choice.online ? language_text(installer_apps[k].about) : WORDS(installer_apps_offline), .class = "quiet");
                 }
-                ui_control(box, .w = 48, .h = 48, .on = installer_act, .arg = 10 + k);
+                ui_host(&big->tick_box[k], .w = 24, .h = 24);
         }
+}
+
+// The cards there are: Steam on x86-64 alone.
+static b32 installer_card_shown(int k)
+{
+        return k != 1 || installer.x86;
+}
+
+// The mode the Disk step's tabs show at an item, and the item a mode is at.
+static int installer_mode_at(int item)
+{
+        return item == 1 ? INSTALLER_UPDATE : item == 2 ? INSTALLER_USE : INSTALLER_OVERWRITE;
 }
 
 static fn installer_layout(void)
@@ -494,29 +647,22 @@ static fn installer_layout(void)
         struct ui address_to ui = &installer.ui;
         struct installer_big address_to big = installer.big;
         struct ui_list address_to l = &big->list;
-        struct ui_trail address_to t = &big->trail;
-        static const unsigned int steps[INSTALLER_TRAIL] = {LANGUAGE_installer_step_language, LANGUAGE_installer_step_keyboard,
-                                                            LANGUAGE_installer_step_network,  LANGUAGE_installer_step_disk,
-                                                            LANGUAGE_installer_step_apps,     LANGUAGE_installer_step_install};
         const char address_to head = null, address_to about = null;
-        b32 rows = false, run = installer.step >= INSTALLER_STEP_RUN;
+        b32 rows = false, run = installer.step >= INSTALLER_STEP_RUN, use = installer.choice.mode == INSTALLER_USE;
 
         if (!l->describe)
                 l->describe = installer_describe, l->damaged = installer_damaged, l->hover = l->down = -1;
         l->count = installer.step == INSTALLER_STEP_LANGUAGE ? (int)INSTALLER_LANGUAGES
                    : installer.step == INSTALLER_STEP_KEYBOARD ? (int)INSTALLER_LAYOUTS
+                   : installer.step == INSTALLER_STEP_NETWORK  ? (big->wifi_on ? big->net_count : 0)
                    : installer.step == INSTALLER_STEP_DISK     ? big->drive_count
                                                                : 0;
         for (int k = 0; k < l->count; k++)
                 l->id[k] = (unsigned short)k;
         l->ids = l->count > 0 ? l->count : 1;
-        l->empty = installer.step == INSTALLER_STEP_DISK ? (installer.listed ? WORDS(installer_disk_none) : WORDS(installer_disk_looking)) : null;
-        for (int k = 0; k < INSTALLER_TRAIL; k++)
-                t->label[k] = language_text(steps[k]);
-        t->count = INSTALLER_TRAIL;
-        t->current = installer.step < INSTALLER_TRAIL ? installer.step : INSTALLER_TRAIL - 1;
-        t->separator = "\xe2\x80\xba";
-        t->hover = -1;
+        l->empty = installer.step == INSTALLER_STEP_DISK      ? (installer.listed ? WORDS(installer_disk_none) : WORDS(installer_disk_looking))
+                   : installer.step == INSTALLER_STEP_NETWORK ? (big->wifi_read ? WORDS(installer_wifi_none) : WORDS(installer_wifi_looking))
+                                                              : null;
 
         switch (installer.step)
         {
@@ -527,7 +673,7 @@ static fn installer_layout(void)
                 head = WORDS(installer_keyboard_head), about = WORDS(installer_keyboard_about), rows = true;
                 break;
         case INSTALLER_STEP_NETWORK:
-                head = WORDS(installer_network_head), about = WORDS(installer_network_about);
+                head = WORDS(installer_network_head), about = WORDS(installer_network_about), rows = big->wifi_on;
                 break;
         case INSTALLER_STEP_DISK:
                 head = WORDS(installer_disk_head), about = WORDS(installer_disk_about), rows = true;
@@ -542,149 +688,160 @@ static fn installer_layout(void)
                 head = WORDS(installer_running);
                 break;
         default:
-                head = WORDS(installer_done_head), about = WORDS(installer_done_about);
+                head = use ? WORDS(installer_use_done_head) : WORDS(installer_done_head);
+                about = use ? WORDS(installer_use_done_about) : WORDS(installer_done_about);
         }
 
         ui_view_begin(&big->view, ui, installer.width, -installer.height);
         ui_col(.class = "inset", .grow = 1)
         {
-                ui_host(&big->trail_box, .h = 36);
-                ui_text(head, .class = "title", .size = 22);
-                if (about)
-                        ui_text(about, .class = "quiet");
-                if (rows)
-                        ui_rows(l, .class = "list", .grow = 1);
-                if (installer.step == INSTALLER_STEP_KEYBOARD)
-                {
-                        if (!big->try_it.kind)
+                ui_host(&big->stepper, .h = 64);
+                ui_row(.class = "middle", .grow = 1)
+                        ui_col(.w = INSTALLER_COLUMN, .class = "gap3")
                         {
-                                big->try_it.kind = UI_INPUT, big->try_it.variant = UI_FIELD_BARE;
-                                ui_control_start(&big->try_it);
-                        }
-                        if (!big->field.doc.selections)
-                        {
-                                ui_field_open(&big->field, &installer.own, "");
-                                big->field.most = 63;
-                                big->field.keeps_vertical = true;
-                                ui_field_focus(&big->field, false);
-                        }
-                        big->try_it.edit = &big->field;
-                        big->try_it.items[0] = WORDS(installer_keyboard_try);
-                        big->try_it.focused = big->field.focused;
-                        ui_control(&big->try_it, .h = 48);
-                }
-                if (installer.step == INSTALLER_STEP_NETWORK)
-                {
-                        if (!big->callout.kind)
-                                big->callout.kind = UI_CALLOUT, ui_control_start(&big->callout);
-                        big->callout.label = installer.choice.online ? WORDS(installer_network_online) : WORDS(installer_network_offline);
-                        big->callout.role = installer.choice.online ? UI_SUCCESS : UI_INFO;
-                        ui_control(&big->callout, .h = 70);
-                        ui_row(.class = "gap3")
-                                ui_button(WORDS(installer_network_wifi), .class = "action.outlined", .on = installer_act, .arg = 3);
-                        ui_col(.grow = 1);
-                }
-                if (installer.step == INSTALLER_STEP_DISK)
-                {
-                        const struct installer_drive address_to d = installer.chosen >= 0 && installer.chosen < big->drive_count ? &big->drives[installer.chosen] : null;
-                        struct ui_control address_to c = &big->modes;
-
-                        if (c->kind != UI_TABS)
-                                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-                        c->items[0] = WORDS(installer_mode_overwrite), c->items[1] = WORDS(installer_mode_update);
-                        c->count = d && d->moonwater ? 2 : 1;
-                        c->at = installer.choice.mode == INSTALLER_UPDATE && c->count == 2 ? 1 : 0;
-                        c->disabled = !d;
-                        ui_control(c, .class = "tabs", .w = 320, .on = installer_act, .arg = 4);
-                        ui_text(c->at ? WORDS(installer_mode_update_about) : WORDS(installer_mode_overwrite_about), .class = "quiet");
-                }
-                if (installer.step == INSTALLER_STEP_APPS)
-                {
-                        ui_col(.class = "gap3", .grow = 1)
-                        {
-                                installer_card(0, "C", WORDS(installer_chrome), WORDS(installer_chrome_about), INSTALLER_CHROME);
-                                if (installer.x86)
-                                        installer_card(1, "S", WORDS(installer_steam), WORDS(installer_steam_about), INSTALLER_STEAM);
-                                installer_card(2, ">_", WORDS(installer_ssh), WORDS(installer_ssh_about), INSTALLER_SSH);
-                        }
-                }
-                if (installer.step == INSTALLER_STEP_REVIEW)
-                {
-                        const struct installer_drive address_to d = installer.chosen >= 0 && installer.chosen < big->drive_count ? &big->drives[installer.chosen] : null;
-                        char size[24];
-
-                        if (d)
-                        {
-                                installer_size(d->bytes, size, sizeof(size));
-                                language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_review_drive), d->model[0] ? d->model : d->name, size, d->name);
-                        }
-                        if (!big->callout.kind)
-                                big->callout.kind = UI_CALLOUT, ui_control_start(&big->callout);
-                        big->callout.label = d ? big->line[0] : "";
-                        string_copy_bounded((string_address)big->callout.text,
-                                            (string_address)(installer.choice.mode == INSTALLER_UPDATE ? WORDS(installer_review_update) : WORDS(installer_review_overwrite)),
-                                            sizeof(big->callout.text));
-                        big->callout.role = installer.choice.mode == INSTALLER_UPDATE ? UI_INFO : UI_WARNING;
-                        ui_control(&big->callout, .h = 76);
-                        language_format(big->line[1], sizeof(big->line[1]), WORDS(installer_review_settings),
-                                        language_name_of(installer.choice.language), installer.choice.keyboard);
-                        ui_text(big->line[1], .class = "quiet");
-                        ui_col(.grow = 1);
-                }
-                if (run)
-                {
-                        if (!big->meter.kind)
-                                big->meter.kind = UI_PROGRESS, ui_control_start(&big->meter);
-                        big->meter.value = installer.step == INSTALLER_STEP_DONE ? UI_ONE
-                                           : installer.at == 0 || !installer.commands ? -1
-                                                                                      : UI_ONE / installer.commands * installer.at;
-                        if (installer.step == INSTALLER_STEP_RUN)
-                        {
-                                language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_running_step), installer.at + 1,
-                                                installer.commands);
-                                ui_text(big->line[0], .class = "quiet");
-                                ui_control(&big->meter, .class = "meter");
-                                if (installer.failed)
+                                ui_text(head, .class = "title", .size = 24);
+                                if (about)
+                                        ui_text(about, .class = "quiet");
+                                if (installer.step == INSTALLER_STEP_NETWORK)
                                 {
-                                        language_format(big->line[1], sizeof(big->line[1]), WORDS(installer_failed), big->last);
-                                        ui_text(big->line[1], .class = "warning");
+                                        if (!big->callout.kind)
+                                                big->callout.kind = UI_CALLOUT, ui_control_start(&big->callout);
+                                        big->callout.label = installer.choice.online ? WORDS(installer_network_online) : WORDS(installer_network_offline);
+                                        big->callout.text[0] = 0;
+                                        big->callout.role = installer.choice.online ? UI_SUCCESS : UI_INFO;
+                                        ui_control(&big->callout, .h = 52);
+                                        if (big->wifi_read && !big->wifi_on)
+                                        {
+                                                ui_text(WORDS(installer_wifi_off), .class = "quiet");
+                                                ui_row(.class = "gap3")
+                                                        ui_button(WORDS(installer_wifi_on), .class = "action.outlined", .on = installer_act, .arg = 3);
+                                        }
                                 }
-                                else
-                                        ui_text(big->last, .class = "quiet");
-                        }
-                        ui_col(.grow = 1);
-                }
-                if (big->note[0])
-                        ui_text(big->note, .class = "warning");
-                ui_row(.class = "foot")
-                {
-                        b32 back = installer.step > INSTALLER_STEP_LANGUAGE && (installer.step <= INSTALLER_STEP_REVIEW || installer.failed);
+                                if (rows)
+                                        ui_rows(l, .class = "list", .grow = 1);
+                                if (installer.step == INSTALLER_STEP_NETWORK && big->net_chosen >= 0)
+                                {
+                                        if (!big->pass_c.kind)
+                                                big->pass_c.kind = UI_INPUT, big->pass_c.variant = UI_FIELD_BARE, ui_control_start(&big->pass_c);
+                                        language_format(big->line[2], sizeof(big->line[2]), WORDS(installer_wifi_password), big->nets[big->net_chosen].name);
+                                        big->pass_c.edit = &big->pass, big->pass_c.items[0] = big->line[2], big->pass_c.focused = big->pass.focused;
+                                        ui_row(.class = "gap3.level")
+                                        {
+                                                ui_control(&big->pass_c, .h = 48, .grow = 1, .host = &big->pass_box);
+                                                ui_button(WORDS(installer_wifi_join), .class = "action.primary", .on = installer_act, .arg = 6);
+                                        }
+                                }
+                                if (installer.step == INSTALLER_STEP_KEYBOARD)
+                                {
+                                        if (!big->try_it.kind)
+                                                big->try_it.kind = UI_INPUT, big->try_it.variant = UI_FIELD_BARE, ui_control_start(&big->try_it);
+                                        if (!big->field.doc.selections)
+                                        {
+                                                ui_field_open(&big->field, &installer.own, "");
+                                                big->field.most = 63;
+                                                big->field.keeps_vertical = true;
+                                                ui_field_focus(&big->field, false);
+                                        }
+                                        big->try_it.edit = &big->field;
+                                        big->try_it.items[0] = WORDS(installer_keyboard_try);
+                                        big->try_it.focused = big->field.focused;
+                                        ui_control(&big->try_it, .h = 48, .host = &big->field_box);
+                                }
+                                if (installer.step == INSTALLER_STEP_DISK)
+                                {
+                                        const struct installer_drive address_to d = installer.chosen >= 0 && installer.chosen < big->drive_count ? &big->drives[installer.chosen] : null;
+                                        struct ui_control address_to c = &big->modes;
 
-                        if (back)
-                                ui_button(WORDS(installer_back), .class = "action.ghost", .on = installer_act, .arg = 0);
-                        if (installer.step < INSTALLER_STEP_REVIEW)
-                                ui_button(installer.step == INSTALLER_STEP_NETWORK && !installer.choice.online ? WORDS(installer_skip) : WORDS(installer_next),
-                                          .class = "action.primary", .on = installer_act, .arg = 1);
-                        else if (installer.step == INSTALLER_STEP_REVIEW)
-                        {
-                                language_format(big->says, sizeof(big->says), WORDS(installer_erase_again), installer.choice.drive);
-                                ui_button(WORDS(installer_install), .class = "action.primary", .on = installer_act, .arg = 2,
-                                          .says = installer.choice.mode == INSTALLER_OVERWRITE ? big->says : null);
+                                        if (c->kind != UI_TABS)
+                                                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
+                                        c->items[0] = WORDS(installer_mode_overwrite), c->items[1] = WORDS(installer_mode_update), c->items[2] = WORDS(installer_mode_use);
+                                        c->count = d && d->moonwater ? 3 : 1;
+                                        c->at = c->count == 3 ? (installer.choice.mode == INSTALLER_UPDATE ? 1 : installer.choice.mode == INSTALLER_USE ? 2 : 0) : 0;
+                                        c->disabled = !d;
+                                        ui_control(c, .class = "tabs", .w = 420, .on = installer_act, .arg = 4);
+                                        ui_text(c->at == 1 ? WORDS(installer_mode_update_about) : c->at == 2 ? WORDS(installer_mode_use_about) : WORDS(installer_mode_overwrite_about),
+                                                .class = "quiet");
+                                }
+                                if (installer.step == INSTALLER_STEP_APPS)
+                                        for (int k = 0; k < 3; k++)
+                                                if (installer_card_shown(k))
+                                                        installer_card(k);
+                                if (installer.step == INSTALLER_STEP_REVIEW)
+                                {
+                                        const struct installer_drive address_to d = installer.chosen >= 0 && installer.chosen < big->drive_count ? &big->drives[installer.chosen] : null;
+                                        char size[24];
+
+                                        if (d)
+                                        {
+                                                installer_size(d->bytes, size, sizeof(size));
+                                                language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_review_drive), d->model[0] ? d->model : d->name, size, d->name);
+                                        }
+                                        if (!big->callout.kind)
+                                                big->callout.kind = UI_CALLOUT, ui_control_start(&big->callout);
+                                        big->callout.label = d ? big->line[0] : "";
+                                        string_copy_bounded((string_address)big->callout.text,
+                                                            (string_address)(installer.choice.mode == INSTALLER_UPDATE ? WORDS(installer_review_update)
+                                                                             : use                                    ? WORDS(installer_review_use)
+                                                                                                                      : WORDS(installer_review_overwrite)),
+                                                            sizeof(big->callout.text));
+                                        big->callout.role = installer.choice.mode == INSTALLER_OVERWRITE ? UI_WARNING : UI_INFO;
+                                        ui_control(&big->callout, .h = 76);
+                                        language_format(big->line[1], sizeof(big->line[1]), WORDS(installer_review_settings),
+                                                        language_name_of(installer.choice.language), installer.choice.keyboard);
+                                        ui_text(big->line[1], .class = "quiet");
+                                }
+                                if (run)
+                                {
+                                        if (!big->meter.kind)
+                                                big->meter.kind = UI_PROGRESS, ui_control_start(&big->meter);
+                                        big->meter.value = installer.step == INSTALLER_STEP_DONE ? UI_ONE
+                                                           : installer.at == 0 || !installer.commands ? -1
+                                                                                                      : UI_ONE / installer.commands * installer.at;
+                                        if (installer.step == INSTALLER_STEP_RUN)
+                                        {
+                                                language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_running_step), installer.at + 1,
+                                                                installer.commands);
+                                                ui_text(big->line[0], .class = "quiet");
+                                                ui_control(&big->meter, .class = "meter");
+                                                if (installer.failed)
+                                                {
+                                                        language_format(big->line[1], sizeof(big->line[1]), WORDS(installer_failed), big->last);
+                                                        ui_text(big->line[1], .class = "warning");
+                                                }
+                                                else
+                                                        ui_text(big->last, .class = "quiet");
+                                        }
+                                }
+                                if (big->note[0])
+                                        ui_text(big->note, .class = "warning");
+                                if (!rows)
+                                        ui_col(.grow = 1);
+                                ui_row(.class = "foot")
+                                {
+                                        b32 back = installer.step > INSTALLER_STEP_LANGUAGE && (installer.step <= INSTALLER_STEP_REVIEW || installer.failed);
+
+                                        if (back)
+                                                ui_button(WORDS(installer_back), .class = "action.ghost", .on = installer_act, .arg = 0);
+                                        if (installer.step < INSTALLER_STEP_REVIEW)
+                                                ui_button(installer.step == INSTALLER_STEP_NETWORK && !installer.choice.online ? WORDS(installer_skip) : WORDS(installer_next),
+                                                          .class = "action.primary", .on = installer_act, .arg = 1);
+                                        else if (installer.step == INSTALLER_STEP_REVIEW)
+                                        {
+                                                language_format(big->says, sizeof(big->says), WORDS(installer_erase_again), installer.choice.drive);
+                                                ui_button(use ? WORDS(installer_use) : WORDS(installer_install), .class = "action.primary", .on = installer_act, .arg = 2,
+                                                          .says = installer.choice.mode == INSTALLER_OVERWRITE ? big->says : null);
+                                        }
+                                        else if (installer.step == INSTALLER_STEP_DONE && !use)
+                                                ui_button(WORDS(installer_reboot), .class = "action.primary", .on = installer_act, .arg = 5);
+                                }
                         }
-                        else if (installer.step == INSTALLER_STEP_DONE)
-                                ui_button(WORDS(installer_reboot), .class = "action.primary", .on = installer_act, .arg = 5);
-                }
         }
         ui_view_end(&big->view);
-        t->x = big->trail_box.x, t->y = big->trail_box.y, t->w = big->trail_box.w, t->h = big->trail_box.h;
-        ui_trail_layout(ui, t);
 }
 
-// A button or a control of the view acted: Back (0), Next (1), Install (2), Wi-Fi (3), the mode (4), Restart (5), a card's box (10 on).
+// A button or a control of the view acted: Back (0), Next (1), Install (2), Wi-Fi on (3), the mode (4), Restart (5), Join (6), a card (10 on).
 static b32 installer_act(int which)
 {
-        string_address face = installer_app.font ? installer_app.font : (string_address)UI_FONT_REGULAR;
-
         switch (which)
         {
         case 0:
@@ -702,13 +859,13 @@ static b32 installer_act(int which)
                 break;
         case 3:
         {
-                string_address words[4] = {(string_address) "/settings", (string_address) "-f", face, null};
+                string_address words[4] = {installer.moonwater, (string_address) "wifi", (string_address) "on", null};
 
-                (void)ui_start_apart(words, 3);
+                installer_start(words, 3, INSTALLER_JOB_JOIN, null);
                 break;
         }
         case 4:
-                installer.choice.mode = installer.big->modes.at == 1 ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
+                installer.choice.mode = installer_mode_at(installer.big->modes.at);
                 break;
         case 5:
         {
@@ -717,37 +874,271 @@ static b32 installer_act(int which)
                 (void)ui_start_apart(words, 3);
                 break;
         }
+        case 6:
+                installer_join();
+                break;
         default:
                 if (which >= 10 && which < 13)
-                        installer_toggle(which == 10 ? INSTALLER_CHROME : which == 11 ? INSTALLER_STEAM : INSTALLER_SSH);
+                        installer_toggle(installer_apps[which - 10].bit);
         }
         installer.dirty = true;
         return true;
 }
 
+/* ---- the window's own pieces: the stepper, the cards and their boxes, a field's well ---- */
+
+// A box of the window, logical pixels from a rectangle in device pixels, in the kit's 256ths.
+static struct ui_box installer_box(struct ui_rect r, int radius)
+{
+        return (struct ui_box){r.x * 256, r.y * 256, (r.x + r.w) * 256, (r.y + r.h) * 256, radius * 256, radius * 256};
+}
+
+// A check mark in a box of side size at x, y (device pixels): its strokes as far as share (Q30) of their length.
+static fn installer_checkmark(struct ui address_to ui, int x, int y, int size, b64 share, unsigned int argb)
+{
+        b32 ax = (x * 256) + size * 256 * 27 / 100, ay = y * 256 + size * 256 * 52 / 100;
+        b32 bx = (x * 256) + size * 256 * 43 / 100, by = y * 256 + size * 256 * 68 / 100;
+        b32 cx = (x * 256) + size * 256 * 75 / 100, cy = y * 256 + size * 256 * 34 / 100;
+        b32 thick = ui_q8(ui, 2);
+        b64 first = share * 2 > UI_ONE ? UI_ONE : share * 2, second = share * 2 > UI_ONE ? share * 2 - UI_ONE : 0;
+
+        if (first <= 0)
+                return;
+        ui_chevron_stroke(ui, ax, ay, ax + (b32)ui_qmul(first, bx - ax), ay + (b32)ui_qmul(first, by - ay), thick, argb);
+        if (second > 0)
+                ui_chevron_stroke(ui, bx, by, bx + (b32)ui_qmul(second, cx - bx), by + (b32)ui_qmul(second, cy - by), thick, argb);
+}
+
+/*
+        The stepper: a circle a step across the top, a line between each two; a step done is the accent filled with a check in the ink
+        on it, the step it is at the accent's ring with its number in the accent and its name in the ink, a step to come a ring and its
+        number in the quiet ink. The names are under the circles.
+*/
+static fn installer_stepper(struct ui address_to ui)
+{
+        static const unsigned int steps[INSTALLER_STEPS] = {LANGUAGE_installer_step_language, LANGUAGE_installer_step_keyboard,
+                                                            LANGUAGE_installer_step_network,  LANGUAGE_installer_step_disk,
+                                                            LANGUAGE_installer_step_apps,     LANGUAGE_installer_step_install};
+        struct ui_rect r = installer.big->stepper;
+        int current = installer.step < INSTALLER_STEPS ? installer.step : INSTALLER_STEPS - 1, d = ui_dev(ui, 26);
+        int left = r.x + (r.w - ui_dev(ui, INSTALLER_COLUMN)) / 2, wide = ui_dev(ui, INSTALLER_COLUMN);
+        unsigned int accent = ui_role(UI_PRIMARY), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), strong = ui_text_colour(ui, UI_ON_SURFACE);
+        unsigned int line = ui_role(UI_OUTLINE_VARIANT);
+
+        if (left < r.x)
+                left = r.x, wide = r.w;
+        if (installer.step == INSTALLER_STEP_DONE)
+                current = INSTALLER_STEPS;
+        for (int k = 0; k < INSTALLER_STEPS; k++)
+        {
+                int cx = left + wide * (2 * k + 1) / (2 * INSTALLER_STEPS), top = r.y + ui_dev(ui, 4), nx = left + wide * (2 * k + 3) / (2 * INSTALLER_STEPS);
+                struct ui_box circle = {(cx - d / 2) * 256, top * 256, (cx - d / 2 + d) * 256, (top + d) * 256, d * 128, d * 128};
+                const char address_to name = language_text(steps[k]);
+                int baseline = ui_kit_baseline(ui, top + d + ui_dev(ui, 6), UI_LABEL_MEDIUM), width = ui_kit_measure(ui, (string_address)name, UI_LABEL_MEDIUM);
+                char number[4] = {(char)('1' + k), 0, 0, 0};
+
+                if (k + 1 < INSTALLER_STEPS)
+                        ui_kit_fill(ui, &(struct ui_box){(cx + d / 2 + ui_dev(ui, 6)) * 256, (top + d / 2) * 256 - 128, (nx - d / 2 - ui_dev(ui, 6)) * 256,
+                                                        (top + d / 2) * 256 + 128 + (ui_dev(ui, 1) - 1) * 256, 0, 0},
+                                    k < current ? accent : line, null);
+                if (k < current)
+                {
+                        ui_kit_fill(ui, &circle, accent, null);
+                        installer_checkmark(ui, cx - d / 2, top, d, UI_ONE, ui_role(UI_ON_PRIMARY));
+                }
+                else
+                {
+                        int nw = ui_kit_measure(ui, (string_address)number, UI_LABEL_LARGE);
+
+                        ui_kit_ring(ui, &circle, ui_q8(ui, 2), k == current ? accent : line);
+                        ui_kit_text_clip(ui, cx - nw / 2, ui_kit_baseline(ui, top + (d - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE), (string_address)number, UI_LABEL_LARGE,
+                                         k == current ? accent : quiet, 0, ui->width);
+                }
+                ui_kit_text_clip(ui, cx - width / 2, baseline, (string_address)name, UI_LABEL_MEDIUM, k == current ? accent : k < current ? strong : quiet, 0,
+                                 ui->width);
+        }
+}
+
+// A field's well: a box with a hairline, the accent's ring of two when it has the keys.
+static fn installer_well(struct ui address_to ui, struct ui_rect r, b32 focused)
+{
+        struct ui_box box = installer_box(r, ui_dev(ui, 10));
+
+        if (r.w <= 0)
+                return;
+        ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOWEST), null);
+        ui_kit_ring(ui, &box, ui_q8(ui, focused ? 2 : 1), focused ? ui_role(UI_PRIMARY) : ui_role(UI_OUTLINE_VARIANT));
+}
+
+// The cards' grounds, under the view's words: the surface, and the state layer of the hover and the press, which the kit's motion moves.
+static fn installer_cards_ground(struct ui address_to ui)
+{
+        struct installer_big address_to big = installer.big;
+
+        for (int k = 0; k < 3; k++)
+        {
+                b32 on = (installer.choice.profiles & installer_apps[k].bit) && installer.choice.online;
+                struct ui_box box = installer_box(big->card_box[k], ui_dev(ui, 18));
+                b64 hover, press;
+                unsigned int layer;
+
+                if (!installer_card_shown(k) || big->card_box[k].w <= 0)
+                        continue;
+                ui_kit_number_to(&big->card_hover[k], big->hover_card == k && installer.choice.online ? UI_ONE : 0, 200, &ui_ease);
+                ui_kit_number_to(&big->card_press[k], big->press_card == k && installer.choice.online ? UI_ONE : 0, 150, &ui_ease);
+                ui_kit_number_to(&big->card_on[k], on ? UI_ONE : 0, 220, &ui_ease);
+                hover = ui_kit_tween(&big->card_hover[k]), press = ui_kit_tween(&big->card_press[k]);
+                ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOWEST), null);
+                // The ink at 6 hundredths over a card hovered and 10 over one pressed, as a list row's layer.
+                layer = (unsigned int)((ui_qmul(hover, UI_Q2(6)) + ui_qmul(press, UI_Q2(4))) * 255 / UI_ONE);
+                if (layer)
+                        ui_kit_fill(ui, &box, (ui_role(UI_ON_SURFACE) & 0xffffffu) | layer << 24, null);
+        }
+}
+
+// What is over the cards' words: the symbol on its tile, the box and its check, the accent's ring of a card chosen, the keys' ring and the veil of a card that cannot be chosen.
+static fn installer_cards_over(struct ui address_to ui)
+{
+        struct installer_big address_to big = installer.big;
+
+        for (int k = 0; k < 3; k++)
+        {
+                struct ui_rect t = big->tick_box[k], i = big->icon_box[k];
+                struct ui_box box = installer_box(big->card_box[k], ui_dev(ui, 18)), tick = installer_box(t, ui_dev(ui, 7)), tile = installer_box(i, ui_dev(ui, 12));
+                b64 share = ui_kit_tween(&big->card_on[k]);
+                unsigned int accent = ui_role(UI_PRIMARY), alpha = (unsigned int)(share * 255 / UI_ONE);
+
+                if (!installer_card_shown(k) || big->card_box[k].w <= 0)
+                        continue;
+                ui_kit_fill(ui, &tile, ui_role(UI_PRIMARY_CONTAINER), null);
+                ui_icon(ui, installer_apps[k].icon, i.x + i.w / 6, i.y + i.h / 6, i.w * 2 / 3, 0, ui_role(UI_ON_PRIMARY_CONTAINER));
+                // The box: its outline off, filled in the accent on, the fill and the check moving in with the kit's ease.
+                ui_kit_ring(ui, &tick, ui_q8(ui, 2), share >= UI_ONE ? accent : ui_role(UI_OUTLINE));
+                if (alpha)
+                {
+                        ui_kit_fill(ui, &tick, (accent & 0xffffffu) | alpha << 24, null);
+                        installer_checkmark(ui, t.x, t.y, t.w, share, ui_role(UI_ON_PRIMARY));
+                }
+                if (alpha)
+                        ui_kit_ring(ui, &box, ui_q8(ui, 2), (accent & 0xffffffu) | alpha << 24);
+                else
+                        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+                if (k == big->focus_card && installer.focused && !installer.big->view.group.keys)
+                {
+                        struct ui_box ring = {box.x0 - ui_q8(ui, 3), box.y0 - ui_q8(ui, 3), box.x1 + ui_q8(ui, 3), box.y1 + ui_q8(ui, 3), box.rx + ui_q8(ui, 3),
+                                              box.ry + ui_q8(ui, 3)};
+
+                        ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_ON_SURFACE));
+                }
+                if (!installer.choice.online)
+                        ui_kit_fill(ui, &box, (ui_role(UI_SURFACE) & 0xffffffu) | 0x8c000000u, null);
+        }
+}
+
 static fn installer_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &installer.ui;
-        struct ui_list address_to l = &installer.big->list;
+        struct installer_big address_to big = installer.big;
+        struct ui_list address_to l = &big->list;
 
         ui_begin(ui, pixels, installer.own.table ? installer.own.table->stride : (unsigned long)installer.width, installer.width, installer.height);
+        memory_zero(big->card_box, sizeof(big->card_box));
+        big->field_box.w = big->pass_box.w = 0;
         installer_layout();
-        l->lit = l->focus >= 0, l->keys = installer.focused && !installer.big->view.group.keys && !installer.big->field.focused;
-        ui_view_draw(ui, &installer.big->view, installer.focused);
-        ui_trail_draw(ui, &installer.big->trail);
+        l->lit = l->focus >= 0, l->keys = installer.focused && !big->view.group.keys && !big->field.focused && !big->pass.focused;
+        if (installer.step == INSTALLER_STEP_APPS)
+                installer_cards_ground(ui);
         if (installer.step == INSTALLER_STEP_KEYBOARD)
-                ui_text_overlay(ui, &installer.big->field);
+                installer_well(ui, big->field_box, big->field.focused);
+        if (installer.step == INSTALLER_STEP_NETWORK && big->net_chosen >= 0)
+                installer_well(ui, big->pass_box, big->pass.focused);
+        ui_view_draw(ui, &big->view, installer.focused);
+        installer_stepper(ui);
+        if (installer.step == INSTALLER_STEP_APPS)
+                installer_cards_over(ui);
+        if (installer.step == INSTALLER_STEP_KEYBOARD)
+                ui_text_overlay(ui, &big->field);
+        if (installer.step == INSTALLER_STEP_NETWORK && big->net_chosen >= 0)
+                ui_text_overlay(ui, &big->pass);
 }
 
-// A row of the step's list chosen: a language, a layout or a drive.
+// A row of the step's list chosen: a language, a layout, a network or a drive.
 static fn installer_pick(int row)
 {
         if (installer.step == INSTALLER_STEP_LANGUAGE)
                 installer_pick_language(row);
         else if (installer.step == INSTALLER_STEP_KEYBOARD)
                 installer_pick_layout(row);
+        else if (installer.step == INSTALLER_STEP_NETWORK)
+                installer_pick_network(row);
         else if (installer.step == INSTALLER_STEP_DISK)
                 installer_choose_drive(row);
+}
+
+// The card a point of the window is on, or -1.
+static int installer_card_at(int x, int y)
+{
+        for (int k = 0; k < 3; k++)
+        {
+                struct ui_rect r = installer.big->card_box[k];
+
+                if (installer_card_shown(k) && r.w > 0 && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                        return k;
+        }
+        return -1;
+}
+
+// The cards' own events: the pointer's hover, a press and its release on the same card (which chooses it), and the keys among them.
+static b32 installer_cards_event(const struct window_event address_to event)
+{
+        struct installer_big address_to big = installer.big;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int at;
+
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                at = installer_card_at(event->a, event->b);
+                if (at != big->hover_card)
+                        big->hover_card = at, installer.dirty = true;
+                if (at >= 0)
+                        ui_kit_shape = WINDOW_POINTER_HAND;
+                return false;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
+        {
+                at = installer_card_at(ui_kit.pointer_x, ui_kit.pointer_y);
+                if (down)
+                {
+                        big->press_card = at, installer.dirty = true;
+                        if (at >= 0)
+                                big->focus_card = at;
+                        return at >= 0;
+                }
+                if (big->press_card >= 0 && at == big->press_card && !(event->flags & WINDOW_KEY_CANCEL))
+                        installer_toggle(installer_apps[at].bit);
+                at = big->press_card, big->press_card = -1, installer.dirty = true;
+                return at >= 0;
+        }
+        if (event->type == WINDOW_EVENT_KEY && down && !big->view.group.keys)
+        {
+                int step = event->a == UI_KEY_DOWN ? 1 : event->a == UI_KEY_UP ? -1 : 0;
+
+                if (step)
+                {
+                        at = big->focus_card < 0 ? 0 : big->focus_card;
+                        do
+                                at = (at + step + 3) % 3;
+                        while (!installer_card_shown(at));
+                        big->focus_card = at, installer.dirty = true;
+                        return true;
+                }
+                if (event->a == 57 /* Space */ && big->focus_card >= 0)
+                {
+                        installer_toggle(installer_apps[big->focus_card].bit);
+                        return true;
+                }
+        }
+        return false;
 }
 
 static b32 installer_event_take(const struct window_event address_to event)
@@ -756,27 +1147,32 @@ static b32 installer_event_take(const struct window_event address_to event)
         struct installer_big address_to big = installer.big;
         struct ui_list address_to l = &big->list;
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        struct ui_text address_to field = installer.step == INSTALLER_STEP_KEYBOARD                           ? &big->field
+                                          : installer.step == INSTALLER_STEP_NETWORK && big->net_chosen >= 0 ? &big->pass
+                                                                                                             : null;
         p32 asks;
         int row;
 
         installer_layout();
-        // The try-it field has the keys once it is pressed, and gives them back on Escape or a press off it.
-        if (installer.step == INSTALLER_STEP_KEYBOARD && big->field.doc.selections)
+        // A field has the keys once it is pressed, and gives them back on Escape or a press off it; Enter in the passphrase joins.
+        if (field && field->doc.selections)
         {
                 if (event->type == WINDOW_EVENT_BUTTON && down)
-                        ui_field_focus(&big->field, ui_text_inside(&big->field, ui_kit.pointer_x, ui_kit.pointer_y));
-                asks = event->type != WINDOW_EVENT_KEY || big->field.focused
-                           ? ui_field_event(ui, &big->field, null, event, ui_kit.pointer_x, ui_kit.pointer_y)
-                           : 0;
+                        ui_field_focus(field, ui_text_inside(field, ui_kit.pointer_x, ui_kit.pointer_y));
+                asks = event->type != WINDOW_EVENT_KEY || field->focused ? ui_field_event(ui, field, null, event, ui_kit.pointer_x, ui_kit.pointer_y) : 0;
                 if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
                         asks = 0;
+                if ((asks & UI_TEXT_SUBMIT) && field == &big->pass)
+                        installer_join();
                 if (asks & (UI_TEXT_CANCEL | UI_TEXT_SUBMIT))
-                        ui_field_focus(&big->field, false);
+                        ui_field_focus(field, false);
                 if (asks)
                         return installer.dirty = true;
         }
         if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE && installer.step != INSTALLER_STEP_RUN)
                 return false;
+        if (installer.step == INSTALLER_STEP_APPS && installer_cards_event(event))
+                return true;
         asks = ui_view_event(ui, &big->view, event);
         if (asks & UI_VIEW_QUIT)
                 return false;
@@ -796,7 +1192,7 @@ static b32 installer_event_take(const struct window_event address_to event)
                 }
                 if (ui_list_key(ui, l, (int)event->a, &moved))
                 {
-                        if (moved)
+                        if (moved && installer.step != INSTALLER_STEP_NETWORK)
                                 installer_pick(l->focus);
                         installer.dirty = true;
                 }
@@ -843,6 +1239,9 @@ static b32 installer_online(void)
 static long installer_tick(long timeout, long address_to other)
 {
         b64 now = (b64)ui_kit.now, wait;
+        struct ui_text address_to field = installer.step == INSTALLER_STEP_KEYBOARD ? &installer.big->field
+                                          : installer.step == INSTALLER_STEP_NETWORK ? &installer.big->pass
+                                                                                     : null;
 
         if (installer.output >= 0)
         {
@@ -850,11 +1249,11 @@ static long installer_tick(long timeout, long address_to other)
                 if (installer.output >= 0)
                         *other = installer.output;
         }
-        if (installer.step == INSTALLER_STEP_KEYBOARD && installer.big->field.focused)
+        if (field && field->focused)
         {
                 b32 redraw = false;
 
-                timeout = ui_text_timeout(&installer.ui, &installer.big->field, timeout, &redraw);
+                timeout = ui_text_timeout(&installer.ui, field, timeout, &redraw);
                 installer.dirty |= redraw;
         }
         if (now >= installer.next_look)
@@ -865,7 +1264,12 @@ static long installer_tick(long timeout, long address_to other)
                 installer.dirty |= was != installer.choice.online;
                 installer.next_look = now + INSTALLER_LOOK_NS;
         }
-        wait = installer.next_look - now;
+        if (installer.step == INSTALLER_STEP_NETWORK && now >= installer.next_wifi && installer.output < 0)
+        {
+                installer_wifi();
+                installer.next_wifi = now + INSTALLER_WIFI_NS;
+        }
+        wait = (installer.step == INSTALLER_STEP_NETWORK && installer.next_wifi < installer.next_look ? installer.next_wifi : installer.next_look) - now;
         if (installer.output >= 0 && wait > 100000000ll)
                 wait = 100000000ll;
         return timeout < 0 || (b64)timeout > wait ? (long)(wait > 0 ? wait : 1) : timeout;
@@ -912,6 +1316,8 @@ static fn installer_begin(void)
 #else
         installer.x86 = 0;
 #endif
+        installer.big->hover_card = installer.big->press_card = installer.big->focus_card = -1;
+        installer.big->net_chosen = -1;
         installer_settings();
         installer_go(INSTALLER_STEP_LANGUAGE);
 }
@@ -960,6 +1366,7 @@ static b32 installer_main()
 {
         memory_zero(&installer, sizeof(installer));
         installer.moonwater = (string_address) "/moonwater";
+        installer.output = -1;
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took)
         {
                 string_address value;

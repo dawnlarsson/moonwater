@@ -84,11 +84,12 @@ installer_mode_overwrite	0e92	بازنویسی
 installer_mode_overwrite_about	550e	کل دیسک را پاک می‌کند و Moonwater را از نو نصب می‌کند.
 installer_mode_update	0e94	به‌روزرسانی
 installer_mode_update_about	c729	پرونده‌ها، برنامه‌ها و تنظیمات شما را نگه می‌دارد و پرونده‌های سیستم و راه‌اندازی را جایگزین می‌کند.
+installer_mode_use	5c94	استفاده
+installer_mode_use_about	08a1	این نسخه را با پرونده‌ها و تنظیمات دیسک اجرا می‌کند و چیزی روی آن نمی‌نویسد.
 installer_network_about	2425	برنامه‌ها به آن نیاز دارند. می‌توانید رد شوید و بعداً آن‌ها را بیفزایید.
 installer_network_head	274e	اتصال به اینترنت
-installer_network_offline	2071	وصل نیست. کابل وصل کنید یا در تنظیمات به Wi-Fi بپیوندید.
+installer_network_offline	c2e1	وصل نیست. کابل وصل کنید یا به یکی از شبکه‌های Wi-Fi زیر بپیوندید.
 installer_network_online	a9cb	به اینترنت وصل است
-installer_network_wifi	c1be	تنظیمات Wi-Fi
 installer_next	da08	بعدی
 installer_reboot	ed8c	راه‌اندازی دوباره
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -96,6 +97,7 @@ installer_review_head	2296	آماده نصب
 installer_review_overwrite	34ed	همه چیز روی این دیسک پاک می‌شود.
 installer_review_settings	482f	زبان %1$s، صفحه‌کلید %2$s
 installer_review_update	87a0	Moonwater روی این دیسک به‌روز می‌شود. داده‌ها و تنظیمات شما می‌مانند.
+installer_review_use	5a47	داده‌های این دیسک همان‌طور که هست استفاده می‌شود. چیزی روی آن نوشته نمی‌شود.
 installer_running	f7a4	در حال نصب Moonwater
 installer_running_step	4adb	گام %1$d از %2$d
 installer_skip	c7e2	رد شدن
@@ -109,7 +111,18 @@ installer_step_install	bd40	نصب
 installer_step_keyboard	a714	صفحه‌کلید
 installer_step_language	db9b	زبان
 installer_step_network	ad65	شبکه
+installer_use	9ba0	استفاده از این دیسک
+installer_use_done_about	5aab	پرونده‌ها و تنظیمات شما روی این دیسک از این پس تا خاموشی نگه داشته می‌شود.
+installer_use_done_head	c26d	داده‌های این دیسک در حال استفاده است
 installer_virtual	757b	نصب را با صفحه‌کلید، ماوس یا صفحه خود این دستگاه فشار دهید.
+installer_wifi_join	5399	پیوستن
+installer_wifi_joined	9370	وصل است
+installer_wifi_looking	60d2	در جست‌وجوی شبکه‌های Wi-Fi
+installer_wifi_none	1d7b	هیچ شبکه Wi-Fi در دسترس نیست
+installer_wifi_off	a42c	Wi-Fi خاموش است.
+installer_wifi_on	0c01	روشن کردن Wi-Fi
+installer_wifi_password	ca99	گذرواژه برای %s
+installer_wifi_saved	79e4	ذخیره‌شده
 launcher_log_out	d8b5	خروج
 launcher_log_out_armed	8615	خروج
 launcher_power_off	ae2f	خاموش کردن
@@ -378,6 +391,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Discover now	398a	اکنون کشف کن
 =Discovery	2db5	کشف
 =Files	1b30	پرونده‌ها
+=Install Moonwater	06fc	نصب Moonwater
 =Internal storage	e961	حافظهٔ داخلی
 =External devices	5769	دستگاه‌های خارجی
 =Display	d9b5	نمایشگر

@@ -84,11 +84,12 @@ installer_mode_overwrite	0e92	اوپر لکھیں
 installer_mode_overwrite_about	550e	پوری ڈرائیو مٹا کر Moonwater نئے سرے سے انسٹال کرتا ہے۔
 installer_mode_update	0e94	اپ ڈیٹ
 installer_mode_update_about	c729	آپ کی فائلیں، ایپس اور ترتیبات رکھتا ہے، اور سسٹم اور بوٹ فائلیں بدلتا ہے۔
+installer_mode_use	5c94	استعمال کریں
+installer_mode_use_about	08a1	یہ ورژن ڈرائیو کی فائلوں اور ترتیبات کے ساتھ چلاتا ہے، اور اس پر کچھ نہیں لکھتا۔
 installer_network_about	2425	ایپس کو اس کی ضرورت ہے۔ آپ اسے چھوڑ کر بعد میں انہیں شامل کر سکتے ہیں۔
 installer_network_head	274e	انٹرنیٹ سے جڑیں
-installer_network_offline	2071	جڑا نہیں۔ کیبل لگائیں، یا ترتیبات میں Wi-Fi سے جڑیں۔
+installer_network_offline	c2e1	جڑا نہیں۔ کیبل لگائیں، یا نیچے کسی Wi-Fi نیٹ ورک سے جڑیں۔
 installer_network_online	a9cb	انٹرنیٹ سے جڑا ہوا
-installer_network_wifi	c1be	Wi-Fi ترتیبات
 installer_next	da08	اگلا
 installer_reboot	ed8c	دوبارہ شروع کریں
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -96,6 +97,7 @@ installer_review_head	2296	انسٹال کے لیے تیار
 installer_review_overwrite	34ed	اس ڈرائیو پر سب کچھ مٹ جاتا ہے۔
 installer_review_settings	482f	زبان %1$s، کی بورڈ %2$s
 installer_review_update	87a0	اس ڈرائیو پر Moonwater اپ ڈیٹ ہوتا ہے۔ آپ کا ڈیٹا اور ترتیبات رہتی ہیں۔
+installer_review_use	5a47	اس ڈرائیو کا ڈیٹا جیسا ہے ویسا استعمال ہوتا ہے۔ اس پر کچھ نہیں لکھا جاتا۔
 installer_running	f7a4	Moonwater انسٹال ہو رہا ہے
 installer_running_step	4adb	مرحلہ %1$d از %2$d
 installer_skip	c7e2	چھوڑیں
@@ -109,7 +111,18 @@ installer_step_install	bd40	انسٹال
 installer_step_keyboard	a714	کی بورڈ
 installer_step_language	db9b	زبان
 installer_step_network	ad65	نیٹ ورک
+installer_use	9ba0	یہ ڈرائیو استعمال کریں
+installer_use_done_about	5aab	اس ڈرائیو پر آپ کی فائلیں اور ترتیبات اب سے بند ہونے تک رکھی جاتی ہیں۔
+installer_use_done_head	c26d	اس ڈرائیو کا ڈیٹا استعمال میں ہے
 installer_virtual	757b	انسٹال کو اس مشین کے اپنے کی بورڈ، ماؤس یا اسکرین سے دبائیں۔
+installer_wifi_join	5399	جڑیں
+installer_wifi_joined	9370	جڑا ہوا
+installer_wifi_looking	60d2	Wi-Fi نیٹ ورکس تلاش ہو رہے ہیں
+installer_wifi_none	1d7b	رینج میں کوئی Wi-Fi نیٹ ورک نہیں
+installer_wifi_off	a42c	Wi-Fi بند ہے۔
+installer_wifi_on	0c01	Wi-Fi آن کریں
+installer_wifi_password	ca99	%s کا پاس ورڈ
+installer_wifi_saved	79e4	محفوظ
 launcher_log_out	d8b5	لاگ آؤٹ
 launcher_log_out_armed	8615	لاگ آؤٹ
 launcher_power_off	ae2f	بند کریں
@@ -378,6 +391,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Discover now	398a	ابھی دریافت کریں
 =Discovery	2db5	دریافت
 =Files	1b30	فائلیں
+=Install Moonwater	06fc	Moonwater انسٹال کریں
 =Internal storage	e961	اندرونی اسٹوریج
 =External devices	5769	بیرونی ڈیوائسز
 =Display	d9b5	اسکرین

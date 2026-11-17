@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Αντικατάσταση
 installer_mode_overwrite_about	550e	Διαγράφει όλο τον δίσκο και εγκαθιστά το Moonwater από την αρχή.
 installer_mode_update	0e94	Ενημέρωση
 installer_mode_update_about	c729	Κρατά τα αρχεία, τις εφαρμογές και τις ρυθμίσεις σας και αντικαθιστά τα αρχεία συστήματος και εκκίνησης.
+installer_mode_use	5c94	Χρήση
+installer_mode_use_about	08a1	Εκτελεί αυτή την έκδοση με τα αρχεία και τις ρυθμίσεις του δίσκου και δεν γράφει τίποτα σε αυτόν.
 installer_network_about	2425	Οι εφαρμογές το χρειάζονται. Μπορείτε να το παραλείψετε και να τις προσθέσετε αργότερα.
 installer_network_head	274e	Σύνδεση στο διαδίκτυο
-installer_network_offline	2071	Χωρίς σύνδεση. Συνδέστε καλώδιο ή συνδεθείτε σε Wi-Fi στις Ρυθμίσεις.
+installer_network_offline	c2e1	Χωρίς σύνδεση. Συνδέστε καλώδιο ή συνδεθείτε σε δίκτυο Wi-Fi παρακάτω.
 installer_network_online	a9cb	Συνδεδεμένο στο διαδίκτυο
-installer_network_wifi	c1be	Ρυθμίσεις Wi-Fi
 installer_next	da08	Επόμενο
 installer_reboot	ed8c	Επανεκκίνηση
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Έτοιμο για εγκατάσταση
 installer_review_overwrite	34ed	Όλα σε αυτόν τον δίσκο διαγράφονται.
 installer_review_settings	482f	Γλώσσα %1$s, πληκτρολόγιο %2$s
 installer_review_update	87a0	Το Moonwater σε αυτόν τον δίσκο ενημερώνεται. Τα δεδομένα και οι ρυθμίσεις σας μένουν.
+installer_review_use	5a47	Τα δεδομένα αυτού του δίσκου χρησιμοποιούνται ως έχουν. Τίποτα δεν γράφεται σε αυτόν.
 installer_running	f7a4	Εγκατάσταση του Moonwater
 installer_running_step	4adb	Βήμα %1$d από %2$d
 installer_skip	c7e2	Παράλειψη
@@ -108,7 +110,18 @@ installer_step_install	bd40	Εγκατάσταση
 installer_step_keyboard	a714	Πληκτρολόγιο
 installer_step_language	db9b	Γλώσσα
 installer_step_network	ad65	Δίκτυο
+installer_use	9ba0	Χρήση αυτού του δίσκου
+installer_use_done_about	5aab	Τα αρχεία και οι ρυθμίσεις σας σε αυτόν τον δίσκο κρατιούνται από τώρα, ως την απενεργοποίηση.
+installer_use_done_head	c26d	Τα δεδομένα αυτού του δίσκου χρησιμοποιούνται
 installer_virtual	757b	Πατήστε Εγκατάσταση με το πληκτρολόγιο, το ποντίκι ή την οθόνη αυτού του μηχανήματος.
+installer_wifi_join	5399	Σύνδεση
+installer_wifi_joined	9370	Συνδεδεμένο
+installer_wifi_looking	60d2	Αναζήτηση δικτύων Wi-Fi
+installer_wifi_none	1d7b	Κανένα δίκτυο Wi-Fi σε εμβέλεια
+installer_wifi_off	a42c	Το Wi-Fi είναι κλειστό.
+installer_wifi_on	0c01	Άνοιγμα Wi-Fi
+installer_wifi_password	ca99	Κωδικός για το %s
+installer_wifi_saved	79e4	Αποθηκευμένο
 launcher_log_out	d8b5	Αποσύνδεση
 launcher_log_out_armed	8615	αποσύνδεση
 launcher_power_off	ae2f	Τερματισμός
@@ -377,6 +390,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Discover now	398a	Ανακάλυψη τώρα
 =Discovery	2db5	Ανακάλυψη
 =Files	1b30	Αρχεία
+=Install Moonwater	06fc	Εγκατάσταση Moonwater
 =Internal storage	e961	Εσωτερικός χώρος αποθήκευσης
 =External devices	5769	Εξωτερικές συσκευές
 =Display	d9b5	Οθόνη

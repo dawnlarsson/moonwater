@@ -45,6 +45,7 @@ struct installer_drive
 
 #define INSTALLER_OVERWRITE 0
 #define INSTALLER_UPDATE 1
+#define INSTALLER_USE 2 // the drive's data used with this build, and nothing written (setup use)
 
 // What the person chose: the drive, the mode, and the settings and profiles.
 struct installer_choice
@@ -361,6 +362,76 @@ static b32 installer_route_default(const char address_to text, positive length)
         return false;
 }
 
+// The verb's word for a mode.
+static const char address_to installer_mode_word(int mode)
+{
+        return mode == INSTALLER_UPDATE ? "update" : mode == INSTALLER_USE ? "use" : "overwrite";
+}
+
+/*
+        The networks `moonwater wifi` says, as Settings' Wi-Fi list reads them (settings_feed_wifi): a heard network is a line of
+        its marker (* joined, + saved, or two blanks), its name, its signal as -NN dBm, four bars of # and ., and what it asks
+        for (open asks no passphrase); the verb's label before a line is passed over. A line "wifi off" says the radio is off.
+        Answers how many networks, at most most; *on is false when the radio is off.
+*/
+#define INSTALLER_NETWORKS 16
+struct installer_network
+{
+        char name[64];
+        int bars;
+        b32 joined, saved, open;
+};
+
+static int installer_wifi_parse(const char address_to text, positive length, struct installer_network address_to nets, int most, b32 address_to on)
+{
+        const char address_to at = text, address_to limit = text + length;
+        int count = 0;
+
+        *on = true;
+        while (at < limit)
+        {
+                const char address_to stop = at, address_to line = at;
+                positive size, dbm = 0;
+
+                while (stop < limit && *stop != '\n')
+                        stop++;
+                at = stop < limit ? stop + 1 : stop;
+                if (stop - line >= 12 && !memory_compare(line, "[Moonwater] ", 12))
+                        line += 12;
+                size = (positive)(stop - line);
+                if (size >= 8 && !memory_compare(line, "wifi off", 8))
+                        *on = false;
+                for (positive k = 0; k + 5 <= size; k++)
+                        if (!memory_compare(line + k, " dBm ", 5))
+                                dbm = k;
+                if (!dbm || size < 4 || count >= most || (line[0] != '*' && line[0] != '+' && line[0] != ' ') || line[1] != ' ')
+                        continue;
+                {
+                        struct installer_network address_to n = &nets[count];
+                        positive number = dbm, name_end, word = dbm + 5;
+
+                        while (number > 2 && ((line[number - 1] >= '0' && line[number - 1] <= '9') || line[number - 1] == '-'))
+                                number--;
+                        name_end = number;
+                        while (name_end > 2 && line[name_end - 1] == ' ')
+                                name_end--;
+                        if (name_end <= 2)
+                                continue;
+                        memory_zero(n, sizeof(*n));
+                        name_end = name_end - 2 < sizeof(n->name) ? name_end : sizeof(n->name) + 1;
+                        memory_copy(n->name, line + 2, name_end - 2);
+                        n->joined = line[0] == '*', n->saved = line[0] != ' ';
+                        for (positive bar = 0; bar < 4 && word < size; bar++, word++)
+                                n->bars += line[word] == '#';
+                        while (word < size && line[word] == ' ')
+                                word++;
+                        n->open = size - word >= 4 && !memory_compare(line + word, "open", 4);
+                        count++;
+                }
+        }
+        return count;
+}
+
 // A command of the plan, its end a newline.
 static fn installer_plan_line(char address_to into, positive room, const char address_to a, const char address_to b, const char address_to c,
                               const char address_to d, const char address_to e)
@@ -390,7 +461,7 @@ static int installer_plan(const struct installer_choice address_to c, b32 x86, c
         into[0] = 0;
         if (!c->drive[0] || installer_skipped(c->drive))
                 return 0;
-        installer_plan_line(into, room, "/moonwater", "install", c->drive, c->mode == INSTALLER_UPDATE ? "update" : "overwrite", "yes"), count++;
+        installer_plan_line(into, room, "/moonwater", "install", c->drive, installer_mode_word(c->mode), "yes"), count++;
         if (c->language_changed && c->language[0])
                 installer_plan_line(into, room, "/moonwater", "language", c->language, null, null), count++;
         if (c->keyboard_changed && c->keyboard[0])

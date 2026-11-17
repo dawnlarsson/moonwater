@@ -616,7 +616,7 @@ static fn check_launcher(void)
         check("launcher: Control-Backspace takes the last word", launcher_holds("ls -l -"));
         launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
         check("launcher: Control-Shift-Backspace clears the field to the caret, and the list is the desktop's",
-              launcher_holds("") && launcher.text[0] == 0 && launcher.entries == LAUNCHER_PROGRAMS);
+              launcher_holds("") && launcher.text[0] == 0 && launcher.entries == launcher_offered_count());
         check("launcher: Escape closes it", !launcher_pressed(FIELD_KEY_ESCAPE, 0));
         launcher_type_text("caf");
         launcher_typed(0xe9);

@@ -84,11 +84,12 @@ installer_mode_overwrite	0e92	الكتابة فوقه
 installer_mode_overwrite_about	550e	يمسح القرص كله ويثبت Moonwater من جديد.
 installer_mode_update	0e94	تحديث
 installer_mode_update_about	c729	يحتفظ بملفاتك وتطبيقاتك وإعداداتك، ويستبدل ملفات النظام والإقلاع.
+installer_mode_use	5c94	استخدام
+installer_mode_use_about	08a1	يشغّل هذا الإصدار بملفات القرص وإعداداته، ولا يكتب عليه شيئاً.
 installer_network_about	2425	تحتاجه التطبيقات. يمكنك تخطي هذا وإضافتها لاحقاً.
 installer_network_head	274e	الاتصال بالإنترنت
-installer_network_offline	2071	غير متصل. صِل كبلاً، أو انضم إلى شبكة Wi-Fi في الإعدادات.
+installer_network_offline	c2e1	غير متصل. صِل كبلاً، أو انضم إلى شبكة Wi-Fi أدناه.
 installer_network_online	a9cb	متصل بالإنترنت
-installer_network_wifi	c1be	إعدادات Wi-Fi
 installer_next	da08	التالي
 installer_reboot	ed8c	إعادة التشغيل
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -96,6 +97,7 @@ installer_review_head	2296	جاهز للتثبيت
 installer_review_overwrite	34ed	يُمسح كل ما على هذا القرص.
 installer_review_settings	482f	اللغة %1$s، لوحة المفاتيح %2$s
 installer_review_update	87a0	يُحدَّث Moonwater على هذا القرص. تبقى بياناتك وإعداداتك.
+installer_review_use	5a47	تُستخدم بيانات هذا القرص كما هي. لا يُكتب عليه شيء.
 installer_running	f7a4	جارٍ تثبيت Moonwater
 installer_running_step	4adb	الخطوة %1$d من %2$d
 installer_skip	c7e2	تخطي
@@ -109,7 +111,18 @@ installer_step_install	bd40	التثبيت
 installer_step_keyboard	a714	لوحة المفاتيح
 installer_step_language	db9b	اللغة
 installer_step_network	ad65	الشبكة
+installer_use	9ba0	استخدام هذا القرص
+installer_use_done_about	5aab	تُحفظ ملفاتك وإعداداتك على هذا القرص من الآن حتى إيقاف التشغيل.
+installer_use_done_head	c26d	بيانات هذا القرص قيد الاستخدام
 installer_virtual	757b	اضغط تثبيت بلوحة مفاتيح هذا الجهاز أو فأرته أو شاشته.
+installer_wifi_join	5399	انضمام
+installer_wifi_joined	9370	متصل
+installer_wifi_looking	60d2	جارٍ البحث عن شبكات Wi-Fi
+installer_wifi_none	1d7b	لا توجد شبكات Wi-Fi في النطاق
+installer_wifi_off	a42c	شبكة Wi-Fi متوقفة.
+installer_wifi_on	0c01	تشغيل Wi-Fi
+installer_wifi_password	ca99	كلمة مرور %s
+installer_wifi_saved	79e4	محفوظة
 launcher_log_out	d8b5	تسجيل الخروج
 launcher_log_out_armed	8615	تسجيل الخروج
 launcher_power_off	ae2f	إيقاف التشغيل
@@ -378,6 +391,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Discover now	398a	اكتشف الآن
 =Discovery	2db5	الاكتشاف
 =Files	1b30	الملفات
+=Install Moonwater	06fc	تثبيت Moonwater
 =Internal storage	e961	التخزين الداخلي
 =External devices	5769	الأجهزة الخارجية
 =Display	d9b5	الشاشة

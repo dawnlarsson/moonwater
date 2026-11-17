@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Nadpisz
 installer_mode_overwrite_about	550e	Wymazuje cały dysk i instaluje Moonwater od nowa.
 installer_mode_update	0e94	Aktualizuj
 installer_mode_update_about	c729	Zachowuje pliki, aplikacje i ustawienia, a zastępuje pliki systemu i rozruchu.
+installer_mode_use	5c94	Użyj
+installer_mode_use_about	08a1	Uruchamia tę wersję z plikami i ustawieniami dysku i nic na nim nie zapisuje.
 installer_network_about	2425	Aplikacje go potrzebują. Możesz to pominąć i dodać je później.
 installer_network_head	274e	Połącz z internetem
-installer_network_offline	2071	Brak połączenia. Podłącz kabel lub połącz się z Wi-Fi w Ustawieniach.
+installer_network_offline	c2e1	Brak połączenia. Podłącz kabel lub połącz się z siecią Wi-Fi poniżej.
 installer_network_online	a9cb	Połączono z internetem
-installer_network_wifi	c1be	Ustawienia Wi-Fi
 installer_next	da08	Dalej
 installer_reboot	ed8c	Uruchom ponownie
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Gotowe do instalacji
 installer_review_overwrite	34ed	Wszystko na tym dysku zostanie wymazane.
 installer_review_settings	482f	Język %1$s, klawiatura %2$s
 installer_review_update	87a0	Moonwater na tym dysku zostanie zaktualizowany. Dane i ustawienia zostaną.
+installer_review_use	5a47	Dane z tego dysku są używane tak, jak są. Nic nie zostanie na nim zapisane.
 installer_running	f7a4	Instalowanie Moonwater
 installer_running_step	4adb	Krok %1$d z %2$d
 installer_skip	c7e2	Pomiń
@@ -108,7 +110,18 @@ installer_step_install	bd40	Instalacja
 installer_step_keyboard	a714	Klawiatura
 installer_step_language	db9b	Język
 installer_step_network	ad65	Sieć
+installer_use	9ba0	Użyj tego dysku
+installer_use_done_about	5aab	Twoje pliki i ustawienia na tym dysku są zachowywane od teraz, do wyłączenia.
+installer_use_done_head	c26d	Dane z tego dysku są w użyciu
 installer_virtual	757b	Naciśnij Zainstaluj klawiaturą, myszą lub ekranem tej maszyny.
+installer_wifi_join	5399	Połącz
+installer_wifi_joined	9370	Połączono
+installer_wifi_looking	60d2	Szukanie sieci Wi-Fi
+installer_wifi_none	1d7b	Brak sieci Wi-Fi w zasięgu
+installer_wifi_off	a42c	Wi-Fi jest wyłączone.
+installer_wifi_on	0c01	Włącz Wi-Fi
+installer_wifi_password	ca99	Hasło do %s
+installer_wifi_saved	79e4	Zapisana
 launcher_log_out	d8b5	Wyloguj
 launcher_log_out_armed	8615	wylogować
 launcher_power_off	ae2f	Wyłącz
@@ -377,6 +390,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Discover now	398a	Wykryj teraz
 =Discovery	2db5	Wykrywanie
 =Files	1b30	Pliki
+=Install Moonwater	06fc	Zainstaluj Moonwater
 =Internal storage	e961	Pamięć wewnętrzna
 =External devices	5769	Urządzenia zewnętrzne
 =Display	d9b5	Ekran

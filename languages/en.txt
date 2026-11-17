@@ -83,11 +83,12 @@ installer_mode_overwrite	0e92	Overwrite
 installer_mode_overwrite_about	550e	Erases the whole drive and installs Moonwater anew.
 installer_mode_update	0e94	Update
 installer_mode_update_about	c729	Keeps your files, apps and settings, and replaces the system and boot files.
+installer_mode_use	5c94	Use
+installer_mode_use_about	08a1	Runs this build with the drive's files and settings, and writes nothing to it.
 installer_network_about	2425	The apps need it. You can skip this and add them later.
 installer_network_head	274e	Connect to the internet
-installer_network_offline	2071	Not connected. Plug in a cable, or join Wi-Fi in Settings.
+installer_network_offline	c2e1	Not connected. Plug in a cable, or join a Wi-Fi network below.
 installer_network_online	a9cb	Connected to the internet
-installer_network_wifi	c1be	Wi-Fi settings
 installer_next	da08	Next
 installer_reboot	ed8c	Restart
 installer_review_drive	7058	%1$s, %2$s, /dev/%3$s
@@ -95,6 +96,7 @@ installer_review_head	2296	Ready to install
 installer_review_overwrite	34ed	Everything on this drive is erased.
 installer_review_settings	482f	Language %1$s, keyboard %2$s
 installer_review_update	87a0	Moonwater on this drive is updated. Your data and settings are kept.
+installer_review_use	5a47	This drive's data is used as it is. Nothing is written to it.
 installer_running	f7a4	Installing Moonwater
 installer_running_step	4adb	Step %1$d of %2$d
 installer_skip	c7e2	Skip
@@ -108,7 +110,18 @@ installer_step_install	bd40	Install
 installer_step_keyboard	a714	Keyboard
 installer_step_language	db9b	Language
 installer_step_network	ad65	Network
+installer_use	9ba0	Use this drive
+installer_use_done_about	5aab	Your files and settings on this drive are kept from now on, until power off.
+installer_use_done_head	c26d	This drive's data is in use
 installer_virtual	757b	Press Install with this machine's own keyboard, mouse or screen.
+installer_wifi_join	5399	Join
+installer_wifi_joined	9370	Connected
+installer_wifi_looking	60d2	Looking for Wi-Fi networks
+installer_wifi_none	1d7b	No Wi-Fi networks in range
+installer_wifi_off	a42c	Wi-Fi is off.
+installer_wifi_on	0c01	Turn on Wi-Fi
+installer_wifi_password	ca99	Password for %s
+installer_wifi_saved	79e4	Saved
 launcher_log_out	d8b5	Log out
 launcher_log_out_armed	8615	log out
 launcher_power_off	ae2f	Power off
@@ -377,6 +390,7 @@ ui_field_full	fe02	that is as much as it holds
 =Discover now	398a	Discover now
 =Discovery	2db5	Discovery
 =Files	1b30	Files
+=Install Moonwater	06fc	Install Moonwater
 =Internal storage	e961	Internal storage
 =External devices	5769	External devices
 =Display	d9b5	Display
