@@ -291,6 +291,19 @@ static void compositor_wl_presented(void); // wayland_host.c: a drawn frame's fe
 static void compositor_wl_frame(void);     // and its callbacks, and the buffers its pictures replaced given back
 #endif
 
+/*
+        A present whose jobs went to the card is recorded when they are done (compositor_card_done): the record, the film, a shot and the
+        keys' trace read the scanout it composes into, and read when the present was handed to the card they took what that buffer held
+        from two presents before (the card had not drawn it yet): a frame on the screen whole was filmed as an older one, a flash that never
+        was.
+*/
+static struct
+{
+        unsigned long long began;
+        enum compositor_record_path path;
+        int wanted;
+} compositor_card_record;
+
 #ifdef MOONWATER_GPU_C
 static void compositor_damage_space(void);
 
@@ -407,19 +420,6 @@ static void compositor_card_began(positive began)
 {
         compositor_card.began = began;
 }
-
-/*
-        A present whose jobs went to the card is recorded when they are done (compositor_card_done): the record, the film, a shot and the
-        keys' trace read the scanout it composes into, and read when the present was handed to the card they took what that buffer held
-        from two presents before (the card had not drawn it yet): a frame on the screen whole was filmed as an older one, a flash that never
-        was.
-*/
-static struct
-{
-        unsigned long long began;
-        enum compositor_record_path path;
-        int wanted;
-} compositor_card_record;
 
 // The present's frame given up (a job of it refused, hung or its fence an error): not shown, and drawn again whole by the next present.
 static void compositor_card_abandon(void)
