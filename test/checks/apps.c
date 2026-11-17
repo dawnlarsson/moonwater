@@ -9559,6 +9559,7 @@ b32 main()
         check_kit_pull_parts();
         check_kit_view_pull();
         check_kit_trail();
+        check_kit_graph();
         check_kit_inks();
         check_kit_place();
         check_kit_controls();

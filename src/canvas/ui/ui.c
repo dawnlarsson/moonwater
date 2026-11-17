@@ -20183,6 +20183,833 @@ static fn ui_trail_draw(struct ui address_to ui, struct ui_trail address_to t)
                 ui_kit_text_clip(ui, ui_trail_flip(t, t->at[t->last] + t->wide[t->last] + gap, t->mark - gap), baseline, (string_address) "...", UI_BODY_MEDIUM, dim, 0, right);
 }
 
+/* ---- a graph: nodes on a plane, under a camera ---- */
+/*
+        A graph (ui_graph): rectangles, the nodes, on a plane of whole units the app chooses (a desk's pixels for the screens of
+        Display, a blueprint's grid for a node editor, any unit for a map of notes), and the edges between them, seen through a
+        camera in a panel of the window. It is the base of every view that lays things out in two dimensions: the screens' map,
+        a blueprint's nodes and wires, a web of notes. The app owns the nodes and the edges (their places, sizes, words and
+        ports) and says them again whenever they change; the kit owns the camera and the hand.
+
+        The camera is a zoom (device pixels a unit of the plane, in UI_GRAPH_ONE ths) and a pan (where the plane's 0, 0 is from
+        the panel's middle, in 256ths of a device pixel), so a point of the plane is at
+
+            screen = middle + pan + world * zoom / UI_GRAPH_ONE        world = (screen - middle - pan) * UI_GRAPH_ONE / zoom
+
+        in integers, rounded down both ways (ui_graph_qx, ui_graph_wx). The camera moves only for the person: the wheel and a
+        pinch zoom about the pointer, Ctrl with the wheel too; a trackpad's two fingers, a drag on the ground, the middle button
+        anywhere and Space with a press pan; Home or F frames every node (ui_graph_home), + and - zoom about the middle. Nothing
+        the app does moves it: nodes that change are drawn where they now are, and the first picture with a node frames them once. When
+        the app's whole plane moves (the compositor puts its screens' top left at 0, 0 again), the app says so (ui_graph_shift)
+        and the camera moves with the plane, so nothing on the screen moves.
+
+        The grid fills the panel to its edges, flush, at whatever zoom: its finer lines are the plane's steps of one, two and
+        five times a power of ten of the app's unit (grid) that are at least UI_GRAPH_LINES apart on the screen, fading in as
+        they open up, and every fifth (a fifth of the next decade) is stronger, as Blender's and Unreal's are.
+
+        A press on a node chooses it (chosen) and takes it; past the slop it is dragged, and where it would be let go (at_x,
+        at_y) is pulled to the other nodes' sides and middles (UI_GRAPH_SIDES) and to the grid (UI_GRAPH_GRID) within
+        UI_GRAPH_SNAP on the screen, so a pull feels the same at any zoom. With UI_GRAPH_APART a node is never laid over
+        another: the place is the nearest one clear of every other node; with UI_GRAPH_TOUCH it also meets another along a
+        side, and every node is held to the rest side to side (ui_graph_apart): a desk of screens, which has no gaps. The
+        node is drawn where it would land, with a ghost where the hand has it and a line along each side or middle it lines
+        up with. Its release is the app's to keep (UI_GRAPH_DROP): the kit never moves a node itself. Shift with a press
+        picks more than one, where nodes may overlap.
+
+        An edge joins a port of one node to a port of another: a node's ports are its ins down its left side and its outs
+        down its right, and a port of -1 is the node's middle (a web of notes). It is a straight line, or a blueprint's curve
+        that leaves and comes in level. The nodes are drawn over the edges, the one in hand last.
+
+        What the hand did comes back in the UI_GRAPH_ bits of ui_graph_event and ui_graph_key: whether it was the graph's,
+        whether the panel is to be drawn again (only its rows: the app damages them), the node chosen, a drag, a drop and a
+        camera that moved. The panel is drawn flat in the theme's roles: the grid on the low surface, a node on the highest,
+        the chosen one in the primary container, and the keys' ring round it while they are in the graph (keys).
+*/
+#define UI_GRAPH_ONE 65536 // a zoom of one device pixel to a unit of the plane
+#define UI_GRAPH_SNAP 10   // logical pixels on the screen: how near a side, a middle or a grid line pulls a node dragged to it
+#define UI_GRAPH_LINES 12  // logical pixels: the least room between two of the grid's finer lines
+#define UI_GRAPH_PAD 24    // logical pixels: the room a frame of the nodes leaves round them
+#define UI_GRAPH_PORT 4    // logical pixels: a port's radius
+#define UI_GRAPH_WIRE 2    // logical pixels: an edge's thickness
+#define UI_GRAPH_BEND 48   // logical pixels: the least reach of a curved edge's ends, out of a port and into one
+#define UI_GRAPH_KEEP 64   // the most nodes UI_GRAPH_TOUCH holds together (past it the plane is taken as held)
+#define UI_GRAPH_SHARE 4   // a node laid against a side shares at least this part of the shorter of the two, not a corner's pixel
+
+// The rules of a graph (ui_graph.rules).
+#define UI_GRAPH_SIDES 1u // a node dragged is pulled to the others' sides and middles
+#define UI_GRAPH_GRID 2u  // and, on an axis no side pulled it on, to the grid's unit
+#define UI_GRAPH_APART 4u // a node is never let go over another (one node is picked at a time)
+#define UI_GRAPH_TOUCH 8u // and meets another along a side, every node held to the rest
+
+// A node's flags.
+#define UI_GRAPH_FIXED 1u  // no hand moves it (it is chosen still)
+#define UI_GRAPH_MARKED 2u // marked: a bar of the accent along its top (the primary screen)
+#define UI_GRAPH_PICKED 4u // picked with others (Shift and a press): a drag moves them all
+
+// What an event did (ui_graph_event, ui_graph_key).
+#define UI_GRAPH_TAKEN 1u // it was the graph's
+#define UI_GRAPH_DRAW 2u  // the panel is to be drawn again
+#define UI_GRAPH_CHOSE 4u // chosen changed
+#define UI_GRAPH_DRAG 8u  // the node in hand moved: at_x, at_y are where it would be let go
+#define UI_GRAPH_DROP 16u // a node was let go somewhere new: dropped, at at_x, at_y (and the picked ones by as much)
+#define UI_GRAPH_VIEW 32u // the camera moved
+
+struct ui_graph_node
+{
+        int x, y, w, h;                // its rectangle, in the plane's units
+        unsigned int flags;            // UI_GRAPH_FIXED, _MARKED, _PICKED
+        const char address_to label;   // the words in its middle, the app's and safe to draw; null for none
+        const char address_to line[2]; // a smaller line under them each (a name, a size), null for none
+        unsigned char ins, outs;       // its ports, down its left side and down its right
+};
+
+struct ui_graph_edge
+{
+        unsigned short from, to; // the nodes it joins
+        signed char out, in;     // from's out port and to's in port; -1 for the node's middle
+        unsigned char curved;    // a blueprint's curve, level out of the port and into the other; 0 a straight line
+};
+
+struct ui_graph
+{
+        // The app's.
+        struct ui_graph_node address_to node;
+        const struct ui_graph_edge address_to edge;
+        int nodes, edges;
+        int x, y, w, h;   // the panel, device pixels
+        int top;          // device pixels across the panel's top the app's controls cover: a frame keeps the nodes under them
+        int grid;         // the plane's unit of the grid, 0 for 1, -1 for none drawn (a plane with nothing on it yet)
+        unsigned int rules; // UI_GRAPH_SIDES, _GRID, _APART, _TOUCH
+        b64 least, most;  // the zoom's range (UI_GRAPH_ONE ths), 0 for the kit's: a 64th to 8
+        b32 keys;         // the keys are in the graph: the chosen node has the ring
+        // The kit's.
+        b64 zoom, pan_x, pan_y;      // the camera
+        b32 homed;                   // the camera was set: the first picture frames the nodes (ui_graph_home)
+        int chosen, hover, held;     // the node chosen, the one under the pointer and the one in hand; -1 none
+        int dropped;                 // the node the last UI_GRAPH_DROP let go
+        b32 moving;                  // the node in hand is past the slop: it is being dragged
+        int panning;                 // the hand pans: 1 a press on the ground, 2 the middle button, 3 Space with a press
+        int press_x, press_y;        // device pixels: where the press went down,
+        int last_x, last_y;          // and the pointer's last place while it pans
+        int grab_x, grab_y;          // the plane's: where on the node in hand the press took it
+        int want_x, want_y;          // where the hand has the node,
+        int at_x, at_y;              // and where it would be let go: pulled and kept apart
+        b32 space;                   // Space is down
+        b64 pinch_from;              // the zoom a pinch began at
+        int rest_x, rest_y;          // a trackpad's 120ths of a pixel not yet panned
+};
+
+// A graph with nothing chosen, in hand or under the pointer, its camera to be set by the first picture.
+static fn ui_graph_start(struct ui_graph address_to g)
+{
+        g->chosen = g->hover = g->held = g->dropped = -1;
+        g->moving = 0, g->panning = 0, g->homed = 0, g->zoom = UI_GRAPH_ONE, g->pan_x = g->pan_y = 0;
+}
+
+// a / b rounded down, b above 0.
+static inline b64 ui_graph_floor(b64 a, b64 b)
+{
+        b64 q = a / b;
+
+        return q * b > a ? q - 1 : q;
+}
+
+static inline b64 ui_graph_mid_x(const struct ui_graph address_to g)
+{
+        return (b64)g->x * 256 + (b64)g->w * 128;
+}
+
+static inline b64 ui_graph_mid_y(const struct ui_graph address_to g)
+{
+        return (b64)g->y * 256 + (b64)g->h * 128;
+}
+
+// A point of the plane on the screen, 256ths of a device pixel; and in whole device pixels, held inside what a box can say.
+static b64 ui_graph_qx(const struct ui_graph address_to g, b64 x)
+{
+        return ui_graph_mid_x(g) + g->pan_x + ui_graph_floor(x * g->zoom, 256);
+}
+
+static b64 ui_graph_qy(const struct ui_graph address_to g, b64 y)
+{
+        return ui_graph_mid_y(g) + g->pan_y + ui_graph_floor(y * g->zoom, 256);
+}
+
+static int ui_graph_px(b64 q)
+{
+        q = q < -(1ll << 30) ? -(1ll << 30) : q > (1ll << 30) ? 1ll << 30 : q;
+        return (int)ui_graph_floor(q, 256);
+}
+
+// The plane's point under a device pixel's middle.
+static int ui_graph_wx(const struct ui_graph address_to g, int px)
+{
+        b64 w = ui_graph_floor(((b64)px * 256 + 128 - ui_graph_mid_x(g) - g->pan_x) * 256, g->zoom);
+
+        return w < -(1ll << 30) ? -(1 << 30) : w > (1ll << 30) ? 1 << 30 : (int)w;
+}
+
+static int ui_graph_wy(const struct ui_graph address_to g, int py)
+{
+        b64 w = ui_graph_floor(((b64)py * 256 + 128 - ui_graph_mid_y(g) - g->pan_y) * 256, g->zoom);
+
+        return w < -(1ll << 30) ? -(1 << 30) : w > (1ll << 30) ? 1 << 30 : (int)w;
+}
+
+static b64 ui_graph_least(const struct ui_graph address_to g)
+{
+        return g->least > 0 ? g->least : UI_GRAPH_ONE / 64;
+}
+
+static b64 ui_graph_most(const struct ui_graph address_to g)
+{
+        return g->most > 0 ? g->most : (b64)UI_GRAPH_ONE * 8;
+}
+
+// The zoom set (held to its range), the plane's point under the device pixel px, py kept where it is. Answers whether it changed.
+static b32 ui_graph_zoom_at(struct ui_graph address_to g, b64 zoom, int px, int py)
+{
+        b64 ax = (b64)px * 256 + 128 - ui_graph_mid_x(g) - g->pan_x, ay = (b64)py * 256 + 128 - ui_graph_mid_y(g) - g->pan_y;
+
+        zoom = zoom < ui_graph_least(g) ? ui_graph_least(g) : zoom > ui_graph_most(g) ? ui_graph_most(g) : zoom;
+        if (zoom == g->zoom)
+                return false;
+        // The point's distance from the plane's 0, 0 grows by the zoom's ratio (split so the product stays inside 64 bits).
+        g->pan_x += ax - (ax / g->zoom * zoom + ax % g->zoom * zoom / g->zoom);
+        g->pan_y += ay - (ay / g->zoom * zoom + ay % g->zoom * zoom / g->zoom);
+        g->zoom = zoom;
+        return true;
+}
+
+// The whole plane moved by dx, dy units (the app's nodes all did): the camera moves with it, so nothing on the screen moves.
+static fn ui_graph_shift(struct ui_graph address_to g, int dx, int dy)
+{
+        g->pan_x -= ui_graph_floor((b64)dx * g->zoom, 256);
+        g->pan_y -= ui_graph_floor((b64)dy * g->zoom, 256);
+        g->want_x += dx, g->want_y += dy, g->at_x += dx, g->at_y += dy;
+}
+
+// The camera on every node: the largest zoom (in its range) that holds them with UI_GRAPH_PAD round them, below the top, centred.
+static fn ui_graph_home(const struct ui address_to ui, struct ui_graph address_to g)
+{
+        b64 x0 = 0, y0 = 0, x1 = 0, y1 = 0, pad = ui_dev(ui, UI_GRAPH_PAD), room_w, room_h, zoom;
+
+        g->homed = g->nodes > 0; // with nothing to frame the camera waits for the first node
+        for (int k = 0; k < g->nodes; k++)
+        {
+                const struct ui_graph_node address_to n = &g->node[k];
+
+                x0 = !k || n->x < x0 ? n->x : x0, y0 = !k || n->y < y0 ? n->y : y0;
+                x1 = !k || n->x + n->w > x1 ? n->x + n->w : x1, y1 = !k || n->y + n->h > y1 ? n->y + n->h : y1;
+        }
+        room_w = g->w - 2 * pad, room_h = g->h - g->top - 2 * pad;
+        room_w = room_w < 1 ? 1 : room_w, room_h = room_h < 1 ? 1 : room_h;
+        zoom = UI_GRAPH_ONE;
+        if (g->nodes && x1 > x0 && y1 > y0)
+        {
+                b64 across = room_w * UI_GRAPH_ONE / (x1 - x0), down = room_h * UI_GRAPH_ONE / (y1 - y0);
+
+                zoom = across < down ? across : down;
+        }
+        g->zoom = zoom < ui_graph_least(g) ? ui_graph_least(g) : zoom > ui_graph_most(g) ? ui_graph_most(g) : zoom;
+        g->pan_x = -ui_graph_floor((x0 + x1) * g->zoom, 512);
+        g->pan_y = (b64)g->top * 128 - ui_graph_floor((y0 + y1) * g->zoom, 512);
+}
+
+// A node's rectangle on the screen, device pixels, never less than one each way.
+static fn ui_graph_box(const struct ui_graph address_to g, int k, int x, int y, int address_to x0, int address_to y0, int address_to x1,
+                       int address_to y1)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+
+        *x0 = ui_graph_px(ui_graph_qx(g, x)), *y0 = ui_graph_px(ui_graph_qy(g, y));
+        *x1 = ui_graph_px(ui_graph_qx(g, (b64)x + n->w)), *y1 = ui_graph_px(ui_graph_qy(g, (b64)y + n->h));
+        *x1 = *x1 <= *x0 ? *x0 + 1 : *x1, *y1 = *y1 <= *y0 ? *y0 + 1 : *y1;
+}
+
+// Where a node is drawn: where it is, or where it would be let go while it is in hand (and a picked one by as much).
+static fn ui_graph_shown(const struct ui_graph address_to g, int k, int address_to x, int address_to y)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+
+        *x = n->x, *y = n->y;
+        if (g->held < 0 || !g->moving)
+                return;
+        if (k == g->held)
+                *x = g->at_x, *y = g->at_y;
+        else if ((n->flags & UI_GRAPH_PICKED) && (g->node[g->held].flags & UI_GRAPH_PICKED))
+                *x += g->at_x - g->node[g->held].x, *y += g->at_y - g->node[g->held].y;
+}
+
+// The node under a device pixel of the panel (the last one drawn over it), or -1; a finger's reach is the kit's target round a small node.
+static int ui_graph_at(const struct ui address_to ui, const struct ui_graph address_to g, int px, int py)
+{
+        if (px < g->x || px >= g->x + g->w || py < g->y || py >= g->y + g->h)
+                return -1;
+        for (int reach = 0; reach < 1 + ui_kit_touch; reach++)
+                for (int k = g->nodes - 1; k >= 0; k--)
+                {
+                        int x0, y0, x1, y1;
+
+                        ui_graph_box(g, k, g->node[k].x, g->node[k].y, &x0, &y0, &x1, &y1);
+                        if (reach ? ui_hit(ui, 1, px, py, x0, y0, x1 - x0, y1 - y0) : px >= x0 && px < x1 && py >= y0 && py < y1)
+                                return k;
+                }
+        return -1;
+}
+
+static inline b64 ui_graph_far(b64 a, b64 b)
+{
+        return a > b ? a - b : b - a;
+}
+
+/*
+        Node k dragged to x, y, pulled: each axis to the nearest of the other nodes' sides and middles that a side or the middle
+        of it comes within UI_GRAPH_SNAP of on the screen (a side to a side, so it meets the other or lines up with it, a middle
+        to a middle), and an axis no side pulled to the grid's unit. Picked nodes that move with it pull nothing.
+*/
+static fn ui_graph_snap(const struct ui address_to ui, const struct ui_graph address_to g, int k, int address_to x, int address_to y)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+        b64 margin = (b64)ui_dev(ui, UI_GRAPH_SNAP) * UI_GRAPH_ONE / g->zoom, near_x = margin + 1, near_y = margin + 1;
+        int to_x = *x, to_y = *y, unit = g->grid > 0 ? g->grid : 1;
+        b32 group = (n->flags & UI_GRAPH_PICKED) != 0;
+
+        for (int j = 0; (g->rules & UI_GRAPH_SIDES) && j < g->nodes; j++)
+        {
+                const struct ui_graph_node address_to o = &g->node[j];
+                int mine_x[3] = {*x, *x + n->w, *x + n->w / 2}, mine_y[3] = {*y, *y + n->h, *y + n->h / 2};
+                int off_x[3] = {0, n->w, n->w / 2}, off_y[3] = {0, n->h, n->h / 2};
+                int their_x[3] = {o->x, o->x + o->w, o->x + o->w / 2}, their_y[3] = {o->y, o->y + o->h, o->y + o->h / 2};
+
+                if (j == k || (group && (o->flags & UI_GRAPH_PICKED)))
+                        continue;
+                for (int a = 0; a < 3; a++)
+                        for (int b = 0; b < 3; b++)
+                        {
+                                if ((a == 2) != (b == 2))
+                                        continue;
+                                if (ui_graph_far(their_x[b], mine_x[a]) < near_x)
+                                        near_x = ui_graph_far(their_x[b], mine_x[a]), to_x = their_x[b] - off_x[a];
+                                if (ui_graph_far(their_y[b], mine_y[a]) < near_y)
+                                        near_y = ui_graph_far(their_y[b], mine_y[a]), to_y = their_y[b] - off_y[a];
+                        }
+        }
+        if ((g->rules & UI_GRAPH_GRID) && near_x > margin)
+                to_x = (int)(ui_graph_floor((b64)*x * 2 + unit, (b64)unit * 2) * unit);
+        if ((g->rules & UI_GRAPH_GRID) && near_y > margin)
+                to_y = (int)(ui_graph_floor((b64)*y * 2 + unit, (b64)unit * 2) * unit);
+        *x = to_x, *y = to_y;
+}
+
+// Whether node k's rectangle at x, y lies over node j's (shares any area with it).
+static b32 ui_graph_over(const struct ui_graph address_to g, int k, int x, int y, int j)
+{
+        const struct ui_graph_node address_to n = &g->node[k], address_to o = &g->node[j];
+
+        return x < o->x + o->w && o->x < x + n->w && y < o->y + o->h && o->y < y + n->h;
+}
+
+// Whether two rectangles meet along a side: an edge of one on an edge of the other, sharing a length (a corner is not a side).
+static b32 ui_graph_meet(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh)
+{
+        return ((ax + aw == bx || bx + bw == ax) && ay < by + bh && by < ay + ah) || ((ay + ah == by || by + bh == ay) && ax < bx + bw && bx < ax + aw);
+}
+
+// Whether every node is held to node k at x, y across sides that meet: the desk is in one piece.
+static b32 ui_graph_held(const struct ui_graph address_to g, int k, int x, int y)
+{
+        unsigned char seen[UI_GRAPH_KEEP];
+        int queue[UI_GRAPH_KEEP], head = 0, tail = 0;
+
+        if (g->nodes > UI_GRAPH_KEEP)
+                return true;
+        memory_zero(seen, sizeof(seen));
+        seen[k] = 1, queue[tail++] = k;
+        while (head < tail)
+        {
+                int at = queue[head++], ax = at == k ? x : g->node[at].x, ay = at == k ? y : g->node[at].y;
+
+                for (int j = 0; j < g->nodes; j++)
+                {
+                        int bx = j == k ? x : g->node[j].x, by = j == k ? y : g->node[j].y;
+
+                        if (seen[j] || !ui_graph_meet(ax, ay, g->node[at].w, g->node[at].h, bx, by, g->node[j].w, g->node[j].h))
+                                continue;
+                        seen[j] = 1, queue[tail++] = j;
+                }
+        }
+        return tail == g->nodes;
+}
+
+// Whether node k at x, y is clear of every other node.
+static b32 ui_graph_clear(const struct ui_graph address_to g, int k, int x, int y)
+{
+        for (int j = 0; j < g->nodes; j++)
+                if (j != k && ui_graph_over(g, k, x, y, j))
+                        return false;
+        return true;
+}
+
+/*
+        The place for node k nearest x, y that is clear of every other node (UI_GRAPH_APART) and, with UI_GRAPH_TOUCH, meets one
+        along a side with every node held to the rest. The places tried are the asked one, and against each side of each other
+        node the node laid flush there: along that side at the asked place, or slid to just past any node that is in the way
+        (its far side, or the node's own length before its near one), and with UI_GRAPH_TOUCH sharing at least a
+        UI_GRAPH_SHARE th of the shorter of the two sides (so a node let go off a corner comes back along a side, not onto the
+        corner's last pixel). Of
+        those clear of every node, one that holds the desk together comes first, then the nearest; a desk that a place can only
+        split is still laid against a side. Answers false when no place is clear (the node then stays where it is).
+*/
+static b32 ui_graph_apart(const struct ui_graph address_to g, int k, int address_to x, int address_to y)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+        b32 touch = (g->rules & UI_GRAPH_TOUCH) != 0, found = false, found_held = false;
+        b64 best = 0;
+        int best_x = *x, best_y = *y;
+
+        if (g->nodes < 2 || (!touch && ui_graph_clear(g, k, *x, *y)))
+                return true;
+        for (int j = 0; j < g->nodes; j++)
+                for (int side = 0; j != k && side < 4; side++)
+                {
+                        const struct ui_graph_node address_to o = &g->node[j];
+                        b32 across = side < 2; // flush to its right or left: the node slides up and down it
+                        int fixed = side == 0 ? o->x + o->w : side == 1 ? o->x - n->w : side == 2 ? o->y + o->h : o->y - n->h;
+                        int size = across ? n->h : n->w, want = across ? *y : *x, length = across ? o->h : o->w;
+                        int share = (size < length ? size : length) / UI_GRAPH_SHARE > 1 ? (size < length ? size : length) / UI_GRAPH_SHARE : 1;
+                        b64 low = touch ? (across ? (b64)o->y : (b64)o->x) - size + share : -(1ll << 30);
+                        b64 high = touch ? (across ? (b64)o->y : (b64)o->x) + length - share : 1ll << 30;
+
+                        for (int t = -1; t < 2 * g->nodes; t++)
+                        {
+                                const struct ui_graph_node address_to m = t < 0 ? n : &g->node[t / 2];
+                                b64 slide = t < 0 ? want : t % 2 ? (across ? (b64)m->y + m->h : (b64)m->x + m->w) : (across ? (b64)m->y - size : (b64)m->x - size);
+                                int cx, cy;
+                                b64 far;
+                                b32 held;
+
+                                if (t >= 0 && t / 2 == k)
+                                        continue;
+                                slide = slide < low ? low : slide > high ? high : slide;
+                                cx = across ? fixed : (int)slide, cy = across ? (int)slide : fixed;
+                                far = ((b64)cx - *x) * ((b64)cx - *x) + ((b64)cy - *y) * ((b64)cy - *y);
+                                if ((found && found_held && far >= best) || !ui_graph_clear(g, k, cx, cy))
+                                        continue;
+                                held = !touch || ui_graph_held(g, k, cx, cy);
+                                if (!found || (held && !found_held) || (held == found_held && far < best))
+                                        found = true, found_held = held, best = far, best_x = cx, best_y = cy;
+                        }
+                }
+        if (found)
+                *x = best_x, *y = best_y;
+        return found;
+}
+
+// Where node k goes for a hand that has it at x, y: pulled (when snap), then kept apart by the rules; where it is when no place is.
+static fn ui_graph_settle(const struct ui address_to ui, const struct ui_graph address_to g, int k, int address_to x, int address_to y, b32 snap)
+{
+        if (snap)
+                ui_graph_snap(ui, g, k, x, y);
+        if ((g->rules & (UI_GRAPH_APART | UI_GRAPH_TOUCH)) && !ui_graph_apart(g, k, x, y))
+                *x = g->node[k].x, *y = g->node[k].y;
+}
+
+// The hand lets go of whatever it held, nothing kept (the panel went, or the press was taken back).
+static fn ui_graph_let_go(struct ui_graph address_to g)
+{
+        g->held = -1, g->moving = 0, g->panning = 0;
+}
+
+// The graph's keys while they are in it: Home and F frame the nodes, + and = zoom in about the middle, - out; Space held makes a press pan.
+static unsigned int ui_graph_key(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int mx = g->x + g->w / 2, my = g->y + g->h / 2;
+
+        if (event->type != WINDOW_EVENT_KEY)
+                return 0;
+        if (event->a == UI_KEY_SPACE)
+        {
+                g->space = down && g->keys;
+                g->panning = !down && g->panning == 3 ? 0 : g->panning;
+                return g->keys ? UI_GRAPH_TAKEN : 0;
+        }
+        if (!down || !g->keys)
+                return 0;
+        if (event->a == UI_KEY_HOME || event->b == 'f' || event->b == 'F')
+        {
+                ui_graph_home(ui, g);
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_VIEW;
+        }
+        if (event->b == '+' || event->b == '=' || event->b == '-' || event->b == '_')
+                return UI_GRAPH_TAKEN | (ui_graph_zoom_at(g, event->b == '-' || event->b == '_' ? g->zoom * 4 / 5 : g->zoom * 5 / 4 + 1, mx, my)
+                                                 ? UI_GRAPH_DRAW | UI_GRAPH_VIEW : 0);
+        return 0;
+}
+
+// The zoom a wheel's turn asks: a fifth more for each notch up (120ths of one), a fifth less down, and a part of a notch its part of that.
+static b64 ui_graph_turned(b64 zoom, int turn)
+{
+        for (; turn >= 120; turn -= 120)
+                zoom = zoom * 5 / 4 + 1;
+        for (; turn <= -120; turn += 120)
+                zoom = zoom * 4 / 5;
+        return zoom + zoom * turn / 480;
+}
+
+/*
+        A window's event as the graph takes it, the pointer at ui_kit.pointer_x, _y: what it did, in the UI_GRAPH_ bits (none when it
+        was not the graph's). A press in the panel is the graph's: on a node it chooses and takes it, on the ground (or with the middle
+        button, or Space held) it pans, and a finger does the same; the right button is the app's. A drag and its release are the
+        graph's wherever the pointer goes. The wheel over the panel zooms about the pointer (Ctrl with it too, which a trackpad's pinch
+        sends), a trackpad's two fingers and Shift with the wheel pan, and a pinch zooms about its middle.
+*/
+static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event)
+{
+        int px = ui_kit.pointer_x, py = ui_kit.pointer_y, hit;
+        b32 inside = px >= g->x && px < g->x + g->w && py >= g->y && py < g->y + g->h, down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        unsigned int out = 0;
+
+        if (!g->homed)
+                ui_graph_home(ui, g);
+        switch (event->type)
+        {
+        case WINDOW_EVENT_MOTION:
+                if (g->held >= 0)
+                {
+                        if (!g->moving && (!ui_press_past(ui, g->press_x, g->press_y, px, py) || (g->node[g->held].flags & UI_GRAPH_FIXED)))
+                                return UI_GRAPH_TAKEN;
+                        g->moving = 1;
+                        g->want_x = ui_graph_wx(g, px) - g->grab_x, g->want_y = ui_graph_wy(g, py) - g->grab_y;
+                        g->at_x = g->want_x, g->at_y = g->want_y;
+                        ui_graph_settle(ui, g, g->held, &g->at_x, &g->at_y, true);
+                        return UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_DRAG;
+                }
+                if (g->panning)
+                {
+                        g->pan_x += (b64)(px - g->last_x) * 256, g->pan_y += (b64)(py - g->last_y) * 256;
+                        out = px != g->last_x || py != g->last_y ? UI_GRAPH_DRAW | UI_GRAPH_VIEW : 0;
+                        g->last_x = px, g->last_y = py;
+                        return UI_GRAPH_TAKEN | out;
+                }
+                hit = inside && !ui_kit_touch ? ui_graph_at(ui, g, px, py) : -1;
+                if (hit != g->hover)
+                        g->hover = hit, out = UI_GRAPH_DRAW;
+                return out | (inside ? UI_GRAPH_TAKEN : 0);
+        case WINDOW_EVENT_BUTTON:
+                if (down)
+                {
+                        if (!inside || (event->a != UI_POINTER_LEFT && event->a != UI_POINTER_MIDDLE))
+                                return 0;
+                        g->press_x = g->last_x = px, g->press_y = g->last_y = py;
+                        hit = event->a == UI_POINTER_LEFT && !g->space ? ui_graph_at(ui, g, px, py) : -1;
+                        if (hit < 0)
+                        {
+                                g->panning = event->a == UI_POINTER_MIDDLE ? 2 : g->space ? 3 : 1;
+                                return UI_GRAPH_TAKEN;
+                        }
+                        // Shift picks more than one (or puts one back), where nodes may lie over each other; a press alone picks the one.
+                        if ((event->flags & WINDOW_KEY_SHIFT) && !(g->rules & (UI_GRAPH_APART | UI_GRAPH_TOUCH)))
+                                g->node[hit].flags ^= UI_GRAPH_PICKED;
+                        else if (!(g->node[hit].flags & UI_GRAPH_PICKED))
+                                for (int k = 0; k < g->nodes; k++)
+                                        g->node[k].flags &= ~UI_GRAPH_PICKED;
+                        out = hit != g->chosen ? UI_GRAPH_CHOSE : 0;
+                        g->chosen = g->held = hit, g->moving = 0;
+                        g->grab_x = ui_graph_wx(g, px) - g->node[hit].x, g->grab_y = ui_graph_wy(g, py) - g->node[hit].y;
+                        g->want_x = g->at_x = g->node[hit].x, g->want_y = g->at_y = g->node[hit].y;
+                        return out | UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                }
+                if (g->panning && (event->a == UI_POINTER_MIDDLE) == (g->panning == 2))
+                {
+                        g->panning = 0;
+                        return UI_GRAPH_TAKEN;
+                }
+                if (g->held < 0 || event->a != UI_POINTER_LEFT)
+                        return 0;
+                hit = g->held;
+                if (g->moving && !(event->flags & WINDOW_KEY_CANCEL) && (g->at_x != g->node[hit].x || g->at_y != g->node[hit].y))
+                        g->dropped = hit, out = UI_GRAPH_DROP;
+                ui_graph_let_go(g);
+                return out | UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        case WINDOW_EVENT_WHEEL:
+                if (!inside || !event->a || (event->flags & WINDOW_WHEEL_STOP))
+                        return inside ? UI_GRAPH_TAKEN : 0;
+                // A trackpad's two fingers pan, one for one; so does Shift with a mouse's wheel, sideways a notch at a time.
+                if ((event->flags & WINDOW_WHEEL_PRECISE) && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_WHEEL_STREAM)))
+                {
+                        if (event->b)
+                                g->pan_x += (b64)ui_wheel_pixels(ui, event, 0, &g->rest_x) * 256;
+                        else
+                                g->pan_y -= (b64)ui_wheel_pixels(ui, event, 0, &g->rest_y) * 256;
+                        return UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_VIEW;
+                }
+                if ((event->flags & WINDOW_KEY_SHIFT) && !(event->flags & WINDOW_KEY_CONTROL))
+                {
+                        g->pan_x -= (b64)ui_wheel_pixels(ui, event, ui_dev(ui, UI_NOTCH), &g->rest_x) * 256;
+                        return UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_VIEW;
+                }
+                return UI_GRAPH_TAKEN | (!event->b && ui_graph_zoom_at(g, ui_graph_turned(g->zoom, event->a), px, py) ? UI_GRAPH_DRAW | UI_GRAPH_VIEW : 0);
+        case WINDOW_EVENT_PINCH:
+                if (event->flags & WINDOW_PINCH_BEGIN)
+                        g->pinch_from = g->zoom;
+                else if (g->pinch_from > 0 &&
+                         ui_graph_zoom_at(g, g->pinch_from * event->a / WINDOW_PINCH_ONE, window_pinch_x(event->b), window_pinch_y(event->b)))
+                        out = UI_GRAPH_DRAW | UI_GRAPH_VIEW;
+                if (event->flags & WINDOW_PINCH_END)
+                        g->pinch_from = 0;
+                return out | UI_GRAPH_TAKEN;
+        case WINDOW_EVENT_KEY:
+                return ui_graph_key(ui, g, event);
+        }
+        return 0;
+}
+
+// The box of a rectangle of device pixels, its corners rounded by radius (all device pixels).
+static struct ui_box ui_graph_rect(int x0, int y0, int x1, int y1, int radius)
+{
+        return (struct ui_box){x0 * 256, y0 * 256, x1 * 256, y1 * 256, radius * 256, radius * 256};
+}
+
+/*
+        The grid, flush across the panel: the finer step is the grid's unit times one, two or five times a power of ten, the least of
+        those UI_GRAPH_LINES apart on the screen, in the outline's quiet colour faded in from where it is that far apart to twice that;
+        every line of the stronger step (five finer ones, or two of the five) is in the outline's colour at its full share.
+*/
+static fn ui_graph_grid(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, unsigned int ground)
+{
+        b64 unit = g->grid > 0 ? g->grid : 1, step = unit, least = (b64)ui_dev(ui, UI_GRAPH_LINES) * UI_GRAPH_ONE, room, strong;
+        int lead = 1, stroke = ui_stroke(ui);
+        unsigned int fine, bold = ui_mix(ui_role(UI_OUTLINE_VARIANT) | 0xff000000u, 70, ground);
+
+        while (step * g->zoom < least && step < (1ll << 40))
+                step = lead == 2 ? step / 2 * 5 : step * 2, lead = lead == 1 ? 2 : lead == 2 ? 5 : 1;
+        strong = lead == 5 ? step * 2 : step * 5;
+        room = step * g->zoom / UI_GRAPH_ONE;
+        least = ui_dev(ui, UI_GRAPH_LINES);
+        room = room - least > least ? least : room - least < 0 ? 0 : room - least;
+        fine = ui_mix(ui_role(UI_OUTLINE_VARIANT) | 0xff000000u, (unsigned int)(35 * room / (least > 0 ? least : 1)), ground);
+        for (int across = 0; across < 2; across++)
+        {
+                int first = across ? ui_graph_wx(g, g->x) : ui_graph_wy(g, g->y), last = across ? ui_graph_wx(g, g->x + g->w) : ui_graph_wy(g, g->y + g->h);
+
+                for (b64 at = ui_graph_floor(first, step) * step; at <= last; at += step)
+                {
+                        b32 heavy = ui_graph_floor(at, strong) * strong == at;
+                        int p = ui_graph_px(across ? ui_graph_qx(g, at) : ui_graph_qy(g, at));
+                        struct ui_box line = across ? (struct ui_box){p * 256, panel->y0, p * 256 + stroke, panel->y1, 0, 0}
+                                                    : (struct ui_box){panel->x0, p * 256, panel->x1, p * 256 + stroke, 0, 0};
+
+                        if (heavy || fine != ground)
+                                ui_kit_fill(ui, &line, heavy ? bold : fine, panel);
+                }
+        }
+}
+
+// Where a port of node k is on the screen (256ths): an in down its left side, an out down its right, -1 (or one it has not) its middle.
+static fn ui_graph_port(const struct ui_graph address_to g, int k, b32 out, int port, b64 address_to qx, b64 address_to qy)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+        int x, y, count = out ? n->outs : n->ins;
+        b64 left, top, right, bottom;
+
+        ui_graph_shown(g, k, &x, &y);
+        left = ui_graph_qx(g, x), top = ui_graph_qy(g, y), right = ui_graph_qx(g, (b64)x + n->w), bottom = ui_graph_qy(g, (b64)y + n->h);
+        if (port < 0 || port >= count)
+        {
+                *qx = (left + right) / 2, *qy = (top + bottom) / 2;
+                return;
+        }
+        *qx = out ? right : left;
+        *qy = top + (bottom - top) * (port + 1) / (count + 1);
+}
+
+static inline b64 ui_graph_lerp(b64 a, b64 b, b64 t)
+{
+        return a + ((b - a) * t >> 16);
+}
+
+/*
+        An edge: from its out port to its in port, a straight line or a cubic curve whose ends leave and come in level (their reach half
+        the way across, and at least UI_GRAPH_BEND), drawn as round dots of the edge's width a half width apart (de Casteljau's steps in
+        65536ths, so no product leaves 64 bits however far the camera is), cut to the panel.
+*/
+static fn ui_graph_wire(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, const struct ui_graph_edge address_to e,
+                        unsigned int ink)
+{
+        b64 x[4], y[4], reach, length, radius = ui_stroke(ui) * UI_GRAPH_WIRE / 2, limit = 1ll << 28;
+        int steps;
+
+        ui_graph_port(g, e->from, 1, e->out, &x[0], &y[0]);
+        ui_graph_port(g, e->to, 0, e->in, &x[3], &y[3]);
+        for (int k = 0; k < 4; k += 3)
+        {
+                x[k] = x[k] < -limit ? -limit : x[k] > limit ? limit : x[k];
+                y[k] = y[k] < -limit ? -limit : y[k] > limit ? limit : y[k];
+        }
+        reach = ui_graph_far(x[3], x[0]) / 2;
+        reach = e->curved ? (reach < ui_q8(ui, UI_GRAPH_BEND) ? ui_q8(ui, UI_GRAPH_BEND) : reach) : 0;
+        x[1] = x[0] + reach, y[1] = y[0], x[2] = x[3] - reach, y[2] = y[3];
+        if (!e->curved)
+                x[1] = x[0], x[2] = x[3];
+        length = ui_graph_far(x[1], x[0]) + ui_graph_far(y[1], y[0]) + ui_graph_far(x[2], x[1]) + ui_graph_far(y[2], y[1]) + ui_graph_far(x[3], x[2]) +
+                 ui_graph_far(y[3], y[2]);
+        steps = (int)(length / (radius > 0 ? radius : 1)) + 1;
+        steps = steps > 2048 ? 2048 : steps;
+        for (int at = 0; at <= steps; at++)
+        {
+                b64 t = (b64)at * 65536 / steps, ax = ui_graph_lerp(x[0], x[1], t), ay = ui_graph_lerp(y[0], y[1], t), bx = ui_graph_lerp(x[1], x[2], t);
+                b64 by = ui_graph_lerp(y[1], y[2], t), cx = ui_graph_lerp(x[2], x[3], t), cy = ui_graph_lerp(y[2], y[3], t);
+                b64 dx = ui_graph_lerp(ax, bx, t), dy = ui_graph_lerp(ay, by, t), ex = ui_graph_lerp(bx, cx, t), ey = ui_graph_lerp(by, cy, t);
+                b64 px = ui_graph_lerp(dx, ex, t), py = ui_graph_lerp(dy, ey, t);
+                struct ui_box dot = {(b32)(px - radius), (b32)(py - radius), (b32)(px + radius), (b32)(py + radius), (b32)radius, (b32)radius};
+
+                if (dot.x1 > panel->x0 && dot.x0 < panel->x1 && dot.y1 > panel->y0 && dot.y0 < panel->y1)
+                        ui_kit_fill(ui, &dot, ink, panel);
+        }
+}
+
+/*
+        A node drawn where it is shown: its face on the highest surface (the chosen one, and one in hand or picked, in the primary
+        container; the one under the pointer a state layer over it), the accent's bar along the top of a marked one, its ports, its
+        label in the middle and the lines under it as far as there is room (cut at its sides and the panel's), and the keys' ring
+        inside its edge while the keys are in the graph.
+*/
+static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, int k)
+{
+        const struct ui_graph_node address_to n = &g->node[k];
+        int x, y, x0, y0, x1, y1, radius = ui_dev(ui, UI_RADIUS), pad = ui_dev(ui, 6), top = ui->top, bottom = ui->bottom, rows[3], used = 0, shown = 0;
+        b32 lit = k == g->chosen || k == g->held || (n->flags & UI_GRAPH_PICKED);
+        unsigned int face = ui_role(lit ? UI_PRIMARY_CONTAINER : UI_SURFACE_HIGHEST) | 0xff000000u;
+        unsigned int ink = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE), quiet = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE_VARIANT);
+        const char address_to words[3] = {n->label, n->line[0], n->line[1]};
+        static const int types[3] = {UI_TITLE_LARGE, UI_LABEL_MEDIUM, UI_LABEL_MEDIUM};
+        struct ui_box box;
+
+        ui_graph_shown(g, k, &x, &y);
+        ui_graph_box(g, k, x, y, &x0, &y0, &x1, &y1);
+        if (x1 <= g->x || x0 >= g->x + g->w || y1 <= g->y || y0 >= g->y + g->h)
+                return;
+        radius = radius * 4 > x1 - x0 ? (x1 - x0) / 4 : radius;
+        radius = radius * 4 > y1 - y0 ? (y1 - y0) / 4 : radius;
+        box = ui_graph_rect(x0, y0, x1, y1, radius);
+        if (k == g->hover && !lit)
+                face = ui_mix(ui_role(UI_ON_SURFACE) | 0xff000000u, 8, face);
+        ui_kit_fill(ui, &box, face, panel);
+        if (n->flags & UI_GRAPH_MARKED)
+        {
+                struct ui_box bar = ui_graph_rect(x0 > g->x ? x0 : g->x, y0, x1 < g->x + g->w ? x1 : g->x + g->w, y0 + (ui_dev(ui, 3) > 1 ? ui_dev(ui, 3) : 1), 0);
+
+                ui_kit_fill(ui, &bar, ui_role(UI_PRIMARY) | 0xff000000u, &box);
+        }
+        for (int side = 0; side < 2; side++)
+                for (int port = 0; port < (side ? n->outs : n->ins); port++)
+                {
+                        b64 qx, qy, r = ui_q8(ui, UI_GRAPH_PORT);
+                        struct ui_box dot;
+
+                        ui_graph_port(g, k, side, port, &qx, &qy);
+                        dot = (struct ui_box){(b32)(qx - r), (b32)(qy - r), (b32)(qx + r), (b32)(qy + r), (b32)r, (b32)r};
+                        ui_kit_fill(ui, &dot, ui_role(UI_OUTLINE) | 0xff000000u, panel);
+                }
+        // The words: as many of them, from the label down, as fit inside the node's height.
+        for (int at = 0; at < 3; at++)
+        {
+                rows[at] = words[at] ? ui_dev(ui, ui_types[types[at]].line) : 0;
+                if (used + rows[at] > y1 - y0 - 2 * pad)
+                        break;
+                used += rows[at], shown = at + 1;
+        }
+        ui->top = y0 > top ? y0 : top, ui->bottom = y1 < bottom ? y1 : bottom;
+        for (int at = 0, line = y0 + (y1 - y0 - used) / 2; at < shown; at++)
+        {
+                int wide, low = x0 > g->x ? x0 : g->x, high = x1 < g->x + g->w ? x1 : g->x + g->w, left;
+
+                if (!rows[at])
+                        continue;
+                wide = ui_kit_measure(ui, (string_address)words[at], types[at]);
+                left = wide <= x1 - x0 - 2 * pad ? x0 + (x1 - x0 - wide) / 2 : x0 + pad;
+                ui_kit_text_in(ui, left, ui_kit_baseline(ui, line, types[at]), (string_address)words[at], types[at], at ? quiet : ink, 0, low, high);
+                line += rows[at];
+        }
+        ui->top = top, ui->bottom = bottom;
+        if (g->keys && k == g->chosen && x0 >= g->x && x1 <= g->x + g->w)
+        {
+                int in = ui_dev(ui, 2);
+                struct ui_box ring = ui_graph_rect(x0 + in, y0 + in, x1 - in, y1 - in, radius > in ? radius - in : 0);
+
+                ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_ON_SURFACE));
+        }
+}
+
+/*
+        The graph drawn in its panel: the ground and the grid flush to its rounded edges, the edges (those of the chosen node in the
+        primary colour), the nodes in order and the one in hand last, over them. While a node is dragged, a ghost is where the hand
+        has it and a line in the primary colour runs across the panel along each side and middle the node lines up with where it
+        would be let go. Nothing is drawn outside the panel: what lies past its edges is cut there.
+*/
+static fn ui_graph_draw(struct ui address_to ui, struct ui_graph address_to g)
+{
+        int top = ui->top, bottom = ui->bottom, stroke = ui_stroke(ui);
+        struct ui_box panel = ui_graph_rect(g->x, g->y, g->x + g->w, g->y + g->h, ui_dev(ui, UI_RADIUS));
+        unsigned int ground = ui_role(UI_SURFACE_LOW) | 0xff000000u;
+
+        if (g->w <= 0 || g->h <= 0)
+                return;
+        if (!g->homed)
+                ui_graph_home(ui, g);
+        ui->top = g->y > top ? g->y : top, ui->bottom = g->y + g->h < bottom ? g->y + g->h : bottom;
+        ui_kit_fill(ui, &panel, ground, null);
+        if (g->grid >= 0)
+                ui_graph_grid(ui, g, &panel, ground);
+        for (int e = 0; e < g->edges; e++)
+                if (g->edge[e].from < g->nodes && g->edge[e].to < g->nodes)
+                        ui_graph_wire(ui, g, &panel, &g->edge[e],
+                                      ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
+        for (int k = 0; k < g->nodes; k++)
+                if (k != g->held)
+                        ui_graph_face(ui, g, &panel, k);
+        if (g->held >= 0 && g->held < g->nodes)
+        {
+                const struct ui_graph_node address_to n = &g->node[g->held];
+                int x0, y0, x1, y1;
+
+                if (g->moving && (g->want_x != g->at_x || g->want_y != g->at_y))
+                {
+                        struct ui_box ghost;
+
+                        ui_graph_box(g, g->held, g->want_x, g->want_y, &x0, &y0, &x1, &y1);
+                        ghost = ui_graph_rect(x0, y0, x1, y1, ui_dev(ui, UI_RADIUS));
+                        ui_kit_fill(ui, &ghost, (ui_role(UI_ON_SURFACE) & 0xffffffu) | 0x24000000u, &panel);
+                }
+                ui_graph_face(ui, g, &panel, g->held);
+                for (int j = 0; g->moving && j < g->nodes; j++)
+                {
+                        const struct ui_graph_node address_to o = &g->node[j];
+                        int their[6] = {o->x, o->x + o->w, o->x + o->w / 2, o->y, o->y + o->h, o->y + o->h / 2};
+                        int mine[6] = {g->at_x, g->at_x + n->w, g->at_x + n->w / 2, g->at_y, g->at_y + n->h, g->at_y + n->h / 2};
+
+                        if (j == g->held)
+                                continue;
+                        for (int a = 0; a < 6; a++)
+                                for (int b = a < 3 ? 0 : 3; b < (a < 3 ? 3 : 6); b++)
+                                {
+                                        int p;
+                                        struct ui_box guide;
+
+                                        if ((a % 3 == 2) != (b % 3 == 2) || mine[a] != their[b])
+                                                continue;
+                                        p = ui_graph_px(a < 3 ? ui_graph_qx(g, their[b]) : ui_graph_qy(g, their[b]));
+                                        guide = a < 3 ? (struct ui_box){p * 256, panel.y0, p * 256 + stroke, panel.y1, 0, 0}
+                                                      : (struct ui_box){panel.x0, p * 256, panel.x1, p * 256 + stroke, 0, 0};
+                                        ui_kit_fill(ui, &guide, (ui_role(UI_PRIMARY) & 0xffffffu) | 0xa0000000u, &panel);
+                                }
+                }
+        }
+        ui->top = top, ui->bottom = bottom;
+}
+
 /* ---- the view ---- */
 /*
         The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the
