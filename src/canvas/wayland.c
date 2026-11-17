@@ -73,8 +73,8 @@
 #define WAYLAND_OUT_FDS 8
 #define WAYLAND_EVENT 1024      // the most one event can take
 #define WAYLAND_DAMAGE 8
-#define WAYLAND_CALLBACKS 32
-#define WAYLAND_PRESENTATIONS 4 // presentation feedbacks a surface holds for its next commits (one more is discarded)
+#define WAYLAND_CALLBACKS 32     // frame callbacks a surface holds in itself; past them a list that grows (struct wayland_idlist)
+#define WAYLAND_PRESENTATIONS 4  // presentation feedbacks a surface holds in itself for its next commits; past them likewise
 #define WAYLAND_SERIALS 8       // configures sent and not yet acknowledged
 #define WAYLAND_TEXT 128        // a title or an app id, its NUL included
 #define WAYLAND_POOL_BYTES (1L << 30)
@@ -415,6 +415,19 @@ struct wayland_table
         its relative pointers): their ids in the order made, a table that grows (as many as it makes), and the slots of those still
         there as a question of them answers (wayland_seats, wayland_devices), a table of their own.
 */
+/*
+        The ids a surface keeps of one kind past the ones it holds in itself (its frame callbacks pending and waiting, its presentation
+        feedbacks requested and taken): count is all of them, the first held in the surface's own array of n, the rest in a table of
+        their own, made at the first one past n and let go with the surface. No count of them is a cap: where the 33rd callback was
+        answered at once (a done no frame brought) and the fifth feedback discarded, each now waits for its frame.
+*/
+struct wayland_idlist
+{
+        long count;
+        unsigned int *more;
+        struct wayland_table table;
+};
+
 struct wayland_ids
 {
         unsigned int *id;
@@ -446,7 +459,7 @@ struct wayland_surface
         unsigned char attach_made;
         unsigned char damage_full;
         unsigned char damages;
-        unsigned char callbacks;
+        struct wayland_idlist callbacks;
         struct wayland_rect damage[WAYLAND_DAMAGE];
         unsigned char damage_kind[WAYLAND_DAMAGE]; // 0 surface, 1 buffer coordinates
         unsigned int callback[WAYLAND_CALLBACKS];
@@ -457,13 +470,13 @@ struct wayland_surface
         long pending_dx, pending_dy;
         // The callbacks a commit took, waiting for the frame.
         unsigned int ready[WAYLAND_CALLBACKS];
-        unsigned char readies;
+        struct wayland_idlist readies;
         // Presentation feedback (wp_presentation): the objects requested since the last commit, and those a commit took, which
         // are answered when the frame that carries the commit is drawn (wayland_presented), not on a frame that was not drawn.
         unsigned int feedback[WAYLAND_PRESENTATIONS];
-        unsigned char feedbacks;
+        struct wayland_idlist feedbacks;
         unsigned int presenting[WAYLAND_PRESENTATIONS];
-        unsigned char presentings;
+        struct wayland_idlist presentings;
         // What is shown. scale is the buffer scale, and scale120 what a unit of the surface is in pixels, in 120ths (wp_fractional_scale's
         // unit): 120 times the buffer scale, or, where a viewport gives the surface a size, the buffer's pixels over that size.
         long scale, scale120, transform;
@@ -978,6 +991,38 @@ static void wayland_table_drop(struct wayland_table *t)
         t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
 }
 
+// An id put at the end of a surface's list (in its array of n, else the list's table, grown): 1, or 0 when the memory is not there.
+static int wayland_idlist_put(unsigned int *own, long n, struct wayland_idlist *l, unsigned int id)
+{
+        if (l->count < n)
+        {
+                own[l->count++] = id;
+                return 1;
+        }
+        l->table.unit = sizeof(unsigned int);
+        if (!wayland_table_reach(&l->table, l->count - n + 1))
+                return 0;
+        l->more = (unsigned int *)l->table.at;
+        l->more[l->count++ - n] = id;
+        return 1;
+}
+
+static unsigned int wayland_idlist_at(const unsigned int *own, long n, const struct wayland_idlist *l, long at)
+{
+        return at < n ? own[at] : l->more[at - n];
+}
+
+static void wayland_idlist_drop(struct wayland_idlist *l)
+{
+        wayland_table_drop(&l->table);
+        l->more = 0, l->count = 0;
+}
+
+#define WAYLAND_CALLBACK_AT(s, at) wayland_idlist_at((s)->callback, WAYLAND_CALLBACKS, &(s)->callbacks, (at))
+#define WAYLAND_READY_AT(s, at) wayland_idlist_at((s)->ready, WAYLAND_CALLBACKS, &(s)->readies, (at))
+#define WAYLAND_FEEDBACK_AT(s, at) wayland_idlist_at((s)->feedback, WAYLAND_PRESENTATIONS, &(s)->feedbacks, (at))
+#define WAYLAND_PRESENTING_AT(s, at) wayland_idlist_at((s)->presenting, WAYLAND_PRESENTATIONS, &(s)->presentings, (at))
+
 /*
         The rows below `row` + 1 made the shim's (their client and surface none, their percent none), the three tables grown as one:
         1 when they are, 0 when the memory is not there (the window is not shown, as when the compositor has no row for it).
@@ -1118,6 +1163,12 @@ static void wayland_tables_drop(struct wayland_client *c)
 {
         for (long at = 0; at < c->source_table.count; at++)
                 wayland_table_drop(&c->sources[at].mime_table);
+        for (long at = 0; at < c->surface_table.count; at++)
+        {
+                struct wayland_surface *s = &c->surfaces[at];
+
+                wayland_idlist_drop(&s->callbacks), wayland_idlist_drop(&s->readies), wayland_idlist_drop(&s->feedbacks), wayland_idlist_drop(&s->presentings);
+        }
         wayland_table_drop(&c->index_table);
         wayland_table_drop(&c->object_table);
         wayland_table_drop(&c->surface_table);
@@ -2206,17 +2257,19 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         A callback waits for a frame on a surface: the one place readies grows, so the client's count of waiting surfaces
         (waiting) is kept exact here, in callbacks_done and in surface_drop, and nowhere else.
 */
-static inline void wayland_ready_add(struct wayland_client *c, struct wayland_surface *s, unsigned int id)
+static inline int wayland_ready_add(struct wayland_client *c, struct wayland_surface *s, unsigned int id)
 {
-        if (!s->readies)
+        if (!wayland_idlist_put(s->ready, WAYLAND_CALLBACKS, &s->readies, id))
+                return 0;
+        if (s->readies.count == 1)
                 c->waiting++;
-        s->ready[s->readies++] = id;
+        return 1;
 }
 
 /*
         One frame callback answered: its done with the time, and its id let go with it. A callback the shim cannot keep waiting
-        (a surface with WAYLAND_CALLBACKS ready already, and no frame drawn between) is answered this way at its commit, as
-        one over the request's cap is, so the client is never left waiting for a done that no frame will bring.
+        (one the memory has no room for) is answered this way at its commit, as
+        one the request had no room for is, so the client is never left waiting for a done that no frame will bring.
 */
 static void wayland_callback_answer(struct wayland_client *c, unsigned int id, long time)
 {
@@ -2235,11 +2288,11 @@ static void wayland_callback_answer(struct wayland_client *c, unsigned int id, l
 /* The callbacks of a surface that have waited for a frame: done, and their ids let go. */
 static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surface *s, long time)
 {
-        for (long at = 0; at < s->readies; at++)
-                wayland_callback_answer(c, s->ready[at], time);
-        if (s->readies)
+        for (long at = 0; at < s->readies.count; at++)
+                wayland_callback_answer(c, WAYLAND_READY_AT(s, at), time);
+        if (s->readies.count)
                 c->waiting--;
-        s->readies = 0;
+        s->readies.count = 0;
 }
 
 /*
@@ -2266,11 +2319,11 @@ static void wayland_feedback_discard(struct wayland_client *c, unsigned int id)
 */
 static void wayland_presenting_drop(struct wayland_client *c, struct wayland_surface *o)
 {
-        for (long at = 0; at < o->presentings; at++)
-                wayland_feedback_discard(c, o->presenting[at]);
-        if (o->presentings)
+        for (long at = 0; at < o->presentings.count; at++)
+                wayland_feedback_discard(c, WAYLAND_PRESENTING_AT(o, at));
+        if (o->presentings.count)
                 c->presenting_surfaces--;
-        o->presentings = 0;
+        o->presentings.count = 0;
 }
 
 static void wayland_presentings_discard(struct wayland_client *c, struct wayland_surface *s)
@@ -2287,23 +2340,22 @@ static void wayland_presentings_discard(struct wayland_client *c, struct wayland
 
 /*
         A commit takes the feedbacks requested since the last one: they are answered by the frame it is drawn in, or, when
-        the surface has no window to draw it in (shown 0), discarded now. A surface past its feedbacks discards the one it
+        the surface has no window to draw it in (shown 0), discarded now. A feedback the memory has no room for is discarded, the one it
         cannot hold, which is the protocol's answer to a feedback that is not presented.
 */
 static void wayland_feedback_take(struct wayland_client *c, struct wayland_surface *s, int shown)
 {
-        for (long at = 0; at < s->feedbacks; at++)
+        for (long at = 0; at < s->feedbacks.count; at++)
         {
-                if (shown && s->presentings < WAYLAND_PRESENTATIONS)
+                if (shown && wayland_idlist_put(s->presenting, WAYLAND_PRESENTATIONS, &s->presentings, WAYLAND_FEEDBACK_AT(s, at)))
                 {
-                        if (!s->presentings)
+                        if (s->presentings.count == 1)
                                 c->presenting_surfaces++;
-                        s->presenting[s->presentings++] = s->feedback[at];
                 }
                 else
-                        wayland_feedback_discard(c, s->feedback[at]);
+                        wayland_feedback_discard(c, WAYLAND_FEEDBACK_AT(s, at));
         }
-        s->feedbacks = 0;
+        s->feedbacks.count = 0;
 }
 
 static void wayland_pool_unref(struct wayland_client *c, long pool);
@@ -3152,12 +3204,10 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 // A root with no window has no frame to wait for: the child's callbacks are answered now, as a commit's are.
                 if (root->row < 0)
                 {
-                        for (long at = 0; at < s->callbacks; at++)
-                                if (s->readies < WAYLAND_CALLBACKS)
-                                        wayland_ready_add(c, s, s->callback[at]);
-                                else
-                                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
-                        s->callbacks = 0;
+                        for (long at = 0; at < s->callbacks.count; at++)
+                                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
+                                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
+                        s->callbacks.count = 0;
                         wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
                 }
                 s->sub_dirty = 1;
@@ -3298,12 +3348,10 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         s->transform = s->pending_transform;
         s->alpha = s->pending_alpha;
         s->async_hint = s->pending_async;
-        for (long at = 0; at < s->callbacks; at++)
-                if (s->readies < WAYLAND_CALLBACKS)
-                        wayland_ready_add(c, s, s->callback[at]);
-                else
-                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
-        s->callbacks = 0;
+        for (long at = 0; at < s->callbacks.count; at++)
+                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
+                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
+        s->callbacks.count = 0;
         wayland_feedback_take(c, s, 1);
 }
 
@@ -3340,12 +3388,10 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
                 s->attach_made = 0;
                 s->attached = 0;
                 s->damages = 0;
-                for (long at = 0; at < s->callbacks; at++)
-                        if (s->readies < WAYLAND_CALLBACKS)
-                                wayland_ready_add(c, s, s->callback[at]);
-                        else
-                                wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
-                s->callbacks = 0;
+                for (long at = 0; at < s->callbacks.count; at++)
+                        if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
+                                wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
+                s->callbacks.count = 0;
                 wayland_feedback_take(c, s, 0);
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
@@ -3409,24 +3455,24 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         wayland_constraints_drop(c, wayland_surface_index(c, s));
         wayland_sub_drop(c, s);
         wayland_row_release(c, s);
-        for (long at = 0; at < s->callbacks; at++)
+        for (long at = 0; at < s->callbacks.count; at++)
         {
-                long slot = wayland_find(c, s->callback[at], WLI_wl_callback);
+                long slot = wayland_find(c, WAYLAND_CALLBACK_AT(s, at), WLI_wl_callback);
 
                 if (slot >= 0)
                         wayland_object_free(c, slot);
         }
-        for (long at = 0; at < s->readies; at++)
+        for (long at = 0; at < s->readies.count; at++)
         {
-                long slot = wayland_find(c, s->ready[at], WLI_wl_callback);
+                long slot = wayland_find(c, WAYLAND_READY_AT(s, at), WLI_wl_callback);
 
                 if (slot >= 0)
                         wayland_object_free(c, slot);
         }
-        if (s->readies)
+        if (s->readies.count)
         {
                 c->waiting--;
-                s->readies = 0;
+                s->readies.count = 0;
         }
         if (s->live && s->role == WAYLAND_ROLE_SUBSURFACE)
         {
@@ -3447,6 +3493,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         s->pending_dx = s->pending_dy = 0;
         if (s->syncobj_id)
                 s->syncobj_id = 0;
+        wayland_idlist_drop(&s->callbacks), wayland_idlist_drop(&s->readies), wayland_idlist_drop(&s->feedbacks), wayland_idlist_drop(&s->presentings);
         s->live = 0;
         s->gen++;
         wayland_table_give(&c->surface_table, wayland_surface_index(c, s));
@@ -4608,16 +4655,14 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         s->damages = 0;
         s->damage_full = 0;
         // The frame callbacks the commit takes. A surface with no window has no frame: its callbacks are answered now.
-        for (long at = 0; at < s->callbacks; at++)
+        for (long at = 0; at < s->callbacks.count; at++)
         {
-                if (s->readies < WAYLAND_CALLBACKS)
-                        wayland_ready_add(c, s, s->callback[at]);
-                else
-                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
+                if (!wayland_ready_add(c, s, WAYLAND_CALLBACK_AT(s, at)))
+                        wayland_callback_answer(c, WAYLAND_CALLBACK_AT(s, at), wayland.host->now(wayland.host->context));
         }
-        s->callbacks = 0;
+        s->callbacks.count = 0;
         wayland_feedback_take(c, s, s->row >= 0);
-        if (s->row < 0 && s->readies)
+        if (s->row < 0 && s->readies.count)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
         return WAYLAND_OK;
 }
@@ -4632,13 +4677,13 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
         {
         case WLQ_wl_surface_destroy:
                 // The feedbacks a surface still holds are discarded by it: a surface gone is a frame that will not come.
-                for (long at = 0; at < s->feedbacks; at++)
-                        wayland_feedback_discard(c, s->feedback[at]);
-                for (long at = 0; at < s->presentings; at++)
-                        wayland_feedback_discard(c, s->presenting[at]);
-                if (s->presentings)
+                for (long at = 0; at < s->feedbacks.count; at++)
+                        wayland_feedback_discard(c, WAYLAND_FEEDBACK_AT(s, at));
+                for (long at = 0; at < s->presentings.count; at++)
+                        wayland_feedback_discard(c, WAYLAND_PRESENTING_AT(s, at));
+                if (s->presentings.count)
                         c->presenting_surfaces--;
-                s->feedbacks = s->presentings = 0;
+                s->feedbacks.count = s->presentings.count = 0;
                 if (s->role_id)
                 {
                         // A role object that outlives its surface is inert; the window goes with the surface.
@@ -4665,9 +4710,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                 wayland_damage_add(s, a, 1);
                 return WAYLAND_OK;
         case WLQ_wl_surface_frame:
-                if (s->callbacks < WAYLAND_CALLBACKS)
-                        s->callback[s->callbacks++] = c->objects[a[0].slot].id;
-                else
+                if (!wayland_idlist_put(s->callback, WAYLAND_CALLBACKS, &s->callbacks, c->objects[a[0].slot].id))
                         wayland_callback_answer(c, c->objects[a[0].slot].id, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
         case WLQ_wl_surface_set_input_region:
@@ -8568,8 +8611,8 @@ static void wayland_constraints_drop(struct wayland_client *c, long surface)
 
 /*
         wp_presentation.feedback (surface, new id): the feedback is answered by the commit that follows it, when its frame is
-        drawn (wayland_presented). Arguments in the order the XML has them: the surface first, then the new object. A surface
-        holding its limit of feedbacks discards the new one at once: the protocol's answer for a frame that is not timed.
+        drawn (wayland_presented). Arguments in the order the XML has them: the surface first, then the new object. A feedback
+        the memory has no room for is discarded at once: the protocol's answer for a frame that is not timed.
 */
 static int wayland_presentation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
@@ -8580,10 +8623,8 @@ static int wayland_presentation_request(struct wayland_client *c, struct wayland
         s = wayland_surface_of(c, a[0].slot);
         if (!s)
                 return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-        if (s->feedbacks >= WAYLAND_PRESENTATIONS)
+        if (!wayland_idlist_put(s->feedback, WAYLAND_PRESENTATIONS, &s->feedbacks, c->objects[a[1].slot].id))
                 wayland_feedback_discard(c, c->objects[a[1].slot].id);
-        else
-                s->feedback[s->feedbacks++] = c->objects[a[1].slot].id;
         return WAYLAND_OK;
 }
 
@@ -10249,13 +10290,13 @@ WAYLAND_API void wayland_frame(void)
                         wayland_configure_owed(c, &c->surfaces[wayland.row_surface[row]]);
                 }
 
-                int any = s && s->live && s->readies;
+                int any = s && s->live && s->readies.count;
 
                 if (c && c->subsurfaces)
                 for (struct wayland_subs sub_it = wayland_subs_of(c); s && s->live && !any && wayland_subs_next(&sub_it);)
                 {
                         long at = sub_it.at;
-                        any = c->surfaces[at].readies && wayland_root_of(c, &c->surfaces[at]) == s;
+                        any = c->surfaces[at].readies.count && wayland_root_of(c, &c->surfaces[at]) == s;
                 }
                 if (!any)
                         continue;
@@ -10282,14 +10323,14 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
 {
         unsigned long seconds = when / 1000000000ul, nanoseconds = when % 1000000000ul;
 
-        for (long at = 0; at < s->presentings; at++)
+        for (long at = 0; at < s->presentings.count; at++)
         {
-                long slot = wayland_find(c, s->presenting[at], WLI_wp_presentation_feedback);
+                long slot = wayland_find(c, WAYLAND_PRESENTING_AT(s, at), WLI_wp_presentation_feedback);
 
                 if (slot < 0)
                         continue;
                 {
-                        unsigned int id = s->presenting[at];
+                        unsigned int id = WAYLAND_PRESENTING_AT(s, at);
                         // The last word is the presentation flags the compositor can vouch for (vsync, hw_clock, hw_completion).
                         unsigned int words[7] = {(unsigned int)(seconds >> 32), (unsigned int)seconds, (unsigned int)nanoseconds, (unsigned int)refresh,
                                                  (unsigned int)(seq >> 32), (unsigned int)seq, (unsigned int)flags};
@@ -10298,9 +10339,9 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                         wayland_object_delete(c, slot);
                 }
         }
-        if (s->presentings)
+        if (s->presentings.count)
                 c->presenting_surfaces--;
-        s->presentings = 0;
+        s->presentings.count = 0;
 }
 
 /*
@@ -10436,12 +10477,12 @@ static int wayland_presentings_wanted(struct wayland_client *c, long row)
 
         if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                 return 0;
-        if (root->presentings)
+        if (root->presentings.count)
                 return 1;
         for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
                 long at = sub_it.at;
-                if (c->surfaces[at].presentings && wayland_root_of(c, &c->surfaces[at]) == root)
+                if (c->surfaces[at].presentings.count && wayland_root_of(c, &c->surfaces[at]) == root)
                         return 1;
         }
         return 0;
@@ -10474,12 +10515,12 @@ WAYLAND_API long wayland_frame_wanted(void)
                         return 1;
                 if (!c || (!c->waiting && !c->presenting_surfaces))
                         continue;
-                waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies != 0;
+                waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies.count != 0;
                 if (c->subsurfaces)
                 for (struct wayland_subs sub_it = wayland_subs_of(c); c->waiting && !waits && wayland_subs_next(&sub_it);)
                 {
                         long at = sub_it.at;
-                        waits = c->surfaces[at].readies && wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
+                        waits = c->surfaces[at].readies.count && wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
                 }
                 // A window put away is told of no frame (wayland_frame), so no frame is wanted for its callbacks: they are answered by the
                 // first frame drawn once it is shown, which the compositor draws for any window it shows.

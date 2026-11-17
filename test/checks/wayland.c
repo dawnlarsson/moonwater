@@ -1811,15 +1811,18 @@ static void test_frame_overflow(void)
         session_window(&s, 0xff223344);
         c = s.c;
         wlc_forget(c);
-        for (int at = 0; at < WAYLAND_CALLBACKS + 1; at++)
+        for (int at = 0; at < 4 * WAYLAND_CALLBACKS + 1; at++)
         {
                 wlc_send(c, s.surface, WLQ_wl_surface_frame, wlc_id(c, WLI_wl_callback, 1));
                 wlc_send(c, s.surface, WLQ_wl_surface_commit);
         }
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0,
+                "past the callbacks a surface holds in itself none is answered before its frame (%ld were)", wlc_count(c, WLI_wl_callback, WLE_wl_callback_done));
         wayland_frame();
         wlc_pump(c);
-        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == WAYLAND_CALLBACKS + 1,
-                "every frame callback is answered: %ld of %d", wlc_count(c, WLI_wl_callback, WLE_wl_callback_done), WAYLAND_CALLBACKS + 1);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 4 * WAYLAND_CALLBACKS + 1,
+                "every frame callback is answered by the frame: %ld of %d", wlc_count(c, WLI_wl_callback, WLE_wl_callback_done), 4 * WAYLAND_CALLBACKS + 1);
         wlc_end(c);
         leak_check("frame overflow");
         wayland_stop();
@@ -2819,13 +2822,13 @@ static void test_presentation(void)
         WLCHECK(a >= 0 && c->ev[a].u[1] == 7 && c->ev[a].u[2] == 0 && c->ev[a].u[6] == 0 && !wayland_frame_wanted(),
                 "an idle frame presents the feedback at its time, with no flags, and nothing waits after it");
 
-        /* more than the surface holds: the one it cannot hold is discarded at once */
+        /* more than the surface holds in itself: kept, none discarded (the list grows past them) */
         wlc_forget(c);
-        for (int at = 0; at < WAYLAND_PRESENTATIONS + 1; at++)
+        for (int at = 0; at < 4 * WAYLAND_PRESENTATIONS + 1; at++)
                 wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
         wlc_pump(c);
-        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 1,
-                "a surface past its limit discards the one it cannot hold, at once");
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 0,
+                "a surface asked for more feedbacks than it holds in itself keeps them all, and discards none");
 
         /* a surface with no window has no frame: its feedback is discarded at the commit */
         plain = wlc_id(c, WLI_wl_surface, 6);
@@ -2840,8 +2843,8 @@ static void test_presentation(void)
         wlc_forget(c);
         wlc_send(c, s.surface, WLQ_wl_surface_destroy);
         wlc_pump(c);
-        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == WAYLAND_PRESENTATIONS,
-                "destroying a surface discards the feedbacks it holds");
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 4 * WAYLAND_PRESENTATIONS + 1,
+                "destroying a surface discards the feedbacks it holds, every one");
         WLCHECK(c->errors == 0, "none of it is a protocol error");
         wlc_end(c);
         leak_check("presentation");
