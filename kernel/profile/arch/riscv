@@ -58,11 +58,11 @@ CONFIG_FPU=y
 #       boot is not a floor.
 #
 #       The symbols below are about the kernel's own use of the extensions,
-#       which goes through RISCV_ALTERNATIVE and is decided at runtime against
-#       what the hardware actually reports. That is safe on any machine; ours
+#       which goes through the kernel's alternatives and is decided at runtime
+#       against what the hardware actually reports (always built since 7.4,
+#       which dropped RISCV_ALTERNATIVE). That is safe on any machine; ours
 #       would not have been.
 #
-CONFIG_RISCV_ALTERNATIVE=y
 CONFIG_RISCV_ISA_C=y
 CONFIG_RISCV_ISA_ZBA=y
 CONFIG_RISCV_ISA_ZBB=y

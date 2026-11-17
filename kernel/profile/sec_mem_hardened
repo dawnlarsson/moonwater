@@ -56,7 +56,7 @@ CONFIG_LIST_HARDENED=y
 
 # W^X, checked rather than assumed: the page tables are walked once at boot and
 # any mapping that is both writable and executable is warned about, which is
-# how a mapping the kernel left open after it applied NX gets found.
-CONFIG_DEBUG_WX=y
+# how a mapping the kernel left open after it applied NX gets found (CHECK_WX since 7.4, DEBUG_WX before).
+CONFIG_CHECK_WX=y
 
 #> cmdline slab_nomerge page_alloc.shuffle=1 init_on_alloc=1

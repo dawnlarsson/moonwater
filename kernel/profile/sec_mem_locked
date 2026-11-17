@@ -41,7 +41,7 @@ CONFIG_SCHED_STACK_END_CHECK=y
 # operation and goes on; for a kiosk that is a state nobody tested.
 CONFIG_LIST_HARDENED=y
 CONFIG_BUG_ON_DATA_CORRUPTION=y
-CONFIG_DEBUG_WX=y
+CONFIG_CHECK_WX=y
 
 # An oops is the kernel saying its own state is not what it thinks, and a
 # machine that does one job is better restarted than left to carry on in it:

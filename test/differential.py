@@ -31880,7 +31880,7 @@ int main(void) {
                 "\t\t      struct ext4_filename *fname,\n\t\t      struct ext4_dir_entry_2 **dest_de)\n{\n\tint nlen = 0;\n\treturn nlen;\n}\n",
             "linux/fs/libfs.c":
                 "enum {\n\tDIR_OFFSET_FIRST\t= 2,\n\tDIR_OFFSET_EOD\t\t= S32_MAX,\n};\n\n"
-                "static noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset)\n{\n\treturn NULL;\n}\n\n"
+                "enum {\n\tDIR_OFFSET_MIN\t\t= DIR_OFFSET_FIRST + 1,\n\tDIR_OFFSET_MAX\t\t= DIR_OFFSET_EOD - 1,\n};\n\n"
                 "static bool offset_dir_emit(struct dir_context *ctx, struct dentry *dentry)\n{\n\treturn true;\n}\n\n"
                 "static void offset_iterate_dir(struct file *file, struct dir_context *ctx)\n{\n\tctx->pos = DIR_OFFSET_EOD;\n}\n",
             "linux/fs/ext4/dir.c":
@@ -31991,9 +31991,10 @@ int main(void) {
                     "_Static_assert(DIRENT_HTREE == 3," in namei and
                     "/* Moonwater: offset_iterate_dir is in kernel/kernel.c */\nvoid offset_iterate_dir(" in libfs and
                     "static void offset_iterate_dir" not in libfs and "\nbool offset_dir_emit(" in libfs and
-                    "static bool offset_dir_emit(" not in libfs and "static noinline_for_stack struct dentry *\noffset_dir_lookup" not in libfs and
-                    "noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset);\n" in libfs and
+                    "static bool offset_dir_emit(" not in libfs and
                     "_Static_assert(DIR_OFFSET_EOD == S32_MAX," in libfs and
+                    "_Static_assert(DIR_OFFSET_FIRST == 2 && DIR_OFFSET_MIN == 3 && DIR_OFFSET_MAX == S32_MAX - 1," in libfs and
+                    "_Static_assert(sizeof(struct ma_state) <= 128 && wr_invalid == 0," in libfs and
                     "/* Moonwater: call_filldir is in kernel/kernel.c */\nint call_filldir(" in (tree / "linux/fs/ext4/dir.c").read_text() and
                     "_Static_assert(offsetof(struct fname, hash) == 0" in (tree / "linux/fs/ext4/dir.c").read_text() and
                     "/* Moonwater: free_rb_tree_fname is in kernel/kernel.c */\nvoid free_rb_tree_fname(" in (tree / "linux/fs/ext4/dir.c").read_text() and
@@ -85112,7 +85113,8 @@ def harness_guest_scenarios(argv):
     lines.append("scen_count 'radio add says it is off' 1 \"$(grep -c 'wifi saved scen-none; wifi is off, moonwater wifi on joins it' /tmp/sc.got)\"")
     lines.append("scen_count 'radio add saved it' 1 \"$(grep -c -x scen-none /root/wifi)\"")
     lines.append("scen_count 'radio add pinned it off' 1 \"$(grep -c -x off /root/wifi.power)\"")
-    lines.append("moonwater status > /tmp/sc.got 2>&1; scen_count 'radio status says off' 1 \"$(grep -c -x '  wifi: switched off (moonwater wifi on)' /tmp/sc.got)\"")
+    # Off on a machine with no radio, the radio not being there is said first (13be78679): switched on, it would not be either.
+    lines.append("moonwater status > /tmp/sc.got 2>&1; scen_count 'radio status says off' 1 \"$(grep -c -x '  wifi: no wireless hardware found' /tmp/sc.got)\"")
     # Switched on, the radio that is not there is said at once.
     lines.append("echo on > /root/wifi.power")
     lines.append("moonwater wifi add scen-none2 passpass1 > /tmp/sc.got 2>&1; scen_status 'radio add, no radio' 1 $?")
@@ -95147,7 +95149,8 @@ static inline u32 get_unaligned_be32(const void *p)
 #define IS_ERR(p) ((unsigned long)(p) >= (unsigned long)-4095)
 #define PTR_ERR(p) ((long)(p))
 struct super_block { unsigned long s_blocksize; void *s_fs_info; };
-struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; unsigned short i_mode; unsigned long i_ino; };
+struct inode_operations;
+struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; unsigned short i_mode; unsigned long i_ino; const struct inode_operations *i_op; };
 struct buffer_head { char *b_data; size_t b_size; unsigned long b_blocknr; };
 struct dentry;
 struct file { void *private_data; struct { void *mnt; struct dentry *dentry; } f_path; unsigned f_mode; struct inode *f_inode; };
@@ -95222,7 +95225,7 @@ static inline int fscrypt_prepare_readdir(struct inode *dir) { if (IS_ENCRYPTED(
 
 #define S32_MAX 2147483647
 enum { DENTRY_D_LOCK_NORMAL, DENTRY_D_LOCK_NESTED };
-enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX };
+enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX, DIR_OFFSET_MAX = S32_MAX - 1 };
 #define S_DT_MASK 15
 #define TIF_SIGPENDING 1
 #define TIF_NOTIFY_SIGNAL 2
@@ -95269,6 +95272,19 @@ struct dir_context { filldir_t actor; loff_t pos; int count; unsigned int dt_fla
 #define IFF_LOOPBACK 0x8
 struct net_device { unsigned long priv_flags; const void *ops[22]; unsigned long state; unsigned int flags; unsigned short hard_header_len; };
 struct sk_buff { struct sk_buff *next, *prev; struct net_device *dev; char cb[48]; };
+/* what 7.4's offset_iterate_dir reads: the directory's offset map, a maple tree, walked through an ma_state laid out as
+   include/linux/maple_tree.h lays it out (lockdep's members aside) */
+#define ULONG_MAX (~0UL)
+struct maple_tree { unsigned long ma_flags; void *ma_root; };
+struct offset_ctx { struct maple_tree mt; unsigned long next_offset; };
+struct inode_operations { void *lookup; struct offset_ctx *(*get_offset_ctx)(struct inode *); };
+enum maple_status { ma_active, ma_start, ma_root, ma_none, ma_pause, ma_overflow, ma_underflow, ma_error };
+enum store_type { wr_invalid, wr_new_root, wr_store_root };
+struct ma_state {
+        struct maple_tree *tree; unsigned long index; unsigned long last; void *node; unsigned long min; unsigned long max;
+        void *sheaf; void *alloc; unsigned long node_request; enum maple_status status;
+        unsigned char depth; unsigned char offset; unsigned char mas_flags; unsigned char end; enum store_type store_type;
+};
 """
 
 KERNEL_PORTS_LIBFS_PRELUDE = r"""
@@ -95282,6 +95298,12 @@ static inline struct dentry *d_next_sibling(const struct dentry *d) { return hli
 static inline bool simple_positive(const struct dentry *d) { return d->d_inode && d->d_hash.pprev; }
 static inline struct dentry *dget_dlock(struct dentry *d) { d->d_lockref.count++; return d; }
 static inline long dentry2offset(struct dentry *d) { return (long)d->d_fsdata; }
+static inline struct inode *file_inode(const struct file *f) { return f->f_inode; }
+#define MA_STATE(name, mt, first, end) struct ma_state name = { .tree = mt, .index = first, .last = end, .node = NULL, \
+        .status = ma_start, .min = 0, .max = ULONG_MAX, .sheaf = NULL, .alloc = NULL, .node_request = 0, .mas_flags = 0, .store_type = wr_invalid, }
+void *mas_find_rev(struct ma_state *mas, unsigned long min);
+#define DCACHE_PERSISTENT (1u << 27)
+#define VFS_WARN_ON_ONCE(cond) ((void)sizeof(cond))
 void _raw_spin_lock(void *);
 void _raw_spin_unlock(void *);
 #define spin_lock(l) _raw_spin_lock(l)
@@ -95294,7 +95316,6 @@ static inline bool dir_emit(struct dir_context *ctx, const char *name, int namel
         return ctx->actor(ctx, name, namelen, ctx->pos, ino, type & dt_mask);
 }
 void dput(struct dentry *);
-struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset);
 /* fs/readdir.c's filldir64, which is cut in whole, over a user buffer that is a window of this process's memory */
 #define __user
 typedef int64_t s64;
@@ -95472,19 +95493,39 @@ int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor, co
 
 
 /* the dcache calls of the libfs port: present in every build of kernel.c, used by the libfs test */
-static struct { long bad, locks, dputs; } LF;
-static struct dentry *(*lf_lookup)(struct dentry *, loff_t);
+static struct { long bad, locks, dputs, finds; } LF;
 void _raw_spin_lock(void *l) { MW_FRAME_AT(2); int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++; }
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { MW_FRAME_AT(2); LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
-struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset)
+/* The directory's offset map: the test's children, ascending by offset, every one positive (7.4 keeps only
+   persistent dentries in the map). mas_find_rev gives the last at or below mas->index on the first call and the
+   one before the last it gave after that, as the maple tree does; the first call checks the ma_state is the one
+   MA_STATE makes, at the start the C computes. */
+static struct dentry *lf_map; static int lf_map_n; static long lf_start;
+static struct offset_ctx lf_octx; static struct inode *lf_dir_inode;
+struct offset_ctx *lf_get_offset_ctx(struct inode *inode) { MW_FRAME_AT(2); if (inode != lf_dir_inode) LF.bad++; return &lf_octx; }
+void *mas_find_rev(struct ma_state *mas, unsigned long min)
 {
-        void *from = mw_frame_from;     /* the lookup's own locks are not the port's calls */
-        struct dentry *found;
+        unsigned long below;
+        struct dentry *found = NULL;
         MW_FRAME_AT(2);
-        mw_frame_from = NULL;
-        found = lf_lookup ? lf_lookup(parent, offset) : NULL;
-        mw_frame_from = from;
+        LF.finds++;
+        if (mas->tree != &lf_octx.mt) LF.bad++;
+        if (mas->status == ma_start) {
+                if (mas->index != (unsigned long)lf_start || mas->last != (unsigned long)lf_start || mas->node || mas->min ||
+                    mas->max != ULONG_MAX || mas->sheaf || mas->alloc || mas->node_request || mas->depth || mas->offset ||
+                    mas->mas_flags || mas->end || mas->store_type != wr_invalid) LF.bad++;
+                below = mas->index;
+        } else if (mas->status == ma_active)
+                below = mas->index - 1;
+        else
+                return NULL;
+        for (int i = 0; i < lf_map_n; i++) {
+                unsigned long off = (unsigned long)lf_map[i].d_fsdata;
+                if (off >= min && off <= below) found = &lf_map[i];
+        }
+        if (!found) { mas->status = ma_underflow; return NULL; }
+        mas->index = mas->last = (unsigned long)found->d_fsdata; mas->status = ma_active;
         return found;
 }
 static struct { long live, allocs, frees, fail_at; } MA;
@@ -95847,16 +95888,6 @@ KERNEL_PORTS_LIBFS_TEST = r"""
 #include <sys/mman.h>
 void offset_iterate_dir(struct file *file, struct dir_context *ctx);
 
-static struct dentry *lf_find(struct dentry *parent, loff_t offset)
-{
-        struct dentry *child = NULL, *d;
-        if (offset == DIR_OFFSET_FIRST)
-                return find_positive_dentry(parent, NULL, false);
-        for (d = d_first_child(parent); d; d = d_next_sibling(d))       /* the maple tree holds every child: the last at or below offset */
-                if ((long)d->d_fsdata <= offset && (!child || (long)d->d_fsdata > (long)child->d_fsdata)) child = d;
-        return find_positive_dentry(parent, child, false);
-}
-
 static struct { int n; struct { char name[256]; int len; long off; u64 ino; unsigned type; long pos; } e[400]; int limit; } EM;
 static struct dentry *lf_dir, *lf_kids;
 static int lf_nkids;
@@ -95878,7 +95909,7 @@ static bool lf_actor(struct dir_context *ctx, const char *name, int namelen, lof
 int main(int argc, char **argv)
 {
         long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, emitted = 0, locks_c = 0, locks_p = 0, puts_c = 0, puts_p = 0;
-        lf_lookup = lf_find;
+        static const struct inode_operations lf_iops = { .get_offset_ctx = lf_get_offset_ctx };
         for (long it = 0; it < iters; it++) {
                 int sizes[] = {0, 1, 2, 15, 16, 17, 31, 32, 33, 1 + rnd() % 70, 1 + rnd() % 70, 1 + rnd() % 70};
                 int n = sizes[rnd() % 12];
@@ -95888,7 +95919,7 @@ int main(int argc, char **argv)
                 struct inode *inodes = calloc(n + 1, sizeof *inodes);
                 long *offs = calloc(n + 1, sizeof *offs);
                 unsigned char *region = mmap(NULL, (2 * n + 2) * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                dir.d_inode = &dir_inode; dir.d_lockref.count = 1;
+                dir.d_inode = &dir_inode; dir.d_lockref.count = 1; dir_inode.i_op = &lf_iops; lf_dir_inode = &dir_inode;
                 long off = DIR_OFFSET_MIN + rnd() % 3;
                 for (int i = 0; i < n; i++) {
                         int len = rnd() % 3 == 0 ? 1 + rnd() % 255 : 1 + rnd() % 40;
@@ -95901,15 +95932,15 @@ int main(int argc, char **argv)
                         d->d_name.name = nm; d->d_name.len = len;
                         inodes[i].i_ino = ((u64)rnd() << 32) | rnd();
                         inodes[i].i_mode = (rnd() % 3 ? (rnd() % 16) << 12 : rnd() & 0xffff) | (rnd() & 0777);   /* every directory type, the four bits that map to nothing too */
-                        d->d_inode = rnd() % 7 == 0 ? NULL : &inodes[i];
-                        d->d_hash.pprev = rnd() % 10 == 0 ? NULL : &d->d_hash.next;
+                        d->d_inode = &inodes[i]; d->d_flags = DCACHE_PERSISTENT;
+                        d->d_hash.pprev = &d->d_hash.next;
                         d->d_fsdata = (void *)off; offs[i] = off;
                         off += 1 + (rnd() % 4 == 0 ? rnd() % 5 : 0);
                         d->d_lockref.count = 1; d->d_parent = &dir;
                         if (i) kids[i - 1].d_sib.next = &d->d_sib; else dir.d_children.first = &d->d_sib;
                 }
-                lf_dir = &dir; lf_kids = kids; lf_nkids = n;
-                struct file file; memset(&file, 0, sizeof file); file.f_path.dentry = &dir;
+                lf_dir = &dir; lf_kids = kids; lf_nkids = n; lf_map = kids; lf_map_n = n;
+                struct file file; memset(&file, 0, sizeof file); file.f_path.dentry = &dir; file.f_inode = &dir_inode;
                 long pos = rnd() % 3 == 0 ? DIR_OFFSET_FIRST : n && rnd() % 2 ? offs[rnd() % n] + (rnd() % 3 == 0 ? 1 : 0) : DIR_OFFSET_MIN + rnd() % 100;
                 for (int round = 0; round < 8; round++) {
                         int limit = rnd() % 3 == 0 ? 0 : 1 + rnd() % 40;
@@ -95935,6 +95966,7 @@ int main(int argc, char **argv)
                         gb = ga; gb.current_dir = (struct linux_dirent64 *)ub;
                         memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
                         mw_user_lo = (char *)ua; mw_user_hi = (char *)ua + window;
+                        lf_start = pos == DIR_OFFSET_FIRST ? DIR_OFFSET_MAX : pos;
                         offset_iterate_dir_c(&file, &ga.ctx);
                         typeof(EM) ea = EM; long la = LF.locks, da = LF.dputs, ba = LF.bad;
                         int ra[n + 1], da_count = dir.d_lockref.count;
@@ -96070,7 +96102,6 @@ static void xd_insert(struct dir_private_info *info, struct fname *f)
 int main(int argc, char **argv)
 {
         long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, emitted = 0;
-        lf_lookup = NULL;
         for (long it = 0; it < iters; it++) {
                 int n = 1 + rnd() % (rnd() % 4 == 0 ? 60 : 20);
                 struct dir_private_info base; memset(&base, 0, sizeof base);
@@ -96387,7 +96418,7 @@ def harness_kernel_ports(argv):
 
     dirent_code = KERNEL_PORTS_DIRENT_SHIM + sources["fs/fs_dirent.c"][sources["fs/fs_dirent.c"].index("static const unsigned char fs_dtype_by_ftype"):]
     libfs_code = "\n".join(cut(sources["fs/libfs.c"], head, "\n}\n", True) for head in (
-        "static struct dentry *find_positive_dentry(struct dentry *parent,", "static bool offset_dir_emit(", "static void offset_iterate_dir("))
+        "static bool offset_dir_emit(", "static void offset_iterate_dir("))
     readdir_code = "\n".join(cut(sources["fs/readdir.c"], head, tail, True) for head, tail in (
         ("struct getdents_callback64 {", "};"), ("static int verify_dirent_name(", "\n}\n"), ("static bool filldir64(", "\n}\n")))
     libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + readdir_code.replace("static bool filldir64(", "bool filldir64(", 1) + "\n" + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
@@ -96522,6 +96553,8 @@ def harness_kernel_ports(argv):
         targets.append(("x86_64", shlex.split(os.environ.get("CC", "cc")), [], ["-static"], 6000))
     elif sys.platform.startswith("linux") and machine in ("aarch64", "arm64"):
         targets.append(("arm64", shlex.split(os.environ.get("CC", "cc")), [], ["-static"], 6000))
+    if machine not in ("x86_64", "amd64") and shutil.which("x86_64-linux-gnu-gcc") and shutil.which("qemu-x86_64"):
+        targets.append(("x86_64", ["x86_64-linux-gnu-gcc"], ["qemu-x86_64", "-cpu", "max"], ["-static"], 1500))
     if machine not in ("aarch64", "arm64") and shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64"):
         targets.append(("arm64", ["aarch64-linux-gnu-gcc"], ["qemu-aarch64"], ["-static"], 1500))
     if machine != "riscv64" and shutil.which("riscv64-linux-gnu-gcc") and shutil.which("qemu-riscv64"):

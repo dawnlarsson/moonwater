@@ -16568,7 +16568,7 @@ counted
 #       the image a tier made and reads what it did: the fs and kernel sysctls
 #       init writes before it starts anything, the flags /proc, /sys, /dev and
 #       /dev/shm were mounted with, the mmap floor and randomisation, the
-#       lockdown line, the W+X page-table check (CONFIG_DEBUG_WX, in sec_mem)
+#       lockdown line, the W+X page-table check (CONFIG_CHECK_WX, in sec_mem)
 #       and the IOMMU's strict mode (sec_dma). x86-64 only: the messages and
 #       the number of random bits are its own.
 #

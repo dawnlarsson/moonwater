@@ -90,29 +90,20 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 To move to a new release: take the .sign file from the
                 mirror's linux-VERSION.tar.sign and paste it here along with
                 the version. */
-        {"kernel_version", "7.3"},
+        {"kernel_version", "7.4-rc3"},
         {"kernel_mirror", "https://cdn.kernel.org/pub/linux/kernel"},
         {"kernel_keys", "torvalds@kernel.org gregkh@kernel.org"},
-        {"kernel_signature",
-         "-----BEGIN PGP SIGNATURE-----\n"
-         "Comment: This signature is for the .tar version of the archive\n"
-         "Comment: git archive --format tar --prefix=linux-7.3/ v7.3\n"
-         "Comment: git version 2.56.0\n"
-         "\n"
-         "iQIzBAABCgAdFiEEZH8oZUiU471FcZm+ONu9yGCSaT4FAmrVrnYACgkQONu9yGCS\n"
-         "aT4SNxAAqzfP8ifT9McZZppOD1b/RLx4nM8NHj3AjXxSq8LJCYX3x3axbkrFuuUw\n"
-         "Dh1m9JgwB1EB+J53ZBpGQXkfWCL1lPxBMCiIedRixy/noluXqz8Eo82ETtCkag4p\n"
-         "dY2LYUUMMYcWB/jFdYUYtrzxaTIVySggUt+pUPcdmldNYrcncKZl5PJ98yli6eoF\n"
-         "buqL6flY5n3Mx+9YjhBsuhc5Y0KDKZLBetk6L3i2eIFZfbkrFHNRZ2jFJQPFxrdt\n"
-         "GlwO2+JuvM6SoyGspu4Kjc6E1J/bFX4b833vAttVec/ODZf1g2cPQQyrClu1pu+a\n"
-         "w/S9zrV68fKLdQOhmSWsEhMwi3I/EVuwD5fqvAlgZpbYpIxDpsdKPFf09YEq1Ykf\n"
-         "0tHvgjPp3QHVbaD4ttCq6ncQ93BIqFRkurRR0+mwSTNrpTVaS7J3fmm66gt3Exn3\n"
-         "kZHeQ1jeZp1B8DsJt9FeGqV4uYGwJ0hUMYuAp3ljrqCtnV8mNE/J8PHjCiuvEZCg\n"
-         "+q8SA9dFBiiur8hO4h7t5XoTUDVifd3XnmwjMO4ugoUJ0KoRTrhYTEWMsnzIrp7d\n"
-         "9aYrQ2AZJqw1cNbCwPucNku13/OwhqR1HK1vhnpHbM2li9uSnqS52AT3UmpyBDhA\n"
-         "n73umJLI01SYCoP/aCLfvCrPGRWVRg3VqSzYzaF9cXT3tzeGgiA=\n"
-         "=WFPR\n"
-         "-----END PGP SIGNATURE-----\n"},
+        /*      A release candidate has no tarball on the mirror and no .sign:
+                its source is the signed tag in Linus's tree, fetched by itself
+                (a shallow fetch of the one tag), held to the tag object and the
+                commit pinned here, its signature checked by git verify-tag
+                against the keys above, and extracted with git archive -- the
+                same bytes the release's .tar.sign is a signature of. A version
+                with no -rc in it takes the tarball and kernel_signature. */
+        {"kernel_git", "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"},
+        {"kernel_tag_object", "19d1b4de6d37bccecc3ad9144d279f1baa405eb1"},
+        {"kernel_tag_commit", "aebb7274476403040d582c61478df8f4a7bf9cd3"},
+        {"kernel_signature", ""},
 
         /*      Linking a freestanding binary of this tree's own shape.
                 The head and tail are separate so the whole-program flags land
@@ -5358,6 +5349,87 @@ static string_address build_kernel_tree_version(string_address tree)
                           values[2], values[3], null);
 }
 
+/*
+        A release candidate's source: its signed tag, fetched alone into a bare
+        repository under artifacts/ (about 300 MB at depth one), which must be
+        the tag object and the commit pinned; git verify-tag checks Linus's
+        signature with the keys fetched as a release's are; git archive lays
+        the tree out. Any step that fails stops the build.
+*/
+static b32 build_kernel_source_tag(string_address tree, string_address version)
+{
+        string_address artifacts = build_setting_get("artifacts");
+        string_address bare = build_join(artifacts, "/linux-", version, ".git", null);
+        string_address tag = build_join("v", version, null);
+        string_address want_tag = build_setting_get("kernel_tag_object");
+        string_address want_commit = build_setting_get("kernel_tag_commit");
+        string_address words[BUILD_ARGUMENT_ROOM] = {"gpg", "--locate-keys"};
+        positive at;
+        p8 said[128];
+
+        if (!build_have("git"))
+        {
+                string_format(log_error, "git is required to fetch the release candidate %s.\n", version);
+                exit(1);
+        }
+        at = build_add_split((string_address address_to)words, 2, BUILD_ARGUMENT_ROOM, build_setting_get("kernel_keys"));
+        words[at] = null;
+        if (build_run_words((string_address address_to)words))
+        {
+                string_format(log_error, BUILD_RED "ERROR: could not fetch the kernel signing keys.\n"
+                                         "Refusing to build an unverified kernel." BUILD_RESET "\n");
+                exit(1);
+        }
+
+        if (!build_is_type(bare, S_IFDIR) && build_run("git", "init", "-q", "--bare", bare, null))
+                exit(1);
+        if (build_run("git", "-C", bare, "fetch", "-q", "--depth=1", "--no-tags", build_setting_get("kernel_git"),
+                      "tag", tag, null))
+        {
+                string_format(log_error, "ERROR: failed to fetch %s from %s\n", tag, build_setting_get("kernel_git"));
+                exit(1);
+        }
+
+        {
+                string_address ask[] = {"git", "-C", bare, "rev-parse", tag, null};
+
+                if (build_capture_words((string_address address_to)ask, said, sizeof(said)) <= 0 ||
+                    memory_compare(said, want_tag, 40))
+                {
+                        string_format(log_error, BUILD_RED "ERROR: %s is not the tag object pinned (%s).\n"
+                                                 "Refusing to build it." BUILD_RESET "\n", tag, want_tag);
+                        exit(1);
+                }
+                ask[4] = build_join(tag, "^{commit}", null);
+                if (build_capture_words((string_address address_to)ask, said, sizeof(said)) <= 0 ||
+                    memory_compare(said, want_commit, 40))
+                {
+                        string_format(log_error, BUILD_RED "ERROR: %s is not the commit pinned (%s).\n"
+                                                 "Refusing to build it." BUILD_RESET "\n", tag, want_commit);
+                        exit(1);
+                }
+        }
+
+        string_format(log, "%s Checking the signature of %s %s\n", BUILD_BOLD, tag, BUILD_RESET);
+        log_flush();
+        if (build_run("git", "-C", bare, "verify-tag", tag, null))
+        {
+                string_format(log_error, BUILD_RED "ERROR: SIGNATURE VERIFICATION FAILED for %s\n"
+                                         "Refusing to extract or build it." BUILD_RESET "\n", tag);
+                exit(1);
+        }
+
+        if (build_run("sh", "-c", "git -C \"$1\" archive \"$2\" | tar -x -C \"$3\"", "sh", bare, tag, tree, null))
+        {
+                string_format(log_error, BUILD_RED "ERROR: could not extract %s" BUILD_RESET "\n", tag);
+                exit(1);
+        }
+
+        string_format(log, "%s Kernel %s extracted to %s %s\n", BUILD_BOLD, version, tree, BUILD_RESET);
+        log_flush();
+        return 0;
+}
+
 static b32 build_kernel_source()
 {
         string_address artifacts = build_setting_get("artifacts");
@@ -5439,6 +5511,9 @@ static b32 build_kernel_source()
 
         if (present)
                 return 0;
+
+        if (memory_search(version, string_length(version), "-rc", 3))
+                return build_kernel_source_tag(tree, version);
 
         if (!build_is_type(archive, S_IFREG))
         {
