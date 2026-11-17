@@ -2498,6 +2498,16 @@ static struct
 static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_to pixels)
 {
         struct ui address_to ui = &taskbar_menu.ui;
+        struct windows address_to table = compositor.table;
+        unsigned int themed = table && table->themed;
+
+        //      The kit's theme, which a kit program takes from the table and the compositor had never been given: a menu's ground
+        //      (ui_role_surface) and its words (ui_text_colour) were the zero theme's, black on black, with only the separator's
+        //      line (ui->ink) to be seen. At once, as reduced motion turns it: the menu is drawn whole each time it is drawn.
+        ui_kit_theme(themed ? table->theme : UI_THEME_DARK, themed ? table->accent : UI_ACCENT_STANDARD, 1);
+
+        unsigned int address_to scratch = ui->scratch;
+        int scratch_width = ui->scratch_width, scratch_scale = ui->scratch_scale;
 
         memory_zero(ui, sizeof(*ui));
         ui->engine = view->engine, ui->regular = view->face, ui->bold = view->bold ? view->bold : view->face;
@@ -2505,6 +2515,11 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         ui->pixels = pixels, ui->pitch = (unsigned long)taskbar_menu.width, ui->width = taskbar_menu.width, ui->height = taskbar_menu.height;
         ui->top = 0, ui->bottom = taskbar_menu.height;
         ui_inks(ui, compositor_tab_target(0) & 0xffffffu);
+        //      The line a run of text is drawn through, kept from draw to draw and grown with the menu: with none (the ui made anew
+        //      each time) every word was skipped, and the menu was its ground and its separators.
+        ui->scratch = scratch, ui->scratch_width = scratch_width, ui->scratch_scale = scratch_scale;
+        if (pixels)
+                ui_scratch_fit(ui, (unsigned int)taskbar_menu.width);
 }
 
 // The menu made, sized and put beside the slot at x, y (width w, height h) of the band being drawn, on the screen's side of the band

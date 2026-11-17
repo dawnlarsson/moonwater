@@ -1901,6 +1901,8 @@ static void check_taskbar_tab_menu(void)
     tab_signal_write(root, 33, "Xwayland", 40), tab_signal_write(root, 92, "helper", 63);
     taskbar_signal = tab_signal_note;
 
+    // The compositor's kit has no theme of its own until a menu takes the table's (taskbar_menu_ui): none here either.
+    memory_zero(&ui_kit.shown, sizeof(ui_kit.shown)), memory_zero(&ui_kit.to, sizeof(ui_kit.to)), ui_kit.made = 0;
     view = compositor_band_view();
     tab = -1;
     for (unsigned int each = 0; each < view.count; each++)
@@ -1918,6 +1920,35 @@ static void check_taskbar_tab_menu(void)
     labelled = two && string_equals((string_address)taskbar_menu.menu.items[1].label, (string_address) "Force stop (2 windows)") &&
                string_equals((string_address)taskbar_menu.menu.items[0].label, (string_address) "Exit");
     check("tab menu: a right press on a tab opens its menu beside it with Exit and Force stop", two);
+    {
+        // Its picture on the screen: drawn, a ground and its words' ink, not a square of black.
+        int rect[4];
+        unsigned int black = 0, first = 0, other = 0, all = 0, bright = 0;
+
+        if (two && taskbar_menu_rect(rect))
+        {
+            compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+            compositor_present();
+            for (int py = rect[1]; py < rect[1] + rect[3] && py < GLASS_SIDE; py++)
+                for (int px = rect[0]; px < rect[0] + rect[2] && px < GLASS_SIDE; px++)
+                {
+                    unsigned int at = screen[py * GLASS_SIDE + px] & 0xffffffu;
+
+                    if (py >= 0 && px >= 0)
+                    {
+                        all++, black += at == 0;
+                        bright += (at >> 16 & 255) + (at >> 8 & 255) + (at & 255) > 3 * 160; // the words' ink on the dark standard's ground
+                        if (all == 1)
+                            first = at;
+                        other += at != first;
+                    }
+                }
+        }
+        string_format(log, "  tab menu: its square %b,%b %bx%b on the screen, %p of %p pixels black, %p not the first's colour %p, %p of its words' ink\n",
+                      (bipolar)rect[0], (bipolar)rect[1], (bipolar)rect[2], (bipolar)rect[3], (positive)black, (positive)all, (positive)other, (positive)first,
+                      (positive)bright);
+        check("tab menu: its picture is on the screen, a ground and its words, not black", all > 0 && black * 2 < all && other > 0 && bright > 40);
+    }
     check("tab menu: Force stop says how many windows the program has when it has more than one", labelled);
 
     // Exit: the window is asked to close as a middle press asks it, once, and nothing is stopped.
