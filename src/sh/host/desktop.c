@@ -505,38 +505,67 @@ static b32 desktop_status(void)
         started as root, so a change needs root, and a program added is a file that can be run. Kept in /root, and taken at the
         desktop's next start.
 */
-static b32 desktop_autostart_status(void)
-{
-        p8 text[SETTING_AUTOSTART_MOST + 16];
-        bipolar got = host_read_state(SETTING_DESKTOP_AUTOSTART_PATH, text, sizeof(text) - 1);
+// Memory of the autostart line given back, none being nothing to give.
+#define desktop_give(block) \
+        do \
+        { \
+                if (block) \
+                        memory_give(block); \
+        } while (0)
 
-        text[got > 0 ? got : 0] = end;
+/*
+        The file as it is, whole, in memory taken for it (given back by the caller), without the line's end and the blanks before it:
+        read again into twice the room while it fills what it was given, so a list of any length is read whole. An empty string when
+        there is no file; none, with *error the kernel's answer, when it cannot be read or the memory cannot be had.
+*/
+static p8 address_to desktop_autostart_read(bipolar address_to error)
+{
+        positive room = 4096;
+        p8 address_to text = null;
+        bipolar got;
+
+        for (;;)
+        {
+                p8 address_to more = (p8 address_to)memory_resize(text, room);
+
+                if (!more)
+                {
+                        desktop_give(text);
+                        *error = -ENOMEM;
+                        return null;
+                }
+                text = more;
+                got = host_read_state(SETTING_DESKTOP_AUTOSTART_PATH, text, room);
+                if (got < 0 || (positive)got + 1 < room)
+                        break;
+                room *= 2;
+        }
+        *error = got < 0 ? got : 0;
+        if (got < 0)
+                got = 0;
+        text[got] = end;
         while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r' || text[got - 1] == ' '))
                 text[--got] = end;
-        if (got < 0 && got != -ENOENT && !bowl_is_root())
+        return text;
+}
+
+static b32 desktop_autostart_status(void)
+{
+        bipolar error;
+        p8 address_to text = desktop_autostart_read(address_of error);
+
+        if (!text || (error < 0 && error != -ENOENT && !bowl_is_root()))
         {
+                desktop_give(text);
                 host_say(log, host_label "autostart " LOCALE_NEEDS_ROOT "\n");
                 return 0;
         }
         host_say(log, host_label "autostart %s\n",
-                 string_equals((string_address)text, "none")             ? (string_address) "none"
+                 string_equals((string_address)text, "none")                    ? (string_address) "none"
                  : text[0] && setting_autostart_valid((const char *)text, null) ? (string_address)text
                                                                                 : (string_address)SETTING_AUTOSTART_STANDARD);
+        desktop_give(text);
         return 0;
-}
-
-// The line kept now: the standard when nothing (or nothing that is a line) is, and empty for none.
-static fn desktop_autostart_kept(p8 address_to text, positive room)
-{
-        bipolar got = host_read_state(SETTING_DESKTOP_AUTOSTART_PATH, text, room - 1);
-
-        text[got > 0 ? got : 0] = end;
-        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r' || text[got - 1] == ' '))
-                text[--got] = end;
-        if (string_equals((string_address)text, "none"))
-                text[0] = end;
-        else if (!text[0] || !setting_autostart_valid((const char *)text, null))
-                string_copy_bounded((string_address)text, (string_address)SETTING_AUTOSTART_STANDARD, room);
 }
 
 static b32 desktop_autostart_runnable(string_address program)
@@ -547,10 +576,33 @@ static b32 desktop_autostart_runnable(string_address program)
         return 0;
 }
 
+// A word appended to the line being made (*used bytes of room, a blank before it unless it is the first), the room grown as it needs.
+static bool desktop_autostart_append(p8 address_to address_to text, positive address_to used, positive address_to room, const char address_to word,
+                                     positive length)
+{
+        positive need = *used + (*used ? 1 : 0) + length + 2;
+
+        if (need > *room)
+        {
+                positive grown = *room * 2 > need ? *room * 2 : need;
+                p8 address_to more = (p8 address_to)memory_resize(*text, grown);
+
+                if (!more)
+                        return false;
+                *text = more, *room = grown;
+        }
+        if (*used)
+                (*text)[(*used)++] = ' ';
+        memory_copy(*text + *used, word, length);
+        *used += length;
+        (*text)[*used] = end;
+        return true;
+}
+
 static b32 desktop_autostart(string_address address_to arguments, positive count)
 {
-        p8 text[SETTING_AUTOSTART_MOST + SETTING_AUTOSTART_WORD + 16], word[SETTING_AUTOSTART_WORD + 1];
-        positive at = 0, bad;
+        p8 address_to text = null, address_to kept = null;
+        positive used = 0, room = 0, bad;
         bipolar failed;
         bool add = count == 5 && string_equals(arguments[3], "add"), remove = count == 5 && string_equals(arguments[3], "remove");
 
@@ -566,62 +618,74 @@ static b32 desktop_autostart(string_address address_to arguments, positive count
         }
         if (add || remove)
         {
-                p8 kept[SETTING_AUTOSTART_MOST + 16];
-                positive from = 0;
+                positive from = 0, length;
+                const char address_to word;
 
-                desktop_autostart_kept(kept, sizeof(kept));
-                if (add)
+                //      The line kept now: the standard when nothing (or nothing that is a line) is, and empty for none.
+                kept = desktop_autostart_read(address_of failed);
+                return_if(!kept, host_fail("desktop autostart", failed));
+                if (string_equals((string_address)kept, "none"))
+                        kept[0] = end;
+                else if (!kept[0] || !setting_autostart_valid((const char *)kept, null))
                 {
-                        return_if(desktop_autostart_runnable(arguments[4]), 1);
-                        return_if(setting_autostart_has((const char *)kept, (const char *)arguments[4]),
-                                  host_refuse("%s is started with the desktop already\n", arguments[4]));
+                        desktop_give(kept);
+                        kept = (p8 address_to)memory_take(sizeof(SETTING_AUTOSTART_STANDARD));
+                        return_if(!kept, host_fail("desktop autostart", -ENOMEM));
+                        memory_copy(kept, SETTING_AUTOSTART_STANDARD, sizeof(SETTING_AUTOSTART_STANDARD));
                 }
-                else
-                        return_if(!setting_autostart_has((const char *)kept, (const char *)arguments[4]),
-                                  host_refuse("%s is not started with the desktop\n", arguments[4]));
-                text[0] = end;
-                while (setting_autostart_next((const char *)kept, &from, (char *)word, sizeof(word)))
-                        if (!remove || !string_equals((string_address)word, arguments[4]))
-                        {
-                                string_append_bounded((string_address)text, (string_address)(text[0] ? " " : ""), sizeof(text));
-                                string_append_bounded((string_address)text, (string_address)word, sizeof(text));
-                        }
-                if (add)
+                if (add && (desktop_autostart_runnable(arguments[4]) ||
+                            (setting_autostart_has((const char *)kept, (const char *)arguments[4]) &&
+                             host_refuse("%s is started with the desktop already\n", arguments[4]))))
                 {
-                        string_append_bounded((string_address)text, (string_address)(text[0] ? " " : ""), sizeof(text));
-                        string_append_bounded((string_address)text, arguments[4], sizeof(text));
+                        desktop_give(kept);
+                        return 1;
                 }
-                at = string_length((string_address)text);
+                if (remove && !setting_autostart_has((const char *)kept, (const char *)arguments[4]))
+                {
+                        desktop_give(kept);
+                        return host_refuse("%s is not started with the desktop\n", arguments[4]);
+                }
+                while ((word = setting_autostart_next((const char *)kept, &from, &length)))
+                        if (!remove || !setting_autostart_same(word, length, (const char *)arguments[4], string_length(arguments[4])))
+                                if (!desktop_autostart_append(&text, &used, &room, word, length))
+                                        goto no_memory;
+                if (add && !desktop_autostart_append(&text, &used, &room, (const char *)arguments[4], string_length(arguments[4])))
+                        goto no_memory;
+                desktop_give(kept);
+                kept = null;
         }
-        else if (string_equals(arguments[3], "none"))
-                text[0] = end;
-        else
+        else if (!string_equals(arguments[3], "none"))
         {
                 //      The whole list, a word each.
-                text[0] = end;
                 for (positive each = 3; each < count; each++)
                 {
-                        return_if(desktop_autostart_runnable(arguments[each]), 1);
-                        return_if(string_length((string_address)text) + string_length(arguments[each]) + 2 > SETTING_AUTOSTART_MOST,
-                                  host_refuse("the programs to start are at most %p bytes\n", (positive)SETTING_AUTOSTART_MOST));
-                        string_append_bounded((string_address)text, (string_address)(text[0] ? " " : ""), sizeof(text));
-                        string_append_bounded((string_address)text, arguments[each], sizeof(text));
+                        if (desktop_autostart_runnable(arguments[each]))
+                        {
+                                desktop_give(text);
+                                return 1;
+                        }
+                        if (!desktop_autostart_append(&text, &used, &room, (const char *)arguments[each], string_length(arguments[each])))
+                                goto no_memory;
                 }
-                at = string_length((string_address)text);
         }
         //      A list left with nothing in it is none, which opens nothing: not the standard, which no file would be.
-        if (!at)
-        {
-                string_copy_bounded((string_address)text, (string_address) "none", sizeof(text));
-                at = 4;
-        }
+        if (!used && !desktop_autostart_append(&text, &used, &room, "none", 4))
+                goto no_memory;
         if (!string_equals((string_address)text, "none") && !setting_autostart_valid((const char *)text, &bad))
-                return host_refuse("the programs to start are at most %p absolute paths, none twice, in %p bytes; it goes wrong at byte %p\n",
-                                   (positive)SETTING_AUTOSTART_ENTRIES, (positive)SETTING_AUTOSTART_MOST, bad);
-        text[at++] = '\n';
-        failed = host_write_file(SETTING_DESKTOP_AUTOSTART_PATH, text, at, 0644, true);
+        {
+                desktop_give(text);
+                return host_refuse("the programs to start are absolute paths, none twice; it goes wrong at byte %p\n", bad);
+        }
+        text[used++] = '\n';
+        failed = host_write_file(SETTING_DESKTOP_AUTOSTART_PATH, text, used, 0644, true);
+        desktop_give(text);
         return_if(failed < 0, host_fail("desktop autostart", failed));
         return desktop_autostart_status();
+
+no_memory:
+        desktop_give(kept);
+        desktop_give(text);
+        return host_fail("desktop autostart", -ENOMEM);
 }
 
 /* moonwater desktop [on|off|PROFILE|start|stop|rest]: the choice kept and put in force now. rest is off put in force and

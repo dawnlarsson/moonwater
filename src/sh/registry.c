@@ -180,12 +180,9 @@
 #define SETTING_PINS_WORD 512   // bytes of a word
 // The programs the desktop opens when it starts (`desktop autostart`): a line of absolute paths, a blank between, opened in that order, or
 // none, which opens nothing. With no file it is the standard: the kernel log, then the console, stacked over it. setting_autostart_valid
-// says what a line is.
+// says what a line is. It names any number of programs, each a path of any length: there is no cap, as with the rest of the system.
 #define SETTING_DESKTOP_AUTOSTART_PATH "/root/desktop.autostart"
 #define SETTING_AUTOSTART_STANDARD "/klog /terminal"
-#define SETTING_AUTOSTART_MOST 1024  // bytes of the line
-#define SETTING_AUTOSTART_ENTRIES 16 // programs it names
-#define SETTING_AUTOSTART_WORD 256   // bytes of a program's path, its null among them
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
 // and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
@@ -1619,10 +1616,10 @@ static bool setting_pins_quote(char *into, positive *at, positive room, const ch
 /*
         The programs the desktop opens when it starts (`desktop autostart`): a line of absolute paths, a blank between each, as in
             /klog /terminal /bowls/bin/firefox
-        A path is letters, digits and _ . / + -, starts with a / and is more than it, has no empty part and no part that is . or .., and is
-        shorter than SETTING_AUTOSTART_WORD; a line names one to SETTING_AUTOSTART_ENTRIES of them, none twice, in at most
-        SETTING_AUTOSTART_MOST bytes. An empty line is no line: none is kept as the word it is, by the verb. setting_autostart_next takes
-        the next path of a line and setting_autostart_has finds one in it.
+        A path is letters, digits and _ . / + -, starts with a / and is more than it, and has no empty part and no part that is . or ..; a
+        line names one of them or more, none twice. There is no cap on how many or how long: a line is what the memory holds. An empty line
+        is no line: none is kept as the word it is, by the verb. setting_autostart_next finds the next path of a line in place (nothing is
+        copied, so no buffer bounds it) and setting_autostart_has finds one in it.
 */
 static bool setting_autostart_bare(unsigned char byte)
 {
@@ -1630,19 +1627,29 @@ static bool setting_autostart_bare(unsigned char byte)
            byte == '/' || byte == '+' || byte == '-';
 }
 
-// The next word of line from *at into word (room bytes, a null after it, cut short where it is longer) and *at after it; false at the end.
-static bool setting_autostart_next(const char *line, positive *at, char *word, positive room)
+// The next word of line from *at: where it starts, its length in *length and *at after it; none at the end of the line.
+static const char *setting_autostart_next(const char *line, positive *at, positive *length)
 {
-    positive used = 0;
+    positive from;
 
     while (line[*at] == ' ')
         (*at)++;
     if (!line[*at])
+        return null;
+    for (from = *at; line[*at] && line[*at] != ' '; (*at)++)
+        ;
+    *length = *at - from;
+    return line + from;
+}
+
+// Whether two words, each where it starts and its length, are the same.
+static bool setting_autostart_same(const char *one, positive one_length, const char *other, positive other_length)
+{
+    if (one_length != other_length)
         return false;
-    for (; line[*at] && line[*at] != ' '; (*at)++)
-        if (used + 1 < room)
-            word[used++] = line[*at];
-    word[used] = 0;
+    for (positive at = 0; at < one_length; at++)
+        if (one[at] != other[at])
+            return false;
     return true;
 }
 
@@ -1652,35 +1659,47 @@ static bool setting_autostart_part_bad(const char *word, positive from, positive
     return to == from || (to == from + 1 && word[from] == '.') || (to == from + 2 && word[from] == '.' && word[from + 1] == '.');
 }
 
-// Whether word is a path a line may name.
-static bool setting_autostart_path(const char *word)
+// Whether a word, where it starts and its length, is a path a line may name.
+static bool setting_autostart_span(const char *word, positive length)
 {
-    positive length = 0, part = 1;
+    positive part = 1;
 
-    if (word[0] != '/' || !word[1])
+    if (length < 2 || word[0] != '/')
         return false;
-    for (length = 1; word[length]; length++)
+    for (positive at = 1; at < length; at++)
     {
-        if (!setting_autostart_bare((unsigned char)word[length]) || length + 1 >= SETTING_AUTOSTART_WORD)
+        if (!setting_autostart_bare((unsigned char)word[at]))
             return false;
-        if (word[length] == '/')
+        if (word[at] == '/')
         {
-            if (setting_autostart_part_bad(word, part, length))
+            if (setting_autostart_part_bad(word, part, at))
                 return false;
-            part = length + 1;
+            part = at + 1;
         }
     }
     return !setting_autostart_part_bad(word, part, length);
 }
 
+// Whether word, a string, is a path a line may name.
+static bool setting_autostart_path(const char *word)
+{
+    positive length = 0;
+
+    while (word[length])
+        length++;
+    return setting_autostart_span(word, length);
+}
+
 // Whether line names word.
 static bool setting_autostart_has(const char *line, const char *word)
 {
-    char each[SETTING_AUTOSTART_WORD + 1];
-    positive at = 0;
+    positive at = 0, length, want = 0;
+    const char *each;
 
-    while (setting_autostart_next(line, &at, each, sizeof(each)))
-        if (string_equals((string_address)each, (string_address)word))
+    while (word[want])
+        want++;
+    while ((each = setting_autostart_next(line, &at, &length)))
+        if (setting_autostart_same(each, length, word, want))
             return true;
     return false;
 }
@@ -1688,36 +1707,29 @@ static bool setting_autostart_has(const char *line, const char *word)
 // Whether line is what `desktop autostart` keeps. When it is not and bad is given, bad is where the fault starts.
 static bool setting_autostart_valid(const char *line, positive *bad)
 {
-    char word[SETTING_AUTOSTART_WORD + 1], before[SETTING_AUTOSTART_WORD + 1];
-    positive at = 0, length = 0, entries = 0, here = 0;
+    positive at = 0, entries = 0, length;
+    const char *word;
 
-    while (line[length])
-        length++;
     if (bad)
         *bad = 0;
-    if (length > SETTING_AUTOSTART_MOST)
-        return bad ? (*bad = SETTING_AUTOSTART_MOST, false) : false;
-    for (;;)
+    while ((word = setting_autostart_next(line, &at, &length)))
     {
-        positive from = 0, seen = 0;
+        positive from = 0, before_length;
+        const char *before;
         bool twice = false;
 
-        while (line[at] == ' ')
-            at++;
-        here = at;
-        if (!setting_autostart_next(line, &at, word, sizeof(word)))
-            return entries > 0;
-        if (at - here >= SETTING_AUTOSTART_WORD || !setting_autostart_path(word) || ++entries > SETTING_AUTOSTART_ENTRIES)
-            break;
         // None twice: each word before this one is another.
-        while (++seen < entries && setting_autostart_next(line, &from, before, sizeof(before)))
-            twice |= string_equals((string_address)before, (string_address)word);
-        if (twice)
-            break;
+        while (!twice && (before = setting_autostart_next(line, &from, &before_length)) && before < word)
+            twice = setting_autostart_same(before, before_length, word, length);
+        if (twice || !setting_autostart_span(word, length))
+        {
+            if (bad)
+                *bad = (positive)(word - line);
+            return false;
+        }
+        entries++;
     }
-    if (bad)
-        *bad = here;
-    return false;
+    return entries > 0;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY

@@ -1353,7 +1353,8 @@ static fn check_autostart(void)
         static const char address_to const good[] = {SETTING_AUTOSTART_STANDARD, "/terminal", "  /klog   /bowls/bin/fire-fox_2.0+x  ", "/a/b/c"};
         static const char address_to const bad[] = {"", "   ", "klog", "/", "/klog /klog", "/a//b", "/a/./b", "/a/../b", "/a/..", "/a/.", "/a/",
                                                      "/klog;rm", "/a b'c", "/x$(y)", "/k\tlog", "none"};
-        char line[SETTING_AUTOSTART_MOST + 64], value[SETTINGS_VALUE];
+        static char line[90000];
+        char value[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
         positive bad_at = 0, count;
         b32 grammar = true, refused = true, many = true;
@@ -1369,22 +1370,50 @@ static fn check_autostart(void)
         check("autostart: nothing, a word that is no path, a path twice, an empty, . or .. part, or a byte a shell reads is none", refused);
         setting_autostart_valid("/klog /a /klog", &bad_at);
         check("autostart: and the fault is where the path named twice starts", bad_at == 9);
-        string_copy((string_address)line, (string_address) "/p0");
-        for (int each = 1; each < 20; each++)
+        //      No cap: 100 programs are a line, and the 100th named again is the fault where it starts.
         {
-                positive stop = string_length((string_address)line);
+                positive used = 0, last = 0;
 
-                line[stop] = ' ', line[stop + 1] = '/', line[stop + 2] = 'p', line[stop + 3] = (char)('a' + each), line[stop + 4] = 0;
-                many &= setting_autostart_valid(line, null) == (each + 1 <= SETTING_AUTOSTART_ENTRIES);
+                for (int each = 0; each < 100; each++)
+                {
+                        if (each)
+                                line[used++] = ' ';
+                        last = used;
+                        used += string_length(string_copy((string_address)line + used, (string_address) "/bowls/bin/program-"));
+                        line[used++] = (char)('0' + each / 10), line[used++] = (char)('0' + each % 10);
+                        line[used] = 0;
+                        many &= setting_autostart_valid(line, null);
+                }
+                check("autostart: 100 programs are a line, each found in it", many && setting_autostart_has(line, "/bowls/bin/program-00") &&
+                      setting_autostart_has(line, "/bowls/bin/program-99"));
+                line[used++] = ' ';
+                memory_copy(line + used, line + last, 21);
+                line[used + 21] = 0;
+                check("autostart: and the 100th named again is none, the fault where it starts", !setting_autostart_valid(line, &bad_at) && bad_at == used);
         }
-        line[0] = '/';
-        for (positive at = 1; at < SETTING_AUTOSTART_WORD + 4; at++)
-                line[at] = 'x';
-        line[SETTING_AUTOSTART_WORD + 4] = 0;
-        many &= !setting_autostart_valid(line, null) && !setting_autostart_path(line);
-        line[SETTING_AUTOSTART_WORD - 1] = 0;
-        many &= setting_autostart_valid(line, null) && setting_autostart_path(line);
-        check("autostart: at most 16 programs, each a path shorter than 256 bytes", many);
+        //      And a long list: 2000 programs of 40 bytes each (81999 bytes), and one path of 64 KiB.
+        {
+                positive used = 0;
+                b32 long_ok;
+
+                for (int each = 0; each < 2000; each++)
+                {
+                        if (each)
+                                line[used++] = ' ';
+                        used += string_length(string_copy((string_address)line + used, (string_address) "/usr/lib/moonwater/a-long-program-"));
+                        for (int digit = 1000; digit; digit /= 10)
+                                line[used++] = (char)('0' + each / digit % 10);
+                        used += string_length(string_copy((string_address)line + used, (string_address) "/x"));
+                }
+                line[used] = 0;
+                long_ok = used == 81999 && setting_autostart_valid(line, null) && setting_autostart_has(line, "/usr/lib/moonwater/a-long-program-1999/x");
+                line[0] = '/';
+                for (positive at = 1; at < 65536; at++)
+                        line[at] = at % 128 ? 'x' : '/';
+                line[65536] = 0;
+                long_ok &= setting_autostart_valid(line, null) && setting_autostart_path(line);
+                check("autostart: a long list is a line, and so is a path of 64 KiB", long_ok);
+        }
         check("autostart: a path is found in a line as a whole word", setting_autostart_has("/klog /terminal", "/terminal") &&
               !setting_autostart_has("/klog /terminal", "/term") && !setting_autostart_has("/klog /terminal", "/klog /terminal"));
 
