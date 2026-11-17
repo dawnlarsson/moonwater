@@ -239,10 +239,8 @@ static fn mixer_list(b64 now)
 
                 if (first->app[0])
                 {
-                        unsigned int hash = 2166136261u;
+                        unsigned int hash = hash_fnv1a(2166136261u, first->app, string_length(first->app));
 
-                        for (const char address_to c = first->app; *c; c++)
-                                hash = (hash ^ (p8)*c) * 16777619u;
                         id = ((unsigned long)first->uid << 32 | hash) | 0x8000000000000000ul;
                 }
                 ui_strips_add(&big->strips, id, mixer_name(first), agg[k].percent, agg[k].muted, 0, agg[k].playing, agg[k].left, agg[k].right, now);

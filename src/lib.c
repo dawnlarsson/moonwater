@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        515 routines (488 public, 27 local), 503 of them on all three and 12 local to one.
+        517 routines (490 public, 27 local), 505 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -198,6 +198,7 @@
           hash_crc32_msb                 public  yes     yes     yes
           hash_crc32c                    public  yes     yes     yes
           hash_crc64                     public  yes     yes     yes
+          hash_fnv1a                     public  yes     yes     yes
           hash_fnv_u32                   public  yes     yes     yes
           hash_half_md4_wide             public  yes     yes     yes
           hash_hmac_sha256_prepared      public  yes     yes     yes
@@ -13913,6 +13914,17 @@ __asm__(
     ASM_END(hash_fnv_u32)
 
     //
+    //       hash_fnv1a: edi the hash so far, rsi the bytes, rdx how many.
+    //       eax the hash, ecx one byte, zero extended. One xor and one 32-bit
+    //       multiply a byte, in order, the FNV-1a of the bytes as they lie.
+    //
+    ASM_FUNC(hash_fnv1a)
+    "mov %edi, %eax\n   test %rdx, %rdx\n   jz 2f\n"
+    "1:  movzbl (%rsi), %ecx\n   xor %ecx, %eax\n   imul $16777619, %eax, %eax\n   add $1, %rsi\n   sub $1, %rdx\n   jnz 1b\n"
+    "2:\n" ASM_RET
+    ASM_END(hash_fnv1a)
+
+    //
     //       A hand's reports on their way to a program (the declarations
     //       have what each answers). evdev_decode: rdi the bytes, rsi how
     //       many, rdx the records, rcx room for how many; a record is the
@@ -26757,6 +26769,13 @@ __asm__(
     "2:  mov w0, w2\n" ASM_RET
     ASM_END(hash_fnv_u32)
 
+    //       hash_fnv1a: the x86_64 walk, w0 the hash, x1 the bytes, x2 how many.
+    ASM_FUNC(hash_fnv1a)
+    "mov w8, #0x0193\n   movk w8, #0x0100, lsl #16\n   cbz x2, 2f\n"
+    "1:  ldrb w9, [x1], #1\n   eor w0, w0, w9\n   mul w0, w0, w8\n   subs x2, x2, #1\n   b.ne 1b\n"
+    "2:\n" ASM_RET
+    ASM_END(hash_fnv1a)
+
     //       evdev_decode, pointer_gain, pointer_scale, rects_point and
     //       ring_post: the x86_64 block has the reasons. evdev_decode: x8
     //       the bytes, x1 how many records, x2 the records. pointer_gain:
@@ -37398,6 +37417,13 @@ __asm__(
     "1:  lw t1, 0(a0)\n   xor a2, a2, t1\n   mulw a2, a2, t0\n   addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 1b\n"
     "2:  slli a0, a2, 32\n   srli a0, a0, 32\n" ASM_RET
     ASM_END(hash_fnv_u32)
+
+    //       hash_fnv1a: the x86_64 walk, a0 the hash, a1 the bytes, a2 how many.
+    ASM_FUNC(hash_fnv1a)
+    "li t0, 16777619\n   beqz a2, 2f\n"
+    "1:  lbu t1, 0(a1)\n   xor a0, a0, t1\n   mulw a0, a0, t0\n   addi a1, a1, 1\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "2:  slli a0, a0, 32\n   srli a0, a0, 32\n" ASM_RET
+    ASM_END(hash_fnv1a)
 
     //       evdev_decode, pointer_gain, pointer_scale, rects_point and
     //       ring_post: the x86_64 block has the reasons. evdev_decode: t0
@@ -55607,6 +55633,13 @@ positive automaton_scan(const p16 address_to moves, const p8 address_to classes,
         from `hash`, each of `count` words is folded in by an exclusive
         or and a multiplication by 16777619, in 32 bits. No words answers
         `hash`.
+
+        hash_fnv1a is the FNV-1a walk over bytes, a byte a step: from `hash`,
+        each of `count` bytes, unsigned, is folded in by an exclusive or and a
+        multiplication by 16777619, in 32 bits. No bytes answers `hash`, so a
+        hash is continued from the one before it: the hash of `a` then `b` is
+        hash_fnv1a(hash_fnv1a(basis, a, n), b, m), the hash of both, and the
+        basis is 2166136261.
 */
 positive bins_starts(p32 address_to cells, positive count);
 fn bins_count(p32 address_to cells, positive pitch, positive columns, positive rows, positive add);
@@ -55614,6 +55647,7 @@ fn bins_place(p32 address_to cells, positive pitch, positive columns, positive r
               const p32 address_to records, positive count);
 fn bins_skip(p32 address_to cells, positive pitch, positive columns, positive rows);
 PURE positive hash_fnv_u32(const p32 address_to words, positive count, positive hash);
+PURE p32 hash_fnv1a(p32 hash, const void address_to bytes, positive count);
 /*
         A hand's reports on their way to a program: what a device says
         decoded, a movement's gain and its pixels, the rectangle a point

@@ -9388,6 +9388,20 @@ static p8 reference_byte_class_holds(b32 which, p8 value)
         return false;
 }
 
+/*
+        The slot byte_class_index_5_5 looks a five byte name up in: the multiply
+        and the shift it does on the name read as one 64-bit value, its low
+        four bytes and then its fifth, and the four bits that come out.
+*/
+static positive reference_byte_slot(string_address name)
+{
+        unsigned long long value = 0;
+
+        for (positive at = 0; at < 5; at++)
+                value |= (unsigned long long)(p8)name[at] << (8 * at);
+        return (positive)(((value * 1228393873ull) >> 14) & 15);
+}
+
 fn check_byte_helpers()
 {
         static p8 name_room[64];
@@ -9491,6 +9505,108 @@ fn check_byte_helpers()
         string_set_add(set, (string_address)"");
         same_bytes("string_set_add", "empty member list changes nothing",
                    set, untouched, sizeof(set));
+
+        // byte_class_index_5_5 finds a five byte name by its hash alone, so
+        // these are the names that exercise every slot of its table: the
+        // eleven five byte classes (xdigit is six bytes and goes to the
+        // generic), the five names that hash to the five empty slots, and one
+        // that is no class and hashes to an occupied slot. Each answer is the
+        // generic's.
+        {
+                static string_address empty_slot_names[] = {"adcaa", "aebaa", "abcaa", "abdaa", "adaaa"};
+                static const positive empty_slots[] = {2, 4, 5, 9, 10};
+                static string_address occupied_name = "aaaaa";
+
+                for (b32 which = 0; which < BYTE_CLASSES; which++)
+                {
+                        string_address name = verify_byte_class_names[which];
+
+                        if (reference_length(name) == 5)
+                                same("byte_class_index_5_5", "a five byte class name",
+                                     (positive)(bipolar)byte_class_index_5_5(name, 5),
+                                     (positive)(bipolar)which);
+                }
+
+                same("byte_class_index_5_5", "a six byte class name goes to the generic",
+                     (positive)(bipolar)byte_class_index_5_5(verify_byte_class_names[BYTE_XDIGIT], 6),
+                     (positive)(bipolar)BYTE_XDIGIT);
+                same("byte_class_index_5_5", "a four byte prefix of a class is none of them",
+                     (positive)(bipolar)byte_class_index_5_5("alph", 4),
+                     (positive)(bipolar)-1);
+
+                for (positive at = 0; at < array_count(empty_slot_names); at++)
+                {
+                        same("byte_class_index_5_5", "the name hashes to the empty slot it is given for",
+                             reference_byte_slot(empty_slot_names[at]), empty_slots[at]);
+                        same("byte_class_index_5_5", "a name in an empty slot is none of the classes",
+                             (positive)(bipolar)byte_class_index_5_5(empty_slot_names[at], 5),
+                             (positive)(bipolar)reference_byte_class_index(empty_slot_names[at], 5));
+                }
+
+                same("byte_class_index_5_5", "the name hashes to an occupied slot",
+                     reference_byte_slot(occupied_name), 7);
+                same("byte_class_index_5_5", "a five byte non-class name in an occupied slot is none of the classes",
+                     (positive)(bipolar)byte_class_index_5_5(occupied_name, 5),
+                     (positive)(bipolar)reference_byte_class_index(occupied_name, 5));
+        }
+}
+
+/*
+        hash_fnv1a against the loop it stands for and against the published
+        FNV-1a values: the empty string gives the offset basis, "a" and
+        "foobar" give theirs, and a hash continued in two steps is the hash of
+        the whole string. The bytes are walked inside the middle of three
+        pages, ending at the protected edge, so a read past the count faults;
+        every count from none to sixty-four, a few offsets from that edge, and
+        four seeds.
+*/
+static p32 reference_hash_fnv1a(p32 hash, const p8 address_to bytes, positive count)
+{
+        for (positive at = 0; at < count; at++)
+                hash = (hash ^ bytes[at]) * 16777619u;
+        return hash;
+}
+
+fn check_hash_fnv1a()
+{
+        p8 address_to pages = guard_pages("hash_fnv1a");
+        positive hashes = 1;
+        unsigned long long seed = 0x9e3779b97f4a7c15ull;
+
+        if (!pages)
+                return;
+
+        same("hash_fnv1a", "the empty string is the offset basis",
+             (positive)(hash_fnv1a)(2166136261u, "", 0), 2166136261u);
+        same("hash_fnv1a", "the byte a", (positive)(hash_fnv1a)(2166136261u, "a", 1), 0xe40c292cu);
+        same("hash_fnv1a", "foobar", (positive)(hash_fnv1a)(2166136261u, "foobar", 6), 0xbf9cf968u);
+        same("hash_fnv1a", "a hash continued in two steps is the hash of the whole",
+             (positive)(hash_fnv1a)((hash_fnv1a)(2166136261u, "foo", 3), "bar", 3), 0xbf9cf968u);
+        same("hash_fnv1a", "no bytes answers the hash given, from a pointer that cannot be read",
+             (positive)(hash_fnv1a)(77, (const void address_to)(pages + 8192), 0), 77);
+
+        for (positive count = 0; count <= 64; count++)
+                for (positive skew = 0; skew < 8; skew++)
+                {
+                        p8 address_to bytes = pages + 8192 - skew - count;
+
+                        for (positive at = 0; at < count; at++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                bytes[at] = (p8)seed;
+                        }
+                        for (positive kind = 0; kind < 4; kind++)
+                        {
+                                p32 from = kind == 0 ? 2166136261u : kind == 1 ? 0 : kind == 2 ? 0xffffffffu : (p32)seed;
+
+                                hashes &= (hash_fnv1a)(from, bytes, count) == reference_hash_fnv1a(from, bytes, count);
+                        }
+                }
+
+        same("hash_fnv1a", "the walk over bytes that end at a page that cannot be read, every count, offset and seed",
+             hashes, 1);
 }
 
 fn check_span()
@@ -19355,6 +19471,7 @@ b32 main()
         }
 #endif
         check_byte_helpers();
+        check_hash_fnv1a();
         check_span();
         check_table_find();
         check_table_find_page_edge();

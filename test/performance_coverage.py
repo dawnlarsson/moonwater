@@ -915,7 +915,7 @@ cover('correctness_only', 'test/modem.c', 'modem_tone_scan',
 # instructions a request than the C the compiler had inline, the time level), which is a commit's word and not a harness.
 cover('correctness_only', 'test/checks.c#CHECK_verify', '''
 automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point rects_point_w
-bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv_u32 pointer_gain pointer_scale ring_post
+bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv1a hash_fnv_u32 pointer_gain pointer_scale ring_post
 ''', 'against the C reference over hostile inputs with guard pages, on x86-64, arm64 and riscv64; no timing claim')
 # The size classes of f32_pair_to_s16 the routine driver names in its rows.
 cover('direct_benchmark', 'test/checks.c#BENCH_routine', 'f32_pair_to_s16_1_2 f32_pair_to_s16_3_3 f32_pair_to_s16_5_7',
@@ -923,7 +923,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_routine', 'f32_pair_to_s16_1_2 f3
 # One and two cells of the terminal's cell painter, compared with the painter by the differential harness.
 cover('correctness_only', 'test/differential.py', 'canvas_cell_1_1 canvas_cell2_1_1',
       'the one-cell classes of canvas_cell and canvas_cell2, named in the differential harness; no timing claim')
-cover('unmeasured', None, 'byte_class_index_5_5 f32_pair_clip_2_3',
+# The five byte class lookup, against the generic: the eleven five byte names, every empty slot of its table and an occupied one.
+cover('correctness_only', 'test/checks.c#CHECK_verify', 'byte_class_index_5_5',
+      'the five byte names of the classes, the empty slots and an occupied slot of its table, against the generic; no timing claim')
+cover('unmeasured', None, 'f32_pair_clip_2_3',
       'size classes named by their callers (src/sh/text.c, the audio library); no row of their own was found')
 
 
