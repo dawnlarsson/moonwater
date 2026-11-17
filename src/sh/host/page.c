@@ -39,7 +39,7 @@ typedef struct
 
 static const host_row host_rows[] = {
     {null, "status", "this session as one page", 'b'},
-    {null, "version", "the commit this build was made from, its date and the kernel's release", 'b'},
+    {null, "version", "the commit this build was made from, its date and the release of the kernel", 'b'},
     {null, "help [VERB]", "these commands, or the page of one", 'b'},
     {null, "setup", "where it runs: install, update, use, live", 'm'},
     {null, "setup", "where this session runs, and the installs found", 'f'},
@@ -91,7 +91,7 @@ static const host_row host_rows[] = {
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel", 'b'},
     {null, "notices [clear]", "the errors and warnings of the kernel the desktop has (root): clear dismisses them", 'b'},
     {null, "sensors", "the processor use, clocks, GPU load, heat, fans and power of this machine, read now", 'b'},
-    {null, "profile NAME|PID [SECONDS]", "where a program's processor time goes: each thread's share, its kernel part, and its functions", 'b'},
+    {null, "profile NAME|PID [SECONDS]", "where the processor time of a program goes: the share of each thread, its kernel part, and its functions", 'b'},
     {null, "memory [log [SECONDS]]", "installed, usable, available and shared memory and the largest memfds (root); log: to the kernel log every SECONDS [60]", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},

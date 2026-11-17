@@ -288,8 +288,8 @@ moonwater security trust               every anchor, built in and added, by the 
 moonwater security trust add FILE      trust a CA certificate, PEM or DER, as the built-in anchors are
 moonwater security trust remove SHA256  stop trusting an anchor that was added
 moonwater sensors                      the processor use, clocks, GPU load, heat, fans and power of this machine, read now
-moonwater profile NAME|PID [SECONDS]   where a program's processor time goes, for 1 to 60 seconds [5]: each thread's share of a core, the part in the kernel, and its hottest functions (/shell, by name) or files (other programs)
-moonwater memory [log [SECONDS]]       the memory in one line: installed (the modules' records), usable, available, shared, and the three largest memfds by the pages they hold and who holds them; log writes it to the kernel log now and every SECONDS [60], which the machine script starts at boot
+moonwater profile NAME|PID [SECONDS]   where the processor time of a program goes: the share of each thread, its kernel part, and its functions
+moonwater memory [log [SECONDS]]       installed, usable, available and shared memory and the largest memfds (root); log: to the kernel log every SECONDS [60]
 moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, every control of the UI kit
 moonwater setup                        where this session runs, and the installs found
 moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it removable takes a disk that says it is; yes is for a script, which cannot be asked
@@ -301,7 +301,7 @@ moonwater setup use [DISK]             run this build with the data of an instal
 moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater splash [FILE|default|off]    the picture the loader draws before the kernel starts, kept on the system partition: a binary PPM of at most 1 MiB, the built-in one, or off
 moonwater status                       this session as one page
-moonwater version                      the commit this build was made from, its date and the kernel's release, one to a line
+moonwater version                      the commit this build was made from, its date and the release of the kernel
 moonwater window                       the windows on the desktop: name, pid, place, size, title
 moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
 moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says: center, at X,Y, maximized, fullscreen, screen N, size WxH, name NAME (what it is remembered by)
