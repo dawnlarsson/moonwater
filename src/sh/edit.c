@@ -4269,6 +4269,52 @@ static terminal_modes edit_modes_before;
 static bool edit_modes_held;
 
 /*
+        The signals that would end the editor while the terminal is raw. Each
+        one is caught for as long as the modes are held, so the terminal is
+        cooked again before the process ends. A signal the shell ignores stays
+        ignored and is not touched.
+*/
+#define EDIT_FATAL_SIGNALS 4
+static const b32 edit_fatal_numbers[EDIT_FATAL_SIGNALS] = {SIGHUP, SIGQUIT, SIGSEGV, SIGTERM};
+static positive edit_fatal_previous[EDIT_FATAL_SIGNALS][4];
+static bool edit_fatal_installed[EDIT_FATAL_SIGNALS];
+
+/*
+        Runs inside the signal, so it makes system calls and nothing else: the
+        saved modes go back with one ioctl, the disposition goes to the default,
+        and the signal is sent to this process again. The signal is blocked
+        until this returns, and is then delivered with its default action.
+*/
+static fn edit_terminal_fatal(b32 number)
+{
+        if (edit_modes_held)
+                system_control(standard_input_descriptor, PTY_TCSETS,
+                               address_of edit_modes_before);
+        system_signal_install(number, 0, 0, 0, null);
+        system_call_2(syscall(kill),
+                      (positive)system_call_1(syscall(getpid), 0),
+                      (positive)number);
+}
+
+static fn edit_terminal_restore()
+{
+        if (!edit_modes_held)
+                return;
+
+        system_control(standard_input_descriptor, PTY_TCSETS,
+                       address_of edit_modes_before);
+        edit_modes_held = false;
+        for (positive at = 0; at < EDIT_FATAL_SIGNALS; at++)
+        {
+                if (!edit_fatal_installed[at])
+                        continue;
+                system_signal_action(edit_fatal_numbers[at],
+                                     edit_fatal_previous[at], 0, 8);
+                edit_fatal_installed[at] = false;
+        }
+}
+
+/*
         Raw, and every flag in here is load bearing for a key the editor is
         supposed to have.
 
@@ -4308,17 +4354,24 @@ static bool edit_terminal_raw()
                 return false;
 
         edit_modes_held = true;
+        for (positive at = 0; at < EDIT_FATAL_SIGNALS; at++)
+        {
+                if (system_signal_action(edit_fatal_numbers[at], null,
+                                         edit_fatal_previous[at], 8) < 0 ||
+                    edit_fatal_previous[at][0] == (positive)SIG_IGN)
+                        continue;
+                if (!system_signal_install(edit_fatal_numbers[at],
+                                           (positive)edit_terminal_fatal,
+                                           SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART,
+                                           SIGNAL_CATCH_RESTORER,
+                                           edit_fatal_previous[at]))
+                {
+                        edit_terminal_restore();
+                        return false;
+                }
+                edit_fatal_installed[at] = true;
+        }
         return true;
-}
-
-static fn edit_terminal_restore()
-{
-        if (!edit_modes_held)
-                return;
-
-        system_control(standard_input_descriptor, PTY_TCSETS,
-                       address_of edit_modes_before);
-        edit_modes_held = false;
 }
 
 static bool edit_flush()

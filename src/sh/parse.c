@@ -333,6 +333,25 @@ static p8 address_to here_names;
 static positive here_names_room;
 
 /*
+        The heredoc registry's four counts, taken and put back as one.
+*/
+static fn parse_here_mark_take(positive address_to mark)
+{
+        mark[0] = here_wanted;
+        mark[1] = here_filled;
+        mark[2] = here_names_used;
+        mark[3] = here_used;
+}
+
+static fn parse_here_mark_put(positive address_to mark)
+{
+        here_wanted = mark[0];
+        here_filled = mark[1];
+        here_names_used = mark[2];
+        here_used = mark[3];
+}
+
+/*
         A line the language is not finished with.
 
         A quote, a substitution and a trailing backslash all run past the end of
@@ -1512,6 +1531,15 @@ static string_address parse_here_skip_bodies(string_address line,
         lex_frame frame;
         bool substitution = expand_in_substitution;
 
+        /* The walk registers each header so that it can find where the
+           document ends, and nothing after it reads those entries. The lexer
+           walks the same text again on every speculative scan, so an entry
+           left behind would be added once more each time. The registry is put
+           back as it was, and the walk's answer is all it leaves. */
+        positive held_marks[4];
+
+        parse_here_mark_take(held_marks);
+
         /* parse_feed's continuation buffer can already hold the containing
            multiline word.  Give this speculative logical header independent
            storage so joining it cannot overwrite the source being scanned. */
@@ -1618,6 +1646,7 @@ static string_address parse_here_skip_bodies(string_address line,
         answer = at;
 
 leave:
+        parse_here_mark_put(held_marks);
         expand_in_substitution = substitution;
         lex_nest_leave(address_of frame);
         if (parse_pending)

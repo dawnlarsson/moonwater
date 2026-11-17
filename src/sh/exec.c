@@ -672,7 +672,6 @@ static HOT fn exec_errexit(b32 status)
 }
 
 
-#define REDIRECT_SAVE_MAX 1024
 //      What a command keeps while it is being built. argv and the saved
 //      assignments point in here, so like the expansion store these bytes may
 //      never move once handed out.
@@ -6944,7 +6943,11 @@ typedef struct
         b32 saved;
 } exec_saved_fd;
 
-static exec_saved_fd exec_saves[REDIRECT_SAVE_MAX];
+/* One save per redirection, kept in a table that grows with the count: a
+   command may carry any number of redirections, and only the kernel refuses
+   the descriptors each save takes. */
+static exec_saved_fd address_to exec_saves;
+static positive exec_save_room;
 static b32 exec_save_count HOT_STATE;
 
 /*
@@ -7188,7 +7191,8 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
         if (exec_child_root && node == parse_nodes + exec_child_root)
                 return true;
 
-        refuse_if(exec_save_count >= REDIRECT_SAVE_MAX, false, "Too many redirections\n");
+        if (!shell_array_room(exec_saves, exec_save_room, (positive)exec_save_count + 1))
+                return false;
 
         /* A descriptor holding an outer save is about to be replaced --
            exec 10>&1 inside { ...; } > f -- so the save moves first, or the
@@ -10232,25 +10236,7 @@ bipolar shell_funsub_run(string_address text, bool value_form,
         if (handle < 0)
                 return -1;
 
-        if (value_form)
-        {
-                string_address reply = env_get("REPLY");
-
-                had_reply = reply != null;
-                if (reply)
-                {
-                        held_size = string_length(reply) + 1;
-                        held_reply = shell_map(held_size);
-                        if (!held_reply)
-                        {
-                                system_close(handle);
-                                return -1;
-                        }
-                        memory_copy((p8 address_to)held_reply, reply, held_size);
-                }
-                env_unset("REPLY");
-        }
-        else
+        if (!value_form)
         {
                 log_flush();
                 saved = exec_save_duplicate(1, null, 10);
@@ -10263,6 +10249,8 @@ bipolar shell_funsub_run(string_address text, bool value_form,
                 }
         }
 
+        //      The locals come first: when they cannot be entered the refusal
+        //      leaves REPLY exactly as it was, because nothing has touched it.
         if (!shell_local_enter())
         {
                 if (saved >= 0)
@@ -10272,6 +10260,26 @@ bipolar shell_funsub_run(string_address text, bool value_form,
                 }
                 system_close(handle);
                 return -1;
+        }
+
+        if (value_form)
+        {
+                string_address reply = env_get("REPLY");
+
+                had_reply = reply != null;
+                if (reply)
+                {
+                        held_size = string_length(reply) + 1;
+                        held_reply = shell_map(held_size);
+                        if (!held_reply)
+                        {
+                                shell_local_leave();
+                                system_close(handle);
+                                return -1;
+                        }
+                        memory_copy((p8 address_to)held_reply, reply, held_size);
+                }
+                env_unset("REPLY");
         }
 
         /*
@@ -17049,36 +17057,43 @@ static bool exec_child_tracked(bipolar pid)
         return false;
 }
 
+/* Reaps the children this shell does not track: the orphans a finished
+   command leaves behind. Reaping a child takes it off the list, and the kernel
+   lists children by position, so a list read on past a reap could skip the
+   child that moved into the gap. The list is therefore read again from its
+   start after each reap that took a child. A child still running is not
+   reaped, and the walk goes on past it. */
 static fn exec_unknown_children_reap()
 {
-        p8 text[FLOODLIGHT_CHILDREN_ROOM];
-        bipolar got;
-        p8 address_to at;
-        p8 address_to stop;
+        floodlight_children_cursor cursor;
+        bool reaped;
 
         if (!floodlight_parent_supervised)
                 return;
 
-        got = floodlight_descendants_read(text, sizeof(text));
-        if (got <= 0)
-                return;
-        at = text;
-        stop = text + got;
-
-        while (at < stop)
+        do
         {
-                bipolar child = floodlight_child_next(address_of at, stop);
+                bipolar child;
 
-                if (child <= 0)
+                reaped = false;
+                if (!floodlight_children_open(address_of cursor))
                         return;
-                if (!exec_child_tracked(child))
+                while ((child = floodlight_children_next(address_of cursor)) > 0)
                 {
                         positive status = 0;
 
-                        (void)system_wait4_retry(child, address_of status,
-                                                JOB_NO_HANG, null);
+                        if (exec_child_tracked(child))
+                                continue;
+                        if (system_wait4_retry(child, address_of status,
+                                               JOB_NO_HANG, null) == child)
+                        {
+                                reaped = true;
+                                break;
+                        }
                 }
-        }
+                if (!floodlight_children_close(address_of cursor))
+                        return;
+        } while (reaped);
 }
 
 /* Protection is needed only while a confined descendant can outlive its

@@ -786,10 +786,54 @@ static bool floodlight_ptrace_scope_safe()
    including jobs removed from shell bookkeeping by `disown`.  An unreadable
    or ambiguous answer is treated as a live descendant so the nondumpable
    supervisor remains in place. */
-/* Read the complete authenticated direct-child list. A bounded overflow is
-   ambiguity rather than an empty inventory; callers therefore fail closed. */
-#define FLOODLIGHT_CHILDREN_ROOM 4096
-static bipolar floodlight_descendants_read(p8 address_to text, positive room)
+/*
+        The direct children of this task, read as a stream. The kernel lists
+        them as decimal pids with blanks between, and a count of children has
+        no bound, so the list is read a chunk at a time: a token the chunk
+        ends inside is carried into the next read rather than parsed short,
+        and no count of children is refused. The cursor keeps the
+        authenticated handles open until it is closed, so every chunk is of
+        the same list.
+*/
+#define FLOODLIGHT_CHILDREN_CHUNK 512
+
+typedef struct
+{
+        bipolar proc;
+        bipolar handle;
+        file_facts proc_facts;
+        file_facts facts;
+        positive used;
+        positive at;
+        positive cut;
+        bool ended;
+        p8 text[FLOODLIGHT_CHILDREN_CHUNK];
+} floodlight_children_cursor;
+
+static bool floodlight_child_blank(p8 c)
+{
+        return c == ' ' || c == '\n' || c == '\t';
+}
+
+/* Gives back both handles the cursor holds. A close that fails is ambiguity,
+   so the answer is false, and every caller takes that as a live child. */
+static bool floodlight_children_close(floodlight_children_cursor address_to cursor)
+{
+        bool closed = true;
+
+        if (cursor->handle >= 0 && system_close(cursor->handle) < 0)
+                closed = false;
+        cursor->handle = -1;
+        if (cursor->proc >= 0 && system_close(cursor->proc) < 0)
+                closed = false;
+        cursor->proc = -1;
+        return closed;
+}
+
+/* Opens the children list of this task on the authenticated proc mount. A
+   list that does not open or does not authenticate gives nothing back, and
+   the handles it took are given back here. */
+static bool floodlight_children_open(floodlight_children_cursor address_to cursor)
 {
         static const p8 prefix[] = "self/task/";
         static const p8 suffix[] = "/children";
@@ -797,15 +841,74 @@ static bipolar floodlight_descendants_read(p8 address_to text, positive room)
         bipolar process = system_call_1(syscall(getpid), 0);
         positive used = sizeof(prefix) - 1;
 
+        cursor->proc = -1;
+        cursor->handle = -1;
+        cursor->used = 0;
+        cursor->at = 0;
+        cursor->cut = 0;
+        cursor->ended = false;
+
         if (process <= 0)
-                return -ERROR_ACCESS;
+                return false;
         memory_copy_apart(path, prefix, used);
         used += positive_into(path + used, (positive)process);
         if (used + sizeof(suffix) > sizeof(path))
-                return -ERROR_ACCESS;
+                return false;
         memory_copy_end(path + used, suffix, sizeof(suffix) - 1);
 
-        return floodlight_proc_read(path, text, room);
+        cursor->proc = floodlight_proc_root_open(address_of cursor->proc_facts);
+        if (cursor->proc < 0)
+                return false;
+
+        cursor->handle = system_open_at((positive)cursor->proc,
+                                        (string_address)path,
+                                        FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (!floodlight_proc_genuine(cursor->handle, address_of cursor->facts,
+                                     address_of cursor->proc_facts, MODE_FILE))
+        {
+                (void)floodlight_children_close(cursor);
+                return false;
+        }
+        return true;
+}
+
+/* Reads the next chunk behind whatever the cursor still carries. Only the
+   part up to the last blank is handed to the parser, so a token the chunk
+   cuts in two is read whole by the next call. Every chunk is cleared first,
+   as floodlight_read_whole clears them, and an impossible count is refused. */
+static bool floodlight_children_fill(floodlight_children_cursor address_to cursor)
+{
+        positive carry = cursor->used - cursor->at;
+        positive room = sizeof(cursor->text);
+        positive chunk;
+        bipolar got;
+
+        for (positive at = 0; at < carry; at++)
+                cursor->text[at] = cursor->text[cursor->at + at];
+        cursor->used = carry;
+        cursor->at = 0;
+        cursor->cut = 0;
+        if (carry >= room)
+                return false;
+
+        chunk = room - carry;
+        memory_fill(cursor->text + carry, 0, chunk);
+        got = system_read_retry((positive)cursor->handle, cursor->text + carry,
+                                chunk);
+        if (got < 0 || (positive)got > chunk)
+                return false;
+        if (!got)
+        {
+                cursor->ended = true;
+                cursor->cut = cursor->used;
+                return true;
+        }
+
+        cursor->used = carry + (positive)got;
+        cursor->cut = cursor->used;
+        while (cursor->cut && !floodlight_child_blank(cursor->text[cursor->cut - 1]))
+                cursor->cut--;
+        return true;
 }
 
 static bipolar floodlight_child_next(p8 address_to address_to at,
@@ -845,39 +948,58 @@ static bipolar floodlight_child_next(p8 address_to address_to at,
         return (bipolar)value;
 }
 
-/* Out of line: its buffer is four kilobytes, and a call to this one inlined
-   into exec_simple was four kilobytes more stack under every level of a
-   function that calls itself, a page of the stack to each. */
+/* The next child of the list: its pid, 0 once the list has ended, or
+   -ERROR_ACCESS when the list cannot be read or is not a list of pids. */
+static bipolar floodlight_children_next(floodlight_children_cursor address_to cursor)
+{
+        for (;;)
+        {
+                if (cursor->at < cursor->cut)
+                {
+                        p8 address_to scan = cursor->text + cursor->at;
+                        bipolar child = floodlight_child_next(
+                            address_of scan, cursor->text + cursor->cut);
+
+                        cursor->at = (positive)(scan - cursor->text);
+                        if (child < 0)
+                                return -ERROR_ACCESS;
+                        if (child > 0)
+                                return child;
+                        cursor->at = cursor->cut;
+                }
+                if (cursor->ended)
+                        return 0;
+                if (!floodlight_children_fill(cursor))
+                        return -ERROR_ACCESS;
+        }
+}
+
+/* Whether this task has a child, or its list cannot say. A list that does not
+   open, read or parse counts as a child to every caller, so each one keeps
+   its protection. Out of line: the cursor holds a chunk and two file facts,
+   and a call inlined into exec_simple would put that on the stack under every
+   level of a function that calls itself. */
 static __attribute__((noinline)) bool floodlight_descendants_present()
 {
-        p8 text[FLOODLIGHT_CHILDREN_ROOM];
-        bipolar got = floodlight_descendants_read(text, sizeof(text));
+        floodlight_children_cursor cursor;
+        bool present;
 
-        return got != 0;
+        if (!floodlight_children_open(address_of cursor))
+                return true;
+        present = floodlight_children_next(address_of cursor) != 0;
+        if (!floodlight_children_close(address_of cursor))
+                present = true;
+        return present;
 }
 
 /* Every child keeps the nondumpable supervisor in place. Even a fixed-code
    here-document writer would become an unreapable zombie after this shell
-   execs; explicit exec therefore materializes that input without a child. */
+   execs; explicit exec therefore materializes that input without a child.
+   Answers the same as floodlight_descendants_present: a child, or a list that
+   cannot be read, both block. */
 static bool floodlight_descendants_blocking()
 {
-        p8 text[FLOODLIGHT_CHILDREN_ROOM];
-        bipolar got = floodlight_descendants_read(text, sizeof(text));
-        p8 address_to at = text;
-        p8 address_to stop;
-
-        if (got < 0)
-                return true;
-        stop = text + got;
-        while (at < stop)
-        {
-                bipolar child = floodlight_child_next(address_of at, stop);
-
-                if (child <= 0)
-                        return child < 0;
-                return true;
-        }
-        return false;
+        return floodlight_descendants_present();
 }
 
 /* execveat with an empty path makes the opened file, rather than a pathname

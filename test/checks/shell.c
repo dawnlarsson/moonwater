@@ -1808,6 +1808,112 @@ b32 main(void)
                       (shell_wait_table[row].flags & SHELL_WAIT_DONE) &&
                           shell_wait_table[row].pidfd == -1);
         }
+
+        /* Every redirection keeps one save, even one whose descriptor is not
+           open, so a command with more than a thousand of them must run: the
+           table that holds the saves grows rather than refusing. 9>&- saves
+           nothing a descriptor is spent on. */
+        {
+                static p8 wide[8192];
+                positive at = 2;
+
+                memory_copy(wide, ": ", 2);
+                for (positive i = 0; i < 1025; i++)
+                {
+                        memory_copy(wide + at, "9>&- ", 5);
+                        at += 5;
+                }
+                wide[at] = 0;
+                shell_status = 99;
+                exec_run_nested((string_address)wide, true, 0);
+                check("a command with 1025 redirections runs", shell_status == 0);
+        }
+
+        /* A confined shell reaps its orphans before an in-place exec, and it
+           must read every direct child to do it: 1200 exited, unreaped children
+           overflow the old 4 KiB list at any pid width. They are untracked, as
+           an orphan from a finished command is, so the reap takes them all. */
+        {
+                timespec pause = {0, 1000000};
+                positive forked = 0;
+
+                floodlight_parent_supervised = true;
+                for (; forked < 1200; forked++)
+                {
+                        bipolar child = system_fork();
+
+                        if (child == 0)
+                                system_call_1(syscall(exit), 0);
+                        if (child < 0)
+                                break;
+                }
+                check("1200 children forked", forked == 1200);
+                for (positive tries = 0; tries < 4000 && floodlight_descendants_present(); tries++)
+                {
+                        exec_unknown_children_reap();
+                        system_call_2(syscall(nanosleep), address_of pause, 0);
+                }
+                check("the reap takes every orphan past the old 4 KiB list",
+                      !floodlight_descendants_present());
+                check("no orphan declines an in-place exec",
+                      !floodlight_descendants_blocking());
+                floodlight_parent_supervised = false;
+        }
+
+        /* A value-form ${ } whose locals cannot be entered leaves REPLY as it
+           was: the refusal comes before REPLY is held or cleared. */
+        {
+                b32 status = 0;
+                positive depth = local_depth;
+
+                env_assign("REPLY", "kept");
+                local_depth = positive_max;
+                bipolar handle = shell_funsub_run("true", true, address_of status);
+                local_depth = depth;
+                check("a forced local-depth failure refuses the value form", handle < 0);
+                check("a forced local-depth failure leaves REPLY unchanged",
+                      env_get("REPLY") && string_equals(env_get("REPLY"), "kept"));
+        }
+
+        /* SIGTERM while the editor holds the terminal raw: the modes it saved
+           come back before the signal ends it, so the terminal is cooked
+           again. A pty stands in for the terminal, and the child is the
+           editor, which dies by the signal it was sent. */
+        {
+                b32 master = 0, slave = 0;
+                bipolar opened = process_pty_open(address_of master, address_of slave, false);
+
+                check("a pty stands in for the terminal", opened >= 0);
+                if (opened >= 0)
+                {
+                        bipolar child = system_fork();
+
+                        if (child == 0)
+                        {
+                                system_duplicate(slave, 0, 0);
+                                if (!edit_terminal_raw())
+                                        system_call_1(syscall(exit), 2);
+                                system_call_2(syscall(kill),
+                                              (positive)system_call_1(syscall(getpid), 0),
+                                              SIGTERM);
+                                system_call_1(syscall(exit), 3);
+                        }
+
+                        positive status = 0;
+                        terminal_modes modes = {0};
+
+                        (void)system_wait4_retry(child, address_of status, 0, null);
+                        check("the editor ends by the SIGTERM it was sent", (status & 0x7f) == SIGTERM);
+                        check("the terminal reads back after the editor ends",
+                              system_control(slave, PTY_TCGETS, address_of modes) == 0);
+                        check("the terminal is cooked again after SIGTERM",
+                              (modes.behaviour & EDIT_LOCAL_CANONICAL) &&
+                              (modes.behaviour & EDIT_LOCAL_ECHO));
+                        system_close((positive)slave);
+                        system_close((positive)master);
+                }
+        }
+
         return test_report(null);
 }
 #endif /* CHECK_audit_builtin_regressions */

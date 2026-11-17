@@ -244,6 +244,22 @@ b32 main(void)
         p8 nested[] = ": \"$(cat <<'E'\ninside\nE\n)\" tail";
         string_address nested_words[] = {":", "\"$(cat <<'E'\ninside\nE\n)\"", "tail"};
         lexer_span_owned(nested, null, nested_words, array_count(nested_words));
+
+        /* A substitution held open over a heredoc is fed in pieces, and the
+           lexer walks the document at every feed, speculative scans included.
+           The walk keeps its entries to itself: however many times the text
+           is walked, the registry the parser reads is left as it was. */
+        parse_reset();
+        p8 held_head[] = ": \"$(cat <<'E'\n";
+        p8 held_rest[] = "inside\nE\n)\" tail";
+        parse_feed(held_head);
+        check("held substitution with a heredoc is accepted", parse_feed(held_rest));
+        check("the walk leaves no here-document registered", here_wanted == 0 && here_filled == 0);
+        parse_reset();
+        p8 whole[] = ": \"$(cat <<'E'\ninside\nE\n)\" tail";
+        parse_feed(whole);
+        check("a complete substitution with a heredoc registers none", here_wanted == 0);
+        parse_reset();
         return test_report(null);
 }
 #endif
