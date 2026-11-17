@@ -286,6 +286,29 @@ function desktop_terminal {
   fi
 }
 
+# What the desktop opens when it starts: the programs of `moonwater desktop autostart`, in its order, and nothing else (the kernel
+# log and the console unless the person says other; none is no window). Its line is read once boot has said what /root is, where it
+# is kept. A kit program goes through its own function, so it has its faces: the kernel log is waited for, so what follows stacks over
+# it, and the console takes the keys when it shows, as a key's would. Any other is its path alone. The paths are what the verb
+# keeps (letters, digits and _ . / + -), so nothing in them is read by the shell again.
+function desktop_autostart {
+  desktop_word=$(moonwater desktop autostart 2> /dev/null)
+  case $desktop_word in
+  *"autostart "*) desktop_word=${desktop_word#*autostart } ;;
+  *) return ;;
+  esac
+  for desktop_auto in $desktop_word; do
+    case $desktop_auto in
+    /klog) desktop_log ;;
+    /terminal) desktop_asked desktop_terminal ;;
+    /settings) desktop_asked desktop_settings ;;
+    /mixer) desktop_asked desktop_mixer ;;
+    /launcher) desktop_asked desktop_launcher ;;
+    /*) desktop_asked desktop_run "$desktop_auto" ;;
+    esac
+  done
+}
+
 # The on-screen keyboard, when the desktop starts it (moonwater keyboard start: the setting on, or auto with a touch screen or
 # no keyboard). It starts hidden, and shows while a text field has the keys.
 function desktop_keyboard {
@@ -409,10 +432,10 @@ function desktop_session {
   : > /run/moonwater/desktop.kids
   desktop_keys_answer &
   echo $! >> /run/moonwater/desktop.kids
-  desktop_log
-  # The terminal the person is at takes the keys when it shows, as a key's would: the mark is its launch's.
+  # The desktop opens no window of its own: the wallpaper and the taskbar are the compositor's, and what is opened on them is the
+  # person's list (desktop_autostart), read once /root is the session's.
   if desktop_settled; then
-    desktop_asked desktop_terminal
+    desktop_autostart
     desktop_keyboard
   fi
   wait $desktop_compositor

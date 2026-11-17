@@ -371,6 +371,10 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Momentum	cfef	Atalet
 =Motion	7647	Hareket
 =Mount kept disks	f0c8	Saklanan diskleri bağla
+=Programs started with the desktop	5b74	Masaüstüyle başlayan programlar
+=Add a program to start (its path)	5e20	Başlangıca program ekle (yolu)
+=Remove a program from the start (its path)	1013	Başlangıçtan program kaldır (yolu)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Masaüstü başladığında bu sırayla açılır; none onu pencere olmadan başlatır
 =Mouse	9b64	Fare
 =Mouse acceleration	c400	Fare ivmesi
 =Mouse sensitivity (percent, or default)	8a23	Fare duyarlılığı (yüzde veya default)

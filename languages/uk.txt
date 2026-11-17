@@ -371,6 +371,10 @@ ui_field_full	fe02	більше не вміщається
 =Momentum	cfef	Інерція
 =Motion	7647	Рух
 =Mount kept disks	f0c8	Монтувати збережені диски
+=Programs started with the desktop	5b74	Програми, що запускаються з робочим столом
+=Add a program to start (its path)	5e20	Додати програму до автозапуску (її шлях)
+=Remove a program from the start (its path)	1013	Прибрати програму з автозапуску (її шлях)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Відкриваються в цьому порядку під час запуску робочого столу; none запускає його без вікон
 =Mouse	9b64	Миша
 =Mouse acceleration	c400	Прискорення миші
 =Mouse sensitivity (percent, or default)	8a23	Чутливість миші (відсотки або default)

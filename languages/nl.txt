@@ -371,6 +371,10 @@ ui_field_full	fe02	meer past er niet in
 =Momentum	cfef	Momentum
 =Motion	7647	Beweging
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
+=Programs started with the desktop	5b74	Programma's die met het bureaublad starten
+=Add a program to start (its path)	5e20	Programma aan de start toevoegen (zijn pad)
+=Remove a program from the start (its path)	1013	Programma uit de start verwijderen (zijn pad)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Geopend in deze volgorde als het bureaublad start; none start het zonder vensters
 =Mouse	9b64	Muis
 =Mouse acceleration	c400	Muisversnelling
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)

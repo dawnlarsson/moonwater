@@ -77,6 +77,7 @@ static const host_row host_rows[] = {
     {null, "canvas film SECONDS [X Y W H]", "every present for SECONDS (1 to 60), of the rectangle or the whole screen, to a file of the record (root)", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop|rest", "begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is", 'b'},
+    {null, "@desktop", null, 'r'},
     {null, "keyboard start", "exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard", 'b'},
     {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
     {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
@@ -1464,6 +1465,8 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(SETTING_AUDIO_DEVICE_PATH),
     HOST_WIPE_KEEP(SETTING_AUDIO_SOURCE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
+    //  The programs the desktop opens when it starts, whose row is a special one (desktop_autostart).
+    HOST_WIPE_KEEP(SETTING_DESKTOP_AUTOSTART_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(NET_DNS_ORDER_PATH),
     HOST_WIPE_KEEP(NET_DNS_DEFAULT_PATH),

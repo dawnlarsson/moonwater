@@ -1344,6 +1344,72 @@ static b32 settings_event_real(const struct window_event address_to event)
         return settings_event(event);
 }
 
+/*
+        The programs the desktop opens when it starts (registry.c's setting_autostart_valid, the verb desktop autostart): what a line is,
+        its limits, a path found in it, and the three rows of the Boot group that read it, set it whole, add one and take one out.
+*/
+static fn check_autostart(void)
+{
+        static const char address_to const good[] = {SETTING_AUTOSTART_STANDARD, "/terminal", "  /klog   /bowls/bin/fire-fox_2.0+x  ", "/a/b/c"};
+        static const char address_to const bad[] = {"", "   ", "klog", "/", "/klog /klog", "/a//b", "/a/./b", "/a/../b", "/a/..", "/a/.", "/a/",
+                                                     "/klog;rm", "/a b'c", "/x$(y)", "/k\tlog", "none"};
+        char line[SETTING_AUTOSTART_MOST + 64], value[SETTINGS_VALUE];
+        string_address words[SETTINGS_WORDS];
+        positive bad_at = 0, count;
+        b32 grammar = true, refused = true, many = true;
+        int list = settings_row_named("Programs started with the desktop"), add = settings_row_named("Add a program to start (its path)"),
+            remove = settings_row_named("Remove a program from the start (its path)");
+
+        for (positive each = 0; each < sizeof(good) / sizeof(good[0]); each++)
+                grammar &= setting_autostart_valid(good[each], null);
+        for (positive each = 0; each < sizeof(bad) / sizeof(bad[0]); each++)
+                refused &= !setting_autostart_valid(bad[each], &bad_at);
+        check("autostart: the standard is the kernel log, then the console, and lines of absolute paths are lines", grammar &&
+              string_equals((string_address)SETTING_AUTOSTART_STANDARD, (string_address) "/klog /terminal"));
+        check("autostart: nothing, a word that is no path, a path twice, an empty, . or .. part, or a byte a shell reads is none", refused);
+        setting_autostart_valid("/klog /a /klog", &bad_at);
+        check("autostart: and the fault is where the path named twice starts", bad_at == 9);
+        string_copy((string_address)line, (string_address) "/p0");
+        for (int each = 1; each < 20; each++)
+        {
+                positive stop = string_length((string_address)line);
+
+                line[stop] = ' ', line[stop + 1] = '/', line[stop + 2] = 'p', line[stop + 3] = (char)('a' + each), line[stop + 4] = 0;
+                many &= setting_autostart_valid(line, null) == (each + 1 <= SETTING_AUTOSTART_ENTRIES);
+        }
+        line[0] = '/';
+        for (positive at = 1; at < SETTING_AUTOSTART_WORD + 4; at++)
+                line[at] = 'x';
+        line[SETTING_AUTOSTART_WORD + 4] = 0;
+        many &= !setting_autostart_valid(line, null) && !setting_autostart_path(line);
+        line[SETTING_AUTOSTART_WORD - 1] = 0;
+        many &= setting_autostart_valid(line, null) && setting_autostart_path(line);
+        check("autostart: at most 16 programs, each a path shorter than 256 bytes", many);
+        check("autostart: a path is found in a line as a whole word", setting_autostart_has("/klog /terminal", "/terminal") &&
+              !setting_autostart_has("/klog /terminal", "/term") && !setting_autostart_has("/klog /terminal", "/klog /terminal"));
+
+        check("autostart: the three rows are in the Boot group, and the list's verb is desktop autostart", list && add && remove &&
+              settings_rows[list].how == SETTING_SPECIAL && string_equals((string_address)settings_rows[list].read[0], (string_address) "desktop") &&
+              string_equals((string_address)settings_rows[list].read[1], (string_address) "autostart") &&
+              string_equals((string_address)settings_rows[add].usage, (string_address) "desktop autostart add PROGRAM") &&
+              string_equals((string_address)settings_rows[remove].usage, (string_address) "desktop autostart remove PROGRAM"));
+        check("autostart: the list row reads what the verb says, and none",
+              settings_parsed((unsigned int)list, "[Moonwater] autostart /klog /terminal\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "/klog /terminal") &&
+                  settings_parsed((unsigned int)list, "[Moonwater] autostart none\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "none"));
+        count = settings_command(&settings_rows[list], (string_address) "/moonwater", "/klog /bin/x", words, SETTINGS_WORDS, false);
+        check("autostart: the list typed is the words of desktop autostart, a program each",
+              count == 5 && string_equals(words[1], (string_address) "desktop") && string_equals(words[2], (string_address) "autostart") &&
+                  string_equals(words[3], (string_address) "/klog") && string_equals(words[4], (string_address) "/bin/x") && !words[5]);
+        count = settings_command(&settings_rows[add], (string_address) "/moonwater", "/bin/x", words, SETTINGS_WORDS, false);
+        check("autostart: a program added is desktop autostart add and its path",
+              count == 5 && string_equals(words[3], (string_address) "add") && string_equals(words[4], (string_address) "/bin/x") && !words[5]);
+        count = settings_command(&settings_rows[remove], (string_address) "/moonwater", "/klog", words, SETTINGS_WORDS, false);
+        check("autostart: and one taken out is desktop autostart remove and its path",
+              count == 5 && string_equals(words[3], (string_address) "remove") && string_equals(words[4], (string_address) "/klog") && !words[5]);
+}
+
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -1352,6 +1418,8 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: the buffers map", false);
                 return;
         }
+        // After the map: a list typed is split in the window's own buffers.
+        check_autostart();
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
 

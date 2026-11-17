@@ -371,6 +371,10 @@ ui_field_full	fe02	non ce ne sta di più
 =Momentum	cfef	Inerzia
 =Motion	7647	Movimento
 =Mount kept disks	f0c8	Monta i dischi conservati
+=Programs started with the desktop	5b74	Programmi avviati con il desktop
+=Add a program to start (its path)	5e20	Aggiungi un programma all'avvio (il suo percorso)
+=Remove a program from the start (its path)	1013	Rimuovi un programma dall'avvio (il suo percorso)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Aperti in quest'ordine all'avvio del desktop; none lo avvia senza finestre
 =Mouse	9b64	Mouse
 =Mouse acceleration	c400	Accelerazione del mouse
 =Mouse sensitivity (percent, or default)	8a23	Sensibilità del mouse (percentuale o default)

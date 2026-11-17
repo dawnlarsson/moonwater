@@ -371,6 +371,10 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Momentum	cfef	Inertie
 =Motion	7647	Animation
 =Mount kept disks	f0c8	Monter les disques conservés
+=Programs started with the desktop	5b74	Programmes lancés avec le bureau
+=Add a program to start (its path)	5e20	Ajouter un programme au démarrage (son chemin)
+=Remove a program from the start (its path)	1013	Retirer un programme du démarrage (son chemin)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Ouverts dans cet ordre au démarrage du bureau ; none le démarre sans fenêtre
 =Mouse	9b64	Souris
 =Mouse acceleration	c400	Accélération de la souris
 =Mouse sensitivity (percent, or default)	8a23	Sensibilité de la souris (pourcentage ou default)

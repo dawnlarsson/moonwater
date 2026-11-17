@@ -275,6 +275,9 @@ moonwater clipboard watch [primary]    a line each time something is copied, the
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
 moonwater desktop start|stop|rest      begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is
+moonwater desktop autostart [PROGRAM...|none|default]  the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [/klog /terminal]
+moonwater desktop autostart add PROGRAM  open PROGRAM as well when the desktop starts, after the others
+moonwater desktop autostart remove PROGRAM  no longer open PROGRAM when the desktop starts
 moonwater help [VERB]                  these commands, or the page of one
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them

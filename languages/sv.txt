@@ -371,6 +371,10 @@ ui_field_full	fe02	mer ryms inte
 =Momentum	cfef	Rörelsemängd
 =Motion	7647	Rörelse
 =Mount kept disks	f0c8	Montera sparade diskar
+=Programs started with the desktop	5b74	Program som startar med skrivbordet
+=Add a program to start (its path)	5e20	Lägg till ett program i starten (dess sökväg)
+=Remove a program from the start (its path)	1013	Ta bort ett program från starten (dess sökväg)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Öppnas i den här ordningen när skrivbordet startar; none startar det utan fönster
 =Mouse	9b64	Mus
 =Mouse acceleration	c400	Musacceleration
 =Mouse sensitivity (percent, or default)	8a23	Musens känslighet (procent eller default)

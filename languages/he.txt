@@ -372,6 +372,10 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Momentum	cfef	תנע
 =Motion	7647	תנועה
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
+=Programs started with the desktop	5b74	תוכניות שמופעלות עם שולחן העבודה
+=Add a program to start (its path)	5e20	הוספת תוכנית להפעלה (הנתיב שלה)
+=Remove a program from the start (its path)	1013	הסרת תוכנית מההפעלה (הנתיב שלה)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	נפתחות בסדר הזה כששולחן העבודה מופעל; none מפעיל אותו בלי חלונות
 =Mouse	9b64	עכבר
 =Mouse acceleration	c400	האצת העכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)

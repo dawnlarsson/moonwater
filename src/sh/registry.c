@@ -178,6 +178,14 @@
 #define SETTING_PINS_ENTRIES 16 // programs it names
 #define SETTING_PINS_WORDS 32   // words of an entry: its app_id, its executable and the words the program is started with
 #define SETTING_PINS_WORD 512   // bytes of a word
+// The programs the desktop opens when it starts (`desktop autostart`): a line of absolute paths, a blank between, opened in that order, or
+// none, which opens nothing. With no file it is the standard: the kernel log, then the console, stacked over it. setting_autostart_valid
+// says what a line is.
+#define SETTING_DESKTOP_AUTOSTART_PATH "/root/desktop.autostart"
+#define SETTING_AUTOSTART_STANDARD "/klog /terminal"
+#define SETTING_AUTOSTART_MOST 1024  // bytes of the line
+#define SETTING_AUTOSTART_ENTRIES 16 // programs it names
+#define SETTING_AUTOSTART_WORD 256   // bytes of a program's path, its null among them
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
 // and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
@@ -950,6 +958,18 @@ static const struct settings_row settings_rows[] = {
      null, 0, .usage = "bind init canvas [on|off]", .help = "start Canvas at boot [on]"},
     {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
      0, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
+    //  What the desktop opens when it starts, in order (desktop.c's desktop_autostart; the machine script's desktop_autostart opens each):
+    //  the desktop opens no window of its own, so these are all there is at its start, the kernel log and the console unless the person
+    //  says other. The whole list is typed in the first row, and one program is added or taken out in the two after it.
+    {null, "Programs started with the desktop", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"desktop", "autostart"}, "autostart ", null,
+     {"desktop", "autostart"}, null, 0,
+     .usage = "desktop autostart [PROGRAM...|none|default]",
+     .help = "the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [/klog /terminal]",
+     .about = "Opened in this order when the desktop starts; none starts it with no windows"},
+    {null, "Add a program to start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "add"}, null, 0,
+     .usage = "desktop autostart add PROGRAM", .help = "open PROGRAM as well when the desktop starts, after the others"},
+    {null, "Remove a program from the start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "remove"},
+     null, 0, .usage = "desktop autostart remove PROGRAM", .help = "no longer open PROGRAM when the desktop starts"},
     //  The kernel's own notices (the feeder puts the errors and warnings of the kernel's log under the key system notices): no verb of its
     //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
     {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
@@ -1594,6 +1614,110 @@ static bool setting_pins_quote(char *into, positive *at, positive room, const ch
     into[used] = 0;
     *at = used;
     return true;
+}
+
+/*
+        The programs the desktop opens when it starts (`desktop autostart`): a line of absolute paths, a blank between each, as in
+            /klog /terminal /bowls/bin/firefox
+        A path is letters, digits and _ . / + -, starts with a / and is more than it, has no empty part and no part that is . or .., and is
+        shorter than SETTING_AUTOSTART_WORD; a line names one to SETTING_AUTOSTART_ENTRIES of them, none twice, in at most
+        SETTING_AUTOSTART_MOST bytes. An empty line is no line: none is kept as the word it is, by the verb. setting_autostart_next takes
+        the next path of a line and setting_autostart_has finds one in it.
+*/
+static bool setting_autostart_bare(unsigned char byte)
+{
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+           byte == '/' || byte == '+' || byte == '-';
+}
+
+// The next word of line from *at into word (room bytes, a null after it, cut short where it is longer) and *at after it; false at the end.
+static bool setting_autostart_next(const char *line, positive *at, char *word, positive room)
+{
+    positive used = 0;
+
+    while (line[*at] == ' ')
+        (*at)++;
+    if (!line[*at])
+        return false;
+    for (; line[*at] && line[*at] != ' '; (*at)++)
+        if (used + 1 < room)
+            word[used++] = line[*at];
+    word[used] = 0;
+    return true;
+}
+
+// Whether the part of a path from after one slash to before the next (from, to) is empty, . or ..
+static bool setting_autostart_part_bad(const char *word, positive from, positive to)
+{
+    return to == from || (to == from + 1 && word[from] == '.') || (to == from + 2 && word[from] == '.' && word[from + 1] == '.');
+}
+
+// Whether word is a path a line may name.
+static bool setting_autostart_path(const char *word)
+{
+    positive length = 0, part = 1;
+
+    if (word[0] != '/' || !word[1])
+        return false;
+    for (length = 1; word[length]; length++)
+    {
+        if (!setting_autostart_bare((unsigned char)word[length]) || length + 1 >= SETTING_AUTOSTART_WORD)
+            return false;
+        if (word[length] == '/')
+        {
+            if (setting_autostart_part_bad(word, part, length))
+                return false;
+            part = length + 1;
+        }
+    }
+    return !setting_autostart_part_bad(word, part, length);
+}
+
+// Whether line names word.
+static bool setting_autostart_has(const char *line, const char *word)
+{
+    char each[SETTING_AUTOSTART_WORD + 1];
+    positive at = 0;
+
+    while (setting_autostart_next(line, &at, each, sizeof(each)))
+        if (string_equals((string_address)each, (string_address)word))
+            return true;
+    return false;
+}
+
+// Whether line is what `desktop autostart` keeps. When it is not and bad is given, bad is where the fault starts.
+static bool setting_autostart_valid(const char *line, positive *bad)
+{
+    char word[SETTING_AUTOSTART_WORD + 1], before[SETTING_AUTOSTART_WORD + 1];
+    positive at = 0, length = 0, entries = 0, here = 0;
+
+    while (line[length])
+        length++;
+    if (bad)
+        *bad = 0;
+    if (length > SETTING_AUTOSTART_MOST)
+        return bad ? (*bad = SETTING_AUTOSTART_MOST, false) : false;
+    for (;;)
+    {
+        positive from = 0, seen = 0;
+        bool twice = false;
+
+        while (line[at] == ' ')
+            at++;
+        here = at;
+        if (!setting_autostart_next(line, &at, word, sizeof(word)))
+            return entries > 0;
+        if (at - here >= SETTING_AUTOSTART_WORD || !setting_autostart_path(word) || ++entries > SETTING_AUTOSTART_ENTRIES)
+            break;
+        // None twice: each word before this one is another.
+        while (++seen < entries && setting_autostart_next(line, &from, before, sizeof(before)))
+            twice |= string_equals((string_address)before, (string_address)word);
+        if (twice)
+            break;
+    }
+    if (bad)
+        *bad = here;
+    return false;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY

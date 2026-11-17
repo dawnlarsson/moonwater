@@ -371,6 +371,10 @@ ui_field_full	fe02	no cabe más
 =Momentum	cfef	Impulso
 =Motion	7647	Movimiento
 =Mount kept disks	f0c8	Montar los discos guardados
+=Programs started with the desktop	5b74	Programas que se inician con el escritorio
+=Add a program to start (its path)	5e20	Añadir un programa al inicio (su ruta)
+=Remove a program from the start (its path)	1013	Quitar un programa del inicio (su ruta)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Se abren en este orden al iniciar el escritorio; none lo inicia sin ventanas
 =Mouse	9b64	Ratón
 =Mouse acceleration	c400	Aceleración del ratón
 =Mouse sensitivity (percent, or default)	8a23	Sensibilidad del ratón (porcentaje o default)

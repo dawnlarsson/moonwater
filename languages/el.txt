@@ -371,6 +371,10 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Momentum	cfef	Αδράνεια
 =Motion	7647	Κίνηση
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
+=Programs started with the desktop	5b74	Προγράμματα που ξεκινούν με την επιφάνεια εργασίας
+=Add a program to start (its path)	5e20	Προσθήκη προγράμματος στην εκκίνηση (η διαδρομή του)
+=Remove a program from the start (its path)	1013	Αφαίρεση προγράμματος από την εκκίνηση (η διαδρομή του)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Ανοίγουν με αυτή τη σειρά όταν ξεκινά η επιφάνεια εργασίας, ενώ το none την ξεκινά χωρίς παράθυρα
 =Mouse	9b64	Ποντίκι
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)

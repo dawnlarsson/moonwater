@@ -371,6 +371,10 @@ ui_field_full	fe02	więcej się nie zmieści
 =Momentum	cfef	Pęd
 =Motion	7647	Ruch
 =Mount kept disks	f0c8	Montuj zachowane dyski
+=Programs started with the desktop	5b74	Programy uruchamiane z pulpitem
+=Add a program to start (its path)	5e20	Dodaj program do startu (jego ścieżka)
+=Remove a program from the start (its path)	1013	Usuń program ze startu (jego ścieżka)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Otwierane w tej kolejności przy starcie pulpitu; none uruchamia go bez okien
 =Mouse	9b64	Mysz
 =Mouse acceleration	c400	Przyspieszenie myszy
 =Mouse sensitivity (percent, or default)	8a23	Czułość myszy (procent lub default)

@@ -372,6 +372,10 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Momentum	cfef	تکانه
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
+=Programs started with the desktop	5b74	برنامه‌هایی که با میز کار شروع می‌شوند
+=Add a program to start (its path)	5e20	افزودن برنامه به شروع (مسیر آن)
+=Remove a program from the start (its path)	1013	حذف برنامه از شروع (مسیر آن)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	به همین ترتیب هنگام شروع میز کار باز می‌شوند؛ none آن را بدون پنجره شروع می‌کند
 =Mouse	9b64	ماوس
 =Mouse acceleration	c400	شتاب ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)

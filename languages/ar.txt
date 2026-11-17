@@ -372,6 +372,10 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Momentum	cfef	الزخم
 =Motion	7647	الحركة
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
+=Programs started with the desktop	5b74	البرامج التي تبدأ مع سطح المكتب
+=Add a program to start (its path)	5e20	إضافة برنامج إلى البدء (مساره)
+=Remove a program from the start (its path)	1013	إزالة برنامج من البدء (مساره)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	تُفتح بهذا الترتيب عند بدء سطح المكتب؛ none يبدؤه بلا نوافذ
 =Mouse	9b64	الماوس
 =Mouse acceleration	c400	تسارع الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)

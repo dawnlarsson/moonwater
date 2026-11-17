@@ -371,6 +371,10 @@ ui_field_full	fe02	that is as much as it holds
 =Momentum	cfef	Momentum
 =Motion	7647	Motion
 =Mount kept disks	f0c8	Mount kept disks
+=Programs started with the desktop	5b74	Programs started with the desktop
+=Add a program to start (its path)	5e20	Add a program to start (its path)
+=Remove a program from the start (its path)	1013	Remove a program from the start (its path)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Opened in this order when the desktop starts; none starts it with no windows
 =Mouse	9b64	Mouse
 =Mouse acceleration	c400	Mouse acceleration
 =Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)

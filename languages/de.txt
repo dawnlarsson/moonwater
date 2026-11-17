@@ -371,6 +371,10 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Momentum	cfef	Schwung
 =Motion	7647	Bewegung
 =Mount kept disks	f0c8	Gespeicherte Datenträger einhängen
+=Programs started with the desktop	5b74	Mit dem Desktop gestartete Programme
+=Add a program to start (its path)	5e20	Programm zum Start hinzufügen (sein Pfad)
+=Remove a program from the start (its path)	1013	Programm aus dem Start entfernen (sein Pfad)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Beim Start des Desktops in dieser Reihenfolge geöffnet; none startet ihn ohne Fenster
 =Mouse	9b64	Maus
 =Mouse acceleration	c400	Mausbeschleunigung
 =Mouse sensitivity (percent, or default)	8a23	Mausempfindlichkeit (Prozent oder default)

@@ -372,6 +372,10 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Momentum	cfef	مومینٹم
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	محفوظ ڈسکس ماؤنٹ کریں
+=Programs started with the desktop	5b74	ڈیسک ٹاپ کے ساتھ شروع ہونے والے پروگرام
+=Add a program to start (its path)	5e20	شروع میں پروگرام شامل کریں (اس کا راستہ)
+=Remove a program from the start (its path)	1013	شروع سے پروگرام ہٹائیں (اس کا راستہ)
+=Opened in this order when the desktop starts; none starts it with no windows	5790	ڈیسک ٹاپ شروع ہونے پر اسی ترتیب سے کھلتے ہیں؛ none اسے بغیر ونڈوز کے شروع کرتا ہے
 =Mouse	9b64	ماؤس
 =Mouse acceleration	c400	ماؤس ایکسیلریشن
 =Mouse sensitivity (percent, or default)	8a23	ماؤس کی حساسیت (فیصد یا default)

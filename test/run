@@ -20323,6 +20323,8 @@ desktop)
         "") echo "desktop $(cat "$STUB/desktop")" ;;
         off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas"; echo off > "$STUB/desktop" ;;
         rest) echo rest >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
+        # The programs the desktop opens: the case's autostart file, else the standard, as the verb says them.
+        autostart) if [ -s "$STUB/autostart" ]; then echo "[Moonwater] autostart $(cat "$STUB/autostart")"; else echo "[Moonwater] autostart /klog /terminal"; fi ;;
         esac ;;
 canvas)
         case $2 in
@@ -20441,6 +20443,34 @@ echo "font=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
 EOF
 run_driver
 report "the first line of /root/font is the face of the terminal" "$(grep '^font=' "$STUB/out")" "font=1"
+
+# D2: what the desktop opens at its start is the autostart list and nothing else: the standard is the kernel log and then the
+# terminal; none opens no window; a list of the terminal alone opens no kernel log; another program is started by its path.
+for desktop_case in standard none terminal other; do
+        begin "autostart-$desktop_case"
+        touch "$STUB/ready"
+        case $desktop_case in
+        none) echo none > "$STUB/autostart" ;;
+        terminal) echo /terminal > "$STUB/autostart" ;;
+        other) echo "$STUB/bin/other /terminal" > "$STUB/autostart"
+                printf '#!/bin/sh\necho "other $*" >> "$STUB/args"\nexit 0\n' > "$STUB/bin/other"
+                chmod +x "$STUB/bin/other" ;;
+        esac
+        cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+sleep 1.5
+desktop_stop
+echo "opened=$(grep -v '^compositor ' "$STUB/args" | cut -d' ' -f1 | tr '\n' ' ')"
+EOF
+        run_driver
+        case $desktop_case in
+        standard) report "autostart: the standard opens the kernel log, then the terminal" "$(grep '^opened=' "$STUB/out")" "opened=klog terminal " ;;
+        none) report "autostart: none opens no window, the desktop is the wallpaper and the taskbar" "$(grep '^opened=' "$STUB/out")" "opened=" ;;
+        terminal) report "autostart: the terminal alone opens no kernel log" "$(grep '^opened=' "$STUB/out")" "opened=terminal " ;;
+        other) report "autostart: another program is opened by its path, in the list's order" "$(grep '^opened=' "$STUB/out")" "opened=other terminal " ;;
+        esac
+done
 
 # E: a compositor that makes no window table is not reported as up, and is seen at once.
 begin table
