@@ -554,6 +554,8 @@ struct compositor_swipe
 #define COMPOSITOR_CHIP_NONE 0
 #define COMPOSITOR_CHIP_CONTROLS 1
 #define COMPOSITOR_CHIP_HINT 2
+#define COMPOSITOR_CHIP_DRAG 3              // a drag's, beside the pointer (compositor_chip_drag)
+#define COMPOSITOR_CHIP_DRAG_GAP_DP 18      // the drag's chip's top left from the pointer
 #define COMPOSITOR_CHIP_W_MOST 960            // the largest chip in device pixels: three cells at 800 percent
 #define COMPOSITOR_CHIP_H_MOST 256            // and the strip's height at 800 percent
 #define COMPOSITOR_CHIP_HOLD_NS 3000000000ull // a controls chip is shown this long, then fades
@@ -2488,6 +2490,9 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_wl.laying, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.parts, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.cursor_asked, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.drag_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.take_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.done_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.source, COMPOSITOR_ROWS_ROW) \

@@ -761,6 +761,38 @@ static inline int window_pinch_y(int b)
 #define WINDOW_EVENT_CLIP 5u
 
 /*
+        Drag and drop's news (the compositor's one drag, of a Wayland client's, an X client's or a program's: WINDOWS_DRAG_*), a what
+        happened and b its word. Over a program that takes drops (drop_ok): ENTER and MOTION (b where it is, window_drag_x and _y of the
+        window's pixels: the drag's types are the copy at WINDOWS_CLIP_DRAG, windows_drag_types), LEAVE, DROP (the button let go over it
+        with what it took), READY (the type it took may be read, windows_drag_read) and DONE (it is over). To the program whose drag it
+        is: ACTION (b the action it came to, WINDOWS_DRAG_COPY, MOVE or ASK, 0 for none), ENDED (b 1 when the target finished with it, 0
+        for a cancel: Escape, nothing there, the target gone) and DECLINED (its drag was not begun: no button of the person's down on it).
+*/
+#define WINDOW_EVENT_DRAG 7u
+#define WINDOWS_DRAG_ENTER 1
+#define WINDOWS_DRAG_MOTION 2
+#define WINDOWS_DRAG_LEAVE 3
+#define WINDOWS_DRAG_DROP 4
+#define WINDOWS_DRAG_READY 5
+#define WINDOWS_DRAG_DONE 6
+#define WINDOWS_DRAG_ACTION 7
+#define WINDOWS_DRAG_DECLINED 8
+#define WINDOWS_DRAG_ENDED 9
+#define WINDOWS_DRAG_COPY 1u
+#define WINDOWS_DRAG_MOVE 2u
+#define WINDOWS_DRAG_ASK 4u
+
+static inline int window_drag_x(int b)
+{
+        return (int)(short)((unsigned int)b & 0xffffu);
+}
+
+static inline int window_drag_y(int b)
+{
+        return (int)(short)(((unsigned int)b >> 16) & 0xffffu);
+}
+
+/*
         Where a program asks its window to be put, and the name the window is known by.
 
         The program writes these into its row before its first picture, and the compositor reads them once with
@@ -1071,8 +1103,8 @@ struct windows
                 for none, or the command line).
         */
         unsigned int clip_pid, clip_on;
-        unsigned int clip_serial[2];
-        unsigned long clip_length[2];
+        unsigned int clip_serial[3];   // [2]: the drag's copy (WINDOWS_CLIP_DRAG), changed each drag
+        unsigned long clip_length[3];
         int clip_owner[2];
         // `moonwater clipboard set` (root): its pid and memfd, the selection, a count up, and the compositor's answer.
         unsigned int cli_pid, cli_fd, cli_which, cli_serial, cli_answer, cli_clear;
@@ -1084,6 +1116,22 @@ struct windows
         // The compositor's answers: the offer it took (or refused, the serial with WINDOWS_CLIP_NO), the paste it gave (its copy's size).
         unsigned int clip_offer_answer[WINDOWS], clip_given_serial[WINDOWS];
         unsigned long clip_given_length[WINDOWS];
+
+        /*
+                Drag and drop, a program's side of the compositor's one drag (WINDOW_EVENT_DRAG says how it goes). A drag: a copy of
+                what is dragged (a sealed memfd in windows_clip_build's format) and the actions it allows, offered while the person's
+                button or finger is down on the window (drag_offer_*, windows_drag_offer); the compositor holds the copy at
+                WINDOWS_CLIP_DRAG while the drag is, and any target, a Wayland client's, an X client's or a program's, takes it from
+                there. A drop: a window that takes drops says so (drop_ok), and over it says what it takes of what it is offered
+                (drop_take: the nth name the drag's copy is offered under, -1 for none; the actions it takes and the one it prefers,
+                windows_drop_take), and once READY has read it says it is done (drop_done: 1 it took it, 0 it did not).
+        */
+        int drag_offer_fd[WINDOWS];
+        unsigned int drag_offer_actions[WINDOWS], drag_offer_serial[WINDOWS];
+        unsigned int drop_ok[WINDOWS];
+        int drop_take[WINDOWS];
+        unsigned int drop_take_actions[WINDOWS], drop_take_preferred[WINDOWS], drop_take_serial[WINDOWS];
+        unsigned int drop_done[WINDOWS], drop_done_serial[WINDOWS];
 
         /*
                 A popup: a menu or a list a window opens, which is a row of its own (so it may reach past its window's
@@ -1269,7 +1317,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 7u // 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 8u // 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)
@@ -1295,6 +1343,7 @@ static inline unsigned int windows_rows(const struct windows *table)
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
 #define WINDOWS_CLIP_PRIMARY 1u
+#define WINDOWS_CLIP_DRAG 2u // the drag's copy, at WINDOWS_CLIP_FD + 2 (no selection: nothing is pasted from it but a drop)
 #define WINDOWS_CLIP_CHANGED 1
 #define WINDOWS_CLIP_READY 2
 #define WINDOWS_CLIP_REFUSED 3
@@ -3653,6 +3702,8 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->popup_parent[row] = table->popup_flags[row] = 0;
         table->popup_x[row] = table->popup_y[row] = table->popup_w[row] = table->popup_h[row] = 0;
         __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
+        // It takes no drops until its program says it does (the kit's windows do), and nothing of a drag of the last one's is its.
+        __atomic_store_n(&table->drop_ok[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
         // A row's list is its new program's from the first frame: the generation the compositor took last is the old program's, and so is
@@ -5125,7 +5176,7 @@ static const unsigned char *windows_clip_map(unsigned int pid, unsigned int whic
 
         if (!pid || !want)
                 return 0;
-        windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which & 1u));
+        windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which < 3 ? which : 0));
         fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
         if (fd < 0)
                 return 0;
@@ -5188,6 +5239,70 @@ static long windows_clip_read_type(const struct window_row *own, unsigned int wh
 static long windows_clip_read(const struct window_row *own, unsigned int which, unsigned char **bytes, unsigned long *length)
 {
         return windows_clip_read_type(own, which, 0, bytes, length);
+}
+
+/*
+        Drag and drop from a program's side (WINDOW_EVENT_DRAG). windows_drag_offer: a drag of the parts begun, while the person's button
+        or finger is down on the window, of the actions it allows; the copy is held until the drag has ENDED (or was DECLINED).
+        windows_drag_types: the drag's copy mapped (unmapped with munmap of *size), to look at its names (windows_clip_offered) while it
+        is over the window. windows_drop_take: what the window takes of it (the nth name, -1 for none; the actions, the one preferred).
+        windows_drag_read: once READY, the type it took. windows_drop_done: the window is done with the drop (1 it took it).
+*/
+static long windows_drag_held = -1;
+
+static long windows_drag_offer(const struct window_row *own, const struct windows_clip_part *parts, unsigned long count, unsigned int actions)
+{
+        struct windows *table = own->table;
+        long fd = count && (actions & 7u) ? windows_clip_build(parts, count) : -22;
+
+        if (fd < 0)
+                return fd;
+        if (windows_drag_held >= 0)
+                window_call(WINDOW_SYS_CLOSE, windows_drag_held, 0, 0, 0, 0, 0);
+        windows_drag_held = fd;
+        table->drag_offer_fd[own->row] = (int)fd;
+        table->drag_offer_actions[own->row] = actions & 7u;
+        __atomic_add_fetch(&table->drag_offer_serial[own->row], 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+        return 0;
+}
+
+// The program's drag is over (ENDED or DECLINED): its copy is let go here.
+static void windows_drag_over(void)
+{
+        if (windows_drag_held >= 0)
+                window_call(WINDOW_SYS_CLOSE, windows_drag_held, 0, 0, 0, 0, 0);
+        windows_drag_held = -1;
+}
+
+static const unsigned char *windows_drag_types(const struct window_row *own, unsigned long *size)
+{
+        *size = __atomic_load_n(&own->table->clip_length[WINDOWS_CLIP_DRAG], __ATOMIC_ACQUIRE);
+        return windows_clip_map(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), WINDOWS_CLIP_DRAG, *size);
+}
+
+static void windows_drop_take(const struct window_row *own, long nth, unsigned int actions, unsigned int preferred)
+{
+        struct windows *table = own->table;
+
+        table->drop_take[own->row] = nth < 0 ? -1 : (int)nth;
+        table->drop_take_actions[own->row] = nth < 0 ? 0 : actions & 7u;
+        table->drop_take_preferred[own->row] = preferred & 7u;
+        __atomic_add_fetch(&table->drop_take_serial[own->row], 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+}
+
+static long windows_drag_read(const struct window_row *own, const char *name, unsigned char **bytes, unsigned long *length)
+{
+        return windows_clip_fetch_type(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), WINDOWS_CLIP_DRAG,
+                                       __atomic_load_n(&own->table->clip_given_length[own->row], __ATOMIC_ACQUIRE), name, bytes, length);
+}
+
+static void windows_drop_done(const struct window_row *own, int took)
+{
+        own->table->drop_done[own->row] = took ? 1u : 0u;
+        __atomic_add_fetch(&own->table->drop_done_serial[own->row], 1, __ATOMIC_RELEASE);
+        windows_knock(own);
 }
 
 static void windows_clip_free(unsigned char *bytes, unsigned long length)

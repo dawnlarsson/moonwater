@@ -852,7 +852,9 @@ static struct
                 // The X side (the window manager of Xwayland's): the row of the X window a Wayland source's drag is over (-1 none) and
                 // whether it takes a type there; or, xsource, a drag an X window makes, with its types (each with its null) and actions.
                 long xtarget;
-                int x_accepted, xsource, x_seen; // x_seen: the drag has been over an X window (its end is told the X side)
+                // held: a drag of the host's whose pointer the compositor drives (a program of the compositor's, wayland_drag_host_begin),
+                // where an X source's is Xwayland's.
+                int x_accepted, xsource, x_seen, held; // x_seen: the drag has been over an X window (its end is told the X side)
                 unsigned int x_actions;
                 struct wayland_table x_types;
                 long x_bytes;
@@ -7366,6 +7368,7 @@ static void wayland_drag_end(int how)
         if (wayland.drag.xsource)
                 wayland_table_drop(&wayland.drag.x_types);
         wayland.drag.xtarget = -1, wayland.drag.x_accepted = 0, wayland.drag.xsource = 0, wayland.drag.x_seen = 0, wayland.drag.x_bytes = 0;
+        wayland.drag.held = 0;
         // The X side is told last, the drag none by then: it may start another from what it is told.
         if (x_end)
                 wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);
@@ -7387,10 +7390,14 @@ static void wayland_drag_over(long row, long x, long y)
         // A drag with no source is its own client's alone.
         if (is && wayland.drag.source < 0 && !wayland.drag.xsource && t != c)
                 is = 0;
-        // A window whose client has no data device: an X window, whose drag the window manager of Xwayland takes when it is a target.
-        if (is && (device = wayland_drag_device(t)) < 0)
+        /*
+                A window the host takes a drag over (xdrag): one whose client has no data device (an X window, whose drag the window manager
+                of Xwayland takes) or a row no client has (a program of the compositor's, which takes drops through the window table). It is
+                the target when the host says so, whoever the source is: a Wayland client's, an X client's or a program's.
+        */
+        if ((is && (device = wayland_drag_device(t)) < 0) || (row >= 0 && !root))
         {
-                if (source && wayland.host->xdrag)
+                if ((source || wayland.drag.xsource) && wayland.host->xdrag)
                 {
                         if (wayland.drag.xtarget == row)
                         {
@@ -7568,14 +7575,16 @@ static void wayland_drag_decide(void)
         long device = t ? wayland_drag_device(t) : -1, slot = o ? wayland_slot_of(t, o->id) : -1;
         int v3 = slot >= 0 && t->objects[slot].version >= 3;
 
-        // Over an X window: dropped when it takes a type (and an action, for a source of version 3), the X side told to drop.
+        // Over a window the host takes it over: dropped when it takes a type (and an action, for a source of version 3 or the host's), the
+        // host told to drop.
         if (wayland.drag.xtarget >= 0)
         {
                 struct wayland_client *sc = wayland_drag_client();
                 struct wayland_source *source = wayland_drag_source();
                 long source_slot = source ? wayland_slot_of(sc, source->id) : -1;
 
-                if (!wayland.drag.x_accepted || (source_slot >= 0 && sc->objects[source_slot].version >= 3 && !wayland.drag.action))
+                if (!wayland.drag.x_accepted || (source_slot >= 0 && sc->objects[source_slot].version >= 3 && !wayland.drag.action) ||
+                    (wayland.drag.xsource && !wayland.drag.action))
                 {
                         wayland_drag_end(0);
                         return;
@@ -7654,10 +7663,11 @@ static void wayland_drag_offer_gone(struct wayland_client *c, long offer)
         wayland.drag.offer = -1;
 }
 
-// Whether a drag holds the pointer (the host sends its motion and its release here, and Escape cancels it).
+// Whether a drag holds the pointer (the host sends its motion and its release here, and Escape cancels it): a Wayland client's, or a
+// program's of the compositor's (an X client's pointer is Xwayland's).
 WAYLAND_API int wayland_dragging(void)
 {
-        return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released && !wayland.drag.xsource;
+        return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released && (!wayland.drag.xsource || wayland.drag.held);
 }
 
 /*
@@ -7675,6 +7685,14 @@ WAYLAND_API long wayland_drag_x_types(const char **types, unsigned int *actions)
 {
         struct wayland_source *source = wayland_drag_source();
 
+        // A drag of the host's (a program's over an X window): its own types and actions.
+        if (wayland.drag.live && wayland.drag.xsource && wayland.drag.x_bytes)
+        {
+                *types = (const char *)wayland.drag.x_types.at;
+                if (actions)
+                        *actions = wayland.drag.x_actions;
+                return wayland.drag.x_bytes;
+        }
         if (!wayland.drag.live || !source || !source->mime_bytes)
                 return 0;
         *types = (const char *)source->mime_table.at;
@@ -7688,13 +7706,13 @@ WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
         struct wayland_client *sc = wayland_drag_client();
         struct wayland_source *source = wayland_drag_source();
 
-        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || !source)
+        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || (!source && !wayland.drag.xsource))
                 return;
-        action = accepted ? action & (source->actions ? source->actions : WAYLAND_DRAG_ACTIONS) : 0;
+        action = accepted ? action & (source ? (source->actions ? source->actions : WAYLAND_DRAG_ACTIONS) : wayland.drag.x_actions) : 0;
         action = action & 1u ? 1u : action & 2u ? 2u : action & 4u ? 4u : 0;
         if (!!accepted != wayland.drag.x_accepted)
         {
-                long slot = wayland_slot_of(sc, source->id);
+                long slot = source ? wayland_slot_of(sc, source->id) : -1;
 
                 wayland.drag.x_accepted = !!accepted;
                 if (slot >= 0)
@@ -7736,9 +7754,10 @@ WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
         return 1;
 }
 
+// The host's target (an X window, a program's) is done with the drop: the drag ends, finished or not.
 WAYLAND_API void wayland_drag_x_finished(long ok)
 {
-        if (wayland.drag.live && wayland.drag.dropped && !wayland.drag.xsource && wayland_drag_source())
+        if (wayland.drag.live && wayland.drag.dropped && wayland.drag.xtarget >= 0)
                 wayland_drag_end(ok ? 2 : 0);
 }
 
@@ -7785,12 +7804,34 @@ WAYLAND_API void wayland_drag_x_actions(unsigned long actions)
 // Whether an X client's drag is over the Wayland side and not dropped (the host's Escape is its cancel too).
 WAYLAND_API int wayland_x_dragging(void)
 {
-        return wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped;
+        return wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped;
+}
+
+/*
+        A drag a program of the compositor's makes (the host holds its types and bytes, its window table's copy): an X drag's but that the
+        compositor drives its pointer, as a Wayland client's (wayland_dragging: its motion and release come here, Escape cancels it), first
+        over the window row at (x, y). 0 while another drag is.
+*/
+WAYLAND_API int wayland_drag_host_begin(const char *types, long bytes, unsigned long actions, long row, long x, long y)
+{
+        if (!wayland_drag_x_begin(types, bytes, actions))
+                return 0;
+        wayland.drag.held = 1;
+        wayland.pointer_x = x, wayland.pointer_y = y;
+        wayland_drag_over(row, x, y);
+        return 1;
+}
+
+// The button of a drag the host makes let go (or its finger lifted): its drop, or its cancel.
+WAYLAND_API void wayland_drag_host_release(void)
+{
+        if (wayland.drag.live && wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
+                wayland_drag_release();
 }
 
 WAYLAND_API void wayland_drag_x_motion(long row, long x, long y)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped && !wayland.drag.released)
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
         {
                 wayland.pointer_x = x, wayland.pointer_y = y;
                 wayland_drag_over(row, x, y);
@@ -7799,13 +7840,13 @@ WAYLAND_API void wayland_drag_x_motion(long row, long x, long y)
 
 WAYLAND_API void wayland_drag_x_leave(void)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped)
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped)
                 wayland_drag_end(0);
 }
 
 WAYLAND_API void wayland_drag_x_drop(void)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped && !wayland.drag.released)
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
                 wayland_drag_release();
 }
 

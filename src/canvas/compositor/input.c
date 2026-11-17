@@ -1386,6 +1386,12 @@ static int compositor_band_hand(unsigned int code, int down)
         return 0;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_drag_follow(int under);
+static int compositor_drag_shape(void);
+static void compositor_drag_let_go(int to);
+#endif
+
 static void compositor_motion(void)
 {
         int under, tab;
@@ -1422,6 +1428,13 @@ static void compositor_motion(void)
                                           : zone ? compositor_cursor_by_edges[zone & 15]
                                           : asked >= 0 ? (unsigned int)asked
                                           : CP_ARROW;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A drag, whoever's: the hand where a target takes it, no drop elsewhere; its chip beside the pointer, and a program's
+                // drag's motion the drag's (compositor_drag_follow).
+                compositor_drag_follow(under);
+                if (compositor_drag_shape() >= 0)
+                        compositor.cursor.shape = (unsigned int)compositor_drag_shape(), asked = -1;
+#endif
                 // A client that asked for no pointer over its window has none there (-2 is that answer).
                 compositor.cursor.client_hidden = asked == -2;
                 compositor.cursor.asked_row = of;
@@ -1722,6 +1735,10 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor.button_down &= (unsigned char)~(1u << index);
                 compositor_grab_settle();
         }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // A program's drag is let go with the button that holds it: its drop, or its cancel (the release still the program's).
+        compositor_drag_let_go(to);
+#endif
         compositor_post(to, WINDOW_EVENT_BUTTON, flags, (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
@@ -3112,6 +3129,53 @@ static void compositor_chip_hint(const int *rect, int x, int y, int side, positi
         }
         c->w = w, c->h = h, c->slide = 0, c->alpha = 255;
         c->shown = now, c->hold = COMPOSITOR_CHIP_HINT_NS, c->fade = 0;
+        compositor_chip_redraw();
+}
+
+/*
+        A drag's chip, whoever's the drag is (a Wayland client's, an X client's, a program's): a capsule of the kit's glass beside the
+        pointer, following it, its glyph the action the drag would come to where it is (copy a plus, move an arrow, ask three dots, none a
+        slash). Shown while the drag is and taken off with it (action -1).
+*/
+static void compositor_chip_drag(int action)
+{
+        struct compositor_chip *c = &compositor.chip;
+        int scale = compositor.scale, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100, w = h * 3 / 2, gap = COMPOSITOR_CHIP_DRAG_GAP_DP * scale / 100;
+
+        if (action < 0)
+        {
+                if (c->kind == COMPOSITOR_CHIP_DRAG)
+                        compositor_chip_hide();
+                return;
+        }
+        if (c->kind != COMPOSITOR_CHIP_DRAG || c->cells != action)
+        {
+                long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cx = w / 2, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
+                unsigned char *glyph;
+
+                if (w < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST || !compositor_chip_map())
+                        return;
+                compositor_chip_hide();
+                compositor_chip_body(c->cover, w, h);
+                glyph = c->cover + (unsigned long)w * h;
+                memory_zero(glyph, (positive)w * h);
+                if (action & WINDOWS_DRAG_COPY)
+                        compositor_chip_stroke_into(glyph, w, h, cx - g, cy, cx + g, cy, radius),
+                            compositor_chip_stroke_into(glyph, w, h, cx, cy - g, cx, cy + g, radius);
+                else if (action & WINDOWS_DRAG_MOVE)
+                        compositor_chip_stroke_into(glyph, w, h, cx - g, cy, cx + g, cy, radius),
+                            compositor_chip_stroke_into(glyph, w, h, cx + g / 2, cy - g / 2, cx + g, cy, radius),
+                            compositor_chip_stroke_into(glyph, w, h, cx + g / 2, cy + g / 2, cx + g, cy, radius);
+                else if (action & WINDOWS_DRAG_ASK)
+                        for (long dot = -1; dot <= 1; dot++)
+                                compositor_chip_stroke_into(glyph, w, h, cx + dot * g, cy, cx + dot * g, cy, radius + 1);
+                else
+                        compositor_chip_stroke_into(glyph, w, h, cx - g, cy + g, cx + g, cy - g, radius);
+                c->kind = COMPOSITOR_CHIP_DRAG, c->row = COMPOSITOR_NONE, c->cells = action;
+                c->w = w, c->h = h, c->slide = 0, c->alpha = 255;
+                c->shown = clock_monotonic_nanoseconds(), c->hold = (positive)1 << 62, c->fade = 0;
+        }
+        c->rel_x = compositor.pointer_x + gap, c->rel_y = compositor.pointer_y + gap;
         compositor_chip_redraw();
 }
 

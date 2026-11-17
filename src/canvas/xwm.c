@@ -3491,8 +3491,9 @@ static void compositor_xwm_dnd_pass(void)
         {
                 int under = compositor_under(hx, hy, &tab);
 
-                if (under >= 0 && under < COMPOSITOR_ROWS && !compositor_xwm_row_is_x(under) && wayland_row_owner(under) >= 0 &&
-                    compositor.w[under] > 0 && compositor.h[under] > 0)
+                if (under >= 0 && under < COMPOSITOR_ROWS && !compositor_xwm_row_is_x(under) &&
+                    (wayland_row_owner(under) >= 0 || (compositor.table && compositor.table->drop_ok[under])) && compositor.w[under] > 0 &&
+                    compositor.h[under] > 0)
                         want = under;
         }
         if (want >= 0 && (!x->xdrag.proxy_mapped || x->xdrag.proxy_row != want || x->xdrag.proxy_x != compositor.x[want] ||
@@ -3563,9 +3564,10 @@ static long compositor_xwm_drag_types(const char **types)
         return wayland_drag_x_types(types, &actions);
 }
 
+// A conversion of the drag's type for an X target: a Wayland source's send, or a program's copy pasted (compositor_drag_push).
 static int compositor_xwm_drag_send(const char *mime, long fd)
 {
-        return wayland_drag_x_send(mime, fd);
+        return compositor_drag.source >= 0 ? compositor_drag_push(mime, fd) : wayland_drag_x_send(mime, fd);
 }
 
 static int compositor_xwm_drag_ours(void)

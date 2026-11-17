@@ -5554,6 +5554,62 @@ static void test_bridge(void)
         wlc_pump(a.s.c);
         WLCHECK(wlc_count(a.s.c, WLI_wl_data_device, WLE_wl_data_device_leave) == 1 && !wayland.drag.live && fx.end_ok == 0,
                 "an X drag that leaves: the Wayland window left, the end not finished");
+
+        /* a program's drag (the host's, its pointer the compositor's): over a Wayland window, dropped, received, finished; over a program's */
+        WLCHECK(wayland_drag_host_begin("text/uri-list\0text/plain;charset=utf-8\0", 39, 3, -1, 0, 0) == 1 && wayland_dragging() && !wayland_x_dragging(),
+                "a program's drag begins and holds the pointer (its motion and its release are the compositor's), and is no X drag");
+        WLCHECK(wayland_drag_host_begin("text/plain\0", 11, 1, -1, 0, 0) == 0, "and no other drag begins while it is");
+        wlc_forget(a.s.c);
+        wayland_drag_motion(a.row, 20, 20);
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_device, WLE_wl_data_device_enter);
+        offer = e ? e->u[4] : 0;
+        WLCHECK(e && offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 2 && wl_offered(a.s.c, "text/uri-list") == 1,
+                "over a Wayland window it is entered with an offer of the program's types");
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_accept, e ? e->u[0] : 0UL, "text/uri-list");
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_set_actions, 3L, 2L);
+        wlc_pump(a.s.c);
+        wlc_forget(a.s.c);
+        wayland_drag_host_release();
+        wlc_pump(a.s.c);
+        WLCHECK(wlc_count(a.s.c, WLI_wl_data_device, WLE_wl_data_device_drop) == 1 && !wayland_dragging() && wayland.drag.action == 2,
+                "its release over the window that took a type is the drop, with the move the window preferred");
+        write_end = wl_pipe(&reader);
+        before = fx.receives;
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_receive, "text/uri-list", write_end);
+        WLCHECK(fx.receives == before + 1 && fx.which == 2 && !strcmp(fx.mime, "text/uri-list") && fx.fd_ok,
+                "the window's receive is the host's to answer from the program's copy");
+        close(reader);
+        before = fx.drags[WAYLAND_XDRAG_END];
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_finish);
+        wlc_pump(a.s.c);
+        WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && fx.end_action == 2 && !wayland.drag.live,
+                "and its finish the drag's end, told to the host finished, with its move");
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_destroy);
+        {
+                long program = FAKE_ROWS - 1; // a row no client has: a program's of the compositor's
+
+                wayland_drag_host_begin("text/plain;charset=utf-8\0", 25, 1, -1, 0, 0);
+                fx.accept = 1;
+                before = fx.drags[WAYLAND_XDRAG_OVER];
+                wayland_drag_motion(program, 40, 50);
+                WLCHECK(fx.drags[WAYLAND_XDRAG_OVER] == before + 1 && fx.row == program && fx.x == 40 && fx.y == 50 && wayland.drag.xtarget == program,
+                        "over a program's window (no client's row) the host is asked, and is the target when it says so");
+                wayland_drag_x_status(1, 1);
+                before = fx.drags[WAYLAND_XDRAG_DROP];
+                wayland_drag_host_release();
+                WLCHECK(fx.drags[WAYLAND_XDRAG_DROP] == before + 1 && wayland.drag.dropped, "the program's take and the release are its drop, told to the host");
+                before = fx.drags[WAYLAND_XDRAG_END];
+                wayland_drag_x_finished(1);
+                WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && !wayland.drag.live, "and its done the drag's end, finished");
+                wayland_drag_host_begin("text/plain;charset=utf-8\0", 25, 1, -1, 0, 0);
+                wayland_drag_motion(program, 4, 5);
+                before = fx.drags[WAYLAND_XDRAG_END];
+                wayland_drag_cancel();
+                WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 0 && !wayland.drag.live && fx.drags[WAYLAND_XDRAG_LEAVE] > 0,
+                        "Escape (the host's cancel) ends a program's drag, left and not finished");
+                fx.accept = 0;
+        }
         WLCHECK(a.s.c->errors == 0 && xs.c->errors == 0, "no error of these (%s)", a.s.c->error_text);
         wlc_end(a.s.c);
         wlc_end(xs.c);

@@ -47,6 +47,7 @@ struct compositor_wl_transfer
         int client, row, in, out, keep, index;
         unsigned long total, base, count, got;
         long reading, text, nth;
+        const char *drop; // a drop's pull: the one type read, its name (compositor_drag_read)
         thread *worker;
         int finished, cancel;
         int nudge; // a pump's: the loop asks for a knock after its next move
@@ -153,6 +154,8 @@ static struct
                 unsigned long modifier;
         } dmabuf_entries[WAYLAND_DMABUF_ENTRIES];
         unsigned char *cursor_asked; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
+        // A program's drag and drop (compositor_drag): the serials of each row's drag offer, drop take and drop done last read.
+        unsigned int *drag_seen, *take_seen, *done_seen;
         unsigned char *row_blend;    // 1 when the row's current surface has non-opaque alpha
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
@@ -4009,6 +4012,7 @@ static void compositor_wl_transfer_free(long at)
         if (compositor_wl.transfer[at].index >= 0)
                 system_close(compositor_wl.transfer[at].index);
         compositor_wl.transfer[at].state = 0;
+        compositor_wl.transfer[at].drop = 0;
         compositor_wl.transfer[at].in = compositor_wl.transfer[at].out = compositor_wl.transfer[at].keep = compositor_wl.transfer[at].index = -1;
 }
 
@@ -4389,11 +4393,19 @@ static void compositor_wl_clip_abort(void *context, long client, long which)
         A type of a copy that ended, well or not: kept at the end of the copy's bytes and in its index when it came whole (and, for the
         text, is UTF-8 with no NUL and not empty), else its bytes cut off again. Then the next type.
 */
+static void compositor_drag_pulled(long at, int ok);
+
 static void compositor_wl_pull_end(long at, int ok)
 {
         struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
-        const char *type = wayland_clip_type(t->client, t->which, t->reading);
+        const char *type = t->drop ? 0 : wayland_clip_type(t->client, t->which, t->reading);
         unsigned long got = t->got;
+
+        if (t->drop)
+        {
+                compositor_drag_pulled(at, ok);
+                return;
+        }
 
         system_close(t->in);
         t->in = -1;
@@ -4481,6 +4493,466 @@ static void compositor_wl_clip_push(void *context, long row, long which, const c
         compositor_wl_transfer_start(slot);
 }
 
+/* ---- drag and drop: a program's of the compositor's, in the shim's one drag ---- */
+
+/*
+        Every drag is the shim's one drag (wayland.c's DRAG AND DROP), whoever makes it and whatever it is over: a Wayland client's, an X
+        client's (xwm.c) or a program's of the compositor's, over a Wayland client's window, an X window or a program's. A program's drag
+        (windows_drag_offer, while the person's button or finger is down on its window) is a drag of the host's whose pointer the
+        compositor drives (wayland_drag_host_begin); its copy is held at WINDOWS_CLIP_DRAG, and every target takes from there: a Wayland
+        client's receive is a paste of a type of that copy (compositor_drag_push), an X window's conversion the same through the window
+        manager's pump, a program's a read of the copy where it is. A program that takes drops (drop_ok) is a target the host answers for
+        (xdrag on a row no client has): it is told it was entered, moved over and left, with the drag's types readable at WINDOWS_CLIP_DRAG
+        (for another's drag a copy of their names alone, made at its first entry), says what it takes (drop_take), and on the drop reads
+        the type it took there: the program's copy as it is, or what a Wayland or an X source sent of it, read into a copy of its own
+        first as a clipboard's is (a transfer's thread: no client's pipe is read on the loop). The source program is told the action the
+        drag comes to and its end; Escape ends it as it ends any (compositor_wl_drag_escape).
+*/
+static struct
+{
+        int source;                     // the program's row whose drag it is, -1 for none
+        int target;                     // the program's row the drag is over, -1 for none
+        long take;                      // what the target takes: the nth name of the drag's copy, -1 for none
+        unsigned int take_actions, take_preferred, told_action;
+        int dropped;                    // dropped on the target: its type is read (reading), then READY
+        long reading;                   // the transfer reading a Wayland or X source's type for the target, -1
+        int named;                      // the drag's copy at WINDOWS_CLIP_DRAG is the names of another's drag's types
+        unsigned char *types;           // the drag's types for the shim, each with its NUL (a reservation: compositor_wl_room)
+        long types_room, types_bytes;
+} compositor_drag = {-1, -1, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0};
+
+// A copy made the drag's: put at WINDOWS_CLIP_DRAG (what was there let go), mapped, its size in the table, its serial moved.
+static void compositor_drag_keep(int opened, unsigned long length)
+{
+        compositor_clip_mapped(WINDOWS_CLIP_DRAG, 0);
+        compositor_call(syscall(dup3), (positive)opened, WINDOWS_CLIP_FD + WINDOWS_CLIP_DRAG, O_CLOEXEC, 0, 0, 0);
+        system_close(opened);
+        compositor_clip.fd[WINDOWS_CLIP_DRAG] = WINDOWS_CLIP_FD + (int)WINDOWS_CLIP_DRAG;
+        compositor_clip_mapped(WINDOWS_CLIP_DRAG, length);
+        compositor.table->clip_length[WINDOWS_CLIP_DRAG] = length;
+        __atomic_add_fetch(&compositor.table->clip_serial[WINDOWS_CLIP_DRAG], 1, __ATOMIC_RELEASE);
+}
+
+// The drag's copy let go: /dev/null takes its number again (compositor_clip_reserve).
+static void compositor_drag_drop_copy(void)
+{
+        if (compositor_clip.fd[WINDOWS_CLIP_DRAG] < 0)
+                return;
+        compositor_clip_mapped(WINDOWS_CLIP_DRAG, 0);
+        if (compositor_clip.blank < 0 ||
+            compositor_call(syscall(dup3), (positive)compositor_clip.blank, WINDOWS_CLIP_FD + WINDOWS_CLIP_DRAG, O_CLOEXEC, 0, 0, 0) < 0)
+                system_close(compositor_clip.fd[WINDOWS_CLIP_DRAG]);
+        compositor_clip.fd[WINDOWS_CLIP_DRAG] = -1;
+        compositor.table->clip_length[WINDOWS_CLIP_DRAG] = 0;
+        __atomic_add_fetch(&compositor.table->clip_serial[WINDOWS_CLIP_DRAG], 1, __ATOMIC_RELEASE);
+}
+
+static void compositor_drag_tell(int row, int what, int word)
+{
+        if (row >= 0 && row < COMPOSITOR_ROWS && compositor.table->pid[row])
+                compositor_post(row, WINDOW_EVENT_DRAG, 0, what, word);
+}
+
+// A place in a row's pixels as a drag's event carries it (window_drag_x and _y).
+static int compositor_drag_place(long x, long y)
+{
+        return (int)(((unsigned int)(y & 0xffff) << 16) | (unsigned int)(x & 0xffff));
+}
+
+// The nth name the drag's copy is offered under (the names text goes by included), or 0.
+static const char *compositor_drag_name(long nth)
+{
+        unsigned long length;
+
+        if (nth < 0 || !compositor_clip.map[WINDOWS_CLIP_DRAG])
+                return 0;
+        return windows_clip_offered(compositor_clip.map[WINDOWS_CLIP_DRAG], compositor.table->clip_length[WINDOWS_CLIP_DRAG], (unsigned long)nth, 0,
+                                    &length);
+}
+
+/*
+        The drag's types as the shim takes them (each with its NUL): every name the drag's copy is offered under. The shim keeps its own
+        copy of them (wayland_drag_x_begin), so they are made here once a drag, in a reservation that grows.
+*/
+static long compositor_drag_types_of(void)
+{
+        const char *name;
+        long bytes = 0;
+
+        for (long nth = 0; (name = compositor_drag_name(nth)); nth++)
+        {
+                long n = (long)string_length((string_address)name) + 1;
+
+                if (!compositor_wl_room(&compositor_drag.types, &compositor_drag.types_room, 1, 1l << 32, bytes + n))
+                        break;
+                memory_copy(compositor_drag.types + bytes, name, (positive)n);
+                bytes += n;
+        }
+        return compositor_drag.types_bytes = bytes;
+}
+
+// Whether a button of the person's or a finger is down on a row now, which a program's drag begins under.
+static int compositor_drag_held(int row)
+{
+        for (int button = 0; button < 8; button++)
+                if ((compositor.button_down & (1u << button)) && compositor.button_row[button] == row)
+                        return 1;
+        return 0;
+}
+
+/*
+        A program offers a drag (drag_offer_*): begun when the person's button or finger is down on its window now and has just been
+        (the clipboard's rule for a copy) and no drag is, its copy checked as any copy is and made the drag's; else DECLINED.
+*/
+static void compositor_drag_offer(int row)
+{
+        struct windows *table = compositor.table;
+        positive now = clock_monotonic_nanoseconds();
+        unsigned long length = 0;
+        int opened = -1, tab = 0, under;
+
+        if (wayland_dragging() || wayland_x_dragging() || compositor_drag.source >= 0 || !compositor_drag_held(row) ||
+            now - compositor_clip.gesture[row] > COMPOSITOR_CLIP_GESTURE_NS ||
+            (opened = compositor_clip_open(table->pid[row], table->drag_offer_fd[row], &length)) < 0)
+        {
+                compositor_drag_tell(row, WINDOWS_DRAG_DECLINED, 0);
+                return;
+        }
+        compositor_drag_keep(opened, length);
+        compositor_drag.source = row, compositor_drag.target = -1, compositor_drag.take = -1, compositor_drag.dropped = 0, compositor_drag.named = 0;
+        compositor_drag.told_action = 0;
+        under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        if (!compositor_drag_types_of() ||
+            !wayland_drag_host_begin((const char *)compositor_drag.types, compositor_drag.types_bytes, table->drag_offer_actions[row], under,
+                                     under >= 0 ? compositor.pointer_x - compositor.x[under] : 0, under >= 0 ? compositor.pointer_y - compositor.y[under] : 0))
+        {
+                compositor_drag.source = -1;
+                compositor_drag_drop_copy();
+                compositor_drag_tell(row, WINDOWS_DRAG_DECLINED, 0);
+        }
+}
+
+/*
+        What a program over which a drag is takes (drop_take): its nth name and the action it comes to (what it takes of what the drag
+        allows, the one it prefers when it is among them), told to the shim as the host's target's status.
+*/
+static void compositor_drag_take(int row)
+{
+        struct windows *table = compositor.table;
+        const char *types = 0;
+        unsigned int allowed = 0, both, action;
+
+        if (row != compositor_drag.target || compositor_drag.dropped)
+                return;
+        compositor_drag.take = table->drop_take[row] >= 0 && compositor_drag_name(table->drop_take[row]) ? table->drop_take[row] : -1;
+        compositor_drag.take_actions = table->drop_take_actions[row] & 7u;
+        compositor_drag.take_preferred = table->drop_take_preferred[row] & 7u;
+        wayland_drag_x_types(&types, &allowed);
+        both = compositor_drag.take_actions & (allowed ? allowed : 7u);
+        action = (both & compositor_drag.take_preferred) ? compositor_drag.take_preferred
+                 : (both & 1u)                            ? 1u
+                 : (both & 2u)                            ? 2u
+                 : (both & 4u)                            ? 4u
+                                                          : 0;
+        wayland_drag_x_status(compositor_drag.take >= 0 && action, action);
+}
+
+// A row's knock: a drag offered, a take, a drop done.
+static void compositor_drag_door(int row)
+{
+        struct windows *table = compositor.table;
+        unsigned int offer = __atomic_load_n(&table->drag_offer_serial[row], __ATOMIC_ACQUIRE);
+        unsigned int take = __atomic_load_n(&table->drop_take_serial[row], __ATOMIC_ACQUIRE);
+        unsigned int done = __atomic_load_n(&table->drop_done_serial[row], __ATOMIC_ACQUIRE);
+
+        if (!compositor_wl.started || !compositor_wl.drag_seen)
+                return;
+        if (offer != compositor_wl.drag_seen[row])
+        {
+                compositor_wl.drag_seen[row] = offer;
+                compositor_drag_offer(row);
+        }
+        if (take != compositor_wl.take_seen[row])
+        {
+                compositor_wl.take_seen[row] = take;
+                compositor_drag_take(row);
+        }
+        if (done != compositor_wl.done_seen[row])
+        {
+                compositor_wl.done_seen[row] = done;
+                if (row == compositor_drag.target && compositor_drag.dropped)
+                        wayland_drag_x_finished(table->drop_done[row] == 1);
+        }
+}
+
+// Another's drag over a program: the names of its types made the drag's copy (types of no bytes), so the program can look at them.
+static void compositor_drag_name_types(void)
+{
+        const char *types = 0;
+        unsigned int actions = 0;
+        long bytes = wayland_drag_x_types(&types, &actions), count = 0;
+        struct windows_clip_part *parts;
+        unsigned long length = 0;
+        long built, opened;
+
+        if (compositor_drag.named || compositor_drag.source >= 0 || bytes <= 0)
+                return;
+        for (long at = 0; at < bytes; at++)
+                count += !types[at];
+        parts = count ? (struct windows_clip_part *)compositor_map_zeroed((unsigned long)count * sizeof(*parts)) : 0;
+        if (!parts)
+                return;
+        count = 0;
+        for (long at = 0; at < bytes; at += (long)string_length((string_address)(types + at)) + 1)
+                if (types[at])
+                        parts[count].name = types + at, parts[count].bytes = "", parts[count++].length = 0;
+        built = windows_clip_build(parts, (unsigned long)count);
+        compositor_call(syscall(munmap), (positive)parts, (positive)((unsigned long)count * sizeof(*parts)), 0, 0, 0, 0);
+        opened = built >= 0 ? compositor_clip_open(compositor.table->clip_pid, (int)built, &length) : -1;
+        if (built >= 0)
+                system_close((int)built);
+        if (opened >= 0)
+        {
+                compositor_drag_keep((int)opened, length);
+                compositor_drag.named = 1;
+        }
+}
+
+/*
+        The shim's word of a drag over a program's window (host->xdrag on a row no client has): OVER (entered, or moved over: 1 when the
+        program takes drops, so it is the target), LEAVE, DROP; and END, the drag over (x 1 finished, y the action it came to).
+*/
+static void compositor_drag_read(const char *name);
+static void compositor_xwm_receive(long client, long which, const char *mime, long fd);
+
+static long compositor_drag_host(long what, long row, long x, long y)
+{
+        struct windows *table = compositor.table;
+        int target = compositor_drag.target;
+
+        if (what == WAYLAND_XDRAG_END)
+        {
+                if (target >= 0)
+                        compositor_drag_tell(target, WINDOWS_DRAG_DONE, (int)x);
+                if (compositor_drag.source >= 0)
+                {
+                        compositor_drag_tell(compositor_drag.source, WINDOWS_DRAG_ACTION, (int)y);
+                        compositor_drag_tell(compositor_drag.source, WINDOWS_DRAG_ENDED, (int)x);
+                }
+                if (compositor_drag.reading >= 0 && compositor_drag.reading < compositor_wl.transfers)
+                        compositor_wl_transfer_cancel(compositor_drag.reading);
+                compositor_drag.source = compositor_drag.target = -1, compositor_drag.take = -1, compositor_drag.reading = -1;
+                compositor_drag.dropped = compositor_drag.named = 0;
+                compositor_drag_drop_copy();
+                compositor_chip_drag(-1);
+                return 0;
+        }
+        if (what == WAYLAND_XDRAG_LEAVE)
+        {
+                if (target >= 0 && !compositor_drag.dropped)
+                        compositor_drag_tell(target, WINDOWS_DRAG_LEAVE, 0);
+                compositor_drag.target = -1, compositor_drag.take = -1;
+                return 0;
+        }
+        if (what == WAYLAND_XDRAG_DROP)
+        {
+                const char *name = compositor_drag_name(compositor_drag.take);
+
+                if (target < 0 || !name)
+                {
+                        wayland_drag_x_finished(0);
+                        return 0;
+                }
+                compositor_drag.dropped = 1;
+                compositor_drag_tell(target, WINDOWS_DRAG_DROP, (int)wayland.drag.action);
+                compositor_drag_read(name);
+                return 0;
+        }
+        if (row < 0 || row >= COMPOSITOR_ROWS || !table->drop_ok[row] || !table->pid[row])
+                return 0;
+        compositor_drag_name_types();
+        if (row != target)
+        {
+                if (target >= 0)
+                        compositor_drag_tell(target, WINDOWS_DRAG_LEAVE, 0);
+                compositor_drag.target = (int)row, compositor_drag.take = -1;
+                compositor_drag_tell((int)row, WINDOWS_DRAG_ENTER, compositor_drag_place(x, y));
+        }
+        else
+                compositor_drag_tell((int)row, WINDOWS_DRAG_MOTION, compositor_drag_place(x, y));
+        return 1;
+}
+
+// The type a target took is there to read: its size given to the target, and READY.
+static void compositor_drag_ready(void)
+{
+        if (compositor_drag.target < 0)
+                return;
+        compositor.table->clip_given_length[compositor_drag.target] = compositor.table->clip_length[WINDOWS_CLIP_DRAG];
+        compositor_drag_tell(compositor_drag.target, WINDOWS_DRAG_READY, 0);
+}
+
+/*
+        The dropped type for a program: a program's drag's copy is there to read as it is; another's is sent by its source (a Wayland
+        client's send, an X client's conversion through the window manager's pump) into a pipe a transfer's thread reads into a copy of its
+        own, made the drag's when it has come (compositor_drag_pulled).
+*/
+static void compositor_drag_read(const char *name)
+{
+        int fds[2] = {-1, -1};
+        long slot, keep, index;
+
+        if (compositor_drag.source >= 0)
+        {
+                compositor_drag_ready();
+                return;
+        }
+        slot = compositor_wl.wake >= 0 ? compositor_wl_transfer_place() : -1;
+        keep = slot >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-drop", 3, 0, 0, 0, 0) : -1;
+        index = keep >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-index", 1, 0, 0, 0, 0) : -1;
+        if (index < 0 || compositor_call(syscall(pipe2), (positive)fds, 0x80000, 0, 0, 0, 0) < 0)
+        {
+                if (keep >= 0)
+                        system_close((int)keep);
+                if (index >= 0)
+                        system_close((int)index);
+                wayland_drag_x_finished(0);
+                return;
+        }
+        compositor_call(syscall(fcntl), (positive)fds[0], 4, 0x800, 0, 0, 0); // F_SETFL, O_NONBLOCK: only this end, which is ours
+        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PULL;
+        compositor_wl.transfer[slot].which = WINDOWS_CLIP_DRAG;
+        compositor_wl.transfer[slot].client = -1;
+        compositor_wl.transfer[slot].row = compositor_drag.target;
+        compositor_wl.transfer[slot].in = fds[0];
+        compositor_wl.transfer[slot].keep = (int)keep;
+        compositor_wl.transfer[slot].index = (int)index;
+        compositor_wl.transfer[slot].total = compositor_wl.transfer[slot].count = 0;
+        compositor_wl.transfer[slot].drop = name;
+        // The write end: a Wayland source's send (the shim's from then on), or an X source's conversion (the window manager's).
+        if (wayland_drag_source())
+        {
+                if (!wayland_drag_x_send(name, fds[1]))
+                        system_close(fds[1]);
+        }
+        else
+                compositor_xwm_receive(-1, 2, name, fds[1]);
+        if (compositor_wl_transfer_start(slot))
+                compositor_drag.reading = slot;
+        else
+                wayland_drag_x_finished(0);
+}
+
+// The dropped type read to its end (ok) or not: made a copy, the drag's, READY; or the drop failed.
+static void compositor_drag_pulled(long at, int ok)
+{
+        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
+        unsigned long length = 0;
+        int kept = -1;
+
+        if (ok && windows_clip_record(t->index, 0, t->got, t->drop, string_length((string_address)t->drop)) && windows_clip_seal(t->keep, t->index, t->got, 1))
+                kept = compositor_clip_open(compositor.table->clip_pid, t->keep, &length);
+        compositor_wl_transfer_free(at);
+        compositor_drag.reading = -1;
+        if (kept < 0)
+        {
+                wayland_drag_x_finished(0);
+                return;
+        }
+        compositor_drag_keep(kept, length);
+        compositor_drag_ready();
+}
+
+/*
+        A type of a program's drag to the descriptor a target gave (a Wayland client's receive; an X window's conversion's pipe), a pipe,
+        as a paste is written (compositor_wl_clip_push), once the drag is dropped on that target.
+*/
+static int compositor_drag_push(const char *mime, long fd)
+{
+        struct windows *table = compositor.table;
+        struct windows_clip_type type;
+        long src, slot;
+
+        if (compositor_drag.source < 0 || !mime || compositor_clip.fd[WINDOWS_CLIP_DRAG] < 0 ||
+            !windows_clip_find(compositor_clip.map[WINDOWS_CLIP_DRAG], table->clip_length[WINDOWS_CLIP_DRAG], mime, string_length((string_address)mime),
+                               &type) ||
+            (slot = compositor_wl_transfer_place()) < 0 ||
+            (src = compositor_call(syscall(fcntl), (positive)compositor_clip.fd[WINDOWS_CLIP_DRAG], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0)) < 0)
+        {
+                system_close((int)fd);
+                return 0;
+        }
+        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PUSH;
+        compositor_wl.transfer[slot].which = WINDOWS_CLIP_DRAG;
+        compositor_wl.transfer[slot].client = -1;
+        compositor_wl.transfer[slot].row = -1;
+        compositor_wl.transfer[slot].in = (int)src;
+        compositor_wl.transfer[slot].out = (int)fd;
+        compositor_wl.transfer[slot].base = type.offset;
+        compositor_wl.transfer[slot].total = type.length;
+        return compositor_wl_transfer_start(slot);
+}
+
+// A row gone: a drag it made is cancelled, and one over it has left it.
+static void compositor_drag_gone(int row)
+{
+        if (!compositor_wl.started)
+                return;
+        if (row == compositor_drag.source)
+                wayland_drag_cancel();
+        if (row == compositor_drag.target && !compositor_drag.dropped)
+                compositor_drag.target = -1, compositor_drag.take = -1;
+}
+
+/*
+        What the person sees of a drag, whoever's it is: the pointer the hand (a target takes it there) or no drop, and the drag's chip
+        beside it (compositor_chip_drag: the kit's glass, with the action it would come to). -1 while there is no drag.
+*/
+static int compositor_drag_shape(void)
+{
+        if (!compositor_wl.started || (!wayland_dragging() && !wayland_x_dragging()))
+                return -1;
+        return wayland.drag.action ? CP_HAND : CP_NOTALLOWED;
+}
+
+/*
+        The pointer moved (compositor_motion): a program's drag, whose pointer the compositor drives, is over what is under it now (the
+        motion is the drag's, as a Wayland client's drag's is); and every drag's chip follows the pointer, or is taken off with no drag.
+*/
+static int compositor_drag_action(void);
+
+static void compositor_drag_follow(int under)
+{
+        if (!compositor_wl.started)
+                return;
+        if (wayland_dragging() && wayland.drag.held)
+                wayland_drag_motion(under, under >= 0 ? compositor.pointer_x - compositor.x[under] : 0, under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
+        compositor_chip_drag(compositor_drag_action());
+}
+
+// A button let go in a row: the program's drag that button held is dropped there, or cancelled.
+static void compositor_drag_let_go(int to)
+{
+        if (compositor_wl.started && wayland.drag.live && wayland.drag.held && to == compositor_drag.source)
+        {
+                wayland_drag_host_release();
+                compositor_chip_drag(compositor_drag_action());
+        }
+}
+
+// The action a drag would come to now (for its chip and its program), 0 for none, -1 for no drag; the program told when it changes.
+static int compositor_drag_action(void)
+{
+        if (compositor_drag_shape() < 0)
+                return -1;
+        if (compositor_drag.source >= 0 && wayland.drag.action != compositor_drag.told_action)
+        {
+                compositor_drag.told_action = wayland.drag.action;
+                compositor_drag_tell(compositor_drag.source, WINDOWS_DRAG_ACTION, (int)wayland.drag.action);
+        }
+        return (int)wayland.drag.action;
+}
+
 // The selection emptied by a client that held it: the compositor lets it go and tells the others, as for any selection.
 static void compositor_wl_clip_clear(void *context, long client, long which)
 {
@@ -4507,16 +4979,28 @@ static void compositor_xwm_receive(long client, long which, const char *mime, lo
 static void compositor_wl_xreceive(void *context, long client, long which, const char *mime, long fd)
 {
         (void)context;
-        compositor_xwm_receive(client, which, mime, fd);
+        // A program's drag: its copy's type, pasted to the target's descriptor (compositor_drag_push).
+        if (compositor_drag.source >= 0)
+                compositor_drag_push(mime, fd);
+        else
+                compositor_xwm_receive(client, which, mime, fd);
 }
 
 // A Wayland drag over an X window, or the end of a drag across the bridge (xwm.c).
 static long compositor_xwm_xdrag(long what, long row, long x, long y);
 
+static int compositor_xwm_row_is_x(int row);
+
+// The host's target of a drag: an X window's is the window manager's, a program's the window table's (compositor_drag_host); its end both's.
 static long compositor_wl_xdrag(void *context, long what, long row, long x, long y)
 {
         (void)context;
-        return compositor_xwm_xdrag(what, row, x, y);
+        if (what == WAYLAND_XDRAG_END)
+        {
+                compositor_xwm_xdrag(what, row, x, y);
+                return compositor_drag_host(what, row, x, y);
+        }
+        return compositor_xwm_row_is_x((int)row) ? compositor_xwm_xdrag(what, row, x, y) : compositor_drag_host(what, row, x, y);
 }
 
 // A client gone: what it was in the middle of is ended, its copies read to the end by nobody.

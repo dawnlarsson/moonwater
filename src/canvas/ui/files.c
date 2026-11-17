@@ -129,6 +129,9 @@ static struct
         struct ui_text field;    // the kit's text engine for it
         struct ui_control path;  // and the kit's bare field it is drawn in
         struct ui_popup menu;    // the field's own menu (copy, paste)
+        struct ui_drag drag;     // the rows dragged out (files_uris: their list of files)
+        p32 drag_place;          // the row the drag was pressed on
+        struct ui_drop drop;     // a drag of files over the window: dropped, its first folder is gone to
 } files;
 
 /* ---- the rows ---- */
@@ -579,6 +582,147 @@ static fn files_part_complete(void)
         files.dirty = true;
 }
 
+/*
+        The rows chosen (or the one pressed, place, when it is not chosen), as what a drag or a copy of files is to every program: a list of
+        file URIs (text/uri-list: file:// and each path, its bytes past the unreserved ones and the slash as %XX, a line each, CRLF), and
+        the same paths as text, a line each, for a program that takes text alone. The two parts, their bytes the caller releases
+        (files_uris_free); false when there is no row.
+*/
+static b32 files_uris(p32 place, struct windows_clip_part address_to parts, p8 address_to address_to uris, positive address_to uris_room,
+                      p8 address_to address_to paths, positive address_to paths_room)
+{
+        static const char hex[] = "0123456789ABCDEF";
+        struct files_model address_to m = &files.big->model;
+        positive uri_length = 0, path_length = 0;
+        b32 any_chosen = files_model_chosen(m, place);
+
+        *uris = *paths = null, *uris_room = *paths_room = 0;
+        for (p32 at = 0; at < files_model_count(m); at++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, at);
+                const p8 address_to name = entry ? files_model_name(m, entry) : null;
+                positive folder = string_length(m->path), length = name ? string_length(name) : 0;
+
+                if (!name || (any_chosen ? !files_model_chosen(m, at) : at != place))
+                        continue;
+                if (!array_store_reserve(*uris, *uris_room, uri_length, uri_length + 3 * (folder + length) + 12, 4096) ||
+                    !array_store_reserve(*paths, *paths_room, path_length, path_length + folder + length + 3, 4096))
+                        break;
+                memory_copy(*uris + uri_length, "file://", 7), uri_length += 7;
+                for (positive k = 0; k < folder + 1 + length; k++)
+                {
+                        p8 c = k < folder ? m->path[k] : k == folder ? (p8)'/' : name[k - folder - 1];
+
+                        if (k == folder && folder == 1)
+                                continue; // the root's own slash is the path's first
+                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+                                (*uris)[uri_length++] = c;
+                        else
+                                (*uris)[uri_length++] = '%', (*uris)[uri_length++] = (p8)hex[c >> 4], (*uris)[uri_length++] = (p8)hex[c & 15];
+                        if (!(k == folder && folder == 1))
+                                (*paths)[path_length++] = c;
+                }
+                (*uris)[uri_length++] = '\r', (*uris)[uri_length++] = '\n';
+                (*paths)[path_length++] = '\n';
+        }
+        if (!uri_length)
+        {
+                array_store_release(*uris, *uris_room, uri_length);
+                array_store_release(*paths, *paths_room, path_length);
+                return false;
+        }
+        parts[0] = (struct windows_clip_part){WINDOWS_CLIP_URIS, *uris, uri_length};
+        parts[1] = (struct windows_clip_part){WINDOWS_CLIP_TEXT, *paths, path_length - 1};
+        return true;
+}
+
+// A hex digit's value, or -1.
+static int files_hex(p8 c)
+{
+        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to paths, positive paths_room, const struct windows_clip_part address_to parts)
+{
+        positive uri_length = parts[0].length, path_length = parts[1].length + 1;
+
+        array_store_release(uris, uris_room, uri_length);
+        array_store_release(paths, paths_room, path_length);
+}
+
+// The rows chosen (the cursor's when none is) copied, as files (files_uris).
+static fn files_rows_copy(void)
+{
+        struct windows_clip_part parts[2];
+        p8 address_to uris, address_to paths;
+        positive uris_room, paths_room;
+
+        if (!files_uris(files.big->model.cursor, parts, &uris, &uris_room, &paths, &paths_room))
+                return;
+        windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, 2);
+        files_uris_free(uris, uris_room, paths, paths_room, parts);
+}
+
+/*
+        Drag and drop (the kit's ui_drag and ui_drop). Out: a press on a row taken past the slop drags the rows (files_uris), copied, to
+        any program. In: a drag of files over the window is taken, and its drop goes to the folder of its first file (the folder itself
+        when it is one), the window showing where what was dropped is.
+*/
+static b32 files_drag_event(const struct window_event address_to event)
+{
+        static const char address_to const names[1] = {WINDOWS_CLIP_URIS};
+        int what;
+
+        if (ui_drag_source(&files.drag, event))
+                return true;
+        what = ui_drop_event(&files.drop, event);
+        if (what == UI_DROP_OVER)
+                ui_drop_pick(&files.own, &files.drop, names, 1, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY);
+        else if (what == UI_DROP_READY)
+        {
+                static p8 path[FILES_PATH];
+                p8 address_to bytes;
+                unsigned long length;
+                positive at = 0, put = 0;
+                b32 took = false;
+
+                if (ui_drop_read(&files.own, &files.drop, &bytes, &length))
+                {
+                        // The first line's path, its %XX made bytes again, and from it the folder (files_model_try goes there).
+                        if (length > 7 && !memory_compare(bytes, "file://", 7))
+                                at = 7;
+                        while (at < length && bytes[at] != '/' && bytes[at] != '\r' && bytes[at] != '\n')
+                                at++; // a host before the path
+                        for (; at < length && bytes[at] != '\r' && bytes[at] != '\n' && put + 1 < sizeof(path); at++)
+                        {
+                                p8 c = bytes[at];
+                                int hi = at + 2 < length ? files_hex(bytes[at + 1]) : -1, lo = at + 2 < length ? files_hex(bytes[at + 2]) : -1;
+
+                                if (c == '%' && hi >= 0 && lo >= 0)
+                                        c = (p8)(hi << 4 | lo), at += 2;
+                                path[put++] = c;
+                        }
+                        path[put] = 0;
+                        windows_clip_free(bytes, length);
+                        if (put && files_model_try(&files.big->model, (string_address)path) == FILES_READING)
+                                took = true;
+                        else
+                        {
+                                while (put > 1 && path[put - 1] != '/')
+                                        path[--put] = 0;
+                                if (put > 1)
+                                        path[--put] = 0;
+                                took = put && files_model_try(&files.big->model, (string_address)path) == FILES_READING;
+                        }
+                        if (took)
+                                files_moved();
+                }
+                ui_drop_done(&files.own, &files.drop, took);
+        }
+        files.dirty = true;
+        return true;
+}
+
 // The whole trail's path, the dimmed part with it, offered to the clipboard as text.
 static fn files_trail_copy(void)
 {
@@ -869,6 +1013,11 @@ static b32 files_key(const struct window_event address_to event)
                 files.dirty = true;
                 return true;
         }
+        if (control && key == FILES_KEY_C)
+        {
+                files_rows_copy();
+                return true;
+        }
         if (control && key == FILES_KEY_A)
         {
                 if (m->shown.count)
@@ -964,9 +1113,27 @@ static b32 files_event(const struct window_event address_to event)
                 return true;
         switch (event->type)
         {
+        case WINDOW_EVENT_DRAG:
+                return files_drag_event(event);
         case WINDOW_EVENT_KEY:
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
+                // A row pressed and taken past the slop: the rows dragged out, as files.
+                if (ui_drag_past(ui, &files.drag, event->a, event->b))
+                {
+                        struct windows_clip_part parts[2];
+                        p8 address_to uris, address_to paths;
+                        positive uris_room, paths_room;
+
+                        if (files_uris(files.drag_place, parts, &uris, &uris_room, &paths, &paths_room))
+                        {
+                                ui_drag_offer(&files.own, &files.drag, parts, 2, WINDOWS_DRAG_COPY);
+                                files_uris_free(uris, uris_room, paths, paths_room, parts);
+                        }
+                        files.drag.armed = false;
+                        l->down = -1;
+                        break;
+                }
                 ui_list_click(ui, l, event, event->a, event->b);
                 // A crumb under the pointer is the hand's, and is drawn in the ink.
                 files.crumb_hover = files_crumb_at(event->a, event->b);
@@ -1005,9 +1172,12 @@ static b32 files_event(const struct window_event address_to event)
                 if (down)
                         files.crumb_keys = false, files.crumb_clicked = -1;
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
-                // The press itself puts the cursor on its row, as the list lights it.
+                // The press itself puts the cursor on its row, as the list lights it; a mouse's left press on a row may drag it out.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
                         m->cursor = (p32)l->down, m->revision++;
+                files.drag.armed = down && l->down >= 0 && event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_TOUCH);
+                if (files.drag.armed)
+                        ui_drag_arm(&files.drag, ui_kit.pointer_x, ui_kit.pointer_y), files.drag_place = (p32)l->down;
                 if (row >= 0)
                 {
                         p32 place = (p32)row;

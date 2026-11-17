@@ -14695,6 +14695,9 @@ static fn ui_kit_track(const struct window_event address_to event)
 {
         if (event->type == WINDOW_EVENT_MOTION)
                 ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b, ui_kit_shape = WINDOW_POINTER_ARROW;
+        // A drag over the window is where the pointer is, as a motion is (ui_drop_event).
+        if (event->type == WINDOW_EVENT_DRAG && (event->a == WINDOWS_DRAG_ENTER || event->a == WINDOWS_DRAG_MOTION))
+                ui_kit.pointer_x = window_drag_x(event->b), ui_kit.pointer_y = window_drag_y(event->b);
 }
 
 // A control under the pointer: an input's I-beam, and the hand over any other control (a button, a tab, a switch, a row).
@@ -25783,6 +25786,8 @@ static int ui_app_run(struct ui_app address_to app)
         windows_app_id_set(table, row, (const char *)app->name);
         table->glass[row] = app->glass;
         ui_kit_table = table, ui_kit_row = row, ui_kit_shape = ui_kit_shape_sent = WINDOW_POINTER_ARROW;
+        // Every window of the kit takes drops: what of a drag it takes is its widgets' to say (ui_drop_pick).
+        __atomic_store_n(&table->drop_ok[row], 1u, __ATOMIC_RELEASE);
         // No field of this program has the keys yet: a count left by the window that had this row is none of its (ui_field_focus).
         table->field[row] = 0;
         *app->ground = table->ground[row];
@@ -26384,6 +26389,30 @@ struct ui_select
 };
 static struct ui_select address_to ui_text_sel(struct ui_text address_to t);
 
+// The kit's drag and drop (ui_drag_*, ui_drop_*, beside the clipboard's): a drag a press may begin, and a drop over a widget.
+#define UI_DROP_NAME 256 // the longest type a drop takes by name (a type's name is a few dozen letters)
+#define UI_DROP_OVER 1
+#define UI_DROP_LEFT 2
+#define UI_DROP_DROPPED 3
+#define UI_DROP_READY 4
+#define UI_DROP_DONE 5
+
+struct ui_drag
+{
+        b32 armed, live, finished; // a press that may become a drag; a drag offered and not over; its target finished with it
+        int x, y;                  // the press
+        p32 action;                // the action it came to (WINDOWS_DRAG_*)
+};
+
+struct ui_drop
+{
+        b32 over, dropped;
+        int x, y;    // where it is over the window, its pixels
+        long nth;    // what is taken: the nth name the drag is offered under, -1 for none
+        p32 action;  // the action of the drop
+        char name[UI_DROP_NAME];
+};
+
 struct ui_text
 {
         struct doc doc;
@@ -26432,6 +26461,10 @@ struct ui_text
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
         struct ui_caret caret;                  // the caret's blink: its phase, restarted by a key or a move (ui_caret_wake)
+        // Drag and drop (ui_text_drag): a press in the selection that may drag it out, and the span it drags; a drag over it to drop.
+        struct ui_drag drag;
+        struct ui_drop drop;
+        p64 drag_from, drag_to, drop_at;
 };
 
 /*
@@ -27412,6 +27445,137 @@ static int ui_clip_chord(const struct window_event address_to event)
         return UI_CLIP_NONE;
 }
 
+/*
+        Drag and drop, for every app: the compositor's one drag (WINDOW_EVENT_DRAG), whoever's it is and whatever it is over, a Wayland
+        client's window, an X window or a program's. A source: ui_drag_arm at a press on what may be dragged, ui_drag_past with each motion
+        while the button is held (true once the hand has gone UI_SLOP from the press: the app then offers what it drags, ui_drag_offer, as
+        a copy of its types as the clipboard takes one), and ui_drag_source with the drag's news (ACTION, and its end: what it came to,
+        whether its target finished with it). A target: every window of the kit takes drops (ui_app_run's drop_ok), and ui_drop_event takes
+        the drag's news over it: over it (ENTER, MOTION: ui_kit.pointer_x and _y follow it), where the app says what it takes with
+        ui_drop_pick (the first of its own names the drag is offered under, the actions it takes, the one it prefers) or ui_drop_pick with
+        none; left; dropped; READY, when ui_drop_read reads what it took, and the app says it is done with ui_drop_done; and DONE. Where it
+        would land the app draws with ui_drop_ring, the kit's focus ring. The drag's chip of glass beside the pointer and the pointer's
+        shape are the compositor's, for every drag alike.
+*/
+static fn ui_drag_arm(struct ui_drag address_to d, int x, int y)
+{
+        d->armed = true, d->x = x, d->y = y;
+}
+
+static b32 ui_drag_past(const struct ui address_to ui, const struct ui_drag address_to d, int x, int y)
+{
+        int slop = UI_SLOP * ui->scale / 100, dx = x - d->x, dy = y - d->y;
+
+        return d->armed && !d->live && (dx > slop || -dx > slop || dy > slop || -dy > slop);
+}
+
+static b32 ui_drag_offer(const struct window_row address_to own, struct ui_drag address_to d, const struct windows_clip_part address_to parts,
+                         positive count, p32 actions)
+{
+        d->armed = false;
+        if (!own || windows_drag_offer(own, parts, count, actions) < 0)
+                return false;
+        d->live = true, d->finished = false, d->action = 0;
+        return true;
+}
+
+// The drag's news for its source: true at its end (action and finished say how it went: a finished move is the app's to take away).
+static b32 ui_drag_source(struct ui_drag address_to d, const struct window_event address_to event)
+{
+        if (event->type != WINDOW_EVENT_DRAG || !d->live)
+                return false;
+        if (event->a == WINDOWS_DRAG_ACTION)
+                d->action = (p32)event->b;
+        if (event->a != WINDOWS_DRAG_ENDED && event->a != WINDOWS_DRAG_DECLINED)
+                return false;
+        d->finished = event->a == WINDOWS_DRAG_ENDED && event->b == 1;
+        d->live = false;
+        windows_drag_over();
+        return true;
+}
+
+// The drag's news over a target: what it is now (UI_DROP_*), 0 for none of a drop's.
+static int ui_drop_event(struct ui_drop address_to drop, const struct window_event address_to event)
+{
+        if (event->type != WINDOW_EVENT_DRAG)
+                return 0;
+        if (event->a == WINDOWS_DRAG_ENTER)
+                drop->nth = -1, drop->name[0] = 0, drop->dropped = false;
+        switch (event->a)
+        {
+        case WINDOWS_DRAG_ENTER:
+        case WINDOWS_DRAG_MOTION:
+                drop->over = true, drop->x = window_drag_x(event->b), drop->y = window_drag_y(event->b);
+                return UI_DROP_OVER;
+        case WINDOWS_DRAG_LEAVE:
+                drop->over = false;
+                return UI_DROP_LEFT;
+        case WINDOWS_DRAG_DROP:
+                drop->over = false, drop->dropped = true, drop->action = (p32)event->b;
+                return UI_DROP_DROPPED;
+        case WINDOWS_DRAG_READY:
+                return drop->dropped ? UI_DROP_READY : 0;
+        case WINDOWS_DRAG_DONE:
+                drop->over = drop->dropped = false;
+                return UI_DROP_DONE;
+        default:
+                return 0;
+        }
+}
+
+// What the window takes of the drag over it: the first of names (count of them) it is offered under, of the actions it takes and the
+// one it prefers; none (-1) when it is offered none of them, or count is 0. True when it takes one.
+static b32 ui_drop_pick(const struct window_row address_to own, struct ui_drop address_to drop, const char address_to const address_to names, positive count,
+                        p32 actions, p32 preferred)
+{
+        unsigned long size = 0;
+        const unsigned char address_to file = own && count ? windows_drag_types(own, &size) : null;
+        long found = -1;
+
+        for (positive want = 0; file && want < count && found < 0; want++)
+        {
+                const char address_to name;
+                unsigned long length;
+
+                for (unsigned long nth = 0; found < 0 && (name = windows_clip_offered(file, size, nth, 0, &length)); nth++)
+                        if (windows_clip_same(name, length, names[want]) && length < UI_DROP_NAME)
+                        {
+                                found = (long)nth;
+                                memory_copy(drop->name, name, (positive)length);
+                                drop->name[length] = 0;
+                        }
+        }
+        if (file)
+                window_call(WINDOW_SYS_MUNMAP, (long)file, (long)size, 0, 0, 0, 0);
+        if (found != drop->nth)
+        {
+                drop->nth = found;
+                if (own)
+                        windows_drop_take(own, found, actions, preferred);
+        }
+        return found >= 0;
+}
+
+// What was dropped, once READY: the type taken, into bytes the caller frees (windows_clip_free); false when it could not be read.
+static b32 ui_drop_read(const struct window_row address_to own, const struct ui_drop address_to drop, p8 address_to address_to bytes, unsigned long address_to length)
+{
+        return own && drop->nth >= 0 && windows_drag_read(own, drop->name, bytes, length) >= 0;
+}
+
+static fn ui_drop_done(const struct window_row address_to own, struct ui_drop address_to drop, b32 took)
+{
+        if (own)
+                windows_drop_done(own, took);
+        drop->dropped = false;
+}
+
+// Where a drop would land: the kit's focus ring round the box, while a drag that the window takes is over it.
+static fn ui_drop_ring(struct ui address_to ui, const struct ui_drop address_to drop, const struct ui_box address_to box)
+{
+        if (drop->over && drop->nth >= 0)
+                ui_kit_focus_ring(ui, box);
+}
+
 // A selection's text to a selection of the clipboard; never a masked field's.
 static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
 {
@@ -27847,6 +28011,77 @@ static b64 ui_text_across_most(struct ui address_to ui, struct ui_text address_t
         return most > 0 ? most : 0;
 }
 
+/*
+        A text widget's drag and drop, the kit's (ui_drag, ui_drop). Out: a press of the left button in the selection, a drag of it once
+        the hand has gone past the slop (its text, as text, copied or moved: moved away from here when the target finished with a move);
+        a press there let go with no drag is a click, the caret where it was. In: a drag of text or of files (their list, as the text of
+        it) over the well is taken (moved when it is this widget's own selection), and dropped at the place under the pointer as one
+        paste, by the widget's rules for a paste; a widget that is read only takes none.
+*/
+static p32 ui_text_drag(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
+{
+        static const char address_to const names[4] = {WINDOWS_CLIP_TEXT, "text/plain", "UTF8_STRING", WINDOWS_CLIP_URIS};
+        p32 asks = 0;
+        int what;
+
+        if (ui_drag_source(&t->drag, event))
+        {
+                // A move its target finished: the text it took goes from here (the span, as a drop on this widget moved it).
+                if (t->drag.finished && t->drag.action == WINDOWS_DRAG_MOVE && !t->read_only && t->drag_to > t->drag_from &&
+                    t->drag_to <= doc_length(&t->doc))
+                {
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, t->drag_from, t->drag_to - t->drag_from, (const p8 address_to) "", 0);
+                        doc_select_set(&t->doc, t->drag_from, t->drag_from);
+                        doc_seal(&t->doc);
+                        asks |= UI_TEXT_CHANGED;
+                }
+                return asks | UI_TEXT_MOVED;
+        }
+        what = ui_drop_event(&t->drop, event);
+        if (what == UI_DROP_OVER)
+        {
+                b32 well = t->drop.x >= t->well_left && t->drop.x < t->well_right && t->drop.y >= t->well_top && t->drop.y < t->well_bottom;
+
+                ui_drop_pick(t->own, &t->drop, names, well && !t->read_only ? 4 : 0, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE,
+                             t->drag.live ? WINDOWS_DRAG_MOVE : WINDOWS_DRAG_COPY);
+                return UI_TEXT_MOVED;
+        }
+        if (what == UI_DROP_DROPPED)
+        {
+                t->drop_at = ui_text_hit(ui, t, t->drop.x, t->drop.y);
+                // Its own selection dropped into itself is no move.
+                if (t->drag.live && t->drop_at >= t->drag_from && t->drop_at <= t->drag_to)
+                        ui_drop_done(t->own, &t->drop, false);
+                return UI_TEXT_MOVED;
+        }
+        if (what == UI_DROP_READY)
+        {
+                p8 address_to bytes;
+                unsigned long length;
+
+                if (!ui_drop_read(t->own, &t->drop, &bytes, &length))
+                {
+                        ui_drop_done(t->own, &t->drop, false);
+                        return 0;
+                }
+                doc_select_set(&t->doc, t->drop_at, t->drop_at);
+                doc_seal(&t->doc);
+                {
+                        p64 before = doc_length(&t->doc);
+
+                        asks = ui_text_paste(t, bytes, length);
+                        // This widget's own text moved before where it was: the span it drags out is further on by what came in.
+                        if (t->drag.live && t->drop_at <= t->drag_from)
+                                t->drag_from += doc_length(&t->doc) - before, t->drag_to += doc_length(&t->doc) - before;
+                }
+                windows_clip_free(bytes, length);
+                ui_drop_done(t->own, &t->drop, true);
+                return asks;
+        }
+        return what ? UI_TEXT_MOVED : 0;
+}
+
 // Any event of the window the widget may take: keys only while it has the keys; the pointer within its box. A key is
 // no finger's selection (its handles and bar go), and neither is a text that changed.
 static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
@@ -27860,7 +28095,9 @@ static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, c
                         t->sel.handles = t->sel.bar = false;
                 return t->asks = ui_text_key(ui, t, event);
         }
-        t->asks = event->type == WINDOW_EVENT_CLIP ? ui_text_clip(t, event) : ui_text_pointer(ui, t, event, x, y);
+        t->asks = event->type == WINDOW_EVENT_CLIP   ? ui_text_clip(t, event)
+                  : event->type == WINDOW_EVENT_DRAG ? ui_text_drag(ui, t, event)
+                                                     : ui_text_pointer(ui, t, event, x, y);
         if (t->asks & UI_TEXT_CHANGED)
                 t->sel.handles = t->sel.bar = false;
         return t->asks;
@@ -28801,6 +29038,14 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 {
                         b32 was = s->dragging;
 
+                        // A press in the selection let go with no drag: a click there, the caret where it was.
+                        if (t->drag.armed && event->a == 0x110)
+                        {
+                                t->drag.armed = false;
+                                doc_select_set(&t->doc, ui_text_hit(ui, t, t->drag.x, t->drag.y), ui_text_hit(ui, t, t->drag.x, t->drag.y));
+                                ui_text_wake(t);
+                                return UI_TEXT_MOVED;
+                        }
                         s->dragging = false, s->edge.past = 0;
                         if (was && doc_any_selected(&t->doc))
                                 ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
@@ -28864,6 +29109,14 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                                 doc_seal(&t->doc);
                                 ui_select_start(s, at, clicks, false);
                         }
+                        else if (clicks == 1 && !t->masked && doc_any_selected(&t->doc) && t->doc.selection_count == 1 &&
+                                 at >= doc_sel_start(&t->doc.selections[0]) && at < doc_sel_end(&t->doc.selections[0]))
+                        {
+                                // A press in the selection: it may be dragged out (ui_text_drag), and is a click if it is not.
+                                ui_drag_arm(&t->drag, x, y);
+                                t->drag_from = doc_sel_start(&t->doc.selections[0]), t->drag_to = doc_sel_end(&t->doc.selections[0]);
+                                return UI_TEXT_MOVED;
+                        }
                         else
                         {
                                 s->boxed = false;
@@ -28873,6 +29126,21 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         ui_text_wake(t);
                         return UI_TEXT_MOVED;
                 }
+        }
+        // The selection pressed in, taken past the slop: its text dragged out, copied or moved (ui_text_drag).
+        if (event->type == WINDOW_EVENT_MOTION && t->drag.armed)
+        {
+                if (ui_drag_past(ui, &t->drag, x, y))
+                {
+                        p8 address_to text;
+                        positive room, length = doc_copy_text(&t->doc, &text, &room);
+                        struct windows_clip_part part = {WINDOWS_CLIP_TEXT, text, length};
+
+                        if (!length || !ui_drag_offer(t->own, &t->drag, &part, 1, WINDOWS_DRAG_COPY | (t->read_only ? 0 : WINDOWS_DRAG_MOVE)))
+                                t->drag.armed = false;
+                        array_store_release(text, room, length);
+                }
+                return 0;
         }
         if (event->type == WINDOW_EVENT_MOTION && s->dragging)
         {

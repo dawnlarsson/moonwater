@@ -2944,14 +2944,14 @@ static void compositor_close(int row)
 static struct
 {
         int door;
-        int fd[2];
+        int fd[3]; // the two selections, and the drag's copy (WINDOWS_CLIP_DRAG: wayland_host.c's compositor_drag)
         unsigned int *offer_seen, *ask_seen, cli_seen;
         positive *gesture;
         unsigned int history_most, history_count;
         int history[COMPOSITOR_CLIP_HISTORY];
         int blank; // /dev/null, which holds a selection's number while there is no selection (compositor_clip_reserve)
-        const unsigned char *map[2]; // each selection's copy mapped whole and read-only while it is held: its types are read there
-} compositor_clip = {.door = -1, .fd = {-1, -1}, .blank = -1};
+        const unsigned char *map[3]; // each selection's copy mapped whole and read-only while it is held: its types are read there
+} compositor_clip = {.door = -1, .fd = {-1, -1, -1}, .blank = -1};
 
 // A selection's mapping let go, and the new one's made (0 for none: its types are then none).
 static void compositor_clip_mapped(unsigned int which, unsigned long size)
@@ -2981,7 +2981,7 @@ static void compositor_clip_reserve(void)
 {
         if (compositor_clip.blank < 0)
                 compositor_clip.blank = (int)system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
-        for (unsigned int which = 0; which < 2 && compositor_clip.blank >= 0; which++)
+        for (unsigned int which = 0; which < 3 && compositor_clip.blank >= 0; which++)
                 if (compositor_clip.fd[which] < 0)
                         compositor_call(syscall(dup3), (positive)compositor_clip.blank, WINDOWS_CLIP_FD + which, O_CLOEXEC, 0, 0, 0);
 }
@@ -3230,10 +3230,20 @@ static void compositor_osk_read(int row)
         }
 }
 
-// What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for. The keyboard's key requests are read here too.
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_drag_door(int row);
+static void compositor_drag_gone(int row);
+#endif
+
+// What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for, a drag and a drop (compositor_drag_door). The
+// keyboard's key requests are read here too.
 static void compositor_clip_door(int row)
 {
         struct windows address_to table = compositor.table;
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_drag_door(row);
+#endif
         unsigned int offer = __atomic_load_n(&table->clip_offer_serial[row], __ATOMIC_ACQUIRE);
         unsigned int ask = __atomic_load_n(&table->clip_ask_serial[row], __ATOMIC_ACQUIRE);
 
@@ -3339,6 +3349,9 @@ static void compositor_clip_leave(int row)
         compositor_clip.gesture[row] = 0;
         compositor_clip.offer_seen[row] = compositor.table->clip_offer_serial[row];
         compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_drag_gone(row);
+#endif
 }
 
 /* ---- popups: menus a window opens, placed and dismissed here ---- */
