@@ -3071,6 +3071,8 @@ static b32 build_spark_symbols(string_address objdump, string_address elf,
         return build_tool("rm", "-f", unsorted, null);
 }
 
+static string_address build_name_of(string_address path);
+
 static b32 build_spark(string_address source, string_address output,
                        string_address mode)
 {
@@ -3293,6 +3295,14 @@ static b32 build_spark(string_address source, string_address output,
         }
 
         if (build_spark_symbols(objdump, elf, output))
+                return 1;
+
+        //      The linked program as an ELF of its own, beside the build's other
+        //      products and never in the image: the image's own code the build
+        //      host can run, on its processor or through qemu-user on another
+        //      (build.sh --groupkey stamps the image's settings with it).
+        if (build_tool("cp", elf, build_join(build_setting_get("artifacts"), "/",
+                                             build_name_of(output), ".elf", null), null))
                 return 1;
 
         //      The image is mapped from SPARK_HEADER_SIZE bytes before .text:

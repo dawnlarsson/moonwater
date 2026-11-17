@@ -11,6 +11,8 @@
 #           sh build.sh --usb                 build, then write a USB stick
 #           sh build.sh --usb-update DIR      build, then copy it onto the FAT stick
 #                                             mounted at DIR, erasing nothing
+#           sh build.sh --groupkey NAME       every image from now on joins link group
+#                                             NAME at boot (none: from now on no group)
 #           sh build.sh --clean               remove what a build produced
 #           sh build.sh --host box            build on another machine over ssh
 #           sh build.sh --arch arm64 --run    build and boot another architecture
@@ -254,6 +256,7 @@ do_clean=0
 do_usb=0
 do_usb_update=0
 usb_dir=""
+group_asked=""
 console=0
 image=""
 ram=4
@@ -382,6 +385,13 @@ while [ "$remaining" -gt 0 ]; do
                 do_usb_update=1
                 ;;
         --usb-update=*) usb_dir=${argument#--usb-update=}; do_usb_update=1 ;;
+        --groupkey)
+                [ "$remaining" -gt 0 ] || die "--groupkey wants a group's name, or none"
+                group_asked=$1
+                shift
+                remaining=$((remaining - 1))
+                ;;
+        --groupkey=*) group_asked=${argument#--groupkey=} ;;
         --host)
                 [ "$remaining" -gt 0 ] || die "--host wants a machine to build on"
                 host=$1
@@ -604,6 +614,7 @@ exec "$@"'
                 --exclude '/.moonwater-stage-v1' \
                 --exclude '.git' \
                 --exclude '.claude' \
+                --exclude '/.moonwater-groups' \
                 --exclude 'linux' \
                 --exclude 'artifacts' \
                 --exclude 'fs' \
@@ -675,6 +686,13 @@ exec "$@"'
         *'/../'*|*'/./'*|*'//'*)
                 die "remote build reported an invalid image path: $image" ;;
         esac
+
+        if [ -n "$group_name" ]; then
+                say "Stamping $image with link group $group_name"
+                # shellcheck disable=SC2029
+                ssh "$host" "$(remote_command sudo sh -c "$group_stamp_script" sh "$image" "$(image_arch "$image" || echo unknown)")" < "$group_key" ||
+                        die "stamping $image with link group $group_name failed on $host"
+        fi
 
         say "Fetching $image"
 
@@ -796,6 +814,85 @@ sensitive filesystem, and this is $(uname). Name a machine that has them with
 }
 
 #
+#       The link group the images join (--groupkey NAME): its key is made here
+#       the first time, kept in .moonwater-groups/NAME.key (owner only, never
+#       committed and never sent with the tree), and the name is remembered,
+#       so every image built from then on -- and so every stick written and
+#       every system installed or updated from one -- starts in the group,
+#       with no code typed. --groupkey none stops it. The image is stamped by
+#       its own program (artifacts/shell.elf, under qemu-user on a build host
+#       of another processor), the key on standard input. ANYBODY WITH A STICK
+#       OR AN IMAGE FROM THIS TREE CAN JOIN THE GROUP; moonwater link group new
+#       NAME on a member makes a new key and leaves the old sticks out.
+#
+groups_dir=$here/.moonwater-groups
+group_name=""
+group_key=""
+if [ -n "$group_asked" ]; then
+        case $group_asked in
+        none)
+                rm -f "$groups_dir/default"
+                say "No link group: images from now on join none"
+                ;;
+        *)
+                case $group_asked in
+                *[!A-Za-z0-9._-]* | "" | .* | -*) die "--groupkey: a group's name is letters, digits, '.', '-' and '_', or none" ;;
+                esac
+                [ "${#group_asked}" -le 31 ] || die "--groupkey: a group's name is at most 31 characters"
+                (umask 077; mkdir -p "$groups_dir") || die "could not make $groups_dir"
+                chmod 700 "$groups_dir"
+                if [ ! -s "$groups_dir/$group_asked.key" ]; then
+                        made=$(head -c 32 /dev/urandom | base64 | tr -d '\n') && [ "${#made}" = 44 ] ||
+                                die "could not make a key for group $group_asked"
+                        (umask 077; printf '%s:%s\n' "$group_asked" "$made" > "$groups_dir/$group_asked.key") ||
+                                die "could not keep the key of group $group_asked"
+                        made=""
+                        say "Made link group $group_asked: its key is $groups_dir/$group_asked.key"
+                        # This machine joins it too, so it reaches every machine the images start; a moonwater
+                        # from before link group new and stamp (whose link group NAME is another verb) is told how to.
+                        joiner=$(command -v moonwater 2> /dev/null || true)
+                        [ -n "$joiner" ] || joiner=$HOME/.local/bin/moonwater
+                        if [ -x "$joiner" ] && grep -aqE 'group stamp IMAGE|carries group' "$joiner" &&
+                                "$joiner" link group add - < "$groups_dir/$group_asked.key"; then
+                                say "This machine is in group $group_asked"
+                        else
+                                say "This machine is not in group $group_asked yet: moonwater link group add - < $groups_dir/$group_asked.key"
+                        fi
+                fi
+                printf '%s\n' "$group_asked" > "$groups_dir/default"
+                ;;
+        esac
+fi
+if [ -s "$groups_dir/default" ]; then
+        group_name=$(cat "$groups_dir/default")
+        group_key=$groups_dir/$group_name.key
+        [ -s "$group_key" ] || die "link group $group_name has no key at $group_key: --groupkey $group_name makes one, --groupkey none stops it"
+fi
+
+#       The stamp, run where the image is (the build host, under sudo when the build ran there): the image's own program with
+#       argv[0] moonwater, natively or through qemu-user, the key on standard input. $1 the image, $2 its architecture.
+group_stamp_script='set -eu
+image=$1
+case $2 in x64) cpu=x86_64 ;; arm64) cpu=aarch64 ;; *) cpu=$2 ;; esac
+[ -f artifacts/shell.elf ] || { echo "build: no artifacts/shell.elf to stamp $image with" >&2; exit 1; }
+ln -sf shell.elf artifacts/moonwater
+case $(uname -m) in
+"$cpu") exec artifacts/moonwater link group stamp "$image" - ;;
+*) command -v "qemu-$cpu" > /dev/null || { echo "build: qemu-$cpu is wanted to stamp a $2 image here" >&2; exit 1; }
+   exec "qemu-$cpu" artifacts/moonwater link group stamp "$image" - ;;
+esac'
+
+#       The architecture an image is for, from its name.
+image_arch() {
+        case $1 in
+        *bootx64.efi) echo x64 ;;
+        *bootaa64.efi | *kernel8.img) echo arm64 ;;
+        *bootriscv64.efi) echo riscv64 ;;
+        *) return 1 ;;
+        esac
+}
+
+#
 #       A Mac with its Lima VM running builds in that VM when no machine was
 #       named: the kernel wants Linux and a case-sensitive disk, and the VM
 #       has both. Lima's own ssh settings are used, and ~/.ssh is left alone.
@@ -868,6 +965,15 @@ if [ -z "$image" ]; then
         image=$(key_one kernel_export 2>/dev/null || true)
 fi
 [ -n "$image" ] || image="dist/bootx64.efi"
+
+#       A build here is stamped here (a build on another machine was, before its image came: build_remote).
+if [ -n "$group_name" ] && [ "$do_build" -eq 1 ] && [ -z "$host" ] && [ -f "$image" ]; then
+        say "Stamping $image with link group $group_name"
+        stamp_as=
+        [ -w "$image" ] || stamp_as=sudo
+        (cd "$here" && $stamp_as sh -c "$group_stamp_script" sh "$image" "$(image_arch "$image" || echo unknown)") < "$group_key" ||
+                die "stamping $image with link group $group_name failed"
+fi
 
 [ -f "$image" ] ||
         die "no image at $image -- build one first, or drop --boot${target:+ (this is the $target image; --arch picks another)}"

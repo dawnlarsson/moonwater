@@ -10,6 +10,9 @@
 /linux/
 /dev/
 
+# The link groups build.sh --groupkey stamps images with: the keys themselves.
+/.moonwater-groups/
+
 # `build asm` writes a .S beside each .asm and kbuild assembles it there, because
 # src/ is symlinked into the kernel tree as kernel/moonwater.
 /src/*.S
