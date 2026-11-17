@@ -1004,9 +1004,17 @@ static void offer_offer(void *d, struct wl_data_offer *o, const char *m)
 {
         (void)d, (void)o, (void)m;
 }
+// The bridge's type (STRESS_MIME: a copy, a paste or a drop of image/png alone), and the actions a drag's offer said its source has.
+static const char *xb_mime(void)
+{
+        const char *m = getenv("STRESS_MIME");
+        return m && *m ? m : "text/plain;charset=utf-8";
+}
+static uint32_t xb_source_actions;
 static void offer_source_actions(void *d, struct wl_data_offer *o, uint32_t a)
 {
-        (void)d, (void)o, (void)a;
+        (void)d, (void)o;
+        xb_source_actions = a;
 }
 static void offer_action(void *d, struct wl_data_offer *o, uint32_t a)
 {
@@ -1024,7 +1032,7 @@ static void dd_enter(void *d, struct wl_data_device *dd, uint32_t serial, struct
         (void)d, (void)dd, (void)s, (void)x, (void)y;
         if (!o)
                 return;
-        wl_data_offer_accept(o, serial, "text/plain;charset=utf-8");
+        wl_data_offer_accept(o, serial, xb_mime());
         if (ddm_version >= 3)
                 wl_data_offer_set_actions(o, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
         offer_now = o, offer_entered = 1;
@@ -1060,7 +1068,7 @@ static long receive_all(struct wl_data_offer *o)
         int p[2];
         if (pipe2(p, O_CLOEXEC) < 0)
                 return -1;
-        wl_data_offer_receive(o, "text/plain;charset=utf-8", p[1]);
+        wl_data_offer_receive(o, xb_mime(), p[1]);
         close(p[1]);
         wl_display_flush(display);
         long total = 0;
@@ -1303,7 +1311,7 @@ static long xb_receive(struct wl_data_offer *o)
         int p[2];
         if (pipe2(p, O_CLOEXEC) < 0)
                 return -1;
-        wl_data_offer_receive(o, "text/plain;charset=utf-8", p[1]);
+        wl_data_offer_receive(o, xb_mime(), p[1]);
         close(p[1]);
         wl_display_flush(display);
         long total = 0;
@@ -1409,7 +1417,7 @@ static int run_xbridge(void)
                 struct wl_data_source *src = wl_data_device_manager_create_data_source(ddm);
                 struct wl_data_offer *before = offer_now;
                 wl_data_source_add_listener(src, &source_listener, NULL);
-                wl_data_source_offer(src, "text/plain;charset=utf-8");
+                wl_data_source_offer(src, xb_mime());
                 xb_key();
                 wl_data_device_set_selection(data_device, src, serial_key);
                 for (uint64_t until = now_ns() + 5000000000ull; offer_now == before && now_ns() < until;)
@@ -1435,8 +1443,8 @@ static int run_xbridge(void)
                         wl_data_offer_destroy(offer_now);
                         wl_display_roundtrip(display);
                 }
-                printf("RESULT mode=xdrop ok=%d entered=%d dropped=%d bytes=%ld want=%ld wrong=%ld ms=%.3f\n", n == payload && !xb_wrong, xb_entered_dnd,
-                       offer_dropped, n, payload, xb_wrong, (double)(now_ns() - t0) / 1e6);
+                printf("RESULT mode=xdrop ok=%d entered=%d dropped=%d bytes=%ld want=%ld wrong=%ld ms=%.3f source_actions=%u left=%d\n", n == payload && !xb_wrong,
+                       xb_entered_dnd, offer_dropped, n, payload, xb_wrong, (double)(now_ns() - t0) / 1e6, xb_source_actions, xb_left);
                 return 0;
         }
         // xdrag: "READY" once the window is shown, and a line on the standard input once the X window is (over this one, being mapped

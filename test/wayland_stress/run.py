@@ -901,7 +901,9 @@ def x_edge(args, comp, xs):
 
 # ---- the bridge between X and Wayland: an X client and a Wayland client on one compositor, each the other's side ----
 X_BRIDGE = ["clip-x-to-wl-small", "clip-x-to-wl-large", "clip-wl-to-x-small", "clip-wl-to-x-large", "dnd-x-to-wl", "dnd-wl-to-x",
-            "dnd-wl-to-x-escape", "clip-x-owner-killed", "clip-x-requestor-killed", "dnd-wl-source-killed"]
+            "dnd-wl-to-x-escape", "clip-x-owner-killed", "clip-x-requestor-killed", "dnd-wl-source-killed",
+            "clip-x-to-wl-png", "clip-wl-to-x-png", "clip-wl-to-x-multiple", "clip-x-saved-after-quit", "dnd-x-to-wl-ask",
+            "dnd-x-to-wl-escape", "dnd-wl-to-x-proxy", "dnd-wl-to-x-override-first"]
 BRIDGE_SMALL, BRIDGE_LARGE, BRIDGE_DND = 4096, 3 << 20, 256 << 10
 
 
@@ -997,23 +999,86 @@ def bridge_case(name, args, comp, xs):
             lines = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")).splitlines()
         return lines
 
-    def x_to_wl(bytes_, die=0):
+    def x_to_wl(bytes_, die=0, mime=None):
         extra = {"STRESS_HOLD": "8"}
         if die:
             extra["STRESS_DIE_AFTER"] = str(die)
+        if mime:
+            extra["STRESS_TARGET"] = mime
         own = Side([xs, "-m", "x-clip-own"], dict(xenv, STRESS_BYTES=str(bytes_), **extra))
         owned = own.wait("OWNED", 10)
         time.sleep(0.3)
+        if mime:
+            wenv["STRESS_MIME"] = mime
         paste = Side.find(wrun("xpaste", bytes_), "RESULT ") or {}
+        wenv.pop("STRESS_MIME", None)
         lines = own.finish(3, kill=True)
         served = sum(1 for l in lines if l.startswith("SERVED"))
         return owned, paste, served, lines
 
-    def wl_to_x(bytes_, die=0):
-        copy = Side([wl, "-m", "xcopy", "-S", str(bytes_), "-t", "10"] + fifo, wenv)
+    def wl_to_x(bytes_, die=0, mime=None, extra=None):
+        copy = Side([wl, "-m", "xcopy", "-S", str(bytes_), "-t", "10"] + fifo, dict(wenv, **({"STRESS_MIME": mime} if mime else {})))
         ready = copy.wait("READY", 10)
-        case = Side.find(xrun("x-clip-paste", bytes_, {"STRESS_DIE_AFTER": str(die)} if die else None), "CASE ") or {}
+        more = dict(extra or {})
+        if die:
+            more["STRESS_DIE_AFTER"] = str(die)
+        if mime:
+            more["STRESS_TARGET"] = mime
+        case = Side.find(xrun("x-clip-paste", bytes_, more), "CASE ") or {}
         return ready, case, copy
+
+    # The rows of what the bridge holds whole: a copy of no text either way, MULTIPLE, a copy kept when its X owner quits (SAVE_TARGETS).
+    if name == "clip-x-to-wl-png":
+        owned, paste, served, lines = x_to_wl(BRIDGE_SMALL, mime="image/png")
+        return {"outcome": "ok" if paste.get("ok") == "1" else "fail", "detail": "image/png_alone_bytes=%s_of_%d_wrong=%s" % (paste.get("bytes"), BRIDGE_SMALL,
+                                                                                                                      paste.get("wrong"))}
+    if name == "clip-wl-to-x-png":
+        ready, case, copy = wl_to_x(BRIDGE_LARGE, mime="image/png")
+        copy.finish(3, kill=True)
+        return {"outcome": case.get("outcome", "none") if ready else "fail", "detail": "image/png_alone_" + case.get("detail", "no_CASE_line")}
+    if name == "clip-wl-to-x-multiple":
+        ready, case, copy = wl_to_x(BRIDGE_SMALL, extra={"STRESS_MULTIPLE": "1"})
+        copy.finish(3, kill=True)
+        return {"outcome": case.get("outcome", "none") if ready else "fail", "detail": case.get("detail", "no_CASE_line")}
+    if name == "clip-x-saved-after-quit":
+        own = Side([xs, "-m", "x-clip-own"], dict(xenv, STRESS_BYTES=str(BRIDGE_LARGE), STRESS_SAVE="1", STRESS_HOLD="10"))
+        saved = own.wait("SAVED", 12)
+        lines = own.finish(5)
+        time.sleep(0.5)
+        paste = Side.find(wrun("xpaste", BRIDGE_LARGE), "RESULT ") or {}
+        ok = bool(saved) and saved.endswith("1") and paste.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail", "detail": "saved=%s_owner_gone_then_bytes=%s_of_%d_wrong=%s" % (
+            (saved or "none").replace(" ", "_"), paste.get("bytes"), BRIDGE_LARGE, paste.get("wrong"))}
+    if name in ("dnd-x-to-wl-ask", "dnd-x-to-wl-escape"):
+        ask = name.endswith("ask")
+        drop = Side([wl, "-m", "xdrop", "-S", str(BRIDGE_DND), "-t", "20" if ask else "8", "-w", "1600", "-h", "900"] + fifo, wenv)
+        ready = drop.wait("READY", 10)
+        time.sleep(0.3)
+        case = Side.find(xrun("x-dnd-to-wl", BRIDGE_DND, {"STRESS_ASK": "1"} if ask else {"STRESS_ESCAPE": "1"}), "CASE ") or {}
+        res = Side.find(drop.finish(12, kill=False) if drop.wait("RESULT", 12) else drop.finish(2, kill=True), "RESULT ") or {}
+        if ask:
+            # Ask with copy and move listed: the Wayland target is offered ask, copy and move (7), and the drop goes through.
+            ok = bool(ready) and case.get("outcome") == "ok" and res.get("ok") == "1" and res.get("source_actions") == "7"
+        else:
+            # Escape over the Wayland window: it is left and never dropped on, and the X source's drop is finished as refused.
+            ok = bool(ready) and case.get("outcome") == "ok" and res.get("dropped") == "0" and int(res.get("left", "0") or 0) >= 1
+        return {"outcome": "ok" if ok else "fail", "detail": "x:%s_wayland:dropped=%s_left=%s_source_actions=%s" % (
+            case.get("detail", "-"), res.get("dropped"), res.get("left"), res.get("source_actions"))}
+    if name == "dnd-wl-to-x-override-first":
+        # The X window (override-redirect, over the right half) mapped before the Wayland window is pressed: the press is the Wayland
+        # window's (not eaten as a press outside a popup), and the X window stays over it, so the drag reaches it there.
+        target = Side([xs, "-m", "x-dnd-from-wl"], dict(xenv, STRESS_BYTES=str(BRIDGE_DND), STRESS_HOLD="20"))
+        tready = target.wait("READY", 10)
+        source = Side([wl, "-m", "xdrag", "-S", str(BRIDGE_DND), "-w", "1600", "-h", "900"] + fifo, wenv)
+        shown = source.wait("READY", 10)
+        source.go()
+        dragging = source.wait("DRAGGING", 10)
+        source.go()
+        res = Side.find(source.finish(15) if source.wait("RESULT", 15) else source.finish(2, kill=True), "RESULT ") or {}
+        case = Side.find(target.finish(15) if target.wait("CASE", 15) else target.finish(2, kill=True), "CASE ") or {}
+        ok = bool(tready and shown and dragging) and case.get("outcome") == "ok" and res.get("ok") == "1"
+        return {"outcome": "ok" if ok else "fail", "detail": "pressed=%d_x:%s_wayland:%s" % (bool(dragging), case.get("detail", "no_CASE"),
+                                                                                            "_".join("%s=%s" % kv for kv in sorted(res.items())) or "no_RESULT")}
 
     if name.startswith("clip-x-to-wl"):
         bytes_ = BRIDGE_SMALL if name.endswith("small") else BRIDGE_LARGE
@@ -1042,6 +1107,8 @@ def bridge_case(name, args, comp, xs):
         extra = {"STRESS_HOLD": "20"}
         if escape:
             extra["STRESS_EXPECT_LEAVE"] = "1"
+        if name.endswith("proxy"):
+            extra["STRESS_PROXY"] = "1"
         # The Wayland window, its drag begun (its press raises it), then the X window over the right half (mapped after, so over it),
         # then the drag on to it.
         flags = ["-E"] if escape else ["-K"] if killed else []

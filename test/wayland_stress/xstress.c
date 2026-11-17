@@ -619,10 +619,19 @@ static int xb_gesture(Display *dpy, Window w)
         return pressed;
 }
 
+// The target a bridge row's copy or paste is of (STRESS_TARGET: image/png alone, say), UTF8_STRING by default.
+static Atom xb_target(Display *dpy)
+{
+        const char *t = getenv("STRESS_TARGET");
+        return XInternAtom(dpy, t && *t ? t : "UTF8_STRING", False);
+}
+
 static int x_clip_own(Display *dpy, char *detail, size_t room)
 {
-        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), targets = XInternAtom(dpy, "TARGETS", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
-        Atom incr = XInternAtom(dpy, "INCR", False);
+        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), targets = XInternAtom(dpy, "TARGETS", False), utf8 = xb_target(dpy);
+        Atom incr = XInternAtom(dpy, "INCR", False), manager = XInternAtom(dpy, "CLIPBOARD_MANAGER", False);
+        Atom save = XInternAtom(dpy, "SAVE_TARGETS", False), saved_into = XInternAtom(dpy, "XSTRESS_SAVED", False);
+        int saving = getenv("STRESS_SAVE") != NULL, text = utf8 == XInternAtom(dpy, "UTF8_STRING", False);
         long total = xb_bytes(), chunk = 65536, served = 0, pieces = 0;
         int die = xb_die_after(), owned;
         Window w = x_window(dpy, 80, 80, 1600, 900, 0x305070u, 0), requestor = None;
@@ -645,8 +654,22 @@ static int x_clip_own(Display *dpy, char *detail, size_t room)
         printf("OWNED %d\n", owned);
         fflush(stdout);
         until = now_ns() + (uint64_t)(xb_hold() * 1e9);
+        // The owner about to quit asks the clipboard manager to keep its copy (freedesktop's SAVE_TARGETS), and quits once it is answered.
+        if (saving)
+        {
+                usleep(500000);
+                XConvertSelection(dpy, manager, save, saved_into, w, CurrentTime);
+                XFlush(dpy);
+        }
         while (xb_next(dpy, &e, until))
         {
+                if (saving && e.type == SelectionNotify && e.xselection.selection == manager)
+                {
+                        printf("SAVED %d\n", e.xselection.property != None);
+                        fflush(stdout);
+                        snprintf(detail, room, "owned=%d_saved=%d", owned, e.xselection.property != None);
+                        return e.xselection.property != None;
+                }
                 if (e.type == SelectionRequest)
                 {
                         XSelectionRequestEvent *r = &e.xselectionrequest;
@@ -658,10 +681,10 @@ static int x_clip_own(Display *dpy, char *detail, size_t room)
                         if (r->target == targets)
                         {
                                 Atom list[3] = {targets, utf8, XA_STRING};
-                                XChangeProperty(dpy, r->requestor, prop, XA_ATOM, 32, PropModeReplace, (unsigned char *)list, 3);
+                                XChangeProperty(dpy, r->requestor, prop, XA_ATOM, 32, PropModeReplace, (unsigned char *)list, text ? 3 : 2);
                                 n.property = prop;
                         }
-                        else if ((r->target == utf8 || r->target == XA_STRING) && total <= chunk)
+                        else if ((r->target == utf8 || (text && r->target == XA_STRING)) && total <= chunk)
                         {
                                 xb_fill(data, 0, total);
                                 XChangeProperty(dpy, r->requestor, prop, r->target, 8, PropModeReplace, data, (int)total);
@@ -670,7 +693,7 @@ static int x_clip_own(Display *dpy, char *detail, size_t room)
                                 fflush(stdout);
                                 served++;
                         }
-                        else if ((r->target == utf8 || r->target == XA_STRING) && requestor == None)
+                        else if ((r->target == utf8 || (text && r->target == XA_STRING)) && requestor == None)
                         {
                                 long size = total;
                                 XSelectInput(dpy, r->requestor, PropertyChangeMask);
@@ -779,9 +802,51 @@ static long xb_convert(Display *dpy, Window w, Atom selection, Atom target, Time
         return incremental ? total : -1;
 }
 
+/* MULTIPLE (ICCCM): the target and TARGETS asked in one conversion, each into a property of its own: the target's bytes read (whole, as
+   this asks for a value no larger than a property holds), and whether TARGETS named it. -1 for a refusal. */
+static long xb_multiple(Display *dpy, Window w, Atom clip, Atom target, long *wrong, int *listed)
+{
+        Atom multiple = XInternAtom(dpy, "MULTIPLE", False), pair = XInternAtom(dpy, "ATOM_PAIR", False), targets = XInternAtom(dpy, "TARGETS", False);
+        Atom into = XInternAtom(dpy, "XSTRESS_MULTIPLE", False), p1 = XInternAtom(dpy, "XSTRESS_ONE", False), p2 = XInternAtom(dpy, "XSTRESS_TWO", False);
+        Atom pairs[4] = {target, p1, targets, p2}, type;
+        uint64_t until = now_ns() + 10000000000ull;
+        unsigned long count, after;
+        unsigned char *data = NULL;
+        int format;
+        XEvent e;
+
+        *wrong = 0, *listed = 0;
+        XChangeProperty(dpy, w, into, pair, 32, PropModeReplace, (unsigned char *)pairs, 4);
+        XConvertSelection(dpy, clip, multiple, into, w, CurrentTime);
+        XFlush(dpy);
+        while (xb_next(dpy, &e, until))
+                if (e.type == SelectionNotify && e.xselection.requestor == w)
+                {
+                        long got = -1;
+
+                        if (e.xselection.property == None)
+                                return -1;
+                        if (XGetWindowProperty(dpy, w, p2, 0, 1024, True, XA_ATOM, &type, &format, &count, &after, &data) == Success && data)
+                        {
+                                for (unsigned long k = 0; k < count; k++)
+                                        *listed |= ((Atom *)data)[k] == target;
+                                XFree(data);
+                                data = NULL;
+                        }
+                        if (XGetWindowProperty(dpy, w, p1, 0, 0x1fffffff, True, AnyPropertyType, &type, &format, &count, &after, &data) == Success && data)
+                        {
+                                got = (long)count;
+                                *wrong = xb_wrong(data, 0, got);
+                                XFree(data);
+                        }
+                        return got;
+                }
+        return -1;
+}
+
 static int x_clip_paste(Display *dpy, char *detail, size_t room)
 {
-        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+        Atom clip = XInternAtom(dpy, "CLIPBOARD", False), utf8 = xb_target(dpy);
         Window w = x_window(dpy, 80, 80, 1600, 900, 0x507030u, 0);
         long want = xb_bytes(), wrong = 0, got;
         double ms = -1;
@@ -793,6 +858,14 @@ static int x_clip_paste(Display *dpy, char *detail, size_t room)
         {
                 snprintf(detail, room, "no_key_reached_the_window");
                 return 0;
+        }
+        if (getenv("STRESS_MULTIPLE"))
+        {
+                int listed = 0;
+
+                got = xb_multiple(dpy, w, clip, utf8, &wrong, &listed);
+                snprintf(detail, room, "multiple_bytes=%ld_of_%ld_wrong=%ld_targets_named_it=%d", got, want, wrong, listed);
+                return got == want && !wrong && listed;
         }
         got = xb_convert(dpy, w, clip, utf8, CurrentTime, xb_die_after(), 10.0, &wrong, &ms);
         snprintf(detail, room, "bytes=%ld_of_%ld_wrong=%ld_paste_ms=%.1f", got, want, wrong, ms);
@@ -808,10 +881,11 @@ static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
         Window root = DefaultRootWindow(dpy), a, over = None, rr, child, requestor = None;
         Atom property = None, type = None;
         long total = xb_bytes(), chunk = 65536, at = 0;
-        int ax, ay, rx = 0, ry = 0, wx, wy, on_a = 0, entered = 0, accepted = 0, dropped = 0, done = 0, ok = 0, served = 0;
+        int ax, ay, rx = 0, ry = 0, wx, wy, on_a = 0, entered = 0, accepted = 0, dropped = 0, done = 0, ok = 0, served = 0, escaped_status = 0;
         unsigned int mask;
         unsigned char *data = malloc((size_t)chunk);
         uint64_t t0;
+        Atom asked = None;
 
         if (!getenv("STRESS_FIFO") || (x_fifo = open(getenv("STRESS_FIFO"), O_WRONLY | O_NONBLOCK)) < 0)
         {
@@ -840,6 +914,17 @@ static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
         x_inject(1, 272, 1);
         usleep(60000);
         XSetSelectionOwner(dpy, selection, a, CurrentTime);
+        // STRESS_ASK: the person is asked (XdndActionAsk), the source offering copy and move (XdndActionList, XdndActionDescription).
+        if (getenv("STRESS_ASK"))
+        {
+                Atom list[2] = {copy, XInternAtom(dpy, "XdndActionMove", False)};
+                static const char words[] = "Copy\0Move";
+
+                XChangeProperty(dpy, a, XInternAtom(dpy, "XdndActionList", False), XA_ATOM, 32, PropModeReplace, (unsigned char *)list, 2);
+                XChangeProperty(dpy, a, XInternAtom(dpy, "XdndActionDescription", False), XA_STRING, 8, PropModeReplace, (const unsigned char *)words,
+                                sizeof(words));
+                asked = XInternAtom(dpy, "XdndActionAsk", False);
+        }
         t0 = now_ns();
         // Right, a step at a time, until a window with XdndAware that is not this client's own accepts.
         for (int i = 0; i < 300 && !(accepted && over != a && over != None); i++)
@@ -863,7 +948,7 @@ static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
                                 XFree(p);
                 }
                 if (entered)
-                        x_client_message(dpy, over, position, (long)a, 0, (long)rx << 16 | ry, CurrentTime, (long)copy);
+                        x_client_message(dpy, over, position, (long)a, 0, (long)rx << 16 | ry, CurrentTime, (long)(asked ? asked : copy));
                 XFlush(dpy);
                 for (uint64_t wait_status = now_ns() + 30000000ull; entered && now_ns() < wait_status;)
                 {
@@ -877,7 +962,40 @@ static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
                         }
                 }
         }
+        // STRESS_ESCAPE: Escape on the compositor's keyboard while the drag is over the Wayland window: the compositor ends the drag on
+        // both sides (the window left, the proxy's status no more accepted), and this source drops all the same, which is refused.
+        if (getenv("STRESS_ESCAPE") && entered)
+        {
+                x_inject(1, 1, 1);
+                x_inject(1, 1, 0);
+                usleep(200000);
+                x_client_message(dpy, over, position, (long)a, 0, (long)rx << 16 | ry, CurrentTime, (long)copy);
+                XFlush(dpy);
+                for (uint64_t wait_status = now_ns() + 500000000ull; now_ns() < wait_status;)
+                {
+                        XEvent e;
+                        if (!xb_next(dpy, &e, wait_status))
+                                break;
+                        if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == status)
+                                escaped_status = 1, accepted = e.xclient.data.l[1] & 1;
+                }
+        }
         x_inject(1, 272, 0);
+        if (getenv("STRESS_ESCAPE") && entered)
+        {
+                x_client_message(dpy, over, drop, (long)a, 0, CurrentTime, 0, 0);
+                XFlush(dpy);
+                for (uint64_t end = now_ns() + 3000000000ull; !done && now_ns() < end;)
+                {
+                        XEvent e;
+                        if (!xb_next(dpy, &e, end))
+                                break;
+                        if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == finished)
+                                done = 1, ok = (e.xclient.data.l[1] & 1) != 0;
+                }
+                snprintf(detail, room, "escaped_status=%d_accepted_after=%d_finished=%d_ok=%d", escaped_status, accepted, done, ok);
+                return escaped_status && !accepted && done && !ok;
+        }
         if (entered && accepted)
                 x_client_message(dpy, over, drop, (long)a, 0, CurrentTime, 0, 0), dropped = 1;
         else if (entered)
@@ -931,6 +1049,10 @@ static int x_dnd_to_wl(Display *dpy, char *detail, size_t room)
         return done && ok && served;
 }
 
+static Window xb_proxy, xb_proxied;
+static Display *xb_proxy_dpy;
+static long proxied;
+
 static int x_dnd_from_wl(Display *dpy, char *detail, size_t room)
 {
         Atom aware = XInternAtom(dpy, "XdndAware", False), enter = XInternAtom(dpy, "XdndEnter", False), position = XInternAtom(dpy, "XdndPosition", False);
@@ -949,13 +1071,34 @@ static int x_dnd_from_wl(Display *dpy, char *detail, size_t room)
 
         XSelectInput(dpy, b, PropertyChangeMask);
         XChangeProperty(dpy, b, aware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&version, 1);
+        // STRESS_PROXY: the target is a proxy's (XdndProxy on it and on the proxy, which names itself): the drag's messages go to the proxy
+        // window, naming this one, and are read there.
+        if (getenv("STRESS_PROXY"))
+        {
+                // The proxy is another connection's window, so a message that comes there came to the proxy and to nothing else.
+                Display *d2 = XOpenDisplay(NULL);
+                Atom proxy_atom = XInternAtom(dpy, "XdndProxy", False);
+                Window p = d2 ? XCreateSimpleWindow(d2, DefaultRootWindow(d2), -10, -10, 1, 1, 0, 0, 0) : None;
+
+                if (p)
+                {
+                        XChangeProperty(dpy, b, proxy_atom, XA_WINDOW, 32, PropModeReplace, (unsigned char *)&p, 1);
+                        XChangeProperty(d2, p, proxy_atom, XA_WINDOW, 32, PropModeReplace, (unsigned char *)&p, 1);
+                        XChangeProperty(d2, p, aware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&version, 1);
+                        XSync(d2, False);
+                        xb_proxy = p, xb_proxied = b, xb_proxy_dpy = d2;
+                }
+        }
         XSync(dpy, False);
         usleep(400000);
         XTranslateCoordinates(dpy, b, DefaultRootWindow(dpy), 0, 0, &bx, &by, &child);
         printf("READY %d %d %d %d\n", bx, by, sw - sw / 2, sh);
         fflush(stdout);
-        while (!dropped && !left && xb_next(dpy, &e, until))
+        while (!dropped && !left && xb_next(xb_proxy_dpy ? xb_proxy_dpy : dpy, &e, until))
         {
+                // Through a proxy a message comes to the proxy's connection and names the target: counted, and read as the target's.
+                if (xb_proxy_dpy && e.type == ClientMessage && e.xclient.window == xb_proxied)
+                        proxied++;
                 if (e.type != ClientMessage || e.xclient.window != b)
                         continue;
                 Atom m = (Atom)e.xclient.message_type;
@@ -995,8 +1138,10 @@ static int x_dnd_from_wl(Display *dpy, char *detail, size_t room)
                         XFlush(dpy);
                 }
         }
-        snprintf(detail, room, "entered=%d_positions=%ld_text=%d_dropped=%d_left=%d_bytes=%ld_of_%ld_wrong=%ld_read_ms=%.1f", entered, positions, types_utf8, dropped,
-                 left, got, want, wrong, ms);
+        snprintf(detail, room, "entered=%d_positions=%ld_text=%d_dropped=%d_left=%d_bytes=%ld_of_%ld_wrong=%ld_read_ms=%.1f_proxied=%ld", entered, positions,
+                 types_utf8, dropped, left, got, want, wrong, ms, proxied);
+        if (xb_proxy && !proxied)
+                return 0;
         if (getenv("STRESS_EXPECT_LEAVE"))
                 return entered && left && !dropped;
         return dropped && got == want && !wrong;

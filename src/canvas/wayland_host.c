@@ -2952,6 +2952,13 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                         compositor.table->popup_y[row] = (int)b;
                         compositor_popup_first(row);
                 }
+                // An override-redirect X window with no window to hang from: where X says it is, in the desktop (it places itself).
+                else if (compositor.table && wayland_row_xoverride(row))
+                {
+                        compositor_damage_row(row);
+                        compositor_put(row, (int)a, (int)b);
+                        compositor_damage_row(row);
+                }
                 break;
         case WAYLAND_DO_PINCH_WANT:
                 compositor.table->pinch_wanted[row] = a ? 1u : 0u;

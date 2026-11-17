@@ -549,7 +549,7 @@ struct wayland_surface
         // The window manager's word on it (wayland_xwindow_adopt): xadopted once it has said what the X window is, xpopup for an
         // override-redirect window at (xx, xy) of the output, xdead once its window manager is gone (never shown again), and xwait,
         // the host's ms at which a commit that waited for the word is made without it.
-        unsigned char xadopted, xpopup, xdead;
+        unsigned char xadopted, xpopup, xdead, xalone; // xalone: an override-redirect one shown as a window of its own (nothing to hang from)
         long xx, xy, xwait;
         // The shortcuts inhibitor: its object, whether it is active (the surface has the keyboard and the inhibitor is not cancelled by
         // the escape chord), and the escape chord's Escape: held down, and since when (the host's ms).
@@ -4211,6 +4211,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                                 s->popup_x = px;
                                 s->popup_y = py;
                         }
+                        s->xalone = parent < 0;
                 }
                 s->row = wayland.host->row_open(wayland.host->context, c->slot, popup ? WAYLAND_KIND_POPUP : WAYLAND_KIND_TOPLEVEL, parent,
                                                 s->popup_x, s->popup_y);
@@ -4369,6 +4370,9 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAXIMIZE, 0, 0);
                 if (s->want_fullscreen)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_FULLSCREEN, 0, 0);
+                // An override-redirect X window shown as a window of its own (nothing to hang from) is where X says, as it places itself.
+                if (s->xalone)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, s->xx, s->xy);
         }
         return WAYLAND_OK;
 }
@@ -11128,8 +11132,10 @@ WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, lo
                 }
                 s->xx = x;
                 s->xy = y;
-                if (c && wayland_xparent(c, s, &px, &py) >= 0)
+                if (c && !s->xalone && wayland_xparent(c, s, &px, &py) >= 0)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, px, py);
+                else if (s->xalone)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, x, y);
         }
         for (; title && title[at] && at < WAYLAND_TEXT - 1; at++)
                 text[at] = title[at];
