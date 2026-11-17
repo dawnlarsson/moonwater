@@ -48731,6 +48731,21 @@ def harness_moonwater_cli(argv):
               sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave",
               "a profile the machine has is applied and kept", repr(seen["power powersave"]))
 
+        # A driver in active mode (amd-pstate-epp, intel_pstate) lists no
+        # schedutil: balanced after performance is its powersave governor with
+        # the balanced preference. It stayed on performance, whose preference
+        # the kernel refuses to change (EBUSY), so performance was for good.
+        for driver in ("amd-pstate-epp", "intel_pstate"):
+            sys_reset()
+            sys_file("devices/system/cpu/cpu0/cpufreq/scaling_driver", driver + "\n")
+            sys_file("devices/system/cpu/cpu0/cpufreq/scaling_available_governors", "performance powersave\n")
+            got, done = session("rm -f /root/tune\n" + say("power performance") + say("power balanced"))
+            seen = answers(got)
+            check(done and seen["power balanced"]["status"] == 0 and
+                  sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave" and
+                  sys_read("devices/system/cpu/cpu0/cpufreq/energy_performance_preference") == "balance_performance",
+                  f"balanced after performance is powersave with balance_performance on {driver}", repr(seen.get("power balanced")))
+
         # The numbers the verbs take, at their edges.
         edges = {"brightness 100000": 0, "brightness 100001": 2, "brightness +0": 0, "brightness -0": 0,
                  "brightness 0050": 0, "brightness 0000050": 0, "brightness 00000000000000000050": 2,

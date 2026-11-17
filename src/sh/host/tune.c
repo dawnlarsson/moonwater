@@ -597,15 +597,28 @@ static bool tune_profile_visit(string_address directory, string_address name, ad
         p8 path[160];
         p8 policy[160];
 
+        string_address governor = profile->governor;
+        p8 driver[24];
+
         if (!tune_is_cpu(name) ||
             !string_join(policy, sizeof(policy), directory, "/", name) ||
             string_append_bounded(policy, "/cpufreq/", sizeof(policy)) >= sizeof(policy))
                 return true;
-        if (profile->governor && string_join(path, sizeof(path), (string_address)policy,
-                                             "scaling_available_governors") &&
-            tune_lists(path, profile->governor) &&
+        //      A driver that picks the P-state itself (intel_pstate, amd-pstate-epp: active mode) offers no schedutil, and its powersave is
+        //      the dynamic range with the energy preference steering it, which is what balanced means there. Without this, balanced after
+        //      performance left the performance governor in place, and the preference's write was refused under it (EBUSY), so the machine
+        //      could not be brought back from performance at all.
+        driver[0] = end;
+        if (governor && string_equals(governor, "schedutil") &&
+            string_join(path, sizeof(path), (string_address)policy, "scaling_available_governors") && !tune_lists(path, governor) &&
+            string_join(path, sizeof(path), (string_address)policy, "scaling_driver") && tune_word(path, driver, sizeof(driver)) &&
+            (string_equals((string_address)driver, "intel_pstate") || string_equals((string_address)driver, "amd-pstate-epp")))
+                governor = (string_address)"powersave";
+        if (governor && string_join(path, sizeof(path), (string_address)policy,
+                                    "scaling_available_governors") &&
+            tune_lists(path, governor) &&
             string_join(path, sizeof(path), (string_address)policy, "scaling_governor"))
-                profile->written += tune_write(path, profile->governor) >= 0;
+                profile->written += tune_write(path, governor) >= 0;
         if (profile->preference && string_join(path, sizeof(path), (string_address)policy,
                                                "energy_performance_available_preferences") &&
             tune_lists(path, profile->preference) &&
