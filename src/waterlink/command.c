@@ -19,7 +19,9 @@
                 link allow NAME GRANT...
                 link deny NAME GRANT...
                 link group ...          machines on one network that link
-                                        themselves
+                                        themselves; new, key, add and stamp
+                                        are the group a stick carries (below,
+                                        before link_group_leave)
                 link doctor             the listener, port, addresses, route and
                                         discovery: each pass or fail, and the fix;
                                         then how this machine is reached
@@ -856,6 +858,8 @@ static p32 link_grants_of(string_address address_to words, positive count,
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
 #define LINK_SECRET_LEAST 8
 
+static p8 link_group_name_good(string_address name);
+
 static b32 link_group_join(string_address address_to words, positive count)
 {
         string_address namespace = words[0];
@@ -880,8 +884,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         scope_exit(crypto_forget(typed, sizeof typed));
         scope_exit(crypto_forget(fresh, sizeof fresh));
 
-        if (!link_name_good(namespace) ||
-            string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
+        if (!link_group_name_good(namespace))
                 return link_refuse_name(namespace, "group name");
         if (at < count && !string_equals(words[at], "allow"))
                 secret = words[at++];
@@ -1100,6 +1103,431 @@ static b32 link_group_join(string_address address_to words, positive count)
         return 0;
 }
 
+/*
+        A group that sticks carry.
+
+        `link group new` makes a group of a key of 256 random bits, and
+        `link group add NAME:KEY` joins one by the key text `link group key`
+        prints. The key is what a secret derives (link_group_join), so it is
+        the secret in every way that matters, and a group joined by it is
+        CARRIED: kept in the image's settings (src/moonwater/spark.c, the
+        group list) as well as in the groups file. A machine that starts from
+        an image that carries one is in the group before anything is typed
+        (link_group_restore, from the restores of every start), with the
+        switch on if nobody has said otherwise, so a stick that was written
+        from the Mac's group answers the Mac, which is a member, and the
+        machines of the group link themselves (nearby.c) as the machines of
+        any group do. An install takes the image with its settings, so a
+        disk is in the group as the stick was. A group joined with its secret
+        (`link group NAME SECRET`) is not carried: it is this session's, as
+        it was.
+
+        What was chosen, and what it costs. The key is in the image as
+        plainly as the image is: ANYBODY WHO HOLDS A STICK OF THE GROUP CAN
+        JOIN THE GROUP, a copy of the file is a member, and so is a person
+        who reads the stick. Nothing else keeps it: the settings are root's
+        in the session (the kernel hands them to root only, and the session's
+        copy is 0600), no command prints a key but `link group new` and
+        `link group key`, and the groups file is root's and 0600. A machine
+        whose image carries no group is exactly as it was. A group is left
+        with `link group leave NAME` (the image forgets it too) and a lost
+        stick is locked out with `link group new NAME`, which makes another
+        key and forgets the machines the old one paired: sticks that carry
+        the old key are in a group nobody else is in, until they are stamped
+        again (`link group stamp IMAGE`). Members trust each other by the
+        key and by nothing else, and the grants are the group's: all four
+        for a group made or added here unless `allow` names fewer.
+
+        Why the image and not a file on the stick, and why a key of the
+        group and not the machine's own: the machine's own key is its
+        identity, and an image copied to another stick or another disk would
+        be two machines with one identity; a group's key is shared by design,
+        so the copy is what it is for. The image is what an install and an
+        update already carry, and the one place that holds root-only text
+        the stick writes in place and reads back whole (host_settings_*), so
+        nothing here writes the stick's file system.
+*/
+#define LINK_GROUP_MAY (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | \
+                        WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+#define LINK_GROUP_TEXT 96
+#define LINK_GROUP_ENTRY_KEY 32
+#define LINK_GROUP_ENTRY_NAME 36
+
+//      The words `link group` takes where a group's name goes.
+static p8 link_group_word(string_address name)
+{
+        return string_equals(name, "new") || string_equals(name, "stamp") ||
+               string_equals(name, "leave") || string_equals(name, "key") ||
+               string_equals(name, "add");
+}
+
+//      Whether a name is one a group can be called.
+static p8 link_group_name_good(string_address name)
+{
+        return link_name_good(name) && string_length(name) < WATERLINK_NAMESPACE_MAX &&
+               !link_group_word(name);
+}
+
+//      A group's key as it is carried about: NAME:KEY, the key in base64 as
+//      a machine's is, and no way to tell it from text.
+static fn link_group_text(string_address namespace, p8 address_to key,
+                          p8 address_to text)
+{
+        positive length = string_length(namespace);
+
+        memory_copy(text, namespace, length);
+        text[length++] = ':';
+        link_key_text(key, text + length);
+}
+
+//      NAME:KEY as a name and a key; false for anything else, a name that is
+//      no group's, and a key of nothing.
+static p8 link_group_text_parse(string_address text, p8 address_to name,
+                                p8 address_to key)
+{
+        positive length = string_span_of_set(text, LINK_NAME_CHARACTERS);
+
+        if (!length || length >= WATERLINK_NAMESPACE_MAX || text[length] != ':')
+                return false;
+        memory_copy(name, text, length);
+        name[length] = 0;
+        return link_group_name_good((string_address)name) &&
+               link_key_parse(text + length + 1, key) &&
+               memory_span_byte(key, 0, 32) != 32;
+}
+
+//      The group of this name that is no code, or null.
+static struct link_group_record address_to link_group_named(
+    link_groups address_to groups, string_address namespace)
+{
+        for (positive at = 0; at < groups->count; at++)
+                if (!(groups->record[at].flags & LINK_GROUP_ONCE) &&
+                    string_equals(groups->record[at].namespace, namespace))
+                        return groups->record + at;
+        return null;
+}
+
+//      The mark the machines a group pairs carry, which is the name's alone.
+static p32 link_group_mark(string_address namespace)
+{
+        struct waterlink_group_keys keys;
+        p8 none[32];
+        p32 mark;
+
+        memory_zero(none, sizeof none);
+        waterlink_group_keys_from(address_of keys, none, namespace);
+        mark = keys.mark;
+        crypto_forget(address_of keys, sizeof keys);
+        return mark;
+}
+
+/*
+        A group's key into the groups file, under the peers lock: the group
+        of that name takes it, with these grants, or one is made. replaced
+        says it was one already, whose key is not this one. 0, or a refusal.
+*/
+static b32 link_group_store(string_address namespace, p8 address_to key,
+                            p32 may, p8 address_to replaced)
+{
+        link_groups groups;
+        struct link_group_record address_to record;
+        bipolar lock = link_peers_lock();
+
+        address_to replaced = false;
+        if (lock < 0)
+                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
+        if (!link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+        }
+        record = link_group_named(address_of groups, namespace);
+        if (record)
+                address_to replaced = !crypto_same(record->key, key, 32);
+        else if (groups.count >= LINK_GROUPS_MAX)
+        {
+                link_peers_unlock(lock);
+                crypto_forget(address_of groups, sizeof groups);
+                return host_refuse("this machine is in 8 groups already\n");
+        }
+        else
+        {
+                record = groups.record + groups.count++;
+                memory_zero(record, sizeof(address_to record));
+                string_copy(record->namespace, namespace);
+        }
+        memory_copy(record->key, key, 32);
+        memory_zero(record->check, sizeof record->check);
+        record->may = may;
+        if (link_groups_save(address_of groups) < 0)
+        {
+                link_peers_unlock(lock);
+                crypto_forget(address_of groups, sizeof groups);
+                return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
+        }
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
+        return 0;
+}
+
+//      The machines a group paired, forgotten, and how many.
+static positive link_group_forget_members(p32 mark)
+{
+        link_peers peers;
+        bipolar lock = link_peers_lock();
+        positive dropped = 0;
+
+        if (lock < 0)
+                return 0;
+        if (link_peers_for_change(address_of peers))
+        {
+                for (positive at = 0; at < peers.count; at++)
+                        if (peers.peer[at].group == mark)
+                        {
+                                peers.peer[at--] = peers.peer[--peers.count];
+                                dropped++;
+                        }
+                if (dropped && link_peers_save(address_of peers) < 0)
+                        dropped = 0;
+        }
+        link_peers_unlock(lock);
+        return dropped;
+}
+
+#if defined(MACOS)
+//      A Mac has no image to keep a group in: its groups file is all it has.
+static fn link_group_carry(string_address namespace, p8 address_to key, p32 may)
+{
+        (void)namespace;
+        (void)key;
+        (void)may;
+}
+
+static fn link_group_uncarry(string_address namespace)
+{
+        (void)namespace;
+}
+#else
+/*
+        A group put in a block of settings: its entry replaced, or added in
+        the first of the four places that is free. The entry is the key, the
+        grants as four bytes little endian, and the name with no end.
+        Null when it is in, else why not.
+*/
+static string_address link_group_entry_put(host_settings address_to settings,
+                                           string_address namespace,
+                                           p8 address_to key, p32 may)
+{
+        host_setting setting;
+        host_setting found;
+        positive at = 0;
+        positive length = string_length(namespace);
+        p8 text[SPARK_SETTINGS_GROUP_MOST + 1];
+        p8 taken[SPARK_SETTINGS_GROUPS + 1];
+        p16 id = 0;
+        p8 have = false;
+
+        memory_zero(taken, sizeof taken);
+        while (host_settings_next(settings, address_of at, address_of setting))
+        {
+                if (setting.entry.list != SPARK_SETTINGS_GROUP ||
+                    setting.entry.length < SPARK_SETTINGS_GROUP_LEAST)
+                        continue;
+                if (setting.entry.id <= SPARK_SETTINGS_GROUPS)
+                        taken[setting.entry.id] = true;
+                if (setting.entry.length - LINK_GROUP_ENTRY_NAME == length &&
+                    !memory_compare(setting.text + LINK_GROUP_ENTRY_NAME,
+                                    namespace, length))
+                {
+                        found = setting;
+                        have = true;
+                        id = setting.entry.id;
+                }
+        }
+        if (have)
+                host_settings_drop(settings, address_of found);
+        for (positive place = 1; !id && place <= SPARK_SETTINGS_GROUPS; place++)
+                if (!taken[place])
+                        id = (p16)place;
+        if (!id)
+                return "an image carries 4 groups at most";
+        memory_copy(text, key, LINK_GROUP_ENTRY_KEY);
+        for (positive byte = 0; byte < 4; byte++)
+                text[LINK_GROUP_ENTRY_KEY + byte] = (p8)(may >> (8 * byte));
+        memory_copy(text + LINK_GROUP_ENTRY_NAME, namespace, length);
+        return host_settings_add(settings, SPARK_SETTINGS_GROUP,
+                                 SPARK_SETTINGS_GROUP_KEY, (string_address)text,
+                                 LINK_GROUP_ENTRY_NAME + length, address_of id);
+}
+
+//      An entry as a name, a key and grants; false for one that is no
+//      group's (a name no group has is not one).
+static p8 link_group_entry_read(host_setting address_to setting, p8 address_to name,
+                                p8 address_to key, p32 address_to may)
+{
+        positive length;
+
+        if (setting->entry.list != SPARK_SETTINGS_GROUP ||
+            setting->entry.kind != SPARK_SETTINGS_GROUP_KEY ||
+            setting->entry.length < SPARK_SETTINGS_GROUP_LEAST ||
+            setting->entry.length > SPARK_SETTINGS_GROUP_MOST)
+                return false;
+        length = setting->entry.length - LINK_GROUP_ENTRY_NAME;
+        memory_copy(key, setting->text, LINK_GROUP_ENTRY_KEY);
+        address_to may = (p32)setting->text[32] | (p32)setting->text[33] << 8 |
+                         (p32)setting->text[34] << 16 | (p32)setting->text[35] << 24;
+        memory_copy(name, setting->text + LINK_GROUP_ENTRY_NAME, length);
+        name[length] = 0;
+        return link_group_name_good((string_address)name);
+}
+
+//      The group kept in this session's settings, and in the image they came
+//      from where that can be written, which is said as every setting says it.
+static fn link_group_carry(string_address namespace, p8 address_to key, p32 may)
+{
+        host_settings settings;
+        string_address failed;
+
+        if (!host_acquire())
+                return;
+        host_state_ready();
+        host_settings_session(address_of settings);
+        failed = link_group_entry_put(address_of settings, namespace, key, may);
+        if (failed)
+                host_settings_refused("group", failed, address_of settings);
+        else
+        {
+                string_format(log, host_label "group %s is carried by this machine's "
+                                              "image: it is in the group at every "
+                                              "start; ",
+                              namespace);
+                (void)host_settings_save(address_of settings);
+        }
+        crypto_forget(address_of settings, sizeof settings);
+        host_release();
+}
+
+//      The group taken out of the image's settings, when it was carried.
+static fn link_group_uncarry(string_address namespace)
+{
+        host_settings settings;
+        host_setting setting;
+        positive at = 0;
+        positive length = string_length(namespace);
+        p8 have = false;
+
+        //      The settings the session holds, and no look at the disks for
+        //      others: a group that was carried is in them, and a machine that
+        //      has none has nothing to take out.
+        if (!host_acquire())
+                return;
+        host_state_ready();
+        if (!host_settings_kept(address_of settings) &&
+            !host_settings_booted(address_of settings))
+        {
+                host_release();
+                return;
+        }
+        while (!have && host_settings_next(address_of settings, address_of at,
+                                           address_of setting))
+                have = setting.entry.list == SPARK_SETTINGS_GROUP &&
+                       setting.entry.length >= SPARK_SETTINGS_GROUP_LEAST &&
+                       setting.entry.length - LINK_GROUP_ENTRY_NAME == length &&
+                       !memory_compare(setting.text + LINK_GROUP_ENTRY_NAME,
+                                       namespace, length);
+        if (have)
+        {
+                host_settings_drop(address_of settings, address_of setting);
+                string_format(log, host_label "group %s is no longer carried by this "
+                                              "machine's image; ",
+                              namespace);
+                (void)host_settings_save(address_of settings);
+        }
+        crypto_forget(address_of settings, sizeof settings);
+        host_release();
+}
+
+/*
+        The groups the image carries, joined: at every start of the machine
+        process and after a disk is taken, so a live session has them from
+        the first and an install has them on the disk's own /root. A group
+        the file has with this key is left as it is, grants and all; with
+        another key (it was made again where the image was stamped) it takes
+        the image's, and its grants; one it has not is made. Whether any is
+        carried, the switch is turned on only when it says nothing, so a
+        person's `link off` stays, and the listener makes the machine's own
+        key when it starts. A machine whose image carries none does nothing
+        here and reads nothing of /root.
+*/
+static fn link_group_restore(void)
+{
+        host_settings settings;
+        host_setting setting;
+        link_groups groups;
+        positive at = 0;
+        p8 carried = false;
+        p8 changed = false;
+        p8 word[16];
+        p8 key[32];
+        bipolar lock;
+
+        if (!host_settings_kept(address_of settings) &&
+            !host_settings_booted(address_of settings))
+                return;
+        while (host_settings_next(address_of settings, address_of at, address_of setting))
+                carried |= setting.entry.list == SPARK_SETTINGS_GROUP;
+        if (!carried)
+        {
+                crypto_forget(address_of settings, sizeof settings);
+                return;
+        }
+
+        lock = link_peers_lock();
+        if (lock < 0 || !link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                crypto_forget(address_of settings, sizeof settings);
+                return;
+        }
+        at = 0;
+        while (host_settings_next(address_of settings, address_of at, address_of setting))
+        {
+                p8 name[WATERLINK_NAMESPACE_MAX];
+                p32 may;
+                struct link_group_record address_to record;
+
+                if (!link_group_entry_read(address_of setting, name, key, address_of may))
+                        continue;
+                record = link_group_named(address_of groups, (string_address)name);
+                if (record && crypto_same(record->key, key, 32))
+                        continue;
+                if (!record)
+                {
+                        if (groups.count >= LINK_GROUPS_MAX)
+                                continue;
+                        record = groups.record + groups.count++;
+                        memory_zero(record, sizeof(address_to record));
+                        string_copy(record->namespace, (string_address)name);
+                }
+                memory_copy(record->key, key, 32);
+                memory_zero(record->check, sizeof record->check);
+                record->may = may;
+                changed = true;
+        }
+        crypto_forget(key, sizeof key);
+        if (changed)
+                (void)link_groups_save(address_of groups);
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
+        crypto_forget(address_of settings, sizeof settings);
+
+        word[0] = 0;
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        if (!word[0])
+                (void)radio_write_word(LINK_SWITCH_PATH, "on");
+}
+#endif
+
 // group leave NAMESPACE [forget]: stop announcing it, and maybe its machines too.
 static b32 link_group_leave(string_address namespace, p8 forget)
 {
@@ -1137,6 +1565,9 @@ static b32 link_group_leave(string_address namespace, p8 forget)
                 crypto_forget(address_of keys, sizeof keys);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         }
+        //      An image that carried it carries it no more, or the next start
+        //      would be in the group again.
+        link_group_uncarry(namespace);
 
         if (forget)
         {
@@ -1186,6 +1617,319 @@ static b32 link_group_leave(string_address namespace, p8 forget)
                          namespace);
         crypto_forget(address_of keys, sizeof keys);
         return 0;
+}
+
+/*
+        The group of a name, or the one group there is: a name is given, or
+        this machine is in exactly one that is no code. Its record is copied
+        into into; the refusal's status when there is none.
+*/
+static b32 link_group_pick(string_address namespace,
+                           struct link_group_record address_to into)
+{
+        link_groups groups;
+        struct link_group_record address_to record = null;
+        positive found = 0;
+
+        if (!link_groups_for_show(address_of groups))
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+        if (namespace)
+                record = link_group_named(address_of groups, namespace);
+        else
+                for (positive at = 0; at < groups.count; at++)
+                        if (!(groups.record[at].flags & LINK_GROUP_ONCE))
+                        {
+                                record = groups.record + at;
+                                found++;
+                        }
+        if (!namespace && found > 1)
+        {
+                crypto_forget(address_of groups, sizeof groups);
+                return host_refuse("this machine is in %p groups: name one\n", found);
+        }
+        if (!record)
+        {
+                crypto_forget(address_of groups, sizeof groups);
+                return namespace ? host_refuse("this machine is not in group %s\n", namespace)
+                                 : host_refuse("this machine is in no group: "
+                                               "moonwater link group new makes one\n");
+        }
+        memory_copy(into, record, sizeof(address_to into));
+        crypto_forget(address_of groups, sizeof groups);
+        return 0;
+}
+
+//      The grants a verb of the group's was given after its words, or what
+//      a carried group gives: all four. False, said, for one that is none.
+static p8 link_group_allowed(string_address address_to words, positive count,
+                             p32 address_to may)
+{
+        p8 good = true;
+
+        address_to may = LINK_GROUP_MAY;
+        if (!count)
+                return true;
+        if (!string_equals(words[0], "allow") || count == 1)
+        {
+                host_usage();
+                return false;
+        }
+        address_to may = link_grants_of(words + 1, count - 1, address_of good);
+        if (!good)
+                host_refuse("a grant is one of shell run files log\n");
+        return good;
+}
+
+static fn link_group_say(string_address namespace, p32 may)
+{
+        p8 grants[96];
+
+        link_grants_text(may, grants, sizeof grants);
+        host_say(log, host_label "in group %s; its members may %s here\n", namespace,
+                 (string_address)grants);
+        if (!link_switch_is_on())
+                host_say(log, host_label "the listener is off: moonwater link on starts "
+                                         "it\n");
+}
+
+/*
+        group new [NAME] [allow GRANT...]
+
+        A group of a key of 256 random bits, joined here and carried (see
+        above); NAME is the one group this machine is in when it is in one,
+        which is made again, and this machine's own name when it is in none.
+        Made again, the machines the old key paired are forgotten here, which
+        is the point: it locks out a stick that was lost. The key is printed,
+        once and for whoever asked, and again by `link group key`.
+*/
+static b32 link_group_new(string_address address_to words, positive count)
+{
+        string_address namespace = null;
+        p8 own[WATERLINK_NAME_MAX];
+        p8 key[32];
+        p8 text[LINK_GROUP_TEXT];
+        p8 replaced;
+        p32 may;
+        positive at = 0;
+        positive dropped = 0;
+        b32 refused;
+
+        scope_exit(crypto_forget(key, sizeof key); crypto_forget(text, sizeof text));
+        if (count && !string_equals(words[0], "allow"))
+                namespace = words[at++];
+        if (!link_group_allowed(words + at, count - at, address_of may))
+                return 1;
+        if (!namespace)
+        {
+                link_groups groups;
+                positive found = 0;
+
+                if (!link_groups_for_show(address_of groups))
+                        return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+                for (positive g = 0; g < groups.count; g++)
+                        if (!(groups.record[g].flags & LINK_GROUP_ONCE))
+                        {
+                                string_copy((string_address)own, groups.record[g].namespace);
+                                found++;
+                        }
+                crypto_forget(address_of groups, sizeof groups);
+                if (found > 1)
+                        return host_refuse("this machine is in %p groups: moonwater link "
+                                           "group new NAME says which\n", found);
+                if (!found)
+                        link_machine_name(own);
+                namespace = (string_address)own;
+        }
+        if (!link_group_name_good(namespace))
+                return link_refuse_name(namespace, "group name");
+        return_if(system_random_fill(key, sizeof key, 0) < 0, host_fail("randomness", -EIO));
+        refused = link_group_store(namespace, key, may, address_of replaced);
+        if (refused)
+                return refused;
+        if (replaced)
+        {
+                dropped = link_group_forget_members(link_group_mark(namespace));
+                host_say(log, host_label "group %s has a new key, and the %p machines "
+                                         "the old one paired are forgotten here: "
+                                         "anything that carries the old key is out of "
+                                         "the group\n",
+                         namespace, dropped);
+        }
+        link_group_carry(namespace, key, may);
+        link_group_text(namespace, key, text);
+        host_say(log, host_label "the key of group %s, which anybody who has it can "
+                                 "join with: %s\n",
+                 namespace, (string_address)text);
+        host_say(log, host_label "on another machine, with the key on standard "
+                                 "input: moonwater link group add -; in an image: "
+                                 "moonwater link group stamp IMAGE\n");
+        link_group_say(namespace, may);
+        return 0;
+}
+
+//      group key [NAME]: the key of a group, which is all there is to say of it.
+static b32 link_group_key(string_address namespace)
+{
+        struct link_group_record record;
+        p8 text[LINK_GROUP_TEXT];
+        b32 refused = link_group_pick(namespace, address_of record);
+
+        if (refused)
+                return refused;
+        link_group_text(record.namespace, record.key, text);
+        host_say(log, "%s\n", (string_address)text);
+        crypto_forget(text, sizeof text);
+        crypto_forget(address_of record, sizeof record);
+        return 0;
+}
+
+#define LINK_GROUP_LINE (LINK_GROUP_TEXT + WATERLINK_NAME_MAX)
+
+/*
+        A key text taken from where it is given: the line, wiped from argv
+        once it is copied (a key there is in /proc/PID/cmdline for every user,
+        and the tight tier refuses it), or "-", one line of standard input.
+        Whether it is a group's key is the caller's to say. 0, or a refusal.
+*/
+static b32 link_group_text_take(string_address word, p8 address_to made)
+{
+        p8 typed[LINK_GROUP_LINE + 1];
+
+        scope_exit(crypto_forget(typed, sizeof typed));
+        memory_zero(made, LINK_GROUP_LINE);
+        if (string_equals(word, "-"))
+        {
+                return_if(radio_password_read(typed, sizeof typed, "group key", false,
+                                              true) < 0,
+                          host_refuse("nothing saved\n"));
+                memory_copy(made, typed, LINK_GROUP_LINE);
+                return 0;
+        }
+        {
+                positive length = string_length(word);
+
+                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT,
+                          host_refuse("a key on the command line is refused: give it "
+                                      "on standard input with -\n"));
+                if (length < LINK_GROUP_LINE)
+                        memory_copy(made, word, length + 1);
+                crypto_forget(word, length);
+                return_if(length >= LINK_GROUP_LINE,
+                          host_refuse("that is not a group's key\n"));
+        }
+        return 0;
+}
+
+/*
+        group add NAME:KEY|- [allow GRANT...]
+
+        A group by its key text, joined and carried. "-" reads the text from
+        standard input, as a secret is.
+*/
+static b32 link_group_add(string_address address_to words, positive count)
+{
+        p8 made[LINK_GROUP_LINE];
+        p8 name[WATERLINK_NAMESPACE_MAX];
+        p8 key[32];
+        p8 replaced;
+        p32 may;
+        b32 refused;
+
+        scope_exit(crypto_forget(made, sizeof made); crypto_forget(key, sizeof key));
+        refused = link_group_text_take(words[0], made);
+        if (refused)
+                return refused;
+        if (!link_group_text_parse((string_address)made, name, key))
+                return host_refuse("that is not a group's key: NAME:KEY, as moonwater "
+                                   "link group key prints it\n");
+        if (!link_group_allowed(words + 1, count - 1, address_of may))
+                return 1;
+        refused = link_group_store((string_address)name, key, may, address_of replaced);
+        if (refused)
+                return refused;
+        link_group_carry((string_address)name, key, may);
+        link_group_say((string_address)name, may);
+        return 0;
+}
+
+/*
+        group stamp IMAGE [NAME|NAME:KEY|-] [allow GRANT...]
+
+        The group put in an image that is a file, which a stick is written
+        from: the machines that start from it are in the group. The group is
+        one this machine is in (NAME, or the only one), or one a key text
+        names, on the line or on standard input with -, which takes nothing
+        of this machine's own and so needs no root: a build machine that was
+        never in the group stamps the images it builds. The key is not
+        printed. Linux only, where the image's settings are read; a Mac gives
+        its key to a machine that runs Moonwater (`link group key`).
+*/
+static b32 link_group_stamp(string_address address_to words, positive count)
+{
+#if defined(MACOS)
+        (void)words;
+        (void)count;
+        return host_refuse("an image is stamped on a machine that runs Moonwater: "
+                           "moonwater link group key here, and there moonwater link "
+                           "group stamp IMAGE NAME:KEY\n");
+#else
+        struct link_group_record record;
+        host_settings settings;
+        string_address failed;
+        p8 made[LINK_GROUP_LINE];
+        p8 name[WATERLINK_NAMESPACE_MAX];
+        p8 key[32];
+        p32 may = LINK_GROUP_MAY;
+        b32 refused;
+        b32 read;
+        bipolar stamped;
+
+        scope_exit(crypto_forget(made, sizeof made); crypto_forget(key, sizeof key);
+                   crypto_forget(address_of record, sizeof record));
+        memory_zero(address_of record, sizeof record);
+        if (count > 1 && (string_equals(words[1], "-") || string_first_of(words[1], ':')))
+        {
+                refused = link_group_text_take(words[1], made);
+                if (refused)
+                        return refused;
+                if (!link_group_text_parse((string_address)made, name, key))
+                        return host_refuse("that is not a group's key: NAME:KEY, as "
+                                           "moonwater link group key prints it\n");
+                if (!link_group_allowed(words + 2, count - 2, address_of may))
+                        return 1;
+        }
+        else
+        {
+                refused = count > 2 ? host_usage()
+                                    : link_group_pick(count > 1 ? words[1] : null,
+                                                      address_of record);
+                if (refused)
+                        return refused;
+                string_copy((string_address)name, record.namespace);
+                memory_copy(key, record.key, 32);
+                may = record.may;
+        }
+        read = host_settings_image(words[0], address_of settings);
+        if (read < 0)
+                return host_refuse("%s is not an image with settings in it\n", words[0]);
+        failed = link_group_entry_put(address_of settings, (string_address)name, key, may);
+        if (failed)
+        {
+                refused = host_settings_refused("group", failed, address_of settings);
+                crypto_forget(address_of settings, sizeof settings);
+                return refused;
+        }
+        settings.generation = (read == 1 ? settings.generation : 0) + 1;
+        stamped = host_settings_stamp(words[0], address_of settings);
+        crypto_forget(address_of settings, sizeof settings);
+        if (stamped)
+                return host_refuse("%s could not be written\n", words[0]);
+        host_say(log, host_label "%s carries group %s: a machine that starts from it "
+                                 "is in the group, and so is anybody who has a copy "
+                                 "of it\n",
+                 words[0], (string_address)name);
+        return 0;
+#endif
 }
 
 /*
@@ -2387,8 +3131,12 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 
         //      The key, the machines and the groups are root's files: for
         //      anyone else the page would say "nobody linked" of a machine
-        //      that has a dozen.
-        host_need_root();
+        //      that has a dozen. An image stamped with a key that is given
+        //      reads none of them (link_group_stamp).
+        if (!(verb && string_equals(verb, "group") && count >= 6 &&
+              string_equals(arguments[3], "stamp") &&
+              (string_equals(arguments[5], "-") || string_first_of(arguments[5], ':'))))
+                host_need_root();
 
         if (!verb)
                 return link_status();
@@ -2469,6 +3217,17 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                                        (count == 6 && string_equals(arguments[5], "forget"))
                                    ? link_group_leave(arguments[4], count == 6)
                                    : host_usage();
+                if (string_equals(arguments[3], "new"))
+                        return link_group_new(arguments + 4, count - 4);
+                if (string_equals(arguments[3], "key"))
+                        return count <= 5 ? link_group_key(count == 5 ? arguments[4] : null)
+                                          : host_usage();
+                if (string_equals(arguments[3], "add"))
+                        return count >= 5 ? link_group_add(arguments + 4, count - 4)
+                                          : host_usage();
+                if (string_equals(arguments[3], "stamp"))
+                        return count >= 5 ? link_group_stamp(arguments + 4, count - 4)
+                                          : host_usage();
                 if (count >= 4)
                         return link_group_join(arguments + 3, count - 3);
         }

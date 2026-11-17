@@ -2945,7 +2945,11 @@ static b32 host_run(string_address address_to argv)
         restores them. name is the caller's: a take settles the name of the
         /root it bound, and the machine process leaves it to host_booted,
         which settles it in every branch of boot. The order is the one both
-        callers always had, the name between usb and the locale.
+        callers always had, the name between usb and the locale. The groups an
+        image carries are joined last, from the settings the session holds: a
+        stick written from a group is in it before the first command (the
+        link's listener starts after these), and an image that carries none
+        changes nothing.
 */
 static fn host_restore_session(bool radio, bool name)
 {
@@ -2957,6 +2961,7 @@ static fn host_restore_session(bool radio, bool name)
         locale_restore();
         dns_restore();
         tune_restore();
+        link_group_restore();
 }
 
 /*

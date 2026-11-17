@@ -4124,6 +4124,102 @@ static fn settings_security(void)
                   spark_settings_check(slot) == 1);
 }
 
+/*
+        The group list (moonwater link group): a key, its grants and a name,
+        37 to 67 bytes, in one of four places; any other kind, id or length
+        in it is damage, so are its kind in any other list and a fifth
+        entry, and a slot from a disk nobody vouches for keeps none of it.
+*/
+static fn settings_group(void)
+{
+        static const struct
+        {
+                p8 kind;
+                p16 id;
+                p16 length;
+                p8 good;
+        } shapes[] = {
+            {SPARK_SETTINGS_GROUP_KEY, 1, SPARK_SETTINGS_GROUP_LEAST, true},
+            {SPARK_SETTINGS_GROUP_KEY, SPARK_SETTINGS_GROUPS, SPARK_SETTINGS_GROUP_MOST, true},
+            {SPARK_SETTINGS_GROUP_KEY, 1, SPARK_SETTINGS_GROUP_LEAST - 1, false},
+            {SPARK_SETTINGS_GROUP_KEY, 1, SPARK_SETTINGS_GROUP_MOST + 1, false},
+            {SPARK_SETTINGS_GROUP_KEY, SPARK_SETTINGS_GROUPS + 1, SPARK_SETTINGS_GROUP_LEAST, false},
+            {SPARK_SETTINGS_COMMAND, 1, SPARK_SETTINGS_GROUP_LEAST, false},
+            {SPARK_SETTINGS_BLOCK, 1, 32, false},
+            {SPARK_SETTINGS_GROUP_KEY + 1, 1, SPARK_SETTINGS_GROUP_LEAST, false},
+        };
+        host_settings address_to slot = address_of settings_block_slot;
+        p8 key[32];
+        p16 id = 2;
+        host_setting setting;
+        positive at = 0;
+        p8 right = true;
+
+        for (positive i = 0; i < array_count(shapes); i++)
+        {
+                host_settings_empty(slot);
+                slot->generation = 1;
+                settings_shaped(slot, SPARK_SETTINGS_GROUP, shapes[i].kind, shapes[i].id,
+                                shapes[i].length);
+                host_settings_seal(slot);
+                right &= (spark_settings_check(slot) == 1) == shapes[i].good;
+        }
+        check("each shape of a group entry is taken or called damage as its kind says", right);
+
+        host_settings_empty(slot);
+        slot->generation = 1;
+        settings_shaped(slot, SPARK_SETTINGS_INIT, SPARK_SETTINGS_GROUP_KEY, 1,
+                        SPARK_SETTINGS_GROUP_LEAST);
+        host_settings_seal(slot);
+        check("a group's kind in another list is damage", spark_settings_check(slot) < 0);
+        host_settings_empty(slot);
+        slot->generation = 1;
+        settings_shaped(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_GROUP_KEY, 1,
+                        SPARK_SETTINGS_GROUP_LEAST);
+        host_settings_seal(slot);
+        check("and in the security list, which TLS reads, is damage", spark_settings_check(slot) < 0);
+
+        host_settings_empty(slot);
+        slot->generation = 1;
+        for (positive i = 0; i < SPARK_SETTINGS_GROUPS; i++)
+                settings_shaped(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY,
+                                (p16)(i + 1), SPARK_SETTINGS_GROUP_LEAST);
+        host_settings_seal(slot);
+        check("four groups check", spark_settings_check(slot) == 1);
+        settings_shaped(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY, 1,
+                        SPARK_SETTINGS_GROUP_LEAST);
+        host_settings_seal(slot);
+        check("a fifth is damaged", spark_settings_check(slot) < 0);
+
+        host_settings_empty(slot);
+        memory_fill(key, 0x6b, sizeof key);
+        memory_zero(settings_block_text, 40);
+        memory_copy(settings_block_text, key, 32);
+        check("a group keeps the id it is given, and checks",
+              !host_settings_add(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY,
+                                 settings_block_text, 37, address_of id) &&
+                  id == 2 && host_settings_next(slot, address_of at, address_of setting) &&
+                  setting.entry.list == SPARK_SETTINGS_GROUP && setting.entry.id == 2 &&
+                  !memory_compare(setting.text, key, 32) &&
+                  (slot->generation = 1, host_settings_seal(slot), spark_settings_check(slot) == 1));
+        check("a group of 68 bytes is refused",
+              host_settings_add(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY,
+                                settings_block_text, SPARK_SETTINGS_GROUP_MOST + 1,
+                                address_of id) != null);
+        for (positive i = 0; i < SPARK_SETTINGS_GROUPS; i++)
+                host_settings_add(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY,
+                                  settings_block_text, 37, address_of id);
+        check("and a fifth is refused with the four there",
+              host_settings_add(slot, SPARK_SETTINGS_GROUP, SPARK_SETTINGS_GROUP_KEY,
+                                settings_block_text, 37, address_of id) != null);
+        host_settings_seal(slot);
+        host_settings_untrusted(slot);
+        at = 0;
+        check("a slot no disk vouches for keeps no group's key",
+              !host_settings_next(slot, address_of at, address_of setting) && !slot->length &&
+                  spark_settings_check(slot) == 1);
+}
+
 static p8 settings_same(host_settings address_to left, host_settings address_to right)
 {
         return left->length == right->length &&
@@ -6305,6 +6401,7 @@ b32 main(void)
         settings_format();
         settings_bounds();
         settings_security();
+        settings_group();
         settings_torn();
         settings_commands();
         settings_sections();

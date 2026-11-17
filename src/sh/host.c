@@ -261,6 +261,8 @@ static b32 security_publish_answer(host_settings address_to settings);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
 static fn name_restore(void);
+//      The groups an image carries, joined (src/waterlink/command.c): the link's, and nothing else reads them.
+static fn link_group_restore(void);
 static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
 

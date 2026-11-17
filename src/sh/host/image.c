@@ -223,21 +223,26 @@ static string_address host_settings_add(host_settings address_to settings,
 {
         positive room = spark_settings_padded(length);
         bool security = list == SPARK_SETTINGS_SECURITY;
+        bool group = list == SPARK_SETTINGS_GROUP;
         struct spark_settings_entry entry;
 
         if (length > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_TEXT_MOST
                       : security                  ? SPARK_SETTINGS_TRUST_MOST
+                      : group                     ? SPARK_SETTINGS_GROUP_MOST
                                                   : SPARK_SETTINGS_TEXT_MOST))
                 return list == SPARK_SETTINGS_BIND ? "a bound command is 255 bytes at most"
                        : security                  ? "an anchor is 552 bytes at most"
+                       : group                     ? "a group's key and name are 67 bytes at most"
                                                    : "an entry is 4096 bytes at most";
 
         if (host_settings_count(settings, list) >=
             (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST
              : security                  ? SPARK_SETTINGS_SECURITY_MOST
+             : group                     ? SPARK_SETTINGS_GROUPS
                                          : SPARK_SETTINGS_LIST_MOST))
                 return list == SPARK_SETTINGS_BIND ? "the bind table holds 48 events at most"
                        : security                  ? "the security list holds 96 entries at most"
+                       : group                     ? "an image carries 4 groups at most"
                                                    : "a list holds 16 entries at most";
 
         if (SPARK_SETTINGS_PAYLOAD - settings->length < SPARK_SETTINGS_ENTRY + room)
@@ -248,9 +253,10 @@ static string_address host_settings_add(host_settings address_to settings,
         entry.kind = kind;
         entry.length = (p16)length;
 
-        //      A bound command's id is its event, and a security entry's says
-        //      which switch it is or who added it: the caller names both.
-        if (list == SPARK_SETTINGS_BIND || security)
+        //      A bound command's id is its event, a security entry's says
+        //      which switch it is or who added it, and a group's is its place
+        //      of four: the caller names each.
+        if (list == SPARK_SETTINGS_BIND || security || group)
                 entry.id = id ? address_to id : 0;
         else
         {

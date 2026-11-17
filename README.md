@@ -183,7 +183,11 @@ moonwater link                         who this machine is linked with, and what
 moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link state)
 moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network that link themselves
+moonwater link group add NAME:KEY|- [allow GRANT...]  a group by its key, - reading it from standard input: it is kept in the image, so a machine that starts from it is in the group (every grant unless allow says fewer)
+moonwater link group key [NAME]        the key of a group as NAME:KEY, which anybody who has it can join with
 moonwater link group leave NAME [forget]  stop, and forget the key of the group
+moonwater link group new [NAME] [allow GRANT...]  a group of a new random key that images carry: this machine is in it and says its key; made again, the machines the old key paired are forgotten here
+moonwater link group stamp IMAGE [NAME|NAME:KEY|-] [allow GRANT...]  a group put in an image file a stick is written from, one this machine is in or the key a line or standard input gives (no root then, and nothing of this machine's own): whoever holds a copy of it is in the group
 moonwater link key                     the public key of this machine, which link add takes
 moonwater link log NAME                follow the kernel log of NAME
 moonwater link modem key               the key of the audio modem, in hex, made on first use: the receiver needs the same

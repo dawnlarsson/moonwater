@@ -13054,6 +13054,457 @@ static fn discovery_switch_rows(void)
         }
 }
 
+/*
+        The groups a stick carries (command.c, link_group_*): the key as text,
+        an entry of the image's settings, a group made, joined by its key,
+        rotated and left, what a start does with an image that carries one
+        and with one that carries none, and the group put in an image file.
+        The session's own copy of the settings is the sandbox's /run, and the
+        groups file the sandbox's /root.
+*/
+static fn wls_settings_copy(void)
+{
+        host_settings settings;
+
+        host_settings_empty(address_of settings);
+        settings.generation = 1;
+        host_settings_seal(address_of settings);
+        (void)host_publish(HOST_SETTINGS, address_of settings, SPARK_SETTINGS_SLOT, 0600);
+}
+
+//      Whether the session's copy of the settings carries the group, with its
+//      key and grants, and how many it carries.
+static p8 wls_carried(string_address namespace, p8 address_to key, p32 address_to may,
+                      positive address_to count)
+{
+        host_settings settings;
+        host_setting setting;
+        positive at = 0;
+        p8 found = false;
+
+        address_to count = 0;
+        if (!host_settings_kept(address_of settings))
+                return false;
+        while (host_settings_next(address_of settings, address_of at, address_of setting))
+        {
+                p8 name[WATERLINK_NAMESPACE_MAX];
+                p8 held[32];
+                p32 grants;
+
+                if (setting.entry.list != SPARK_SETTINGS_GROUP)
+                        continue;
+                address_to count += 1;
+                if (link_group_entry_read(address_of setting, name, held, address_of grants) &&
+                    string_equals((string_address)name, namespace))
+                {
+                        found = true;
+                        if (key)
+                                memory_copy(key, held, 32);
+                        if (may)
+                                address_to may = grants;
+                }
+        }
+        return found;
+}
+
+//      The record of the group in the groups file, or none.
+static p8 wls_group_record(string_address namespace, struct link_group_record address_to into)
+{
+        link_groups groups;
+        struct link_group_record address_to record;
+
+        if (!link_groups_load(address_of groups))
+                return false;
+        record = link_group_named(address_of groups, namespace);
+        if (record)
+                memory_copy(into, record, sizeof(address_to into));
+        return record != null;
+}
+
+//      How many groups a block of settings carries.
+static positive wls_settings_count_of(host_settings address_to block)
+{
+        return host_settings_count(block, SPARK_SETTINGS_GROUP);
+}
+
+static positive wls_image_build(p8 address_to image, p8 address_to name)
+{
+        p8 address_to table = image + 0x80 + 24 + 0xf0;
+        host_settings slot;
+
+        memory_zero(image, 0xa100);
+        image[0] = 'M';
+        image[1] = 'Z';
+        storage_put32(image + 0x3c, 0x80);
+        memory_copy_apart(image + 0x80, "PE\0\0", 4);
+        storage_put16(image + 0x86, 3);
+        storage_put16(image + 0x94, 0xf0);
+        memory_copy_apart(table, ".text\0\0\0", 8);
+        storage_put32(table + 16, 0x1000);
+        storage_put32(table + 20, 0x1000);
+        memory_copy_apart(table + 40, name, 8);
+        storage_put32(table + 56, 0x8000);
+        storage_put32(table + 60, 0x2000);
+        memory_copy_apart(table + 80, ".data\0\0\0", 8);
+        storage_put32(table + 96, 0x1000);
+        storage_put32(table + 100, 0xa000);
+        host_settings_empty(address_of slot);
+        memory_copy_apart(image + 0x2000, address_of slot, 64);
+        memory_copy_apart(image + 0x6000, address_of slot, 64);
+        return 0xa100;
+}
+
+//      link group stamp IMAGE [WORD]
+static b32 wls_stamp(string_address image, string_address word)
+{
+        string_address words[2] = {image, word};
+
+        return link_group_stamp(words, word ? 2 : 1);
+}
+
+static fn group_carried(void)
+{
+        static p8 image[0xa100];
+        host_settings block;
+        host_settings into;
+        host_setting setting;
+        struct link_group_record record;
+        struct link_group_record again;
+        link_peers peers;
+        string_address words[4];
+        p8 key[32];
+        p8 other[32];
+        p8 held[32];
+        p8 text[LINK_GROUP_TEXT];
+        p8 bad[LINK_GROUP_TEXT + 8];
+        p8 name[WATERLINK_NAMESPACE_MAX];
+        p8 typed[LINK_GROUP_TEXT];
+        p8 word[16];
+        p32 may = 0;
+        positive count = 0;
+        positive at = 0;
+
+        memory_fill(key, 0x3c, sizeof key);
+        memory_fill(other, 0x3d, sizeof other);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_KEY_PATH, 0);
+
+        //      The key as text.
+        link_group_text("lab", key, text);
+        check("a group's key text is its name, a colon and the key in base64 as a "
+              "machine's is",
+              !memory_compare(text, "lab:", 4) && string_length((string_address)text) == 4 + 44);
+        memory_zero(name, sizeof name);
+        memory_zero(held, sizeof held);
+        check("and reads back as the name and the key",
+              link_group_text_parse((string_address)text, name, held) &&
+                  string_equals((string_address)name, "lab") && !memory_compare(held, key, 32));
+        {
+                static const struct
+                {
+                        string_address head;
+                        p8 with_key;
+                } refused[] = {
+                    {"", false},           {"lab", false},      {"lab:", false},
+                    {":", true},           {"new:", true},      {"key:", true},
+                    {"stamp:", true},      {"add:", true},      {"leave:", true},
+                    {"abcdefghijklmnopqrstuvwxyz012345:", true},
+                    {"bad name:", true},   {"lab/:", true},     {"-lab:", true},
+                };
+                p8 right = true;
+
+                for (positive each = 0; each < array_count(refused); each++)
+                {
+                        string_copy((string_address)bad, refused[each].head);
+                        if (refused[each].with_key)
+                                link_key_text(key, bad + string_length(refused[each].head));
+                        right &= !link_group_text_parse((string_address)bad, name, held);
+                }
+                check("sec: a key text with no name, no colon, no key, or a name no group "
+                      "has (a verb of the group's, one too long, one with a blank or a "
+                      "slash, one that does not start with a letter) is refused",
+                      right);
+        }
+        link_group_text("lab", key, bad);
+        bad[string_length((string_address)bad) - 1] = 0;
+        check("sec: a key cut short is refused",
+              !link_group_text_parse((string_address)bad, name, held));
+        link_group_text("lab", key, bad);
+        string_append_bounded((string_address)bad, "x", sizeof bad);
+        check("sec: and one with more after it",
+              !link_group_text_parse((string_address)bad, name, held));
+        memory_zero(held, sizeof held);
+        link_group_text("lab", held, bad);
+        check("sec: and a key of nothing, which any machine could have",
+              !link_group_text_parse((string_address)bad, name, held));
+
+        //      An entry in a block of the image's settings.
+        host_settings_empty(address_of block);
+        block.generation = 1;
+        check("a group is put in the settings",
+              !link_group_entry_put(address_of block, "lab", key, 0x36) && block.length);
+        host_settings_seal(address_of block);
+        check("and the block checks", spark_settings_check(address_of block) == 1);
+        at = 0;
+        memory_zero(name, sizeof name);
+        check("and reads back whole: the name, the key, what its members may do and its "
+              "place",
+              host_settings_next(address_of block, address_of at, address_of setting) &&
+                  link_group_entry_read(address_of setting, name, held, address_of may) &&
+                  string_equals((string_address)name, "lab") && !memory_compare(held, key, 32) &&
+                  may == 0x36 && setting.entry.id == 1);
+        check("a group put again is replaced where it was, and is one entry",
+              !link_group_entry_put(address_of block, "lab", other, 0x2) &&
+                  wls_settings_count_of(address_of block) == 1);
+        at = 0;
+        check("with the new key and grants",
+              host_settings_next(address_of block, address_of at, address_of setting) &&
+                  link_group_entry_read(address_of setting, name, held, address_of may) &&
+                  !memory_compare(held, other, 32) && may == 0x2 && setting.entry.id == 1);
+        check("a second group has the next place",
+              !link_group_entry_put(address_of block, "ops", key, 0x4) &&
+                  wls_settings_count_of(address_of block) == 2);
+        check("four groups fit",
+              !link_group_entry_put(address_of block, "a1", key, 0x4) &&
+                  !link_group_entry_put(address_of block, "a2", key, 0x4) &&
+                  wls_settings_count_of(address_of block) == 4);
+        check("sec: a fifth is refused, and the four are as they were",
+              link_group_entry_put(address_of block, "a3", key, 0x4) != null &&
+                  wls_settings_count_of(address_of block) == 4);
+        check("and a group of the four is replaced when the block is full",
+              !link_group_entry_put(address_of block, "ops", other, 0x8) &&
+                  wls_settings_count_of(address_of block) == 4);
+        host_settings_seal(address_of block);
+        check("a block of four checks", spark_settings_check(address_of block) == 1);
+
+        //      A group made.
+        wls_settings_copy();
+        words[0] = "lab";
+        check("link group new makes the group, with every grant, a key of 256 random "
+              "bits and a record that is no code's",
+              link_group_new(words, 1) == 0 && wls_group_record("lab", address_of record) &&
+                  !(record.flags & LINK_GROUP_ONCE) && record.may == LINK_GROUP_MAY &&
+                  memory_span_byte(record.key, 0, 32) != 32);
+        check("and carries it: the session's settings have it, with the same key and grants, "
+              "and no other",
+              wls_carried("lab", held, address_of may, address_of count) &&
+                  !memory_compare(held, record.key, 32) && may == LINK_GROUP_MAY && count == 1);
+        again = record;
+
+        //      The machines it paired go when its key does; one paired by hand stays.
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "stick");
+        memory_fill(peers.peer[0].key, 0x71, 32);
+        peers.peer[0].group = link_group_mark("lab");
+        string_copy(peers.peer[1].name, "hand");
+        memory_fill(peers.peer[1].key, 0x72, 32);
+        peers.count = 2;
+        (void)link_peers_save(address_of peers);
+        check("link group new again makes another key, forgets the machines the old "
+              "key paired and not one paired by hand, and carries the new one",
+              link_group_new(words, 1) == 0 && wls_group_record("lab", address_of record) &&
+                  memory_compare(record.key, again.key, 32) && wls_peers_count() == 1 &&
+                  wls_carried("lab", held, null, address_of count) &&
+                  !memory_compare(held, record.key, 32) && count == 1);
+
+        //      Joined by its key, here as another machine.
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        wls_settings_copy();
+        memory_zero(typed, sizeof typed);
+        link_group_text("lab", key, (p8 address_to)typed);
+        if (MOONWATER_STRICT_NET < STRICT_TIGHT)
+        {
+                words[0] = (string_address)typed;
+                check("link group add joins a group by its key text, with every grant, and "
+                      "carries it",
+                      link_group_add(words, 1) == 0 && wls_group_record("lab", address_of record) &&
+                          !memory_compare(record.key, key, 32) && record.may == LINK_GROUP_MAY &&
+                          wls_carried("lab", held, address_of may, address_of count) &&
+                          !memory_compare(held, key, 32) && count == 1);
+                check("sec: the key on the line is wiped from the argument it was given in",
+                      memory_span_byte(typed, 0, sizeof typed) == sizeof typed);
+                memory_zero(typed, sizeof typed);
+                link_group_text("lab", other, (p8 address_to)typed);
+                words[0] = (string_address)typed;
+                words[1] = "allow";
+                words[2] = "run";
+                check("with allow it gives the members that and no more, and the new key "
+                      "replaces the old in the file and in the settings",
+                      link_group_add(words, 3) == 0 && wls_group_record("lab", address_of record) &&
+                          !memory_compare(record.key, other, 32) &&
+                          record.may == WATERLINK_MAY_RUN &&
+                          wls_carried("lab", held, address_of may, address_of count) &&
+                          !memory_compare(held, other, 32) && may == WATERLINK_MAY_RUN &&
+                          count == 1);
+        }
+        else
+        {
+                words[0] = (string_address)typed;
+                check("the tight tier refuses a key on the command line",
+                      link_group_add(words, 1) != 0 && !wls_group_record("lab", address_of record));
+                (void)link_group_store("lab", key, LINK_GROUP_MAY, address_of word[0]);
+                link_group_carry("lab", key, LINK_GROUP_MAY);
+        }
+        words[0] = "not-a-key";
+        check("sec: a word that is no key text is refused and joins nothing",
+              link_group_add(words, 1) != 0 && wls_group_record("lab", address_of again) &&
+                  !memory_compare(again.key, record.key, 32));
+        check("link group key is the key text the group is joined by",
+              link_group_pick(null, address_of again) == 0 &&
+                  !memory_compare(again.key, record.key, 32));
+
+        //      A start with an image that carries the group.
+        wls_carried("lab", key, address_of may, address_of count);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+        link_group_restore();
+        check("a start joins the group the image carries, with its grants, and turns "
+              "the listener on where nobody said",
+              wls_group_record("lab", address_of record) && !memory_compare(record.key, key, 32) &&
+                  record.may == may &&
+                  (word[0] = 0, host_read_word(LINK_SWITCH_PATH, word, sizeof word),
+                   string_equals((string_address)word, "on")));
+        (void)wls_text(LINK_SWITCH_PATH, "off\n");
+        link_group_restore();
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        check("a person's off stays off", string_equals((string_address)word, "off"));
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+
+        //      A record with another key (the image was written again) takes
+        //      the image's; one with the same key is left as it is.
+        memory_fill(held, 0x3e, sizeof held);
+        (void)link_group_store("lab", held, 0x1, address_of word[0]);
+        link_group_restore();
+        check("a group the file has with another key takes the image's key and grants",
+              wls_group_record("lab", address_of record) && !memory_compare(record.key, key, 32) &&
+                  record.may == may);
+        (void)link_group_store("lab", key, 0x4, address_of word[0]);
+        link_group_restore();
+        check("and one with the same key is left as it is, grants and all",
+              wls_group_record("lab", address_of record) && record.may == 0x4);
+        {
+                struct link_group_record code;
+                link_groups groups;
+
+                memory_zero(address_of code, sizeof code);
+                (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+                string_copy(code.namespace, "lab");
+                memory_fill(code.key, 0x55, 32);
+                code.flags = LINK_GROUP_ONCE;
+                code.expires = link_boot_seconds() + 300;
+                (void)wls_write(LINK_GROUPS_PATH, address_of code, sizeof code, 0600);
+                link_group_restore();
+                check("a code of the same name is no group of that name: the group is "
+                      "joined beside it, and the code is as it was",
+                      link_groups_load(address_of groups) && groups.count == 2 &&
+                          (groups.record[0].flags & LINK_GROUP_ONCE) &&
+                          !memory_compare(groups.record[0].key, code.key, 32) &&
+                          !(groups.record[1].flags & LINK_GROUP_ONCE) &&
+                          !memory_compare(groups.record[1].key, key, 32));
+        }
+
+        //      An image that carries none changes nothing.
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+        wls_settings_copy();
+        link_group_restore();
+        check("an image that carries no group leaves the file and the switch alone",
+              system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ) < 0 &&
+                  system_open_at(AT_FDCWD, LINK_SWITCH_PATH, FILE_READ) < 0);
+        (void)system_remove_at(AT_FDCWD, HOST_SETTINGS, 0);
+        link_group_restore();
+        check("and so does a session with no settings at all",
+              system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ) < 0 &&
+                  system_open_at(AT_FDCWD, LINK_SWITCH_PATH, FILE_READ) < 0);
+
+        //      Left: out of the file and out of the image.
+        wls_settings_copy();
+        words[0] = "lab";
+        (void)link_group_new(words, 1);
+        check("sec: leaving the group takes it out of the file and out of the image, "
+              "or the next start would join it again",
+              link_group_leave("lab", false) == 0 && !wls_group_record("lab", address_of record) &&
+                  !wls_carried("lab", null, null, address_of count) && count == 0);
+        link_group_restore();
+        check("and a start after it is in no group",
+              !wls_group_record("lab", address_of record));
+
+        //      The group put in an image that is a file.
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        wls_settings_copy();
+        words[0] = "lab";
+        (void)link_group_new(words, 1);
+        (void)wls_group_record("lab", address_of record);
+        (void)wls_write("/root/stamp.efi", image,
+                        wls_image_build(image, (p8 address_to) ".mwset\0\0"), 0600);
+        check("link group stamp puts the group in an image, so a machine that starts "
+              "from it is in the group",
+              wls_stamp("/root/stamp.efi", "lab") == 0 &&
+                  host_settings_image("/root/stamp.efi", address_of into) == 1 &&
+                  into.generation == 1 && wls_settings_count_of(address_of into) == 1);
+        at = 0;
+        check("with the key and grants of the group here",
+              host_settings_next(address_of into, address_of at, address_of setting) &&
+                  link_group_entry_read(address_of setting, name, held, address_of may) &&
+                  string_equals((string_address)name, "lab") &&
+                  !memory_compare(held, record.key, 32) && may == record.may);
+        check("stamped again it is one entry, a newer block",
+              wls_stamp("/root/stamp.efi", null) == 0 &&
+                  host_settings_image("/root/stamp.efi", address_of into) == 1 &&
+                  into.generation == 2 && wls_settings_count_of(address_of into) == 1);
+        check("sec: a group this machine is not in is not stamped, and the image is as it was",
+              wls_stamp("/root/stamp.efi", "nobody") != 0 &&
+                  host_settings_image("/root/stamp.efi", address_of into) == 1 &&
+                  into.generation == 2);
+        (void)wls_write("/root/plain.efi", image,
+                        wls_image_build(image, (p8 address_to) ".mwsex\0\0"), 0600);
+        check("an image with no settings in it is refused, and left as it is",
+              wls_stamp("/root/plain.efi", "lab") != 0);
+        //      By a key that is given, with no group of this machine's: the build
+        //      machine's way.
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)wls_write("/root/stamp.efi", image,
+                        wls_image_build(image, (p8 address_to) ".mwset\0\0"), 0600);
+        memory_zero(typed, sizeof typed);
+        link_group_text("lab", other, (p8 address_to)typed);
+        {
+                string_address words[4] = {"/root/stamp.efi", (string_address)typed, "allow", "run"};
+
+                check("link group stamp IMAGE NAME:KEY puts the key it is given in the image, "
+                      "with the grants it names, and wipes it from the line",
+                      link_group_stamp(words, 4) == 0 &&
+                          host_settings_image("/root/stamp.efi", address_of into) == 1 &&
+                          into.generation == 1 && wls_settings_count_of(address_of into) == 1 &&
+                          memory_span_byte(typed, 0, sizeof typed) == sizeof typed);
+        }
+        at = 0;
+        check("and the image carries that key and those grants, though this machine is in no group",
+              host_settings_next(address_of into, address_of at, address_of setting) &&
+                  link_group_entry_read(address_of setting, name, held, address_of may) &&
+                  string_equals((string_address)name, "lab") && !memory_compare(held, other, 32) &&
+                  may == WATERLINK_MAY_RUN && !wls_group_record("lab", address_of record));
+        {
+                p8 cut[LINK_GROUP_TEXT];
+                string_address words[2] = {"/root/stamp.efi", (string_address)cut};
+
+                memory_zero(cut, sizeof cut);
+                link_group_text("lab", other, cut);
+                cut[string_length((string_address)cut) - 2] = 0;
+                check("sec: a key text that is no key is refused, and the image is as it was",
+                      link_group_stamp(words, 2) != 0 &&
+                          host_settings_image("/root/stamp.efi", address_of into) == 1 &&
+                          into.generation == 1);
+        }
+        (void)system_remove_at(AT_FDCWD, "/root/stamp.efi", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/plain.efi", 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, HOST_SETTINGS, 0);
+}
+
 static fn indexes_and_commands(void)
 {
         entropy_down = true;
@@ -14699,6 +15150,7 @@ b32 main(void)
         nearby_reload_failures();
         records_named();
         machine_names();
+        group_carried();
         labels();
         wpa_key();
         wifi_key_checks();

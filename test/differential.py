@@ -84421,7 +84421,11 @@ waiter = waiting("a", "pair", 90)
 code, said = code_said(waiter, "box-a")
 if code:
     status, out, err = on("c", moon + " link box-a " + code, timeout=90)
-    waiter.communicate(timeout=60)
+    try:
+        waiter.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        waiter.kill()
+        waiter.communicate()
     say(status == 0, "a second code links the two again (%r)" % (err[-160:],))
     status, out, err = on("c", moon + " link box-a echo coded-$((20+22))", timeout=60)
     say(status == 0 and out == b"coded-42\n", "link NAME COMMAND runs it there (%r %r)" % (out, err[-100:]))
@@ -84440,7 +84444,20 @@ if code:
 #       a says the key changed, and the old key is nobody's.
 if code:
     old_c = keys["c"]
+    #       Its machine stops, as one does that is powered off: the listener is
+    #       told, and whatever is left of it is killed, since a listener that
+    #       kept running would go on with the old key in its memory.
     on("c", moon + " link off")
+    where = os.readlink("/proc/%d/ns/net" % spaces["c"].pid)
+    for entry in os.listdir("/proc"):
+        try:
+            if entry.isdigit() and os.readlink("/proc/%s/ns/net" % entry) == where:
+                words = open("/proc/%s/cmdline" % entry, "rb").read().split(b"\0")
+                if b"link" in words and b"serve" in words:
+                    os.kill(int(entry), signal.SIGKILL)
+        except OSError:
+            continue
+    time.sleep(1)
     os.unlink(top + "/c/root/link.key")
     #       A machine that starts with a key of its own knows nobody yet.
     on("c", moon + " link remove box-a")
@@ -84460,14 +84477,32 @@ if code:
         _, new_key, _ = on("c", moon + " link key")
         keys["c"] = new_key.decode().strip()
         say(len(keys["c"]) == 44 and keys["c"] != old_c, "c has another key than it had")
-        say(b"box-c's key changed; the new one replaces it" in waited and b"linked with box-c" in waited,
-            "a says the key of box-c changed and the new one replaces it (%r)" % (waited[-200:],))
+        said_changed = b"box-c's key changed; the new one replaces it" in waited and b"linked with box-c" in waited
+        say(said_changed, "a says the key of box-c changed and the new one replaces it (%r)" % (waited[-200:],))
+        if not said_changed:
+            for side in "ac":
+                _, shown, _ = on(side, moon + " link")
+                print("  debug %s status:\n%s" % (side, shown.decode(errors="replace")[:900]), flush=True)
+                print("  debug %s groups: %r" % (side, [(r[0], r[1]) for r in once_records(side)]), flush=True)
+            print("  debug c status %r, new key %r, waiter %r %r" % (status, keys["c"], waited, waited_err[-300:]), flush=True)
+            for side in "ac":
+                _, shown, _ = on(side, moon + " link doctor")
+                print("  debug %s doctor:\n%s" % (side, shown.decode(errors="replace")[:1400]), flush=True)
+            for entry in os.listdir("/proc"):
+                try:
+                    if entry.isdigit() and b"serve" in open("/proc/%s/cmdline" % entry, "rb").read():
+                        print("  debug listener %s in %s" % (entry, os.readlink("/proc/%s/ns/net" % entry)), flush=True)
+                except OSError:
+                    continue
+            print("  debug c net %s, b net %s" % (os.readlink("/proc/%d/ns/net" % spaces["c"].pid),
+                                                  os.readlink("/proc/%d/ns/net" % spaces["b"].pid)), flush=True)
         status, out, err = on("a", moon + " link")
         mine = [line for line in out.decode(errors="replace").splitlines() if line.startswith("  box-c")]
         say(len(mine) == 1 and mine[0].split()[0] == "box-c" and mine[0].split()[1] == keys["c"][:8] + "...",
             "a knows c by its name and its new key, in one record (%r)" % (mine,))
-        say(b"box-c-" not in out and old_c[:8].encode() not in out,
-            "and holds no second box-c, nor the old key (%r)" % (out[-300:],))
+        say(all(not line.startswith("  box-c-") and old_c[:8] not in line for line in
+                out.decode(errors="replace").splitlines()),
+            "and holds no second box-c, nor the old key (%r)" % (mine,))
         status, out, err = on("c", moon + " link box-a echo renamed-$((20+22))", timeout=60)
         say(status == 0 and out == b"renamed-42\n", "box-a still runs a command there under the same name (%r %r)" % (out, err[-100:]))
         status, out, err = on("a", moon + " link box-c echo kept-$((20+22))", timeout=60)
@@ -84578,6 +84613,85 @@ if len(names) == 2:
     say(status == 0 and a_line and "in group lab" in a_line[0],
         "and the old secret again is the same group again (%r)" % (a_line,))
     on("b", "%s link allow %s run" % (moon, names["b"]))
+
+#       A group made with a key and joined by the key's text, as sticks carry
+#       one: a makes `stick` (every grant, no secret typed and none kept), b
+#       takes its key on standard input, and the two pair by themselves and
+#       reach each other by the names they have. Made again, a has another
+#       key, forgets the machines the old one paired, and the key b holds is
+#       no group's.
+#       a and b are each other's machines by lab already, and a machine known
+#       by its key is not paired again by another group, so they leave lab
+#       (forgetting what it paired) for this and join it again after.
+for side in "ab":
+    on(side, moon + " link group leave lab forget")
+#       A join does not switch the listener on (link on does, as a person
+#       would), and what the lane has done before leaves them as it left them.
+for side in "ab":
+    on(side, moon + " link on")
+status, out, err = on("a", moon + " link group new stick")
+found = re.search(rb"(stick:[A-Za-z0-9+/]{43}=)", out)
+say(status == 0 and found is not None and b"in group stick; its members may shell run files log" in out,
+    "link group new makes a group with every grant and says its key (%r %r)" % (out[-300:], err[-100:]))
+stick_text = found.group(1) if found else b""
+status, out, err = on("a", moon + " link group key stick")
+say(status == 0 and out.strip() == stick_text, "link group key says the same key (%r)" % (out[-120:],))
+record = open(top + "/a/root/link.groups", "rb").read()
+say(base64.b64decode(stick_text.split(b":")[1]) in record and
+    os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
+    "the key is in a's groups file, which is root's alone")
+status, out, err = on("a", moon + " link")
+say(stick_text not in out and stick_text.split(b":")[1] not in out and b"group stick" in out,
+    "sec: the status names the group and never its key")
+for word in ("not-a-key", "stick:short", "new:" + stick_text.decode().split(":")[1]):
+    status, out, err = on("b", moon + " link group add " + word)
+    say(status != 0 and b"not a group's key" in err or b"command line is refused" in err,
+        "sec: %r is not a key text, and joins nothing (%r)" % (word, err[-100:]))
+status, out, err = on("b", moon + " link group add -", stdin=stick_text + b"\n")
+say(status == 0 and b"in group stick; its members may shell run files log" in out,
+    "b joins by the key on standard input, with every grant (%r %r)" % (out[-200:], err[-100:]))
+named = {}
+began = time.time()
+while time.time() - began < 40 and len(named) < 2:
+    time.sleep(1)
+    for side, other in (("a", "b"), ("b", "a")):
+        status, out, err = on(side, moon + " link")
+        for line in out.decode(errors="replace").splitlines():
+            if line.startswith("  box-" + other) and "in group stick" in line:
+                named[side] = line.split()[0]
+say(len(named) == 2, "a and b pair by themselves in the group, with no code or secret typed (%r, %.1fs)" %
+    (named, time.time() - began))
+if len(named) == 2:
+    status, out, err = on("a", "%s link run %s 'echo stick-$((20+22))'" % (moon, named["a"]))
+    say(status == 0 and out == b"stick-42\n", "a runs a command on b with the grants the key gave (%r %r)" % (out, err[-100:]))
+    status, out, err = on("b", "%s link run %s 'echo back-$((20+22))'" % (moon, named["b"]))
+    say(status == 0 and out == b"back-42\n", "and b on a (%r %r)" % (out, err[-100:]))
+    status, out, err = on("a", moon + " link group new stick")
+    new_text = re.search(rb"(stick:[A-Za-z0-9+/]{43}=)", out)
+    say(status == 0 and new_text is not None and new_text.group(1) != stick_text and
+        b"has a new key" in out,
+        "made again, the group has another key, and says the old one is out (%r)" % (out[-300:],))
+    status, out, err = on("a", moon + " link")
+    peers_b = [line for line in out.decode(errors="replace").splitlines() if line.startswith("  box-b")]
+    say(not peers_b, "and a has forgotten the machines the old key paired (%r)" % (peers_b,))
+    status, out, err = on("a", "%s link run %s 'echo no'" % (moon, named["a"]), timeout=30)
+    say(status != 0 and (b"no machine is called" in err or b"no peer is called" in err),
+        "a no longer reaches b (%r %r)" % (out, err[-100:]))
+for side in "ab":
+    on(side, moon + " link group leave stick forget")
+on("a", "%s link group lab %s allow run" % (moon, secret))
+on("b", "%s link group lab %s allow run shell" % (moon, secret))
+names = {}
+began = time.time()
+while time.time() - began < 60 and len(names) < 2:
+    time.sleep(1)
+    for side, other in (("a", "b"), ("b", "a")):
+        status, out, err = on(side, moon + " link")
+        for line in out.decode(errors="replace").splitlines():
+            if line.startswith("  box-" + other) and "in group lab" in line:
+                names[side] = line.split()[0]
+say(len(names) == 2, "and lab, joined again, pairs a and b again by itself (%r, %.1fs)" %
+    (names, time.time() - began))
 
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for

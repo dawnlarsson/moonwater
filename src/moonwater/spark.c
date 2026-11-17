@@ -538,6 +538,20 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
         reads them from /run/moonwater/security, never from this block. A
         build from before the list has no list 5 and calls the whole slot
         damaged, so going back to one boots on the defaults.
+
+        The group list is the groups of `moonwater link group` this image
+        joins at every boot: each entry is the key of one (what the group's
+        secret derives, which is everything a member has: it is the secret
+        in every way that matters), what its members may do on this machine,
+        and its name, so a stick that carries one is a member the moment it
+        starts, with no code typed, and an install made from it takes the
+        same entry. The checker only holds the shape (kind 7, ids 1 to 4,
+        37 to 67 bytes); the link reads the entry (src/waterlink/command.c,
+        link_group_boot) and nothing else does, and no command lists it.
+        ANYBODY WHO HOLDS A STICK OF THE GROUP CAN JOIN THE GROUP: the key is
+        in the image as plainly as the image is, a copy of the file is a
+        member, and so is a person who reads the stick. A build from before
+        the list has no list 6 and calls the slot damaged as above.
 */
 #define SPARK_SETTINGS_MAGIC 0x474e54544553574dull
 #define SPARK_SETTINGS_VERSION 1
@@ -561,7 +575,8 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 #define SPARK_SETTINGS_EXIT 3
 #define SPARK_SETTINGS_BIND 4 // event id -> command; no entry is the event's default
 #define SPARK_SETTINGS_SECURITY 5 // keys refused and trusted, and TLS's switches
-#define SPARK_SETTINGS_LISTS 5
+#define SPARK_SETTINGS_GROUP 6    // the link's groups this machine is in at every boot, each as its key
+#define SPARK_SETTINGS_LISTS 6
 
 #define SPARK_SETTINGS_COMMAND 1       // run through /shell -c
 #define SPARK_SETTINGS_SHELL 2         // a terminal window with a shell
@@ -569,12 +584,17 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 #define SPARK_SETTINGS_BLOCK 4         // security: a key refused, 32 bytes
 #define SPARK_SETTINGS_TRUST 5         // security: a trust anchor added
 #define SPARK_SETTINGS_SWITCH 6        // security: a switch, its id, no text
+#define SPARK_SETTINGS_GROUP_KEY 7     // group: the key, 32 bytes, what its members may do here,
+                                       // four bytes little endian, and the group's name, 1 to 31
 
 #define SPARK_SETTINGS_SECURITY_MOST 96 // entries in the security list
 #define SPARK_SETTINGS_TRUST_LEAST 104  // an anchor: 40 bytes and a P-256 key,
 #define SPARK_SETTINGS_TRUST_MOST 552   // up to an RSA modulus of 4096 bits
 #define SPARK_SETTINGS_SWITCHES 16      // switch ids from 1 to this
 #define SPARK_SETTINGS_BY_HAND 1        // a block's or an anchor's id
+#define SPARK_SETTINGS_GROUPS 4         // groups kept at most, ids 1 to this
+#define SPARK_SETTINGS_GROUP_LEAST 37   // a group's entry: key, grants and a name of one byte
+#define SPARK_SETTINGS_GROUP_MOST 67    // and of 31
 
 struct spark_settings {
         unsigned long magic;
@@ -660,6 +680,18 @@ static inline int spark_settings_security_shaped(unsigned int kind, unsigned int
                id <= SPARK_SETTINGS_SWITCHES;
 }
 
+/*
+        A group entry's kind, id and length: a key, its grants and a name, in
+        one of the four places a group has.
+*/
+static inline int spark_settings_group_shaped(unsigned int kind, unsigned int id,
+                                              unsigned int length)
+{
+        return kind == SPARK_SETTINGS_GROUP_KEY && id <= SPARK_SETTINGS_GROUPS &&
+               length >= SPARK_SETTINGS_GROUP_LEAST &&
+               length <= SPARK_SETTINGS_GROUP_MOST;
+}
+
 static inline int spark_settings_check(const struct spark_settings *slot)
 {
         unsigned long counts[SPARK_SETTINGS_LISTS + 1] = {0};
@@ -699,10 +731,14 @@ static inline int spark_settings_check(const struct spark_settings *slot)
                     ++counts[list] > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST
                                       : list == SPARK_SETTINGS_SECURITY
                                           ? SPARK_SETTINGS_SECURITY_MOST
+                                      : list == SPARK_SETTINGS_GROUP
+                                          ? SPARK_SETTINGS_GROUPS
                                           : SPARK_SETTINGS_LIST_MOST) ||
                     length > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_TEXT_MOST
                               : list == SPARK_SETTINGS_SECURITY
                                   ? SPARK_SETTINGS_TRUST_MOST
+                              : list == SPARK_SETTINGS_GROUP
+                                  ? SPARK_SETTINGS_GROUP_MOST
                                   : SPARK_SETTINGS_TEXT_MOST) ||
                     slot->length - at < spark_settings_padded(length))
                         return -1;
@@ -721,6 +757,8 @@ static inline int spark_settings_check(const struct spark_settings *slot)
                         return -1;
                 if (list == SPARK_SETTINGS_SECURITY
                         ? !spark_settings_security_shaped(kind, id, length)
+                    : list == SPARK_SETTINGS_GROUP
+                        ? !spark_settings_group_shaped(kind, id, length)
                         : !kind || kind > SPARK_SETTINGS_KERNEL_SHELL ||
                               (list == SPARK_SETTINGS_BIND && id > SPARK_BIND_EVENTS))
                         return -1;
