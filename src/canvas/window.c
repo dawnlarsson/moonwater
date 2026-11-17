@@ -532,14 +532,15 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "other frames, or empty damage", "a window with alpha and round corners (the file gpu-round-off is there)",
     "a client's own pointer picture drawn into the scene"};
 // The GPU's prerequisites, in the order the path needs them (gpu.c's enum gpu_req, the same order): their names, and what to do about each one, in words.
-// moonwater debug shows them, and the issue board's detail for a failed one.
+// moonwater debug shows them, and the issue board's detail for a failed one, except the driver's and the chip's steps, whose detail is the machine's own words
+// (gpu.c's gpu_req_words: the driver and its node, the chip), which Settings puts in its message.
 #define WINDOWS_GPU_REQS 10
 static const string_address windows_gpu_req_names[WINDOWS_GPU_REQS] = {"none", "render node", "driver", "family", "userptr", "context", "ring", "self-test",
                                                                      "udmabuf", "PRIME import"};
 static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
     "", "no render node of the card opened: check its mode and owner, and that the driver is loaded (the render group, or mode 0666, lets a user open it)",
-    "the card's driver is not amdgpu: there is no GPU path for it yet (i915, virtio_gpu and nouveau stay on the processor)",
-    "this AMD family has no kernels (RDNA2 only: 144, 146, 149, 151); the card stays on the processor",
+    "the card's driver has no GPU path: Canvas reads amdgpu and i915 cards (virtio_gpu, nouveau and xe stay on the processor)",
+    "the chip has no GPU kernels yet (so far AMD RDNA2 only: families 144, 146, 149, 151; none for i915 yet): the processor draws everything",
     "the kernel would not map a page for the card: rebuild it with CONFIG_DRM_AMDGPU_USERPTR=y (error 19 is that kernel: it selects HMM_MIRROR and MMU_NOTIFIER)",
     "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)",
     "the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)",
@@ -590,7 +591,8 @@ enum windows_issue_code
         WINDOWS_ISSUE_GPU_USERPTR,   // the kernel was built without userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR): a the step, b the error
         WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
         WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
-        WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix
+        WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix, or for the driver's
+                                     // and the chip's steps the machine's words (the driver and its node, the chip), which the message says
         WINDOWS_ISSUE_GPU_FAULT,     // the card faulted reading GPU memory: a the jobs that found a fault; the detail is the fault's text (what the address was in)
         WINDOWS_ISSUE_GPU_HUNG,      // the card hung twice within a minute: the processor draws the desktop for the rest of the session (no numbers)
         // The kernel's own notices (the feeder below): a the records of the class seen, b the seconds since the last, the detail the last line.
@@ -1772,7 +1774,12 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
         if (table->gpu_state == WINDOWS_GPU_UNTRUSTED)
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
         if (table->gpu_state == WINDOWS_GPU_NO_CARD && table->gpu_family)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, "");
+        {
+                char driver[sizeof(table->gpu_req_driver) + 1]; // the family's driver (amdgpu's and i915's numbers are each their own), ended here whatever the table holds
+
+                memory_copy(driver, table->gpu_req_driver, sizeof(table->gpu_req_driver)), driver[sizeof(table->gpu_req_driver)] = 0;
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, driver);
+        }
         if (table->gpu_state == WINDOWS_GPU_COOLING)
                 WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, table->gpu_steps, 0, "");
         if (table->gpu_state == WINDOWS_GPU_HUNG)
@@ -1810,7 +1817,8 @@ static unsigned int windows_gpu_judge(const struct windows *table, unsigned int 
 
         if (!table->gpu_on)
                 return WINDOWS_GPU_STATUS_OFF;
-        if (table->gpu_state == WINDOWS_GPU_NO_CARD && !table->gpu_family)
+        // No card the path takes, a chip with no kernels among them: the processor draws everything, which is what the line says.
+        if (table->gpu_state == WINDOWS_GPU_NO_CARD)
                 return WINDOWS_GPU_STATUS_NONE;
         if (total < 16)
                 return previous == WINDOWS_GPU_STATUS_OFF || previous == WINDOWS_GPU_STATUS_NONE ? WINDOWS_GPU_STATUS_NOT : previous;

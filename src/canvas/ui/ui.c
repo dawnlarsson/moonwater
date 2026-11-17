@@ -7987,8 +7987,8 @@ LANGUAGE_ID(settings_refused_place, "%s (its place in the file is not read)") \
 LANGUAGE_ID(settings_refused_rate, "%1$s (%2$d Hz is not offered)") \
 LANGUAGE_ID(settings_refused_turn, "%1$s (%2$s could not be done)") \
 LANGUAGE_ID(settings_req_context, "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)") \
-LANGUAGE_ID(settings_req_driver, "the card's driver is not amdgpu: there is no GPU path for it yet (i915, virtio_gpu and nouveau stay on the processor)") \
-LANGUAGE_ID(settings_req_family, "this AMD family has no kernels (RDNA2 only: 144, 146, 149, 151); the card stays on the processor") \
+LANGUAGE_ID(settings_req_driver, "the card's driver, %1$s, has no GPU path yet: the processor draws everything") \
+LANGUAGE_ID(settings_req_family, "there are no GPU kernels for this chip yet, %1$s: the processor draws everything") \
 LANGUAGE_ID(settings_req_node, "no render node of the card opened: check its mode and owner, and that the driver is loaded (the render group, or mode 0666, lets a user open it)") \
 LANGUAGE_ID(settings_req_prime, "a dma-buf would not import into the render node: the card cannot read a window's memfd (CONFIG_DRM_AMDGPU, with PRIME; the card still composes)") \
 LANGUAGE_ID(settings_req_ring, "the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)") \

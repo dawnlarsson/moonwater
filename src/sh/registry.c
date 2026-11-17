@@ -391,10 +391,11 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
 #ifndef SHELL_NO_GPU
     //  Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
-    //  has none. Alpha: off by default, so every pixel stays on the processor until the user turns it on. Not in the image
+    //  has none. On by default: the GPU is the robust default, and every failure (no kernels, a refused map, a hang, a lost card)
+    //  falls back to the processor for that job or the session, with one notice. Not in the image
     //  when the build says CONFIG_MOONWATER_GPU=n.
     SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
-                      .path = SETTING_GPU_PATH, .standard = "off",
+                      .path = SETTING_GPU_PATH, .standard = "on",
                       .usage = "canvas gpu [on|off]",
                       .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]"),
 #endif

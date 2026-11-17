@@ -956,6 +956,336 @@ static b32 gpu_route_rows(void)
 }
 
 /*
+        The i915 row with no card under it (the fake i915 node, gpu_kernel.i915, and gpu.c's calls of it): its chips by device id, a start on an i915 node that
+        stops at the chip's step (no kernel set yet: the processor draws) and is settled, a node of a driver with no path, the late look that does not start a
+        settled card again while the nodes are the same and does when they change, the outcome said once, the notices' words, the address windows, userptr's
+        read-only rule, the submit's object list and its errors as the classifier takes them, the waits and the fence, and amdgpu's window and classifier as
+        they were. Everything the rows change of gpu.c's and the compositor's state is put back.
+*/
+static unsigned int gpu_i915_test_words;
+static unsigned int gpu_i915_test_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
+{
+        (void)job;
+        if (room < 1 || !gpu_i915_test_words)
+                return 0;
+        words[0] = 0x05000000u; // MI_BATCH_BUFFER_END (one word: the call pads it to a quadword)
+        return gpu_i915_test_words;
+}
+static const struct gpu_set gpu_i915_test_set = {gpu_kernels, 0, 0, 0, gpu_i915_test_batch};
+
+static b32 gpu_i915_has(const char *text, const char *word)
+{
+        return string_find((string_address)text, (string_address)word) != 0;
+}
+
+static void gpu_i915_rows(void)
+{
+        static unsigned char kept_kernel[sizeof(gpu_kernel)];
+        static unsigned char buffer[65536] __attribute__((aligned(4096)));
+        unsigned char kept_gpu[sizeof(gpu)], kept_req[sizeof(gpu_req)], kept_state[sizeof(compositor_gpu_state)], kept_i915[sizeof(gpu_i915)];
+        unsigned char kept_window[sizeof(gpu_window)], kept_layout[sizeof(gpu_layout)];
+        const struct gpu_backend *kept_backend = gpu_backend;
+        const struct gpu_set *kept_set = gpu_set;
+        positive kept_next = gpu_map_next, kept_va_max = gpu_amd_va_max, va = 0, maps = 0, top = 0, nodes, sequence = 0;
+        unsigned int family = 0, device = 0, made = 0, handle = 0, identified, kept_ours = gpu_jobs_ours, kept_error = gpu_last_error;
+        int kept_on = compositor_gpu, fd = -1;
+        b32 kept_lost = gpu_lost;
+        char words[256];
+        struct gpu_i915_object objects[8];
+        struct gpu_i915_exec run;
+
+        memory_copy(kept_kernel, &gpu_kernel, sizeof(gpu_kernel)), memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_req, &gpu_req, sizeof(gpu_req));
+        memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_i915, &gpu_i915, sizeof(gpu_i915));
+        memory_copy(kept_window, &gpu_window, sizeof(gpu_window)), memory_copy(kept_layout, &gpu_layout, sizeof(gpu_layout));
+        // (The start's stop lets go of the card's buffer and maps: none are the rows' before them, so none of the earlier rows' is let go of.)
+        unsigned int kept_maps = gpu_map_count, kept_faults = gpu_faults, kept_job_error = gpu_job_error;
+        positive kept_fault_next = gpu_fault_next;
+        char kept_fault[sizeof(gpu_fault)];
+        struct windows *kept_table = compositor.table;
+        int kept_card = compositor.card;
+        unsigned char kept_shared[sizeof(gpu_shared)];
+
+        memory_copy(kept_fault, gpu_fault, sizeof(gpu_fault)), memory_copy(kept_shared, &gpu_shared, sizeof(gpu_shared));
+        gpu.at = 0, gpu.fd = -1, gpu.size = 0, gpu.imports = 0, gpu.pending = 0, gpu_map_count = 0, compositor.table = 0, compositor.card = -1;
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        gpu_kernel.on = 1, gpu_kernel.i915_chip = 0x3e92, gpu_kernel.i915_ppgtt = 2, gpu_kernel.i915_gtt = 1ull << 48;
+        string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "i915", sizeof(gpu_kernel.i915));
+
+        // The chips: the families by the kernel's device tables, 0 for one before Ivy Bridge or of the xe era.
+        {
+                static const unsigned int ids[][2] = {{0x0152, 700}, {0x0F31, 701}, {0x041E, 750}, {0x1616, 800}, {0x22B0, 801}, {0x3E92, 900}, {0x3185, 901},
+                                                      {0x8A52, 1100}, {0x4E61, 1101}, {0x9A49, 1200}, {0xA7A0, 1200}, {0x0102, 0}, {0x56A0, 0}, {0x7D55, 0}};
+                b32 all = true;
+
+                for (unsigned int i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+                {
+                        gpu_kernel.i915_chip = ids[i][0];
+                        all &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == ids[i][1] && device == ids[i][0];
+                }
+                check("gpu i915: CHIPSET_ID's device is the chip's family (Ivy Bridge 700 to Raptor Lake 1200; Sandy Bridge and the xe era none)", all);
+                gpu_kernel.i915_chip = 0x3e92;
+                check("gpu i915: no chip has a kernel set yet: none is a card the path takes", !gpu_i915_set(700) && !gpu_i915_set(750) && !gpu_i915_set(900) && !gpu_i915_set(1200));
+        }
+        // A start on the i915 node: the driver is known, the chip has no kernels, the start stops at the chip's step with nothing of a card made, and it is settled.
+        identified = gpu_kernel.i915_identifies;
+        check("gpu i915: a start on an i915 node stops at the chip's step, with the driver and the chip kept",
+              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_FAMILY && (gpu_req.mask & (1u << GPU_REQ_DRIVER)) && gpu_req.family == 900 && gpu_req.device == 0x3e92 &&
+                  string_equals((string_address)gpu_req.name, (string_address) "i915"));
+        check("gpu i915: and nothing of a card was made (no buffer, no context), the descriptor closed", gpu_kernel.i915_creates == 0 && gpu_kernel.i915_contexts == 0 && gpu.fd == -1 &&
+              gpu_kernel.i915_identifies == identified + 1);
+        check("gpu i915: a chip with no kernel set is settled, and the nodes it saw are kept", gpu_req.settled && gpu_req.nodes != 0 && gpu_req.nodes == gpu_nodes_seen());
+        check("gpu i915: the notice's words name the driver and the chip",
+              gpu_req_words(words, sizeof(words)) && gpu_i915_has(words, "i915 Gen9 Skylake to Comet Lake") && gpu_i915_has(words, "0x3e92"));
+        nodes = gpu_req.nodes;
+        string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "virtio_gpu", sizeof(gpu_kernel.i915));
+        check("gpu i915: a driver loaded in the node's place is other nodes", gpu_nodes_seen() != nodes);
+        check("gpu i915: a node of a driver with no path stops at the driver's step, settled, and its words name it and its node",
+              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_DRIVER && gpu_req.settled && gpu_req_words(words, sizeof(words)) &&
+                  gpu_i915_has(words, "virtio_gpu on /dev/dri/renderD128"));
+        string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "i915", sizeof(gpu_kernel.i915));
+
+        // The compositor: the start fails once, is said once and given up as no card, settled; the late look sees the same nodes and starts nothing; the
+        // nodes changed, it starts the card again and says the new outcome; the turn of the setting starts it once whatever the nodes.
+        {
+                positive now = 500000000000ull, said;
+
+                compositor_gpu = 1, compositor_gpu_state.up = 0, compositor_gpu_state.dead = 0, compositor_gpu_state.settled = 0, compositor_gpu_state.said = 0;
+                compositor_gpu_state.late_first = compositor_gpu_state.late_next = 0, compositor_gpu_state.hung_off = 0;
+                check("gpu i915: the compositor's start fails and the card is given up as no card, settled on the nodes it saw",
+                      !compositor_gpu_up() && compositor_gpu_state.dead && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD &&
+                          compositor_gpu_state.settled == gpu_req.nodes && compositor_gpu_state.said != 0);
+                said = compositor_gpu_state.said, identified = gpu_kernel.i915_identifies;
+                compositor_gpu_late_at(now);
+                compositor_gpu_late_tick(compositor_gpu_state.late_next);
+                compositor_gpu_late_tick(compositor_gpu_state.late_next);
+                check("gpu i915: the late look at the same nodes starts nothing (no chip asked, the outcome not said again)",
+                      gpu_kernel.i915_identifies == identified && compositor_gpu_state.dead && compositor_gpu_state.said == said && compositor_gpu_late_at(now) != 0);
+                compositor_gpu_state.dead = 0;
+                check("gpu i915: a start that fails the same way again is not said again", !compositor_gpu_up() && compositor_gpu_state.said == said);
+                gpu_kernel.i915_chip = 0x0152, identified = gpu_kernel.i915_identifies; // (the same nodes: the chip is not part of what the look sees)
+                compositor_gpu_late_tick(compositor_gpu_state.late_next);
+                check("gpu i915: the same nodes with another chip under them are not looked at either", gpu_kernel.i915_identifies == identified);
+                gpu_kernel.i915[0] = 0; // the node gone: every node absent (the fake's i915 empty, so the walk sees the machine's own, which the row does not know)
+                gpu_fake_absent = 1000;
+                compositor_gpu_late_tick(compositor_gpu_state.late_next);
+                gpu_fake_absent = 0;
+                check("gpu i915: nodes that changed are looked at: the card is started again, and the new outcome said (no node, not settled)",
+                      compositor_gpu_state.dead && gpu_req.first == GPU_REQ_NODE && !compositor_gpu_state.settled && compositor_gpu_state.said != said);
+                string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "i915", sizeof(gpu_kernel.i915));
+                gpu_kernel.i915_chip = 0x3e92;
+        }
+        // The board and Settings' line: a chip with no kernels is no supported GPU (the processor draws everything), its family named with its driver, and the
+        // message of the chip's step says the chip.
+        {
+                struct windows *table = windows_scratch_table(&app_table_scratch);
+                struct windows_issue want[WINDOWS_GPU_CODES], issue;
+                unsigned int count;
+                char text[512];
+
+                windows_scratch_zero(table);
+                table->gpu_on = 1, table->gpu_state = WINDOWS_GPU_NO_CARD, table->gpu_family = 900;
+                memory_copy(table->gpu_req_driver, "i915", 5);
+                count = windows_gpu_wanted(table, want, WINDOWS_GPU_CODES);
+                check("gpu i915: a chip with no kernels is said as no supported GPU on Settings' line", windows_gpu_judge(table, WINDOWS_GPU_STATUS_NOT, 0, 50) == WINDOWS_GPU_STATUS_NONE);
+                {
+                        b32 named = false;
+
+                        for (unsigned int k = 0; k < count; k++)
+                                named |= want[k].code == WINDOWS_ISSUE_GPU_FAMILY && want[k].a == 900 && string_equals((string_address)want[k].detail, (string_address) "i915");
+                        check("gpu i915: the board's family warning names the family's driver", named);
+                }
+                memory_zero(&issue, sizeof(issue));
+                issue.code = WINDOWS_ISSUE_GPU_REQUIRES, issue.a = GPU_REQ_FAMILY;
+                string_copy_bounded((string_address)issue.detail, (string_address) "i915 Gen7.5 Haswell, device 0x41e", WINDOWS_ISSUE_DETAIL);
+                settings_issue_text(&issue, text, sizeof(text));
+                check("gpu i915: Settings' message of the chip's step says the chip", gpu_i915_has(text, "Gen7.5 Haswell") && gpu_i915_has(text, "kernels"));
+                issue.a = GPU_REQ_DRIVER;
+                string_copy_bounded((string_address)issue.detail, (string_address) "nouveau on /dev/dri/renderD128", WINDOWS_ISSUE_DETAIL);
+                settings_issue_text(&issue, text, sizeof(text));
+                check("gpu i915: and of the driver's step says the driver and its node, and none names amdgpu as the only one", gpu_i915_has(text, "nouveau on /dev/dri/renderD128") &&
+                      !gpu_i915_has(text, "not amdgpu"));
+                windows_scratch_zero(table);
+        }
+
+        // The windows: the whole record's reach where the space is 48 bits and not the display's; Ivy Bridge's 2 GiB shared with the display from 256 MiB, the maps
+        // from 1 GiB to the last page; a space under 1.25 GiB refused.
+        gpu_i915.gtt = 1ull << 48, gpu_i915.ppgtt = 2;
+        check("gpu i915: a 48-bit address space of its own has amdgpu's window", gpu_i915_window(900, &va, &maps, &top) == 0 && va == GPU_AMD_VA && maps == GPU_AMD_VA_MAPS && top == GPU_VA_RECORD);
+        gpu_i915.gtt = 1ull << 31, gpu_i915.ppgtt = 1;
+        check("gpu i915: Ivy Bridge's 2 GiB shared with the display: the buffer at 256 MiB, the maps from 1 GiB to its last page",
+              gpu_i915_window(700, &va, &maps, &top) == 0 && va == 0x10000000ull && maps == 1ull << 30 && top == (1ull << 31) - 4096);
+        gpu_i915.gtt = 0;
+        check("gpu i915: a space the kernel does not say is the chip's (Cherry View 4 GiB, Elkhart Lake 64 GiB)",
+              gpu_i915_window(801, &va, &maps, &top) == 0 && top == (1ull << 32) - 4096 && gpu_i915_window(1101, &va, &maps, &top) == 0 && top == (1ull << 36) - 4096);
+        gpu_i915.gtt = 1ull << 30;
+        check("gpu i915: a space too small for the path is refused (ENOSPC)", gpu_i915_window(700, &va, &maps, &top) == 28);
+        // amdgpu's window as it was where DEV_INFO says nothing or 2^40 and more (RDNA2); an old card's 64 GiB moves it below its top; 2 GiB is refused.
+        gpu_amd_va_max = 0;
+        check("gpu amd: a space DEV_INFO does not say keeps the window", gpu_amd_window(144, &va, &maps, &top) == 0 && va == GPU_AMD_VA && maps == GPU_AMD_VA_MAPS && top == GPU_VA_RECORD);
+        gpu_amd_va_max = (1ull << 47) - (2ull << 20);
+        check("gpu amd: RDNA2's 2^47 keeps the window", gpu_amd_window(144, &va, &maps, &top) == 0 && va == GPU_AMD_VA && top == GPU_VA_RECORD);
+        gpu_amd_va_max = (64ull << 30) - 0x203000ull;
+        check("gpu amd: a 64 GiB space (gmc v6 to v8 on a machine of less than 22 GiB) has the window below its top",
+              gpu_amd_window(130, &va, &maps, &top) == 0 && va == 1ull << 30 && maps == 2ull << 30 && top < 64ull << 30 && va < maps && maps < top);
+        gpu_amd_va_max = 2ull << 30;
+        check("gpu amd: a space under 3 GiB is refused", gpu_amd_window(130, &va, &maps, &top) == 28);
+        gpu_amd_va_max = kept_va_max;
+        check("gpu amd: the classifier is as it was: EINVAL, ENODEV and ECANCELED the card lost, EAGAIN asked again, EFAULT refused",
+              gpu_amd_classify(22) == GPU_ERR_LOST && gpu_amd_classify(19) == GPU_ERR_LOST && gpu_amd_classify(125) == GPU_ERR_LOST && gpu_amd_classify(11) == GPU_ERR_AGAIN &&
+                  gpu_amd_classify(14) == GPU_ERR_REFUSED && gpu_amd_classify(5) == GPU_ERR_REFUSED);
+        check("gpu i915: the classifier: EINVAL, ENOSPC, ENOENT and EOPNOTSUPP our own job, EIO and ENODEV the card lost, EAGAIN and EINTR asked again, EFAULT refused",
+              gpu_i915_classify(22) == GPU_ERR_OURS && gpu_i915_classify(28) == GPU_ERR_OURS && gpu_i915_classify(2) == GPU_ERR_OURS && gpu_i915_classify(95) == GPU_ERR_OURS &&
+                  gpu_i915_classify(5) == GPU_ERR_LOST && gpu_i915_classify(19) == GPU_ERR_LOST && gpu_i915_classify(11) == GPU_ERR_AGAIN && gpu_i915_classify(4) == GPU_ERR_AGAIN &&
+                  gpu_i915_classify(14) == GPU_ERR_REFUSED);
+
+        // The calls on an open card (the fake node as the card's descriptor, the 48-bit window).
+        gpu_kernel.i915_chip = 0x3e92, gpu_kernel.i915_fence = 0;
+        gpu_i915_identify(GPU_KERNEL_I915, &family, &device);
+        gpu_backend = &gpu_i915_row, gpu.fd = GPU_KERNEL_I915, gpu.family = 900, gpu.device = 0x3e92;
+        gpu_i915_window(900, &gpu_window.va, &gpu_window.maps, &gpu_window.top);
+        gpu_layout.packets = gpu_i915_row.packets, gpu_layout.args = GPU_SLOTS * gpu_i915_row.packets, gpu_layout.code = 2560;
+        {
+                p64 offset = 0;
+
+                check("gpu i915: the card's buffer is made and mapped write-back on a chip with LLC, bound at the window's start",
+                      gpu_i915_buffer(sizeof(buffer), GPU_VA, &handle, &offset) == 0 && handle && offset == 0x100000ull * handle && gpu_kernel.i915_mmap_flags == 2 &&
+                          gpu_i915.main == handle && gpu_i915.bound[handle].va == GPU_VA && gpu_i915.bound[handle].written);
+        }
+        check("gpu i915: a context is made not recoverable (RECOVERABLE 0), and the one before it let go of",
+              gpu_i915_context(&made, 0) == 0 && made && gpu_kernel.i915_set_ctx == made && gpu_kernel.i915_set_param == 8 && gpu_kernel.i915_set_value == 0 &&
+                  gpu_i915_context(&gpu.ctx, made) == 0 && gpu_kernel.i915_destroyed == made && gpu.ctx != made);
+        gpu.at = (unsigned int address_to)buffer, gpu.size = sizeof(buffer);
+        {
+                unsigned int h = 0, calls = gpu_kernel.i915_userptrs;
+
+                gpu_i915.read_only_refused = 0;
+                check("gpu i915: a map to read on Gen9 is registered read-only, its range looked at now (READ_ONLY | PROBE)",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 0 && h && gpu_kernel.i915_userptr_flags == 3);
+                check("gpu i915: a written map is not read-only; one taken later is not looked at now",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_WRITTEN, &h) == 0 && gpu_kernel.i915_userptr_flags == 2 &&
+                          gpu_i915_user(0x10000000ull, 4096, GPU_USER_LATER, &h) == 0 && gpu_kernel.i915_userptr_flags == 0);
+                calls = gpu_kernel.i915_userptrs, gpu.family = 750;
+                check("gpu i915: a map to read on a chip without read-only entries (Haswell) is refused at once, EPERM, and the kernel not asked",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && h == 0 && gpu_kernel.i915_userptrs == calls);
+                gpu.family = 1200;
+                check("gpu i915: and on Gen12", gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls);
+                gpu.family = 900, gpu_kernel.i915_userptr_error = 19;
+                check("gpu i915: a chip that answers read-only with ENODEV is refused (EPERM) and not asked read-only again",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_i915.read_only_refused &&
+                          gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls + 1);
+                gpu_kernel.i915_userptr_error = 0, gpu_i915.read_only_refused = 0;
+        }
+        check("gpu i915: a range bound outside the window or not of whole pages is refused (EINVAL), one inside is kept by its handle",
+              gpu_i915_bind(40, GPU_VA_END, 4096, false) == 22 && gpu_i915_bind(40, GPU_VA_MAPS + 100, 4096, false) == 22 &&
+                  gpu_i915_bind(40, GPU_VA_MAPS, 5000, false) == 0 && gpu_i915.bound[40].bytes == 8192 && !gpu_i915.bound[40].written &&
+                  gpu_i915_bind(41, GPU_VA_MAPS + 8192, 4096, true) == 0);
+        check("gpu i915: an unbind at another address is refused, at its own it is let go of", gpu_i915_unbind(41, GPU_VA_MAPS, 4096) == 2 &&
+              gpu_i915_unbind(41, GPU_VA_MAPS + 8192, 4096) == 0 && !gpu_i915.bound[41].bytes && gpu_i915_bind(41, GPU_VA_MAPS + 8192, 4096, true) == 0);
+        // The submit: none without a kernel set; with one, every buffer pinned at its address, the card's own buffer last, the batch at the slot's packets.
+        {
+                struct gpu_job job = {0, GPU_VA + 2560, GPU_VA + 2048, 1, 1, (unsigned int address_to)(buffer + 1024), GPU_VA + 1024};
+                p64 bos[2] = {40, 41};
+                unsigned int execs = gpu_kernel.i915_execs;
+
+                gpu_set = 0;
+                check("gpu i915: a submit with no kernel set is refused as our own job (EOPNOTSUPP) and the kernel is not asked",
+                      gpu_i915_submit(&job, bos, 2, &sequence) == 95 && sequence == 0 && gpu_kernel.i915_execs == execs);
+                gpu_set = &gpu_i915_test_set, gpu_i915_test_words = 1;
+                check("gpu i915: with a set, the batch is submitted: its length padded to a quadword, at the slot's packets, on the render ring with NO_RELOC, in the context",
+                      gpu_i915_submit(&job, bos, 2, &sequence) == 0 && sequence == gpu_i915.sequence && gpu_kernel.i915_execs == execs + 1 &&
+                          (memory_copy(&run, gpu_kernel.i915_exec, 64), run.buffer_count == 3 && run.batch_start_offset == 1024 && run.batch_len == 8 &&
+                                                                         run.flags == GPU_I915_RUN && run.rsvd1 == gpu.ctx) &&
+                          buffer[1024 + 4] == 0);
+                memory_copy(objects, gpu_kernel.i915_objects, 3 * sizeof(objects[0]));
+                check("gpu i915: every buffer pinned at the address the table gave it, written only where bound written, the card's own buffer last",
+                      objects[0].handle == 40 && objects[0].offset == GPU_VA_MAPS && objects[0].flags == (GPU_I915_PINNED | GPU_I915_WIDE) &&
+                          objects[1].handle == 41 && objects[1].offset == GPU_VA_MAPS + 8192 && objects[1].flags == (GPU_I915_PINNED | GPU_I915_WIDE | GPU_I915_WRITTEN) &&
+                          objects[2].handle == handle && objects[2].offset == GPU_VA && (objects[2].flags & GPU_I915_WRITTEN) && !objects[2].relocation_count);
+                bos[1] = 42;
+                check("gpu i915: a buffer the table never bound is refused as our own (ENOENT), not sent", gpu_i915_submit(&job, bos, 2, &sequence) == 2 &&
+                      gpu_kernel.i915_execs == execs + 1);
+                bos[1] = 41;
+                gpu_i915_test_words = GPU_PACKETS / 4 + 2;
+                check("gpu i915: a batch past its slot's room is refused as our own (EINVAL), not sent", gpu_i915_submit(&job, bos, 2, &sequence) == 22 &&
+                      gpu_kernel.i915_execs == execs + 1);
+                gpu_i915_test_words = 1;
+        }
+        // The waits: GEM_WAIT on the card's own buffer, what is left to the deadline (0 a look), ETIME still running; done, the context's lost batches looked at.
+        {
+                positive first = gpu_i915.sequence;
+
+                gpu_kernel.i915_wait_error = 62;
+                check("gpu i915: a look at a running job is a GEM_WAIT of 0 that answers ETIME: still running",
+                      gpu_i915_wait(first, 0) == 0 && gpu_kernel.i915_wait_timeout == 0);
+                check("gpu i915: a wait to a deadline asks for what is left of it", gpu_i915_wait(first, clock_monotonic_nanoseconds() + 1000000000ull) == 0 &&
+                      gpu_kernel.i915_wait_timeout > 900000000ll && gpu_kernel.i915_wait_timeout <= 1000000000ll);
+                gpu_kernel.i915_wait_error = 0;
+                check("gpu i915: the buffer idle, the job is done, and every job before", gpu_i915_wait(first, 0) == 1 && gpu_i915.done == first && gpu_i915_wait(first - 1, 0) == 1);
+                gpu_kernel.i915_wait_error = 5;
+                gpu_i915_submit(&(struct gpu_job){0, GPU_VA + 2560, GPU_VA + 2048, 1, 1, (unsigned int address_to)(buffer + 1024), GPU_VA + 1024}, 0, 0, &sequence);
+                check("gpu i915: a wait the kernel refuses (not ETIME) is a wait that failed", gpu_i915_wait(sequence, 0) == -1);
+                gpu_kernel.i915_wait_error = 0, gpu_kernel.i915_lost = 1;
+                check("gpu i915: a job done after a reset took a batch of the context is a wait that failed, not a job done", gpu_i915_wait(sequence, 0) == -1 && gpu_i915.lost == 1);
+                check("gpu i915: no fence where the kernel has no EXEC_FENCE: the caller waits on the sequence", gpu_i915_fence(sequence, &fd) == 95 && fd == -1);
+                // With EXEC_FENCE: the job's sync_file, polled (one job's end), and a descriptor of its own for the loop.
+                gpu_i915.fence = 1;
+                gpu_i915_submit(&(struct gpu_job){0, GPU_VA + 2560, GPU_VA + 2048, 1, 1, (unsigned int address_to)(buffer + 1024), GPU_VA + 1024}, 0, 0, &sequence);
+                memory_copy(&run, gpu_kernel.i915_exec, 64);
+                check("gpu i915: with EXEC_FENCE the submit asks for the job's sync_file (FENCE_OUT, by the _WR request)", (run.flags & GPU_I915_FENCE_OUT) && gpu_kernel.i915_fence_fd > 0);
+                check("gpu i915: the fence is a descriptor of its own", gpu_i915_fence(sequence, &fd) == 0 && fd >= 0 && fd != gpu_kernel.i915_fence_fd);
+                if (fd >= 0)
+                        system_close(fd), fd = -1;
+                gpu_kernel.i915_wait_error = 62;
+                check("gpu i915: a job whose sync_file is not readable is still running (GEM_WAIT not asked)",
+                      (gpu_kernel.i915_waits = 0, gpu_i915_wait(sequence, 0)) == 0 && gpu_kernel.i915_waits == 0);
+                {
+                        positive one = 1;
+
+                        system_write_once(gpu_kernel.i915_fence_fd, &one, 8);
+                }
+                check("gpu i915: readable, it is done, its sync_file let go of", gpu_i915_wait(sequence, 0) == 1 && gpu_i915.done == sequence &&
+                      !gpu_i915.jobs[sequence % GPU_I915_JOBS].fence);
+                check("gpu i915: a job seen done has no fence left to poll (EALREADY)", gpu_i915_fence(sequence, &fd) == 114);
+                gpu_kernel.i915_wait_error = 0, gpu_i915.fence = 0;
+        }
+        // The core's submit on the i915 row: EINVAL is our own job (one call, not asked again, the card not lost, counted); EIO is a lost card.
+        {
+                unsigned int execs, ours = gpu_jobs_ours;
+
+                gpu_slot = 0, gpu.pending = 0, gpu_before.sequence = 0, gpu.imports = 0, gpu_map_count = 0, gpu_lost = 0;
+                memory_zero(GPU_ARGS, sizeof(*GPU_ARGS));
+                GPU_ARGS->w = 64, GPU_ARGS->rows = 1;
+                gpu_kernel.i915_exec_error = 22, execs = gpu_kernel.i915_execs;
+                check("gpu i915: a batch the kernel refuses with EINVAL is our own job: refused once, not asked again, the card not lost, counted",
+                      gpu_submit() == 0 && gpu_last_error == 22 && gpu_kernel.i915_execs == execs + 1 && !gpu_lost && gpu_jobs_ours == ours + 1);
+                gpu_kernel.i915_exec_error = 5;
+                check("gpu i915: EIO (a context banned after a reset, a wedged GPU) is a card lost", gpu_submit() == 0 && gpu_last_error == 5 && gpu_lost);
+                gpu_kernel.i915_exec_error = 0, gpu_lost = 0;
+                gpu_set = 0, execs = gpu_kernel.i915_execs;
+                check("gpu i915: with no kernel set the core's submit is refused at once and the card is not lost",
+                      gpu_submit() == 0 && gpu_last_error == 95 && !gpu_lost && gpu_kernel.i915_execs == execs);
+        }
+
+        // Put back what the rows changed (the sync_files are the table's: gpu_i915_forget closes the ones a wait did not).
+        gpu_i915_forget();
+        memory_zero(gpu_i915.bound, (positive)64 * sizeof(gpu_i915.bound[0]));
+        memory_copy(&gpu_kernel, kept_kernel, sizeof(gpu_kernel)), memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&gpu_req, kept_req, sizeof(gpu_req));
+        memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));
+        {
+                struct gpu_i915_bound *bound = gpu_i915.bound;
+                struct gpu_i915_object *list = gpu_i915.objects;
+
+                memory_copy(&gpu_i915, kept_i915, sizeof(gpu_i915));
+                gpu_i915.bound = bound, gpu_i915.objects = list;
+        }
+        memory_copy(&gpu_window, kept_window, sizeof(gpu_window)), memory_copy(&gpu_layout, kept_layout, sizeof(gpu_layout));
+        gpu_backend = kept_backend, gpu_set = kept_set, gpu_map_next = kept_next, gpu_jobs_ours = kept_ours, gpu_last_error = kept_error, gpu_lost = kept_lost;
+        compositor_gpu = kept_on, compositor.table = kept_table, compositor.card = kept_card;
+        gpu_slot = 0, gpu_map_count = kept_maps, gpu_faults = kept_faults, gpu_job_error = kept_job_error, gpu_fault_next = kept_fault_next;
+        memory_copy(gpu_fault, kept_fault, sizeof(gpu_fault)), memory_copy(&gpu_shared, kept_shared, sizeof(gpu_shared));
+}
+
+/*
         The card's prerequisites beyond the start: the node the card is (gpu_pick, the display's own device first), the late probe's schedule (compositor_gpu_late_due:
         a look at once, then every five seconds for the first minute, then every minute), and the card's losses on the real card: a submit that answers ECANCELED is
         a lost card (gpu_lost), recovered by gpu_recover (the maps let go, the card started again, its self-test drawn right), and a card whose node is absent
@@ -4126,6 +4456,7 @@ b32 main(void)
         dirty_rows();
         close_ask_rows();
         grab_protocol_rows();
+        gpu_i915_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;

@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (de plaats in het bestand wordt niet gelezen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wordt niet aangeboden)
 settings_refused_turn	7b3a	%1$s (%2$s kon niet worden gedaan)
 settings_req_context	a233	de kaart levert geen buffer, geen VM-koppeling en geen rekencontext: de amdgpu-rekenring of zijn firmware draait niet
-settings_req_driver	9d2d	het stuurprogramma van de kaart is niet amdgpu: er is nog geen GPU-route ervoor (i915, virtio_gpu en nouveau blijven op de processor)
-settings_req_family	ddcf	deze AMD-familie heeft geen kernels (alleen RDNA2: 144, 146, 149, 151); de kaart blijft op de processor
+settings_req_driver	42ea	het stuurprogramma van de kaart, %1$s, heeft nog geen GPU-route: de processor tekent alles
+settings_req_family	8305	er zijn nog geen GPU-kernels voor deze chip, %1$s: de processor tekent alles
 settings_req_node	a362	geen render-knoop van de kaart geopend: controleer modus, eigenaar en of het stuurprogramma geladen is (groep render of modus 0666)
 settings_req_prime	a63c	een dma-buf importeert niet in de render-knoop: de kaart kan het memfd van een venster niet lezen (CONFIG_DRM_AMDGPU met PRIME)
 settings_req_ring	29f2	de rekenring heeft de zelftest niet afgerond: firmware, kloks of een ringreset (de kernelregels zeggen welke)

@@ -51,6 +51,9 @@ static struct
         b32 restart_due;           // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
         positive slept_seen;       // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
         b64 late_first, late_next; // the late probe: when the first look that found no card was, and when the next look is due
+        positive settled;          // a start that failed by what the nodes are (gpu_req.settled): the nodes it saw (gpu_req.nodes), 0 for none. Not started
+                                   // again while the nodes are the same (the late probe looks at the nodes, not at the card)
+        positive said;             // the last failed start's outcome said in the log (compositor_gpu_outcome): a start that fails the same way is not said again
 } compositor_gpu_state;
 
 // The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
@@ -88,15 +91,24 @@ static void compositor_gpu_publish(void)
 // The prerequisites of the card, as the table and the issue board say them after a start: the first one that failed is an ERROR under "canvas gpu" with its
 // fix (the detail) and the kernel's error; when the card is up, that issue is cleared. The table's record is written either way (moonwater debug).
 typedef char gpu_req_words_fit[sizeof(windows_gpu_req_fixes) / sizeof(windows_gpu_req_fixes[0]) == GPU_REQ_COUNT ? 1 : -1];
+// The detail of a failed step: the machine's own words where gpu.c has them (the driver that has no path and its node, the chip that has no kernels: Settings
+// puts them in its message), else the step's fix.
+static const char *compositor_gpu_req_detail(char *into, unsigned int room)
+{
+        return gpu_req_words(into, room) ? into : (const char *)windows_gpu_req_fixes[gpu_req.first];
+}
+
 static void compositor_gpu_requirements(void)
 {
+        char words[WINDOWS_ISSUE_DETAIL];
+
         if (!compositor.table)
                 return;
         compositor.table->gpu_req_checked = 1;
         compositor_gpu_publish();
         if (gpu_req.first)
                 windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.first, gpu_req.error,
-                                  windows_gpu_req_fixes[gpu_req.first]);
+                                  compositor_gpu_req_detail(words, sizeof(words)));
         else if (gpu_req.route) // the card composes; a refused userptr has no fallback until the dma-buf route works
                 windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.route, gpu_req.route_error,
                                   windows_gpu_req_fixes[gpu_req.route]);
@@ -147,6 +159,37 @@ static b32 compositor_gpu_late_due(b64 now, b64 *first, b64 *next)
         return true;
 }
 
+// A failed start's outcome as a number (the step, its error, the driver, the chip): the same outcome is the same number, and one is said in the log once
+// (compositor_gpu_failed_say), however often the late probe or a recovery comes to it. Never 0.
+static positive compositor_gpu_outcome(void)
+{
+        positive h = gpu_node_mix(14695981039346656037ull, gpu_req.first, gpu_req.driver);
+
+        return (h ^ ((positive)gpu_req.error << 48 ^ (positive)gpu_req.family << 24 ^ gpu_req.device)) * 1099511628211ull | 1;
+}
+
+// A start that failed: given up (no card, or untrusted), settled where the nodes say it can never start while they stay as they are, the board told, and the
+// outcome said in the log the first time it is this one: the step, its error, its fix and the machine's words for it.
+static void compositor_gpu_failed(void)
+{
+        char words[WINDOWS_ISSUE_DETAIL];
+        positive outcome = compositor_gpu_outcome();
+        b32 own;
+
+        compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
+        compositor_gpu_state.dead_why = gpu.broken ? COMPOSITOR_GPU_WHY_UNTRUSTED : COMPOSITOR_GPU_WHY_NO_CARD;
+        compositor_gpu_state.settled = gpu_req.settled ? gpu_req.nodes : 0;
+        compositor_gpu_requirements();
+        if (outcome == compositor_gpu_state.said)
+                return;
+        compositor_gpu_state.said = outcome, own = gpu_req_words(words, sizeof(words));
+        string_format(log, "compositor: the GPU is not up, the processor draws: %s failed (error %p): %s%s%s%s%s\n", windows_gpu_req_names[gpu_req.first],
+                      (positive)gpu_req.error, windows_gpu_req_fixes[gpu_req.first], own ? (string_address) " (" : (string_address) "",
+                      (string_address)words, own ? (string_address) ")" : (string_address) "",
+                      compositor_gpu_state.settled ? (string_address) " (not looked for again while the render nodes stay as they are)" : (string_address) "");
+        log_flush();
+}
+
 // The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
 static int compositor_gpu_up(void)
 {
@@ -164,14 +207,10 @@ static int compositor_gpu_up(void)
         gpu_shared.pin = compositor_gpu_pin;
         if (!gpu_start((2 << 20) + (16 << 20)))
         {
-                compositor_gpu_state.dead = 1;
-                compositor_gpu_state.dead_why = gpu.broken ? COMPOSITOR_GPU_WHY_UNTRUSTED : COMPOSITOR_GPU_WHY_NO_CARD;
-                compositor_gpu_requirements();
-                string_format(log, "compositor: the GPU is not up: %s failed (error %p): %s\n", windows_gpu_req_names[gpu_req.first], (positive)gpu_req.error,
-                              windows_gpu_req_fixes[gpu_req.first]);
-                log_flush();
+                compositor_gpu_failed();
                 return 0;
         }
+        compositor_gpu_state.settled = 0, compositor_gpu_state.said = 0; // (a card that is up again says its next failure, whatever the last was)
         compositor_gpu_requirements();
         if (gpu_req.route)
                 string_format(log, "compositor: the GPU is up; its dma-buf route is not (%s, error %p): %s\n", windows_gpu_req_names[gpu_req.route],
@@ -194,8 +233,7 @@ static void compositor_gpu_recover(void)
         memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
         if (!gpu_recover())
         {
-                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_NO_CARD;
-                compositor_gpu_requirements();
+                compositor_gpu_failed(); // (no card: looked for again when it is due; one that drew its self-test wrong this time: untrusted)
                 return;
         }
         compositor_gpu_layout();
@@ -995,12 +1033,14 @@ static positive compositor_gpu_late_at(positive now)
 }
 
 // The loop has come to the late probe's time: the card is looked for again, and the next look is set. Started from its dead state, it is up, or dead again.
+// A start that failed by what the nodes are (settled: a driver with no path, a chip with no kernels) is not started again while the render nodes are the ones
+// it saw: the look is at the nodes (a version call each), and the card is started, and its outcome said, only when they have changed.
 static void compositor_gpu_late_tick(positive now)
 {
         if (!compositor_gpu_late_at(now) || !compositor_gpu_late_due(now, &compositor_gpu_state.late_first, &compositor_gpu_state.late_next))
                 return;
         if (compositor_gpu && !compositor_gpu_state.up && compositor_gpu_state.dead &&
-            compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD)
+            compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD && (!compositor_gpu_state.settled || gpu_nodes_seen() != compositor_gpu_state.settled))
         {
                 compositor_gpu_state.dead = 0;
                 if (compositor_gpu_up())

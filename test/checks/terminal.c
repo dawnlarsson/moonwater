@@ -101,7 +101,20 @@ static long gpu_fake_addfb_answer;
 #define COMPOSITOR_WL_ADDFB(fb) (gpu_fake_addfb_calls++, memory_copy(gpu_fake_addfb, &(fb), sizeof(fb) < sizeof gpu_fake_addfb ? sizeof(fb) : sizeof gpu_fake_addfb), \
                                  (fb).fb_id = gpu_fake_addfb_answer ? 0u : 40u + (unsigned int)gpu_fake_addfb_calls, gpu_fake_addfb_answer)
 #define GPU_SUBMIT_FAKE(error, taken, sequence) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true, (sequence) = ++gpu_fake_sequence; } while (0)
-#define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
+// While gpu_kernel.i915 names a driver, the first render node is the fake i915 node (GPU_KERNEL_I915, its version answering that name) and every other node is
+// absent: the walk of the nodes (gpu_start, gpu_nodes_seen, whose loops name their node `node`) sees one node, whatever the machine has.
+#define GPU_OPEN_FAKE(fd)                                                                                                                                          \
+        do                                                                                                                                                         \
+        {                                                                                                                                                          \
+                if (gpu_fake_absent)                                                                                                                               \
+                        gpu_fake_absent--, (fd) = -2;                                                                                                              \
+                else if (gpu_kernel.i915[0])                                                                                                                       \
+                {                                                                                                                                                  \
+                        if ((fd) >= 0)                                                                                                                             \
+                                system_close((int)(fd));                                                                                                           \
+                        (fd) = node == 0 ? GPU_KERNEL_I915 : -2;                                                                                                   \
+                }                                                                                                                                                  \
+        } while (0)
 // The file that lets the other gfx10 families in (/run/moonwater/gpu-gfx10), as the check has it: 0 the machine's own answer, 1 there (an fd that is not open: the
 // close of it is refused and does nothing), -1 not there.
 static int gpu_fake_wide;
@@ -138,6 +151,7 @@ static long gpu_fake_fence_error;
 #define GPU_KERNEL_DMABUF 2000
 #define GPU_KERNEL_HANDLES 512 // past the two hundred and one imports the import rows make (no count of imports is a limit)
 #define GPU_KERNEL_UDMABUF 1002
+#define GPU_KERNEL_I915 1003 // the fake i915 render node (gpu_kernel.i915)
 
 static struct
 {
@@ -157,6 +171,17 @@ static struct
         unsigned long udmabuf_limit; // the bytes a dma-buf may have (udmabuf's size_limit_mb, 64 MB by default: past it EINVAL); 0 none
         unsigned int udmabufs, udmabuf_memfd, userptrs;
         unsigned long udmabuf_offset, udmabuf_size;
+        // The fake i915 node (gpu_kernel_i915): its driver's name ("" no node), the device id CHIPSET_ID answers, HAS_ALIASING_PPGTT's and HAS_EXEC_FENCE's
+        // answers, the address space GTT_SIZE answers (0: refused), what each request was last asked and how often, and the answers the rows set.
+        char i915[16];
+        unsigned int i915_chip, i915_ppgtt, i915_fence, i915_lost;
+        positive i915_gtt;
+        unsigned int i915_identifies, i915_creates, i915_mmap_flags, i915_contexts, i915_destroyed, i915_set_ctx, i915_userptrs, i915_userptr_flags, i915_execs, i915_waits;
+        positive i915_set_param, i915_set_value;
+        long i915_userptr_error, i915_exec_error, i915_wait_error;
+        long long i915_wait_timeout;
+        unsigned char i915_exec[64], i915_objects[8 * 56];
+        int i915_fence_fd; // the sync_file the last submit was given (an eventfd: readable once the row writes it)
 } gpu_kernel;
 
 static unsigned int gpu_kernel_live(void)
@@ -177,12 +202,101 @@ static unsigned int gpu_kernel_handle(unsigned int buffer)
         return 0;
 }
 
+// The fake i915 node's answers: the requests gpu.c's i915 row makes (i915_drm.h's numbers), each as the kernel answers it where the rows turn on it.
+static long gpu_kernel_i915(unsigned int request, void *a)
+{
+        unsigned int *words = (unsigned int *)a;
+        p64 *longs = (p64 *)a;
+        unsigned int h = 0;
+
+        switch (request)
+        {
+        case 0xc0406400u: // DRM_IOCTL_VERSION: the name's whole length written back, no 0 after the bytes copied
+        {
+                positive length = string_length((string_address)gpu_kernel.i915), room = longs[2];
+
+                memory_copy((void *)longs[3], gpu_kernel.i915, length < room ? length : room);
+                longs[2] = length;
+                return 0;
+        }
+        case 0xc0106446u: // GETPARAM: CHIPSET_ID, HAS_LLC, HAS_ALIASING_PPGTT, HAS_EXEC_NO_RELOC, HAS_EXEC_SOFTPIN, HAS_EXEC_FENCE, HAS_USERPTR_PROBE
+        {
+                int value = words[0] == 4 ? (gpu_kernel.i915_identifies++, (int)gpu_kernel.i915_chip) : words[0] == 18 ? (int)gpu_kernel.i915_ppgtt
+                            : words[0] == 44 ? (int)gpu_kernel.i915_fence : words[0] == 17 || words[0] == 25 || words[0] == 37 || words[0] == 56 ? 1 : -1;
+
+                if (value < 0)
+                        return -22;
+                *(int *)longs[1] = value;
+                return 0;
+        }
+        case 0xc0186474u: // CONTEXT_GETPARAM: GTT_SIZE
+                if (longs[1] != 3 || !gpu_kernel.i915_gtt)
+                        return -22;
+                longs[2] = gpu_kernel.i915_gtt, words[1] = 0;
+                return 0;
+        case 0xc010645bu: // GEM_CREATE
+        case 0xc0186473u: // GEM_USERPTR
+                if (request == 0xc0186473u)
+                {
+                        gpu_kernel.i915_userptrs++, gpu_kernel.i915_userptr_flags = words[4];
+                        if (gpu_kernel.i915_userptr_error)
+                                return -gpu_kernel.i915_userptr_error;
+                }
+                else
+                        gpu_kernel.i915_creates++;
+                for (unsigned int free = 1; !h && free < GPU_KERNEL_HANDLES; free++)
+                        if (!gpu_kernel.buffer[free])
+                                h = free;
+                if (!h)
+                        return -12;
+                gpu_kernel.buffer[h] = 700 + h, gpu_kernel.mapped[h] = 0;
+                words[request == 0xc0186473u ? 5 : 2] = h;
+                return 0;
+        case 0xc0206464u: // GEM_MMAP_OFFSET: the offset the object's map is made at (as mmap would be asked it)
+                gpu_kernel.i915_mmap_flags = (unsigned int)longs[2], longs[1] = 0x100000ull * words[0];
+                return 0;
+        case 0xc008646du: // GEM_CONTEXT_CREATE
+                words[0] = 10 + ++gpu_kernel.i915_contexts;
+                return 0;
+        case 0x4008646eu: // GEM_CONTEXT_DESTROY
+                gpu_kernel.i915_destroyed = words[0];
+                return 0;
+        case 0xc0186475u: // GEM_CONTEXT_SETPARAM
+                gpu_kernel.i915_set_ctx = words[0], gpu_kernel.i915_set_param = longs[1], gpu_kernel.i915_set_value = longs[2];
+                return 0;
+        case 0xc0186472u: // GET_RESET_STATS: the context's lost batches as batch_active, none pending
+                words[2] = 0, words[3] = gpu_kernel.i915_lost, words[4] = 0;
+                return 0;
+        case 0x40406469u: // GEM_EXECBUFFER2 and its _WR: the record and its first eight objects kept; FENCE_OUT given an eventfd (not readable until the row writes it)
+        case 0xc0406469u:
+                gpu_kernel.i915_execs++;
+                memory_copy(gpu_kernel.i915_exec, a, 64);
+                memory_copy(gpu_kernel.i915_objects, (void *)longs[0], (words[2] < 8 ? words[2] : 8) * 56ull);
+                if (gpu_kernel.i915_exec_error)
+                        return -gpu_kernel.i915_exec_error;
+                if (request == 0xc0406469u && (longs[5] & (1ull << 17)))
+                        gpu_kernel.i915_fence_fd = (int)system_call_2(syscall(eventfd2), 0, 0x80000), longs[7] = (p64)(unsigned int)gpu_kernel.i915_fence_fd << 32;
+                return 0;
+        case 0xc010646cu: // GEM_WAIT: the timeout asked kept, and the answer the row sets (ETIME: still busy)
+                gpu_kernel.i915_waits++, gpu_kernel.i915_wait_timeout = (long long)longs[1];
+                return -gpu_kernel.i915_wait_error;
+        case 0x40086409u: // DRM_IOCTL_GEM_CLOSE
+                if (words[0] == 0 || words[0] >= GPU_KERNEL_HANDLES || !gpu_kernel.buffer[words[0]])
+                        return gpu_kernel.refused++, -22;
+                gpu_kernel.buffer[words[0]] = 0, gpu_kernel.closes++;
+                return 0;
+        }
+        return request == 0xc0106401u ? -13 : -22; // GET_UNIQUE is refused on a render node
+}
+
 static long gpu_kernel_control(int fd, unsigned int request, void *a)
 {
         unsigned int *words = (unsigned int *)a;
         p64 *longs = (p64 *)a;
 
         gpu_fake_requests++;
+        if (fd == GPU_KERNEL_I915 && gpu_kernel.i915[0])
+                return gpu_kernel_i915(request, a);
         // AMDGPU_FENCE_TO_HANDLE on the fake card: the words asked are kept, and the sync_file is an eventfd (a descriptor the row closes), or the error the row gives.
         if (gpu_fake_card && fd < 0 && request == 0xc0206454u)
         {

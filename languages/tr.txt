@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (dosyadaki konumu okunmuyor)
 settings_refused_rate	97bc	%1$s (%2$d Hz sunulmuyor)
 settings_refused_turn	7b3a	%1$s (%2$s yapılamadı)
 settings_req_context	a233	kart bir arabellek, VM eşlemesi ya da hesaplama bağlamı vermiyor: amdgpu hesaplama halkası ya da yazılımı çalışmıyor
-settings_req_driver	9d2d	kartın sürücüsü amdgpu değil: onun için henüz GPU yolu yok (i915, virtio_gpu ve nouveau işlemcide kalır)
-settings_req_family	ddcf	bu AMD ailesinin çekirdekleri yok (yalnızca RDNA2: 144, 146, 149, 151); kart işlemcide kalır
+settings_req_driver	42ea	kartın sürücüsü %1$s için henüz bir GPU yolu yok: her şeyi işlemci çizer
+settings_req_family	8305	bu çip için henüz GPU çekirdeği yok, %1$s: her şeyi işlemci çizer
 settings_req_node	a362	kartın render düğümü açılamadı: kipi, sahibi ve sürücünün yüklü olup olmadığını denetleyin (render grubu veya 0666 kipi)
 settings_req_prime	a63c	dma-buf render düğümüne aktarılamıyor: kart bir pencerenin memfd'sini okuyamıyor (CONFIG_DRM_AMDGPU ve PRIME)
 settings_req_ring	29f2	hesaplama halkası öz testi bitirmedi: yazılım, saatler ya da halka sıfırlaması (çekirdek satırları hangisini söyler)

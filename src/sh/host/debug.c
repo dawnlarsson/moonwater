@@ -622,7 +622,13 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 if (table->gpu_refused[why])
                         host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
         if (table->gpu_family)
-                host_say(log, "  gpu card        amdgpu family %p, device id %p\n", (positive)table->gpu_family, (positive)table->gpu_device);
+        {
+                char card_driver[9];
+
+                memory_copy(card_driver, table->gpu_req_driver, 8), card_driver[8] = 0;
+                host_say(log, "  gpu card        %s family %p, device id %p\n", card_driver[0] ? (string_address)card_driver : (string_address) "-",
+                         (positive)table->gpu_family, (positive)table->gpu_device);
+        }
         //      The card's prerequisites in the order the path needs them (gpu.c's gpu_req): each one ok, failed (with its error and the fix in words) or not reached.
         if (!table->gpu_req_checked)
                 host_say(log, "  gpu requirements not checked (the card is looked for when canvas gpu is on and a present wants it)\n");
@@ -659,7 +665,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  gpu node        the card is %s: %s (the display is on %s)\n", node_bus[0] ? (string_address)node_bus : (string_address) "-",
                          table->gpu_node_pick == 1 ? (string_address) "the display's own device" :
                          table->gpu_node_pick == 2 ? (string_address) "another device than the display's: it composes only if its PRIME import of the scanout works" :
-                                                     (string_address) "the first amdgpu node (no display's bus known)",
+                                                     (string_address) "the first node of a chip with kernels (no display's bus known)",
                          display_bus[0] ? (string_address)display_bus : (string_address) "-");
         }
         if (table->gpu_recovered)

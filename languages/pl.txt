@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (jego położenie w pliku nie jest odczytywane)
 settings_refused_rate	97bc	%1$s (%2$d Hz nie jest dostępne)
 settings_refused_turn	7b3a	%1$s (nie udało się: %2$s)
 settings_req_context	a233	karta nie daje bufora, mapy VM ani kontekstu obliczeń: pierścień obliczeń amdgpu lub jego firmware nie działa
-settings_req_driver	9d2d	sterownik karty nie jest amdgpu: nie ma dla niego jeszcze ścieżki GPU (i915, virtio_gpu i nouveau zostają przy procesorze)
-settings_req_family	ddcf	ta rodzina AMD nie ma jąder (tylko RDNA2: 144, 146, 149, 151); karta zostaje przy procesorze
+settings_req_driver	42ea	sterownik karty, %1$s, nie ma jeszcze ścieżki GPU: procesor rysuje wszystko
+settings_req_family	8305	dla tego układu nie ma jeszcze jąder GPU, %1$s: procesor rysuje wszystko
 settings_req_node	a362	nie otwarto węzła renderowania karty: sprawdź tryb, właściciela i czy sterownik jest załadowany (grupa render lub tryb 0666)
 settings_req_prime	a63c	dma-buf nie importuje się do węzła renderowania: karta nie odczyta memfd okna (CONFIG_DRM_AMDGPU z PRIME)
 settings_req_ring	29f2	pierścień obliczeń nie dokończył autotestu: firmware, zegary lub reset pierścienia (linie jądra mówią, który)

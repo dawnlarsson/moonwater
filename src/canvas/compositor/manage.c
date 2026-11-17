@@ -3140,6 +3140,8 @@ static void compositor_gpu_settings(void)
                 // Given up for the session after two hangs (compositor_gpu_job_failed) stays so: the turn does not bring it back.
                 if (!compositor_gpu_state.hung_off && (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED))
                         compositor_gpu_state.dead = 0;
+                // The turn is the owner asking: the card is started once whatever the nodes were (settled), and its outcome is said again even if it is the last one.
+                compositor_gpu_state.settled = 0, compositor_gpu_state.said = 0;
                 compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
         }
 #endif

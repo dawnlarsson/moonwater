@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (його розташування у файлі 
 settings_refused_rate	97bc	%1$s (%2$d Гц не пропонується)
 settings_refused_turn	7b3a	%1$s (не вдалося: %2$s)
 settings_req_context	a233	відеокарта не дає буфер, VM-відображення чи контекст: кільце amdgpu або його прошивка не запущені
-settings_req_driver	9d2d	драйвер відеокарти не amdgpu: для нього ще немає шляху GPU (i915, virtio_gpu і nouveau лишаються на процесорі)
-settings_req_family	ddcf	для цього сімейства AMD немає ядер (лише RDNA2: 144, 146, 149, 151); відеокарта лишається на процесорі
+settings_req_driver	42ea	драйвер відеокарти, %1$s, ще не має шляху GPU: усе малює процесор
+settings_req_family	8305	для цього чипа ще немає ядер GPU, %1$s: усе малює процесор
 settings_req_node	a362	вузол рендерингу не відкрився: перевірте режим, власника і драйвер (група render або режим 0666)
 settings_req_prime	a63c	dma-buf не імпортується у вузол рендерингу: відеокарта не може читати memfd вікна (CONFIG_DRM_AMDGPU з PRIME)
 settings_req_ring	29f2	кільце обчислень не завершило самотест: прошивка, частоти або скидання кільця (рядки ядра скажуть які)

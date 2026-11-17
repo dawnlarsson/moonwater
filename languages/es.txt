@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (su lugar en el archivo no se lee)
 settings_refused_rate	97bc	%1$s (%2$d Hz no se ofrece)
 settings_refused_turn	7b3a	%1$s (no se pudo hacer: %2$s)
 settings_req_context	a233	la tarjeta no da búfer, mapa de VM ni contexto de cómputo: el anillo de cómputo amdgpu o su firmware no están activos
-settings_req_driver	9d2d	el controlador de la tarjeta no es amdgpu: aún no hay ruta de GPU para él (i915, virtio_gpu y nouveau siguen en el procesador)
-settings_req_family	ddcf	esta familia AMD no tiene núcleos de GPU (solo RDNA2: 144, 146, 149, 151); la tarjeta sigue en el procesador
+settings_req_driver	42ea	el controlador de la tarjeta, %1$s, aún no tiene ruta de GPU: el procesador lo dibuja todo
+settings_req_family	8305	aún no hay núcleos de GPU para este chip, %1$s: el procesador lo dibuja todo
 settings_req_node	a362	no se abrió ningún nodo de render de la tarjeta: revise modo y propietario, y que el controlador esté cargado (el grupo render o el modo 0666 permiten abrirlo)
 settings_req_prime	a63c	un dma-buf no se importa al nodo de render: la tarjeta no puede leer el memfd de una ventana (CONFIG_DRM_AMDGPU con PRIME)
 settings_req_ring	29f2	el anillo de cómputo no terminó la autoprueba: firmware, relojes o un reinicio del anillo (las líneas del kernel lo dicen)

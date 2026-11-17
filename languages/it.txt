@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (la sua posizione nel file non viene letta)
 settings_refused_rate	97bc	%1$s (%2$d Hz non è offerto)
 settings_refused_turn	7b3a	%1$s (%2$s non è stato possibile)
 settings_req_context	a233	la scheda non fornisce buffer, mappa VM né contesto di calcolo: l'anello di calcolo amdgpu o il suo firmware non è attivo
-settings_req_driver	9d2d	il driver della scheda non è amdgpu: non esiste ancora un percorso GPU per esso (i915, virtio_gpu e nouveau restano sul processore)
-settings_req_family	ddcf	questa famiglia AMD non ha kernel (solo RDNA2: 144, 146, 149, 151); la scheda resta sul processore
+settings_req_driver	42ea	il driver della scheda, %1$s, non ha ancora un percorso GPU: il processore disegna tutto
+settings_req_family	8305	non ci sono ancora kernel GPU per questo chip, %1$s: il processore disegna tutto
 settings_req_node	a362	nessun nodo di rendering della scheda si è aperto: controllare modalità, proprietario e che il driver sia caricato (gruppo render o modo 0666)
 settings_req_prime	a63c	un dma-buf non si importa nel nodo di rendering: la scheda non legge il memfd di una finestra (CONFIG_DRM_AMDGPU con PRIME)
 settings_req_ring	29f2	l'anello di calcolo non ha completato l'autotest: firmware, clock o un reset dell'anello (lo dicono le righe del kernel)

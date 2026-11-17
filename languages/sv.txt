@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (dess plats i filen läses inte)
 settings_refused_rate	97bc	%1$s (%2$d Hz erbjuds inte)
 settings_refused_turn	7b3a	%1$s (%2$s gick inte att göra)
 settings_req_context	a233	grafikkortet ger ingen buffert, ingen VM-mappning och inget beräkningssammanhang: amdgpu-beräkningsringen eller firmware är inte igång
-settings_req_driver	9d2d	grafikkortets drivrutin är inte amdgpu: det finns ingen GPU-väg för den än (i915, virtio_gpu och nouveau stannar på processorn)
-settings_req_family	ddcf	den här AMD-familjen har inga kärnor (bara RDNA2: 144, 146, 149, 151); grafikkortet stannar på processorn
+settings_req_driver	42ea	grafikkortets drivrutin, %1$s, har ingen GPU-väg än: processorn ritar allt
+settings_req_family	8305	det finns inga GPU-kärnor för det här chippet än, %1$s: processorn ritar allt
 settings_req_node	a362	ingen renderingsnod för grafikkortet öppnades: kontrollera läge, ägare och att drivrutinen är laddad (grupp render eller läge 0666)
 settings_req_prime	a63c	en dma-buf importeras inte i renderingsnoden: grafikkortet kan inte läsa ett fönsters memfd (CONFIG_DRM_AMDGPU med PRIME)
 settings_req_ring	29f2	beräkningsringen slutförde inte självtestet: firmware, klockor eller en ringåterställning (kärnraderna säger vilken)

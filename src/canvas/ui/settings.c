@@ -1109,8 +1109,8 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
         switch (issue->code)
         {
         case WINDOWS_ISSUE_GPU_REQUIRES:
-                if (settings_req_words(issue->a))
-                        language_format(into, room, settings_req_words(issue->a));
+                if (settings_req_words(issue->a)) // (the driver's and the chip's words say the detail: which driver, which chip)
+                        language_format(into, room, settings_req_words(issue->a), issue->detail);
                 else
                         language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code);
                 break;

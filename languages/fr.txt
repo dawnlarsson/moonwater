@@ -198,8 +198,8 @@ settings_refused_place	9632	%s (sa place dans le fichier n'est pas lue)
 settings_refused_rate	97bc	%1$s (%2$d Hz n'est pas proposé)
 settings_refused_turn	7b3a	%1$s (%2$s n'a pas pu être fait)
 settings_req_context	a233	la carte ne fournit ni tampon, ni mappage VM, ni contexte de calcul : l'anneau de calcul amdgpu ou son micrologiciel n'est pas prêt
-settings_req_driver	9d2d	le pilote de la carte n'est pas amdgpu : il n'existe pas encore de voie GPU pour lui (i915, virtio_gpu et nouveau restent sur le processeur)
-settings_req_family	ddcf	cette famille AMD n'a pas de noyaux (RDNA2 seulement : 144, 146, 149, 151) ; la carte reste sur le processeur
+settings_req_driver	42ea	le pilote de la carte, %1$s, n'a pas encore de voie GPU : le processeur dessine tout
+settings_req_family	8305	il n'y a pas encore de noyaux GPU pour cette puce, %1$s : le processeur dessine tout
 settings_req_node	a362	aucun nœud de rendu de la carte ne s'est ouvert : vérifiez mode et propriétaire, et que le pilote est chargé (groupe render ou mode 0666)
 settings_req_prime	a63c	un dma-buf ne s'importe pas dans le nœud de rendu : la carte ne peut pas lire le memfd d'une fenêtre (CONFIG_DRM_AMDGPU avec PRIME)
 settings_req_ring	29f2	l'anneau de calcul n'a pas fini l'autotest : micrologiciel, horloges ou réinitialisation de l'anneau (lignes du noyau)

@@ -4,13 +4,26 @@
 
 #define GPU_IO(dir, n, size) ((dir) << 30 | (size) << 16 | 0x6400u | (0x40 + (n)))
 #define GPU_PKT(op, n) (0xc0000002u | (op) << 8 | (n) << 16) // type 3, for the compute shader type
-#define GPU_VA 0x1000000000ull
+// The card's address space as its driver gives it (struct gpu_backend's window, asked at each start once the card is picked; amdgpu's until then): the card's
+// own buffer at va, the maps and imports placed in [maps, end). Every address a record holds is in it, so a driver whose address space is smaller (an old
+// amdgpu's 64 GiB, Ivy Bridge's 2 GiB) is given a window inside its own.
+#define GPU_AMD_VA 0x1000000000ull
+#define GPU_AMD_VA_MAPS 0x2000000000ull
+#define GPU_VA_RECORD (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it, whatever the driver's space
+static struct { positive va, maps, top; } gpu_window = {GPU_AMD_VA, GPU_AMD_VA_MAPS, GPU_VA_RECORD};
+#define GPU_VA (gpu_window.va)
+#define GPU_VA_MAPS (gpu_window.maps)
+#define GPU_VA_END (gpu_window.top) // never past GPU_VA_RECORD
+static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import is placed (gpu_place): from GPU_VA_MAPS of the window
 #define GPU_BASES_AT 40960 // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
-#define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024, the bases from GPU_BASES_AT
-// The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k, its arguments at
-// 512 + GPU_PACKETS * k. A slot is not written while its job may run (gpu_slot_take).
+#define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024 (or after the arguments), the bases from GPU_BASES_AT
+// The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k (the driver's room for a
+// job's command words: struct gpu_backend's packets), its arguments at GPU_SLOTS * GPU_PACKETS + 256 * k, the kernels from gpu_layout.code. With amdgpu's 256
+// that is packets at 0 and 256, arguments at 512 and 768, the kernels from 1024. A slot is not written while its job may run (gpu_slot_take).
 #define GPU_SLOTS 2
-#define GPU_PACKETS 256
+#define GPU_AMD_PACKETS 256
+static struct { unsigned int packets, args, code; } gpu_layout = {GPU_AMD_PACKETS, GPU_SLOTS * GPU_AMD_PACKETS, 1024};
+#define GPU_PACKETS (gpu_layout.packets)
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 // The imports the table may hold: as many as there are buffers (gpu_imports_room grows it a doubling at a time in a reservation of
@@ -199,12 +212,14 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #endif
 
 // Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables).
-static const struct { const unsigned int *words; unsigned int size; } gpu_kernels[] = {
+struct gpu_code { const unsigned int *words; unsigned int size; };
+static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
     {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
+typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 1024 ? 1 : -1]; // amdgpu's packets and arguments end where its kernels begin
 typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + 256 * 8 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
@@ -230,6 +245,18 @@ static b32 gpu_family_ok(unsigned int family)
 {
         return GPU_FAMILIES(family) || ((gpu_wide || gpu_gfx103) && GPU_FAMILIES_WIDE(family));
 }
+// A driver's kernels for one instruction set (struct gpu_backend's set): the kernels in the order of the ops, each its words in the table (skip of them the set's
+// own header, not code: amdgpu's rsrc1 and rsrc2), the hash the self-test's first pass draws (GPU_TEST_HASH for the set it was taken on), and for a driver whose
+// command words are made from the job (i915's batch) the call that makes them: the words written at words, room of them at most, 0 for none.
+struct gpu_job;
+struct gpu_set
+{
+        const struct gpu_code *kernels;
+        unsigned int count, skip, hash;
+        unsigned int (*batch)(const struct gpu_job *job, unsigned int address_to words, unsigned int room);
+};
+static const struct gpu_set gpu_amd_rdna2 = {gpu_kernels, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
+static const struct gpu_set *gpu_set = &gpu_amd_rdna2; // the started card's (amdgpu's until a start says otherwise: a check's fake card is one)
 // The prerequisites of the path, in the order it needs them. gpu_start stops at the first that fails and keeps it: the code, the kernel's error (its
 // errno; 0 where the step failed by what it found, not by a call), and a bit in gpu_req.mask for each that passed. The node the checks looked at (its path,
 // mode and owner), the driver's name and the family are kept whether or not that node was taken: moonwater debug says them.
@@ -237,8 +264,8 @@ enum gpu_req
 {
         GPU_REQ_NONE,
         GPU_REQ_NODE,     // a render node opens (none does: the first one's error, and its mode and owner)
-        GPU_REQ_DRIVER,   // a node's driver is amdgpu (the first node's name is kept; another driver has no GPU path yet)
-        GPU_REQ_FAMILY,   // the family is one the kernels are for (the family and device id are kept)
+        GPU_REQ_DRIVER,   // a node's driver is one of gpu_backends' (amdgpu, i915: the first node's name is kept; another driver has no GPU path yet)
+        GPU_REQ_FAMILY,   // the chip has a kernel set (its driver's set call: the family and device id are kept; i915 has none yet, so every i915 chip stops here)
         GPU_REQ_USERPTR,  // AMDGPU_GEM_USERPTR maps an anonymous page (19: a kernel without CONFIG_DRM_AMDGPU_USERPTR)
         GPU_REQ_CONTEXT,  // a GEM buffer, its VM map and a compute context
         GPU_REQ_RING,     // the compute ring finished the self-test's job (its error when it did not: the submit's, or 62 for a job still running)
@@ -247,8 +274,12 @@ enum gpu_req
         GPU_REQ_PRIME,    // and that dma-buf imports into the render node. Checked once the card is up (gpu_route_probe): not a step the card needs while userptr works
         GPU_REQ_COUNT
 };
-// first: the required step that failed (0 none; the card is not up); route: the dma-buf route's step that failed once the card is up (0 none; the card is up)
-static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error, pick; char driver[8], node[20], bus[32]; } gpu_req;
+// first: the required step that failed (0 none; the card is not up); route: the dma-buf route's step that failed once the card is up (0 none; the card is up).
+// settled: the start failed by what the nodes are, not by anything that may change while they stay as they are: no node's driver is one this file has, or every
+// node of one that is answered with a chip that has no kernel set (a driver whose chip could not be asked, a node that would not open, are not settled); nodes:
+// the render nodes the start saw, as gpu_nodes_seen says them (nonzero), so that a late look can tell the same nodes from new ones without starting the card;
+// name: the named node's driver's whole name (driver is the table's eight bytes of it).
+static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error, pick, settled; positive nodes; char driver[8], node[20], bus[32], name[32]; } gpu_req;
 static char gpu_display[32]; // the display card's bus (set by the compositor before the start: "" for a headless one, or one the kernel does not name)
 #define GPU_NODES 8
 static unsigned int gpu_last_error; // the last job's refusal: the submit's errno, 62 (ETIME) for one that hung (two seconds old, not done), 5 for a wait that failed
@@ -312,19 +343,35 @@ static unsigned int gpu_raw(int fd, unsigned int request, void *a)
 #define GPU_GEM_CLOSE 0x40086409u // DRM_IOW(0x09, struct drm_gem_close)
 
 /*
-        The card's driver, behind ten calls. Everything above them is any card's: the scene's records and their bins, the table of maps and of imports and
-        their addresses, the tick and the marks, the late, hung and lost job, the self-test, the prerequisites. Everything below them is one driver's requests
-        of the kernel and one chip's command words. A second driver, or a second chip of this one with other words, is a second struct gpu_backend and its
-        kernels; nothing above the calls names amdgpu. (The requests every DRM driver has are not behind them: the version, a handle closed, a dma-buf to a
-        handle and back.) Each call answers 0 or the kernel's errno unless it says otherwise.
+        The card's driver, behind ten calls and the values of its row. Everything above them is any card's: the scene's records and their bins, the table of
+        maps and of imports and their addresses, the tick and the marks, the late, hung and lost job, the self-test, the prerequisites. Everything below them is
+        one driver's requests of the kernel and one chip's command words. A second driver, or a second chip of this one with other words, is a second struct
+        gpu_backend and its kernel sets; nothing above the calls names a driver. (The requests every DRM driver has are not behind them: the version, a handle
+        closed, a dma-buf to a handle and back.) Each call answers 0 or the kernel's errno unless it says otherwise.
+
+        A refused submit is what the driver's classify says it is (enum gpu_err), since the same errno is another thing to each driver:
+          amdgpu: EAGAIN (11) asked again at once; ECANCELED (125, the context lost in a reset), ENODEV (19, the device gone) and EINVAL (22, the VM or the
+                  context the kernel no longer has) the card lost; anything else refused, asked again up to three times without the maps whose pages are gone.
+          i915:   EAGAIN and EINTR (4) asked again at once; EIO (5, a context banned after a reset, or the GPU wedged) and ENODEV the card lost; EINVAL (our
+                  batch or an object the kernel will not take as it is: a misaligned batch, a pinned offset not page-aligned or not canonical), ENOSPC (28, a
+                  pinned range something else holds: on Ivy Bridge and Haswell the display's), ENOENT (2, a handle the kernel does not have) and EOPNOTSUPP
+                  (95, no batch for the chip: no kernel set) our own job, refused as it is and never asked again (the processor draws it, and it is counted
+                  as any refused job is); anything else (EFAULT, a userptr's pages gone; ENOMEM) refused as amdgpu's.
 */
 struct gpu_job
 {
-        const unsigned int *kernel; // the program's two resource words (the code follows them in the card's buffer)
+        const unsigned int *kernel; // the kernel's words in its set (the set's header first: amdgpu's two resource words; the code follows them in the card's buffer)
         positive code, arguments;   // the card's addresses of the code and of the arguments' block
-        unsigned int columns, rows; // the grid: columns of 64 pixels (a wave), rows of what the kernel takes a row to be
+        unsigned int columns, rows; // the grid: columns of the driver's lanes (struct gpu_backend's lanes: amdgpu's wave of 64 pixels), rows of what the kernel takes a row to be
         unsigned int address_to packets_at; // the job's room for its command words (GPU_PACKETS bytes of the card's buffer: its slot's), and its card address
         positive packets;
+};
+enum gpu_err
+{
+        GPU_ERR_REFUSED, // the job refused: asked again up to three times, without the maps whose pages are gone (gpu_drop_unmapped)
+        GPU_ERR_AGAIN,   // asked again at once (up to GPU_AGAIN times)
+        GPU_ERR_LOST,    // the card lost its state: the caller starts it again (gpu_recover)
+        GPU_ERR_OURS     // our own job is wrong as it is (the same job is refused the same way again): refused at once, not asked again, and the card is not lost
 };
 struct gpu_vm_fault
 {
@@ -337,6 +384,8 @@ enum
         GPU_USER_WRITTEN, // pages it may write, taken at once
         GPU_USER_LATER    // pages it may write, taken when a job first names them (the probe's question of a range the kernel would not take at once)
 };
+static unsigned int gpu_text_put(char *to, unsigned int at, unsigned int room, const char *words);
+static unsigned int gpu_text_num(char *to, unsigned int at, unsigned int room, positive value, unsigned int base);
 struct gpu_backend
 {
         const char *driver; // the DRM driver's name (DRM_IOCTL_VERSION)
@@ -359,20 +408,63 @@ struct gpu_backend
         unsigned int (*fault)(struct gpu_vm_fault *fault);
         // 10. a job's fence as a sync_file: a descriptor that polls readable once the job is done (one of a job done long ago is readable at once)
         unsigned int (*fence)(positive sequence, int *fd);
+        // The chip's kernel set (0 for none: a card of that chip is not one the path takes, and the processor draws), what a refused submit's errno is
+        // (the mapping above), the card's address space for that chip (0, or the errno of a space too small for the path), and the chip in words for the
+        // notices (into's end, as gpu_text_put answers it).
+        const struct gpu_set *(*set)(unsigned int family);
+        enum gpu_err (*classify)(unsigned int error);
+        unsigned int (*window)(unsigned int family, positive *va, positive *maps, positive *top);
+        unsigned int (*describe)(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room);
+        unsigned int lanes, packets; // a column of the grid in pixels (amdgpu's wave64: 64); a slot's room for its command words, in bytes (a multiple of 256)
 };
 
+// The top of the card's address space as the last DEV_INFO said it (virtual_address_max, struct drm_amdgpu_info_device at byte 152), 0 for not said.
+static positive gpu_amd_va_max;
 static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int *device)
 {
-        unsigned int who[16] = {0}, ip[8] = {0}, e;
-        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32}; // AMDGPU_INFO_DEV_INFO
+        unsigned int who[40] = {0}, ip[8] = {0}, e;
+        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32}; // AMDGPU_INFO_DEV_INFO: the 160 bytes up to virtual_address_max
         p64 ip_ask[4] = {(p64)ip, sizeof(ip) | 0x02ull << 32, 1ull, 0}; // AMDGPU_INFO_HW_IP_INFO (AMDGPU_HW_IP_COMPUTE = 1)
 
         gpu_gfx103 = 0;
         e = gpu_raw(fd, GPU_IO(1u, 5, 32), ask);
         *family = e ? 0 : who[4], *device = e ? 0 : who[0];
+        gpu_amd_va_max = e ? 0 : (positive)who[39] << 32 | who[38];
         if (!e && who[4] == 143 && !gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask) && ip[0] == 10 && ip[1] == 3 && who[2] >= 0x28)
                 gpu_gfx103 = 1;
         return e;
+}
+
+// The card's address space. amdgpu's is the VM the kernel sized (amdgpu_vm_adjust_size): gmc v6 to v8 (SI to Polaris) ask for at least 64 GiB and at most 2^40, as
+// three times the machine's memory in GiB rounded up to a power of two, so a machine of less than 22 GiB has 64 GiB, which ends where the window here begins (v6.19:
+// gmc_v6_0.c 836, gmc_v7_0.c 1012, gmc_v8_0.c 1127, amdgpu_vm.c 2358); gmc v9 on and RDNA ask for 2^48 (gmc_v10_0.c 834). DEV_INFO says the top it took
+// (min(vm, 2^47) less the reserved top, amdgpu_kms.c 970). A space that holds the whole record's reach keeps the window it always had; a smaller one has the window
+// moved to 1 GiB, maps from 2 GiB to its top, and one under 3 GiB is refused (ENOSPC).
+static unsigned int gpu_amd_window(unsigned int family, positive *va, positive *maps, positive *top)
+{
+        (void)family;
+        if (!gpu_amd_va_max || gpu_amd_va_max >= GPU_VA_RECORD)
+                return *va = GPU_AMD_VA, *maps = GPU_AMD_VA_MAPS, *top = GPU_VA_RECORD, 0;
+        if (gpu_amd_va_max < (3ull << 30))
+                return 28;
+        return *va = 1ull << 30, *maps = 2ull << 30, *top = gpu_amd_va_max & ~4095ull, 0;
+}
+
+static const struct gpu_set *gpu_amd_set(unsigned int family)
+{
+        return gpu_family_ok(family) ? &gpu_amd_rdna2 : 0;
+}
+
+static enum gpu_err gpu_amd_classify(unsigned int error)
+{
+        return error == 11 ? GPU_ERR_AGAIN : error == 125 || error == 19 || error == 22 ? GPU_ERR_LOST : GPU_ERR_REFUSED;
+}
+
+static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
+{
+        at = gpu_text_put(into, at, room, "amdgpu family "), at = gpu_text_num(into, at, room, family, 10);
+        at = gpu_text_put(into, at, room, ", device 0x"), at = gpu_text_num(into, at, room, device, 16);
+        return gpu_text_put(into, at, room, GPU_FAMILIES_WIDE(family) ? ", RDNA1 or an RDNA2 card: its kernels are let in by the file gpu-gfx10" : "");
 }
 
 static unsigned int gpu_amd_buffer(positive size, positive at, unsigned int *handle, p64 *offset)
@@ -442,7 +534,7 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
             GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
             GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
             GPU_PKT(0x15, 3), job->columns, job->rows, 1, 0x45};
-        _Static_assert(sizeof(ib) <= GPU_PACKETS, "the packets end where the next slot's begin (GPU_PACKETS)");
+        _Static_assert(sizeof(ib) <= GPU_AMD_PACKETS, "the packets end where the next slot's begin (GPU_AMD_PACKETS)");
         // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
         p64 boin[3] = {0, named | 8ull << 32, (positive)bos}, ibc[4] = {0, job->packets, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
@@ -504,9 +596,460 @@ static unsigned int gpu_amd_fence(positive sequence, int *fd)
         return e;
 }
 
-static const struct gpu_backend gpu_amd = {"amdgpu",       gpu_amd_identify, gpu_amd_buffer, gpu_amd_context, gpu_amd_user,
-                                           gpu_amd_bind,   gpu_amd_unbind,   gpu_amd_submit, gpu_amd_wait,    gpu_amd_fault, gpu_amd_fence};
-static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver (one today)
+static const struct gpu_backend gpu_amd = {
+    .driver = "amdgpu", .identify = gpu_amd_identify, .buffer = gpu_amd_buffer, .context = gpu_amd_context, .user = gpu_amd_user, .bind = gpu_amd_bind,
+    .unbind = gpu_amd_unbind, .submit = gpu_amd_submit, .wait = gpu_amd_wait, .fault = gpu_amd_fault, .fence = gpu_amd_fence, .set = gpu_amd_set,
+    .classify = gpu_amd_classify, .window = gpu_amd_window, .describe = gpu_amd_describe, .lanes = 64, .packets = GPU_AMD_PACKETS};
+
+/*
+        i915: Ivy Bridge (2012) to Raptor Lake, graphics versions 7 to 12, on the render node. Every request is the uAPI of include/uapi/drm/i915_drm.h, the
+        numbers and the sizes of its records held to it below (and to intel-probe, which ran the same requests on Ivy Bridge, Haswell and a Coffee Lake), and
+        none of libdrm or Mesa is under it:
+          - the card's addresses are ours: every buffer a job names is in its object list pinned (EXEC_OBJECT_PINNED) at the address the table gave it, with
+            NO_RELOC and no relocation anywhere, so bind and unbind only keep the table of bound ranges (by handle) the submit reads; no GGTT pin, no VM_BIND;
+          - a job is one EXECBUFFER2 on the render ring of our context (its id in rsvd1), the batch the last object: the card's own buffer, the batch at its
+            slot's packets (batch_start_offset), its words made by the chip's kernel set (struct gpu_set's batch). No chip has a kernel set yet, so no i915
+            card is picked (GPU_REQ_FAMILY), and a submit without one is refused as our own job (EOPNOTSUPP) before the kernel is asked;
+          - the wait is GEM_WAIT on the card's own buffer, which every job's batch is in: a timeout of what is left to the deadline, 0 a look that does not
+            wait, ETIME still running (i915_gem_wait.c: "the wait ioctl with a timeout of 0 reimplements the busy ioctl"; -ETIME "still busy after timeout");
+            where the kernel has EXEC_FENCE (I915_PARAM_HAS_EXEC_FENCE) each job asks for its sync_file (FENCE_OUT, upper half of rsvd2, by the _WR ioctl so
+            that it is written back), which says one job's end where GEM_WAIT says all of them, and is the fence call's descriptor;
+          - a job seen done is held to the context's lost batches (GET_RESET_STATS: batch_active and batch_pending): a reset that took one of ours is a wait
+            that failed, never a job done, and the context is made not recoverable (I915_CONTEXT_PARAM_RECOVERABLE 0), so that after a reset it is banned
+            and its next submit answers EIO (a card lost: started again) instead of running on from a default state;
+          - userptr is synchronised (UNSYNCHRONIZED is refused by the kernel), read-only (I915_USERPTR_READ_ONLY) only where the chip's address space has
+            read-only entries: gen8_ppgtt.c sets has_read_only for graphics 8 and 9 and not 11 and 12, and Ivy Bridge and Haswell answer ENODEV (seen on
+            both); there a map to read is refused (EPERM), as amdgpu's of a page the compositor maps read-only is, and goes by the dma-buf route or to the
+            processor, so the card is never given a window's picture to write through userptr;
+          - i915 has no query of the address space's last fault: the fault call answers zeros, and the kernel's log is what says a hang.
+*/
+#define GPU_I915_GETPARAM GPU_IO(3u, 0x06, 16)
+#define GPU_I915_GEM_CREATE GPU_IO(3u, 0x1b, 16)
+#define GPU_I915_GEM_MMAP_OFFSET GPU_IO(3u, 0x24, 32)
+#define GPU_I915_EXECBUFFER2 GPU_IO(1u, 0x29, 64)
+#define GPU_I915_EXECBUFFER2_WR GPU_IO(3u, 0x29, 64)
+#define GPU_I915_GEM_WAIT GPU_IO(3u, 0x2c, 16)
+#define GPU_I915_CONTEXT_CREATE GPU_IO(3u, 0x2d, 8)
+#define GPU_I915_CONTEXT_DESTROY GPU_IO(1u, 0x2e, 8)
+#define GPU_I915_RESET_STATS GPU_IO(3u, 0x32, 24)
+#define GPU_I915_GEM_USERPTR GPU_IO(3u, 0x33, 24)
+#define GPU_I915_CONTEXT_GETPARAM GPU_IO(3u, 0x34, 24)
+#define GPU_I915_CONTEXT_SETPARAM GPU_IO(3u, 0x35, 24)
+_Static_assert(GPU_I915_GETPARAM == 0xc0106446u && GPU_I915_GEM_CREATE == 0xc010645bu && GPU_I915_GEM_MMAP_OFFSET == 0xc0206464u, "i915_drm.h: GETPARAM, GEM_CREATE, MMAP_OFFSET");
+_Static_assert(GPU_I915_EXECBUFFER2 == 0x40406469u && GPU_I915_EXECBUFFER2_WR == 0xc0406469u && GPU_I915_GEM_WAIT == 0xc010646cu, "i915_drm.h: EXECBUFFER2, _WR, GEM_WAIT");
+_Static_assert(GPU_I915_CONTEXT_CREATE == 0xc008646du && GPU_I915_CONTEXT_DESTROY == 0x4008646eu && GPU_I915_RESET_STATS == 0xc0186472u, "i915_drm.h: contexts, reset stats");
+_Static_assert(GPU_I915_GEM_USERPTR == 0xc0186473u && GPU_I915_CONTEXT_GETPARAM == 0xc0186474u && GPU_I915_CONTEXT_SETPARAM == 0xc0186475u, "i915_drm.h: USERPTR, context params");
+struct gpu_i915_param { int param, pad; p64 value; };                                       // drm_i915_getparam (int, then int *)
+struct gpu_i915_create { p64 size; unsigned int handle, pad; };                             // drm_i915_gem_create
+struct gpu_i915_mmap { unsigned int handle, pad; p64 offset, flags, extensions; };            // drm_i915_gem_mmap_offset
+struct gpu_i915_object { unsigned int handle, relocation_count; p64 relocs_ptr, alignment, offset, flags, rsvd1, rsvd2; }; // drm_i915_gem_exec_object2
+struct gpu_i915_exec { p64 buffers_ptr; unsigned int buffer_count, batch_start_offset, batch_len, dr1, dr4, num_cliprects; p64 cliprects_ptr, flags, rsvd1, rsvd2; };
+struct gpu_i915_wait { unsigned int handle, flags; long long timeout_ns; };                 // drm_i915_gem_wait
+struct gpu_i915_context { unsigned int id, pad; };                                          // drm_i915_gem_context_create and _destroy
+struct gpu_i915_context_param { unsigned int id, size; p64 param, value; };                 // drm_i915_gem_context_param
+struct gpu_i915_reset { unsigned int id, flags, resets, active, pending, pad; };            // drm_i915_reset_stats
+struct gpu_i915_userptr { p64 from, bytes; unsigned int flags, handle; };                   // drm_i915_gem_userptr
+_Static_assert(sizeof(struct gpu_i915_param) == 16 && sizeof(struct gpu_i915_create) == 16 && sizeof(struct gpu_i915_mmap) == 32 && sizeof(struct gpu_i915_object) == 56 &&
+                   sizeof(struct gpu_i915_exec) == 64 && sizeof(struct gpu_i915_wait) == 16 && sizeof(struct gpu_i915_context) == 8 &&
+                   sizeof(struct gpu_i915_context_param) == 24 && sizeof(struct gpu_i915_reset) == 24 && sizeof(struct gpu_i915_userptr) == 24,
+               "the i915 records are i915_drm.h's sizes");
+#define GPU_I915_PINNED 16ull     // EXEC_OBJECT_PINNED
+#define GPU_I915_WIDE 8ull        // EXEC_OBJECT_SUPPORTS_48B_ADDRESS: an object may be placed past 4 GiB
+#define GPU_I915_WRITTEN 4ull     // EXEC_OBJECT_WRITE
+#define GPU_I915_RUN 0x801ull     // I915_EXEC_RENDER | I915_EXEC_NO_RELOC
+#define GPU_I915_FENCE_OUT (1ull << 17)
+#define GPU_I915_JOBS 4           // the jobs whose sync_file is kept (two may be pending: gpu.pending and gpu_before)
+#define GPU_I915_HANDLES (GPU_IMPORTS_MOST + 64 + 1024) // the table of bound ranges, by handle (the kernel gives the lowest free one: as many as the buffers held)
+
+// The kernels' sets by family: none yet. A family's set is written in its own assembly and added here as {first family, last family, &set}; until then every
+// i915 card stops at GPU_REQ_FAMILY and the processor draws. A check names sets of its own (GPU_I915_SETS) to run the row without one.
+#ifndef GPU_I915_SETS
+#define GPU_I915_SETS
+#endif
+static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {GPU_I915_SETS{0, 0, 0}};
+
+/*
+        The chips, by the PCI device id CHIPSET_ID answers (the kernel's include/drm/intel/pciids.h, the tables intel-probe classified with): family is the
+        graphics version times 100, with a variant in the units where the chip differs in what the path stands on (no LLC, a smaller address space). A device in
+        none of them is family 0: older than Ivy Bridge (out of the path's reach), or a part of the xe era (DG1, DG2, Meteor Lake on i915).
+*/
+static const unsigned short gpu_i915_ivb[] = {0x0156, 0x0166, 0x0152, 0x015A, 0x0162, 0x016A};
+static const unsigned short gpu_i915_vlv[] = {0x0F30, 0x0F31, 0x0F32, 0x0F33};
+static const unsigned short gpu_i915_hsw[] = {
+    0x0A02, 0x0A06, 0x0A0A, 0x0A0B, 0x0A0E, 0x0402, 0x0406, 0x040A, 0x040B, 0x040E, 0x0C02, 0x0C06, 0x0C0A, 0x0C0B, 0x0C0E, 0x0D02, 0x0D06, 0x0D0A, 0x0D0B, 0x0D0E,
+    0x0A12, 0x0A16, 0x0A1A, 0x0A1B, 0x0A1E, 0x0412, 0x0416, 0x041A, 0x041B, 0x041E, 0x0C12, 0x0C16, 0x0C1A, 0x0C1B, 0x0C1E, 0x0D12, 0x0D16, 0x0D1A, 0x0D1B, 0x0D1E,
+    0x0A22, 0x0A26, 0x0A2A, 0x0A2B, 0x0A2E, 0x0422, 0x0426, 0x042A, 0x042B, 0x042E, 0x0C22, 0x0C26, 0x0C2A, 0x0C2B, 0x0C2E, 0x0D22, 0x0D26, 0x0D2A, 0x0D2B, 0x0D2E};
+static const unsigned short gpu_i915_bdw[] = {0x1606, 0x160B, 0x160E, 0x1602, 0x160A, 0x160D, 0x1616, 0x161B, 0x161E, 0x1612, 0x161A, 0x161D,
+                                              0x1626, 0x162B, 0x162E, 0x1622, 0x162A, 0x162D, 0x1636, 0x163B, 0x163E, 0x1632, 0x163A, 0x163D};
+static const unsigned short gpu_i915_chv[] = {0x22B0, 0x22B1, 0x22B2, 0x22B3};
+static const unsigned short gpu_i915_gen9[] = {
+    0x1906, 0x1913, 0x190E, 0x1915, 0x1902, 0x190A, 0x190B, 0x1917, 0x1916, 0x1921, 0x191E, 0x1912, 0x191A, 0x191B, 0x191D, 0x1923, 0x1926, 0x1927, 0x192A,
+    0x192B, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D, 0x5906, 0x5913, 0x590E, 0x5915, 0x5902, 0x5908, 0x590A, 0x590B, 0x5916, 0x5921, 0x591E, 0x5912, 0x5917,
+    0x591A, 0x591B, 0x591D, 0x5926, 0x5923, 0x5927, 0x593B, 0x591C, 0x87C0, 0x3E90, 0x3E93, 0x3E99, 0x3E91, 0x3E92, 0x3E96, 0x3E98, 0x3E9A, 0x3E9C, 0x3E94,
+    0x3E9B, 0x3EA9, 0x3EA5, 0x3EA6, 0x3EA7, 0x3EA8, 0x3EA1, 0x3EA4, 0x3EA0, 0x3EA3, 0x3EA2, 0x87CA, 0x9BA2, 0x9BA4, 0x9BA5, 0x9BA8, 0x9BC2, 0x9BC4, 0x9BC5,
+    0x9BC6, 0x9BC8, 0x9BE6, 0x9BF6, 0x9B21, 0x9BAA, 0x9BAC, 0x9B41, 0x9BCA, 0x9BCC};
+static const unsigned short gpu_i915_gen9lp[] = {0x0A84, 0x1A84, 0x1A85, 0x5A84, 0x5A85, 0x3184, 0x3185};
+static const unsigned short gpu_i915_icl[] = {0x8A50, 0x8A52, 0x8A53, 0x8A54, 0x8A56, 0x8A57, 0x8A58, 0x8A59, 0x8A5A, 0x8A5B, 0x8A5C, 0x8A70, 0x8A71, 0x8A51, 0x8A5D};
+static const unsigned short gpu_i915_ehl[] = {0x4541, 0x4551, 0x4555, 0x4557, 0x4570, 0x4571, 0x4E51, 0x4E55, 0x4E57, 0x4E61, 0x4E71};
+static const unsigned short gpu_i915_gen12[] = {
+    0x9A60, 0x9A68, 0x9A70, 0x9A40, 0x9A49, 0x9A59, 0x9A78, 0x9AC0, 0x9AC9, 0x9AD9, 0x9AF8, 0x4C80, 0x4C8A, 0x4C8B, 0x4C8C, 0x4C90, 0x4C9A, 0x4680, 0x4682,
+    0x4688, 0x468A, 0x468B, 0x4690, 0x4692, 0x4693, 0xA780, 0xA781, 0xA782, 0xA783, 0xA788, 0xA789, 0xA78A, 0xA78B, 0x46A0, 0x46A1, 0x46A2, 0x46A3, 0x46A6,
+    0x46A8, 0x46AA, 0x462A, 0x4626, 0x4628, 0x46B0, 0x46B1, 0x46B2, 0x46B3, 0x46C0, 0x46C1, 0x46C2, 0x46C3, 0x46D0, 0x46D1, 0x46D2, 0x46D3, 0x46D4, 0xA721,
+    0xA7A1, 0xA7A9, 0xA7AC, 0xA7AD, 0xA720, 0xA7A0, 0xA7A8, 0xA7AA, 0xA7AB};
+#define GPU_I915_CHIPS(X) X(gpu_i915_ivb, 700, "Gen7 Ivy Bridge") X(gpu_i915_vlv, 701, "Gen7 Valleyview") X(gpu_i915_hsw, 750, "Gen7.5 Haswell") \
+        X(gpu_i915_bdw, 800, "Gen8 Broadwell") X(gpu_i915_chv, 801, "Gen8 Cherry View") X(gpu_i915_gen9, 900, "Gen9 Skylake to Comet Lake")       \
+        X(gpu_i915_gen9lp, 901, "Gen9 Broxton or Gemini Lake") X(gpu_i915_icl, 1100, "Gen11 Ice Lake") X(gpu_i915_ehl, 1101, "Gen11 Elkhart Lake or Jasper Lake") \
+        X(gpu_i915_gen12, 1200, "Gen12 Tiger Lake to Raptor Lake")
+static unsigned int gpu_i915_family_of(unsigned int device)
+{
+#define GPU_I915_LOOK(table, family, words) \
+        for (unsigned int i = 0; i < sizeof(table) / sizeof(table[0]); i++) \
+                if (table[i] == device) \
+                        return family;
+        GPU_I915_CHIPS(GPU_I915_LOOK)
+#undef GPU_I915_LOOK
+        return 0;
+}
+
+// What the last identify found of the node (the one picked is the last asked), and the state of the open card: its jobs, their sync_files (+1: 0 none), and the
+// table of bound ranges with the object list of a submit, each a reservation of address space taken at its first use.
+struct gpu_i915_bound { positive va, bytes; unsigned int written, pad; };
+static struct
+{
+        b32 llc, softpin, no_reloc, fence, probe, read_only_refused;
+        unsigned int ppgtt, main, lost; // HAS_ALIASING_PPGTT (1 aliasing, 2 and up full); the card's own buffer's handle; its context's lost batches when last looked
+        positive gtt, sequence, done;   // the address space's size (I915_CONTEXT_PARAM_GTT_SIZE, 0 not said); the last job's sequence (from 1) and the last one seen done
+        struct { positive sequence; int fence; } jobs[GPU_I915_JOBS];
+        struct gpu_i915_bound *bound;
+        struct gpu_i915_object *objects;
+} gpu_i915;
+
+static int gpu_i915_param(int fd, int param)
+{
+        int value = 0;
+        struct gpu_i915_param ask = {param, 0, (p64)&value};
+
+        return gpu_raw(fd, GPU_I915_GETPARAM, &ask) ? 0 : value;
+}
+
+static unsigned int gpu_i915_identify(int fd, unsigned int *family, unsigned int *device)
+{
+        int id = 0;
+        struct gpu_i915_param ask = {4, 0, (p64)&id}; // I915_PARAM_CHIPSET_ID
+        struct gpu_i915_context_param gtt = {0, 0, 3, 0}; // I915_CONTEXT_PARAM_GTT_SIZE of the descriptor's default context
+        unsigned int e = gpu_raw(fd, GPU_I915_GETPARAM, &ask);
+
+        *device = e ? 0 : (unsigned int)id & 0xffff, *family = e ? 0 : gpu_i915_family_of((unsigned int)id & 0xffff);
+        if (e)
+                return e;
+        gpu_i915.llc = gpu_i915_param(fd, 17) > 0, gpu_i915.ppgtt = (unsigned int)gpu_i915_param(fd, 18), gpu_i915.no_reloc = gpu_i915_param(fd, 25) > 0;
+        gpu_i915.softpin = gpu_i915_param(fd, 37) > 0, gpu_i915.fence = gpu_i915_param(fd, 44) > 0, gpu_i915.probe = gpu_i915_param(fd, 56) > 0;
+        gpu_i915.gtt = gpu_raw(fd, GPU_I915_CONTEXT_GETPARAM, &gtt) ? 0 : gtt.value;
+        gpu_i915.read_only_refused = 0;
+        return 0;
+}
+
+// The address space: the kernel's size of it (GTT_SIZE), else the chip's (i915_pci.c: ppgtt_size 31 for graphics 7, 32 Cherry View, 36 Elkhart and Jasper Lake,
+// 48 the rest). A space of the whole record's reach, not shared with the display, has amdgpu's window; a smaller one, or one shared with the display (aliasing
+// PPGTT: Ivy Bridge, Valleyview and Haswell, where the display's buffers have their places in the same space), has the card's buffer at 256 MiB (the address
+// intel-probe ran at on Ivy Bridge and Haswell, where 8 MiB was the display's: ENOSPC) and the maps from 1 GiB to its top, the last page left out.
+static unsigned int gpu_i915_window(unsigned int family, positive *va, positive *maps, positive *top)
+{
+        positive space = gpu_i915.gtt ? gpu_i915.gtt
+                         : family < 800 ? 1ull << 31 : family == 801 ? 1ull << 32 : family == 1101 ? 1ull << 36 : 1ull << 48;
+        b32 shared = gpu_i915.ppgtt == 1 || family < 800;
+
+        if (space >= GPU_VA_RECORD && !shared)
+                return *va = GPU_AMD_VA, *maps = GPU_AMD_VA_MAPS, *top = GPU_VA_RECORD, 0;
+        if (space < (1ull << 30) + (256ull << 20))
+                return 28;
+        return *va = 0x10000000ull, *maps = 1ull << 30, *top = (space > GPU_VA_RECORD ? GPU_VA_RECORD : space - 4096) & ~4095ull, 0;
+}
+
+static const struct gpu_set *gpu_i915_set(unsigned int family)
+{
+        for (unsigned int i = 0; gpu_i915_sets[i].set; i++)
+                if (family >= gpu_i915_sets[i].from && family <= gpu_i915_sets[i].to)
+                        return gpu_i915.softpin && gpu_i915.no_reloc ? gpu_i915_sets[i].set : 0;
+        return 0;
+}
+
+static unsigned int gpu_i915_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
+{
+        const char *words = "a chip not in the tables: older than Ivy Bridge, or of the xe era";
+
+#define GPU_I915_NAME(table, f, name) if (family == (f)) words = name;
+        GPU_I915_CHIPS(GPU_I915_NAME)
+#undef GPU_I915_NAME
+        at = gpu_text_put(into, at, room, "i915 "), at = gpu_text_put(into, at, room, words);
+        at = gpu_text_put(into, at, room, ", device 0x");
+        return gpu_text_num(into, at, room, device, 16);
+}
+
+static enum gpu_err gpu_i915_classify(unsigned int error)
+{
+        return error == 11 || error == 4 ? GPU_ERR_AGAIN : error == 5 || error == 19 ? GPU_ERR_LOST
+               : error == 22 || error == 28 || error == 2 || error == 95 ? GPU_ERR_OURS : GPU_ERR_REFUSED;
+}
+
+// The reservations, taken once: the table of bound ranges and room for the object list of a submit of as many objects. False when the memory is not there.
+static b32 gpu_i915_room(void)
+{
+        if (!gpu_i915.bound)
+        {
+                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound), 3, 0x4022, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return false;
+                gpu_i915.bound = (struct gpu_i915_bound address_to)got;
+        }
+        if (!gpu_i915.objects)
+        {
+                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_object), 3, 0x4022, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return false;
+                gpu_i915.objects = (struct gpu_i915_object address_to)got;
+        }
+        return true;
+}
+
+static unsigned int gpu_i915_bind(unsigned int handle, positive va, positive bytes, b32 written)
+{
+        if (!gpu_i915_room())
+                return 12;
+        if (!handle || handle >= GPU_I915_HANDLES)
+                return 28;
+        // A range the window does not hold, or not of whole pages, would be refused at the submit (EINVAL: the kernel takes a pinned offset page-aligned and canonical).
+        if ((va & 4095) || !bytes || va < GPU_VA || va > GPU_VA_END || bytes > GPU_VA_END - va)
+                return 22;
+        gpu_i915.bound[handle].va = va, gpu_i915.bound[handle].bytes = (bytes + 4095) & ~4095ull, gpu_i915.bound[handle].written = written ? 1 : 0;
+        return 0;
+}
+
+static unsigned int gpu_i915_unbind(unsigned int handle, positive va, positive bytes)
+{
+        (void)bytes;
+        if (!gpu_i915.bound || !handle || handle >= GPU_I915_HANDLES || !gpu_i915.bound[handle].bytes || gpu_i915.bound[handle].va != va)
+                return 2;
+        memory_zero(&gpu_i915.bound[handle], sizeof(gpu_i915.bound[handle]));
+        return 0;
+}
+
+// The card's own buffer: made (GEM_CREATE), its map's offset (MMAP_OFFSET: write-back where the chip shares the last-level cache with the processor, LLC,
+// write-combined where it does not: Valleyview, Cherry View, Broxton, Gemini Lake), and its place in the table at va, written.
+static unsigned int gpu_i915_buffer(positive size, positive va, unsigned int *handle, p64 *offset)
+{
+        struct gpu_i915_create made = {size, 0, 0};
+        struct gpu_i915_mmap map = {0, 0, 0, 0, 0};
+        unsigned int e = gpu_call(3u, 0x1b, 16, &made);
+
+        if (e)
+                return e;
+        *handle = made.handle, map.handle = made.handle, map.flags = gpu_i915.llc ? 2 : 1; // I915_MMAP_OFFSET_WB, _WC
+        if ((e = gpu_call(3u, 0x24, 32, &map)) != 0 || (e = gpu_i915_bind(made.handle, va, size, true)) != 0)
+                return e;
+        gpu_i915.main = made.handle, *offset = map.offset;
+        return 0;
+}
+
+// A context's lost batches (GET_RESET_STATS: the ones lost while running, guilty, and while waiting), 0 when the kernel does not say.
+static unsigned int gpu_i915_lost(unsigned int context)
+{
+        struct gpu_i915_reset stats = {context, 0, 0, 0, 0, 0};
+
+        return gpu_call(3u, 0x32, 24, &stats) ? 0 : stats.active + stats.pending;
+}
+
+// The jobs' sync_files closed, every job up to the last submitted taken as done (a context let go of: its jobs are over for us, as amdgpu's are).
+static void gpu_i915_forget(void)
+{
+        for (unsigned int i = 0; i < GPU_I915_JOBS; i++)
+        {
+                if (gpu_i915.jobs[i].fence)
+                        system_close(gpu_i915.jobs[i].fence - 1);
+                gpu_i915.jobs[i].fence = 0, gpu_i915.jobs[i].sequence = 0;
+        }
+        gpu_i915.done = gpu_i915.sequence;
+}
+
+static unsigned int gpu_i915_context(unsigned int *made, unsigned int before)
+{
+        struct gpu_i915_context ctx = {0, 0}, old = {before, 0};
+        struct gpu_i915_context_param unrecoverable = {0, 0, 8, 0}; // I915_CONTEXT_PARAM_RECOVERABLE, false
+        unsigned int e = gpu_call(3u, 0x2d, 8, &ctx);
+
+        if (e)
+                return e;
+        // A kernel without the parameter keeps the context recoverable: a reset then still shows, as a lost batch at the job's end (gpu_i915_ended).
+        unrecoverable.id = ctx.id;
+        gpu_call(3u, 0x35, 24, &unrecoverable);
+        if (before)
+                gpu_call(1u, 0x2e, 8, &old), gpu_i915_forget();
+        gpu_i915.lost = gpu_i915_lost(ctx.id);
+        *made = ctx.id;
+        return 0;
+}
+
+static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int how, unsigned int *handle)
+{
+        struct gpu_i915_userptr up = {from, bytes, 0, 0};
+        unsigned int e;
+
+        *handle = 0;
+        if (how == GPU_USER_READ)
+        {
+                if (gpu_i915.read_only_refused || gpu.family == 700 || gpu.family == 750 || gpu.family >= 1100)
+                        return 1;
+                up.flags |= 1; // I915_USERPTR_READ_ONLY
+        }
+        if (how != GPU_USER_LATER && gpu_i915.probe)
+                up.flags |= 2; // I915_USERPTR_PROBE: the range is looked at now (EFAULT), where without it the pages are first taken at a submit
+        e = gpu_call(3u, 0x33, 24, &up);
+        if (e == 19 && (up.flags & 1))
+                return gpu_i915.read_only_refused = 1, 1;
+        *handle = e ? 0 : up.handle;
+        return e;
+}
+
+static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigned int named, positive *sequence)
+{
+        const positive wide = GPU_VA_END > (1ull << 32) ? GPU_I915_WIDE : 0;
+        struct gpu_i915_exec run = {0, 0, 0, 0, 0, 0, 0, 0, GPU_I915_RUN, 0, 0};
+        unsigned int words, n = 0, e, slot;
+
+        *sequence = 0;
+        if (!gpu_set || !gpu_set->batch)
+                return 95;
+        words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4);
+        if ((words & 1) && words < GPU_PACKETS / 4) // the batch's length is of whole quadwords (a length that is not is EINVAL): an MI_NOOP ends it
+                job->packets_at[words++] = 0;
+        if (!words || words > GPU_PACKETS / 4 || (words & 1) || !gpu_i915_room() || !gpu_i915.main)
+                return 22;
+        for (unsigned int k = 0; k < named; k++)
+        {
+                const unsigned int handle = (unsigned int)bos[k];
+
+                if (handle >= GPU_I915_HANDLES || !gpu_i915.bound[handle].bytes)
+                        return 2; // a buffer the table never bound: it has no address to be pinned at
+                memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
+                gpu_i915.objects[n].handle = handle, gpu_i915.objects[n].offset = gpu_i915.bound[handle].va;
+                gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0);
+        }
+        memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
+        gpu_i915.objects[n].handle = gpu_i915.main, gpu_i915.objects[n].offset = GPU_VA, gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | GPU_I915_WRITTEN;
+        run.buffers_ptr = (p64)gpu_i915.objects, run.buffer_count = n, run.batch_start_offset = (unsigned int)(job->packets - GPU_VA), run.batch_len = 4 * words;
+        run.flags |= gpu_i915.fence ? GPU_I915_FENCE_OUT : 0, run.rsvd1 = gpu.ctx;
+        if ((e = gpu_raw(gpu.fd, gpu_i915.fence ? GPU_I915_EXECBUFFER2_WR : GPU_I915_EXECBUFFER2, &run)) != 0)
+                return e;
+        *sequence = ++gpu_i915.sequence, slot = (unsigned int)(*sequence % GPU_I915_JOBS);
+        if (gpu_i915.jobs[slot].fence)
+                system_close(gpu_i915.jobs[slot].fence - 1);
+        gpu_i915.jobs[slot].sequence = *sequence, gpu_i915.jobs[slot].fence = gpu_i915.fence ? (int)(run.rsvd2 >> 32) + 1 : 0;
+        return 0;
+}
+
+// Jobs up to sequence seen done: their sync_files let go of, and the context's lost batches looked at. A batch lost since the last look is a reset that took
+// a job of ours (the job did not draw what it was given): -1, the wait failed; else 1.
+static int gpu_i915_ended(positive sequence)
+{
+        unsigned int lost = gpu_i915_lost(gpu.ctx);
+
+        if (sequence > gpu_i915.done)
+                gpu_i915.done = sequence;
+        for (unsigned int i = 0; i < GPU_I915_JOBS; i++)
+                if (gpu_i915.jobs[i].sequence && gpu_i915.jobs[i].sequence <= gpu_i915.done)
+                {
+                        if (gpu_i915.jobs[i].fence)
+                                system_close(gpu_i915.jobs[i].fence - 1);
+                        gpu_i915.jobs[i].fence = 0, gpu_i915.jobs[i].sequence = 0;
+                }
+        if (lost != gpu_i915.lost)
+                return gpu_i915.lost = lost, -1;
+        return 1;
+}
+
+// A job waited for until a time: its sync_file polled where it has one (the one job's end), else GEM_WAIT on the card's own buffer (every job's end), one call
+// to the deadline either way (what is left of it: 0, a look) and asked again only when a signal ended it.
+static int gpu_i915_wait(positive sequence, positive until)
+{
+        const unsigned int slot = (unsigned int)(sequence % GPU_I915_JOBS);
+
+        for (;;)
+        {
+                positive now = clock_monotonic_nanoseconds(), left = until > now ? until - now : 0;
+                unsigned int e;
+
+                if (!sequence || sequence <= gpu_i915.done)
+                        return 1;
+                left = left > (1ull << 62) ? 1ull << 62 : left; // (a negative timeout is a wait with none)
+                if (gpu_i915.jobs[slot].sequence == sequence && gpu_i915.jobs[slot].fence)
+                {
+                        struct { int fd; short events, returned; } watch = {gpu_i915.jobs[slot].fence - 1, 1, 0}; // POLLIN
+                        positive wait[2] = {left / 1000000000ull, left % 1000000000ull};
+                        long r = (long)system_call_4(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0);
+
+                        if (r == -4)
+                                continue;
+                        if (r < 0 || (watch.returned & 0x38)) // POLLERR, POLLHUP, POLLNVAL
+                                return -1;
+                        return r == 0 ? 0 : gpu_i915_ended(sequence);
+                }
+                {
+                        struct gpu_i915_wait wait = {gpu_i915.main, 0, (long long)left};
+
+                        e = gpu_call(3u, 0x2c, 16, &wait);
+                        if (e == 4 || e == 11)
+                                continue;
+                        if (e == 62)
+                                return 0;
+                        return e ? -1 : gpu_i915_ended(gpu_i915.sequence);
+                }
+        }
+}
+
+static unsigned int gpu_i915_fault(struct gpu_vm_fault *fault)
+{
+        memory_zero(fault, sizeof(*fault));
+        return 0;
+}
+
+// The job's sync_file, a descriptor of its own (F_DUPFD_CLOEXEC of the one the submit kept): EOPNOTSUPP where the kernel has no EXEC_FENCE (the caller waits on
+// the sequence), EALREADY for a job seen done (nothing is left to poll), ENOENT for one this table does not hold.
+static unsigned int gpu_i915_fence(positive sequence, int *fd)
+{
+        const unsigned int slot = (unsigned int)(sequence % GPU_I915_JOBS);
+        long made;
+
+        *fd = -1;
+        if (!gpu_i915.fence)
+                return 95;
+        if (gpu_i915.jobs[slot].sequence != sequence || !gpu_i915.jobs[slot].fence)
+                return sequence && sequence <= gpu_i915.done ? 114 : 2;
+        made = (long)system_call_3(syscall(fcntl), (positive)(gpu_i915.jobs[slot].fence - 1), 1030, 3);
+        if (made < 0)
+                return (unsigned int)-made & 255;
+        *fd = (int)made;
+        return 0;
+}
+
+static const struct gpu_backend gpu_i915_row = {
+    .driver = "i915", .identify = gpu_i915_identify, .buffer = gpu_i915_buffer, .context = gpu_i915_context, .user = gpu_i915_user, .bind = gpu_i915_bind,
+    .unbind = gpu_i915_unbind, .submit = gpu_i915_submit, .wait = gpu_i915_wait, .fault = gpu_i915_fault, .fence = gpu_i915_fence, .set = gpu_i915_set,
+    .classify = gpu_i915_classify, .window = gpu_i915_window, .describe = gpu_i915_describe, .lanes = 16, .packets = 1024}; // (a SIMD16 thread a column)
+
+// The drivers, in the order a node of each is taken when the display's own device is none of them.
+static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row};
+#define GPU_BACKENDS (sizeof(gpu_backends) / sizeof(gpu_backends[0]))
+static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
+
+static const struct gpu_backend *gpu_backend_of(const char *name)
+{
+        for (unsigned int i = 0; i < GPU_BACKENDS; i++)
+                if (string_equals((string_address)name, (string_address)gpu_backends[i]->driver))
+                        return gpu_backends[i];
+        return 0;
+}
 
 // A handle of the card's let go of (any DRM driver's request).
 static void gpu_close(unsigned int handle)
@@ -708,15 +1251,53 @@ static int gpu_pick(char candidate[][32], unsigned int count, const char *displa
         return 0;
 }
 
+// The render nodes as a number: each node that opens mixed in by its minor and its driver's name ("" for a node that does not say), so that the same nodes with
+// the same drivers are the same number and a node come or gone, or a driver loaded in another's place, is another one. Never 0.
+static positive gpu_node_mix(positive seen, unsigned int node, const char *name)
+{
+        seen = (seen ^ (node + 1)) * 1099511628211ull;
+        while (*name)
+                seen = (seen ^ (p8)*name++) * 1099511628211ull;
+        return seen;
+}
+
+// The render nodes as they are now, as gpu_start's walk of them mixes them (gpu_node_mix): the late look's way to tell a settled start's nodes from new ones
+// without starting the card (a version call a node, nothing of the card made).
+static positive gpu_nodes_seen(void)
+{
+        char path[] = "/dev/dri/renderD128";
+        positive seen = 14695981039346656037ull;
+
+        for (unsigned int node = 0; node < 64; node++)
+        {
+                char name[32] = "";
+                p64 ver[8] = {0, 0, sizeof(name) - 1, (p64)name};
+                long fd;
+
+                path[17] = (char)('0' + (28 + node) / 10), path[18] = (char)('0' + (28 + node) % 10);
+                fd = system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
+                GPU_OPEN_FAKE(fd);
+                if (fd < 0)
+                        continue;
+                if (gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) != 0)
+                        name[0] = 0;
+                seen = gpu_node_mix(seen, node, name);
+                system_close((int)fd);
+        }
+        return seen | 1;
+}
+
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
         p64 offset = 0;
         unsigned int ctx = 0, family = 0, device = 0, e = 0, open_error = 0;
         char path[] = "/dev/dri/renderD128";
-        int named = 0, amd = 0, amd_named = 0;
+        int named = 0, known = 0, known_named = 0, unasked = 0;
         unsigned int candidates = 0, candidate_node[GPU_NODES];
+        const struct gpu_backend *candidate_backend[GPU_NODES];
         char candidate_bus[GPU_NODES][32] = {{0}}; // (whole: the one picked is copied to the table every program reads, all 32 bytes of it)
+        positive seen = 14695981039346656037ull;
         long at, hash;
 
         memory_zero(&gpu_req, sizeof(gpu_req));
@@ -754,6 +1335,7 @@ static b32 gpu_start(positive bytes)
                 p64 ver[8] = {0, 0, sizeof(name) - 1, (p64)name};
                 long fd;
                 unsigned int family_error;
+                const struct gpu_backend *driver;
                 b32 version;
 
                 path[17] = (char)('0' + (28 + node) / 10), path[18] = (char)('0' + (28 + node) % 10);
@@ -768,26 +1350,33 @@ static b32 gpu_start(positive bytes)
                         continue;
                 }
                 version = gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0;
-                if (!named) // the first node that opens is the one the table names when no amdgpu node is found
-                        named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                if (!version || !string_equals((string_address)name, (string_address)gpu_backend->driver))
+                if (!version)
+                        name[0] = 0;
+                seen = gpu_node_mix(seen, node, name);
+                if (!named) // the first node that opens is the one the table names when no node of a driver this file has is found
+                        named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1),
+                        memory_copy(gpu_req.name, name, sizeof(gpu_req.name) - 1);
+                if (!version || !(driver = gpu_backend_of(name)))
                 {
                         system_close((int)fd);
                         continue;
                 }
-                // An amdgpu node: the first of them is the one the table names, whether or not its family is one the kernels are for.
-                family_error = gpu_backend->identify((int)fd, &family, &device);
-                if (!amd_named)
+                // A node of a driver this file has: the first of them is the one the table names, whether or not its chip has a kernel set.
+                family_error = driver->identify((int)fd, &family, &device);
+                if (!known_named)
                 {
-                        amd_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
+                        known_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
+                        memory_copy(gpu_req.name, name, sizeof(gpu_req.name) - 1);
                         gpu_req.family = family, gpu_req.device = device;
                 }
-                amd = 1;
-                // The candidates are the amdgpu nodes of a family the kernels are for; the one on the display's own device is taken (gpu_pick), else the first.
-                if (!family_error && gpu_family_ok(family) && candidates < GPU_NODES)
-                        candidate_node[candidates] = node, gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
+                known = 1, unasked |= family_error != 0;
+                // The candidates are the nodes whose chip has a kernel set; the one on the display's own device is taken (gpu_pick), else the first.
+                if (!family_error && driver->set(family) && candidates < GPU_NODES)
+                        candidate_node[candidates] = node, candidate_backend[candidates] = driver,
+                        gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
                 system_close((int)fd);
         }
+        gpu_req.nodes = seen | 1;
         if (candidates)
         {
                 int pick = gpu_pick(candidate_bus, candidates, gpu_display, &gpu_req.pick);
@@ -797,11 +1386,14 @@ static b32 gpu_start(positive bytes)
                 picked = system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
                 if (picked >= 0)
                 {
-                        gpu.fd = (int)picked;
-                        if (gpu_backend->identify(gpu.fd, &family, &device) == 0 && gpu_family_ok(family))
+                        gpu.fd = (int)picked, gpu_backend = candidate_backend[pick];
+                        if (gpu_backend->identify(gpu.fd, &family, &device) == 0 && gpu_backend->set(family))
                         {
                                 gpu.family = family, gpu.device = device;
                                 memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.bus, candidate_bus[pick], sizeof(gpu_req.bus));
+                                memory_zero(gpu_req.driver, sizeof(gpu_req.driver)), memory_zero(gpu_req.name, sizeof(gpu_req.name));
+                                string_copy_bounded((string_address)gpu_req.driver, (string_address)gpu_backend->driver, sizeof(gpu_req.driver));
+                                string_copy_bounded((string_address)gpu_req.name, (string_address)gpu_backend->driver, sizeof(gpu_req.name));
                                 gpu_req.family = gpu.family, gpu_req.device = gpu.device;
                         }
                         else
@@ -815,10 +1407,31 @@ static b32 gpu_start(positive bytes)
         {
                 if (!gpu_req_step(GPU_REQ_NODE, !named, open_error))
                         break;
-                if (!gpu_req_step(GPU_REQ_DRIVER, !amd, 0))
+                if (!gpu_req_step(GPU_REQ_DRIVER, !known, 0))
                         break;
                 if (!gpu_req_step(GPU_REQ_FAMILY, gpu.fd < 0, 0))
                         break;
+                // The picked chip's kernel set, address space and slots: the window every address is placed in, the room of each slot's command words, and where
+                // the kernels go after the slots' arguments. A space too small for the path is the context's step (its errno).
+                {
+                        positive va = 0, maps = 0, top = 0;
+                        unsigned int room = gpu_backend->packets, code;
+
+                        gpu_set = gpu_backend->set(gpu.family);
+                        e = gpu_backend->window(gpu.family, &va, &maps, &top);
+                        code = (GPU_SLOTS * room + 256 * GPU_SLOTS + 255) & ~255u;
+                        code = code < 1024 ? 1024 : code;
+                        if (!e && (!gpu_set || gpu_set->count > GPU_KERNELS || (room & 255) || va + size > maps || maps >= top || top > GPU_VA_RECORD))
+                                e = 22;
+                        for (unsigned int i = 0, reach = code; !e && i < gpu_set->count; i++)
+                                if ((reach = (reach + gpu_set->kernels[i].size - 4 * gpu_set->skip + 255) & ~255u) > GPU_BASES_AT)
+                                        e = 28; // the kernels end before the bases begin
+                        if (!e)
+                                gpu_window.va = va, gpu_window.maps = maps, gpu_window.top = top, gpu_map_next = maps,
+                                gpu_layout.packets = room, gpu_layout.args = GPU_SLOTS * room, gpu_layout.code = code;
+                        if (e && !gpu_req_step(GPU_REQ_CONTEXT, true, e))
+                                break;
+                }
                 // Userptr: an anonymous page the kernel takes for the card; if userptr is refused, try udmabuf+PRIME fallback before aborting init.
                 {
                         long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
@@ -851,11 +1464,11 @@ static b32 gpu_start(positive bytes)
                 if (!gpu_req_step(GPU_REQ_CONTEXT, e != 0, e))
                         break;
                 gpu.ctx = ctx, gpu.size = size;
-                for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
+                for (unsigned int i = 0, here = gpu_layout.code; i < gpu_set->count; i++)
                 {
                         gpu_kernel_at[i] = here;
-                        memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
-                        here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
+                        memory_copy((p8 address_to)gpu.at + here, gpu_set->kernels[i].words + gpu_set->skip, gpu_set->kernels[i].size - 4 * gpu_set->skip);
+                        here = (here + gpu_set->kernels[i].size - 4 * gpu_set->skip + 255) & ~255u;
                 }
                 // The self-test: the card must finish its job (RING) and draw the picture the kernels draw (SELFTEST).
                 hash = gpu_test_hash();
@@ -864,7 +1477,7 @@ static b32 gpu_start(positive bytes)
                         gpu_say_kernel();
                         break;
                 }
-                if (!gpu_req_step(GPU_REQ_SELFTEST, hash != GPU_TEST_HASH, 0))
+                if (!gpu_req_step(GPU_REQ_SELFTEST, hash != gpu_set->hash, 0))
                 {
                         gpu.broken = 1;
                         break;
@@ -874,8 +1487,43 @@ static b32 gpu_start(positive bytes)
                 gpu_kmsg_drain();
                 return true;
         } while (0);
-        gpu_stop();
+        // Settled: no node of a driver this file has, or every one of them answered with a chip that has no kernel set. The same nodes answer the same.
+        gpu_req.settled = gpu_req.first == GPU_REQ_DRIVER || (gpu_req.first == GPU_REQ_FAMILY && !candidates && !unasked);
+        // A card that drew the self-test wrong is kept broken past the stop (which zeroes the card's state): the compositor gives it up as untrusted and does
+        // not start it again, where with the flag cleared it was a card not there, started and self-tested again by every late look.
+        {
+                int broken = gpu.broken;
+
+                gpu_stop();
+                gpu.broken = broken;
+        }
         return false;
+}
+
+// What the start's first failed step was in this machine's words, for the notices (the issue board's detail, the log): a driver that has no path names itself and
+// its node, a chip with no kernel set names its driver, its family and its device. False, and "", for the other steps, whose fix is the same on every machine.
+static b32 gpu_req_words(char *into, unsigned int room)
+{
+        const struct gpu_backend *driver = gpu_backend_of(gpu_req.name);
+        unsigned int at;
+
+        into[0] = 0;
+        if (gpu_req.first == GPU_REQ_DRIVER)
+        {
+                at = gpu_text_put(into, 0, room, gpu_req.name[0] ? gpu_req.name : "a driver that does not say its name");
+                at = gpu_text_put(into, at, room, " on "), gpu_text_put(into, at, room, gpu_req.node[0] ? gpu_req.node : "the first render node");
+                return true;
+        }
+        if (gpu_req.first != GPU_REQ_FAMILY || !driver)
+                return false;
+        if (!gpu_req.family && !gpu_req.device)
+        {
+                at = gpu_text_put(into, 0, room, gpu_req.name);
+                gpu_text_put(into, at, room, ", a chip that did not say what it is (the kernel lines say why)");
+                return true;
+        }
+        driver->describe(gpu_req.family, gpu_req.device, into, 0, room);
+        return true;
 }
 
 // Pages of the processor's (a window's picture: a memfd's, mapped shared) the GPU can reach, as userptr buffers at addresses of their own: gpu_map widens
@@ -975,9 +1623,6 @@ static unsigned long long gpu_job_submit_ns, gpu_job_wait_ns, gpu_job_ns_kind[3]
 // their address, 9 a written map over one a record of this tick was given, 10 a map would be let go of for it while a job given up on may still read it; for 3
 // and 4 the error (the kernel's, negated) is in the bits above the first byte. moonwater canvas says it with the card's refusals.
 static unsigned int gpu_map_why;
-#define GPU_VA_MAPS 0x2000000000ull
-#define GPU_VA_END (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it
-static positive gpu_map_next = GPU_VA_MAPS;
 
 static void gpu_maps_reset(void)
 {
@@ -1489,9 +2134,9 @@ static void gpu_release_import(positive at)
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
 // s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene, 5 with boxes (both by clang, any width), 6 by hand with or without boxes for a width and a pitch of a multiple of 4 (gpu_scene picks).
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab; };
-#define GPU_ARGS_AT(slot) (512 + GPU_PACKETS * (positive)(slot)) // a slot's arguments, in bytes of the buffer
+#define GPU_ARGS_AT(slot) (gpu_layout.args + 256 * (positive)(slot)) // a slot's arguments, in bytes of the buffer (after every slot's packets)
 #define GPU_ARGS ((struct gpu_args address_to)((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot))) // the arguments of the slot the job is built in
-typedef char gpu_slots_fit[GPU_ARGS_AT(GPU_SLOTS) <= 1024 && GPU_PACKETS * GPU_SLOTS <= 512 && sizeof(struct gpu_args) <= GPU_PACKETS ? 1 : -1]; // before the kernels
+typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
 // binned, and what it was binned for (its width and height, and the damage its lists hold), which gpu_scene_more_submit draws more of.
@@ -1970,6 +2615,7 @@ static b32 gpu_map_named(unsigned int i)
 }
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
+static unsigned int gpu_jobs_ours; // the jobs refused as our own (GPU_ERR_OURS), which are never asked again
 /*
         The kernel run over the w by rows pixels of the arguments of the slot the job was built in (gpu_slot, which the caller took with gpu_slot_take and wrote:
         GPU_ARGS), submitted and not waited for: its sequence, for gpu_done, gpu_fence_fd and gpu_wait_job; 0 when the submit was refused (gpu_last_error its
@@ -1978,12 +2624,14 @@ static b32 gpu_map_named(unsigned int i)
 */
 static positive gpu_submit(void)
 {
-        const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op);
-        const struct gpu_job job = {gpu_kernels[which].words, GPU_VA + gpu_kernel_at[which], GPU_VA + GPU_ARGS_AT(gpu_slot), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows,
+        const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), lanes = gpu_backend->lanes;
+        const struct gpu_job job = {gpu_set && which < gpu_set->count ? gpu_set->kernels[which].words : 0, GPU_VA + gpu_kernel_at[which < GPU_KERNELS ? which : 0],
+                                    GPU_VA + GPU_ARGS_AT(gpu_slot), (GPU_ARGS->w + lanes - 1) / lanes, GPU_ARGS->rows,
                                     (unsigned int address_to)((p8 address_to)gpu.at + GPU_PACKETS * gpu_slot), GPU_VA + GPU_PACKETS * gpu_slot};
         p64 *bos = gpu_imports_room(gpu.imports) ? gpu_submit_bos : 0;
         positive sequence = 0, began = clock_monotonic_nanoseconds(), kept = gpu_job_began;
         unsigned int named, tries = 0, again = 0;
+        enum gpu_err kind;
 
         if (!bos) // no memory for the list of the job's buffers: the job is not made, as one too late is not
                 return gpu_end = GPU_END_LATE, 0;
@@ -2009,8 +2657,10 @@ static positive gpu_submit(void)
                 gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
                 if (gpu_last_error == 0)
                         break;
-                // The card lost the context or its VM (ECANCELED after a reset, ENODEV, EINVAL): nothing this job can do again succeeds: the caller recovers (gpu_recover).
-                if (gpu_last_error == 125 || gpu_last_error == 19 || gpu_last_error == 22)
+                kind = gpu_backend->classify(gpu_last_error); // what the errno is to this driver (struct gpu_backend's mapping)
+                // The card lost the context or its VM (amdgpu: ECANCELED after a reset, ENODEV, EINVAL; i915: EIO, a banned context or a wedged GPU, ENODEV):
+                // nothing this job can do again succeeds: the caller recovers (gpu_recover).
+                if (kind == GPU_ERR_LOST)
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
                         gpu_lost = 1, gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
@@ -2019,10 +2669,18 @@ static positive gpu_submit(void)
                 // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
                 // ten), and the kernel asks for the call again, which takes the pages afresh. Asked again up to GPU_AGAIN times with the processor let go of between: three
                 // calls in a row failed the job, the present was the processor's, a list was refused, and three such jobs in a row cooled the card for two seconds.
-                if (gpu_last_error == 11 && again++ < GPU_AGAIN)
+                if (kind == GPU_ERR_AGAIN && again++ < GPU_AGAIN)
                 {
                         system_call_2(syscall(sched_yield), 0, 0);
                         continue;
+                }
+                // Our own job, wrong as it is (i915's EINVAL: a batch or an object it will not take): the same words are refused the same way again, so it is
+                // not asked again and the card is not lost; the processor draws, and the refusal is counted as any refused job is (three in a row cool the card).
+                if (kind == GPU_ERR_OURS)
+                {
+                        gpu_jobs_ours++, gpu_job_error = gpu_last_error, gpu_fault_note(false);
+                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
+                        return 0;
                 }
                 // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
                 if (++tries == 3 || gpu_drop_unmapped())

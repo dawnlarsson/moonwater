@@ -199,8 +199,8 @@ settings_refused_place	9632	%s (جایگاه آن در پرونده خوانده
 settings_refused_rate	97bc	%1$s (%2$d هرتز ارائه نمی‌شود)
 settings_refused_turn	7b3a	%1$s (%2$s انجام نشد)
 settings_req_context	a233	کارت بافر، نگاشت VM یا بستر محاسبه نمی‌دهد: حلقه محاسبه amdgpu یا سخت‌افزار نرم آن بالا نیست
-settings_req_driver	9d2d	درایور کارت amdgpu نیست: هنوز مسیر GPU برای آن نیست (i915، virtio_gpu و nouveau روی پردازنده می‌مانند)
-settings_req_family	ddcf	این خانواده AMD هسته ندارد (فقط RDNA2: 144، 146، 149، 151)؛ کارت روی پردازنده می‌ماند
+settings_req_driver	42ea	درایور کارت، %1$s، هنوز مسیر GPU ندارد: پردازنده همه چیز را می‌کشد
+settings_req_family	8305	هنوز هسته GPU برای این تراشه نیست، %1$s: پردازنده همه چیز را می‌کشد
 settings_req_node	a362	گره رندر کارت باز نشد: حالت، مالک و بارگذاری درایور را بررسی کنید (گروه render یا حالت 0666)
 settings_req_prime	a63c	dma-buf به گره رندر وارد نمی‌شود: کارت memfd یک پنجره را نمی‌خواند (CONFIG_DRM_AMDGPU با PRIME)
 settings_req_ring	29f2	حلقه محاسبه خودآزمایی را تمام نکرد: سخت‌افزار نرم، کلاک‌ها یا بازنشانی حلقه (خط‌های کرنل می‌گویند کدام)

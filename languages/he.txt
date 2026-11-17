@@ -199,8 +199,8 @@ settings_refused_place	9632	%s (מקומו בקובץ לא נקרא)
 settings_refused_rate	97bc	%1$s (%2$d הרץ אינו מוצע)
 settings_refused_turn	7b3a	%1$s (לא ניתן היה לבצע %2$s)
 settings_req_context	a233	הכרטיס לא מספק מאגר, מיפוי VM או הקשר חישוב: טבעת החישוב של amdgpu או הקושחה שלה אינן פעילות
-settings_req_driver	9d2d	מנהל ההתקן של הכרטיס אינו amdgpu: אין עדיין נתיב GPU עבורו (i915, virtio_gpu ו-nouveau נשארים במעבד)
-settings_req_family	ddcf	למשפחת AMD זו אין ליבות (רק RDNA2: 144, 146, 149, 151); הכרטיס נשאר במעבד
+settings_req_driver	42ea	למנהל ההתקן של הכרטיס, %1$s, אין עדיין נתיב GPU: המעבד מצייר הכול
+settings_req_family	8305	אין עדיין ליבות GPU עבור השבב הזה, %1$s: המעבד מצייר הכול
 settings_req_node	a362	לא נפתח צומת הרינדור של הכרטיס: בדקו מצב, בעלים וטעינת מנהל ההתקן (קבוצה render או מצב 0666)
 settings_req_prime	a63c	dma-buf לא מיובא לצומת הרינדור: הכרטיס לא קורא את ה-memfd של חלון (CONFIG_DRM_AMDGPU עם PRIME)
 settings_req_ring	29f2	טבעת החישוב לא סיימה את הבדיקה העצמית: קושחה, שעונים או איפוס הטבעת (שורות הליבה אומרות איזו)
