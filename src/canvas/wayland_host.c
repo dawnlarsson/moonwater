@@ -189,7 +189,7 @@ static struct
                 long fd, size;
                 unsigned long dev, ino, modifier;
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
-                unsigned int fourcc, offset, scan_fb, scan_handle;
+                unsigned int fourcc, offset, scan_fb, scan_handle, scan_fourcc; // scan_fourcc: the format scan_fb was made as
                 int synced, scan_failed;
         } *lent;
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
@@ -1217,9 +1217,17 @@ static unsigned int compositor_lent_fb(int row)
         if (!compositor_lent(row) || compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0 ||
             compositor_wl_layers.count[row])
                 return 0;
+        fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
+        // A window the compositor shows opaque (no blend: an X format, or an opaque region over all of it) is given to the card as the X
+        // format of the same bytes, so the plane's alpha is not read: as ARGB the display engine blends the buffer's own alpha over the
+        // primary plane under it, where nothing is drawn, and a client's alpha that is not meant to be seen (a game's, written as depth,
+        // or an overlay blended into its frame) showed as black or darkened on the screen and nowhere in the composed picture.
+        if (!compositor_wl.row_blend[row] && (fourcc == 0x34325241u || fourcc == 0x34324241u || fourcc == 0x30335241u || fourcc == 0x30334241u))
+                fourcc = (fourcc & ~0xffu) | 'X'; // AR24, AB24, AR30, AB30 to XR24, XB24, XR30, XB30
+        if (compositor_wl.lent[row].scan_fb && compositor_wl.lent[row].scan_fourcc != fourcc)
+                compositor_wl_lent_drop_fb(row);
         if (compositor_wl.lent[row].scan_fb)
                 return compositor_wl.lent[row].scan_fb;
-        fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
         fb.width = (unsigned int)compositor_wl.lent[row].width;
         fb.height = (unsigned int)compositor_wl.lent[row].height;
         fb.pixel_format = fourcc;
@@ -1254,6 +1262,7 @@ static unsigned int compositor_lent_fb(int row)
         }
         compositor_wl.lent[row].scan_fb = fb.fb_id;
         compositor_wl.lent[row].scan_handle = prime.handle;
+        compositor_wl.lent[row].scan_fourcc = fourcc;
         return fb.fb_id;
 }
 
