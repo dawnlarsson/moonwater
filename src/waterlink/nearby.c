@@ -383,6 +383,53 @@ static p8 link_name_for(link_peers address_to peers, p8 address_to offered,
         return !link_peer_named(peers, (string_address)name);
 }
 
+/*
+        A machine that is back under a name this machine knows, with a key it
+        does not know: the same machine with a new key (a live stick starts
+        with a new one at every boot), and not a second one for the name to
+        be cut to fit beside the first. Its record takes the new key and
+        keeps the name, so what is typed to reach it, `link NAME` and every
+        script that says it, still reaches it. The old key goes with the
+        record's old bytes; the grants are what the record had and no more
+        than the group gives, so a new key is never given more than the old
+        one had; where it was last heard is not known until it is.
+
+        Whose word that is: a code is single use -- the one machine that used
+        it is the only one kept under it, since the listener closes it in the
+        turn that kept the first, so two machines are never answering one
+        code -- and a person typed it on both machines, which is that person's
+        own say that this is the machine. Any record of that name is its old
+        one, however it was paired. A group's word is the group's: a member
+        that comes back under a name takes the record of a member of the same
+        group, and a record paired by hand or by another group is never
+        replaced, for anybody who holds the group's key can say any name.
+        Such a name is cut to fit beside it, as before.
+
+        The offered name must be one a machine could have been paired as
+        (link_name_good): a name that is not is not a name to take from
+        another. The record that was replaced, or null when there is none.
+*/
+static struct waterlink_peer address_to link_peer_returned(
+    link_peers address_to peers, p8 address_to offered, p8 address_to key,
+    p8 once, p32 mark, p32 may)
+{
+        struct waterlink_peer address_to peer;
+
+        offered[WATERLINK_NAME_MAX - 1] = 0;
+        if (!link_name_good((string_address)offered))
+                return null;
+        peer = link_peer_named(peers, (string_address)offered);
+        if (!peer || (!once && (!mark || peer->group != mark)))
+                return null;
+        memory_copy(peer->key, key, 32);
+        peer->may &= may;
+        peer->group = mark;
+        memory_zero(peer->address, sizeof peer->address);
+        peer->port = 0;
+        peer->seen = 0;
+        return peer;
+}
+
 // The listener's side of it ------------------------------------------------
 
 struct link_greeted {
@@ -562,8 +609,10 @@ static p8 link_group_held(positive group,
 /*
         Keeping a member whose greeting opened: new, with the group's grants,
         or moved, when the record is the group's own. A record paired by hand
-        or by another group is never replaced or widened. True when the
-        member was new here.
+        or by another group is never moved or widened, and is replaced only
+        by a code, which is a person's own word (link_peer_returned). True
+        when the member was new here, which is also a machine that came back
+        under a name with a new key.
 
         The record keeps the seconds of the last greeting it took, which is
         the replay marker that outlives the listener: the markers in memory
@@ -612,19 +661,27 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         if (!open)
                 link_nearby.refused_code = true;
         peer = link_peer_keyed(address_of peers, key);
-        //      Named before it is in the list, or it meets itself; with no
-        //      name left that nobody has, it is not kept.
-        if (!peer && open && peers.count < LINK_PEERS_MAX &&
-            !crypto_same(key, link_self.me.public, 32) &&
-            link_name_for(address_of peers, offered, key, name))
+        //      A machine back under its name with a new key keeps the name
+        //      (link_peer_returned); another is named before it is in the
+        //      list, or it meets itself, and with no name left that nobody
+        //      has, it is not kept.
+        if (!peer && open && !crypto_same(key, link_self.me.public, 32))
         {
-                peer = peers.peer + peers.count++;
-                memory_zero(peer, sizeof(address_to peer));
-                memory_copy(peer->key, key, 32);
-                memory_copy(peer->name, name, WATERLINK_NAME_MAX);
-                peer->may = held.may;
-                peer->group = keys->mark;
-                new = changed = true;
+                peer = link_peer_returned(address_of peers, offered, key, once,
+                                          keys->mark, held.may);
+                if (peer)
+                        new = changed = true;
+                else if (peers.count < LINK_PEERS_MAX &&
+                         link_name_for(address_of peers, offered, key, name))
+                {
+                        peer = peers.peer + peers.count++;
+                        memory_zero(peer, sizeof(address_to peer));
+                        memory_copy(peer->key, key, 32);
+                        memory_copy(peer->name, name, WATERLINK_NAME_MAX);
+                        peer->may = held.may;
+                        peer->group = keys->mark;
+                        new = changed = true;
+                }
         }
         else if (peer && peer->group == keys->mark && stamped <= peer->seen)
                 peer = null;

@@ -1548,6 +1548,15 @@ static b32 link_pair_wait(link_pair_made address_to made, string_address namespa
                         {
                                 if (tty && shown)
                                         host_say(log, "\n");
+                                //      The name was known by another key: the
+                                //      listener kept the machine under it, and
+                                //      the old key went (link_peer_returned).
+                                if (link_peer_named(address_of made->had,
+                                                    (string_address)peers.peer[at].name))
+                                        host_say(log, host_label "%s's key "
+                                                      "changed; the new one "
+                                                      "replaces it\n",
+                                                 (string_address)peers.peer[at].name);
                                 host_say(log, host_label "linked with %s: it and "
                                                          "this machine may each "
                                                          "use a terminal, "

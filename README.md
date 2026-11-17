@@ -188,7 +188,7 @@ moonwater link log NAME                follow the kernel log of NAME
 moonwater link modem key               the key of the audio modem, in hex, made on first use: the receiver needs the same
 moonwater link modem send FILE         FILE over the sound card to the receiver on the Mac (tools/modem_rx.c); nothing is acknowledged
 moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its status
-moonwater link NAME CODE               link to the machine called NAME, which waits
+moonwater link NAME CODE               link to the machine called NAME, which waits; a machine known by NAME that comes with a new key is kept as NAME, and its old key goes
 moonwater link on|off                  the listener, kept across boots [off]
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
 moonwater link paths                   the ways in this machine has (its udp port, discovery on the network, its public address) and where each machine linked was last heard

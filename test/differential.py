@@ -84433,6 +84433,45 @@ if code:
             for line in out.decode(errors="replace").splitlines()),
         "a shows what c may do, and that no group did it")
 
+#       c comes back with a new key, as a live stick does at every boot, and
+#       is paired by a code under the name a knows: a's record of it takes the
+#       new key and keeps the name (it is not box-c-xyz beside the old one),
+#       a says the key changed, and the old key is nobody's.
+if code:
+    old_c = keys["c"]
+    on("c", moon + " link off")
+    os.unlink(top + "/c/root/link.key")
+    #       A machine that starts with a key of its own knows nobody yet.
+    on("c", moon + " link remove box-a")
+    waiter = waiting("a", "pair", 90)
+    code, said = code_said(waiter, "box-a")
+    say(code is not None, "a prints a code for c's pairing with a new key (%r)" % (said[-200:],))
+    if code:
+        status, out, err = on("c", moon + " link box-a " + code, timeout=90)
+        try:
+            waited, waited_err = waiter.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            waiter.kill()
+            waited, waited_err = waiter.communicate()
+        say(status == 0, "c pairs again with a new key (%r)" % (err[-160:],))
+        #       c's listener was off when the pairing began, and goes back to off.
+        on("c", moon + " link on")
+        _, new_key, _ = on("c", moon + " link key")
+        keys["c"] = new_key.decode().strip()
+        say(len(keys["c"]) == 44 and keys["c"] != old_c, "c has another key than it had")
+        say(b"box-c's key changed; the new one replaces it" in waited and b"linked with box-c" in waited,
+            "a says the key of box-c changed and the new one replaces it (%r)" % (waited[-200:],))
+        status, out, err = on("a", moon + " link")
+        mine = [line for line in out.decode(errors="replace").splitlines() if line.startswith("  box-c")]
+        say(len(mine) == 1 and mine[0].split()[0] == "box-c" and mine[0].split()[1] == keys["c"][:8] + "...",
+            "a knows c by its name and its new key, in one record (%r)" % (mine,))
+        say(b"box-c-" not in out and old_c[:8].encode() not in out,
+            "and holds no second box-c, nor the old key (%r)" % (out[-300:],))
+        status, out, err = on("c", moon + " link box-a echo renamed-$((20+22))", timeout=60)
+        say(status == 0 and out == b"renamed-42\n", "box-a still runs a command there under the same name (%r %r)" % (out, err[-100:]))
+        status, out, err = on("a", moon + " link box-c echo kept-$((20+22))", timeout=60)
+        say(status == 0 and out.endswith(b"kept-42\n"), "and a reaches c by the name it had, now by the new key (%r %r)" % (out, err[-100:]))
+
 #       A machine in too many groups has no room for a code.
 on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group g$i secret-number-$i-a-long-one; done'" % moon,
    timeout=120)

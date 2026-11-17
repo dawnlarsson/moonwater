@@ -10603,8 +10603,9 @@ static p8 wls_change_leave(void)
 static p8 wls_change_open(void)
 {
         p8 code[LINK_CODE_LENGTH] = {'a', 'b', 'c', 'd', 'e', 'f'};
-        p32 mark = 0;
+        link_pair_made mark;
 
+        memory_zero(address_of mark, sizeof mark);
         return link_pair_open("gadget", code, null, address_of mark) < 0;
 }
 
@@ -10642,7 +10643,9 @@ static fn groups_unreadable(void)
         link_groups groups;
         p8 want[2 * sizeof(struct link_group_record)];
         p8 code[LINK_CODE_LENGTH] = {'a', 'b', 'c', 'd', 'e', 'f'};
-        p32 mark = 0;
+        link_pair_made mark;
+
+        memory_zero(address_of mark, sizeof mark);
 
         //      A directory where the switch's word goes and one where the
         //      key does: a join that went on would start a listener, and is
@@ -10695,10 +10698,10 @@ static fn groups_unreadable(void)
                       string_equals(groups.record[1].namespace, "kiosk"));
         check("a code made where the file reads is the third",
               link_pair_open("gadget", code, null, address_of mark) == 0 &&
-                      mark != 0 && link_groups_load(address_of groups) &&
+                      mark.mark != 0 && link_groups_load(address_of groups) &&
                       groups.count == 3 &&
                       string_equals(groups.record[2].namespace, "gadget"));
-        link_pair_close(mark);
+        link_pair_close(mark.mark);
         check("and taken back it is gone, and nothing else",
               link_groups_load(address_of groups) && groups.count == 2 &&
                       string_equals(groups.record[0].namespace, "office") &&
@@ -13265,6 +13268,119 @@ static fn indexes_and_commands(void)
                               !string_equals((string_address)name,
                                              (string_address)offered) &&
                               link_name_good((string_address)name));
+        }
+
+        /*      A machine back under a name this machine knows, with a key it
+                does not: the record takes the new key and keeps the name,
+                for a code (any record of the name) and for a group (a
+                record of the same group only), and nothing else changes
+                hands: not a record paired by hand or by another group, not a
+                name that is no machine's, and never more grants than the
+                record had. */
+        {
+                static link_peers peers;
+                p8 offered[WATERLINK_NAME_MAX];
+                p8 old[32];
+                p8 fresh[32];
+                struct waterlink_peer address_to returned;
+                const p32 all = WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN |
+                                WATERLINK_MAY_FILES | WATERLINK_MAY_LOG;
+
+                memory_fill(old, 0x11, sizeof old);
+                memory_fill(fresh, 0x22, sizeof fresh);
+                memory_zero(address_of peers, sizeof peers);
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "intel2", 7);
+                string_copy(peers.peer[0].name, "intel2");
+                memory_copy(peers.peer[0].key, old, 32);
+                peers.peer[0].may = all;
+                peers.peer[0].group = 7;
+                peers.peer[0].seen = 99;
+                peers.peer[0].port = 22348;
+                memory_fill(peers.peer[0].address, 0x44, 16);
+                string_copy(peers.peer[1].name, "box");
+                memory_fill(peers.peer[1].key, 0x55, 32);
+                peers.count = 2;
+
+                returned = link_peer_returned(address_of peers, offered, fresh, true,
+                                              9, all);
+                check("a code's machine back under a known name with a new key "
+                      "replaces that record's key, keeps its name and its place "
+                      "in the list, and owes nothing to where it was",
+                      returned == peers.peer && peers.count == 2 &&
+                              string_equals(peers.peer[0].name, "intel2") &&
+                              !memory_compare(peers.peer[0].key, fresh, 32) &&
+                              peers.peer[0].group == 9 && peers.peer[0].may == all &&
+                              !peers.peer[0].seen && !peers.peer[0].port &&
+                              memory_span_byte(peers.peer[0].address, 0, 16) == 16 &&
+                              string_equals(peers.peer[1].name, "box"));
+
+                memory_copy(peers.peer[0].key, old, 32);
+                peers.peer[0].group = 0;
+                peers.peer[0].may = WATERLINK_MAY_RUN;
+                returned = link_peer_returned(address_of peers, offered, fresh, true,
+                                              9, WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN);
+                check("a code replaces a record paired by hand too, and the new "
+                      "key has no grant the old one had not, nor one the code "
+                      "does not give",
+                      returned == peers.peer && peers.peer[0].may == WATERLINK_MAY_RUN &&
+                              !memory_compare(peers.peer[0].key, fresh, 32));
+                memory_copy(peers.peer[0].key, old, 32);
+                peers.peer[0].may = all;
+                returned = link_peer_returned(address_of peers, offered, fresh, true,
+                                              9, WATERLINK_MAY_LOG);
+                check("sec: and no more than the code gives",
+                      returned && peers.peer[0].may == WATERLINK_MAY_LOG);
+
+                memory_copy(peers.peer[0].key, old, 32);
+                peers.peer[0].group = 9;
+                returned = link_peer_returned(address_of peers, offered, fresh, false,
+                                              9, all);
+                check("a group's member back under its name takes the record of "
+                      "a member of the same group",
+                      returned == peers.peer &&
+                              !memory_compare(peers.peer[0].key, fresh, 32));
+
+                memory_copy(peers.peer[0].key, old, 32);
+                peers.peer[0].group = 0;
+                check("sec: a group never takes a record paired by hand",
+                      !link_peer_returned(address_of peers, offered, fresh, false, 9,
+                                          all) &&
+                              !memory_compare(peers.peer[0].key, old, 32));
+                peers.peer[0].group = 8;
+                check("sec: nor one of another group",
+                      !link_peer_returned(address_of peers, offered, fresh, false, 9,
+                                          all) &&
+                              !memory_compare(peers.peer[0].key, old, 32) &&
+                              peers.peer[0].group == 8);
+                peers.peer[0].group = 0;
+                check("sec: a group with no mark takes nothing",
+                      !link_peer_returned(address_of peers, offered, fresh, false, 0,
+                                          all));
+
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "other", 6);
+                check("a name nobody has is not a record to take",
+                      !link_peer_returned(address_of peers, offered, fresh, true, 9,
+                                          all));
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "Intel2", 7);
+                check("a name is compared as it is offered",
+                      !link_peer_returned(address_of peers, offered, fresh, true, 9,
+                                          all));
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "run", 4);
+                string_copy(peers.peer[1].name, "run");
+                check("sec: a name that is a word link takes in its place is no "
+                      "machine's to take",
+                      !link_peer_returned(address_of peers, offered, fresh, true, 9,
+                                          all));
+                memory_fill(offered, 'n', WATERLINK_NAME_MAX);
+                check("sec: a name with no end is cut before it is looked up, "
+                      "and is the name of nobody here",
+                      !link_peer_returned(address_of peers, offered, fresh, true, 9,
+                                          all) &&
+                              offered[WATERLINK_NAME_MAX - 1] == 0);
         }
 }
 

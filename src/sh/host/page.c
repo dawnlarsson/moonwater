@@ -157,7 +157,7 @@ static const host_row host_rows[] = {
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
-    {null, "link NAME CODE", "link to the machine called NAME, which waits", 'f'},
+    {null, "link NAME CODE", "link to the machine called NAME, which waits; a machine known by NAME that comes with a new key is kept as NAME, and its old key goes", 'f'},
     {null, "link cancel", "end every wait for a code, so the pair or link NAME CODE that waits ends with no answer", 'f'},
     {null, "link NAME [COMMAND...]", "a terminal on NAME, or one command with its status", 'f'},
     {null, "link key", "the public key of this machine, which link add takes", 'f'},
