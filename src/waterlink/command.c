@@ -37,6 +37,16 @@
         a code gives the two that used it a terminal, a command, files and
         the log, in both directions.
 
+        A machine is known by the name it gave when it was paired, and what
+        the record is, is its key. Renamed (`moonwater name NEW`, or the
+        hostname of a Mac), the machine says the new name in every session
+        and every greeting it makes -- a listener within a second, a client at
+        its start -- and the record that has its key takes it, with one line
+        saying so, so that `link NEW` reaches it and `link OLD` no longer
+        does. A name given with link add is the person's, and is left alone.
+        A name another machine has here is not taken: the one that was renamed
+        is kept under it with its key's suffix, as when it is paired.
+
         The grants: shell is a terminal, run is one command, log follows the
         kernel log, and files is push and pull of any file root has, which
         is as good as run -- a file pushed over a script that runs at boot is
@@ -551,6 +561,10 @@ static b32 link_add_locked(string_address name, string_address text,
 
         string_copy(peer.name, name);
         peer.may = WATERLINK_MAY_DEFAULT;
+        //      The name is the person's, whatever the machine calls itself: it
+        //      is what they type to reach it, and a rename on the far side does
+        //      not take it from them (link_peer_follow).
+        peer.flags = WATERLINK_PEER_LABELLED;
 
         if (!link_peers_for_change(address_of peers))
                 return host_refuse("%s could not be read\n", LINK_PEERS_PATH);

@@ -9918,6 +9918,572 @@ static fn greeting_freshness(bipolar listener, p16 port)
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
+static bipolar wls_quiet_socket(void);
+
+/*
+        A machine that was renamed is the same machine: the record that has its
+        key takes the name it says now, whichever way it says it, and nothing
+        else of the record moves.
+*/
+static p8 wls_follow(link_peers address_to peers, positive at,
+                     string_address offered, p8 address_to was,
+                     p8 address_to now)
+{
+        p8 asked[WATERLINK_NAME_MAX];
+
+        memory_zero(asked, sizeof asked);
+        string_copy((string_address)asked, offered);
+        return link_peer_follow(peers, peers->peer + at, asked, was, now);
+}
+
+static fn renamed_records(void)
+{
+        static link_peers peers;
+        p8 was[WATERLINK_NAME_MAX];
+        p8 now[WATERLINK_NAME_MAX];
+        p8 asked[WATERLINK_NAME_MAX];
+        p8 line[96];
+        p8 old[32];
+        p8 hex[8];
+        p8 clashing[WATERLINK_NAME_MAX];
+        const p32 all = WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN |
+                        WATERLINK_MAY_FILES | WATERLINK_MAY_LOG;
+
+        memory_fill(old, 0x11, sizeof old);
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "intel2");
+        memory_copy(peers.peer[0].key, old, 32);
+        peers.peer[0].may = all;
+        peers.peer[0].group = 7;
+        peers.peer[0].seen = 99;
+        peers.peer[0].port = 22348;
+        memory_fill(peers.peer[0].address, 0x44, 16);
+        string_copy(peers.peer[1].name, "box");
+        memory_fill(peers.peer[1].key, 0x55, 32);
+        peers.count = 2;
+
+        check("a renamed machine's record takes the new name, says the one it "
+              "had, and keeps its key, its grants, its group, its place and "
+              "where it stands in the list",
+              wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-pc") &&
+                      string_equals((string_address)was, "intel2") &&
+                      string_equals((string_address)now, "lab-pc") &&
+                      !memory_compare(peers.peer[0].key, old, 32) &&
+                      peers.peer[0].may == all && peers.peer[0].group == 7 &&
+                      peers.peer[0].seen == 99 && peers.peer[0].port == 22348 &&
+                      memory_span_byte(peers.peer[0].address, 0x44, 16) == 16 &&
+                      string_equals(peers.peer[1].name, "box") &&
+                      peers.count == 2);
+        check("the name it has already is no rename",
+              !wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-pc"));
+        check("a name in capitals is the name in lowercase, as one is when it "
+              "is typed",
+              wls_follow(address_of peers, 0, "Lab-RIG", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-rig") &&
+                      !wls_follow(address_of peers, 0, "LAB-rig", was, now));
+        check("the machine's own name does not clash with itself",
+              !wls_follow(address_of peers, 0, "lab-rig", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-rig"));
+
+        //      Another record has the name: the machine is kept under it with
+        //      its key's suffix, once, and the same again changes nothing.
+        string_copy(peers.peer[0].name, "intel2");
+        string_copy(peers.peer[1].name, "lab-pc");
+        memory_into_hex(hex, old, 4);
+        string_copy((string_address)clashing, "lab-pc-");
+        memory_copy(clashing + 7, hex, 3);
+        clashing[10] = 0;
+        check("sec: a name another machine has here is not taken: the record "
+              "is kept under it with its key's suffix, and the other is not "
+              "touched",
+              wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, (string_address)clashing) &&
+                      string_equals(peers.peer[1].name, "lab-pc") &&
+                      peers.peer[1].key[0] == 0x55);
+        link_name_line(was, now, (p8 address_to) "lab-pc", line, sizeof line);
+        check("and it is said whose the name is",
+              !string_compare((string_address)line,
+                              "intel2 is now called lab-pc-111: lab-pc is "
+                              "another machine here"));
+        check("the suffix it has is not moved to a longer one at every "
+              "contact",
+              !wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, (string_address)clashing));
+        peers.count = 1;
+        check("and once the name is nobody else's the record has it",
+              wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-pc"));
+
+        //      Every suffix is taken: nothing moves.
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "intel2");
+        memory_copy(peers.peer[0].key, old, 32);
+        peers.peer[0].group = 7;
+        string_copy(peers.peer[1].name, "lab-pc");
+        memory_fill(peers.peer[1].key, 0x55, 32);
+        memory_into_hex(hex, old, 4);
+        for (positive width = 3; width <= 6; width++)
+        {
+                p8 taken[WATERLINK_NAME_MAX];
+
+                string_copy((string_address)taken, "lab-pc-");
+                memory_copy(taken + 7, hex, width);
+                taken[7 + width] = 0;
+                string_copy(peers.peer[width - 1].name, (string_address)taken);
+                memory_fill(peers.peer[width - 1].key, 0x60 + (p8)width, 32);
+        }
+        peers.count = 6;
+        check("sec: with every suffix taken the record keeps its name",
+              !wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "intel2"));
+
+        //      A name a person gave is theirs.
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "mybox");
+        peers.peer[0].group = 7;
+        peers.peer[0].flags = WATERLINK_PEER_LABELLED;
+        peers.count = 1;
+        check("a name a person gave to a machine a code or a group paired "
+              "(link add over it) is theirs, and what the machine calls "
+              "itself does not change it",
+              !wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "mybox"));
+        peers.peer[0].flags = 0;
+        peers.peer[0].group = 0;
+        check("a record paired by hand (link add: no group made it) is the "
+              "name a person typed, and keeps it",
+              !wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "mybox"));
+        peers.peer[0].group = 7;
+        check("a record that a code or a group paired and nobody named follows",
+              wls_follow(address_of peers, 0, "lab-pc", was, now) &&
+                      string_equals(peers.peer[0].name, "lab-pc"));
+
+        //      What is not a name a machine could be paired as is not taken.
+        string_copy(peers.peer[0].name, "intel2");
+        {
+                static const string_address bad[] = {"", "run", "shell", "-x",
+                                                     "a b", "x/y", ".dot"};
+                positive taken = 0;
+
+                for (positive at = 0; at < array_count(bad); at++)
+                        taken += wls_follow(address_of peers, 0, bad[at], was, now);
+                check("sec: a word link takes in a name's place, a name with a "
+                      "space or a slash, one that starts with a dash or a dot, "
+                      "and none at all are not names to take",
+                      taken == 0 && string_equals(peers.peer[0].name, "intel2"));
+        }
+        memory_fill(asked, 'n', sizeof asked);
+        check("sec: a name with no end is cut at its room and is a name of 31",
+              link_peer_follow(address_of peers, peers.peer, asked, was, now) &&
+                      string_length(peers.peer[0].name) == WATERLINK_NAME_MAX - 1 &&
+                      asked[WATERLINK_NAME_MAX - 1] == 0);
+        check("no record is no rename",
+              !link_peer_follow(address_of peers, null, asked, was, now));
+}
+
+/*
+        A session says its machine's name on a key of its own, and a machine
+        that hears one renames the record that has the session's key.
+*/
+static fn renamed_sessions(void)
+{
+        static link_peers peers;
+        struct link_session address_to s = link_self.session;
+        struct waterlink_frame head;
+        p8 key[32];
+        p8 other[32];
+        p8 payload[WATERLINK_NAME_MAX + 8];
+        p8 server = link_self.server;
+
+        link_self.server = false;
+        if (s->used)
+                link_session_close(s);
+        if (!link_session_open(s))
+        {
+                check("a session opens for the name's key", false);
+                return;
+        }
+        wls_seeded(key, 32, 21);
+        wls_seeded(other, 32, 22);
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "intel2");
+        memory_copy(peers.peer[0].key, key, 32);
+        peers.peer[0].may = WATERLINK_MAY_RUN;
+        peers.peer[0].group = 5;
+        string_copy(peers.peer[1].name, "box");
+        memory_copy(peers.peer[1].key, other, 32);
+        peers.count = 2;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, 2 * sizeof peers.peer[0],
+                        0600);
+        memory_copy(s->peer, key, 32);
+        string_copy((string_address)s->name, "intel2");
+
+        //      Said: this machine's name, once for each time it changed.
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        string_copy((string_address)link_nearby.name, "wls-a");
+        link_nearby.name_gen = 3;
+        link_name_post(s);
+        check("a session says this machine's name on the name's key, once it "
+              "has said it, and not again until it changes",
+              s->named == 3 && s->link->posted == 1);
+        link_nearby.name_gen = 4;
+        check("a name that changed is a session that has not said it",
+              s->named != link_nearby.name_gen);
+        link_name_post(s);
+        check("and it says it again", s->named == 4 && s->link->posted == 2);
+
+        //      Heard.
+        payload[0] = LINK_NAME_SAY;
+        memory_copy(payload + 1, "lab-pc", 6);
+        head.key = LINK_KEY_NAME;
+        head.length = 7;
+        head.flags = WATERLINK_FRAME_DURABLE;
+        head.sequence = 1;
+        check("a frame on the name's key is taken", link_hear(s, address_of head, payload));
+        link_peers_load(address_of peers);
+        check("and the record that has the session's key is called what the "
+              "far end says, and its grants are what they were",
+              peers.count == 2 && string_equals(peers.peer[0].name, "lab-pc") &&
+                      peers.peer[0].may == WATERLINK_MAY_RUN &&
+                      !memory_compare(peers.peer[0].key, key, 32) &&
+                      string_equals(peers.peer[1].name, "box") &&
+                      string_equals((string_address)s->name, "lab-pc") &&
+                      s->names == 1);
+        link_name_heard(s, payload, 7);
+        check("what the session's record has already is not looked into again",
+              s->names == 1);
+
+        //      Not names.
+        {
+                static const struct
+                {
+                        positive length;
+                        p8 first;
+                        string_address text;
+                } bad[] = {
+                    {0, 'M', ""},         {1, 'M', ""},           {7, 'X', "lab-rig"},
+                    {4, 'M', "a\0b"},     {WATERLINK_NAME_MAX + 1, 'M', "aaaa"},
+                    {4, 'M', "run"},      {4, 'M', "a b"},        {2, 'M', "-"},
+                };
+                positive moved = 0;
+
+                for (positive at = 0; at < array_count(bad); at++)
+                {
+                        memory_fill(payload, 'a', sizeof payload);
+                        payload[0] = bad[at].first;
+                        if (bad[at].length > 1 && bad[at].length < 7)
+                                memory_copy(payload + 1, bad[at].text,
+                                            bad[at].length - 1);
+                        link_name_heard(s, payload, bad[at].length);
+                        link_peers_load(address_of peers);
+                        moved += !string_equals(peers.peer[0].name, "lab-pc");
+                }
+                check("sec: a frame that is too short or too long, of another "
+                      "kind, with a byte that ends the name early, or that is "
+                      "no name moves nothing",
+                      moved == 0 && s->names == 1);
+        }
+
+        //      A record a person named, and a key nobody has.
+        peers.peer[0].flags = WATERLINK_PEER_LABELLED;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, 2 * sizeof peers.peer[0],
+                        0600);
+        string_copy((string_address)s->name, "lab-pc");
+        payload[0] = LINK_NAME_SAY;
+        memory_copy(payload + 1, "lab-rig", 7);
+        link_name_heard(s, payload, 8);
+        link_peers_load(address_of peers);
+        check("a record a person named is not renamed",
+              string_equals(peers.peer[0].name, "lab-pc") && s->names == 1);
+        peers.peer[0].flags = 0;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, 2 * sizeof peers.peer[0],
+                        0600);
+        memory_fill(s->peer, 0x99, 32);
+        link_name_heard(s, payload, 8);
+        link_peers_load(address_of peers);
+        check("sec: a key this machine does not know renames nobody",
+              string_equals(peers.peer[0].name, "lab-pc") &&
+                      string_equals(peers.peer[1].name, "box") &&
+                      peers.count == 2);
+        memory_copy(s->peer, key, 32);
+
+        //      A session may rename its machine only so many times.
+        {
+                p8 name[8] = {'a', 'a', '-', '0', 0};
+                positive made = 0;
+
+                s->names = 0;
+                for (positive at = 0; at < LINK_NAMES_MOST + 3; at++)
+                {
+                        name[3] = (p8)('0' + at);
+                        payload[0] = LINK_NAME_SAY;
+                        memory_copy(payload + 1, name, 4);
+                        link_name_heard(s, payload, 5);
+                        link_peers_load(address_of peers);
+                        made += string_equals(peers.peer[0].name,
+                                              (string_address)name);
+                }
+                check("sec: a session renames its record at most "
+                      "LINK_NAMES_MOST times, each a file written and synced",
+                      s->names == LINK_NAMES_MOST &&
+                              string_equals(peers.peer[0].name, "aa-7") &&
+                              made == LINK_NAMES_MOST);
+        }
+        link_session_close(s);
+        link_self.server = server;
+}
+
+//      The name is the host name, looked at once a second: a rename moves
+//      the generation sessions say it by, and asks for the members to be
+//      greeted under it, and the first look asks for neither.
+static fn renamed_looks(void)
+{
+        p8 name[WATERLINK_NAME_MAX];
+
+        if (system_call_2(syscall(sethostname), (positive) "wls-one", 7) < 0)
+                return;
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        link_name_look(1000000);
+        check("the first look learns the name, and has said nothing under "
+              "another",
+              string_equals((string_address)link_nearby.name, "wls-one") &&
+                      link_nearby.name_gen == 1 && !link_nearby.regreet);
+        (void)system_call_2(syscall(sethostname), (positive) "wls-two", 7);
+        link_name_look(1500000);
+        check("sec: the host name is looked at once a second, not at every turn",
+              string_equals((string_address)link_nearby.name, "wls-one") &&
+                      link_nearby.name_gen == 1);
+        link_name_look(2000001);
+        link_machine_name(name);
+        check("a rename is the name at the next look, a new generation for the "
+              "sessions to say, and the groups' members to be greeted",
+              string_equals((string_address)link_nearby.name, "wls-two") &&
+                      string_equals((string_address)name, "wls-two") &&
+                      link_nearby.name_gen == 2 && link_nearby.regreet);
+        link_nearby.regreet = false;
+        link_name_look(4000000);
+        check("and the same name again is no change",
+              link_nearby.name_gen == 2 && !link_nearby.regreet);
+        (void)system_call_2(syscall(sethostname), (positive) "WLS-Three.local", 15);
+        link_name_look(6000000);
+        check("a host name is said as a machine's name is: lowercase, as far as "
+              "it reads",
+              string_equals((string_address)link_nearby.name, "wls-three") &&
+                      link_nearby.name_gen == 3);
+        (void)system_call_2(syscall(sethostname), (positive) "wls-host", 8);
+}
+
+//      A greeting names its sender, and a member the machine knows by its key
+//      that greets under another name is renamed, whichever way it was paired.
+static fn renamed_greetings(bipolar listener, p16 port)
+{
+        static link_peers peers;
+        p8 back[WATERLINK_DATAGRAM + 16];
+        p8 server = link_self.server;
+        p64 at = 90000000;
+        p8 hex[8];
+        p8 suffixed[WATERLINK_NAME_MAX];
+        p8 played[WATERLINK_DATAGRAM];
+
+        link_self.server = false;
+        link_self.me = wls_b;
+        wls_group_file(0, 0, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "intel2", 60, port, at);
+        link_peers_load(address_of peers);
+        check("a member greets under its name and is kept under it",
+              peers.count == 1 && string_equals(peers.peer[0].name, "intel2") &&
+                      !link_nearby.renamed[0].used);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        wls_greeting(address_of wls_client, address_of wls_office, "lab-pc", 61,
+                     played);
+        link_server_initiation(played, WATERLINK_DATAGRAM, wls_loopback, port,
+                               at + 1000);
+        link_peers_load(address_of peers);
+        check("the same member greeting under another name is renamed, and "
+              "nothing else of it changes",
+              peers.count == 1 && string_equals(peers.peer[0].name, "lab-pc") &&
+                      !memory_compare(peers.peer[0].key, wls_client.public, 32) &&
+                      peers.peer[0].group == wls_office.mark &&
+                      peers.peer[0].may == WATERLINK_MAY_DEFAULT &&
+                      !memory_compare(peers.peer[0].address, wls_loopback, 16) &&
+                      peers.peer[0].port == port);
+        check("and the rename waits to be said by the turn that does",
+              link_nearby.renamed[0].used &&
+                      string_equals((string_address)link_nearby.renamed[0].was,
+                                    "intel2") &&
+                      string_equals((string_address)link_nearby.renamed[0].now,
+                                    "lab-pc"));
+        link_names_said();
+        check("which says it, once",
+              !link_nearby.renamed[0].used && link_self.state_dirty);
+
+        //      The record is called what it was and the greeting is played again
+        //      -- the same bytes, and then an older one -- and it is not renamed.
+        string_copy(peers.peer[0].name, "intel2");
+        peers.peer[0].seen = 0;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_server_initiation(played, WATERLINK_DATAGRAM, wls_loopback, port,
+                               at + 2000);
+        wls_greeted(address_of wls_client, "lab-rig", 59, port, at + 3000);
+        link_peers_load(address_of peers);
+        check("sec: a greeting played back, or older than the last, renames "
+              "nothing",
+              string_equals(peers.peer[0].name, "intel2") &&
+                      !link_nearby.renamed[0].used);
+
+        //      Paired by hand: the name is the person's, whatever the machine says.
+        peers.peer[0].group = 0;
+        peers.peer[0].may = WATERLINK_MAY_RUN;
+        peers.peer[0].port = 0;
+        peers.peer[0].seen = 0;
+        memory_zero(peers.peer[0].address, sizeof peers.peer[0].address);
+        string_copy(peers.peer[0].name, "intel2");
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        wls_greeted(address_of wls_client, "lab-pc", 62, port, at + 4000);
+        link_peers_load(address_of peers);
+        check("sec: a record paired by hand keeps the name a person typed, and "
+              "is not made a member, moved or widened",
+              string_equals(peers.peer[0].name, "intel2") &&
+                      peers.peer[0].group == 0 &&
+                      peers.peer[0].may == WATERLINK_MAY_RUN &&
+                      peers.peer[0].port == 0 && !link_nearby.renamed[0].used);
+
+        //      Paired by a code, which is gone now, or by another group: it is
+        //      the machine by its key, and follows, and is not moved.
+        peers.peer[0].group = 12345;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        wls_greeted(address_of wls_client, "lab-pc", 63, port, at + 4500);
+        link_peers_load(address_of peers);
+        check("a record a code paired, which no group of this machine's is, "
+              "follows too, and is not made a member, moved or widened",
+              string_equals(peers.peer[0].name, "lab-pc") &&
+                      peers.peer[0].group == 12345 &&
+                      peers.peer[0].may == WATERLINK_MAY_RUN &&
+                      peers.peer[0].port == 0 && link_nearby.renamed[0].used);
+        link_names_said();
+
+        peers.peer[0].flags = WATERLINK_PEER_LABELLED;
+        string_copy(peers.peer[0].name, "mybox");
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        wls_greeted(address_of wls_client, "lab-rig", 64, port, at + 5000);
+        link_peers_load(address_of peers);
+        check("a record a person named after a code paired it is not renamed "
+              "by a greeting",
+              string_equals(peers.peer[0].name, "mybox") &&
+                      !link_nearby.renamed[0].used);
+
+        //      A name another record has.
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "intel2");
+        memory_copy(peers.peer[0].key, wls_client.public, 32);
+        peers.peer[0].group = wls_office.mark;
+        string_copy(peers.peer[1].name, "lab-pc");
+        memory_fill(peers.peer[1].key, 0x55, 32);
+        peers.count = 2;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, 2 * sizeof peers.peer[0],
+                        0600);
+        wls_greeted(address_of wls_client, "lab-pc", 65, port, at + 6000);
+        link_peers_load(address_of peers);
+        memory_into_hex(hex, wls_client.public, 4);
+        string_copy((string_address)suffixed, "lab-pc-");
+        memory_copy(suffixed + 7, hex, 3);
+        suffixed[10] = 0;
+        check("sec: a greeting under a name another machine has here is kept "
+              "under it with its key's suffix, and the other is not touched",
+              peers.count == 2 &&
+                      string_equals(peers.peer[0].name, (string_address)suffixed) &&
+                      string_equals(peers.peer[1].name, "lab-pc") &&
+                      string_equals((string_address)link_nearby.renamed[0].offered,
+                                    "lab-pc"));
+        link_names_said();
+
+        //      A code that is spent keeps no member and renames none.
+        wls_group_file(LINK_GROUP_ONCE | LINK_GROUP_DONE, link_boot_seconds() + 300, 0);
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "intel2");
+        memory_copy(peers.peer[0].key, wls_client.public, 32);
+        peers.peer[0].group = 12345;
+        peers.count = 1;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        wls_greeted(address_of wls_client, "lab-pc", 66, port, at + 7000);
+        link_peers_load(address_of peers);
+        check("sec: a greeting to a code that is spent renames nobody",
+              string_equals(peers.peer[0].name, "intel2"));
+
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_self.stamps = 0;
+        link_self.server = server;
+        wls_drain(listener);
+}
+
+//      Renamed here: the members of the groups this machine is in, that it
+//      knows a place for, are greeted under the new name once; nobody else.
+static fn renamed_regreets(bipolar listener, p16 port)
+{
+        static link_peers peers;
+        struct waterlink_noise noise;
+        p8 back[WATERLINK_DATAGRAM + 16];
+        p8 who[32], hello[WATERLINK_HELLO_BYTES];
+        p8 server = link_self.server;
+
+        link_self.server = false;
+        link_self.me = wls_b;
+        wls_group_file(0, 0, 0);
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "member");
+        memory_fill(peers.peer[0].key, 0x31, 32);
+        peers.peer[0].group = wls_office.mark;
+        memory_copy(peers.peer[0].address, wls_loopback, 16);
+        peers.peer[0].port = port;
+        string_copy(peers.peer[1].name, "byhand");
+        memory_fill(peers.peer[1].key, 0x32, 32);
+        memory_copy(peers.peer[1].address, wls_loopback, 16);
+        peers.peer[1].port = (p16)(port + 1);
+        string_copy(peers.peer[2].name, "noplace");
+        memory_fill(peers.peer[2].key, 0x33, 32);
+        peers.peer[2].group = wls_office.mark;
+        peers.count = 3;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, 3 * sizeof peers.peer[0],
+                        0600);
+        wls_drain(listener);
+
+        string_copy((string_address)link_nearby.name, "lab-pc");
+        link_nearby.lan.socket = wls_quiet_socket();
+        link_nearby.interfaces_looked = 100000000;
+        link_nearby.regreet = true;
+        (void)link_nearby_tick(100000000);
+        check("a rename here greets the member of the group that has a place, "
+              "under the new name, once",
+              !link_nearby.regreet &&
+                      wls_heard(listener, back) == WATERLINK_DATAGRAM &&
+                      waterlink_gate_passes(address_of wls_office.identity, back,
+                                            WATERLINK_DATAGRAM) &&
+                      waterlink_accept(address_of noise,
+                                       address_of wls_office.identity,
+                                       wls_office.psk, back, who, hello) &&
+                      !memory_compare(who, wls_b.public, 32) &&
+                      string_equals((string_address)hello + WATERLINK_STAMP_BYTES,
+                                    "lab-pc"));
+        check("and nobody else: not a machine paired by hand, nor a member "
+              "with no place",
+              wls_heard(listener, back) <= 0);
+        (void)link_nearby_tick(100000001);
+        check("sec: and not again before another rename",
+              wls_heard(listener, back) <= 0);
+        discovery_lan_close(address_of link_nearby.lan);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_self.server = server;
+}
+
 /*      A socket for the listener's mDNS that sends nothing: nothing in this
         test may reach the link it runs on. A send on it is refused (the
         write side is shut), and what joins a group on it is only the
@@ -15136,6 +15702,11 @@ b32 main(void)
         greetings(listener, port);
         greeting_answers(listener, port);
         greeting_freshness(listener, port);
+        renamed_records();
+        renamed_sessions();
+        renamed_looks();
+        renamed_greetings(listener, port);
+        renamed_regreets(listener, port);
         mdns_amplification();
         mdns_interface_selection();
         mdns_names_one();

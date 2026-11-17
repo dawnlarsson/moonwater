@@ -317,10 +317,20 @@ struct waterlink_peer {
                             // that paired it (group.c)
         unsigned char address[16]; // last seen, v6 or v4 mapped
         unsigned short port;
-        unsigned short reserved; // zero, so the record is whole words
+        unsigned short flags; // WATERLINK_PEER_*; zero in a record made before
+                              // there were any, which is the common case
         unsigned int seen; // group-paired: the member's last greeting stamp,
                            // older ones are replays; 0 for never
 };
+
+/*      The name in a record is the machine's own, as it said it when a code
+        or a group paired it, and follows it when it is renamed: a machine says
+        its name again in every session and every greeting, and the record that
+        has its key takes the new one. A record paired by hand (link add NAME
+        KEY: group zero) has the name a person gave, which is theirs and not
+        what the machine calls itself, and so has one that link add named
+        after a code or a group had paired it, which LABELLED says. */
+#define WATERLINK_PEER_LABELLED 0x0001u
 
 _Static_assert(sizeof(struct waterlink_peer) == 96,
                "waterlink peer record must be exactly 96 bytes");

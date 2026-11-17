@@ -83751,6 +83751,12 @@ status, _, err = on("a", moon + " link shell b", stdin=b"")
 say(status == 255 and b"shell is not granted to a" in err, "a peer without the shell grant is told so")
 on("b", moon + " link allow a shell")
 runs("")
+#       A name a person gave (link add b KEY) is theirs: the machine says it is box-b in every session, and a's record keeps
+#       the name a typed.
+status, out, err = on("a", moon + " link")
+say(any(line.startswith("  b ") for line in out.decode(errors="replace").splitlines()) and
+    b"  box-b " not in out,
+    "a name given with link add stays what it was after a run of sessions with a machine that says another (%r)" % (out[-200:],))
 shell("")
 
 #       A client with nothing more to send sleeps while the far command runs:
@@ -84128,6 +84134,30 @@ def listeners_in(space):
         except OSError:
             continue
     return found
+def rename_listener(space, name):
+    #       The listener's host name, in the namespace of its own that on() made for it, which is where `moonwater name` of
+    #       that machine would have set it: the link says the host name, and nothing kept beside it.
+    #       The listener and the process it forks to read mDNS apart are both `link serve`, in one namespace.
+    pids = listeners_in(space)
+    return bool(pids) and len({os.readlink("/proc/%d/ns/uts" % pid) for pid in pids}) == 1 and subprocess.run(
+        ["nsenter", "--uts=/proc/%d/ns/uts" % pids[0], "python3", "-c",
+         "import socket; socket.sethostname(%r)" % name], capture_output=True).returncode == 0
+
+def peer_line(side, name):
+    status, out, err = on(side, moon + " link")
+    for line in out.decode(errors="replace").splitlines():
+        if line.startswith("  " + name + " "):
+            return line
+    return None
+
+def peer_waited(side, name, seconds=30):
+    began = time.time()
+    line = peer_line(side, name)
+    while line is None and time.time() - began < seconds:
+        time.sleep(1)
+        line = peer_line(side, name)
+    return line, time.time() - began
+
 status, out, err = on("b", moon + " link on")
 dying = listeners_in(far)
 for pid in dying:
@@ -84248,6 +84278,29 @@ if len(names) == 2:
     status, out, err = on("b", moon + " link")
     say(b"may shell run, in group lab" in out,
         "b gives a what its own join line granted, and says how it was paired")
+
+#       b is renamed. The listener's host name is all there is of it, and a, which has b paired by the group, calls it
+#       by the new name within seconds, with b's key, its group and what it may do; the old name reaches nobody; and
+#       b renamed back is the old name again.
+if len(names) == 2:
+    old_name = names["a"]
+    before = peer_line("a", old_name)
+    say(rename_listener(far, "box-bb"), "b's listener has another host name")
+    line, took = peer_waited("a", "box-bb")
+    say(line is not None and before is not None and line.split()[1:] == before.split()[1:] and "in group lab" in line,
+        "a calls b by its new name, with the same key, grants and group (%r, then %r, %.1fs)" % (before, line, took))
+    say(peer_line("a", old_name) is None, "and no machine is left under the old name")
+    status, out, err = on("a", "%s link run box-bb 'echo renamed-$((20+22))'" % moon)
+    say(status == 0 and out == b"renamed-42\n", "link box-bb reaches it, with what it was allowed (%r %r)" % (out, err[-80:]))
+    status, out, err = on("a", "%s link run %s 'echo old'" % (moon, old_name), timeout=30)
+    say(status != 0 and out == b"" and b"no peer is called" in err, "and the old name reaches nobody (%r %r)" % (status, err[-80:]))
+    status, out, err = on("b", moon + " link")
+    say(("  box-a " in out.decode(errors="replace")) and b"box-bb" not in out,
+        "b's own list is as it was: it is its name that changed, and a's is the same")
+    say(rename_listener(far, "box-b"), "b's listener has its first host name again")
+    line, took = peer_waited("a", old_name)
+    say(line is not None and line.split()[1:] == before.split()[1:] and peer_line("a", "box-bb") is None,
+        "and a calls it by that (%r, %.1fs)" % (line, took))
 
 status, out, err = on("c", moon + " link")
 say(b"in group lab" not in out, "the machine with the wrong secret paired with nobody")
@@ -84507,6 +84560,54 @@ if code:
         say(status == 0 and out == b"renamed-42\n", "box-a still runs a command there under the same name (%r %r)" % (out, err[-100:]))
         status, out, err = on("a", moon + " link box-c echo kept-$((20+22))", timeout=60)
         say(status == 0 and out.endswith(b"kept-42\n"), "and a reaches c by the name it had, now by the new key (%r %r)" % (out, err[-100:]))
+
+#       The same by a session alone. c is linked with a the way a code leaves it -- a record with the number of a group in
+#       it that neither machine is in, and nothing that is a person's name -- so what a hears of c's new name can only be
+#       what c's listener says in a session: no greeting reaches a for it, and a record named by hand would keep its name.
+def patch_peer(side, name, group, flags):
+    path = top + "/%s/root/link.peers" % side
+    data = bytearray(open(path, "rb").read())
+    for at in range(0, len(data) - 95, 96):
+        if data[at + 32:at + 64].split(b"\0")[0] == name.encode():
+            struct.pack_into("<I", data, at + 68, group)
+            struct.pack_into("<H", data, at + 90, flags)
+    open(path + ".new", "wb").write(bytes(data))
+    os.chmod(path + ".new", 0o600)
+    os.rename(path + ".new", path)
+
+status, key_c, err = on("c", moon + " link key")
+key_c = key_c.decode().strip()
+on("a", "%s link add box-c %s 10.77.0.3" % (moon, key_c))
+on("c", "%s link add box-a %s 10.77.0.1" % (moon, keys["a"]))
+on("c", moon + " link allow box-a run")
+on("c", moon + " link on")
+patch_peer("a", "box-c", 0x7777, 0)
+status, out, err = on("a", moon + " link box-c echo before-$((20+22))", timeout=60)
+say(status == 0 and out == b"before-42\n", "a reaches c, which a code left as a record of a group (%r %r)" % (out, err[-80:]))
+before = peer_line("a", "box-c")
+say(before is not None, "and a calls it box-c (%r)" % (before,))
+if before is not None:
+    say(rename_listener(spaces["c"], "box-cc"), "c's listener has another host name")
+    line, took = peer_waited("a", "box-cc")
+    say(line is not None and line.split()[1:] == before.split()[1:] and peer_line("a", "box-c") is None,
+        "a calls c by its new name after a session with it, with its key and what it may do (%r, then %r, %.1fs)" % (before, line, took))
+    status, out, err = on("a", moon + " link box-cc echo after-$((20+22))", timeout=60)
+    say(status == 0 and out == b"after-42\n", "and link box-cc reaches it (%r %r)" % (out, err[-80:]))
+    status, out, err = on("a", moon + " link box-c echo old", timeout=30)
+    say(status != 0 and out == b"" and b"no machine is called box-c" in err, "and the old name reaches nobody (%r %r)" % (status, err[-80:]))
+    say(rename_listener(spaces["c"], "box-c"), "c's listener has its first host name again")
+    line, took = peer_waited("a", "box-c")
+    say(line is not None and line.split()[1:] == before.split()[1:] and peer_line("a", "box-cc") is None,
+        "and a calls it by that again (%r, %.1fs)" % (line, took))
+    #       A name a person gave is theirs: the same record, named by hand again, is not renamed by the machine.
+    on("a", "%s link add mine %s 10.77.0.3" % (moon, key_c))
+    say(rename_listener(spaces["c"], "box-cc"), "c's listener is renamed once more")
+    time.sleep(6)
+    on("a", moon + " link mine true", timeout=60)
+    say(peer_line("a", "mine") is not None and peer_line("a", "box-cc") is None,
+        "a record named with link add keeps that name through it (%r)" % (peer_line("a", "mine"),))
+    rename_listener(spaces["c"], "box-c")
+    on("a", moon + " link remove mine")
 
 #       A machine in too many groups has no room for a code.
 on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group g$i secret-number-$i-a-long-one; done'" % moon,

@@ -26,6 +26,10 @@
                 output    machine to client, durable: the terminal's bytes,
                           or standard output, ending in the exit status
                 error     machine to client, durable: standard error
+                name      either end to the other, durable: what the sender
+                          is called, when the session comes up and again when
+                          that changes, so a machine that was renamed is the
+                          same record under its new name (LINK_KEY_NAME)
 
         Every payload starts with one byte naming what it is -- data, end,
         exit -- so a stream ends in order with what it carried.
@@ -198,6 +202,16 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_KEY_SIGNAL 5
 #define LINK_KEY_OUTPUT 7
 #define LINK_KEY_ERROR 8
+
+/*      A name, on a key of its own: each end says what it is called when a
+        session comes up and again when that changes, 'M' and the name, so the
+        machine at the other end keeps its record of this one under it
+        (link_name_heard). Durable, as the request is. A machine from before
+        there was one takes the frame as every key it does not know and does
+        nothing with it, and says nothing, so the two stay as they were. */
+#define LINK_KEY_NAME 6
+#define LINK_NAME_SAY 'M'
+#define LINK_NAMES_MOST 8 // names one session may change its record by: a peer can rename itself, and a file is written for each
 
 #define LINK_DATA 'D'
 #define LINK_END 'E'
@@ -930,6 +944,8 @@ struct link_session {
         p8 dialed; // this machine dialled it: the keeper dials it again when it drops
         p8 kind;
         p8 name[WATERLINK_NAME_MAX];
+        p32 named; // the generation of this machine's name this session last said (link_nearby.name_gen)
+        p8 names;  // the names the far end said that changed the record, which a session has only so many of
         p8 peer[32];
         p64 conversation;
         p8 address[16];
@@ -2398,8 +2414,12 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                                     link_grants[grant].name, sizeof why);
                 string_append_bounded((string_address)why,
                                       " is not granted to ", sizeof why);
+                //      Named as the file has it now: the session's own copy is
+                //      from when it opened, and a rename since is the file's.
                 string_append_bounded((string_address)why,
-                                      (string_address)s->name, sizeof why);
+                                      peer ? (string_address)peer->name
+                                           : (string_address)s->name,
+                                      sizeof why);
                 link_refuse(s, (string_address)why);
                 return;
         }
@@ -2747,6 +2767,9 @@ static p8 link_stream_take(struct link_session address_to s,
         return true;
 }
 
+static fn link_name_heard(struct link_session address_to s,
+                         p8 address_to payload, positive length);
+
 /*
         A frame arrives, at either end. The key says which stream or which
         question; the payload's first byte says what it is.
@@ -2810,6 +2833,9 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                         system_control(s->terminal, TIOCSWINSZ,
                                        address_of size);
                 }
+                break;
+        case LINK_KEY_NAME:
+                link_name_heard(s, payload, length);
                 break;
         case LINK_KEY_SIGNAL:
                 if (length == 2 && payload[0] == 'K' && s->pid > 0 &&
@@ -3488,6 +3514,7 @@ static fn link_note_seen(struct link_session address_to s, p64 wall)
 static fn link_state_write(p64 now)
 {
         link_state address_to state = address_of link_self.state;
+        link_peers peers;
 
         if (!link_self.state_dirty ||
             link_age(now, link_self.state_written) < 200000)
@@ -3495,15 +3522,24 @@ static fn link_state_write(p64 now)
         link_self.state_dirty = false;
         link_self.state_written = now;
 
+        //      A session is shown under the name the file has for its key now:
+        //      a machine renamed since the session opened -- by this listener,
+        //      or by a command that talked to it -- is not shown under the name
+        //      it had, which `moonwater link` would not find a record for.
+        link_peers_load(address_of peers);
         state->open_count = 0;
         for (positive at = 0; at < LINK_SESSIONS; at++)
         {
                 struct link_session address_to s = link_self.session + at;
                 link_open_entry address_to open = state->open + state->open_count;
+                struct waterlink_peer address_to peer;
 
                 if (!s->used || !s->now.live)
                         continue;
-                memory_copy(open->name, s->name, WATERLINK_NAME_MAX);
+                peer = link_peer_keyed(address_of peers, s->peer);
+                memory_copy(open->name,
+                            peer ? (address_any)peer->name : (address_any)s->name,
+                            WATERLINK_NAME_MAX);
                 open->kind = s->kind;
                 memory_copy(open->address, s->address, 16);
                 open->port = s->port;
@@ -3866,6 +3902,10 @@ static p64 link_sessions_turn(p64 now)
 {
         p64 wake = now + 1000000;
 
+        //      The name this machine has now, and what a greeting has told of a
+        //      machine that has another.
+        link_name_look(now);
+        link_names_said();
         link_peers_moved();
         if (link_self.server)
                 link_sessions_granted(now);
@@ -3901,6 +3941,8 @@ static p64 link_sessions_turn(p64 now)
 
                 if (s->now.live)
                         link_session_streams(s, now);
+                if (s->now.live && s->named != link_nearby.name_gen)
+                        link_name_post(s);
                 if (s->now.live)
                 {
                         link_session_flush(s, now);
@@ -4922,7 +4964,7 @@ static b32 link_client_run(string_address name, p8 kind,
                                                      WATERLINK_FRAME_LAST,
                                              request, (p16)request_length, now);
                         if (kind == LINK_KIND_SHELL)
-                                (void)edit_terminal_raw();
+                                link_terminal_raw = edit_terminal_raw();
                         asked = true;
                 }
                 else if (link_age(now, s->now.made) >= rekey_after &&
@@ -4987,6 +5029,7 @@ static b32 link_client_run(string_address name, p8 kind,
                 {
                         link_session_end(s, true);
                         edit_terminal_restore();
+                        link_terminal_raw = false;
                         string_format(log_error, host_label "%s: %s\n", name,
                                       (string_address)s->refusal);
                         log_flush();
@@ -5018,6 +5061,7 @@ static b32 link_client_run(string_address name, p8 kind,
                                                        : (string_address) "standard output";
                                 link_session_end(s, true);
                                 edit_terminal_restore();
+                                link_terminal_raw = false;
                                 if (broken->error != -EPIPE)
                                         (void)host_fail(what, broken->error);
                                 answer = broken == s->reads        ? LINK_FAILED
@@ -5040,6 +5084,7 @@ static b32 link_client_run(string_address name, p8 kind,
                     (link_age(now, s->heard) > LINK_DEAD || s->finished))
                 {
                         edit_terminal_restore();
+                        link_terminal_raw = false;
                         string_format(log_error,
                                       s->finished
                                               ? host_label "%s closed the link\n"
@@ -5068,6 +5113,7 @@ static b32 link_client_run(string_address name, p8 kind,
                 link_tcp_write(link_tcp_self.conn + at, link_now());
         link_tcp_close_all();
         edit_terminal_restore();
+        link_terminal_raw = false;
         crypto_forget(address_of link_client.noise, sizeof link_client.noise);
 
         //      A pulled file is only there under its name once it is whole.

@@ -430,6 +430,57 @@ static struct waterlink_peer address_to link_peer_returned(
         return peer;
 }
 
+/*
+        A machine that has been renamed, heard by its key: the record that
+        has the key takes the name the machine says it has now, and the name
+        it had goes -- `moonwater link NEW` reaches it and `link OLD` no
+        longer does. The key is the machine, and it was proved to this
+        machine by the handshake that carried the name, so nobody but the
+        machine itself can rename its record, and only its name moves: its
+        grants, its place and its group stay as they were.
+
+        What is left alone: a record a person named -- one paired by hand
+        (link add NAME KEY, which no group made: group zero) or marked
+        WATERLINK_PEER_LABELLED (link add over a machine a code or a group
+        paired), a name that is theirs and not what the machine calls itself
+        -- a name that is not one a machine could be paired as
+        (link_name_good), and one the record has already. A name another
+        record has is not taken: the machine is kept as the same name with
+        its key's suffix, as when it is paired, and it is the offered name
+        that is another machine's here, for the caller to say. The record's
+        own name is taken out while the new one is chosen, so that the name
+        it has is not found as another's and moved on to a longer suffix at
+        every contact.
+
+        True when the record's name changed; was is the name it had and now
+        the one it has, whole buffers of WATERLINK_NAME_MAX. offered is
+        folded to lowercase and ended, as a name is when it is typed.
+*/
+static p8 link_peer_follow(link_peers address_to peers,
+                           struct waterlink_peer address_to peer,
+                           p8 address_to offered, p8 address_to was,
+                           p8 address_to now)
+{
+        p8 changed;
+
+        if (!peer)
+                return false;
+        offered[WATERLINK_NAME_MAX - 1] = 0;
+        for (positive at = 0; offered[at]; at++)
+                if (offered[at] >= 'A' && offered[at] <= 'Z')
+                        offered[at] += 'a' - 'A';
+        if (!peer->group || (peer->flags & WATERLINK_PEER_LABELLED) ||
+            !link_name_good((string_address)offered) ||
+            string_equals(peer->name, (string_address)offered))
+                return false;
+        memory_copy(was, peer->name, WATERLINK_NAME_MAX);
+        memory_zero(peer->name, WATERLINK_NAME_MAX);
+        changed = link_name_for(peers, offered, peer->key, now) &&
+                  !string_equals((string_address)now, (string_address)was);
+        memory_copy(peer->name, changed ? now : was, WATERLINK_NAME_MAX);
+        return changed;
+}
+
 // The listener's side of it ------------------------------------------------
 
 struct link_greeted {
@@ -459,6 +510,18 @@ struct link_pending {
         p8 used;
 };
 
+/*      A member's rename a greeting brought, kept for the turn that says it
+        (link_names_said): the greeting is read where nothing is written to a
+        log. The record has the new name already, in the file. */
+#define LINK_RENAMED 4
+struct link_renamed {
+        p8 key[32];
+        p8 was[WATERLINK_NAME_MAX];
+        p8 now[WATERLINK_NAME_MAX];
+        p8 offered[WATERLINK_NAME_MAX];
+        p8 used;
+};
+
 typedef struct
 {
         link_groups groups;
@@ -483,7 +546,15 @@ typedef struct
         p8 refused_code; // a one-use code turned a greeting away
         p8 no_route;     // the last send found no route to its place
         positive greeted_next;
+        //      This machine's name as it is now (link_name_look), what greetings
+        //      and sessions say of it. A session says it again when name_gen has
+        //      moved past the one it said, and the members of a group are
+        //      greeted under it once more when regreet is set.
         p8 name[WATERLINK_NAME_MAX];
+        p32 name_gen;
+        p64 name_looked;
+        p8 regreet;
+        struct link_renamed renamed[LINK_RENAMED];
         p64 expiry_look;
         positive sweep_left; // sweeps still to start for the waiting code
         p8 sweeping;
@@ -631,7 +702,10 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         bipolar lock = link_peers_lock();
         p8 changed = false;
         p8 new = false;
+        p8 renamed = false;
         p8 name[WATERLINK_NAME_MAX];
+        p8 was[WATERLINK_NAME_MAX];
+        p8 asked[WATERLINK_NAME_MAX];
 
         struct link_group_record address_to record =
                 link_nearby.groups.record + group;
@@ -685,6 +759,18 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         }
         else if (peer && peer->group == keys->mark && stamped <= peer->seen)
                 peer = null;
+        //      A member that is known by its key and says another name than the
+        //      record has was renamed: the key is what proved it is the same
+        //      machine, so the record follows it (link_peer_follow), whichever
+        //      group or code paired it, and not one paired by hand, which is a
+        //      person's own name; a new member has the name it offered already.
+        if (peer && !new && open)
+        {
+                memory_copy(asked, offered, WATERLINK_NAME_MAX);
+                renamed = link_peer_follow(address_of peers, peer, asked, was,
+                                           name);
+                changed |= renamed;
+        }
         if (peer && peer->group == keys->mark)
         {
                 changed |= peer->seen != stamped ||
@@ -702,10 +788,25 @@ static p8 link_pair_keep(positive group, p8 address_to key,
                 p8 saved = link_peers_save(address_of peers) >= 0;
 
                 new = saved && new;
+                renamed = saved && renamed;
                 if (!saved)
                         peer = null;
         }
         address_to accepted = peer != null;
+        if (renamed)
+                for (positive at = 0; at < LINK_RENAMED; at++)
+                {
+                        struct link_renamed address_to slot = link_nearby.renamed + at;
+
+                        if (slot->used && at + 1 < LINK_RENAMED)
+                                continue;
+                        memory_copy(slot->key, peer->key, 32);
+                        memory_copy(slot->was, was, WATERLINK_NAME_MAX);
+                        memory_copy(slot->now, name, WATERLINK_NAME_MAX);
+                        memory_copy(slot->offered, asked, WATERLINK_NAME_MAX);
+                        slot->used = true;
+                        break;
+                }
         link_peers_unlock(lock);
         crypto_forget(address_of held, sizeof held);
         link_self.state_dirty = true;
@@ -723,6 +824,173 @@ static p8 link_pair_keep(positive group, p8 address_to key,
 static p8 link_groups_unknown(bipolar read)
 {
         return read < 0 && read != -ENOENT && read != -EPERM && read != -ELOOP;
+}
+
+/*
+        What this machine is called, as the link says it, is the kernel's host
+        name and nothing kept beside it -- `moonwater name` sets that, and a
+        Mac's hostname is it -- so it is looked at again, once a second, by
+        every loop that says it: the listener's and a client's. A rename is
+        said at the next turn, with no restart and no pairing again, and no
+        copy of the old name is left anywhere to say. What says it:
+
+                greetings, from link_nearby.name, and the members of the
+                groups this machine is in are greeted under the new name at
+                once (regreet), since a member already known is greeted by
+                nothing else: its announcements are not answered;
+                sessions, on their own key (LINK_KEY_NAME), when they come up
+                and again when name_gen has moved past what they said.
+
+        The first look only learns the name: nothing was said under another.
+*/
+static fn link_name_look(p64 now)
+{
+        p8 fresh[WATERLINK_NAME_MAX];
+
+        if (link_nearby.name_looked &&
+            link_age(now, link_nearby.name_looked) < 1000000)
+                return;
+        link_nearby.name_looked = now ? now : 1;
+        link_machine_name(fresh);
+        if (!memory_compare(fresh, link_nearby.name, WATERLINK_NAME_MAX))
+                return;
+        if (link_nearby.name[0])
+                link_nearby.regreet = true;
+        memory_copy(link_nearby.name, fresh, WATERLINK_NAME_MAX);
+        link_nearby.name_gen++;
+}
+
+//      This machine's name, said to the far end of a session.
+static fn link_name_post(struct link_session address_to s)
+{
+        if (link_post(s, LINK_KEY_NAME, WATERLINK_FRAME_DURABLE, LINK_NAME_SAY,
+                      link_nearby.name,
+                      string_length((string_address)link_nearby.name)))
+                s->named = link_nearby.name_gen;
+}
+
+//      What is said of a rename, in one line: the old name is now called the
+//      new one, and when the new one is not what the machine asked for, whose
+//      name that is here instead.
+static fn link_name_line(p8 address_to was, p8 address_to now,
+                         p8 address_to offered, p8 address_to line,
+                         positive room)
+{
+        string_copy_bounded((string_address)line, (string_address)was, room);
+        string_append_bounded((string_address)line, " is now called ", room);
+        string_append_bounded((string_address)line, (string_address)now, room);
+        if (!string_equals((string_address)now, (string_address)offered))
+        {
+                string_append_bounded((string_address)line, ": ", room);
+                string_append_bounded((string_address)line,
+                                      (string_address)offered, room);
+                string_append_bounded((string_address)line,
+                                      " is another machine here", room);
+        }
+}
+
+/*      A line of what the link found out by itself, where whoever looks will
+        see it: the listener's goes to the kernel log, which the log window
+        shows (nothing reads its standard error), and a client's to its
+        standard error, which a person is reading and the output of a command
+        it ran is not. A terminal a shell has raw does not process output, so
+        its line ends in both bytes. */
+static p8 link_terminal_raw;
+
+static fn link_note(p8 address_to line)
+{
+#if !defined(MACOS)
+        if (link_self.server)
+        {
+                string_address parts[] = {(string_address)line, null};
+
+                host_kmsg(parts);
+                return;
+        }
+#endif
+        string_format(log_error, host_label "%s%s", (string_address)line,
+                      link_terminal_raw ? (string_address) "\r\n"
+                                        : (string_address) "\n");
+        log_flush();
+}
+
+/*      A record was renamed, and is already in the file: the sessions that
+        have it say the new name where the state file shows them, and one line
+        says what happened. */
+static fn link_name_said(p8 address_to key, p8 address_to was, p8 address_to now,
+                         p8 address_to offered)
+{
+        p8 line[3 * WATERLINK_NAME_MAX + 40];
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+
+                if (s->used && crypto_same(s->peer, key, 32))
+                        memory_copy(s->name, now, WATERLINK_NAME_MAX);
+        }
+        link_self.state_dirty = true;
+        link_name_line(was, now, offered, line, sizeof line);
+        link_note(line);
+}
+
+//      The renames the greetings brought (link_pair_keep), said.
+static fn link_names_said(void)
+{
+        for (positive at = 0; at < LINK_RENAMED; at++)
+        {
+                struct link_renamed slot = link_nearby.renamed[at];
+
+                if (!slot.used)
+                        continue;
+                link_nearby.renamed[at].used = false;
+                link_name_said(slot.key, slot.was, slot.now, slot.offered);
+        }
+}
+
+/*
+        The far end of a session says its name: 'M' and up to 31 bytes of it
+        (LINK_KEY_NAME). The record that has the session's key takes it, and
+        the line is said. It is the machine that was proved by the handshake
+        that says it, and a name one is held to is the one a machine could be
+        paired as; what is not, a name with a byte that ends it before its
+        length, or one this session's record has already, is not worth a
+        look at the file. A session changes its record only so many times
+        (LINK_NAMES_MOST): each is a file written and synced, and an end that
+        may rename itself may not do it a thousand times a second.
+*/
+static fn link_name_heard(struct link_session address_to s,
+                          p8 address_to payload, positive length)
+{
+        p8 offered[WATERLINK_NAME_MAX];
+        p8 was[WATERLINK_NAME_MAX];
+        p8 now[WATERLINK_NAME_MAX];
+        link_peers peers;
+        bipolar lock;
+        p8 renamed = false;
+
+        if (length < 2 || length > WATERLINK_NAME_MAX ||
+            payload[0] != LINK_NAME_SAY || s->names >= LINK_NAMES_MOST)
+                return;
+        memory_zero(offered, sizeof offered);
+        memory_copy(offered, payload + 1, length - 1);
+        if (string_length((string_address)offered) != length - 1 ||
+            string_equals((string_address)s->name, (string_address)offered))
+                return;
+        lock = link_peers_lock();
+        if (lock < 0)
+                return;
+        if (link_peers_for_change(address_of peers))
+        {
+                renamed = link_peer_follow(address_of peers,
+                                           link_peer_keyed(address_of peers, s->peer),
+                                           offered, was, now) &&
+                          link_peers_save(address_of peers) >= 0;
+                s->names += renamed;
+        }
+        link_peers_unlock(lock);
+        if (renamed)
+                link_name_said(s->peer, was, now, offered);
 }
 
 /*
@@ -937,7 +1205,6 @@ static fn link_nearby_reload(p64 now)
                 waterlink_group_keys_from(link_nearby.keys + at,
                                           link_nearby.groups.record[at].key,
                                           link_nearby.groups.record[at].namespace);
-        link_machine_name(link_nearby.name);
 
         link_nearby_socket();
 
@@ -1480,6 +1747,30 @@ static p64 link_nearby_tick(p64 now)
                 return wake;
         if (!link_nearby.labels_ready && !link_nearby_labels())
                 return wake;
+
+        //      Renamed: every member of a group this machine is in that it knows
+        //      a place for is greeted, once, under the new name. A greeting is
+        //      what carries the name to a member that is in no session with
+        //      this machine, and the member keeps the sender under it as it
+        //      keeps any greeting (link_pair_keep). A code's group is a pairing
+        //      and not a place members are.
+        if (link_nearby.regreet)
+        {
+                link_peers peers;
+
+                link_nearby.regreet = false;
+                link_peers_load(address_of peers);
+                for (positive group = 0; group < link_nearby.groups.count; group++)
+                {
+                        if (link_nearby.groups.record[group].flags & LINK_GROUP_ONCE)
+                                continue;
+                        for (positive at = 0; at < peers.count; at++)
+                                if (peers.peer[at].port &&
+                                    peers.peer[at].group == link_nearby.keys[group].mark)
+                                        link_pair_begin(group, peers.peer[at].address,
+                                                        peers.peer[at].port, now, true);
+                }
+        }
 
         //      Interfaces come and go, and an address comes late -- a lease
         //      that arrives after the listener started is the ordinary case
