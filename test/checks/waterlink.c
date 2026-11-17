@@ -4799,7 +4799,7 @@ static fn discovery_line_rows(void)
         static const string_address keys[] = {
             "discovery ", "stun ", "https ", "announce ", "listen ", "stun servers ",
             "https url ", "public ipv4 ", "public ipv6 ", "udp out ", "nat ", "proxy ",
-            "addresses ", "learned "};
+            "addresses ", "wired address ", "wifi address ", "learned "};
         //      Names a kernel takes: a row's key, a key after a semicolon, an
         //      escape and a quote.
         static const string_address names[] = {"learned", "x;nat", "a\x1b[2Jb", "q\"udp"};
@@ -4909,6 +4909,122 @@ static fn discovery_line_rows(void)
               spoofed == 0);
         check("discovery: a row's line is its value alone, and how and when it was "
               "learned are lines of their own", bare == 0);
+}
+
+/*
+        The addresses a connection has: the line Settings' Wired IP address and
+        Wi-Fi IP address rows read (`wired address`, `wifi address`) says the
+        IPv4 addresses of the interfaces of its kind that are up with a carrier,
+        then the first IPv6 one that is global or unique local, each family's
+        own; a cable that is pulled (no carrier), a link taken down, an
+        address that is a loopback's or link-local IPv6, a virtual interface's
+        or a VPN's say nothing; a kind with none says none and why, and the
+        names of the interfaces come on the line after it, quoted.
+*/
+static fn discovery_local_rows(void)
+{
+        static const struct
+        {
+                string_address name;
+                p16 type;
+                string_address driver;
+                p32 flags;
+        } links[] = {
+            {"eth0", 1, null, IFF_UP | IFF_RUNNING},         // index 1: up with a cable in
+            {"eth1", 1, null, IFF_UP},                       // index 2: up, cable out
+            {"wlan0", 1, null, IFF_UP | IFF_RUNNING},        // index 3: wireless, joined
+            {"docker0", 1, "bridge", IFF_UP | IFF_RUNNING},  // index 4: virtual
+            {"lo", 772, null, IFF_UP | IFF_RUNNING},         // index 5: loopback
+        };
+        static const struct
+        {
+                string_address text;
+                p32 index;
+                p8 prefix;
+                p8 six;
+        } places[] = {
+            {"192.168.109.27", 1, 22, 0}, {"169.254.7.7", 2, 16, 0}, {"192.168.1.40", 3, 24, 0},
+            {"172.17.0.1", 4, 16, 0},     {"127.0.0.1", 5, 8, 0},    {"10.0.0.9", 1, 8, 0},
+            {"2001:db8::7", 1, 64, 1},    {"fe80::1", 1, 64, 1},     {"fd00::5", 1, 64, 1},
+            {"2001:db8::9", 3, 64, 1},
+        };
+        discovery_settings settings;
+        discovery_found found;
+        discovery_here here;
+        p8 value[256];
+        positive wrong = 0;
+
+        memory_zero(address_of here, sizeof here);
+        memory_zero(address_of found, sizeof found);
+        memory_zero(address_of settings, sizeof settings);
+        discovery_settings_read_at("/nonexistent-moonwater", address_of settings);
+        for (positive at = 0; at < array_count(links); at++)
+        {
+                wrong += !discovery_link_fed(address_of here, links[at].name, links[at].type,
+                                             links[at].driver, links[at].name[0] == 'w');
+                here.interface[at].flags = links[at].flags;
+        }
+        for (positive at = 0; at < array_count(places); at++)
+        {
+                discovery_local address_to mine = here.own + here.owns++;
+                positive length = string_length(places[at].text);
+
+                mine->index = places[at].index;
+                mine->prefix = places[at].prefix;
+                wrong += !(places[at].six
+                               ? discovery_parse6((const p8 address_to)places[at].text, length, mine->address)
+                               : discovery_parse4((const p8 address_to)places[at].text, length, mine->address));
+                mine->scope = (p8)discovery_address_scope(mine->address);
+        }
+        discovery_said_used = 0;
+        discovery_report(discovery_said_put, address_of settings, address_of found, address_of here, "");
+        //      The wired line: the one interface with a cable, its two IPv4 addresses and its first global
+        //      IPv6 one (the unique local one is the second), in the order the kernel dumps them.
+        wrong += !discovery_key_own("wired address ", value, sizeof value) ||
+                 !string_equals((string_address)value, "192.168.109.27; 10.0.0.9; 2001:db8::7");
+        wrong += !discovery_key_own("wired address how ", value, sizeof value) ||
+                 !string_equals((string_address)value, "up with a link on \"eth0\"");
+        //      The wireless one: its own address, and its global IPv6 one.
+        wrong += !discovery_key_own("wifi address ", value, sizeof value) ||
+                 !string_equals((string_address)value, "192.168.1.40; 2001:db8::9");
+        check("discovery: the line of a connection's addresses says those of the interfaces of its kind "
+              "that are up with a carrier, IPv4 first and one IPv6 that is global or unique local, and "
+              "no cable-out, virtual, loopback or link-local one", wrong == 0);
+
+        //      A cable pulled out and a radio not joined: none, and why.
+        wrong = 0;
+        here.interface[0].flags = IFF_UP;
+        here.interface[2].flags = IFF_UP;
+        discovery_said_used = 0;
+        discovery_report(discovery_said_put, address_of settings, address_of found, address_of here, "");
+        wrong += !discovery_key_own("wired address ", value, sizeof value) ||
+                 !string_equals((string_address)value, "none");
+        wrong += !discovery_key_own("wired address how ", value, sizeof value) ||
+                 !string_equals((string_address)value, "no ethernet interface is up with a link");
+        wrong += !discovery_key_own("wifi address ", value, sizeof value) ||
+                 !string_equals((string_address)value, "none");
+        //      A link up whose lease has not come: its kind is there and says it has no address.
+        here.interface[0].flags = IFF_UP | IFF_RUNNING;
+        here.interface[2].flags = IFF_UP | IFF_RUNNING;
+        for (positive at = 0; at < here.owns; at++)
+                here.own[at].index = here.own[at].index == 1 ? 6 : here.own[at].index;
+        discovery_said_used = 0;
+        discovery_report(discovery_said_put, address_of settings, address_of found, address_of here, "");
+        wrong += !discovery_key_own("wired address ", value, sizeof value) ||
+                 !string_equals((string_address)value, "none");
+        wrong += !discovery_key_own("wired address how ", value, sizeof value) ||
+                 !string_equals((string_address)value, "no ethernet interface that is up has an address");
+        //      No interface of the kind at all (the first two are not ethernet's now).
+        here.interfaces = 0;
+        here.owns = 0;
+        discovery_said_used = 0;
+        discovery_report(discovery_said_put, address_of settings, address_of found, address_of here, "");
+        wrong += !discovery_key_own("wired address how ", value, sizeof value) ||
+                 !string_equals((string_address)value, "no ethernet interface") ||
+                 !discovery_key_own("wifi address how ", value, sizeof value) ||
+                 !string_equals((string_address)value, "no wifi interface");
+        check("discovery: a cable pulled out or a radio not joined says none, and why: no interface "
+              "of the kind, none up with a link, or none up that has an address", wrong == 0);
 }
 
 /*
@@ -6110,6 +6226,7 @@ b32 main(void)
         discovery_setting_rows();
         discovery_list_rows();
         discovery_line_rows();
+        discovery_local_rows();
         discovery_lan_rows();
         discovery_fold_rows();
         return test_report(null);

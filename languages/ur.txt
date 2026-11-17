@@ -468,7 +468,9 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =What a swipe in from this edge does	faab	اس کنارے سے سوائپ کیا کرتا ہے
 =White edged in black, or the reverse	cd63	سفید سیاہ کنارے کے ساتھ، یا الٹ
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Wi-Fi کا IP پتہ
 =Wired	9a54	وائرڈ نیٹ ورک
+=Wired IP address	0e25	وائرڈ نیٹ ورک کا IP پتہ
 =all	4bc4	سب
 =allow	a832	اجازت
 =amber	bec0	عنبری

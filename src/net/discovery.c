@@ -563,6 +563,7 @@ static positive discovery_nat_classify(p8 answered, const p8 address_to first,
 typedef struct
 {
         b32 index;
+        p32 flags; // IFF_*, as the kernel said them when the link was dumped
         p8 kind;
         p8 name[16];
 } discovery_interface;
@@ -615,6 +616,7 @@ static p8 discovery_link_seen(netlink_header address_to header,
                 memory_copy(driver, kind, size);
         into = here->interface + here->interfaces++;
         into->index = (b32)link->index;
+        into->flags = link->flags;
         string_copy_bounded((string_address)into->name, name, sizeof into->name);
         into->kind = (p8)discovery_interface_kind(
             name, link->kind, netlink_link_is_wireless(header, name),
@@ -1505,6 +1507,85 @@ static fn discovery_server_text(const discovery_stun_server address_to server,
 }
 
 /*
+        The addresses a kind of interface has, as the line a Settings row
+        reads (Wired IP address, Wi-Fi IP address): every IPv4 address of
+        an interface of the kind that is up with a carrier (IFF_UP and a
+        link), a link-local one too, which is what a link that was given no
+        lease has; and the first IPv6 address that is global or unique
+        local, which a machine beyond the router reaches it by. A cable
+        pulled out, or a link taken down, takes its addresses off the line
+        at the next reading, whatever the kernel keeps on it. At most
+        DISCOVERY_LOCAL_V4 IPv4 addresses, so the line is one a row shows
+        whole. A kind with none says none, and the line after it, how, says
+        why, or which interfaces the addresses are of (each name quoted and
+        escaped, discovery_name_text).
+*/
+#define DISCOVERY_LOCAL_V4 4
+
+//      Whether a link is up and has a carrier, as net.c's watcher asks it.
+static p8 discovery_link_up(const discovery_interface address_to link)
+{
+        return (link->flags & IFF_UP) && (link->flags & (IFF_RUNNING | IFF_LOWER_UP));
+}
+
+//      Whether a line of the kind says an address: any IPv4 one but a loopback's,
+//      and an IPv6 one that is global or unique local.
+static p8 discovery_local_says(const discovery_local address_to mine)
+{
+        if (discovery_mapped(mine->address))
+                return mine->scope != NET_SCOPE_LOOPBACK;
+        return mine->scope == NET_SCOPE_GLOBAL || mine->scope == NET_SCOPE_UNIQUE;
+}
+
+static fn discovery_report_local(writer say, discovery_here address_to here, positive kind,
+                                 string_address word, string_address prefix)
+{
+        p8 text[48];
+        p8 name[DISCOVERY_NAME_TEXT];
+        positive v4 = 0, v6 = 0, links = 0, up = 0, named = 0;
+
+        for (positive at = 0; at < here->interfaces; at++)
+                if (here->interface[at].kind == kind)
+                        links++, up += discovery_link_up(here->interface + at);
+        string_format(say, "%s%s address", prefix, word);
+        for (positive at = 0; at < here->owns; at++)
+        {
+                discovery_local address_to mine = here->own + at;
+                discovery_interface address_to link = discovery_interface_of(here, mine->index);
+                p8 four = discovery_mapped(mine->address);
+
+                if (!link || link->kind != kind || !discovery_link_up(link) ||
+                    !discovery_local_says(mine) || (four ? v4 >= DISCOVERY_LOCAL_V4 : v6 >= 1))
+                        continue;
+                discovery_address_text(mine->address, text);
+                string_format(say, "%s %s", v4 + v6 ? ";" : "", (string_address)text);
+                v4 += four, v6 += !four;
+        }
+        if (!v4 && !v6)
+        {
+                string_format(say, " none\n%s%s address how no %s interface%s\n", prefix, word,
+                              (string_address)discovery_kind_names[kind],
+                              !links ? "" : !up ? " is up with a link" : " that is up has an address");
+                return;
+        }
+        string_format(say, "\n%s%s address how up with a link on", prefix, word);
+        for (positive at = 0; at < here->interfaces; at++)
+        {
+                discovery_interface address_to link = here->interface + at;
+                p8 has = false;
+
+                for (positive own = 0; own < here->owns && !has; own++)
+                        has = here->own[own].index == link->index &&
+                              discovery_local_says(here->own + own);
+                if (link->kind != kind || !discovery_link_up(link) || !has)
+                        continue;
+                discovery_name_text(link->name, name);
+                string_format(say, "%s %s", named++ ? "," : "", (string_address)name);
+        }
+        string_format(say, "\n");
+}
+
+/*
         The page, prefix before each line (the doctor's indent, or nothing).
         Each line is a key and its value alone, the line a Settings row
         reads: a switch's word, a list, an address, a word of the tables.
@@ -1684,6 +1765,8 @@ static fn discovery_report(writer say, const discovery_settings address_to setti
                               (string_address)discovery_scope_names[mine->scope]);
         }
         string_format(say, "%s\n", shown ? "" : " none but loopback");
+        discovery_report_local(say, here, DISCOVERY_KIND_ETHERNET, "wired", prefix);
+        discovery_report_local(say, here, DISCOVERY_KIND_WIFI, "wifi", prefix);
 
         string_format(say, "%slearned %s\n", prefix, (string_address)ago);
 }

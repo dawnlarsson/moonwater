@@ -467,7 +467,9 @@ ui_field_full	fe02	больше не помещается
 =What a swipe in from this edge does	faab	Что делает жест от этого края
 =White edged in black, or the reverse	cd63	Белый с чёрной каймой или наоборот
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	IP-адрес Wi-Fi
 =Wired	9a54	Проводная сеть
+=Wired IP address	0e25	IP-адрес проводной сети
 =all	4bc4	все
 =allow	a832	разрешить
 =amber	bec0	янтарный

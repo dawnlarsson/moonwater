@@ -467,7 +467,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =What a swipe in from this edge does	faab	Co robi przesunięcie od tej krawędzi
 =White edged in black, or the reverse	cd63	Biały z czarną krawędzią albo odwrotnie
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Adres IP Wi-Fi
 =Wired	9a54	Przewodowa
+=Wired IP address	0e25	Adres IP przewodowy
 =all	4bc4	wszystkie
 =allow	a832	zezwól
 =amber	bec0	bursztynowy

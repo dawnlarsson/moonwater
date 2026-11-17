@@ -36,6 +36,7 @@ src/canvas/ui/settings.c	In range and saved
 src/canvas/ui/settings.c	Remembered devices
 src/canvas/ui/settings.c	Power
 src/canvas/ui/settings.c	Time
+src/canvas/ui/settings.c	Network
 src/canvas/ui/settings.c	rotation
 src/canvas/ui/settings.c	scale
 src/canvas/ui/settings.c	refresh

@@ -110,6 +110,18 @@ line says as much as it did. `moonwater dns` is the same: `dns order`,
 then `dns order from` with each server's source, `dns internal on`, its
 suffixes, its server and how.
 
+The address a connection has is two lines of the same kind, `wired address`
+and `wifi address`: the IPv4 addresses (at most four, a link-local one when a
+link was given no lease) of the interfaces of that kind that are up with a
+carrier, then the first IPv6 address that is global or unique local, or
+`none`. A cable pulled out takes its address off the line at the next reading
+even where the kernel keeps it on the link, and the line after it (`wired
+address how up with a link on "eth0"`, or `no ethernet interface is up with a
+link`) says which interfaces they are of, or why there is none. Settings'
+Network group shows them as Wired IP address and Wi-Fi IP address, asks them
+again every two seconds while the group is shown, and copies one from the
+row's menu.
+
 Settings finds a value by its key at a line's start or after a blank or a
 semicolon, the first line that has it. Each key is said on its own line
 before any other line holds it, and an interface's name, which the kernel

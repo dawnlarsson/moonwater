@@ -467,7 +467,9 @@ ui_field_full	fe02	meer past er niet in
 =What a swipe in from this edge does	faab	Wat vegen vanaf deze rand doet
 =White edged in black, or the reverse	cd63	Wit met een zwarte rand, of andersom
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Wi-Fi IP-adres
 =Wired	9a54	Bekabeld
+=Wired IP address	0e25	Bekabeld IP-adres
 =all	4bc4	alle
 =allow	a832	toestaan
 =amber	bec0	amber

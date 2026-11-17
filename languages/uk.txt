@@ -467,7 +467,9 @@ ui_field_full	fe02	більше не вміщається
 =What a swipe in from this edge does	faab	Що робить жест від цього краю
 =White edged in black, or the reverse	cd63	Білий із чорною облямівкою або навпаки
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	IP-адреса Wi-Fi
 =Wired	9a54	Дротова мережа
+=Wired IP address	0e25	IP-адреса дротової мережі
 =all	4bc4	усі
 =allow	a832	дозволити
 =amber	bec0	бурштиновий

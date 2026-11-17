@@ -792,6 +792,13 @@ static const struct settings_row settings_rows[] = {
     {null, "The internet prefers", SETTINGS_CHOICE, 0, 0, {"priority"}, "internet prefers ", null,
      {"priority", "internet"}, "wired wifi", 0,
      .usage = "priority [internet [wired|wifi]]", .help = "which link wins when both are up [wired]"},
+    //  The address each connection has, read from `moonwater network discovery` as the Public ones are: the IPv4 addresses (and the
+    //  first IPv6 one that reaches beyond the router) of the wired links, or the wireless ones, that are up with a carrier; none when
+    //  there is none, as when a cable is out, and asked again while the group is shown.
+    {null, "Wired IP address", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "wired address ", null, {null}, null, 0,
+     .help = "the IPv4 addresses, and the first IPv6 one beyond the router, of the wired interfaces that are up with a cable in, or none"},
+    {null, "Wi-Fi IP address", SETTINGS_INFO, 0, SETTINGS_LINE | SETTINGS_TICK, {"network", "discovery"}, "wifi address ", null, {null}, null, 0,
+     .help = "the IPv4 addresses, and the first IPv6 one beyond the router, of the Wi-Fi interfaces that are up and joined, or none"},
     {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0,
      .usage = "dns tls [on|off|only]", .help = "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]"},
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(',

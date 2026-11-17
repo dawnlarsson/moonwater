@@ -467,7 +467,9 @@ ui_field_full	fe02	daha fazlası sığmaz
 =What a swipe in from this edge does	faab	Bu kenardan içeri kaydırmanın ne yaptığı
 =White edged in black, or the reverse	cd63	Siyah kenarlı beyaz ya da tersi
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Wi-Fi IP adresi
 =Wired	9a54	Kablolu
+=Wired IP address	0e25	Kablolu IP adresi
 =all	4bc4	tümü
 =allow	a832	izin ver
 =amber	bec0	kehribar

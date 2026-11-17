@@ -1412,6 +1412,24 @@ static fn check_settings(string_address regular, string_address bold)
                   string_equals((string_address)value, (string_address) "wired"));
         check("settings: names over TLS", settings_parsed(tls, "[Moonwater] dns tls only\n", value) == SETTINGS_READ &&
                                               string_equals((string_address)value, (string_address) "only"));
+        {
+                // Network discovery's lines, as the verb says them: a connection's addresses are the rest of its line, none says none,
+                // and the how line after it is no row's value (the first line that has the key is the value's).
+                int wired_ip = settings_row_named("Wired IP address"), wifi_ip = settings_row_named("Wi-Fi IP address");
+                static const char said[] = "discovery on\nnat endpoint-independent\n"
+                                           "addresses \"eth0\" ethernet 192.168.109.27/22 private\n"
+                                           "wired address 192.168.109.27; 10.0.0.9; 2001:db8::7\n"
+                                           "wired address how up with a link on \"eth0\"\n"
+                                           "wifi address none\nwifi address how no wifi interface\nlearned now\n";
+
+                check("settings: a connection's IP address is the rest of its line, and none says none",
+                      wired_ip >= 0 && wifi_ip >= 0 && wired_ip != wifi_ip &&
+                          settings_rows[wired_ip].kind == SETTINGS_INFO && settings_rows[wifi_ip].kind == SETTINGS_INFO &&
+                          (settings_rows[wired_ip].flags & SETTINGS_TICK) && (settings_rows[wifi_ip].flags & SETTINGS_TICK) &&
+                          settings_parsed(wired_ip, said, value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "192.168.109.27; 10.0.0.9; 2001:db8::7") &&
+                          settings_parsed(wifi_ip, said, value) == SETTINGS_READ && string_equals((string_address)value, (string_address) "none"));
+        }
         check("settings: a machine with no power profile has none",
               settings_parsed(power, "[Moonwater] this machine has no power profile\n", value) == SETTINGS_ABSENT);
         check("settings: a profile not set here is the platform's",
@@ -2922,13 +2940,14 @@ static fn check_settings(string_address regular, string_address bold)
                                   string_equals((string_address)settings_group_name(wifi_group), (string_address) "Wi-Fi") &&
                                   string_equals((string_address)settings_group_name(bt_group), (string_address) "Bluetooth"));
                         settings.page.chosen = wifi_group;
-                        // The table of feeds (settings_feeds) is Wi-Fi, Bluetooth, Devices, Waterlink, Power and Time, in that order.
-                        check("settings: the feeds are of Wi-Fi, Bluetooth, Devices, Waterlink, Power and Time and no others",
+                        // The table of feeds (settings_feeds) is Wi-Fi, Bluetooth, Devices, Waterlink, Power, Time and Network, in that order.
+                        check("settings: the feeds are of Wi-Fi, Bluetooth, Devices, Waterlink, Power, Time and Network and no others",
                               settings_feed_of_group() == 0 && (settings.page.chosen = bt_group, settings_feed_of_group() == 1) &&
                                   (settings.page.chosen = settings_group_of(settings_row_named("New devices")), settings_feed_of_group() == 2) &&
                                   (settings.page.chosen = settings_group_of(settings_row_named("Pair a machine")), settings_feed_of_group() == 3) &&
                                   (settings.page.chosen = settings_group_of(battery), settings_feed_of_group() == 4) &&
                                   (settings.page.chosen = settings_group_of(clock_row), settings_feed_of_group() == 5) &&
+                                  (settings.page.chosen = settings_group_of(settings_row_named("Wired IP address")), settings_feed_of_group() == 6) &&
                                   (settings.page.chosen = 0, settings_feed_of_group() < 0));
 
                         // What moonwater wifi says, as the list: marker, name (with blanks), dBm, bars, what it asks for.

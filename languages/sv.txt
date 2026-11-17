@@ -467,7 +467,9 @@ ui_field_full	fe02	mer ryms inte
 =What a swipe in from this edge does	faab	Vad ett svep in från den här kanten gör
 =White edged in black, or the reverse	cd63	Vit med svart kant, eller tvärtom
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Wi-Fi IP-adress
 =Wired	9a54	Trådbundet
+=Wired IP address	0e25	Trådbundet IP-adress
 =all	4bc4	alla
 =allow	a832	tillåt
 =amber	bec0	bärnsten

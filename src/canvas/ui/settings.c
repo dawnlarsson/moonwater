@@ -128,7 +128,13 @@
         them), and its outcome is the command's last line; a press on the row
         while it waits stops it. The linked machines are a list, each with
         the words the command says of where it was last heard. Power asks the
-        battery again and Time the clock. The keys stay on the row of the name they were on when
+        battery again and Time the clock; Network asks again the addresses its
+        connections have (Wired IP address, Wi-Fi IP address, from moonwater
+        network discovery, none when a cable is out or the radio is not
+        joined) and what discovery learned beside them, so a lease that
+        changes or a cable that is pulled shows without leaving the group;
+        the right button on the row (or the menu key) offers its value to copy.
+        The keys stay on the row of the name they were on when
         the list moves under them, and a reading that says what the last
         said draws nothing.
 
@@ -200,7 +206,7 @@ struct settings_change
         the group's own rows (the networks in range, the devices kept), and
         the verb's own first line is also what the switch of the group reads
         as; a rows feed asks again the rows of the group that say they change
-        by themselves (the clock, the battery).
+        by themselves (the clock, the battery, the addresses a connection has and the public one).
 */
 #define SETTINGS_FEED_ROWS 1u
 #define SETTINGS_FEED_WIFI 2u
@@ -231,6 +237,7 @@ static const struct settings_feed settings_feeds[] = {
     {"Waterlink", "Waterlink", {"link"}, "Linked machines", 2000, SETTINGS_FEED_LINKS},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
+    {"Network", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
 };
 
 #define SETTINGS_FEEDS (sizeof(settings_feeds) / sizeof(settings_feeds[0]))

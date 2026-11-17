@@ -467,7 +467,9 @@ ui_field_full	fe02	não cabe mais que isso
 =What a swipe in from this edge does	faab	O que faz deslizar a partir desta borda
 =White edged in black, or the reverse	cd63	Branco com borda preta, ou o contrário
 =Wi-Fi	0ec1	Wi-Fi
+=Wi-Fi IP address	9026	Endereço IP Wi-Fi
 =Wired	9a54	Com fio
+=Wired IP address	0e25	Endereço IP com fio
 =all	4bc4	todas
 =allow	a832	permitir
 =amber	bec0	âmbar
