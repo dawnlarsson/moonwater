@@ -1511,14 +1511,18 @@ static void compositor_first_place(int row, int *x, int *y)
 
         for (int at = 0; at < 8; at++)
         {
-                int taken = 0, tx = *x + at * step, ty = *y + at * step;
+                int taken = 0, tx = *x + at * step, ty = *y + at * step, kx = tx, ky = ty;
 
                 if (tx + (int)compositor.w[row] > right || ty + (int)compositor.h[row] > bottom)
                         break;
-
+                // Where the place is kept to (compositor_place: a window's line inside the screen), which is where one put there before
+                // is: a window asking for 0,0 (a Wayland or an X top-level, which ask for no place) lands at 1,1, and the next one asking
+                // 0,0 was on it, as 0,0 was no window's.
+                compositor_screen_keep_window(screens, count, &kx, &ky, (int)compositor.w[row], (int)compositor.h[row], compositor_line(row),
+                                              COMPOSITOR_GRAB * compositor.scale / 100);
                 for (int other = 0; other < (int)compositor_rows_in_use; other++)
-                        taken |= other != row && compositor.showing[other] && compositor.x[other] == tx &&
-                                 compositor.y[other] == ty;
+                        taken |= other != row && compositor.showing[other] &&
+                                 ((compositor.x[other] == tx && compositor.y[other] == ty) || (compositor.x[other] == kx && compositor.y[other] == ky));
 
                 if (!taken)
                 {

@@ -218,6 +218,13 @@ static fn check_compositor_place(void)
         place_paint(10, WINDOW_PLACE_AT, 999999, -999999, 0, 0, 64, 85, 100, 60);
         check("place: nor is a place past WINDOW_PLACE_MOST, which a program writing its row itself could ask",
               compositor.x[10] == 64 && compositor.y[10] == 85);
+        // Two that ask for one place the screen keeps them off (left of it: as 0,0 is for a Wayland or an X top-level, kept to the line
+        // inside) shown in turn: the second steps down and across until it is off the first, not on it (it had been: the place asked was no
+        // window's, the first being where it was kept to).
+        place_paint(11, WINDOW_PLACE_AUTO, 0, 0, 0, 0, -40, 100, 60, 40);
+        place_paint(12, WINDOW_PLACE_AUTO, 0, 0, 0, 0, -40, 100, 60, 40);
+        check("place: two windows that ask for a place kept inside the screen are apart, the second a step down from the first",
+              compositor.y[12] > compositor.y[11] && compositor.y[11] == 100);
 
         // Two presses on the top of the maximized window: it is given back where it would have been.
         compositor_raise(3);
