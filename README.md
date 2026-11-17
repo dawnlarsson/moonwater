@@ -59,6 +59,7 @@ moonwater canvas record report         the report of the presents: the paths, fl
 moonwater canvas shot                  the screen as the compositor last composed it, to a file of the record (root)
 moonwater canvas film SECONDS [X Y W H] every present for SECONDS (1 to 60), of the rectangle or the whole screen, to a file of the record (root)
 moonwater canvas keys SECONDS           every key for SECONDS (1 to 60) followed to the vblank that showed it, a line a key in the record's keys.txt (root)
+moonwater canvas frames SECONDS         every window's frames, presents and vblanks for SECONDS (1 to 60), a line each in the record's frames.txt (root)
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
 moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
 moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]

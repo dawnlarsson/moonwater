@@ -80,6 +80,7 @@ static const host_row host_rows[] = {
     {null, "canvas shot", "the screen as the compositor last composed it, to a file of the record (root)", 'b'},
     {null, "canvas film SECONDS [X Y W H]", "every present for SECONDS (1 to 60), of the rectangle or the whole screen, to a file of the record (root)", 'b'},
     {null, "canvas keys SECONDS", "every key for SECONDS (1 to 60) followed to the vblank that showed it, a line a key in the record's keys.txt (root)", 'b'},
+    {null, "canvas frames SECONDS", "every window's frames, presents and vblanks for SECONDS (1 to 60), a line each in the record's frames.txt (root)", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop|rest", "begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is", 'b'},
     {null, "@desktop", null, 'r'},

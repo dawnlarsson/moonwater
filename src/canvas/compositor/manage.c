@@ -2356,6 +2356,7 @@ static void compositor_take(int row)
 
         if (frame == compositor.seen[row])
                 return;
+        compositor_frametrace_note('T', row, clock_monotonic_nanoseconds());
 
         unsigned int seen = compositor.seen[row];
         b32 reclaimed = rows_has(&compositor.reclaim, row);

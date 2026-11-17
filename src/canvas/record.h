@@ -884,6 +884,61 @@ static void compositor_keytrace_end(void)
         compositor_keytrace.count = compositor_keytrace.open = 0;
 }
 
+/*
+        moonwater canvas frames SECONDS: for SECONDS (1 to 60), every window's new picture taken (compositor_take: a frame of its program's), every
+        present's end and every flip's vblank, stamped on the monotonic clock into a ring (a compare a stage while nothing runs), and at the end
+        /run/moonwater/record/frames.txt, a line an event: "T ROW NS" for a window's picture taken, "P - NS" for a present made, "V - NS" for the
+        vblank a flip landed on. test/perf/frames.py reads it: the frame times of a game (its window's pictures), its 1% and 0.1% lows, the
+        pictures replaced before a present showed them, and when each reached the screen.
+*/
+#define COMPOSITOR_FRAMETRACE_RING 131072
+#define COMPOSITOR_FRAMETRACE_MAX_SECONDS 60
+static struct
+{
+        unsigned long long until;
+        unsigned int count;
+        struct { unsigned long long when; int row; char kind; } *ring;
+        positive bytes;
+} compositor_frametrace;
+
+static void compositor_frametrace_note(char kind, int row, unsigned long long when)
+{
+        if (!compositor_frametrace.until || !compositor_frametrace.ring || compositor_frametrace.count >= COMPOSITOR_FRAMETRACE_RING)
+                return;
+        compositor_frametrace.ring[compositor_frametrace.count].when = when;
+        compositor_frametrace.ring[compositor_frametrace.count].row = row;
+        compositor_frametrace.ring[compositor_frametrace.count++].kind = kind;
+}
+
+static void compositor_frametrace_end(void)
+{
+        static char line[64];
+        long handle;
+
+        compositor_frametrace.until = 0;
+        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/frames.txt",
+                                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle >= 0)
+        {
+                for (unsigned int i = 0; i < compositor_frametrace.count; i++)
+                {
+                        unsigned int at = 0;
+
+                        line[at++] = compositor_frametrace.ring[i].kind, line[at++] = ' ';
+                        if (compositor_frametrace.ring[i].row < 0)
+                                line[at++] = '-';
+                        else
+                                at = compositor_record_number(line, at, sizeof(line), (unsigned long long)compositor_frametrace.ring[i].row);
+                        line[at++] = ' ';
+                        at = compositor_record_number(line, at, sizeof(line), compositor_frametrace.ring[i].when);
+                        line[at++] = '\n';
+                        system_write_all((int)handle, line, at);
+                }
+                system_close((int)handle);
+        }
+        compositor_frametrace.count = 0;
+}
+
 static int compositor_record_look_wanted(long long mtime, long long seen, long long read_at)
 {
         return !mtime || mtime != seen || read_at - mtime < COMPOSITOR_RECORD_SETTLE_NS;
@@ -948,6 +1003,31 @@ static void compositor_record_look(unsigned long long now)
                         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/film.txt", 0, 0, 0, 0);
                 }
         }
+        handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/frames", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                got = (long)system_read_once(handle, word, sizeof(word) - 1);
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/frames", 0, 0, 0, 0);
+                secs = 0;
+                for (long at = 0; at < got && word[at] >= '0' && word[at] <= '9'; at++)
+                        secs = secs * 10 + (unsigned long long)(word[at] - '0');
+                if (secs >= 1 && secs <= COMPOSITOR_FRAMETRACE_MAX_SECONDS)
+                {
+                        if (!compositor_frametrace.ring)
+                        {
+                                long mapped;
+
+                                compositor_frametrace.bytes = (positive)COMPOSITOR_FRAMETRACE_RING * sizeof(compositor_frametrace.ring[0]);
+                                mapped = (long)compositor_call(syscall(mmap), 0, compositor_frametrace.bytes, 3, 0x22, (positive)-1, 0);
+                                compositor_frametrace.ring = mapped < 0 && mapped > -4096 ? 0 : (void *)mapped;
+                        }
+                        compositor_frametrace.count = 0;
+                        compositor_frametrace.until = compositor_frametrace.ring ? now + secs * 1000000000ull : 0;
+                        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/frames.txt", 0, 0, 0, 0);
+                }
+                secs = 0;
+        }
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/keys", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
@@ -1009,6 +1089,12 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
                 compositor_record_look(ended);
         if (compositor_record_until && compositor_record_mark.damaged)
                 compositor_record_capture(ended);
+        if (compositor_frametrace.until)
+        {
+                compositor_frametrace_note('P', -1, ended);
+                if (ended >= compositor_frametrace.until)
+                        compositor_frametrace_end();
+        }
         if (compositor_keytrace.until)
         {
                 compositor_keytrace_present(began, ended);
