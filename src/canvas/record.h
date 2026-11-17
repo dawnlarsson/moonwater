@@ -651,6 +651,80 @@ static long long compositor_record_seen, compositor_record_read_at;
 // moonwater canvas shot asked for the screen as it is: the next present writes it (frame-SEQ-shot.ppm), whatever the card or the processor composed.
 static int compositor_record_shot_wanted;
 
+/*
+        moonwater canvas film SECONDS [X Y W H]: every present for SECONDS (1 to 60), the screen's rectangle X Y W H of it (all of it by default),
+        appended as it was composed to film.raw: a record a frame, 32 bytes of head (the bytes "MWFILM01", the present's number, the time it
+        ended in nanoseconds of the monotonic clock, the width and the height) and then its pixels, XRGB rows of width. film.txt says it is done
+        and how many frames. The owner's alone (the screen). One write a frame, from a buffer of the rectangle made once.
+*/
+#define COMPOSITOR_FILM_MAX_SECONDS 60
+static struct
+{
+        unsigned long long until;
+        int x, y, w, h;
+        long fd;
+        unsigned int frames;
+        unsigned int *buffer;
+        unsigned long bytes;
+} compositor_film = {0, 0, 0, 0, 0, -1, 0, 0, 0};
+
+static void compositor_film_end(void)
+{
+        char text[64];
+        unsigned int at;
+
+        if (compositor_film.fd >= 0)
+                system_close((int)compositor_film.fd);
+        compositor_film.fd = -1;
+        compositor_film.until = 0;
+        if (compositor_film.buffer)
+                compositor_call(syscall(munmap), (positive)compositor_film.buffer, compositor_film.bytes, 0, 0, 0, 0);
+        compositor_film.buffer = 0;
+        at = compositor_record_cat(text, 0, sizeof(text), "done ");
+        at = compositor_record_number(text, at, sizeof(text), compositor_film.frames);
+        at = compositor_record_cat(text, at, sizeof(text), " frames\n");
+        compositor_record_write_file(COMPOSITOR_RECORD_DIR "/film.txt", text, at);
+}
+
+// A frame of the film: the present just made, its rectangle, one write.
+static void compositor_film_frame(unsigned long long when)
+{
+        unsigned int width = compositor.width, height = compositor.height, stride = compositor.scanout_pitch / 4;
+        int x = compositor_film.x, y = compositor_film.y, w = compositor_film.w, h = compositor_film.h;
+        unsigned int *out;
+
+        if (compositor_film.fd < 0 || !compositor.scanout)
+                return;
+        if (w <= 0 || h <= 0 || x < 0 || y < 0 || (unsigned int)(x + w) > width || (unsigned int)(y + h) > height)
+                x = y = 0, w = (int)width, h = (int)height;
+        if (!compositor_film.buffer || compositor_film.bytes < 32 + (unsigned long)w * (unsigned long)h * 4)
+        {
+                long got;
+
+                if (compositor_film.buffer)
+                        compositor_call(syscall(munmap), (positive)compositor_film.buffer, compositor_film.bytes, 0, 0, 0, 0);
+                compositor_film.bytes = (32 + (unsigned long)w * (unsigned long)h * 4 + 4095) & ~4095ul;
+                got = (long)compositor_call(syscall(mmap), 0, compositor_film.bytes, 3, 0x22, (positive)-1, 0);
+                compositor_film.buffer = got < 0 && got > -4096 ? 0 : (unsigned int *)got;
+                if (!compositor_film.buffer)
+                {
+                        compositor_film_end();
+                        return;
+                }
+        }
+        memory_copy(compositor_film.buffer, "MWFILM01", 8);
+        compositor_film.buffer[2] = (unsigned int)compositor_records_all;
+        compositor_film.buffer[3] = 0;
+        *(unsigned long long *)(compositor_film.buffer + 4) = when;
+        compositor_film.buffer[6] = (unsigned int)w, compositor_film.buffer[7] = (unsigned int)h;
+        out = compositor_film.buffer + 8;
+        for (int row = 0; row < h; row++)
+                memory_copy(out + (unsigned long)row * (unsigned long)w, compositor.scanout + (unsigned long)(y + row) * stride + (unsigned long)x,
+                            (unsigned long)w * 4);
+        system_write_all((int)compositor_film.fd, (const char *)compositor_film.buffer, 32 + (unsigned long)w * (unsigned long)h * 4);
+        compositor_film.frames++;
+}
+
 static int compositor_record_look_wanted(long long mtime, long long seen, long long read_at)
 {
         return !mtime || mtime != seen || read_at - mtime < COMPOSITOR_RECORD_SETTLE_NS;
@@ -686,6 +760,35 @@ static void compositor_record_look(unsigned long long now)
         compositor_record_seen = mtime, compositor_record_read_at = (long long)real.tv_sec * 1000000000ll + real.tv_nsec;
         if (!mtime)
                 compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR, 0755, 0, 0, 0);
+        handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/film", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                char line[96];
+                long values[5] = {0, 0, 0, 0, 0}, count = 0, value = -1;
+
+                got = (long)system_read_once(handle, line, sizeof(line) - 1);
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/film", 0, 0, 0, 0);
+                for (long at = 0; at < got && count < 5; at++)
+                        if (line[at] >= '0' && line[at] <= '9')
+                                value = (value < 0 ? 0 : value) * 10 + (line[at] - '0');
+                        else if (value >= 0)
+                                values[count++] = value, value = -1;
+                if (value >= 0 && count < 5)
+                        values[count++] = value;
+                if (count >= 1 && values[0] >= 1 && values[0] <= COMPOSITOR_FILM_MAX_SECONDS)
+                {
+                        if (compositor_film.fd >= 0)
+                                compositor_film_end();
+                        compositor_film.fd = (long)system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/film.raw",
+                                                                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+                        compositor_film.x = (int)values[1], compositor_film.y = (int)values[2];
+                        compositor_film.w = count == 5 ? (int)values[3] : 0, compositor_film.h = count == 5 ? (int)values[4] : 0;
+                        compositor_film.frames = 0;
+                        compositor_film.until = compositor_film.fd >= 0 ? now + (unsigned long long)values[0] * 1000000000ull : 0;
+                        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/film.txt", 0, 0, 0, 0);
+                }
+        }
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/shot", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
@@ -730,6 +833,12 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
                 compositor_record_look(ended);
         if (compositor_record_until && compositor_record_mark.damaged)
                 compositor_record_capture(ended);
+        if (compositor_film.until)
+        {
+                compositor_film_frame(ended);
+                if (ended >= compositor_film.until)
+                        compositor_film_end();
+        }
         if (compositor_record_shot_wanted && compositor.scanout)
         {
                 compositor_record_shot_wanted = 0;

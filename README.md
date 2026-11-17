@@ -52,6 +52,7 @@ moonwater canvas motion speed [PERCENT|default]  how fast windows, menus and con
 moonwater canvas record [SECONDS]      record the presents of the compositor for SECONDS (1 to 10, 3 by default)
 moonwater canvas record report         the report of the presents: the paths, flips, late and held presents
 moonwater canvas shot                  the screen as the compositor last composed it, to a file of the record (root)
+moonwater canvas film SECONDS [X Y W H] every present for SECONDS (1 to 60), of the rectangle or the whole screen, to a file of the record (root)
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
 moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
 moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]

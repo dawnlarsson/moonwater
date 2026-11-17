@@ -797,6 +797,33 @@ static b32 host_canvas_shot(positive count)
         return host_refuse("the compositor wrote no shot in five seconds (it writes one at a present: nothing on the screen moved)\n");
 }
 
+/*
+        moonwater canvas film SECONDS [X Y W H]: every present of the compositor for SECONDS (1 to 60), the rectangle X Y W H of the screen or
+        all of it, to /run/moonwater/record/film.raw (src/canvas/record.h says its form; test/perf/film.py makes pictures of it). This asks
+        for it and says where it goes; film.txt there says when it is done.
+*/
+static b32 host_canvas_film(string_address address_to arguments, positive count)
+{
+        p8 line[96];
+        positive at = 0;
+
+        return_if(count != 4 && count != 8, host_usage());
+        for (positive word = 3; word < count; word++)
+        {
+                positive used = 0, value = string_digits_max(arguments[word], 5, address_of used);
+
+                return_if(!used || arguments[word][used] || (word == 3 && (value < 1 || value > 60)), host_usage());
+                at += positive_into_string(line + at, value);
+                line[at++] = word + 1 < count ? ' ' : '\n';
+        }
+        host_need_root();
+        if (host_write_file((string_address)HOST_RECORD_DIR "/film", line, at, 0644, false) < 0)
+                return host_refuse("the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
+        host_say(log, "filming every present to %s/film.raw; %s/film.txt says when it is done\n", (string_address)HOST_RECORD_DIR,
+                 (string_address)HOST_RECORD_DIR);
+        return 0;
+}
+
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -820,6 +847,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return host_canvas_record(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "shot"))
                 return host_canvas_shot(count);
+        if (count >= 3 && string_equals(arguments[2], "film"))
+                return host_canvas_film(arguments, count);
 
         return_if(count > 3, host_usage());
 
