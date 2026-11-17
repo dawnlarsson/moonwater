@@ -1779,6 +1779,8 @@ typedef struct {
         positive position, lower;
 } rx_choice;
 
+#define REGEX_SCRATCH_MAX 20000
+
 typedef struct {
         p8 slot;
         positive previous;
@@ -1788,7 +1790,7 @@ typedef struct {
         rx_frame *frames;
         rx_choice *choices;
         rx_undo *undo;
-        p32 frame_capacity, choice_capacity, undo_capacity;
+        positive frame_capacity, choice_capacity, undo_capacity;
         const regex_program *program;
         string_address bytes;
         positive length, slots[20], best_slots[20];
@@ -1809,11 +1811,28 @@ typedef struct {
         // The last walk's slots are its answer, none having been set aside.
         bool best_in_place;
         bool pending_exhaustion, first_exhausted;
+        // The scratch above is the matcher's own, from the heap, and grows.
+        bool owned_scratch;
 } rx_match;
+
+/*
+        Room for one more entry of a scratch array the matcher owns: the
+        array doubles from the heap as a repeated group asks for it. Scratch
+        another caller lent (grep's, which is fixed) has no owner to grow it,
+        and the ceiling it has is the one it reports as too complex.
+*/
+static bool rx_scratch_grow(rx_match *match, address_any address_to held,
+                            positive address_to have, positive used, positive unit)
+{
+        return match->owned_scratch &&
+               memory_reserve(held, have, used, used + 1, unit, REGEX_SCRATCH_MAX);
+}
 
 static p32 rx_frame_put(rx_match *match, rx_frame frame)
 {
-        if (match->frame_used == match->frame_capacity)
+        if (match->frame_used == match->frame_capacity &&
+            !rx_scratch_grow(match, (address_any address_to)&match->frames, &match->frame_capacity,
+                             match->frame_used, sizeof(rx_frame)))
         {
                 match->pending_exhaustion = true;
                 return 0;
@@ -1825,7 +1844,9 @@ static p32 rx_frame_put(rx_match *match, rx_frame frame)
 static bool rx_choice_put(rx_match *match, rx_ref node, p32 continuation,
                           positive position, positive lower)
 {
-        if (match->choice_used == match->choice_capacity)
+        if (match->choice_used == match->choice_capacity &&
+            !rx_scratch_grow(match, (address_any address_to)&match->choices, &match->choice_capacity,
+                             match->choice_used, sizeof(rx_choice)))
         {
                 match->pending_exhaustion = true;
                 return false;
@@ -1840,7 +1861,9 @@ static bool rx_slot_put(rx_match *match, p8 slot, positive value)
 {
         if (match->choice_used)
         {
-                if (match->undo_used == match->undo_capacity)
+                if (match->undo_used == match->undo_capacity &&
+                    !rx_scratch_grow(match, (address_any address_to)&match->undo, &match->undo_capacity,
+                                     match->undo_used, sizeof(rx_undo)))
                 {
                         match->pending_exhaustion = true;
                         return false;
@@ -3303,28 +3326,27 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
         return total;
 }
 
-#define REGEX_SCRATCH_MAX 20000
-
 static rx_pool address_to regex_pool_held;
 static regex_program regex_current;
-static rx_frame (address_to regex_frames_held)[REGEX_SCRATCH_MAX];
-#define regex_frames UTILITY_HELD(regex_frames)
-static rx_choice (address_to regex_choices_held)[REGEX_SCRATCH_MAX];
-#define regex_choices UTILITY_HELD(regex_choices)
-static rx_undo (address_to regex_undo_held)[REGEX_SCRATCH_MAX];
-#define regex_undo UTILITY_HELD(regex_undo)
-//      Its scratch is held, with the pool, at the first use of either.
+//      Its scratch is put in place, with the pool, at the first use of either.
 static rx_match regex_match = {
-    .frame_capacity = REGEX_SCRATCH_MAX, .choice_capacity = REGEX_SCRATCH_MAX,
-    .undo_capacity = REGEX_SCRATCH_MAX,
     .work_limit = 100000000,
 };
 
+/*
+        The scratch starts at REGEX_SCRATCH_MAX entries of each kind, which is
+        what a search that does not repeat a group needs, and grows from there.
+*/
 static COLD fn rx_match_scratch(rx_match *match)
 {
-        match->frames = regex_frames;
-        match->choices = regex_choices;
-        match->undo = regex_undo;
+        match->owned_scratch = true;
+        if (!memory_reserve((address_any address_to)&match->frames, &match->frame_capacity, 0,
+                            REGEX_SCRATCH_MAX, sizeof(rx_frame), REGEX_SCRATCH_MAX) ||
+            !memory_reserve((address_any address_to)&match->choices, &match->choice_capacity, 0,
+                            REGEX_SCRATCH_MAX, sizeof(rx_choice), REGEX_SCRATCH_MAX) ||
+            !memory_reserve((address_any address_to)&match->undo, &match->undo_capacity, 0,
+                            REGEX_SCRATCH_MAX, sizeof(rx_undo), REGEX_SCRATCH_MAX))
+                exit(1);
 }
 
 /* Every match runs a program compiled into the pool, so the pool's first

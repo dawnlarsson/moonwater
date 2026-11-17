@@ -317,6 +317,7 @@ b32 main(void)
                         {
                                 program.boundary = interpreter.boundary = boundary;
                                 rx_match fast = regex_match;
+                                fast.owned_scratch = false;
                                 fast.work_limit = budgets[work];
                                 fast.frame_capacity = capacities[room];
                                 fast.choice_capacity = fast.undo_capacity = room ? REGEX_SCRATCH_MAX : 0;
@@ -347,6 +348,21 @@ b32 main(void)
                 proof_check(regex_find(REGEX_LONGEST, reuse_subjects[i], length, 0));
                 proof_check(regex_slots[0] == 0 && regex_slots[1] == length);
         }
+        /*
+                A repeated group pushes a frame and a choice for each
+                iteration, so twenty thousand and one pairs once ran the
+                scratch out, and the search reported "too complex". The
+                scratch grows instead: the whole line matches, in both
+                selections, and the iterations are counted in full.
+        */
+        static p8 pairs[2 * 20001];
+        for (positive i = 0; i < sizeof(pairs); i++)
+                pairs[i] = i & 1 ? 'b' : 'a';
+        proof_check(regex_compile("(ab)*", true, false, true, REGEX_POLICY_DEFAULT));
+        proof_check(regex_find(REGEX_LONGEST, pairs, sizeof(pairs), 0));
+        proof_check(regex_slots[0] == 0 && regex_slots[1] == sizeof(pairs));
+        proof_check(regex_find(REGEX_FIRST, pairs, sizeof(pairs), 0));
+        proof_check(regex_slots[0] == 0 && regex_slots[1] == sizeof(pairs));
         /*
                 The shortcuts of rx_find that look at a pattern's shape (a
                 class, a run of one, a run at the front, a run at the end)
