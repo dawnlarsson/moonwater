@@ -1154,6 +1154,143 @@ static fn record_rows(void)
               !launcher_line && !launcher_recorded);
 }
 
+/*
+        The build profile: what build.sh and the kernel's make ask for, the
+        session that runs build.sh in the bowl as root, and the triplet's links
+        made and taken away on real files (bowl_tools_at), under a root of this
+        process's own so the gcc and clang lanes do not share one.
+*/
+static fn build_profile(void)
+{
+        const struct bowl_profile address_to build = bowl_find_profile("build");
+        const struct bowl_component address_to part = build ? build->components : null;
+        string_address address_to packages = part ? part->packages : null;
+        //      build.c's "required" setting, and the packages that hold each: gpg is gnupg's, rustc rust's.
+        static string_address required[] = {"bison", "flex", "bc", "gnupg", "make", "gcc", "clang", "rust", null};
+        //      What the kernel's make, kernel/patch/apply and kernel/firmware/apply run, and the handoff's copy.
+        static string_address asked[] = {"perl", "python3", "elfutils-dev", "openssl-dev", "zstd", "xz", "git",
+                                          "curl", "patch", "gawk", "sudo", "rsync", "musl-dev", "binutils", null};
+        p8 all = true;
+        p8 unique = true;
+
+        check("The build profile is a program with one component, Alpine's, and no libraries",
+              build && build->program && !build->libraries && build->session && part &&
+                  string_equals(part->distro, "alpine") && !(part + 1)->distro);
+        for (string_address address_to name = required; *name; name++)
+                all &= chrome_has(packages, *name);
+        check("The build profile holds every program build.c requires before it starts", all);
+        all = true;
+        for (string_address address_to name = asked; *name; name++)
+                all &= chrome_has(packages, *name);
+        check("The build profile holds what the kernel's make, its patch and firmware scripts and the handoff run", all);
+        for (positive at = 0; packages && packages[at]; at++)
+                for (positive other = at + 1; packages[other]; other++)
+                        unique &= !string_equals(packages[at], packages[other]);
+        check("No package the build profile names is named twice", unique);
+        check("The build component exposes no program of the bowl by name: its session is the way in",
+              part && part->expose && !part->expose[0] && build && !build->names);
+
+        positive found = chrome_line(build ? build->session : null, "-f build.sh");
+        positive run = chrome_line(build ? build->session : null,
+                                   "exec bowl --root " BOWL_ROOT_PREFIX "alpine /bin/sh build.sh \"$@\"");
+        check("The session refuses a directory with no build.sh, then runs build.sh in the Alpine bowl as root",
+              found == 1 && run == 2 && build && !build->session[2]);
+
+#if X64
+        check("The build profile's triplet is the one arch/x64 names its compiler by",
+              build && string_equals(build->tool_prefix, "x86_64-linux-gnu-"));
+#elif ARM64
+        check("The build profile's triplet is the one arch/arm names its compiler by",
+              build && string_equals(build->tool_prefix, "aarch64-linux-gnu-"));
+#else
+        check("The build profile's triplet is the one arch/riscv names its compiler by",
+              build && string_equals(build->tool_prefix, "riscv64-linux-gnu-"));
+#endif
+        check("The triplet's tools are the compiler and every binutil the kernel's make takes from CROSS_COMPILE",
+              build && chrome_has(build->tools, "gcc") && chrome_has(build->tools, "ld") &&
+                  chrome_has(build->tools, "as") && chrome_has(build->tools, "objcopy") &&
+                  chrome_has(build->tools, "nm") && chrome_has(build->tools, "ar") &&
+                  chrome_has(build->tools, "strip") && chrome_has(build->tools, "readelf") &&
+                  chrome_has(build->tools, "objdump"));
+
+        p8 root[256];
+        p8 out[256];
+        p8 path[256];
+        p8 have[256];
+        static string_address tools[] = {"gcc", "ld", "nm", null};
+        bipolar got;
+
+        unpack_path(root, "tools", "");
+        unpack_path(out, "toolsout", "");
+        bowl_forget_path(root);
+        bowl_forget_path(out);
+        landing_make(root, "");
+        landing_make(root, "/usr");
+        landing_make(root, "/usr/bin");
+        unpack_write(root, "/usr/bin/gcc", "#!/bin/sh\n", 0755);
+        unpack_write(root, "/usr/bin/ld", "#!/bin/sh\n", 0755);
+        landing_make(root, "/usr/local");
+        landing_make(root, "/usr/local/bin");
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/bin/t-ld", sizeof path);
+        system_symbolic_link_at("/opt/ld", AT_FDCWD, path);
+
+        check("Install links the triplet's name of each tool the bowl has, and leaves a name somebody else has",
+              bowl_tools_at(root, "t-", tools, true) == 1);
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/bin/t-gcc", sizeof path);
+        got = system_read_link_at(AT_FDCWD, path, have, sizeof have - 1);
+        have[got > 0 ? got : 0] = end;
+        check("The link names the plain tool by its path in the bowl", got > 0 && string_equals(have, "/usr/bin/gcc"));
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/bin/t-nm", sizeof path);
+        check("A tool the bowl lacks gets no link", system_read_link_at(AT_FDCWD, path, have, sizeof have) < 0);
+        check("A second install makes nothing again", bowl_tools_at(root, "t-", tools, true) == 0);
+        check("Remove takes the link install made, and not one it did not make",
+              bowl_tools_at(root, "t-", tools, false) == 1);
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/bin/t-ld", sizeof path);
+        got = system_read_link_at(AT_FDCWD, path, have, sizeof have - 1);
+        have[got > 0 ? got : 0] = end;
+        check("The link somebody else made is still theirs", got > 0 && string_equals(have, "/opt/ld"));
+
+        //      The bowl's /bin and /sbin before Moonwater's /usr: a name its /usr/bin has is found there first and gets none.
+        check("The build profile puts the bowl's /bin and /sbin first in root's PATH", build && build->bins_first);
+        landing_make(root, "/bin");
+        landing_make(root, "/sbin");
+        unpack_write(root, "/bin/sed", "#!/bin/sh\n", 0755);
+        unpack_write(root, "/bin/ld", "#!/bin/sh\n", 0755);
+        unpack_write(root, "/sbin/depmod", "#!/bin/sh\n", 0755);
+        check("Install links each program of /bin and /sbin that /usr has not",
+              bowl_bins_at(root, true) == 2);
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/sbin/depmod", sizeof path);
+        got = system_read_link_at(AT_FDCWD, path, have, sizeof have - 1);
+        have[got > 0 ? got : 0] = end;
+        check("An /sbin program's link is in /usr/local/sbin and names it", got > 0 && string_equals(have, "/sbin/depmod"));
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local/bin/ld", sizeof path);
+        check("A /bin program /usr/bin has as well gets no link", system_read_link_at(AT_FDCWD, path, have, sizeof have) < 0);
+        check("Remove takes those links away again", bowl_bins_at(root, false) == 2 && bowl_bins_at(root, true) == 2 &&
+                                                         bowl_bins_at(root, false) == 2);
+
+        //      A /usr/local that is a link out of the bowl: the directory is opened inside it, so nothing lands outside.
+        landing_make(out, "");
+        landing_make(out, "/bin");
+        string_copy_bounded(path, root, sizeof path);
+        string_append_bounded(path, "/usr/local", sizeof path);
+        bowl_forget_path(path);
+        system_symbolic_link_at(out, AT_FDCWD, path);
+        bowl_tools_at(root, "t-", tools, true);
+        string_copy_bounded(path, out, sizeof path);
+        string_append_bounded(path, "/bin/t-gcc", sizeof path);
+        check("A /usr/local that links out of the bowl is not followed",
+              system_read_link_at(AT_FDCWD, path, have, sizeof have) < 0);
+
+        bowl_forget_path(out);
+        bowl_forget_path(root);
+}
+
 static fn steam_profile(void)
 {
         const struct bowl_profile address_to steam = bowl_find_profile("steam");
@@ -3996,6 +4133,7 @@ b32 main(void)
         distros();
         profiles();
         chrome_profile();
+        build_profile();
         multilib_rows();
         record_rows();
         steam_profile();

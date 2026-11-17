@@ -14,11 +14,16 @@ the whole system is meant to stay under 15 MB.
 sh build.sh --run                       default profiles, booted in a window
 sh build.sh arch/x64 debug_none serial  the profiles named
 sh build.sh --usb-update DIR            and copied onto the FAT stick mounted at DIR, for an update
+sh build.sh --on box                    built on box, a linked Moonwater with bowl profile build, and fetched into dist/
 sh build.sh --help                      every option
 ```
 
 The build is one C program, `src/build/build.c`, on this project's own
-freestanding stack: a bare machine needs a C compiler and an assembler.
+freestanding stack: a bare machine needs a C compiler and an assembler. A
+Moonwater builds its own image in a bowl: `bowl profile build` installs Alpine's
+gcc, make and the kernel's tools, `build` in a checkout runs `sh build.sh` there
+as root, and `sh build.sh --on NAME` on a Mac sends the tree over the link,
+builds there on every core and fetches the image back, checked by its SHA-256.
 Profiles in `kernel/profile/` compose the kernel configuration and the security
 tiers (`sec_default`, `sec_hardened`, `sec_locked`; see
 [.github/SECURITY.md](.github/SECURITY.md)).
@@ -331,7 +336,8 @@ changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). `bowl` runs other distributions' programs
 (`bowl profile desktop` installs KDE, `bowl profile chrome` Alpine's Chromium as a
 program of Canvas, `bowl profile steam` Arch's Steam with its 32-bit graphics and
-sound, on x86-64: `moonwater desktop` does not take either for a session), and
+sound, on x86-64, `bowl profile build` what `sh build.sh` needs to build an image
+here: `moonwater desktop` takes none of the three for a session), and
 `main.moonwater.sh` is the machine script that sets a machine up at boot.
 
 `moonwater security` changes what the TLS client (wget, the clock's NTS, names over

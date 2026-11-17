@@ -15,6 +15,7 @@
 #                                             NAME at boot (none: from now on no group)
 #           sh build.sh --clean               remove what a build produced
 #           sh build.sh --host box            build on another machine over ssh
+#           sh build.sh --on box              build on a linked machine, in its build bowl
 #           sh build.sh --arch arm64 --run    build and boot another architecture
 #           sh build.sh --run --ram 8         boot with 8 GB of memory (default 4)
 #           sh build.sh --env check           report the local x86-64 build environment
@@ -27,7 +28,7 @@
 #       read from
 #       $LIMA_HOME/default/ssh.config, LIMA_HOME defaulting to ~/.lima, the
 #       same place limactl reads them. MOONWATER_NO_LIMA=1 turns that off, and
-#       then a Mac without --host refuses to build. --host always wins.
+#       then a Mac without --host refuses to build. --host and --on always win.
 #
 #       Memory is what a live image keeps its bowls in, so it is the room a
 #       setup has: Arch's tree is 0.6 GB on x86-64 and 2.1 GB on arm64, with
@@ -233,6 +234,7 @@ arch_image() {
 #
 host=${MOONWATER_BUILD_HOST:-}
 host_given=0
+link_host=""
 #
 #       One build directory per source tree and architecture, not one per
 #       machine. The suffix is a checksum of this tree's own path, so the same
@@ -259,6 +261,7 @@ usb_dir=""
 group_asked=""
 console=0
 image=""
+image_sum=""
 ram=4
 
 # Whole gigabytes, 1 to 4096, as "8" or "8G"; says the number or fails.
@@ -400,6 +403,17 @@ while [ "$remaining" -gt 0 ]; do
                 remaining=$((remaining - 1))
                 ;;
         --host=*) host=${argument#--host=}; host_given=1 ;;
+        --on)
+                [ "$remaining" -gt 0 ] || die "--on wants a linked machine to build on"
+                link_host=$1
+                [ -n "$link_host" ] || die "--on wants a linked machine to build on"
+                shift
+                remaining=$((remaining - 1))
+                ;;
+        --on=*)
+                link_host=${argument#--on=}
+                [ -n "$link_host" ] || die "--on wants a linked machine to build on"
+                ;;
         --arch)
                 [ "$remaining" -gt 0 ] || die "--arch wants x64, arm64 or riscv64"
                 arch_asked=$(arch_name "$1") || die "unknown architecture $1 -- x64, arm64 or riscv64"
@@ -447,6 +461,17 @@ esac
 #       --host with nothing after it names no machine, and must not fall through
 #       to the Lima VM the way an unnamed build does.
 [ "$host_given" = 0 ] || [ -n "$host" ] || die "--host wants a machine to build on"
+#       A linked machine is a name of the link's (moonwater link lists them):
+#       letters, digits, '.', '-' and '_', and never a dash first, since it is
+#       a word of the link client's command line.
+case $link_host in
+-* | *[!A-Za-z0-9._-]*) die "not a linked machine to build on: $link_host" ;;
+esac
+#       Two machines named for one build is a mistake, not a choice. A
+#       MOONWATER_BUILD_HOST in the environment is not a naming: --on wins.
+[ -z "$link_host" ] || [ "$host_given" = 0 ] ||
+        die "--on and --host both name a machine to build on: name one"
+[ -z "$link_host" ] || host=""
 
 #       Which architecture.
 #
@@ -502,39 +527,16 @@ checkout_carry() {
         printf '%s\n' "$carry"
 }
 
-build_remote() {
-        carriage_return=$(printf '\r')
-
-        # Asked only when nothing on this side decided: a plain build is for
-        # the machine doing it.
-        if [ -z "$target" ]; then
-                built_on=$(ssh -n -o BatchMode=yes -o ConnectTimeout=20 \
-                        "$host" uname -m 2>/dev/null) ||
-                        die "cannot reach $host over ssh"
-                target=$(arch_name "$built_on") || target=x64
-        fi
-
-        if [ -z "$remote" ]; then
-                flavour=${profile_arch:-$(arch_profile "$target")}
-                remote=.cache/moonwater/$(basename "$here")-$tree_mark-${flavour#arch/}
-        fi
-
-        case "$remote" in
-        *'
-'*|*"$carriage_return"*)
-                die "the remote build directory contains a line break" ;;
-        esac
-
-        say "Checking $host"
-        ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$host" true 2>/dev/null ||
-                die "cannot reach $host over ssh"
-
-        # Resolve the parent first, create only the final directory, and pin
-        # the command's working directory before it runs.  The marker prevents
-        # a path swapped to some other private directory from being accepted
-        # merely because that directory happens to have the right owner and
-        # mode. An existing owner-only stage is tightened to 0700 and claimed;
-        # group- or other-writable directories are refused.
+#       The stage on the build host, made safe and entered before anything
+#       runs there: sh -c "$remote_stage" sh STAGE COMMAND... Both --host and
+#       --on run every command of a build through it.
+#
+#       Resolve the parent first, create only the final directory, and pin
+#       the command's working directory before it runs.  The marker prevents
+#       a path swapped to some other private directory from being accepted
+#       merely because that directory happens to have the right owner and
+#       mode. An existing owner-only stage is tightened to 0700 and claimed;
+#       group- or other-writable directories are refused.
 remote_stage='set -eu
 fail() { printf "build: refusing unsafe remote stage: %s\n" "$stage" >&2; exit 73; }
 owner_of() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1"; }
@@ -578,6 +580,33 @@ fi
 [ "$(mode_of "$marker")" = 600 ] || fail
 [ "$(cat -- "$marker")" = moonwater-stage-v1 ] || fail
 exec "$@"'
+
+build_remote() {
+        carriage_return=$(printf '\r')
+
+        # Asked only when nothing on this side decided: a plain build is for
+        # the machine doing it.
+        if [ -z "$target" ]; then
+                built_on=$(ssh -n -o BatchMode=yes -o ConnectTimeout=20 \
+                        "$host" uname -m 2>/dev/null) ||
+                        die "cannot reach $host over ssh"
+                target=$(arch_name "$built_on") || target=x64
+        fi
+
+        if [ -z "$remote" ]; then
+                flavour=${profile_arch:-$(arch_profile "$target")}
+                remote=.cache/moonwater/$(basename "$here")-$tree_mark-${flavour#arch/}
+        fi
+
+        case "$remote" in
+        *'
+'*|*"$carriage_return"*)
+                die "the remote build directory contains a line break" ;;
+        esac
+
+        say "Checking $host"
+        ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$host" true 2>/dev/null ||
+                die "cannot reach $host over ssh"
 
         remote_command() {
                 shell_quote sh -c "$remote_stage" sh "$remote" "$@"
@@ -707,6 +736,26 @@ exec "$@"'
         image=$(ssh -n "$host" \
                 "$(remote_command ./build key-one kernel_export)") ||
                 die "could not identify the built image"
+        image_check
+
+        if [ -n "$group_name" ]; then
+                say "Stamping $image with link group $group_name"
+                # shellcheck disable=SC2029
+                ssh "$host" "$(remote_command sudo sh -c "$group_stamp_script" sh "$image" "$(image_arch "$image" || echo unknown)")" < "$group_key" ||
+                        die "stamping $image with link group $group_name failed on $host"
+        fi
+
+        say "Fetching $image"
+        ssh_image() { ssh -n "$host" "$(remote_command cat -- "$image")"; }
+        image_receive ssh_image
+}
+#
+#       The image a build host named, checked before any of it is a path
+#       here: under dist/, one line, and no ., .. or empty step. Sets
+#       relative, its path under dist/.
+#
+image_check() {
+        carriage_return=$(printf '\r')
         case "$image" in
         *'
 '*|*"$carriage_return"*) die "remote build reported an invalid image path" ;;
@@ -719,15 +768,14 @@ exec "$@"'
         *'/../'*|*'/./'*|*'//'*)
                 die "remote build reported an invalid image path: $image" ;;
         esac
+}
 
-        if [ -n "$group_name" ]; then
-                say "Stamping $image with link group $group_name"
-                # shellcheck disable=SC2029
-                ssh "$host" "$(remote_command sudo sh -c "$group_stamp_script" sh "$image" "$(image_arch "$image" || echo unknown)")" < "$group_key" ||
-                        die "stamping $image with link group $group_name failed on $host"
-        fi
-
-        say "Fetching $image"
+#
+#       Fetching $image into dist/ here: $1 is the command whose output is the
+#       image. Published whole or not at all, by a rename out of a private
+#       stage, and only when it is what image_sum says, when that is set.
+#
+image_receive() {
 
         artifact_owner_of() {
                 stat -c %u -- "$1" 2>/dev/null || stat -f %u -- "$1"
@@ -802,6 +850,9 @@ exec "$@"'
                 exec 9>&- || :
                 [ -z "${fetched:-}" ] || rm -f -- "$fetched"
                 [ -z "${fetched_stage:-}" ] || rmdir -- "$fetched_stage" 2>/dev/null || :
+                #       And what the caller asked to go with them (--on: the build
+                #       host's private directory).
+                [ -z "${fetch_also:-}" ] || "$fetch_also"
         }
         trap fetch_cleanup 0 HUP INT TERM
         (umask 077; set -C; : > "$fetched") ||
@@ -810,9 +861,15 @@ exec "$@"'
         artifact_same_file "$fetched" /dev/fd/9 ||
                 die "temporary image changed while it was opened"
 
-        if ! ssh -n "$host" \
-                "$(remote_command cat -- "$image")" >&9; then
+        if ! "$1" >&9; then
                 die "could not fetch the built image"
+        fi
+        #       What the build host said the image is, when it said: a fetch
+        #       that ended early or brought other bytes is not published.
+        if [ -n "$image_sum" ]; then
+                fetched_sum=$(shasum -a 256 < "$fetched" | cut -d' ' -f1)
+                [ "$fetched_sum" = "$image_sum" ] ||
+                        die "the image arrived damaged: its sha256 is $fetched_sum, and the build host's $image_sum"
         fi
 
         [ -f "$fetched" ] && [ ! -L "$fetched" ] &&
@@ -840,6 +897,268 @@ exec "$@"'
         fetched_stage=
         trap - 0 HUP INT TERM
 }
+
+#
+#       Building on a linked machine (--on NAME).
+#
+#       The machine is one this Mac is linked with (moonwater link), a
+#       Moonwater with the build profile installed (bowl profile build
+#       install), and the build runs in that bowl, as root, on every core it
+#       has, at idle priority so the desktop there does not wait on it. No
+#       ssh and no rsync on this side: the link runs one command at a
+#       time and sends a file whole or not at all, so the tree goes as one
+#       archive, the files rsync would have sent and no others, with its
+#       SHA-256. There it is unpacked beside the stage and made the stage's by
+#       the bowl's rsync with the same excludes, so what the build directory
+#       keeps (the kernel tree, artifacts/, fs/, dist/, the stage's marker and
+#       its .moonwater-groups) and what it drops are what --host's copy keeps
+#       and drops. The stage is the same directory --host would use, under the
+#       home the link's commands start in, made safe by the same script.
+#
+#       The image comes back as base64 on the command's output (the link's
+#       pull does not answer a Mac) and is published only when its SHA-256 is
+#       the one the build host read off the file, after the stamp. Commands
+#       stay under the link's 1024 bytes: what is longer (the stage script,
+#       the stamp, the steps below) goes as files into a private directory
+#       of the build host's /tmp, which is removed when this ends.
+#
+#       MOONWATER_BUILD_BOWL names another bowl than /bowls/alpine.
+#
+link_driver='set -eu
+say() { printf "%s\n" "$*" >&2; }
+phase=$1
+bowl_root=$2
+shift 2
+case $phase in
+check)
+        case $(uname -m) in
+        x86_64) triplet=x86_64-linux-gnu- ;;
+        aarch64 | arm64) triplet=aarch64-linux-gnu- ;;
+        riscv64) triplet=riscv64-linux-gnu- ;;
+        *) say "build: this machine is $(uname -m), which nothing here builds on"; exit 69 ;;
+        esac
+        if [ ! -x "$bowl_root/usr/bin/gcc" ] || [ ! -L "$bowl_root/usr/local/bin/${triplet}gcc" ]; then
+                say "build: no build bowl at $bowl_root here: bowl profile build install makes it"
+                exit 69
+        fi
+        command -v flock > /dev/null 2>&1 || { say "build: no flock(1) here, which the build lock needs"; exit 69; }
+        command -v bowl > /dev/null 2>&1 || { say "build: no bowl here"; exit 69; }
+        uname -m
+        ;;
+unpack)
+        tarball=$1
+        case $tarball in /tmp/moonwater-handoff.*/tree.tgz) ;; *) say "build: not a tree: $tarball"; exit 2 ;; esac
+        have=$(sha256sum < "$tarball" | cut -d" " -f1)
+        if [ "$have" != "$2" ]; then
+                say "build: the tree arrived damaged: its sha256 is $have, and the one sent $2"
+                exit 1
+        fi
+        tree=${tarball%/tree.tgz}/tree
+        mkdir -- "$tree"
+        bowl --root "$bowl_root" /bin/tar -xzf "$tarball" -C "$tree" --no-same-owner
+        rm -f -- "$tarball"
+        bowl --root "$bowl_root" /usr/bin/rsync -a --delete --no-perms \
+                --exclude /.moonwater-stage-v1 --exclude .git --exclude .claude \
+                --exclude /.moonwater-groups --exclude linux --exclude artifacts \
+                --exclude fs --exclude dist "$tree/" ./
+        ;;
+build)
+        #       At idle priority, which every compiler under it inherits: the
+        #       build has every core when nothing else wants one, and the
+        #       desktop there stays as quick as it was while it runs
+        #       (SCHED_IDLE, or nice 19 where chrt is not, and the disk at
+        #       its idle class).
+        idle=
+        if chrt -i 0 true 2> /dev/null; then
+                idle="chrt -i 0"
+        elif nice -n 19 true 2> /dev/null; then
+                idle="nice -n 19"
+        fi
+        ! ionice -c 3 true 2> /dev/null || idle="ionice -c 3 $idle"
+        exec $idle flock /tmp/moonwater-build.lock bowl --root "$bowl_root" /bin/sh build.sh "$@"
+        ;;
+clean)
+        [ -f build.sh ] || exit 0
+        exec bowl --root "$bowl_root" /bin/sh build.sh --clean
+        ;;
+image) exec ./build key-one kernel_export ;;
+stamp) exec sh "${0%/*}/stamp.sh" "$@" ;;
+sum)
+        [ -f "$1" ] && [ ! -L "$1" ] || { say "build: no image at $1"; exit 1; }
+        printf "%s %s\n" "$(sha256sum < "$1" | cut -d" " -f1)" "$(wc -c < "$1" | tr -d " ")"
+        ;;
+send) exec base64 -w0 < "$1" ;;
+*) say "build: no step $phase"; exit 2 ;;
+esac'
+
+build_link() {
+        link_started=$(date +%s)
+        link=$(command -v moonwater 2> /dev/null || true)
+        [ -n "$link" ] || link=$HOME/.local/bin/moonwater
+        [ -x "$link" ] && grep -aq 'push NAME FILE PATH' "$link" ||
+                die "--on wants the link client: moonwater on PATH or in ~/.local/bin (src/waterlink/mac.c), with link push"
+        bowl_root=${MOONWATER_BUILD_BOWL:-/bowls/alpine}
+        case $bowl_root in
+        /bowls/*/* | /bowls/ | *[!A-Za-z0-9._/-]*) die "MOONWATER_BUILD_BOWL is a bowl, /bowls/NAME: $bowl_root" ;;
+        /bowls/?*) ;;
+        *) die "MOONWATER_BUILD_BOWL is a bowl, /bowls/NAME: $bowl_root" ;;
+        esac
+
+        #       One command there, its output here. The link's commands are at
+        #       most 1024 bytes, so one that is longer is refused here, saying
+        #       so, rather than failing there with nothing said.
+        link_run() {
+                [ "${#1}" -lt 1000 ] || die "a command for $link_host is ${#1} bytes, more than the link takes"
+                "$link" link "$link_host" "$1"
+        }
+        link_quiet() { link_run "$1" < /dev/null; }
+        #       Its output as one line, and the status the command's: a pipe
+        #       into tr would have had tr's.
+        link_say() {
+                link_said=$(link_quiet "$1") || return
+                printf '%s\n' "$link_said" | tr -d '\r'
+        }
+
+        handoff=""
+        link_local=""
+        link_cleanup() {
+                [ -z "$link_local" ] || rm -rf -- "$link_local"
+                link_local=""
+                case $handoff in
+                /tmp/moonwater-handoff.?*) link_quiet "rm -rf -- $(shell_quote "$handoff")" > /dev/null 2>&1 || : ;;
+                esac
+                handoff=""
+        }
+        trap link_cleanup 0
+        trap 'exit 130' INT
+        trap 'exit 143' HUP TERM
+
+        say "Checking $link_host"
+        reply=$(link_say 'echo moonwater-link-ok' 2> /dev/null) || reply=""
+        [ "$reply" = moonwater-link-ok ] ||
+                die "cannot reach $link_host over the link: moonwater link doctor says why"
+
+        handoff=$(link_say 'umask 077 && mktemp -d /tmp/moonwater-handoff.XXXXXX') ||
+                die "could not make a private directory on $link_host"
+        case $handoff in
+        /tmp/moonwater-handoff.*[!A-Za-z0-9]* | /tmp/moonwater-handoff.) handoff=""; die "$link_host made an odd private directory" ;;
+        /tmp/moonwater-handoff.*) ;;
+        *) handoff=""; die "could not make a private directory on $link_host" ;;
+        esac
+        link_local=$(mktemp -d) || die "could not make a private directory here"
+        [ -n "$link_local" ] && [ -d "$link_local" ] || die "could not make a private directory here"
+        printf '%s\n' "$remote_stage" > "$link_local/stage.sh" &&
+                printf '%s\n' "$link_driver" > "$link_local/driver.sh" &&
+                printf '%s\n' "$group_stamp_script" > "$link_local/stamp.sh" ||
+                die "could not write the build steps"
+        for step in stage driver stamp; do
+                "$link" link push "$link_host" "$link_local/$step.sh" "$handoff/$step.sh" < /dev/null > /dev/null ||
+                        die "could not send the build steps to $link_host"
+        done
+
+        #       Every command there: in the stage, by the stage script, then a step.
+        link_step() { shell_quote sh "$handoff/stage.sh" "$remote" sh "$handoff/driver.sh" "$@"; }
+
+        built_on=$(link_say "$(shell_quote sh "$handoff/driver.sh" check "$bowl_root")") ||
+                die "$link_host cannot build"
+        built_on=$(arch_name "$built_on") || die "$link_host is a machine nothing here builds on"
+        #       The bowl's compilers are its own machine's (bowl profile build):
+        #       an image for another one is not built there, and is refused
+        #       before the tree is sent.
+        if [ -z "$target" ]; then
+                target=$built_on
+        elif [ "$target" != "$built_on" ]; then
+                die "$link_host builds $built_on images only, and this one is for $target: --arch $built_on builds there"
+        fi
+        if [ -z "$remote" ]; then
+                flavour=${profile_arch:-$(arch_profile "$target")}
+                remote=.cache/moonwater/$(basename "$here")-$tree_mark-${flavour#arch/}
+        fi
+        case "$remote" in
+        *[[:space:][:cntrl:]]*) die "the remote build directory holds a blank or a control character" ;;
+        esac
+
+        if [ "$do_clean" -eq 1 ]; then
+                say "Cleaning $link_host:$remote"
+                link_quiet "$(link_step clean "$bowl_root")" || die "cleaning failed on $link_host"
+                return 0
+        fi
+
+        say "Copying the tree to $link_host:$remote"
+        if carry_before=$(checkout_carry); then
+                :
+        else
+                say "No git checkout here: the image will say commit unknown"
+                carry_before=
+        fi
+        copy_marker=$(mktemp) || die "could not make a marker for the copy"
+        #       A second more, as for --host: a write in the same tick as the
+        #       marker would not show.
+        sleep 1
+        #       The files rsync would send: find takes its paths before its
+        #       tests, and a directory is named by itself (tar -n), so an empty
+        #       one goes too and nothing under an excluded name does.
+        copy_status=0
+        find . \( -name .git -o -name .claude -o -name linux -o -name artifacts -o -name fs -o -name dist \) -prune -o \
+                \( -path ./.moonwater-stage-v1 -o -path ./.moonwater-groups \) -prune -o -print 2> /dev/null |
+                sed 1d > "$link_local/files" || copy_status=1
+        COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --no-acls --no-fflags -cnzf "$link_local/tree.tgz" \
+                -T "$link_local/files" 2> "$link_local/tar.log" || copy_status=1
+        changed_during_copy=$(find . \( -name .git -o -name .claude -o -name linux -o -name artifacts \
+                -o -name fs -o -name dist \) -prune -o -type f -newer "$copy_marker" -print 2>/dev/null | head -1)
+        if carry_after=$(checkout_carry); then :; else carry_after=; fi
+        rm -f -- "$copy_marker"
+        [ "$copy_status" = 0 ] || die "packing the tree failed: $(head -3 "$link_local/tar.log")"
+        [ -z "$changed_during_copy" ] && [ "$carry_after" = "$carry_before" ] ||
+                die "the checkout changed while it was packed for $link_host: build again once it is still"
+        tree_sum=$(shasum -a 256 < "$link_local/tree.tgz" | cut -d' ' -f1)
+        "$link" link push "$link_host" "$link_local/tree.tgz" "$handoff/tree.tgz" < /dev/null > /dev/null ||
+                die "could not send the tree to $link_host"
+        link_quiet "$(link_step unpack "$bowl_root" "$handoff/tree.tgz" "$tree_sum")" ||
+                die "could not make $link_host:$remote the tree sent"
+
+        if [ -z "$profile_arch" ]; then
+                set -- --arch "$target" "$@"
+        fi
+        say "Building on $link_host: $*"
+        carry=""
+        [ -z "${MOONWATER_STOCK:-}" ] || carry="MOONWATER_STOCK=1"
+        [ -z "$carry_before" ] || carry="$carry $carry_before"
+        # shellcheck disable=SC2086
+        link_quiet "env $carry $(link_step build "$bowl_root" "$@")" ||
+                die "the build failed on $link_host"
+
+        image=$(link_say "$(link_step image "$bowl_root")") ||
+                die "could not identify the built image"
+        image_check
+
+        if [ -n "$group_name" ]; then
+                say "Stamping $image with link group $group_name"
+                link_run "$(link_step stamp "$bowl_root" "$image" "$(image_arch "$image" || echo unknown)")" < "$group_key" ||
+                        die "stamping $image with link group $group_name failed on $link_host"
+        fi
+
+        #       Read after the stamp, which writes the image.
+        image_said=$(link_say "$(link_step sum "$bowl_root" "$image")") ||
+                die "could not read the built image on $link_host"
+        image_sum=${image_said%% *}
+        image_size=${image_said#* }
+        case $image_sum:$image_size in
+        *[!0-9a-f:]*:* | *:*[!0-9]* | :* | *:) die "$link_host said odd things of the image: $image_said" ;;
+        esac
+        [ "${#image_sum}" = 64 ] || die "$link_host said odd things of the image: $image_said"
+        image_host_name=$link_host
+
+        say "Fetching $image ($((image_size / 1048576)) MiB)"
+        link_image() { link_quiet "$(link_step send "$bowl_root" "$image")" | base64 -d; }
+        fetch_also=link_cleanup
+        image_receive link_image
+        fetch_also=""
+        link_cleanup
+        trap - 0 INT HUP TERM
+        say "Built on $link_host in $(( $(date +%s) - link_started )) s: $image, sha256 $image_sum"
+}
+
 build_local() {
         die "building a kernel wants a Linux toolchain and a case
 sensitive filesystem, and this is $(uname). Name a machine that has them with
@@ -935,7 +1254,7 @@ image_arch() {
 #
 lima_home=${LIMA_HOME:-$HOME/.lima}
 lima_ssh=
-if [ -z "$host" ] && [ "$(uname -s)" = Darwin ] && [ -z "${MOONWATER_NO_LIMA:-}" ] &&
+if [ -z "$host" ] && [ -z "$link_host" ] && [ "$(uname -s)" = Darwin ] && [ -z "${MOONWATER_NO_LIMA:-}" ] &&
         command -v limactl > /dev/null 2>&1 && [ -f "$lima_home/default/ssh.config" ] &&
         limactl list --format '{{.Name}} {{.Status}}' 2> /dev/null | grep -qx 'default Running'; then
         lima_ssh="$lima_home/default/ssh.config"
@@ -952,6 +1271,10 @@ fi
 #       purpose: throwing it away means fetching a hundred and fifty megabytes
 #       again to get back where you were.
 #
+if [ "$do_clean" -eq 1 ] && [ -n "$link_host" ]; then
+        build_link
+        exit 0
+fi
 if [ "$do_clean" -eq 1 ] && [ -n "$host" ]; then
         build_remote
         exit 0
@@ -976,7 +1299,9 @@ if [ "$do_clean" -eq 1 ]; then
 fi
 
 if [ "$do_build" -eq 1 ]; then
-        if [ -n "$host" ]; then
+        if [ -n "$link_host" ]; then
+                build_link "$@"
+        elif [ -n "$host" ]; then
                 build_remote "$@"
         else
                 build_local "$@"

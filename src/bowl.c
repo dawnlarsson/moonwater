@@ -8489,6 +8489,16 @@ struct bowl_profile
         // from by their digests and leaves the server off; remove stops it, and
         // every session with it, and drops the record. Neither starts it.
         bool ssh;
+        // Names a build asks for that the bowl's packages do not have: install
+        // links tool_prefix followed by each of tools, in the bowl's
+        // /usr/local/bin, to the bowl's /usr/bin program of the plain name
+        // (bowl_profile_tools), and remove takes the links away. Null for none.
+        string_address tool_prefix;
+        string_address address_to tools;
+        // Root's PATH finds the programs of the bowl's /bin and /sbin before
+        // Moonwater's, by links in its /usr/local (bowl_bins_at): what a build
+        // run as root asks for by name is the distribution's.
+        bool bins_first;
 };
 
 /*
@@ -9738,6 +9748,222 @@ static string_address bowl_steam_session[] = {
 #endif
 
 /*
+        What `sh build.sh` reads, runs and links to build a whole image on this
+        machine, from Alpine, whose toolchain the image's own programs need
+        nothing of: they are freestanding (-nostdlib, no libc of anybody's), and
+        the kernel's host programs (fixdep, objtool, sign-file) build against
+        musl as Alpine's own kernels do. Each package is a name the build or
+        the kernel's make asks for:
+          - gcc, musl-dev and binutils, the compiler (musl-dev is what the
+            kernel's host programs link with); clang, lld and llvm, which the
+            build's list of required programs names and which build.sh takes
+            for the build tool when it is there (llvm-readelf reads the ISA
+            floor); rust, since rustc is on that list too;
+          - make, bison, flex, bc, perl, python3 and bash, the kernel's own
+            scripts; elfutils-dev (objtool, resolve_btfids), openssl-dev and
+            openssl (module signing, certs), linux-headers, zstd and xz (the
+            image and every module are zstd, the release is xz), gzip, cpio
+            and kmod (depmod for the module tree);
+          - gnupg (the release's signature), curl and git (the release, its
+            release candidates and the firmware), tar and patch (the
+            kernel/patch and kernel/firmware scripts), and the GNU coreutils,
+            findutils, diffutils, sed, gawk and grep, so nothing the kernel's
+            scripts ask of them falls to busybox's smaller versions;
+          - rsync, which `sh build.sh --on NAME` uses there to make the
+            build's copy of the tree the one sent, as --host's rsync does;
+          - sudo, which kernel/patch/apply runs for every file of the kernel
+            tree it writes, root or not (root's own sudo asks nothing).
+        The profiles of arch/ name the compiler x86_64-linux-gnu-gcc (and
+        CROSS_COMPILE=x86_64-linux-gnu-), the name Debian and Ubuntu give it,
+        and Alpine names its own x86_64-alpine-linux-musl-gcc: so install makes
+        this machine's triplet of each tool in /usr/local/bin a link to the
+        plain one (bowl_build_tools), which is where a build run as root looks
+        first. Only the machine's own triplet: Alpine packages no compiler for
+        another Linux, so an x86-64 machine builds an x86-64 image here and an
+        arm64 one an arm64 image. And the bowl's /bin and /sbin go before
+        Moonwater's programs in root's PATH (bins_first): the kernel's make
+        asks for sed, grep, tar and cp by name, and Alpine's GNU ones are there.
+
+        The way in is the session: `build` in a checkout runs build.sh in the
+        bowl as root (the build makes device nodes and owns its kernel tree),
+        and `sh build.sh --on NAME` on a Mac does the same over the link.
+*/
+static string_address bowl_build_alpine[] = {
+    "gcc", "musl-dev", "binutils", "clang", "lld", "llvm", "rust", "make",
+    "bison", "flex", "bc", "perl", "python3", "bash", "elfutils-dev",
+    "openssl-dev", "openssl", "linux-headers", "zstd", "xz", "gzip", "cpio",
+    "kmod", "gnupg", "curl", "git", "tar", "patch", "coreutils", "findutils",
+    "diffutils", "sed", "gawk", "grep", "rsync", "sudo", null};
+
+static string_address bowl_build_expose[] = {null};
+
+/* The tools a triplet-named compiler is asked for beside it: what the kernel's
+   make takes from CROSS_COMPILE and the build's binutil lookup (build.c). */
+static string_address bowl_build_tools[] = {
+    "gcc", "cpp", "as", "ld", "ld.bfd", "ar", "nm", "objcopy", "objdump",
+    "readelf", "strip", "ranlib", "size", "strings", "addr2line", "elfedit",
+    "c++filt", "gcc-ar", "gcc-nm", "gcc-ranlib", null};
+
+#if X64
+#define BOWL_BUILD_TRIPLET "x86_64-linux-gnu-"
+#elif ARM64
+#define BOWL_BUILD_TRIPLET "aarch64-linux-gnu-"
+#else
+#define BOWL_BUILD_TRIPLET "riscv64-linux-gnu-"
+#endif
+
+/* 958 MiB in 144 packages, measured on x86-64 Alpine 3.24 on 2026-11-17
+   (apk's own total after the install, the bowl's 16 included). */
+#if X64
+#define BOWL_BUILD_ALPINE_BYTES ((p64)958 * 1024 * 1024)
+#else
+#define BOWL_BUILD_ALPINE_BYTES 0
+#endif
+
+static const struct bowl_component bowl_build_components[] = {
+    {"alpine", bowl_build_alpine, BOWL_BUILD_ALPINE_BYTES, bowl_build_expose},
+    {null, null, 0, null},
+};
+
+static string_address bowl_build_session[] = {
+    "[ -f build.sh ] || { echo \"build: no build.sh here: run it in a checkout\" >&2; exit 1; }",
+    "exec bowl --root " BOWL_ROOT_PREFIX "alpine /bin/sh build.sh \"$@\"",
+    null};
+
+/*
+        Links in a bowl's /usr/local, which root's PATH (build.c's, sudo's)
+        reads before /usr and /: one name, PREFIX followed by NAME, made to
+        name FROM/NAME where the name is free and the bowl has that program,
+        and on remove taken away only while it is still the link install made.
+        SHADOW, when there is one, is where the bowl's own program of the name
+        would be found first anyway, and then no link is made. The directory
+        is opened inside the bowl, so a link planted at /usr/local or under it
+        is not followed out of it. 1 when it made or took one away.
+*/
+static positive bowl_link_one(bipolar directory, string_address root,
+                              string_address from, string_address prefix,
+                              string_address name, string_address shadow,
+                              bool make)
+{
+        positive prefix_length = string_length(prefix);
+        positive length = string_length(name);
+        p8 link[128];
+        p8 target[128];
+        p8 have[128];
+        bipolar got;
+
+        if (!bowl_name(name, true) || !path_join(target, sizeof(target), from, name) ||
+            prefix_length + length + 1 > sizeof(link))
+                return 0;
+        memory_copy(link, prefix, prefix_length);
+        memory_copy(link + prefix_length, name, length + 1);
+        if (make)
+        {
+                p8 shadowed[128];
+
+                if (shadow && path_join(shadowed, sizeof(shadowed), shadow, name) &&
+                    bowl_has(root, shadowed))
+                        return 0;
+                return bowl_has(root, target) &&
+                       system_symbolic_link_at(target, directory, link) == 0;
+        }
+        got = system_read_link_at(directory, link, have, sizeof(have) - 1);
+        if (got <= 0)
+                return 0;
+        have[got] = end;
+        return string_equals(have, target) && system_remove_at(directory, link, 0) == 0;
+}
+
+/* The bowl's directory INTO (under /usr/local), made first when links are
+   being made; negative when it is not there. */
+static bipolar bowl_local_directory(string_address root, string_address into, bool make)
+{
+        p8 directory[BOWL_PATH_LIMIT];
+
+        if (!bowl_root_path(directory, sizeof(directory), root, into) ||
+            (make && bowl_mkdir_parents(directory) < 0))
+                return -1;
+        return bowl_open_in_root(root, into, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+}
+
+/* The triplet's names of TOOLS in /usr/local/bin, each naming /usr/bin's plain
+   one: how many it made or took away. */
+static positive __attribute__((__noinline__))
+bowl_tools_at(string_address root, string_address prefix,
+              string_address address_to tools, bool make)
+{
+        bipolar handle = bowl_local_directory(root, "/usr/local/bin", make);
+        positive done = 0;
+
+        if (handle < 0)
+                return 0;
+        for (; *tools; tools++)
+                done += bowl_link_one(handle, root, "/usr/bin", prefix, *tools, null, make);
+        system_close(handle);
+        return done;
+}
+
+/*
+        Every program of the bowl's /bin and /sbin that its /usr/bin or
+        /usr/sbin does not have, in /usr/local/bin and /usr/local/sbin. A fast
+        view's /usr/bin is the bowl's over a snapshot of Moonwater's, so root's
+        PATH, which reads /usr before /, found Moonwater's sed, grep, tar and
+        cp before the GNU ones a distribution that keeps its base in /bin
+        (Alpine) puts there: the kernel's make ran Moonwater's sed and stopped
+        at a script of the kernel's it does not take. How many links it made
+        or took away.
+*/
+static positive __attribute__((__noinline__))
+bowl_bins_at(string_address root, bool make)
+{
+        static string_address const pairs[][3] = {
+            {"/bin", "/usr/local/bin", "/usr/bin"},
+            {"/sbin", "/usr/local/sbin", "/usr/sbin"},
+        };
+        positive done = 0;
+
+        for (positive at = 0; at < array_count(pairs); at++)
+        {
+                bipolar from = bowl_open_in_root(root, pairs[at][0],
+                                                 FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                bipolar into;
+                struct linux_dirent64 address_to entry;
+                file_walk walk;
+
+                if (from < 0)
+                        continue;
+                into = bowl_local_directory(root, pairs[at][1], make);
+                if (into >= 0 && file_walk_open(address_of walk, from, "."))
+                {
+                        while ((entry = file_walk_next(address_of walk)))
+                                done += bowl_link_one(into, root, pairs[at][0], "",
+                                                      entry->d_name, pairs[at][2], make);
+                        file_walk_close(address_of walk);
+                }
+                if (into >= 0)
+                        system_close(into);
+                system_close(from);
+        }
+        return done;
+}
+
+static fn bowl_profile_tools(const struct bowl_profile address_to profile, bool make)
+{
+        for (const struct bowl_component address_to part = profile->components;
+             part->distro; part++)
+        {
+                const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+
+                if (!distro || !bowl_has(distro->root, distro->marker))
+                        continue;
+                if (profile->tools)
+                        bowl_tools_at(distro->root, profile->tool_prefix, profile->tools, make);
+                if (profile->bins_first)
+                        bowl_bins_at(distro->root, make);
+        }
+}
+
+/*
         OpenSSH's server, for a person to reach this machine by a key of a list
         Moonwater keeps, and nothing else of the bowl's: Moonwater writes its
         configuration from its own settings and starts it itself, from copies of
@@ -9780,9 +10006,13 @@ static const struct bowl_profile bowl_profiles[] = {
     {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
      "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
      bowl_ssh_components, null, false, null, null, false, false, false, false, true},
+    {"build", "Everything sh build.sh needs to build a Moonwater image here (Alpine's gcc, make and the kernel's tools)",
+     "in a checkout, build an image with: build [profile...]; from a Mac: sh build.sh --on THIS-MACHINE",
+     bowl_build_components, bowl_build_session, false, null, null, true, false, false, false, false,
+     BOWL_BUILD_TRIPLET, bowl_build_tools, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam, ssh\n"
+#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam, ssh, build\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -10556,6 +10786,8 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                 bowl_xwayland_install(profile);
         if (profile->pwrite_shim)
                 bowl_chrome_pwrite_install(profile);
+        if (profile->tools || profile->bins_first)
+                bowl_profile_tools(profile, true);
         if (profile->input)
                 for (const struct bowl_component address_to part =
                          profile->components;
@@ -10726,6 +10958,9 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
         //      The server before its files: stopped, and its sessions with it.
         if (profile->ssh)
                 ssh_profile_forget();
+        //      The links before the packages they name, while they still read as install made them.
+        if (profile->tools || profile->bins_first)
+                bowl_profile_tools(profile, false);
         for (const struct bowl_component address_to part =
                  profile->components;
              part->distro; part++)

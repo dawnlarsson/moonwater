@@ -114,7 +114,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         {"freestanding_source", "src/main.c"},
         {"freestanding_output", "bin"},
         {"freestanding_flags",
-         "-static -s -flto -nostdlib -nostartfiles -ffreestanding -fno-builtin"
+         "-static -no-pie -s -flto -nostdlib -nostartfiles -ffreestanding -fno-builtin"
          " -Qn -Wl,--build-id=none -Wl,--gc-sections -Wl,--strip-all"
          " -Wl,--strip-debug -Wl,-x -Wl,-s -Wl,--no-warn-rwx-segments"
          " -Wl,-nmagic -O2"},
@@ -3229,14 +3229,20 @@ static b32 build_spark(string_address source, string_address output,
                 if (kernels && *kernels && count + 1 < BUILD_ARGUMENT_ROOM)
                         words[count++] = kernels;
         }
-        //      The eight words below and the null that ends the vector have
+        //      The nine words below and the null that ends the vector have
         //      to fit: the split keeps that room.
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM - 8,
+                                BUILD_ARGUMENT_ROOM - 9,
                                 string_get_environment(environ,
                                                        "SPARK_CPPFLAGS"));
 
+        //      -no-pie as well: a gcc built with --enable-default-pie that makes
+        //      -static a static PIE (Alpine's) links the -fno-pie objects as
+        //      one, and refuses: "read-only segment has dynamic relocations".
+        //      Where -static is already not a PIE (Debian's, Arch's, clang) it
+        //      changes nothing.
         words[count++] = "-static";
+        words[count++] = "-no-pie";
         words[count++] = "-nostdlib";
         words[count++] = "-nostartfiles";
         words[count++] = "-T";
@@ -5737,7 +5743,7 @@ static b32 build_diagnostics(string_address image)
         if (build_tool("mkdir", "-p", where, null))
                 return build_die("making the diagnostics directory");
 
-        if (build_run(build_compiler(), "-ffreestanding", "-nostdlib", "-static", "-fno-builtin",
+        if (build_run(build_compiler(), "-ffreestanding", "-nostdlib", "-static", "-no-pie", "-fno-builtin",
                       "-fno-stack-protector", "-O2", "-w", "-o", probe, "src/diag/intel-probe.c", null))
                 return build_die("compiling src/diag/intel-probe.c");
 
