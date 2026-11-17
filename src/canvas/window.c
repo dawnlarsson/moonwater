@@ -1288,6 +1288,19 @@ struct windows
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
         unsigned int client_rects_card, client_rects_cpu; // the damage rectangles copied by the card, and by the processor
+        /*
+                A window's subsurfaces not kept as layers composed from where their client drew them (compositor_wl_row_layers), and laid into the
+                window's picture in the table instead, by reason: 0 the shim made no list of them (one under a root that shows it, more than
+                WAYLAND_LAYERS, a change of scale), 1 the window lands, is glass, or layers are off, 2 the root's picture is the table's (it is asked
+                for again), 3 the root's picture was copied when last handed with them, 4 a layer of another window size, 5 a dma-buf of a row the
+                processor composes, 6 a picture that cannot be gathered (a format other than 8888, a modifier, planes, a source past its buffer), 7
+                an X window's pool, 8 meets a round corner, 9 past its buffer, its pool cut, or the card's map or import refused, 10 more than
+                COMPOSITOR_LAYERS in all, 11 at a present, the window drawn scaled or as glass or no longer read in place. client_layers_laid is
+                how many layers the processor laid into a picture of the table (compositor_wl_layers_put_list); client_layers_gathered the layers
+                turned, flipped, cropped or scaled into a picture of their own, by the card ([0]) and by the processor ([1]).
+        */
+        unsigned int client_layers_refused[12];
+        unsigned int client_layers_laid, client_layers_gathered[2];
         // The program's: the least size its window can be laid out at, logical pixels at the scale it is drawn at (0: none). The compositor
         // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
         // WINDOW_MIN_HEIGHT holds for every window whatever it says.
@@ -1324,7 +1337,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 8u // 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 9u // 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)

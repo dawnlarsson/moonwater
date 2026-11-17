@@ -246,6 +246,7 @@ struct compositor_wl_layer
         positive va, import;          // a dma-buf's: the card's address of the first pixel, and the import's
         unsigned int epoch, fourcc, offset;
         int synced;
+        int swap;                     // red and blue the other way round (an ABGR or XBGR dma-buf, compositor_wl_card_swaps): the frame's swap
 };
 
 static struct
@@ -1329,6 +1330,17 @@ static int compositor_wl_row_async(int row)
         return row >= 0 && wayland_row_hint(row, WAYLAND_HINT_ASYNC) != 0;
 }
 
+// A window's subsurfaces laid into its picture and not kept as layers (compositor_wl_row_layers), counted by the reason (struct windows's
+// client_layers_refused): always 0.
+static int compositor_wl_layers_refused(unsigned int why)
+{
+        struct windows *table = compositor.table;
+
+        if (table && why < sizeof table->client_layers_refused / sizeof table->client_layers_refused[0])
+                table->client_layers_refused[why]++;
+        return 0;
+}
+
 // A row's layers let go of: the imports of their dma-bufs released (as the lent picture's are), and the row has none.
 static void compositor_wl_layers_drop(int row)
 {
@@ -1346,6 +1358,8 @@ static void compositor_wl_layers_drop(int row)
 // Layers laid into a picture of the table (to, pitch: the window's first pixel), each over what is under it, bottom first.
 static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list, unsigned int count, unsigned int *to, unsigned long pitch)
 {
+        if (compositor.table)
+                compositor.table->client_layers_laid += count;
         for (unsigned int at = 0; at < count; at++)
         {
                 const struct compositor_wl_layer *l = &list[at];
@@ -1354,7 +1368,28 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
 
                 if (l->fd >= 0)
                         compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-                if (l->blend)
+                if (l->swap)
+                {
+                        // Red and blue the other way round: each row read with the streaming loads into a run of its own, turned there, and
+                        // laid (over what is under it, or as it is) from it.
+                        unsigned int run[1024];
+                        unsigned int alpha = l->fourcc == WAYLAND_FOURCC_XBGR8888 ? 0xff000000u : 0;
+
+                        for (long y = 0; y < l->height; y++)
+                                for (long x = 0; x < l->width; x += 1024)
+                                {
+                                        unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
+                                        unsigned int *line = into + (unsigned long)y * pitch + (unsigned long)x;
+
+                                        memory_copy_rect_stream_u32(run, n, l->pixels + (unsigned long)y * l->pitch + (unsigned long)x, l->pitch, n, 1);
+                                        memory_swizzle_rb_u32(run, run, (positive)n, alpha);
+                                        if (l->blend)
+                                                memory_over_u32_rect(line, pitch, run, n, n, 1);
+                                        else
+                                                memory_copy_rect_u32(line, pitch, run, n, n, 1);
+                                }
+                }
+                else if (l->blend)
                         memory_over_u32_rect(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
                 else if (l->fd >= 0)
                         memory_copy_rect_stream_u32(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
@@ -1478,7 +1513,7 @@ static void compositor_wl_settle(int row)
                                 gpu_forget(compositor_wl_layers.layer[row][at].pixels,
                                            (positive)compositor_wl_layers.layer[row][at].height * compositor_wl_layers.layer[row][at].pitch * 4);
                 if (!compositor_lent(row) || compositor.landing[row] || compositor.glassy[row])
-                        compositor_wl_layers_lay(row);
+                        compositor_wl_layers_refused(11), compositor_wl_layers_lay(row);
         }
         if (!compositor_lent(row))
                 return;
@@ -1636,7 +1671,8 @@ static void compositor_wl_lent_sync(int start)
                 }
         // The layers of dma-bufs, each bracketed as the picture under them is, for a present that draws their window.
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                for (unsigned int k = 0, counted = compositor_lent(row) && compositor_wl.lent[row].fd >= 0;
+                     k < compositor_wl_layers.count[row]; k++)
                 {
                         struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
 
@@ -1646,9 +1682,14 @@ static void compositor_wl_lent_sync(int start)
                         {
                                 l->synced = compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)l->fd) &&
                                             compositor_wl_sync_start(wayland_row_owner(row), (int)l->fd);
-                                // The processor reads it in place as it does a lent picture: counted the same (compositor_wl.wc_reads).
-                                if (compositor_wl.wc_reads[row] < 255)
+                                // The processor reads it in place as it does a lent picture: counted the same (compositor_wl.wc_reads), once a
+                                // present for the row, its own picture and every layer together. A count a layer made a window with a lent
+                                // picture and two layers three reads in one present, past COMPOSITOR_WL_WC_PRESENTS at the taskbar's first redraw
+                                // over it while the card drew every present, and the window was copied into the table and its layers laid there
+                                // (Chromium's omnibox: 299 windows so in 15 seconds of typing).
+                                if (!counted && compositor_wl.wc_reads[row] < 255)
                                         compositor_wl.wc_reads[row]++;
+                                counted = 1;
                         }
                         else if (!start && l->synced)
                         {
@@ -1966,7 +2007,7 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
         from it. And one whose rectangle meets a round corner of the window is refused: it would be drawn square over it.
 */
 static int compositor_wl_layer_make(const struct wayland_picture *picture, long width, long height, int radius, int line,
-                                    struct compositor_wl_layer *old, unsigned int olds, struct compositor_wl_layer *out)
+                                    struct compositor_wl_layer *old, unsigned int olds, struct compositor_wl_layer *out, unsigned int *why)
 {
         long x1, y1, x2, y2;
         unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0, bytes;
@@ -1976,8 +2017,16 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         memory_zero(out, sizeof *out);
         out->fd = -1;
         out->id = (unsigned int)picture->layer;
-        if (picture->layer <= 0 || !picture->pixels || !picture->map || picture->fragile || compositor_wl_needs_xform(picture, picture->width, picture->height))
+        *why = 9;
+        if (picture->layer <= 0 || !picture->pixels || !picture->map)
                 return 0;
+        *why = 7;
+        if (picture->fragile)
+                return 0;
+        *why = 6;
+        if (compositor_wl_needs_xform_ordered(picture, picture->width, picture->height, compositor_wl_card_swaps(picture)))
+                return 0;
+        *why = 9;
         if (picture->width <= 0 || picture->height <= 0 || picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || (stride & 3) ||
             stride < (unsigned long)picture->width * 4 || picture->dest_x < -WAYLAND_DIMENSION || picture->dest_x > WAYLAND_DIMENSION ||
             picture->dest_y < -WAYLAND_DIMENSION || picture->dest_y > WAYLAND_DIMENSION)
@@ -1989,7 +2038,7 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         if (x2 <= x1 || y2 <= y1)
                 return 1;
         if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line))
-                return 0;
+                return (*why = 8), 0;
         at = picture->pixels + (unsigned long)(y1 - picture->dest_y) * stride + (unsigned long)(x1 - picture->dest_x) * 4;
         bytes = (unsigned long)(y2 - y1 - 1) * stride + (unsigned long)(x2 - x1) * 4;
         if (at < picture->map || (unsigned long)(at - picture->map) + bytes > (unsigned long)picture->map_bytes)
@@ -2042,6 +2091,7 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         out->epoch = gpu_epoch;
         out->fourcc = picture->fourcc;
         out->offset = (unsigned int)(picture->plane_offset[0] + (unsigned long)(at - picture->pixels));
+        out->swap = compositor_wl_fourcc_swapped(picture->fourcc);
         return 1;
 }
 
@@ -2098,7 +2148,7 @@ static void compositor_wl_layers_changes(const struct compositor_wl_layer *old, 
                 if (was >= 0)
                         matched[was] = 1;
                 if (was < 0 || restacked || old[was].x != l->x || old[was].y != l->y || old[was].width != l->width || old[was].height != l->height ||
-                    old[was].blend != l->blend)
+                    old[was].blend != l->blend || old[was].swap != l->swap)
                 {
                         compositor_wl_change(rects, count, room, box, l->x, l->y, l->x + l->width, l->y + l->height);
                         if (was >= 0)
@@ -2136,7 +2186,7 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
         struct compositor_wl_layer made[WAYLAND_LAYERS], *old;
         const struct wayland_picture *from[WAYLAND_LAYERS];
         struct compositor_frame corners;
-        unsigned int kept = 0, olds;
+        unsigned int kept = 0, olds, why = 0;
         long width, height;
         int ok = 1, changes = 0, box[4] = {0, 0, 0, 0}, rects[WAYLAND_DAMAGE][4];
 
@@ -2148,14 +2198,17 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
         if (count < 0 || count > WAYLAND_LAYERS || (count && !layers) || compositor.landing[row] || compositor.glassy[row] || compositor_wl_layers.off)
         {
                 compositor_wl_layers_lay(row);
-                return 0;
+                return compositor_wl_layers_refused(count < 0 ? 0 : 1);
         }
         // Over a picture that is the table's (it has older layers laid in it), the layers are taken only with the root's picture again,
         // unless that was copied last time: then they are laid as before.
         if (!root && !compositor_lent(row))
         {
                 compositor_wl_layers_lay(row);
-                return compositor_wl_layers.root_refused[row] ? 0 : WAYLAND_LAYERS_ROOT;
+                if (compositor_wl_layers.root_refused[row])
+                        return compositor_wl_layers_refused(3);
+                compositor_wl_layers_refused(2);
+                return WAYLAND_LAYERS_ROOT;
         }
         width = root && count ? layers[0].row_width : (long)table->width[row];
         height = root && count ? layers[0].row_height : (long)table->height[row];
@@ -2172,22 +2225,24 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
         {
                 // A dma-buf of a row the processor composes is copied, not read in place (compositor_wl.wc_copy): no layers then.
                 if (layers[at].row_width != (root ? layers[0].row_width : (long)table->width[row]) ||
-                    layers[at].row_height != (root ? layers[0].row_height : (long)table->height[row]) ||
-                    (layers[at].sync_fd >= 0 && compositor_wl.wc_copy[row]) ||
-                    !compositor_wl_layer_make(&layers[at], width, height, compositor_radius(&corners), corners.line, old, olds, &made[kept]))
+                    layers[at].row_height != (root ? layers[0].row_height : (long)table->height[row]))
+                        ok = 0, why = 4;
+                else if (layers[at].sync_fd >= 0 && compositor_wl.wc_copy[row])
+                        ok = 0, why = 5;
+                else if (!compositor_wl_layer_make(&layers[at], width, height, compositor_radius(&corners), corners.line, old, olds, &made[kept], &why))
                         ok = 0;
                 else if (made[kept].width > 0)
                         from[kept++] = &layers[at];
         }
         if (ok && compositor_wl_layers.total - olds + kept > COMPOSITOR_LAYERS)
-                ok = 0;
+                ok = 0, why = 10;
         if (!ok)
         {
                 for (unsigned int at = 0; at < kept; at++)
                         if (compositor_wl_live(made[at].import, made[at].epoch))
                                 gpu_release_import(made[at].import);
                 compositor_wl_layers_lay(row);
-                return 0;
+                return compositor_wl_layers_refused(why);
         }
         compositor_wl_layers_changes(old, olds, made, from, kept, rects, &changes, WAYLAND_DAMAGE, box);
         for (unsigned int at = 0; at < olds; at++)
@@ -2280,6 +2335,7 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
         {
                 if (count)
                 {
+                        compositor_wl_layers_refused(11);
                         compositor_wl_layers_lay(row);
                         window->pixels = compositor_pixels(row);
                         window->pitch = (unsigned long)compositor_stride();
@@ -2302,6 +2358,7 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
                 f->pitch = l->pitch;
                 f->gpu_base = compositor_wl_live(l->va, l->epoch);
                 f->blend = l->blend;
+                f->swap = l->swap;
                 f->layer = 1;
                 rows[at + k] = (unsigned int)row;
         }

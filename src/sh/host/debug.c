@@ -919,6 +919,27 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                           (string_address) "the kernel's errno",
                          (positive)(table->client_scan_errno < 0 ? 0 : table->client_scan_errno));
         }
+        //      A window's subsurfaces: the layers laid into the table by the processor, gathered into pictures of their own (turned, flipped,
+        //      cropped or scaled) by the card and the processor, and why a window's were not kept as layers (compositor_wl_row_layers).
+        {
+                static const string_address layer[] = {"the shim made none", "landing or glass", "the root asked again", "the root copied",
+                                                       "another window size", "the processor composes it", "cannot be gathered", "an X window's pool",
+                                                       "a round corner", "its buffer, pool or map", "no room", "drawn scaled or not in place"};
+                unsigned int any = table->client_layers_laid | table->client_layers_gathered[0] | table->client_layers_gathered[1];
+
+                for (unsigned int at = 0; at < 12; at++)
+                        any |= table->client_layers_refused[at];
+                if (any)
+                {
+                        host_say(log, "  client layers   %p laid into the table by the processor, %p gathered by the card, %p by the processor;",
+                                 (positive)table->client_layers_laid, (positive)table->client_layers_gathered[0],
+                                 (positive)table->client_layers_gathered[1]);
+                        for (unsigned int at = 0; at < 12; at++)
+                                if (table->client_layers_refused[at])
+                                        host_say(log, " %s %p;", layer[at], (positive)table->client_layers_refused[at]);
+                        host_say(log, "\n");
+                }
+        }
         //      A lent dma-buf the processor read in place (its write-combined mapping): the presents it did, and the rows copied once for it.
         if (table->client_wc_presents || table->client_wc_seeded)
                 host_say(log, "  client wc       %p presents the processor read a client's dma-buf in place, %p rows copied into the table for it\n",

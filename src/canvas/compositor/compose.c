@@ -324,6 +324,39 @@ static void compositor_blit_blend(const struct compositor_target *t, int x, int 
         memory_over_u32_rect(into, t->pitch, from, pitch, (positive)(x2 - x1), (positive)(y2 - y1));
 }
 
+/*
+        A frame whose picture has red and blue the other way round (frame->swap: a client's ABGR or XBGR buffer read in place, which the card
+        swaps as it loads it), drawn by the processor as the card draws it: each row's run turned into a run of its own and laid from there, copied,
+        over what the target holds, or over the ground (blend 2). The bytes are the card's: only red and blue trade places.
+*/
+static void compositor_blit_swapped(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        int x1 = frame->x > t->x1 ? frame->x : t->x1;
+        int y1 = frame->y > t->y1 ? frame->y : t->y1;
+        int x2 = frame->x + frame->width < t->x2 ? frame->x + frame->width : t->x2;
+        int y2 = frame->y + frame->height < t->y2 ? frame->y + frame->height : t->y2;
+        unsigned int run[1024];
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        if (frame->blend == 1)
+                compositor_reading(t);
+        for (int py = y1; py < y2; py++)
+                for (int px = x1; px < x2; px += 1024)
+                {
+                        unsigned long n = (unsigned long)(x2 - px < 1024 ? x2 - px : 1024);
+                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
+
+                        memory_swizzle_rb_u32(run, frame->pixels + (unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x), (positive)n, 0);
+                        if (frame->blend == 2)
+                                compositor_over_ground(into, t->pitch, run, n, n, 1, t->out, px, py);
+                        else if (frame->blend)
+                                memory_over_u32_rect(into, t->pitch, run, n, n, 1);
+                        else
+                                (t->out ? memory_copy_rect_out_u32 : memory_copy_rect_u32)(into, t->pitch, run, n, n, 1);
+                }
+}
+
 // Whether two run rows hold the same runs.
 static int compositor_runs_same(const struct compositor_run_row *one, const struct compositor_run_row *two)
 {
@@ -788,6 +821,8 @@ static void compositor_contents(const struct compositor_target *t, const struct 
                 return;
         if (frame->builtin)
                 compositor_fill(t, frame->x, frame->y, frame->width, frame->height, taskbar_tab_ink(((int)(frame->slot)), ((unsigned int)(compositor_panel_mark(frame)))));
+        else if (frame->swap && !compositor_scaled(frame))
+                compositor_blit_swapped(t, frame);
         else if (frame->blend)
         {
                 if (compositor_scaled(frame))
