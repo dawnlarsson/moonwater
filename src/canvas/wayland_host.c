@@ -1465,18 +1465,22 @@ static int compositor_wl_needs_xform_ordered(const struct wayland_picture *pictu
                 return 1;
         if (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID)
                 return 1;
-        //      A viewport's source at the buffer's corner, of whole pixels and the window's size, is the buffer's top left as it is: what a copy
-        //      clipped to the window and a lend of the window's size from the buffer's start both read (Chromium keeps a larger buffer through a
-        //      resize and shows its corner this way, a set_source at every step). Anything else a viewport asks is a transform.
+        //      A viewport's source at the buffer's corner, of whole pixels and shown at its own size, is the buffer's top left as it is: the
+        //      window is the part of it at the window's place in the surface (dest_x, dest_y: its geometry, inside the shadow a toolkit draws
+        //      round it), which a copy clipped to the window and a lend from the buffer at that place both read, as for a buffer of the
+        //      surface's own size. Chromium keeps a larger buffer through a resize and shows its corner this way, a set_source at every step,
+        //      its shadow in it: that the crop be the window's own size made every frame after a resize a copy on the processor (12 frames a
+        //      second for a window of 1900x1000). Anything else a viewport asks (an offset source, a scale) is a transform.
         {
                 int cropped = picture->src_width > 0;
                 long seen_w = cropped ? picture->src_width / 256 : picture->width, seen_h = cropped ? picture->src_height / 256 : picture->height;
+                long right = -picture->dest_x + width, bottom = -picture->dest_y + height;
 
                 if (cropped && (picture->src_x != 0 || picture->src_y != 0 || picture->src_width % 256 || picture->src_height % 256 ||
-                                seen_w > picture->width || seen_h > picture->height || seen_w != width || seen_h != height))
+                                seen_w > picture->width || seen_h > picture->height || picture->dest_x > 0 || picture->dest_y > 0 ||
+                                right > seen_w || bottom > seen_h))
                         return 1;
-                if (picture->dst_width > 0 &&
-                    (picture->dst_width != width || picture->dst_height != height || seen_w != width || seen_h != height))
+                if (picture->dst_width > 0 && (picture->dst_width != seen_w || picture->dst_height != seen_h))
                         return 1;
         }
         return 0;
@@ -2603,6 +2607,13 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 return -1;
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
+        // A floating window whose client acknowledged the size asked of it and drew another chose its own (a browser resizing itself
+        // to the bounds it was given): the ask is over and the window takes the size (compositor_take), where it was stretched to the
+        // ask and waited for a picture of it the client would never draw. Not while the hand holds an edge of it: the ask is the
+        // hand's, and the picture catches up with it.
+        if (picture->own_size && compositor.asking[row] && compositor.arranged[row] == COMPOSITOR_FLOATING && !compositor.fullscreen[row] &&
+            compositor.resize != row && compositor.shared_row != row)
+                compositor.asking[row] = 0;
         if (has_content && !compositor_wl.laying[row].open)
                 compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
@@ -2630,7 +2641,15 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         }
         if (compositor_wl_layers.pending_row == row && !(picture->last && has_content))
                 compositor_wl_layers.pending_row = -1;
-        if (picture->sync_fd >= 0 && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+        /*
+                A buffer whose writer may not be done is not read, and the next picture is shown whole. Not one committed with explicit
+                sync: its acquire point was reached before the commit was taken, which is the protocol's word that it is done, and its
+                implicit fences are none of it. Waited on as well, a resize's first frames (new buffers, a slow first draw) timed the
+                sync's wait out, the client was let alone for two seconds, every picture it sent was skipped, and the buffer the window
+                still showed in place was never replaced, so never released: Chromium, which draws only with a buffer given back, drew
+                no more (the window stopped at its first resize and never drew again).
+        */
+        if (picture->sync_fd >= 0 && !picture->explicit_sync && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
         {
                 compositor_wl_layers.pending_row = -1; // not shown: the next is whole
                 return 1;
@@ -2691,7 +2710,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
 
                         if (picture->sync_fd >= 0 && !sync_started)
                         {
-                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
                                 {
                                         compositor_wl.laying[row].open = 0;
                                         return 1;
@@ -2760,7 +2779,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 {
                                         if (picture->sync_fd >= 0 && !sync_started)
                                         {
-                                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
                                                 {
                                                         compositor_wl.laying[row].open = 0;
                                                         return 1;
@@ -2779,7 +2798,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 {
                                         if (!sync_started)
                                         {
-                                                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                                                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
                                                 {
                                                         compositor_wl.laying[row].open = 0;
                                                         return 1;

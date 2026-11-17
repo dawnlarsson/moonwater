@@ -256,6 +256,13 @@ struct wayland_picture
         unsigned int fourcc;
         unsigned long modifier;
         unsigned long pool_id;
+        // A toplevel's size is its client's own choice (1): every configure it was sent is acknowledged and the last one said what the
+        // compositor asks of it now, so a size other than that ask is one the client chose (a browser that resizes itself), not one it is
+        // still on its way from. The host lets a floating window take it (compositor_wl_row_picture).
+        long own_size;
+        // The commit was synchronized explicitly (wp_linux_drm_syncobj: an acquire point and a release point): the shim held it until its
+        // acquire point was reached, so the client's writes to the buffer are done, and the buffer's implicit fences are no word on it.
+        long explicit_sync;
         // Extra planes for multi-plane or planar dma-bufs (plane 0 duplicates sync_fd when >= 0).
         long plane_count;
         long plane_fd[4];
@@ -4297,6 +4304,14 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 wayland_layers_lent(c, s, picture.last ? list : 0, count);
                 s->laying = !picture.last;
         }
+        if (s->role == WAYLAND_ROLE_TOPLEVEL && s->told && !s->serials && s->row >= 0)
+        {
+                struct wayland_facts now;
+
+                picture.own_size = wayland.host->row_facts(wayland.host->context, (int)s->row, &now) >= 0 && now.width == s->told_width &&
+                                   now.height == s->told_height;
+        }
+        picture.explicit_sync = b->rel_pending;
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
         // A picture the host reads in place keeps its buffer: it is the surface's lent buffer, and the one it replaced is let go of when
         // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.

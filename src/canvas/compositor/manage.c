@@ -365,9 +365,11 @@ static void compositor_want(int row, int width, int height)
         if (!compositor.showing[row])
                 return;
 
-        // Shown at it now, its picture stretched or cut to it, and the edges the hand does not hold where they were.
+        // Shown at it now, its picture stretched or cut to it, and the edges the hand does not hold where they were. A size its picture
+        // is already is no ask to wait on: a window asked for the size it has (a fit, a place remembered) drew it before the ask and
+        // need not draw it again, and an idle one would not, which left the ask standing and its next size of its own stretched to it.
         compositor_damage_row(row);
-        compositor.asking[row] = 1;
+        compositor.asking[row] = compositor.picture_w[row] != (unsigned int)width || compositor.picture_h[row] != (unsigned int)height;
         compositor.w[row] = (unsigned int)width;
         compositor.h[row] = (unsigned int)height;
         if (compositor.edges[row] & COMPOSITOR_EDGE_LEFT)
@@ -3500,9 +3502,20 @@ static void compositor_popup_leave(int row)
                         compositor_popup_parent[child] = -1;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static long wayland_row_owner(long row);
+#endif
+
 // A row whose program has gone, its new door open: let go.
 static void compositor_door_gone(int row)
 {
+#ifdef CONFIG_MOONWATER_WAYLAND
+        //      A window of the shim's (a Wayland client's, or an X window's through Xwayland) has no program at its door: whoever opened
+        //      it to knock (moonwater window move) closed it again, which says nothing of the window. The shim alone lets it go
+        //      (row_close). It was let go here, while its client went on drawing into a row that was no longer on the screen.
+        if (wayland_row_owner(row) >= 0)
+                return;
+#endif
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
