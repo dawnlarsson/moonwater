@@ -219,6 +219,7 @@
 #define COMPOSITOR_XWM_POPUPTYPE 512u         // its _NET_WM_WINDOW_TYPE is a popup's: it is shown as an override-redirect window is
 #define COMPOSITOR_XWM_PROPS_READ 1024u       // the properties asked for at the map (the last is the type) have come
 #define COMPOSITOR_XWM_RAISED 2048u           // a transient window has been raised over its parent once
+#define COMPOSITOR_XWM_COVERED 4096u          // made fullscreen for mapping over a whole screen (compositor_xwm_covers), not by asking
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
@@ -1279,9 +1280,29 @@ static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
                ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
 }
 
+/*
+        The screen an X window covers exactly, at its place and its size (a game that maps borderless at the output's size, the common way
+        a game goes fullscreen without asking for _NET_WM_STATE_FULLSCREEN), or -1. Only a managed window that is no one's transient: a
+        popup's or a dialog's place is its own.
+*/
+static int compositor_xwm_covers(const struct compositor_xwm_window *w)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int x = compositor_xwm_from_x(w->x, 0), y = compositor_xwm_from_x(w->y, 1);
+
+        if ((w->state & COMPOSITOR_XWM_POPUPISH) || w->transient)
+                return -1;
+        for (unsigned int at = 0; at < count; at++)
+                if (screens[at][0] == x && screens[at][1] == y && screens[at][2] == (int)w->width && screens[at][3] == (int)w->height)
+                        return (int)at;
+        return -1;
+}
+
 static void compositor_xwm_resolve(struct compositor_xwm_window *w)
 {
         long row;
+        int covers = -1;
 
         if (!(w->state & COMPOSITOR_XWM_SERIAL))
                 return;
@@ -1296,6 +1317,13 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 long how = ((w->state & COMPOSITOR_XWM_POPUPISH) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
                            WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
 
+                // A window mapped over a whole screen is fullscreen on it, said so (_NET_WM_STATE), as if it had asked.
+                if (!(w->state & (COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_FULLSCREEN)) && (covers = compositor_xwm_covers(w)) >= 0)
+                {
+                        w->restore_w = w->width, w->restore_h = w->height;
+                        w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
+                        compositor_xwm_net_state(w->id, (int)w->state);
+                }
                 row = wayland_xwindow_adopt(compositor_xwm_server(compositor_xwm_at), w->serial, how, compositor_xwm_from_x(w->x, 0),
                                             compositor_xwm_from_x(w->y, 1),
                                             w->title);
@@ -1313,7 +1341,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
         w->row = (int)row;
         compositor_xwm_owned(w);
         if (w->state & COMPOSITOR_XWM_FULLSCREEN)
-                compositor_fullscreen_row((int)row);
+                compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
         else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
                 compositor_arrange((int)row, COMPOSITOR_ROOM);
 }
@@ -1323,6 +1351,7 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
 {
         struct xwm_configure c;
 
+        w->state &= ~COMPOSITOR_XWM_COVERED; // asked for now, either way
         if (on == !!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 return;
         if (on)
@@ -1351,14 +1380,15 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
         {
                 w->state &= ~COMPOSITOR_XWM_FULLSCREEN;
                 compositor_xwm_net_state(w->id, (int)w->state);
-                if (w->state & COMPOSITOR_XWM_MAXIMIZED)
-                {
-                        if (w->row >= 0)
-                                compositor_arrange(w->row, COMPOSITOR_ROOM);
-                        return;
-                }
-                if (w->row >= 0)
+                // Back to what it filled before (compositor_fullscreen_off); one made fullscreen before it had a row is maximized or floats.
+                if (w->row >= 0 && compositor.fullscreen[w->row])
+                        compositor_fullscreen_off(w->row);
+                else if (w->row >= 0 && (w->state & COMPOSITOR_XWM_MAXIMIZED))
+                        compositor_arrange(w->row, COMPOSITOR_ROOM);
+                else if (w->row >= 0)
                         compositor_float(w->row);
+                if (w->row >= 0 && compositor.arranged[w->row] != COMPOSITOR_FLOATING)
+                        return;
                 // The size it had is its own again: floating asks nothing of it.
                 if (w->restore_w && w->restore_h)
                 {
@@ -1398,6 +1428,15 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         struct xwm_configure c;
         int row = w->row;
 
+        // Fullscreen made or ended by the compositor (Super+F11, a drag off, a chord) is said to the client in _NET_WM_STATE.
+        if (!!(w->state & COMPOSITOR_XWM_FULLSCREEN) != !!compositor.fullscreen[row])
+        {
+                if (compositor.fullscreen[row])
+                        w->restore_w = w->width, w->restore_h = w->height, w->state |= COMPOSITOR_XWM_FULLSCREEN;
+                else
+                        w->state &= ~(COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED);
+                compositor_xwm_net_state(w->id, (int)w->state);
+        }
         if (!(w->state & COMPOSITOR_XWM_FULLSCREEN))
         {
                 int is_max = compositor.arranged[row] == COMPOSITOR_ROOM || compositor.arranged[row] == COMPOSITOR_MAXIMIZED;
@@ -3657,6 +3696,15 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 struct xwm_configure c;
 
                 w = compositor_xwm_find(e->window, 0);
+                // A window made fullscreen for covering its screen that asks for another size is a window of that size again (a game
+                // gone from borderless to windowed in its settings): out of fullscreen, floating at the size it asks.
+                if (w && (w->state & COMPOSITOR_XWM_COVERED) && (w->state & COMPOSITOR_XWM_FULLSCREEN) && w->row >= 0 &&
+                    (e->value_mask & (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT)) == (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT) &&
+                    (e->width != compositor.w[w->row] || e->height != compositor.h[w->row]))
+                {
+                        w->restore_w = e->width, w->restore_h = e->height;
+                        compositor_xwm_fullscreen(w, 0);
+                }
                 // A fullscreen window keeps the output's place and size whatever it asks.
                 c.mask = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
                                           XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);

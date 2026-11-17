@@ -39,6 +39,7 @@
 #define CK_KEY_TAB 15
 #define CK_KEY_F4 62
 #define CK_KEY_F9 67
+#define CK_KEY_F11 87
 #define CK_KEY_MUTE 113
 #define CK_KEY_VOLUME_DOWN 114
 #define CK_KEY_VOLUME_UP 115

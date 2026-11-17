@@ -26,19 +26,6 @@ static void compositor_stack_remove(int row)
         compositor.stacked--;
 }
 
-/*
-        Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window): it places itself and keeps its own grabs, as
-        it does under any X window manager, so it stays over the windows the compositor arranges (a press that raises one does not put it
-        under) and is not put away by a press elsewhere or its window losing the keys, as a popup of the compositor's is; its client ends
-        it, as its focus leaves. None without the Wayland shim.
-*/
-#ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_wl_row_xoverride(int row);
-#define compositor_row_xoverride(row) compositor_wl_row_xoverride(row)
-#else
-#define compositor_row_xoverride(row) 0
-#endif
-
 // On top of the others; an override-redirect X window stays over a window raised (compositor_row_xoverride).
 static void compositor_raise(int row)
 {
@@ -1449,15 +1436,62 @@ static void compositor_arrange(int row, unsigned int how)
         compositor_arrange_on(row, how, -1);
 }
 
-// A window asked to fill its screen under the taskbar too (a client's set_fullscreen): arranged maximised, and marked, so the second-swipe
-// rule of the screen edges applies to it and to no other maximised window (compositor_swipe_act).
+/*
+        A window asked to fill its screen under the taskbar too (a client's set_fullscreen, an X window's _NET_WM_STATE_FULLSCREEN, F11 on a
+        window of Canvas's own): arranged maximised on the screen asked (-1: the one it is mostly on), and marked, so the taskbar slides away
+        while it is the top window (compositor_fullscreen_up), the card may show it straight from its buffer (compositor_direct_candidate), and
+        the second-swipe rule of the screen edges applies to it and to no other maximised window (compositor_swipe_act). It is put on top and
+        given the keys. What it filled before is kept (fullscreen_was), so leaving fullscreen puts it back as it was: floating where it floated,
+        or maximised, or a tile, where every exit floated it before.
+*/
+static void compositor_fullscreen_on(int row, int screen)
+{
+        unsigned int was;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return;
+        was = compositor.fullscreen[row] ? compositor.fullscreen_was[row] : compositor.arranged[row];
+        compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
+        if (compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
+                return;
+        compositor.fullscreen[row] = 1;
+        compositor.fullscreen_was[row] = (unsigned char)was;
+        compositor_raise(row);
+        compositor_focus(row);
+}
+
 static void compositor_fullscreen_row(int row)
+{
+        compositor_fullscreen_on(row, -1);
+}
+
+// Out of fullscreen: back to what it filled before (fullscreen_was), a floating window to the place and size it had. A window that is not
+// fullscreen is left as it is.
+static void compositor_fullscreen_off(int row)
+{
+        unsigned int was;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.fullscreen[row])
+                return;
+        was = compositor.fullscreen_was[row];
+        compositor.fullscreen[row] = 0;
+        if (was == COMPOSITOR_FLOATING)
+                compositor_float(row);
+        else
+                compositor_arrange(row, was);
+        // The band comes back, and what it covers is drawn again.
+        compositor_damage_row(row);
+}
+
+// F11 (compositor_fullscreen_key): a fullscreen window out of it, any other into it on the screen it is mostly on.
+static void compositor_fullscreen_toggle(int row)
 {
         if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
-        compositor_arrange(row, COMPOSITOR_MAXIMIZED);
-        if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
-                compositor.fullscreen[row] = 1;
+        if (compositor.fullscreen[row])
+                compositor_fullscreen_off(row);
+        else
+                compositor_fullscreen_on(row, -1);
 }
 
 // Back to the rectangle it had, wherever it was put since.
@@ -2017,9 +2051,12 @@ static void compositor_first_put(int row, int x, int y)
                            least_w, least_h, rect);
         if (fills != COMPOSITOR_FLOATING)
         {
+                unsigned int was = compositor.fullscreen[row] ? compositor.fullscreen_was[row] : compositor.arranged[row];
+
                 compositor_arrange_rect(row, fills, rect);
+                // Fullscreen as a client's ask is (compositor_fullscreen_on), and what it filled before kept for its way out.
                 if (fills == COMPOSITOR_MAXIMIZED && how == WINDOW_PLACE_FULLSCREEN)
-                        compositor.fullscreen[row] = 1;
+                        compositor.fullscreen[row] = 1, compositor.fullscreen_was[row] = (unsigned char)was;
                 return;
         }
         compositor_put(row, rect[0], rect[1]);

@@ -1047,6 +1047,7 @@ static struct
         unsigned int *asking;   // shown at a size asked of it, until a picture of that size comes
         unsigned int *arranged; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
         unsigned char *fullscreen; // a window that asked to fill its screen under the taskbar too (fullscreen): a client's request, or a placement's
+        unsigned char *fullscreen_was; // what a fullscreen window filled before (arranged), which leaving fullscreen puts back
         unsigned int *edges;    // the edges the hand holds, until the window is the size asked for
         int *far_x, *far_y; // where the edges it does not hold are
         int *saved_x, *saved_y; // where it was floating, and how large
@@ -2432,6 +2433,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.asking, COMPOSITOR_ROWS_ROW) \
         X(compositor.arranged, COMPOSITOR_ROWS_ROW) \
         X(compositor.fullscreen, COMPOSITOR_ROWS_ROW) \
+        X(compositor.fullscreen_was, COMPOSITOR_ROWS_ROW) \
         X(compositor.edges, COMPOSITOR_ROWS_ROW) \
         X(compositor.far_x, COMPOSITOR_ROWS_ROW) \
         X(compositor.far_y, COMPOSITOR_ROWS_ROW) \

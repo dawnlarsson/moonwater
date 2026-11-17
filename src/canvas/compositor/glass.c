@@ -372,13 +372,30 @@ static void compositor_taskbar_damage(b64 before)
         compositor.band_at = 0;
 }
 
-// Whether a window is fullscreen and on the screen: a fullscreen window that is put away is not, and the taskbar slides away for one
-// that is (taskbar_slide_now).
+/*
+        Whether a fullscreen window is the top window of its screen, and the taskbar slides away for it (taskbar_slide_now): the first window
+        of each screen from the top of the stack, a popup, an X window's menu or an overlay of no tab passed over (a menu of the fullscreen
+        window's own shows over it, and the band stays away). Put away or under another window, it is not, and the band comes back; it slid
+        away for any fullscreen window shown, under a window over it too, and stayed away there.
+*/
 static int compositor_fullscreen_up(void)
 {
-        for (unsigned int row = 0; row < compositor_rows_in_use; row++)
-                if (compositor.fullscreen[row] && compositor_visible((int)row))
+        unsigned int seen = 0;
+
+        for (unsigned int at = compositor.stacked; at-- > 0;)
+        {
+                int row = (int)compositor.stack[at], screen;
+
+                if (!compositor_visible(row) || compositor_popup_parent[row] >= 0 || compositor_row_xoverride(row) ||
+                    (compositor.asks[row] & WINDOW_NO_TAB))
+                        continue;
+                screen = compositor_screen_of(row);
+                if (screen < 0 || screen >= 32 || (seen & (1u << screen)))
+                        continue;
+                seen |= 1u << screen;
+                if (compositor.fullscreen[row])
                         return 1;
+        }
         return 0;
 }
 

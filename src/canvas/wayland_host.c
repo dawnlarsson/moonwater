@@ -3041,11 +3041,13 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_MAXIMIZE:
                 compositor_arrange(row, COMPOSITOR_ROOM);
                 break;
-        case WAYLAND_DO_FULLSCREEN:
-                compositor_fullscreen_row(row);
+        case WAYLAND_DO_FULLSCREEN: // on the output it named (a), or the one it is mostly on (-1)
+                compositor_fullscreen_on(row, (int)a);
+                break;
+        case WAYLAND_DO_UNFULLSCREEN: // back to what it filled before
+                compositor_fullscreen_off(row);
                 break;
         case WAYLAND_DO_UNMAXIMIZE:
-        case WAYLAND_DO_UNFULLSCREEN:
                 compositor_float(row);
                 break;
         case WAYLAND_DO_CLOSE:

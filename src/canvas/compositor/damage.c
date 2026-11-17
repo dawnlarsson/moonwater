@@ -598,6 +598,19 @@ static void compositor_preview_keep(void)
         }
 }
 
+/*
+        Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window): it places itself and keeps its own grabs, as
+        it does under any X window manager, so it stays over the windows the compositor arranges (a press that raises one does not put it
+        under) and is not put away by a press elsewhere or its window losing the keys, as a popup of the compositor's is; its client ends
+        it, as its focus leaves. None without the Wayland shim.
+*/
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_row_xoverride(int row);
+#define compositor_row_xoverride(row) compositor_wl_row_xoverride(row)
+#else
+#define compositor_row_xoverride(row) 0
+#endif
+
 // A row's picture the client's own buffer, read in place (wayland_host.c): its pixels and pitch, the card's address of them for a dma-buf, and
 // whether the row's picture is one at all. A row that is not one has its picture in the table.
 #ifdef CONFIG_MOONWATER_WAYLAND

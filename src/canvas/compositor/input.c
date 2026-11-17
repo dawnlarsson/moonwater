@@ -851,6 +851,20 @@ static int compositor_wl_hold_counts(int dx, int dy, positive now)
 }
 #endif
 
+// Whether F11 is the compositor's fullscreen key for the window with the keys: with Super for any window, alone for one of Canvas's own.
+static int compositor_fullscreen_key(int super, int alone)
+{
+        int row = compositor.focus;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_visible(row) || (!super && !alone))
+                return 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (!super && wayland_row_owner(row) >= 0)
+                return 0;
+#endif
+        return 1;
+}
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
@@ -993,6 +1007,17 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         {
                 if (value == 1)
                         compositor_screen_chord(code);
+                return;
+        }
+        // Fullscreen, on and off: Super with F11 for any window, and F11 alone for a window of Canvas's own. A client's window reads F11
+        // itself (a browser's own fullscreen is its set_fullscreen), so it is given the key.
+        if (code == CK_KEY_F11 && !compositor.cycle && compositor_fullscreen_key((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL |
+                                                                                                WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER,
+                                                                                   (modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL |
+                                                                                                WINDOW_KEY_ALT)) == 0))
+        {
+                if (value == 1)
+                        compositor_fullscreen_toggle(compositor.focus);
                 return;
         }
 

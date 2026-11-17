@@ -591,6 +591,7 @@ struct wayland_surface
         unsigned char told;
         unsigned int decoration_id;      // its zxdg_toplevel_decoration_v1, or 0
         unsigned char want_maximized, want_fullscreen, grab;
+        short want_screen; // the screen set_fullscreen named (its wl_output's), -1 for none
         unsigned int entered;            // the screens it was told it is on, a bit each (WAYLAND_SCREENS of them)
         unsigned int syncobj_id;
         unsigned char pending_sync_acq_set, pending_sync_rel_set;
@@ -2191,7 +2192,8 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                 {
                         if (wayland.screens)
                         {
-                                const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
+                                const struct wayland_screen *own =
+                                        &wayland.screen[s->want_screen >= 0 && s->want_screen < wayland.screens ? s->want_screen : wayland_screen_at(ask.x, ask.y)];
 
                                 ask.x = own->x;
                                 ask.y = own->y;
@@ -4495,7 +4497,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 if (s->want_maximized)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAXIMIZE, 0, 0);
                 if (s->want_fullscreen)
-                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_FULLSCREEN, 0, 0);
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_FULLSCREEN, s->want_screen, 0);
                 // An override-redirect X window shown as a window of its own (nothing to hang from) is where X says, as it places itself.
                 if (s->xalone)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, s->xx, s->xy);
@@ -5741,8 +5743,14 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                         s->want_fullscreen = 1;
                 else if (what == WAYLAND_DO_UNFULLSCREEN)
                         s->want_fullscreen = 0;
+                // set_fullscreen's output, when it names one: the screen it is (its wl_output's), or -1 for the one the window is mostly on.
+                if (what == WAYLAND_DO_FULLSCREEN)
+                        s->want_screen = op == WLQ_xdg_toplevel_set_fullscreen && a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_output &&
+                                                         c->objects[a[0].slot].aux < WAYLAND_SCREENS
+                                                 ? (short)c->objects[a[0].slot].aux
+                                                 : -1;
                 if (row >= 0)
-                        wayland.host->row_do(wayland.host->context, (int)row, what, 0, 0);
+                        wayland.host->row_do(wayland.host->context, (int)row, what, what == WAYLAND_DO_FULLSCREEN ? s->want_screen : 0, 0);
                 return WAYLAND_OK;
         }
         default:

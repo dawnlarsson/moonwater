@@ -247,6 +247,8 @@ b32 main(void)
 
 #ifdef CHECK_gpu_kit
 #include "../../src/canvas/gpu.c"
+// The window manager's state of the server these rows drive: the first slot (xwm.c keeps one a server since its slots, compositor_xwm_at).
+#define compositor_xwm (*compositor_xwm_at)
 /*
         The kit's anti-aliased box on the GPU against ui_kit_fill, the painter it replaces: rounds of random boxes laid in order
         over a random picture, in 256ths, off every edge, thin as a hair, wider than tall, with radii past the half (CSS
@@ -4069,6 +4071,125 @@ static void present_due_rows(void)
         }
 }
 
+/*
+        Fullscreen for every kind of window: on and off keep what the window filled (floating at its place, or maximised in its room), it is put
+        on top with the keys, the taskbar slides for a fullscreen window only while it is the top one, a client's row (NO_CLOSE and NO_GRAB, no
+        WINDOW_GLASS) filling the screen from its own dma-buf is the one to show straight where a glass one is not, F11 is the compositor's for
+        Canvas's own windows, an X window mapped over a whole screen is fullscreen on it, and a client framebuffer the card still shows waits to
+        be removed until the card is off it.
+*/
+static void fullscreen_rows(void)
+{
+        static struct windows *tbl_scratch;
+        struct windows *const tbl_at = windows_scratch_table(&tbl_scratch);
+        static unsigned char kept_comp[sizeof(compositor)], kept_xwm[sizeof(compositor_xwm)];
+        static unsigned int pixels[64 * 64];
+        int kept_parent[2] = {compositor_popup_parent[0], compositor_popup_parent[1]};
+        char kept_driver[sizeof compositor.driver];
+        struct compositor_frame frame;
+        struct compositor_xwm_window w;
+        unsigned int rows[1] = {0}, graves;
+
+        memory_copy(kept_comp, &compositor, sizeof(compositor));
+        memory_copy(kept_xwm, &compositor_xwm, sizeof(compositor_xwm));
+        memory_copy(kept_driver, compositor.driver, sizeof kept_driver);
+        compositor_zero();
+        memory_zero(&compositor_xwm, sizeof(compositor_xwm));
+        windows_scratch_zero(tbl_at);
+        compositor.card = -1;
+        compositor.table = tbl_at;
+        compositor.width = 1920, compositor.height = 1080, compositor.scale = 100;
+        compositor.drag = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
+        compositor.shared_row = COMPOSITOR_NONE, compositor.focus = COMPOSITOR_NONE, compositor.grab = COMPOSITOR_NONE;
+        compositor_popup_parent[0] = compositor_popup_parent[1] = -1;
+        compositor.showing[0] = compositor.showing[1] = 1;
+        compositor.stacked = 2, compositor.stack[0] = 0, compositor.stack[1] = 1;
+        compositor.x[0] = 100, compositor.y[0] = 120, compositor.w[0] = 400, compositor.h[0] = 300;
+        compositor.saved_x[0] = 100, compositor.saved_y[0] = 120, compositor.saved_w[0] = 400, compositor.saved_h[0] = 300;
+        compositor.x[1] = 700, compositor.y[1] = 200, compositor.w[1] = 300, compositor.h[1] = 200;
+
+        compositor_fullscreen_on(0, -1);
+        check("fullscreen: a floating window asked is maximised over its screen, marked, on top and with the keys",
+              compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_MAXIMIZED && compositor.x[0] == 0 && compositor.y[0] == 0 &&
+                  compositor.stack[compositor.stacked - 1] == 0 && compositor.focus == 0 && compositor.fullscreen_was[0] == COMPOSITOR_FLOATING);
+        check("fullscreen: the taskbar slides away for the fullscreen window on top", compositor_fullscreen_up());
+        compositor_raise(1);
+        check("fullscreen: and comes back while another window is over it", !compositor_fullscreen_up());
+        compositor_raise(0);
+        compositor_fullscreen_off(0);
+        check("fullscreen: out of it, a window that floated floats again at its place and size",
+              !compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_FLOATING && compositor.x[0] == 100 && compositor.y[0] == 120 &&
+                  !compositor_fullscreen_up());
+        compositor_arrange(0, COMPOSITOR_ROOM);
+        compositor_fullscreen_on(0, -1);
+        compositor_fullscreen_on(0, -1);
+        compositor_fullscreen_off(0);
+        check("fullscreen: a maximised window (asked twice) is maximised in its room again, where every way out floated it",
+              !compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_ROOM);
+        compositor_fullscreen_off(0);
+        check("fullscreen: out of it when it is not fullscreen is nothing", compositor.arranged[0] == COMPOSITOR_ROOM);
+        compositor_fullscreen_toggle(0);
+        check("fullscreen: F11 puts a window in", compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_MAXIMIZED);
+        check("fullscreen: F11 alone is the compositor's for a window of Canvas's own, and with Super",
+              compositor_fullscreen_key(0, 1) && compositor_fullscreen_key(1, 0) && !compositor_fullscreen_key(0, 0));
+        compositor_fullscreen_toggle(0);
+        check("fullscreen: and F11 again takes it out", !compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_ROOM);
+
+        // A client's window, fullscreen from its own dma-buf (lent): shown straight, unless it is glass.
+        compositor_fullscreen_on(0, -1);
+        memory_zero(compositor.driver, sizeof compositor.driver);
+        memory_copy(compositor.driver, "amdgpu", 7);
+        compositor.card = 1000; // no descriptor: the requests are the fakes, and RMFB is EBADF
+        compositor.w[0] = 1920, compositor.h[0] = 1080, compositor.picture_w[0] = 1920, compositor.picture_h[0] = 1080;
+        compositor.glide[0] = compositor.landing[0] = compositor.asking[0] = 0;
+        tbl_at->glass[0] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB, compositor.glassy[0] = 0;
+        compositor_wl_unlend(0);
+        memory_zero(&compositor_wl.lent[0], sizeof compositor_wl.lent[0]);
+        compositor_wl.lent[0].map = (const unsigned char *)pixels, compositor_wl.lent[0].pixels = pixels, compositor_wl.lent[0].pitch = 1920;
+        compositor_wl.lent[0].width = 1920, compositor_wl.lent[0].height = 1080, compositor_wl.lent[0].fd = 9;
+        compositor_wl.lent[0].size = sizeof pixels, compositor_wl.lent[0].fourcc = 0x34325258u, compositor_wl.lent[0].modifier = 0;
+        memory_zero(&frame, sizeof frame);
+        frame.width = 1920, frame.height = 1080;
+        gpu_fake_addfb_answer = 0;
+        check("fullscreen: a client's window (no close, no grab, no glass) filling the screen from its dma-buf is the one shown straight",
+              compositor_direct_candidate(&frame, rows, 1) == 0);
+        compositor.glassy[0] = 1;
+        check("fullscreen: and a glass window is not", compositor_direct_candidate(&frame, rows, 1) == -1);
+        compositor.glassy[0] = 0;
+
+        // The framebuffer the card shows is kept past the client's next buffer, and removed once the card is off it.
+        graves = compositor_wl_grave_count;
+        compositor.on_screen = compositor_lent_fb(0), compositor.flip_pending = 0;
+        compositor_wl_lent_drop_fb(0);
+        check("fullscreen: a client's framebuffer on the screen is not removed when its buffer is replaced", compositor_wl_grave_count == graves + 1);
+        compositor_wl_graves_sweep();
+        check("fullscreen: nor while it is still on the screen", compositor_wl_grave_count == graves + 1);
+        compositor.on_screen = 77, compositor.flip_pending = 1;
+        compositor_wl_graves_sweep();
+        check("fullscreen: nor while a flip is on its way (the card scans the one before it until it lands)", compositor_wl_grave_count == graves + 1);
+        compositor.flip_pending = 0;
+        compositor_wl_graves_sweep();
+        check("fullscreen: and is removed once the card is off it", compositor_wl_grave_count == graves);
+        compositor.on_screen = 0;
+        memory_zero(&compositor_wl.lent[0], sizeof compositor_wl.lent[0]);
+
+        // An X window mapped over its whole screen is fullscreen there; a transient one or a popup is not.
+        memory_zero(&w, sizeof w);
+        w.x = 0, w.y = 0, w.width = 1920, w.height = 1080, w.row = -1;
+        check("fullscreen: an X window mapped over the whole screen covers it (fullscreen without asking)", compositor_xwm_covers(&w) == 0);
+        w.width = 1919;
+        check("fullscreen: one a pixel narrower does not", compositor_xwm_covers(&w) == -1);
+        w.width = 1920, w.transient = 0x77u;
+        check("fullscreen: nor a transient one", compositor_xwm_covers(&w) == -1);
+        w.transient = 0, w.state = COMPOSITOR_XWM_OVERRIDE;
+        check("fullscreen: nor an override-redirect one", compositor_xwm_covers(&w) == -1);
+
+        memory_copy(compositor.driver, kept_driver, sizeof kept_driver);
+        compositor_popup_parent[0] = kept_parent[0], compositor_popup_parent[1] = kept_parent[1];
+        memory_copy(&compositor_xwm, kept_xwm, sizeof(compositor_xwm));
+        memory_copy(&compositor, kept_comp, sizeof(compositor));
+}
+
 // EWMH/XDG grab protocols: maximized vs fullscreen row_facts, immediate float past button slop on client move, and XWM _NET_SUPPORTED / _NET_WM_MOVERESIZE.
 static void grab_protocol_rows(void)
 {
@@ -4139,7 +4260,7 @@ static void grab_protocol_rows(void)
         compositor_button(COMPOSITOR_BTN_LEFT, 0);
 
         // compositor_xwm_claim emits _NET_SUPPORTING_WM_CHECK, _NET_WM_NAME, and _NET_SUPPORTED including _NET_WM_MOVERESIZE.
-        compositor_xwm.listen = -1, compositor_xwm.fd = -1, compositor_xwm.poll_at = -1, compositor_xwm.focus_row = -2;
+        compositor_xwm_listen_fd = -1, compositor_xwm.fd = -1, compositor_xwm.poll_at = -1, compositor_xwm.focus_row = -2;
         compositor_xwm.root = 0x100u, compositor_xwm.resource_base = 0x2000u, compositor_xwm.resource_mask = 0x1fffffu;
         compositor_xwm.seq = 1;
         for (unsigned int i = 0; i < COMPOSITOR_XWM_ATOMS; i++)
@@ -4456,6 +4577,7 @@ b32 main(void)
         dirty_rows();
         close_ask_rows();
         grab_protocol_rows();
+        fullscreen_rows();
         gpu_i915_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
