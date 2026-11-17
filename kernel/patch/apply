@@ -414,11 +414,18 @@ fi
 #       x86_64 only: the other two have no claims to fold against yet and the
 #       size distribution was counted on this one.
 #
-if [ -n "${fold_header:-}" ] && [ -f kernel/patch/fold-x86.h ] &&
-   ! grep -q MOONWATER_FOLD_X86 "$fold_header"
-then
+#
+#       header_fold ADD MARKER DIE NOTE: places the text of ADD before the
+#       final #endif /* __KERNEL__ */ of $fold_header, unless MARKER is there
+#       already, and puts the file back as sudo's copy of the result. DIE says
+#       what stops the build when the file has no such #endif; NOTE is what is
+#       said once it is done.
+#
+header_fold() {
+        add=$1 marker=$2 die_text=$3 note=$4
+        [ -f "$add" ] && ! grep -q -- "$marker" "$fold_header" || return 0
         fold_work=$(mktemp)
-        awk -v add=kernel/patch/fold-x86.h '
+        awk -v add="$add" '
                 /^#endif \/\* __KERNEL__ \*\/$/ && !placed {
                         while ((getline line < add) > 0)
                                 print line
@@ -428,9 +435,15 @@ then
                 END { if (!placed) exit 3 }
         ' "$fold_header" > "$fold_work" &&
         sudo cp "$fold_work" "$fold_header" ||
-                die "folding constant sizes into $fold_header, which has no #endif /* __KERNEL__ */ to place them before"
+                die "$die_text"
         rm -f "$fold_work"
-        echo "  folded constant memcpy and memset into $(basename "$fold_header")"
+        echo "  $note $(basename "$fold_header")"
+}
+
+if [ -n "${fold_header:-}" ]; then
+        header_fold kernel/patch/fold-x86.h MOONWATER_FOLD_X86 \
+                "folding constant sizes into $fold_header, which has no #endif /* __KERNEL__ */ to place them before" \
+                "folded constant memcpy and memset into"
 fi
 
 #
@@ -441,24 +454,10 @@ fi
 #       alone: every edit here is idempotent, and this one catches up the trees
 #       that have the older half.
 #
-if [ -n "${fold_header:-}" ] && [ -f kernel/patch/fold-x86-fortify.h ] &&
-   grep -q MOONWATER_FOLD_X86 "$fold_header" &&
-   ! grep -q MOONWATER_FOLD_X86_FORTIFY "$fold_header"
-then
-        fold_work=$(mktemp)
-        awk -v add=kernel/patch/fold-x86-fortify.h '
-                /^#endif \/\* __KERNEL__ \*\/$/ && !placed {
-                        while ((getline line < add) > 0)
-                                print line
-                        placed = 1
-                }
-                { print }
-                END { if (!placed) exit 3 }
-        ' "$fold_header" > "$fold_work" &&
-        sudo cp "$fold_work" "$fold_header" ||
-                die "keeping the fold out of FORTIFY_SOURCE in $fold_header, which has no #endif /* __KERNEL__ */ to place it before"
-        rm -f "$fold_work"
-        echo "  kept the fold out of FORTIFY_SOURCE in $(basename "$fold_header")"
+if [ -n "${fold_header:-}" ] && grep -q MOONWATER_FOLD_X86 "$fold_header"; then
+        header_fold kernel/patch/fold-x86-fortify.h MOONWATER_FOLD_X86_FORTIFY \
+                "keeping the fold out of FORTIFY_SOURCE in $fold_header, which has no #endif /* __KERNEL__ */ to place it before" \
+                "kept the fold out of FORTIFY_SOURCE in"
 fi
 
 #
@@ -1115,14 +1114,17 @@ settings_insert linux/drivers/input/joydev.c "	joydev->dev.type = &input_node_ty
 lttpr_cap=linux/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 if [ -f "$lttpr_cap" ]; then
         if grep -q -F -- 'DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
-                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/'
+                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/' ||
+                die "amdgpu lttpr_caps: could not edit $lttpr_cap"
         elif grep -q -F -- 'DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
-                settings_replace "$lttpr_cap" 's/DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/'
+                settings_replace "$lttpr_cap" 's/DC_LOG_WARNING("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",/' ||
+                die "amdgpu lttpr_caps: could not edit $lttpr_cap"
         elif ! grep -q -F -- 'DC_LOG_DC("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then
                 die "amdgpu lttpr_caps: expected line moved in $lttpr_cap"
         fi
         if grep -q -F -- 'DC_LOG_ERROR("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\n");' "$lttpr_cap"; then
-                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/DC_LOG_DC("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/'
+                settings_replace "$lttpr_cap" 's/DC_LOG_ERROR("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/DC_LOG_DC("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\\n");/' ||
+                die "amdgpu lttpr_caps: could not edit $lttpr_cap"
         elif ! grep -q -F -- 'DC_LOG_DC("LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.\n");' "$lttpr_cap"; then
                 die "amdgpu lttpr_caps: expected lane count line moved in $lttpr_cap"
         fi
