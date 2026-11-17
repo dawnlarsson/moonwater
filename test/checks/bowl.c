@@ -1647,6 +1647,8 @@ static fn chrome_profile(void)
               exec && !strstr(start, "--disable-gpu") && !strstr(start, "--use-gl") && !strstr(start, "--use-angle") &&
                   !strstr(start, "--no-sandbox") && !strstr(start, "--disable-software-rasterizer") &&
                   !strstr(start, "--disable-features") && !strstr(start, "--in-process-gpu"));
+        check("The browser encodes video on the card where it has an encoder (AcceleratedVideoEncoder), as it decodes there by default",
+              exec && strstr(start, "--enable-features=AcceleratedVideoEncoder ") && strstr(start, "--enable-features") < strstr(start, "\"$@\""));
         positive preload = chrome_line(chrome ? chrome->session : null,
                                        "LD_PRELOAD=" BOWL_CHROME_PWRITE_LIBRARY);
         check("The browser preloads its seccomp-safe pwrite shim before starting Chromium, and only Chrome carries that flag",

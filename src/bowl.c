@@ -8820,8 +8820,11 @@ static string_address bowl_chrome_session[] = {
     BOWL_SHADER_CACHE_LIVE,
     "if [ -r " BOWL_ROOT_PREFIX "alpine" BOWL_CHROME_PWRITE_LIBRARY " ]; then "
     "export LD_PRELOAD=" BOWL_CHROME_PWRITE_LIBRARY "${LD_PRELOAD:+:$LD_PRELOAD}; fi",
+    // Video encoding on the card where it has one (VA-API: a call's camera, a shared screen, WebCodecs), which Chromium leaves to the
+    // processor on Linux unless AcceleratedVideoEncoder is asked for (VaapiVideoEncoder, the older name, does nothing in 156);
+    // decoding on the card is already its default. A card with no encoder for a codec encodes it on the processor as before.
     "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "
-    "--ozone-platform=wayland --password-store=basic --no-first-run "
+    "--ozone-platform=wayland --enable-features=AcceleratedVideoEncoder --password-store=basic --no-first-run "
     "--no-default-browser-check --log-level=3 \"$@\"",
     null};
 
