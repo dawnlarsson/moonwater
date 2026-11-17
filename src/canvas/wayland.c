@@ -2784,6 +2784,20 @@ static inline int wayland_surface_is_opaque(const struct wayland_surface *s, con
         return wayland_surface_is_opaque_at(s, b, s->scale, s->transform);
 }
 
+/*
+        Whether a surface's viewport only crops its buffer: a source at the buffer's corner, of whole pixels at a buffer scale of one, shown at its
+        own size (no destination, or the source's), the buffer neither turned nor flipped; tw and th the surface's size in pixels. Such a surface
+        is its buffer's top left as it is: a buffer of the crop's size with the buffer's pitch (wayland_fill_picture_meta makes its picture so).
+        Chromium's omnibox dropdown is one at every commit (set_source 0 0 583 138 of a larger buffer, no destination): read as a transform, it
+        was laid on the processor, never a layer, and the window under all of it was laid again at each of its commits.
+*/
+static int wayland_crop_plain(const struct wayland_surface *s, const struct wayland_buffer *b, long transform, long tw, long th)
+{
+        return s->source_width > 0 && !transform && !b->y_invert && !s->source_x && !s->source_y && s->pending_scale == 1 &&
+               !(s->source_width & 255) && !(s->source_height & 255) && s->source_width / 256 <= b->width &&
+               s->source_height / 256 <= b->height && tw == s->source_width / 256 && th == s->source_height / 256;
+}
+
 static void wayland_fill_picture_meta(struct wayland_picture *picture, const struct wayland_surface *s, const struct wayland_buffer *b,
                                       const struct wayland_pool *p, long transform, long tw, long th)
 {
@@ -2828,6 +2842,12 @@ static void wayland_fill_picture_meta(struct wayland_picture *picture, const str
         {
                 picture->dst_width = tw;
                 picture->dst_height = th;
+        }
+        if (wayland_crop_plain(s, b, transform, tw, th))
+        {
+                picture->width = tw, picture->height = th;
+                picture->src_x = picture->src_y = picture->src_width = picture->src_height = 0;
+                picture->dst_width = picture->dst_height = 0;
         }
 }
 
@@ -2903,9 +2923,14 @@ static struct wayland_rect wayland_flatten_reach(struct wayland_client *c, struc
                 struct wayland_surface *child = &c->surfaces[sub_it.at];
                 long ox, oy;
 
+                long tw, th;
+
                 if (child == root || !child->held || wayland_root_of(c, child) != root ||
                     !(child->source_width > 0 || child->dest_width > 0 || child->transform || c->buffers[child->held - 1].y_invert))
                         continue;
+                wayland_surface_target_pixels(child, &c->buffers[child->held - 1], child->transform, &tw, &th);
+                if (wayland_crop_plain(child, &c->buffers[child->held - 1], child->transform, tw, th))
+                        continue; // cut to the rectangle as any buffer is
                 wayland_sub_offset(c, child, &ox, &oy);
                 if (ox >= x2 || oy >= y2 || ox + child->width <= x1 || oy + child->height <= y1)
                         continue;
