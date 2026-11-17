@@ -5522,6 +5522,21 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
         then, and keeps what it last told). Once the client has acknowledged some, what the window is now is sent, as the next change
         would have sent it; nothing else would, if the window stays as it is.
 */
+/*
+        Whether what the compositor says of a toplevel changed only by its ask being answered: a floating window's size goes back to its
+        own (0 by 0) once its client drew the size asked, the states the same. Nothing is told for it (the client is at that size, and is
+        free to keep it); the shim only takes the 0 by 0 as told, so the next ask of any size is sent. Told, a configure of 0 by 0 a few
+        milliseconds after the one it answered had Chromium choose its size again in the middle of its resize, and its page stayed at the
+        size before, in a window of the new one, until something else made it draw (seconds).
+*/
+static int wayland_facts_freed(struct wayland_surface *s, const struct wayland_facts *facts)
+{
+        if (facts->width || facts->height || facts->states != s->told_states || !s->told_width || !s->told_height)
+                return 0;
+        s->told_width = s->told_height = 0;
+        return 1;
+}
+
 static void wayland_configure_owed(struct wayland_client *c, struct wayland_surface *s)
 {
         struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
@@ -5530,7 +5545,7 @@ static void wayland_configure_owed(struct wayland_client *c, struct wayland_surf
                 return;
         if (wayland.host->row_facts(wayland.host->context, s->row, &facts) < 0)
                 return;
-        if (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states)
+        if ((facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states) && !wayland_facts_freed(s, &facts))
                 wayland_configure(c, s, 0);
 }
 
@@ -10829,7 +10844,7 @@ WAYLAND_API void wayland_row_wake(long row)
                         s->want_maximized = 0;
         }
         if (s->role == WAYLAND_ROLE_TOPLEVEL && s->told &&
-            (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states))
+            (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states) && !wayland_facts_freed(s, &facts))
         {
                 // A window resized by hand is told a size a frame: the hand moves many times in one (a mouse reports a thousand times a
                 // second), and each size told is a buffer the client allocates and a picture it draws to be shown for none of them. A
